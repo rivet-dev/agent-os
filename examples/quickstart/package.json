@@ -15,12 +15,7 @@
 		"tools": "node --import tsx src/tools.ts",
 		"agent-session": "node --import tsx src/agent-session.ts",
 		"sandbox": "node --import tsx src/sandbox.ts",
-		"s3-filesystem": "node --import tsx src/s3-filesystem.ts",
-		"webhooks": "node --import tsx src/webhooks.ts",
-		"multiplayer": "node --import tsx src/multiplayer.ts",
-		"agent-to-agent": "node --import tsx src/agent-to-agent.ts",
-		"queues": "node --import tsx src/queues.ts",
-		"sqlite": "node --import tsx src/sqlite.ts"
+		"s3-filesystem": "node --import tsx src/s3-filesystem.ts"
 	},
 	"dependencies": {
 		"@rivet-dev/agent-os-core": "workspace:*",
@@ -30,7 +25,6 @@
 		"@rivet-dev/agent-os-git": "link:../../registry/software/git",
 		"@rivet-dev/agent-os-pi": "link:../../registry/agent/pi",
 		"@rivet-dev/agent-os-s3": "link:../../registry/file-system/s3",
-		"@rivet-dev/agent-os-sqlite3": "link:../../registry/software/sqlite3",
 		"zod": "^3.25.0"
 	},
 	"devDependencies": {
