@@ -21,7 +21,7 @@
 		"test": "vitest run"
 	},
 	"dependencies": {
-		"@rivet-dev/agent-os-core": "link:../../../packages/core",
+		"@rivet-dev/agent-os-core": "workspace:*",
 		"sandbox-agent": "^0.4.2",
 		"@secure-exec/core": "^0.2.1",
 		"zod": "^3.25.0"

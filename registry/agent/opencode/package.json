@@ -16,7 +16,7 @@
 		"check-types": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@rivet-dev/agent-os-core": "link:../../../packages/core",
+		"@rivet-dev/agent-os-core": "workspace:*",
 		"opencode-ai": "^1.3.3"
 	},
 	"devDependencies": {
