@@ -52,6 +52,8 @@ The `registry/` directory contains four categories of extension packages, all pu
 
 **Software packages are on a separate track.** They require a native build step (Rust nightly + wasi-sdk for C) to compile WASM binaries before they can be published. They use date-based versioning (`0.0.YYMMDDHHmmss`) instead of semver and are published via `make publish` from `registry/`. The software publish pipeline skips unchanged packages via content hashing. Software packages have no dependency on the core release cycle.
 
+**Publish timing:** Core TypeScript packages (10 packages) take ~50 seconds via CI (`release.yml`). Software packages (19 packages with WASM binaries) take ~3 minutes via `make publish` locally. A full fresh publish of all 29 packages takes ~4 minutes total.
+
 The registry software packages depend on `@rivet-dev/agent-os-registry-types` (in `packages/registry-types/`) via workspace link. This is the single source of truth for descriptor types like `WasmCommandPackage` and `WasmMetaPackage`.
 
 ## Terminology
