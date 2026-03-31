@@ -1,6 +1,6 @@
 {
 	"name": "@rivet-dev/agent-os-pi",
-	"version": "0.1.0-rc.2",
+	"version": "0.1.0-rc.3",
 	"type": "module",
 	"license": "Apache-2.0",
 	"main": "./dist/index.js",
