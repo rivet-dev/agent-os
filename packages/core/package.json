@@ -29,6 +29,8 @@
 	"scripts": {
 		"check-types": "tsc --noEmit",
 		"build": "tsc",
+		"build:base-filesystem": "node ./scripts/build-base-filesystem.mjs",
+		"snapshot:alpine-defaults": "node ./scripts/snapshot-alpine-defaults.mjs",
 		"test": "vitest run"
 	},
 	"dependencies": {

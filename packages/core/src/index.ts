@@ -25,12 +25,16 @@ export type {
 	BatchWriteResult,
 	CreateSessionOptions,
 	DirEntry,
+	OverlayMountConfig,
 	McpServerConfig,
 	McpServerConfigLocal,
 	McpServerConfigRemote,
 	MountConfig,
+	PlainMountConfig,
 	ProcessTreeNode,
 	ReaddirRecursiveOptions,
+	RootFilesystemConfig,
+	RootLowerInput,
 	SessionInfo,
 	SpawnedProcessInfo,
 } from "./agent-os.js";
@@ -57,6 +61,20 @@ export type { HostDirBackendOptions } from "./backends/host-dir-backend.js";
 export { createHostDirBackend } from "./backends/host-dir-backend.js";
 export type { OverlayBackendOptions } from "./backends/overlay-backend.js";
 export { createOverlayBackend } from "./backends/overlay-backend.js";
+export type {
+	FilesystemSnapshotExport,
+	LayerHandle,
+	LayerStore,
+	OverlayFilesystemMode,
+	RootSnapshotExport,
+	SnapshotImportSource,
+	SnapshotLayerHandle,
+	WritableLayerHandle,
+} from "./layers.js";
+export {
+	createInMemoryLayerStore,
+	createSnapshotExport,
+} from "./layers.js";
 export type {
 	CronAction,
 	CronEvent,

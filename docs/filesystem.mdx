@@ -1,0 +1,93 @@
+---
+title: Filesystem
+description: Layered filesystem model for AgentOs virtual machines.
+icon: "folder"
+---
+
+`AgentOs` gives each VM a Linux-like filesystem with a layered root, predictable defaults, and optional mounted filesystems for custom behavior.
+
+## Layering model
+
+Each VM starts with three filesystem concepts working together:
+
+- **Base filesystem** — the default root layout and OS files that every VM starts with.
+- **Writable overlay** — the per-VM writable layer that records changes without mutating the base filesystem.
+- **Mounted filesystems** — additional filesystems mounted at specific paths such as `/etc/agentos` or user-provided mount points.
+
+This means a fresh VM always starts from the same known root layout, while each VM still gets an isolated writable view of that root.
+
+## How the overlay works
+
+The default root filesystem uses copy-on-write overlay behavior.
+
+- **Reads** fall through to the base filesystem when a path has not been changed in the VM.
+- **Writes** go to the writable overlay. If a file already exists in the base filesystem, it is copied into the writable layer before the change is applied.
+- **Deletes** hide lower-layer entries from the VM's view, so a deleted base file stays deleted for that VM even though the shared base layer is unchanged.
+- **New files and directories** are created only in the writable layer.
+
+This keeps startup fast, makes the default root deterministic, and lets each VM change its filesystem freely without affecting other VMs.
+
+## Default filesystem
+
+The default base filesystem is intended to mimic Alpine Linux as closely as practical for agent workloads.
+
+- It uses an Alpine-like directory layout such as `/bin`, `/etc`, `/home`, `/tmp`, `/usr`, and `/var`.
+- It includes a default user home at `/home/user`.
+- It preserves Alpine-like environment and shell defaults such as `PATH`, `PAGER`, prompt shape, and common `/etc` files.
+- It keeps familiar symlinks and permissions where they matter for normal shell and tool behavior.
+
+AgentOs normalizes the small pieces that should be stable across VMs, such as the hostname being `agent-os`, while keeping the rest of the base layout as close as possible to Alpine.
+
+## Root filesystem config
+
+`AgentOs.create()` now accepts a `rootFilesystem` option that configures the root overlay directly.
+
+- `mode: "ephemeral"` keeps the default writable root behavior.
+- `mode: "read-only"` keeps the merged root visible and mounts it read-only from the start of VM boot.
+- `disableDefaultBaseLayer: true` removes the bundled base snapshot from the lower stack.
+- `lowers` lets you add one or more snapshot exports as lower layers, ordered highest-precedence first.
+
+If you omit `rootFilesystem`, AgentOs still creates the default overlay-backed root with the bundled base snapshot as its deepest lower.
+
+If you set `disableDefaultBaseLayer: true` and do not provide any `lowers`, the VM starts from a minimal synthetic root that contains only the boot-critical POSIX directories and runtime command stubs.
+
+## Mounts and precedence
+
+Mounted filesystems replace a subtree at the mount point.
+
+- A mount at `/data` makes `/data` resolve to that mounted filesystem instead of the default root layer.
+- Mounts are useful for read-only instruction files, host-backed directories, persistent stores, or custom virtual filesystems.
+- The overlay-backed root still applies everywhere that is not covered by a mount.
+
+In practice, the path lookup order is:
+
+1. Mounted filesystem at the path, if one exists.
+2. Writable overlay for the default root.
+3. Base filesystem for the default root.
+
+For `mode: "read-only"`, step 2 is omitted entirely: the VM reads directly from the merged lower stack.
+
+Mount entries can also be declarative overlay mounts. Those use a `LayerStore` plus one or more snapshot handles to build an isolated overlay at the mount path, instead of requiring you to prebuild a `VirtualFileSystem` yourself.
+
+## Root snapshots
+
+`AgentOs.snapshotRootFilesystem()` exports the current visible root tree as a reusable snapshot descriptor.
+
+You can feed that snapshot back into a later VM through `rootFilesystem.lowers`, or import it into a `LayerStore` for declarative overlay mounts.
+
+## Why this design exists
+
+- It gives agents a familiar Linux-style root filesystem.
+- It keeps the default VM state deterministic across runs.
+- It avoids mutating the shared base filesystem at boot time.
+- It makes it easy to add read-only or custom filesystems at specific paths.
+- It keeps per-VM writes isolated and disposable.
+
+## Rebuilding the base filesystem
+
+The default root is generated in two steps:
+
+1. Capture a fresh Alpine snapshot.
+2. Build the AgentOs base filesystem artifact from that snapshot, applying the small AgentOs-specific normalizations.
+
+The runtime itself consumes the built base filesystem artifact, not the Alpine snapshot directly.

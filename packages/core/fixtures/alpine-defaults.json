@@ -1,0 +1,520 @@
+{
+  "image": "alpine:3.22",
+  "createdAt": "2026-04-01T18:44:12.482Z",
+  "environment": {
+    "env": {
+      "CHARSET": "UTF-8",
+      "HOME": "/home/user",
+      "HOSTNAME": "1e3e3d3175cb",
+      "LANG": "C.UTF-8",
+      "LC_COLLATE": "C",
+      "LOGNAME": "user",
+      "PAGER": "less",
+      "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "SHELL": "/bin/sh",
+      "USER": "user"
+    },
+    "prompt": "\\h:\\w\\$ "
+  },
+  "filesystem": {
+    "entries": [
+      {
+        "path": "/",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/bin",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/alpine-release",
+        "type": "file",
+        "mode": "644",
+        "uid": 0,
+        "gid": 0,
+        "content": "3.22.3\n"
+      },
+      {
+        "path": "/etc/apk",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/busybox-paths.d",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/crontabs",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/group",
+        "type": "file",
+        "mode": "644",
+        "uid": 0,
+        "gid": 0,
+        "content": "root:x:0:root\nbin:x:1:root,bin,daemon\ndaemon:x:2:root,bin,daemon\nsys:x:3:root,bin\nadm:x:4:root,daemon\ntty:x:5:\ndisk:x:6:root\nlp:x:7:lp\nkmem:x:9:\nwheel:x:10:root\nfloppy:x:11:root\nmail:x:12:mail\nnews:x:13:news\nuucp:x:14:uucp\ncron:x:16:cron\naudio:x:18:\ncdrom:x:19:\ndialout:x:20:root\nftp:x:21:\nsshd:x:22:\ninput:x:23:\ntape:x:26:root\nvideo:x:27:root\nnetdev:x:28:\nkvm:x:34:kvm\ngames:x:35:\nshadow:x:42:\nwww-data:x:82:\nusers:x:100:games\nntp:x:123:\nabuild:x:300:\nutmp:x:406:\nping:x:999:\nnogroup:x:65533:\nnobody:x:65534:\nuser:x:1000:\n"
+      },
+      {
+        "path": "/etc/hostname",
+        "type": "file",
+        "mode": "644",
+        "uid": 0,
+        "gid": 0,
+        "content": "1e3e3d3175cb\n"
+      },
+      {
+        "path": "/etc/logrotate.d",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/modprobe.d",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/modules-load.d",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/network",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/nsswitch.conf",
+        "type": "file",
+        "mode": "644",
+        "uid": 0,
+        "gid": 0,
+        "content": "# musl itself does not support NSS, however some third-party DNS\n# implementations use the nsswitch.conf file to determine what\n# policy to follow.\n# Editing this file is not recommended.\nhosts: files dns\n"
+      },
+      {
+        "path": "/etc/opt",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/os-release",
+        "type": "symlink",
+        "mode": "777",
+        "uid": 0,
+        "gid": 0,
+        "target": "../usr/lib/os-release"
+      },
+      {
+        "path": "/etc/passwd",
+        "type": "file",
+        "mode": "644",
+        "uid": 0,
+        "gid": 0,
+        "content": "root:x:0:0:root:/root:/bin/sh\nbin:x:1:1:bin:/bin:/sbin/nologin\ndaemon:x:2:2:daemon:/sbin:/sbin/nologin\nlp:x:4:7:lp:/var/spool/lpd:/sbin/nologin\nsync:x:5:0:sync:/sbin:/bin/sync\nshutdown:x:6:0:shutdown:/sbin:/sbin/shutdown\nhalt:x:7:0:halt:/sbin:/sbin/halt\nmail:x:8:12:mail:/var/mail:/sbin/nologin\nnews:x:9:13:news:/usr/lib/news:/sbin/nologin\nuucp:x:10:14:uucp:/var/spool/uucppublic:/sbin/nologin\ncron:x:16:16:cron:/var/spool/cron:/sbin/nologin\nftp:x:21:21::/var/lib/ftp:/sbin/nologin\nsshd:x:22:22:sshd:/dev/null:/sbin/nologin\ngames:x:35:35:games:/usr/games:/sbin/nologin\nntp:x:123:123:NTP:/var/empty:/sbin/nologin\nguest:x:405:100:guest:/dev/null:/sbin/nologin\nnobody:x:65534:65534:nobody:/:/sbin/nologin\nuser:x:1000:1000::/home/user:/bin/sh\n"
+      },
+      {
+        "path": "/etc/periodic",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/profile",
+        "type": "file",
+        "mode": "644",
+        "uid": 0,
+        "gid": 0,
+        "content": "export PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n\nexport PAGER=less\numask 022\n\n# use nicer PS1 for bash and busybox ash\nif [ -n \"$BASH_VERSION\" -o \"$BB_ASH_VERSION\" ]; then\n\tPS1='\\h:\\w\\$ '\n# use nicer PS1 for zsh\nelif [ -n \"$ZSH_VERSION\" ]; then\n\tPS1='%m:%~%# '\n# set up fallback default PS1\nelse\n\t: \"${HOSTNAME:=$(hostname)}\"\n\tPS1='${HOSTNAME%%.*}:$PWD'\n\t[ \"$(id -u)\" -eq 0 ] && PS1=\"${PS1}# \" || PS1=\"${PS1}\\$ \"\nfi\n\nfor script in /etc/profile.d/*.sh ; do\n\tif [ -r \"$script\" ] ; then\n\t\t. \"$script\"\n\tfi\ndone\nunset script\n"
+      },
+      {
+        "path": "/etc/profile.d",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/secfixes.d",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/shadow",
+        "type": "file",
+        "mode": "640",
+        "uid": 0,
+        "gid": 42,
+        "content": "root:*::0:::::\nbin:!::0:::::\ndaemon:!::0:::::\nlp:!::0:::::\nsync:!::0:::::\nshutdown:!::0:::::\nhalt:!::0:::::\nmail:!::0:::::\nnews:!::0:::::\nuucp:!::0:::::\ncron:!::0:::::\nftp:!::0:::::\nsshd:!::0:::::\ngames:!::0:::::\nntp:!::0:::::\nguest:!::0:::::\nnobody:!::0:::::\nuser:!:20544:0:99999:7:::\n"
+      },
+      {
+        "path": "/etc/shells",
+        "type": "file",
+        "mode": "644",
+        "uid": 0,
+        "gid": 0,
+        "content": "# valid login shells\n/bin/sh\n/bin/ash\n"
+      },
+      {
+        "path": "/etc/ssl",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/ssl1.1",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/sysctl.d",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/etc/udhcpc",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/home",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/home/user",
+        "type": "directory",
+        "mode": "2755",
+        "uid": 1000,
+        "gid": 1000
+      },
+      {
+        "path": "/lib",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/lib/apk",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/lib/firmware",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/lib/modules-load.d",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/lib/sysctl.d",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/media",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/media/cdrom",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/media/floppy",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/media/usb",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/mnt",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/opt",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/root",
+        "type": "directory",
+        "mode": "700",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/run",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/run/lock",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/sbin",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/srv",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/sys",
+        "type": "directory",
+        "mode": "555",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/tmp",
+        "type": "directory",
+        "mode": "1777",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/usr",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/usr/bin",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/usr/bin/env",
+        "type": "symlink",
+        "mode": "777",
+        "uid": 0,
+        "gid": 0,
+        "target": "/bin/busybox"
+      },
+      {
+        "path": "/usr/lib",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/usr/lib/os-release",
+        "type": "file",
+        "mode": "644",
+        "uid": 0,
+        "gid": 0,
+        "content": "NAME=\"Alpine Linux\"\nID=alpine\nVERSION_ID=3.22.3\nPRETTY_NAME=\"Alpine Linux v3.22\"\nHOME_URL=\"https://alpinelinux.org/\"\nBUG_REPORT_URL=\"https://gitlab.alpinelinux.org/alpine/aports/-/issues\"\n"
+      },
+      {
+        "path": "/usr/local",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/usr/sbin",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/usr/share",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/var",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/var/cache",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/var/empty",
+        "type": "directory",
+        "mode": "555",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/var/lib",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/var/local",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/var/lock",
+        "type": "symlink",
+        "mode": "777",
+        "uid": 0,
+        "gid": 0,
+        "target": "../run/lock"
+      },
+      {
+        "path": "/var/log",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/var/mail",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/var/opt",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/var/run",
+        "type": "symlink",
+        "mode": "777",
+        "uid": 0,
+        "gid": 0,
+        "target": "../run"
+      },
+      {
+        "path": "/var/spool",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/var/spool/cron",
+        "type": "directory",
+        "mode": "755",
+        "uid": 0,
+        "gid": 0
+      },
+      {
+        "path": "/var/spool/cron/crontabs",
+        "type": "symlink",
+        "mode": "777",
+        "uid": 0,
+        "gid": 0,
+        "target": "../../../etc/crontabs"
+      },
+      {
+        "path": "/var/tmp",
+        "type": "directory",
+        "mode": "1777",
+        "uid": 0,
+        "gid": 0
+      }
+    ]
+  }
+}

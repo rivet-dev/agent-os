@@ -12,7 +12,8 @@
 		"test:watch": "npx turbo watch test",
 		"check-types": "npx turbo check-types",
 		"lint": "pnpm biome check .",
-		"fmt": "pnpm biome check --write --diagnostic-level=error ."
+		"fmt": "pnpm biome check --write --diagnostic-level=error .",
+		"shell": "pnpm --filter @rivet-dev/agent-os-shell shell"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.3",

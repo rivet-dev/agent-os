@@ -9,7 +9,7 @@ overrides:
 
 patchedDependencies:
   '@secure-exec/nodejs@0.2.1':
-    hash: 1b55bfdc13a5329270980574e382c56c27c145390cb03e3eb7bce6c620be4c69
+    hash: dc7b85660389e571beac82d61aa14936e29803ba733156fb8d3df12504c847dc
     path: patches/@secure-exec__nodejs@0.2.1.patch
   '@secure-exec/v8@0.2.1':
     hash: e542d0ba16b29b7dd6e777f4f16d26ddf6da49ac7f8286912419de975a3a5ead
@@ -156,7 +156,7 @@ importers:
         version: 0.2.1
       '@secure-exec/nodejs':
         specifier: ^0.2.1
-        version: 0.2.1(patch_hash=1b55bfdc13a5329270980574e382c56c27c145390cb03e3eb7bce6c620be4c69)
+        version: 0.2.1(patch_hash=dc7b85660389e571beac82d61aa14936e29803ba733156fb8d3df12504c847dc)
       '@secure-exec/v8':
         specifier: ^0.2.1
         version: 0.2.1(patch_hash=e542d0ba16b29b7dd6e777f4f16d26ddf6da49ac7f8286912419de975a3a5ead)
@@ -277,7 +277,7 @@ importers:
         version: 0.2.1
       '@secure-exec/nodejs':
         specifier: ^0.2.1
-        version: 0.2.1(patch_hash=1b55bfdc13a5329270980574e382c56c27c145390cb03e3eb7bce6c620be4c69)
+        version: 0.2.1(patch_hash=dc7b85660389e571beac82d61aa14936e29803ba733156fb8d3df12504c847dc)
       pino:
         specifier: ^10.3.1
         version: 10.3.1
@@ -362,7 +362,7 @@ importers:
     devDependencies:
       '@secure-exec/nodejs':
         specifier: ^0.2.1
-        version: 0.2.1(patch_hash=1b55bfdc13a5329270980574e382c56c27c145390cb03e3eb7bce6c620be4c69)
+        version: 0.2.1(patch_hash=dc7b85660389e571beac82d61aa14936e29803ba733156fb8d3df12504c847dc)
       '@types/node':
         specifier: ^22.10.2
         version: 22.19.15
@@ -378,6 +378,55 @@ importers:
       '@types/node':
         specifier: ^22.10.2
         version: 22.19.15
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/shell:
+    dependencies:
+      '@rivet-dev/agent-os-codex':
+        specifier: 0.0.260331072558
+        version: 0.0.260331072558
+      '@rivet-dev/agent-os-common':
+        specifier: 0.0.260331072558
+        version: 0.0.260331072558
+      '@rivet-dev/agent-os-core':
+        specifier: workspace:*
+        version: link:../core
+      '@rivet-dev/agent-os-fd':
+        specifier: 0.0.260331072558
+        version: 0.0.260331072558
+      '@rivet-dev/agent-os-file':
+        specifier: 0.0.260331072558
+        version: 0.0.260331072558
+      '@rivet-dev/agent-os-jq':
+        specifier: 0.0.260331072558
+        version: 0.0.260331072558
+      '@rivet-dev/agent-os-ripgrep':
+        specifier: 0.0.260331072558
+        version: 0.0.260331072558
+      '@rivet-dev/agent-os-tree':
+        specifier: 0.0.260331072558
+        version: 0.0.260331072558
+      '@rivet-dev/agent-os-unzip':
+        specifier: 0.0.260331072558
+        version: 0.0.260331072558
+      '@rivet-dev/agent-os-yq':
+        specifier: 0.0.260331072558
+        version: 0.0.260331072558
+      '@rivet-dev/agent-os-zip':
+        specifier: 0.0.260331072558
+        version: 0.0.260331072558
+      pyodide:
+        specifier: ^0.28.3
+        version: 0.28.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22.19.3
+        version: 22.19.15
+      tsx:
+        specifier: ^4.19.2
+        version: 4.21.0
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
@@ -428,9 +477,6 @@ importers:
       '@rivet-dev/agent-os-core':
         specifier: workspace:*
         version: link:../../../packages/core
-      jsonc-parser:
-        specifier: ^3.3.1
-        version: 3.3.1
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1824,6 +1870,60 @@ packages:
   '@protobufjs/utf8@1.1.0':
     resolution: {integrity: sha512-Vvn3zZrhQZkkBE8LSuW3em98c0FwgO4nxzv6OdSxPKJIEKY2bGbHn+mhGIPerzI4twdxaP8/0+06HBpwf345Lw==}
 
+  '@rivet-dev/agent-os-codex@0.0.260331072558':
+    resolution: {integrity: sha512-Fs+w0vkr/z1tjIWg52OYytttXXiQFkS1ahVm28SjlusTFLy156ofai7me2ZDYnfCsA4DvKi/T5XFBl/2z5oBGg==}
+
+  '@rivet-dev/agent-os-common@0.0.260331072558':
+    resolution: {integrity: sha512-bkMU6yqLxNLoXYA2/f2qRf0JrlqbIiBRKRpP3d+tbmF+VV2wrAY+iLJDHN6Jw+Q8q3CkT6jB5KTnCZkcYEF3RQ==}
+
+  '@rivet-dev/agent-os-coreutils@0.0.260331072558':
+    resolution: {integrity: sha512-vI/J2MJnpsJQZ7F5DU/udGqGMtliqhTg28lE6XZ/qEGyjUvmEQ9AiV8CaAcX5HrImAUWOofBbTv6/XGKjOhT1w==}
+
+  '@rivet-dev/agent-os-diffutils@0.0.260331072558':
+    resolution: {integrity: sha512-OiTesXIVqGjEHm/LBvqa20kBu8b+W741EyjRptDKkBju+nQY1hKs0+qFE3vSuBe8N8I7F1GdoXUdwzj8easong==}
+
+  '@rivet-dev/agent-os-fd@0.0.260331072558':
+    resolution: {integrity: sha512-mTy1EGKm8dqV7gFcOv4JyDoYynRgEKNIxPcdEW9tK2PkQO/OPfnIDPbBVExowIn90R+fpAQl0RbNip9U6lotng==}
+
+  '@rivet-dev/agent-os-file@0.0.260331072558':
+    resolution: {integrity: sha512-o/MElu1v1M7Z4hod3XO1VAU5doVEeHJSqX9cLVH/Jaw8B7M/xvCMOuQr8cU1nLF6q34ZNCfExOycRWCeFTCxUA==}
+
+  '@rivet-dev/agent-os-findutils@0.0.260331072558':
+    resolution: {integrity: sha512-Bqc85t0jDJlDj/3afLg4iuzk1qGVHMroRx6HDEWQ2kdishfVMTMUSfac+q5IbqUOaQquhf3ixZzTt+utyc7Qew==}
+
+  '@rivet-dev/agent-os-gawk@0.0.260331072558':
+    resolution: {integrity: sha512-Y2vW1ox1C0ky0Wij2RLLt3NKRY8/pghoy5CM0fDU91bAnWMyB2Jn7aD/GsluK7h8X8ptwqL0q8E1szASIlJK4A==}
+
+  '@rivet-dev/agent-os-grep@0.0.260331072558':
+    resolution: {integrity: sha512-VlBOteHBFlAtlKfh1abk0FouJwgtqAXEqQGFU8Gnk6FLNgRss5S0yXBnj9p0qwrmZsKlopljrKJIpJp1GCwJrw==}
+
+  '@rivet-dev/agent-os-gzip@0.0.260331072558':
+    resolution: {integrity: sha512-id9iOrZFAuaXaFWIIiQEo70Ze/poI7hodSqWfo9ro0sajV0xI7kSp0BbXgS4PvGc9O2+VWcOE2qzqTUnKNlBzQ==}
+
+  '@rivet-dev/agent-os-jq@0.0.260331072558':
+    resolution: {integrity: sha512-bTDtT8tOMx6M8oQ9GoNo3s/nOxbbiDWLWqUjhJweNNVBp8AMPixJ2kq3jbgiUPepHZtScYRWjQkUggGjb1BgQw==}
+
+  '@rivet-dev/agent-os-ripgrep@0.0.260331072558':
+    resolution: {integrity: sha512-RX1S6M2T2ghTqkkBHyesm5dFWaQsIrr6EEIlk6UdFYS0G7pcZ11UvTgeirVr2yOvyPRlRrA7FcmupHadQ1wrbw==}
+
+  '@rivet-dev/agent-os-sed@0.0.260331072558':
+    resolution: {integrity: sha512-i/6ifWCcGE2TEfPWR5ig5tMVKUc0qL0ng59htgS+sqt6zdMaPIllwVztOgXNxMEdFM1TF646e/OkMfMzmYZDCA==}
+
+  '@rivet-dev/agent-os-tar@0.0.260331072558':
+    resolution: {integrity: sha512-LAa8fm4jombNBQRR42O/57WxY6VA13Uea8JFChh6yPN4VtFP84KI5Kg4/Zzne3YDronGZlgJivznNUH3dtTMzA==}
+
+  '@rivet-dev/agent-os-tree@0.0.260331072558':
+    resolution: {integrity: sha512-6/+agxo9rKWT7I6i0Fk8oGxKWYyiM0mHsTr2QLB8d0Lz/Bax/pv7ca0E+IwfFaEG1J19LgTnrxf/9YwUSThF7Q==}
+
+  '@rivet-dev/agent-os-unzip@0.0.260331072558':
+    resolution: {integrity: sha512-W+TkYvcgzaC3+Sc07NckEG45/dVM+k/Ez4KVjIxmwNdrgiMsqPKZvnBIlMX0C6nXjnE6PUlVcdU/Qq+Uvp0mbA==}
+
+  '@rivet-dev/agent-os-yq@0.0.260331072558':
+    resolution: {integrity: sha512-vUx12neBEWp3v9Lhbkx6eT9pMTdbcmQQEK8kugepfqRiYjus2VpN7KCotaTDSnMPZlqoUhQC7Nu8PMwUgwN5IQ==}
+
+  '@rivet-dev/agent-os-zip@0.0.260331072558':
+    resolution: {integrity: sha512-v4Y6FvgyLSENCmUUZMUtC2pDIC1dpUq9NGg5ODAWliOOj/8ahFhMa1hTRWb4gKZQjQOevrlJTfBcmJ4FaObgYw==}
+
   '@rollup/rollup-android-arm-eabi@4.60.1':
     resolution: {integrity: sha512-d6FinEBLdIiK+1uACUttJKfgZREXrF0Qc2SmLII7W2AD8FfiZ9Wjd+rD/iRuf5s5dWrr1GgwXCvPqOuDquOowA==}
     cpu: [arm]
@@ -3101,9 +3201,6 @@ packages:
 
   json-schema@0.4.0:
     resolution: {integrity: sha512-es94M3nTIfsEPisRafak+HDLfHXnKBhV3vU5eqPcS3flIWqcxJWgXHXiey3YrpaNsanY5ei1VoYEbOzijuq9BA==}
-
-  jsonc-parser@3.3.1:
-    resolution: {integrity: sha512-HUgH65KyejrUFPvHFPbqOY0rsFip3Bo5wb4ngvdi1EpCYWUQDC5V+Y7mZws+DLkr4M//zQJoanu1SP+87Dv1oQ==}
 
   jwa@2.0.1:
     resolution: {integrity: sha512-hRF04fqJIP8Abbkq5NKGN0Bbr3JxlQ+qhZufXVr0DvujKy93ZCbXZMHDL4EOtodSbCWxOqR8MS1tXA5hwqCXDg==}
@@ -5162,6 +5259,51 @@ snapshots:
 
   '@protobufjs/utf8@1.1.0': {}
 
+  '@rivet-dev/agent-os-codex@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-common@0.0.260331072558':
+    dependencies:
+      '@rivet-dev/agent-os-coreutils': 0.0.260331072558
+      '@rivet-dev/agent-os-diffutils': 0.0.260331072558
+      '@rivet-dev/agent-os-findutils': 0.0.260331072558
+      '@rivet-dev/agent-os-gawk': 0.0.260331072558
+      '@rivet-dev/agent-os-grep': 0.0.260331072558
+      '@rivet-dev/agent-os-gzip': 0.0.260331072558
+      '@rivet-dev/agent-os-sed': 0.0.260331072558
+      '@rivet-dev/agent-os-tar': 0.0.260331072558
+
+  '@rivet-dev/agent-os-coreutils@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-diffutils@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-fd@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-file@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-findutils@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-gawk@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-grep@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-gzip@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-jq@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-ripgrep@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-sed@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-tar@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-tree@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-unzip@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-yq@0.0.260331072558': {}
+
+  '@rivet-dev/agent-os-zip@0.0.260331072558': {}
+
   '@rollup/rollup-android-arm-eabi@4.60.1':
     optional: true
 
@@ -5269,7 +5411,7 @@ snapshots:
     dependencies:
       better-sqlite3: 12.8.0
 
-  '@secure-exec/nodejs@0.2.1(patch_hash=1b55bfdc13a5329270980574e382c56c27c145390cb03e3eb7bce6c620be4c69)':
+  '@secure-exec/nodejs@0.2.1(patch_hash=dc7b85660389e571beac82d61aa14936e29803ba733156fb8d3df12504c847dc)':
     dependencies:
       '@secure-exec/core': 0.2.1
       '@secure-exec/v8': 0.2.1(patch_hash=e542d0ba16b29b7dd6e777f4f16d26ddf6da49ac7f8286912419de975a3a5ead)
@@ -6687,8 +6829,6 @@ snapshots:
 
   json-schema@0.4.0: {}
 
-  jsonc-parser@3.3.1: {}
-
   jwa@2.0.1:
     dependencies:
       buffer-equal-constant-time: 1.0.1
@@ -7224,7 +7364,7 @@ snapshots:
   secure-exec@0.2.1:
     dependencies:
       '@secure-exec/core': 0.2.1
-      '@secure-exec/nodejs': 0.2.1(patch_hash=1b55bfdc13a5329270980574e382c56c27c145390cb03e3eb7bce6c620be4c69)
+      '@secure-exec/nodejs': 0.2.1(patch_hash=dc7b85660389e571beac82d61aa14936e29803ba733156fb8d3df12504c847dc)
 
   semver@7.7.4: {}
 

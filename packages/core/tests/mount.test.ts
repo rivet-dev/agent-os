@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, test } from "vitest";
-import { AgentOs, createInMemoryFileSystem } from "../src/index.js";
+import {
+	AgentOs,
+	createInMemoryFileSystem,
+	createInMemoryLayerStore,
+	createSnapshotExport,
+} from "../src/index.js";
 
 describe("mount integration", () => {
 	let vm: AgentOs;
@@ -76,6 +81,86 @@ describe("mount integration", () => {
 		});
 		await expect(
 			vm.writeFile("/ro/blocked.txt", "should fail"),
+		).rejects.toThrow("EROFS");
+	});
+
+	test("declarative overlay mounts create an isolated writable upper", async () => {
+		const store = createInMemoryLayerStore();
+		const lower = await store.importSnapshot({
+			kind: "snapshot-export",
+			source: createSnapshotExport([
+				{
+					path: "/",
+					type: "directory",
+					mode: "0755",
+					uid: 0,
+					gid: 0,
+				},
+				{
+					path: "/seed.txt",
+					type: "file",
+					mode: "0644",
+					uid: 0,
+					gid: 0,
+					content: Buffer.from("seeded").toString("base64"),
+					encoding: "base64",
+				},
+			]).source,
+		});
+
+		vm = await AgentOs.create({
+			mounts: [
+				{
+					path: "/data",
+					filesystem: {
+						type: "overlay",
+						store,
+						lowers: [lower],
+					},
+				},
+			],
+		});
+
+		expect(new TextDecoder().decode(await vm.readFile("/data/seed.txt"))).toBe(
+			"seeded",
+		);
+		await vm.writeFile("/data/new.txt", "overlay mount");
+		expect(new TextDecoder().decode(await vm.readFile("/data/new.txt"))).toBe(
+			"overlay mount",
+		);
+	});
+
+	test("read-only overlay mounts reject writes", async () => {
+		const store = createInMemoryLayerStore();
+		const lower = await store.importSnapshot({
+			kind: "snapshot-export",
+			source: createSnapshotExport([
+				{
+					path: "/",
+					type: "directory",
+					mode: "0755",
+					uid: 0,
+					gid: 0,
+				},
+			]).source,
+		});
+
+		vm = await AgentOs.create({
+			mounts: [
+				{
+					path: "/data",
+					filesystem: {
+						type: "overlay",
+						store,
+						mode: "read-only",
+						lowers: [lower],
+					},
+				},
+			],
+		});
+
+		await expect(
+			vm.writeFile("/data/blocked.txt", "should fail"),
 		).rejects.toThrow("EROFS");
 	});
 });

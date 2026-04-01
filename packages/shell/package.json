@@ -1,0 +1,32 @@
+{
+  "name": "@rivet-dev/agent-os-shell",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agent-os-shell": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "check-types": "tsc --noEmit",
+    "shell": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@rivet-dev/agent-os-core": "workspace:*",
+    "@rivet-dev/agent-os-common": "0.0.260331072558",
+    "@rivet-dev/agent-os-jq": "0.0.260331072558",
+    "@rivet-dev/agent-os-ripgrep": "0.0.260331072558",
+    "@rivet-dev/agent-os-fd": "0.0.260331072558",
+    "@rivet-dev/agent-os-tree": "0.0.260331072558",
+    "@rivet-dev/agent-os-file": "0.0.260331072558",
+    "@rivet-dev/agent-os-zip": "0.0.260331072558",
+    "@rivet-dev/agent-os-unzip": "0.0.260331072558",
+    "@rivet-dev/agent-os-yq": "0.0.260331072558",
+    "@rivet-dev/agent-os-codex": "0.0.260331072558",
+    "pyodide": "^0.28.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

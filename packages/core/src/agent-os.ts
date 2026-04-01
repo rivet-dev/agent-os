@@ -1,14 +1,14 @@
 import { spawn as spawnChildProcess } from "node:child_process";
 import {
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import {
-	basename,
-	dirname,
 	join,
 	posix as posixPath,
 	relative as relativeHostPath,
@@ -19,7 +19,6 @@ import {
 	allowAll,
 	createInMemoryFileSystem,
 	createKernel,
-	type FsMount,
 	type Kernel,
 	type KernelExecOptions,
 	type KernelExecResult,
@@ -100,6 +99,24 @@ import {
 import { createPythonRuntime } from "@rivet-dev/agent-os-python";
 import { createWasmVmRuntime } from "@rivet-dev/agent-os-posix";
 import { AcpClient } from "./acp-client.js";
+import {
+	createBootstrapAwareFilesystem,
+	getBaseEnvironment,
+	getBaseFilesystemEntries,
+} from "./base-filesystem.js";
+import {
+	snapshotVirtualFilesystem,
+	type FilesystemEntry,
+} from "./filesystem-snapshot.js";
+import {
+	createDefaultRootLowerInput,
+	createInMemoryLayerStore,
+	createSnapshotExport,
+	type LayerStore,
+	type OverlayFilesystemMode,
+	type RootSnapshotExport,
+	type SnapshotLayerHandle,
+} from "./layers.js";
 import { AGENT_CONFIGS, type AgentConfig, type AgentType } from "./agents.js";
 import { getHostDirBackendMeta } from "./backends/host-dir-backend.js";
 import {
@@ -149,8 +166,19 @@ interface AcpTerminalState {
 	outputByteLimit: number;
 }
 
+export type RootLowerInput =
+	| { kind: "bundled-base-filesystem" }
+	| RootSnapshotExport;
+
+export interface RootFilesystemConfig {
+	type?: "overlay";
+	mode?: OverlayFilesystemMode;
+	disableDefaultBaseLayer?: boolean;
+	lowers?: RootLowerInput[];
+}
+
 /** Configuration for mounting a filesystem driver at a path. */
-export interface MountConfig {
+export interface PlainMountConfig {
 	/** Path inside the VM to mount at. */
 	path: string;
 	/** The filesystem driver to mount. */
@@ -158,6 +186,18 @@ export interface MountConfig {
 	/** If true, write operations throw EROFS. */
 	readOnly?: boolean;
 }
+
+export interface OverlayMountConfig {
+	path: string;
+	filesystem: {
+		type: "overlay";
+		store: LayerStore;
+		mode?: OverlayFilesystemMode;
+		lowers: SnapshotLayerHandle[];
+	};
+}
+
+export type MountConfig = PlainMountConfig | OverlayMountConfig;
 
 export interface AgentOsOptions {
 	/**
@@ -176,6 +216,8 @@ export interface AgentOsOptions {
 	 * Defaults to process.cwd().
 	 */
 	moduleAccessCwd?: string;
+	/** Root filesystem configuration. Defaults to an overlay with the bundled base snapshot as its deepest lower. */
+	rootFilesystem?: RootFilesystemConfig;
 	/** Filesystems to mount at boot time. */
 	mounts?: MountConfig[];
 	/** Additional instructions appended to the base OS instructions written to /etc/agentos/instructions.md. */
@@ -240,6 +282,284 @@ export interface SpawnedProcessInfo {
 	exitCode: number | null;
 }
 
+function isOverlayMountConfig(config: MountConfig): config is OverlayMountConfig {
+	return "filesystem" in config;
+}
+
+const KERNEL_POSIX_BOOTSTRAP_DIRS = [
+	"/dev",
+	"/proc",
+	"/tmp",
+	"/bin",
+	"/lib",
+	"/sbin",
+	"/boot",
+	"/etc",
+	"/root",
+	"/run",
+	"/srv",
+	"/sys",
+	"/opt",
+	"/mnt",
+	"/media",
+	"/home",
+	"/usr",
+	"/usr/bin",
+	"/usr/games",
+	"/usr/include",
+	"/usr/lib",
+	"/usr/libexec",
+	"/usr/man",
+	"/usr/local",
+	"/usr/local/bin",
+	"/usr/sbin",
+	"/usr/share",
+	"/usr/share/man",
+	"/var",
+	"/var/cache",
+	"/var/empty",
+	"/var/lib",
+	"/var/lock",
+	"/var/log",
+	"/var/run",
+	"/var/spool",
+	"/var/tmp",
+	"/etc/agentos",
+] as const;
+
+const NODE_RUNTIME_BOOTSTRAP_COMMANDS = ["node", "npm", "npx"] as const;
+const PYTHON_RUNTIME_BOOTSTRAP_COMMANDS = ["python", "python3", "pip"] as const;
+const KERNEL_COMMAND_STUB = "#!/bin/sh\n# kernel command stub\n";
+
+function isWasmBinaryFile(path: string): boolean {
+	try {
+		const header = readFileSync(path);
+		return (
+			header.length >= 4
+			&& header[0] === 0x00
+			&& header[1] === 0x61
+			&& header[2] === 0x73
+			&& header[3] === 0x6d
+		);
+	} catch {
+		return false;
+	}
+}
+
+function collectBootstrapWasmCommands(commandDirs: string[]): string[] {
+	const commands: string[] = [];
+	const seen = new Set<string>();
+
+	for (const dir of commandDirs) {
+		let entries: string[];
+		try {
+			entries = readdirSync(dir).sort((a, b) => a.localeCompare(b));
+		} catch {
+			continue;
+		}
+
+		for (const entry of entries) {
+			if (entry.startsWith(".")) {
+				continue;
+			}
+
+			const fullPath = join(dir, entry);
+			try {
+				if (statSync(fullPath).isDirectory()) {
+					continue;
+				}
+			} catch {
+				continue;
+			}
+
+			if (!isWasmBinaryFile(fullPath) || seen.has(entry)) {
+				continue;
+			}
+
+			seen.add(entry);
+			commands.push(entry);
+		}
+	}
+
+	return commands;
+}
+
+function collectConfiguredLowerPaths(config?: RootFilesystemConfig): Set<string> {
+	const paths = new Set<string>();
+
+	for (const lower of config?.lowers ?? []) {
+		if (lower.kind !== "snapshot-export") {
+			continue;
+		}
+		for (const entry of lower.source.filesystem.entries) {
+			paths.add(entry.path);
+		}
+	}
+
+	if (!config?.disableDefaultBaseLayer) {
+		for (const entry of getBaseFilesystemEntries()) {
+			paths.add(entry.path);
+		}
+	}
+
+	return paths;
+}
+
+function createKernelBootstrapLower(
+	config: RootFilesystemConfig | undefined,
+	commandNames: string[],
+): RootSnapshotExport | null {
+	const existingPaths = collectConfiguredLowerPaths(config);
+	const entries: FilesystemEntry[] = [
+		{
+			path: "/",
+			type: "directory",
+			mode: "755",
+			uid: 0,
+			gid: 0,
+		},
+	];
+
+	for (const dir of KERNEL_POSIX_BOOTSTRAP_DIRS) {
+		if (existingPaths.has(dir)) {
+			continue;
+		}
+		entries.push({
+			path: dir,
+			type: "directory",
+			mode: "755",
+			uid: 0,
+			gid: 0,
+		});
+	}
+
+	if (!existingPaths.has("/usr/bin/env")) {
+		entries.push({
+			path: "/usr/bin/env",
+			type: "file",
+			mode: "644",
+			uid: 0,
+			gid: 0,
+			content: "AA==",
+			encoding: "base64",
+		});
+	}
+
+	const uniqueCommands = [...new Set(commandNames)].sort((a, b) => a.localeCompare(b));
+	for (const command of uniqueCommands) {
+		const stubPath = `/bin/${command}`;
+		if (existingPaths.has(stubPath)) {
+			continue;
+		}
+		entries.push({
+			path: stubPath,
+			type: "file",
+			mode: "755",
+			uid: 0,
+			gid: 0,
+			content: KERNEL_COMMAND_STUB,
+			encoding: "utf8",
+		});
+	}
+
+	return entries.length > 1 ? createSnapshotExport(entries) : null;
+}
+
+async function createRootFilesystem(
+	config?: RootFilesystemConfig,
+	bootstrapLower?: RootSnapshotExport | null,
+): Promise<{
+	filesystem: VirtualFileSystem;
+	finishKernelBootstrap: () => void;
+	rootView: VirtualFileSystem;
+}> {
+	const rootStore = createInMemoryLayerStore();
+	const normalizedConfig = config ?? {};
+	const lowerInputs = normalizedConfig.lowers
+		? [...normalizedConfig.lowers]
+		: [];
+
+	if (bootstrapLower) {
+		lowerInputs.push(bootstrapLower);
+	}
+
+	if (!normalizedConfig.disableDefaultBaseLayer) {
+		lowerInputs.push({ kind: "bundled-base-filesystem" });
+	}
+
+	const lowers = await Promise.all(
+		lowerInputs.map((lower) => rootStore.importSnapshot(
+			lower.kind === "bundled-base-filesystem"
+				? createDefaultRootLowerInput()
+				: lower,
+		)),
+	);
+
+	const rootView = normalizedConfig.mode === "read-only"
+		? rootStore.createOverlayFilesystem({
+			mode: "read-only",
+			lowers,
+		})
+		: rootStore.createOverlayFilesystem({
+			upper: await rootStore.createWritableLayer(),
+			lowers,
+		});
+
+	if (normalizedConfig.mode === "read-only") {
+		return {
+			filesystem: rootView,
+			finishKernelBootstrap: () => {},
+			rootView,
+		};
+	}
+
+	const { filesystem, finishKernelBootstrap } = createBootstrapAwareFilesystem(
+		rootView,
+		rootView,
+	);
+
+	return {
+		filesystem,
+		finishKernelBootstrap,
+		rootView,
+	};
+}
+
+async function resolveMounts(
+	mounts?: MountConfig[],
+): Promise<Array<{ path: string; fs: VirtualFileSystem; readOnly?: boolean }>> {
+	if (!mounts) {
+		return [];
+	}
+
+	return Promise.all(mounts.map(async (mount) => {
+		if (!isOverlayMountConfig(mount)) {
+			return {
+				path: mount.path,
+				fs: mount.driver,
+				readOnly: mount.readOnly,
+			};
+		}
+
+		const mode = mount.filesystem.mode ?? "ephemeral";
+		const fs = mode === "read-only"
+			? mount.filesystem.store.createOverlayFilesystem({
+				mode: "read-only",
+				lowers: mount.filesystem.lowers,
+			})
+			: mount.filesystem.store.createOverlayFilesystem({
+				upper: await mount.filesystem.store.createWritableLayer(),
+				lowers: mount.filesystem.lowers,
+			});
+
+		return {
+			path: mount.path,
+			fs,
+			readOnly: mode === "read-only",
+		};
+	}));
+}
+
 export class AgentOs {
 	readonly kernel: Kernel;
 	private _sessions = new Map<string, Session>();
@@ -273,6 +593,7 @@ export class AgentOs {
 	private _acpTerminals = new Map<string, AcpTerminalState>();
 	private _acpTerminalCounter = 0;
 	private _env: Record<string, string>;
+	private _rootFilesystem: VirtualFileSystem;
 
 	private constructor(
 		kernel: Kernel,
@@ -281,6 +602,7 @@ export class AgentOs {
 		softwareAgentConfigs: Map<string, AgentConfig>,
 		hostMounts: HostMountInfo[],
 		env: Record<string, string>,
+		rootFilesystem: VirtualFileSystem,
 	) {
 		this.kernel = kernel;
 		this._moduleAccessCwd = moduleAccessCwd;
@@ -288,23 +610,35 @@ export class AgentOs {
 		this._softwareAgentConfigs = softwareAgentConfigs;
 		this._hostMounts = hostMounts;
 		this._env = env;
+		this._rootFilesystem = rootFilesystem;
 	}
 
 	static async create(options?: AgentOsOptions): Promise<AgentOs> {
-		const filesystem = createInMemoryFileSystem();
+		// Process software descriptors first so the root lower can include the
+		// exact command stubs Secure Exec will register during boot.
+		const processed = processSoftware(options?.software ?? []);
+		const bootstrapLower = createKernelBootstrapLower(
+			options?.rootFilesystem,
+			[
+				...collectBootstrapWasmCommands(processed.commandDirs),
+				...NODE_RUNTIME_BOOTSTRAP_COMMANDS,
+				...PYTHON_RUNTIME_BOOTSTRAP_COMMANDS,
+			],
+		);
+		const {
+			filesystem,
+			finishKernelBootstrap,
+			rootView,
+		} = await createRootFilesystem(options?.rootFilesystem, bootstrapLower);
 		const hostNetworkAdapter = createNodeHostNetworkAdapter();
 		const moduleAccessCwd = options?.moduleAccessCwd ?? process.cwd();
 
-		// Process software descriptors to collect WASM dirs, module roots, and agent configs.
-		const processed = processSoftware(options?.software ?? []);
-
-		const mounts = options?.mounts?.map((m) => ({
-			path: m.path,
-			fs: m.driver,
-			readOnly: m.readOnly,
-		}));
+		const mounts = await resolveMounts(options?.mounts);
 		const hostMounts = (options?.mounts ?? [])
 			.flatMap((mount) => {
+				if (isOverlayMountConfig(mount)) {
+					return [];
+				}
 				const meta = getHostDirBackendMeta(mount.driver);
 				if (!meta) {
 					return [];
@@ -333,11 +667,7 @@ export class AgentOs {
 			...(toolsServer ? [toolsServer.port] : []),
 		];
 
-		const env: Record<string, string> = {
-			HOME: "/home/user",
-			USER: "user",
-			PATH: "/usr/local/bin:/usr/bin:/bin",
-		};
+		const env: Record<string, string> = getBaseEnvironment();
 		if (toolsServer) {
 			env.AGENTOS_TOOLS_PORT = String(toolsServer.port);
 		}
@@ -384,6 +714,7 @@ export class AgentOs {
 			}),
 		);
 		await kernel.mount(createPythonRuntime());
+		finishKernelBootstrap();
 
 		const vm = new AgentOs(
 			kernel,
@@ -392,6 +723,7 @@ export class AgentOs {
 			processed.agentConfigs,
 			hostMounts,
 			env,
+			rootView,
 		);
 		vm._toolsServer = toolsServer;
 		vm._toolKits = toolKits ?? [];
@@ -534,11 +866,55 @@ export class AgentOs {
 		return entry.proc.wait();
 	}
 
+	private _assertSafeAbsolutePath(path: string): void {
+		if (!path.startsWith("/")) {
+			throw new Error(`Path must be absolute: ${path}`);
+		}
+		if (posixPath.normalize(path) !== path) {
+			throw new Error(`Path must be normalized: ${path}`);
+		}
+	}
+
+	private _vfs(): VirtualFileSystem {
+		return (this.kernel as unknown as { vfs: VirtualFileSystem }).vfs;
+	}
+
+	private async _copyPath(from: string, to: string): Promise<void> {
+		const stat = await this._vfs().lstat(from);
+		if (stat.isSymbolicLink) {
+			const target = await this._vfs().readlink(from);
+			await this._vfs().symlink(target, to);
+			return;
+		}
+		if (stat.isDirectory) {
+			await this._mkdirp(posixPath.dirname(to));
+			if (!(await this.kernel.exists(to))) {
+				await this.kernel.mkdir(to);
+			}
+			await this._vfs().chmod(to, stat.mode);
+			await this._vfs().chown(to, stat.uid, stat.gid);
+			const entries = await this.kernel.readdir(from);
+			for (const entry of entries) {
+				if (entry === "." || entry === "..") continue;
+				const fromPath = from === "/" ? `/${entry}` : `${from}/${entry}`;
+				const toPath = to === "/" ? `/${entry}` : `${to}/${entry}`;
+				await this._copyPath(fromPath, toPath);
+			}
+			return;
+		}
+		const content = await this.kernel.readFile(from);
+		await this.writeFile(to, content);
+		await this._vfs().chmod(to, stat.mode);
+		await this._vfs().chown(to, stat.uid, stat.gid);
+	}
+
 	async readFile(path: string): Promise<Uint8Array> {
+		this._assertSafeAbsolutePath(path);
 		return this.kernel.readFile(path);
 	}
 
 	async writeFile(path: string, content: string | Uint8Array): Promise<void> {
+		this._assertSafeAbsolutePath(path);
 		return this.kernel.writeFile(path, content);
 	}
 
@@ -546,6 +922,7 @@ export class AgentOs {
 		const results: BatchWriteResult[] = [];
 		for (const entry of entries) {
 			try {
+				this._assertSafeAbsolutePath(entry.path);
 				// Create parent directories as needed
 				const parentDir = entry.path.substring(
 					0,
@@ -571,6 +948,7 @@ export class AgentOs {
 		const results: BatchReadResult[] = [];
 		for (const path of paths) {
 			try {
+				this._assertSafeAbsolutePath(path);
 				const content = await this.kernel.readFile(path);
 				results.push({ path, content });
 			} catch (err: unknown) {
@@ -586,6 +964,7 @@ export class AgentOs {
 
 	/** Recursively create directories (mkdir -p). */
 	private async _mkdirp(path: string): Promise<void> {
+		this._assertSafeAbsolutePath(path);
 		const parts = path.split("/").filter(Boolean);
 		let current = "";
 		for (const part of parts) {
@@ -597,10 +976,12 @@ export class AgentOs {
 	}
 
 	async mkdir(path: string): Promise<void> {
+		this._assertSafeAbsolutePath(path);
 		return this.kernel.mkdir(path);
 	}
 
 	async readdir(path: string): Promise<string[]> {
+		this._assertSafeAbsolutePath(path);
 		return this.kernel.readdir(path);
 	}
 
@@ -608,6 +989,7 @@ export class AgentOs {
 		path: string,
 		options?: ReaddirRecursiveOptions,
 	): Promise<DirEntry[]> {
+		this._assertSafeAbsolutePath(path);
 		const maxDepth = options?.maxDepth;
 		const exclude = options?.exclude ? new Set(options.exclude) : undefined;
 		const results: DirEntry[] = [];
@@ -658,29 +1040,47 @@ export class AgentOs {
 	}
 
 	async stat(path: string): Promise<VirtualStat> {
+		this._assertSafeAbsolutePath(path);
 		return this.kernel.stat(path);
 	}
 
 	async exists(path: string): Promise<boolean> {
+		this._assertSafeAbsolutePath(path);
 		return this.kernel.exists(path);
 	}
 
+	async snapshotRootFilesystem(): Promise<RootSnapshotExport> {
+		return createSnapshotExport(
+			await snapshotVirtualFilesystem(this._rootFilesystem),
+		);
+	}
+
 	mountFs(path: string, driver: VirtualFileSystem, options?: { readOnly?: boolean }): void {
+		this._assertSafeAbsolutePath(path);
 		this.kernel.mountFs(path, driver, { readOnly: options?.readOnly });
 	}
 
 	unmountFs(path: string): void {
+		this._assertSafeAbsolutePath(path);
 		this.kernel.unmountFs(path);
 	}
 
 	async move(from: string, to: string): Promise<void> {
-		return this.kernel.rename(from, to);
+		this._assertSafeAbsolutePath(from);
+		this._assertSafeAbsolutePath(to);
+		const sourceStat = await this._vfs().lstat(from);
+		if (!sourceStat.isDirectory || sourceStat.isSymbolicLink) {
+			return this.kernel.rename(from, to);
+		}
+		await this._copyPath(from, to);
+		await this.delete(from, { recursive: true });
 	}
 
 	async delete(
 		path: string,
 		options?: { recursive?: boolean },
 	): Promise<void> {
+		this._assertSafeAbsolutePath(path);
 		const s = await this.kernel.stat(path);
 		if (s.isDirectory) {
 			if (options?.recursive) {

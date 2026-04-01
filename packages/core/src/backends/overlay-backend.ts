@@ -1,10 +1,9 @@
 /**
  * Overlay (copy-on-write) filesystem backend.
  *
- * Layers a writable upper filesystem over a read-only lower filesystem.
- * Reads check the upper first, then fall through to the lower.
- * Writes always go to the upper. Deletes record a "whiteout" in the upper
- * so that the file appears deleted even if it exists in the lower.
+ * Layers an optional writable upper filesystem over zero or more lower
+ * filesystems. Reads resolve from highest precedence to lowest. Writes
+ * go to the writable upper only, with copy-up and whiteout behavior.
  */
 
 import * as posixPath from "node:path/posix";
@@ -17,366 +16,587 @@ import {
 } from "@secure-exec/core";
 
 export interface OverlayBackendOptions {
-	/** Read-only base layer. Never written to. */
-	lower: VirtualFileSystem;
-	/** Writable upper layer. Defaults to a fresh InMemoryFileSystem. */
+	/** Legacy single lower layer. */
+	lower?: VirtualFileSystem;
+	/** Lower layers ordered highest-precedence first. */
+	lowers?: VirtualFileSystem[];
+	/** Writable upper layer. Defaults to a fresh in-memory filesystem in ephemeral mode. */
 	upper?: VirtualFileSystem;
+	/** Overlay mode. Defaults to ephemeral. */
+	mode?: "ephemeral" | "read-only";
 }
 
-/**
- * Create a copy-on-write overlay filesystem.
- * Reads fall through from upper to lower. Writes go to upper only.
- * Deletes record whiteout markers so files in lower appear removed.
- */
 export function createOverlayBackend(
 	options: OverlayBackendOptions,
 ): VirtualFileSystem {
-	const lower = options.lower;
-	const upper = options.upper ?? createInMemoryFileSystem();
+	const mode = options.mode ?? "ephemeral";
+	if (mode === "read-only" && options.upper) {
+		throw new Error("Read-only overlays cannot accept a writable upper layer");
+	}
 
-	// Whiteout set: paths that have been "deleted" in the overlay.
-	// If a path is in this set, it should not be visible even if it exists in lower.
+	const configuredLowers = options.lowers
+		?? (options.lower ? [options.lower] : []);
+	const lowers = configuredLowers.length > 0
+		? configuredLowers
+		: [createInMemoryFileSystem()];
+	const upper = mode === "read-only"
+		? null
+		: options.upper ?? createInMemoryFileSystem();
 	const whiteouts = new Set<string>();
 
-	function normPath(p: string): string {
-		return posixPath.normalize(p);
+	function normPath(path: string): string {
+		return posixPath.normalize(path);
 	}
 
-	function isWhitedOut(p: string): boolean {
-		return whiteouts.has(normPath(p));
+	function isWhitedOut(path: string): boolean {
+		return whiteouts.has(normPath(path));
 	}
 
-	function addWhiteout(p: string): void {
-		whiteouts.add(normPath(p));
+	function addWhiteout(path: string): void {
+		whiteouts.add(normPath(path));
 	}
 
-	function removeWhiteout(p: string): void {
-		whiteouts.delete(normPath(p));
+	function removeWhiteout(path: string): void {
+		whiteouts.delete(normPath(path));
 	}
 
-	/** Check if path exists in upper layer. */
-	async function existsInUpper(p: string): Promise<boolean> {
+	function throwReadOnly(): never {
+		throw new KernelError("EROFS", "read-only file system");
+	}
+
+	async function existsInFilesystem(
+		filesystem: VirtualFileSystem,
+		path: string,
+	): Promise<boolean> {
+		return hasEntryInFilesystem(filesystem, path);
+	}
+
+	async function hasEntryInFilesystem(
+		filesystem: VirtualFileSystem,
+		path: string,
+	): Promise<boolean> {
 		try {
-			return await upper.exists(p);
+			if (path === "/") {
+				await filesystem.stat(path);
+			} else {
+				await filesystem.lstat(path);
+			}
+			return true;
 		} catch {
 			return false;
 		}
 	}
 
+	async function existsInUpper(path: string): Promise<boolean> {
+		if (!upper) {
+			return false;
+		}
+		return existsInFilesystem(upper, path);
+	}
+
+	async function hasEntryInUpper(path: string): Promise<boolean> {
+		if (!upper) {
+			return false;
+		}
+		return hasEntryInFilesystem(upper, path);
+	}
+
+	async function findLowerByExists(
+		path: string,
+	): Promise<VirtualFileSystem | null> {
+		for (const lower of lowers) {
+			if (await existsInFilesystem(lower, path)) {
+				return lower;
+			}
+		}
+		return null;
+	}
+
+	async function findLowerByEntry(
+		path: string,
+	): Promise<{ filesystem: VirtualFileSystem; stat: VirtualStat } | null> {
+		for (const lower of lowers) {
+			try {
+				return {
+					filesystem: lower,
+					stat: path === "/" ? await lower.stat(path) : await lower.lstat(path),
+				};
+			} catch {
+				// Try the next lower layer.
+			}
+		}
+		return null;
+	}
+
+	async function mergedLstat(path: string): Promise<VirtualStat> {
+		if (isWhitedOut(path)) {
+			throw new KernelError("ENOENT", `no such file: ${path}`);
+		}
+		if (await hasEntryInUpper(path)) {
+			return upper!.lstat(path);
+		}
+		const lower = await findLowerByEntry(path);
+		if (!lower) {
+			throw new KernelError("ENOENT", `no such file: ${path}`);
+		}
+		return lower.stat;
+	}
+
+	async function ensureAncestorDirectoriesInUpper(path: string): Promise<void> {
+		if (!upper) {
+			throwReadOnly();
+		}
+
+		const normalized = normPath(path);
+		const parts = normalized.split("/").filter(Boolean);
+		let current = "";
+
+		for (let index = 0; index < parts.length - 1; index++) {
+			current += `/${parts[index]}`;
+			if (await existsInUpper(current)) {
+				continue;
+			}
+
+			const lower = await findLowerByExists(current);
+			if (lower) {
+				const stat = await lower.stat(current);
+				if (!stat.isDirectory) {
+					throw new KernelError("ENOTDIR", `not a directory: ${current}`);
+				}
+				await upper.mkdir(current);
+				await upper.chmod(current, stat.mode);
+				await upper.chown(current, stat.uid, stat.gid);
+				continue;
+			}
+
+			await upper.mkdir(current);
+		}
+	}
+
+	async function copyUpPath(path: string): Promise<void> {
+		if (!upper) {
+			throwReadOnly();
+		}
+		if (await hasEntryInUpper(path)) {
+			return;
+		}
+
+		await ensureAncestorDirectoriesInUpper(path);
+
+		const lower = await findLowerByEntry(path);
+		if (!lower) {
+			throw new KernelError("ENOENT", `no such file: ${path}`);
+		}
+
+		if (lower.stat.isSymbolicLink) {
+			const target = await lower.filesystem.readlink(path);
+			await upper.symlink(target, path);
+			return;
+		}
+
+		if (lower.stat.isDirectory) {
+			await upper.mkdir(path);
+			await upper.chmod(path, lower.stat.mode);
+			await upper.chown(path, lower.stat.uid, lower.stat.gid);
+			return;
+		}
+
+		const data = await lower.filesystem.readFile(path);
+		await upper.writeFile(path, data);
+		await upper.chmod(path, lower.stat.mode);
+		await upper.chown(path, lower.stat.uid, lower.stat.gid);
+	}
+
+	async function pathExistsInMergedView(path: string): Promise<boolean> {
+		if (isWhitedOut(path)) {
+			return false;
+		}
+		if (await hasEntryInUpper(path)) {
+			return true;
+		}
+		return (await findLowerByEntry(path)) !== null;
+	}
+
 	const backend: VirtualFileSystem = {
-		async readFile(p: string): Promise<Uint8Array> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such file: ${p}`);
+		async readFile(path: string): Promise<Uint8Array> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			if (await existsInUpper(p)) {
-				return upper.readFile(p);
+			if (await existsInUpper(path)) {
+				return upper!.readFile(path);
 			}
-			return lower.readFile(p);
+			const lower = await findLowerByExists(path);
+			if (!lower) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
+			}
+			return lower.readFile(path);
 		},
 
-		async readTextFile(p: string): Promise<string> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such file: ${p}`);
+		async readTextFile(path: string): Promise<string> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			if (await existsInUpper(p)) {
-				return upper.readTextFile(p);
+			if (await existsInUpper(path)) {
+				return upper!.readTextFile(path);
 			}
-			return lower.readTextFile(p);
+			const lower = await findLowerByExists(path);
+			if (!lower) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
+			}
+			return lower.readTextFile(path);
 		},
 
-		async readDir(p: string): Promise<string[]> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such directory: ${p}`);
+		async readDir(path: string): Promise<string[]> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such directory: ${path}`);
 			}
 
+			let directoryExists = false;
 			const entries = new Set<string>();
 
-			// Collect from lower first (if directory exists)
-			try {
-				const lowerEntries = await lower.readDir(p);
-				for (const e of lowerEntries) {
-					if (e === "." || e === "..") continue;
-					const childPath = posixPath.join(normPath(p), e);
-					if (!isWhitedOut(childPath)) {
-						entries.add(e);
+			for (let index = lowers.length - 1; index >= 0; index--) {
+				try {
+					const lowerEntries = await lowers[index].readDir(path);
+					directoryExists = true;
+					for (const entry of lowerEntries) {
+						if (entry === "." || entry === "..") continue;
+						const childPath = posixPath.join(normPath(path), entry);
+						if (!isWhitedOut(childPath)) {
+							entries.add(entry);
+						}
 					}
+				} catch {
+					// This lower does not contribute a directory here.
 				}
-			} catch {
-				// Lower may not have this directory — that's fine
 			}
 
-			// Overlay upper entries
-			try {
-				const upperEntries = await upper.readDir(p);
-				for (const e of upperEntries) {
-					if (e === "." || e === "..") continue;
-					entries.add(e);
+			if (upper) {
+				try {
+					const upperEntries = await upper.readDir(path);
+					directoryExists = true;
+					for (const entry of upperEntries) {
+						if (entry === "." || entry === "..") continue;
+						entries.add(entry);
+					}
+				} catch {
+					// No upper directory at this path.
 				}
-			} catch {
-				// Upper may not have this directory either
 			}
 
-			// If neither layer had the directory, throw
-			if (entries.size === 0) {
-				// Verify at least one layer has it
-				const lowerExists = await lower.exists(p).catch(() => false);
-				const upperExists = await upper.exists(p).catch(() => false);
-				if (!lowerExists && !upperExists) {
-					throw new KernelError("ENOENT", `no such directory: ${p}`);
-				}
+			if (!directoryExists) {
+				throw new KernelError("ENOENT", `no such directory: ${path}`);
 			}
 
 			return [...entries];
 		},
 
-		async readDirWithTypes(p: string): Promise<VirtualDirEntry[]> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such directory: ${p}`);
+		async readDirWithTypes(path: string): Promise<VirtualDirEntry[]> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such directory: ${path}`);
 			}
 
+			let directoryExists = false;
 			const entriesByName = new Map<string, VirtualDirEntry>();
 
-			// Lower first
-			try {
-				const lowerEntries = await lower.readDirWithTypes(p);
-				for (const e of lowerEntries) {
-					if (e.name === "." || e.name === "..") continue;
-					const childPath = posixPath.join(normPath(p), e.name);
-					if (!isWhitedOut(childPath)) {
-						entriesByName.set(e.name, e);
+			for (let index = lowers.length - 1; index >= 0; index--) {
+				try {
+					const lowerEntries = await lowers[index].readDirWithTypes(path);
+					directoryExists = true;
+					for (const entry of lowerEntries) {
+						if (entry.name === "." || entry.name === "..") continue;
+						const childPath = posixPath.join(normPath(path), entry.name);
+						if (!isWhitedOut(childPath)) {
+							entriesByName.set(entry.name, entry);
+						}
 					}
+				} catch {
+					// This lower does not contribute a directory here.
 				}
-			} catch {
-				// Lower may not have this directory
 			}
 
-			// Upper overwrites
-			try {
-				const upperEntries = await upper.readDirWithTypes(p);
-				for (const e of upperEntries) {
-					if (e.name === "." || e.name === "..") continue;
-					entriesByName.set(e.name, e);
+			if (upper) {
+				try {
+					const upperEntries = await upper.readDirWithTypes(path);
+					directoryExists = true;
+					for (const entry of upperEntries) {
+						if (entry.name === "." || entry.name === "..") continue;
+						entriesByName.set(entry.name, entry);
+					}
+				} catch {
+					// No upper directory at this path.
 				}
-			} catch {
-				// Upper may not have this directory
 			}
 
-			if (entriesByName.size === 0) {
-				const lowerExists = await lower.exists(p).catch(() => false);
-				const upperExists = await upper.exists(p).catch(() => false);
-				if (!lowerExists && !upperExists) {
-					throw new KernelError("ENOENT", `no such directory: ${p}`);
-				}
+			if (!directoryExists) {
+				throw new KernelError("ENOENT", `no such directory: ${path}`);
 			}
 
 			return [...entriesByName.values()];
 		},
 
 		async writeFile(
-			p: string,
+			path: string,
 			content: string | Uint8Array,
 		): Promise<void> {
-			// Writing removes any whiteout for this path
-			removeWhiteout(p);
-			// Ensure parent directory exists in upper
-			const parent = posixPath.dirname(p);
-			if (parent !== p) {
-				try {
-					await upper.mkdir(parent, { recursive: true });
-				} catch {
-					// May already exist
-				}
+			if (!upper) {
+				throwReadOnly();
 			}
-			return upper.writeFile(p, content);
+			removeWhiteout(path);
+			if (await findLowerByEntry(path)) {
+				await copyUpPath(path);
+			} else {
+				await ensureAncestorDirectoriesInUpper(path);
+			}
+			return upper.writeFile(path, content);
 		},
 
-		async createDir(p: string): Promise<void> {
-			removeWhiteout(p);
-			return upper.createDir(p);
+		async createDir(path: string): Promise<void> {
+			if (!upper) {
+				throwReadOnly();
+			}
+			removeWhiteout(path);
+			if (await pathExistsInMergedView(path)) {
+				throw new KernelError("EEXIST", `file exists: ${path}`);
+			}
+			await ensureAncestorDirectoriesInUpper(path);
+			return upper.createDir(path);
 		},
 
 		async mkdir(
-			p: string,
+			path: string,
 			options?: { recursive?: boolean },
 		): Promise<void> {
-			removeWhiteout(p);
-			return upper.mkdir(p, options);
+			removeWhiteout(path);
+			if (await pathExistsInMergedView(path)) {
+				const stat = await mergedLstat(path);
+				if (options?.recursive && stat.isDirectory && !stat.isSymbolicLink) {
+					return;
+				}
+				throw new KernelError("EEXIST", `file exists: ${path}`);
+			}
+			if (!upper) {
+				throwReadOnly();
+			}
+			await ensureAncestorDirectoriesInUpper(path);
+			return upper.mkdir(path, options);
 		},
 
-		async exists(p: string): Promise<boolean> {
-			if (isWhitedOut(p)) {
-				return false;
-			}
-			if (await existsInUpper(p)) {
-				return true;
-			}
-			return lower.exists(p);
+		async exists(path: string): Promise<boolean> {
+			return pathExistsInMergedView(path);
 		},
 
-		async stat(p: string): Promise<VirtualStat> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such file: ${p}`);
+		async stat(path: string): Promise<VirtualStat> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			if (await existsInUpper(p)) {
-				return upper.stat(p);
+			if (await existsInUpper(path)) {
+				return upper!.stat(path);
 			}
-			return lower.stat(p);
+			const lower = await findLowerByExists(path);
+			if (!lower) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
+			}
+			return lower.stat(path);
 		},
 
-		async removeFile(p: string): Promise<void> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such file: ${p}`);
+		async removeFile(path: string): Promise<void> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			// If in upper, remove from upper
-			if (await existsInUpper(p)) {
-				await upper.removeFile(p);
+			const lower = await findLowerByExists(path);
+			const upperExists = await existsInUpper(path);
+			if (!upperExists && !lower) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			// Record whiteout so lower version is hidden
-			addWhiteout(p);
+			if (!upper) {
+				throwReadOnly();
+			}
+			if (upperExists) {
+				await upper.removeFile(path);
+			}
+			addWhiteout(path);
 		},
 
-		async removeDir(p: string): Promise<void> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such directory: ${p}`);
+		async removeDir(path: string): Promise<void> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such directory: ${path}`);
 			}
-			if (await existsInUpper(p)) {
-				await upper.removeDir(p);
+			const lower = await findLowerByExists(path);
+			const upperExists = await existsInUpper(path);
+			if (!upperExists && !lower) {
+				throw new KernelError("ENOENT", `no such directory: ${path}`);
 			}
-			addWhiteout(p);
+			if (!upper) {
+				throwReadOnly();
+			}
+			if (upperExists) {
+				await upper.removeDir(path);
+			}
+			addWhiteout(path);
 		},
 
 		async rename(oldPath: string, newPath: string): Promise<void> {
-			// Copy-up: read from wherever it exists, write to upper, whiteout old
+			if (!upper) {
+				throwReadOnly();
+			}
 			const data = await backend.readFile(oldPath);
 			await backend.writeFile(newPath, data);
 			await backend.removeFile(oldPath);
 		},
 
-		async realpath(p: string): Promise<string> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such file: ${p}`);
+		async realpath(path: string): Promise<string> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			if (await existsInUpper(p)) {
-				return upper.realpath(p);
+			if (await existsInUpper(path)) {
+				return upper!.realpath(path);
 			}
-			return lower.realpath(p);
+			const lower = await findLowerByExists(path);
+			if (!lower) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
+			}
+			return lower.realpath(path);
 		},
 
 		async symlink(target: string, linkPath: string): Promise<void> {
+			if (!upper) {
+				throwReadOnly();
+			}
 			removeWhiteout(linkPath);
+			await ensureAncestorDirectoriesInUpper(linkPath);
 			return upper.symlink(target, linkPath);
 		},
 
-		async readlink(p: string): Promise<string> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such file: ${p}`);
+		async readlink(path: string): Promise<string> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			if (await existsInUpper(p)) {
-				return upper.readlink(p);
+			if (await hasEntryInUpper(path)) {
+				return upper!.readlink(path);
 			}
-			return lower.readlink(p);
+			const lower = await findLowerByEntry(path);
+			if (!lower) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
+			}
+			return lower.filesystem.readlink(path);
 		},
 
-		async lstat(p: string): Promise<VirtualStat> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such file: ${p}`);
+		async lstat(path: string): Promise<VirtualStat> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			if (await existsInUpper(p)) {
-				return upper.lstat(p);
+			if (await hasEntryInUpper(path)) {
+				return path === "/" ? upper!.stat(path) : upper!.lstat(path);
 			}
-			return lower.lstat(p);
+			const lower = await findLowerByEntry(path);
+			if (!lower) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
+			}
+			return lower.stat;
 		},
 
 		async link(oldPath: string, newPath: string): Promise<void> {
-			removeWhiteout(newPath);
-			// Copy-up to upper for link
-			if (!(await existsInUpper(oldPath))) {
-				const data = await lower.readFile(oldPath);
-				await upper.writeFile(oldPath, data);
+			if (!upper) {
+				throwReadOnly();
 			}
+			removeWhiteout(newPath);
+			await copyUpPath(oldPath);
+			await ensureAncestorDirectoriesInUpper(newPath);
 			return upper.link(oldPath, newPath);
 		},
 
-		async chmod(p: string, mode: number): Promise<void> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such file: ${p}`);
+		async chmod(path: string, modeValue: number): Promise<void> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			// Copy-up if only in lower
-			if (!(await existsInUpper(p))) {
-				const data = await lower.readFile(p);
-				await upper.writeFile(p, data);
+			if (!upper) {
+				throwReadOnly();
 			}
-			return upper.chmod(p, mode);
+			if (!(await existsInUpper(path))) {
+				await copyUpPath(path);
+			}
+			return upper.chmod(path, modeValue);
 		},
 
-		async chown(p: string, uid: number, gid: number): Promise<void> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such file: ${p}`);
+		async chown(path: string, uid: number, gid: number): Promise<void> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			if (!(await existsInUpper(p))) {
-				const data = await lower.readFile(p);
-				await upper.writeFile(p, data);
+			if (!upper) {
+				throwReadOnly();
 			}
-			return upper.chown(p, uid, gid);
+			if (!(await existsInUpper(path))) {
+				await copyUpPath(path);
+			}
+			return upper.chown(path, uid, gid);
 		},
 
-		async utimes(p: string, atime: number, mtime: number): Promise<void> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such file: ${p}`);
+		async utimes(path: string, atime: number, mtime: number): Promise<void> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			if (!(await existsInUpper(p))) {
-				const data = await lower.readFile(p);
-				await upper.writeFile(p, data);
+			if (!upper) {
+				throwReadOnly();
 			}
-			await upper.utimes(p, atime, mtime);
-			const updated = await upper.stat(p);
-			// Some backends (notably the in-memory core VFS) interpret utimes
-			// inputs as seconds rather than milliseconds. Normalize them here so
-			// the overlay presents a consistent millisecond-based contract.
+			if (!(await existsInUpper(path))) {
+				await copyUpPath(path);
+			}
+			await upper.utimes(path, atime, mtime);
+			const updated = await upper.stat(path);
+			// Some backends interpret utimes inputs as seconds rather than
+			// milliseconds. Normalize them here so the overlay presents a
+			// consistent millisecond-based contract.
 			if (updated.atimeMs === atime * 1000 && updated.mtimeMs === mtime * 1000) {
-				await upper.utimes(p, atime / 1000, mtime / 1000);
+				await upper.utimes(path, atime / 1000, mtime / 1000);
 			}
 		},
 
-		async truncate(p: string, length: number): Promise<void> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such file: ${p}`);
+		async truncate(path: string, length: number): Promise<void> {
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			if (!(await existsInUpper(p))) {
-				const data = await lower.readFile(p);
-				await upper.writeFile(p, data);
+			if (!upper) {
+				throwReadOnly();
 			}
-			return upper.truncate(p, length);
+			if (!(await existsInUpper(path))) {
+				await copyUpPath(path);
+			}
+			return upper.truncate(path, length);
 		},
 
 		async pread(
-			p: string,
+			path: string,
 			offset: number,
 			length: number,
 		): Promise<Uint8Array> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such file: ${p}`);
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			if (await existsInUpper(p)) {
-				return upper.pread(p, offset, length);
+			if (await existsInUpper(path)) {
+				return upper!.pread(path, offset, length);
 			}
-			return lower.pread(p, offset, length);
+			const lower = await findLowerByExists(path);
+			if (!lower) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
+			}
+			return lower.pread(path, offset, length);
 		},
 
 		async pwrite(
-			p: string,
+			path: string,
 			offset: number,
 			data: Uint8Array,
 		): Promise<void> {
-			if (isWhitedOut(p)) {
-				throw new KernelError("ENOENT", `no such file: ${p}`);
+			if (isWhitedOut(path)) {
+				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
-			// Copy-up if only in lower.
-			if (!(await existsInUpper(p))) {
-				const content = await lower.readFile(p);
-				await upper.writeFile(p, content);
+			if (!upper) {
+				throwReadOnly();
 			}
-			return upper.pwrite(p, offset, data);
+			if (!(await existsInUpper(path))) {
+				await copyUpPath(path);
+			}
+			return upper.pwrite(path, offset, data);
 		},
 	};
 

@@ -93,6 +93,17 @@ describe("OverlayBackend (layer behavior)", () => {
 		await expect(overlay.stat("/data/base.txt")).rejects.toThrow("ENOENT");
 	});
 
+	test("deleting a lower-layer file preserves lower data and does not copy it into upper", async () => {
+		await overlay.removeFile("/data/base.txt");
+
+		expect(await overlay.exists("/data/base.txt")).toBe(false);
+		expect(await lower.readTextFile("/data/base.txt")).toBe("base content");
+		expect(await upper.exists("/data/base.txt")).toBe(false);
+
+		const entries = await overlay.readDir("/data");
+		expect(entries).not.toContain("base.txt");
+	});
+
 	test("readdir merges both layers and excludes whiteouts", async () => {
 		await overlay.mkdir("/data", { recursive: true });
 		await overlay.writeFile("/data/upper-only.txt", "upper only");
@@ -143,5 +154,88 @@ describe("OverlayBackend (layer behavior)", () => {
 		expect(text).toBe("written");
 
 		expect(await lower.exists("/data/new.txt")).toBe(false);
+	});
+
+	test("mkdir -p on an existing lower directory is a no-op", async () => {
+		await lower.chmod("/data", 0o2755);
+
+		await overlay.mkdir("/data", { recursive: true });
+
+		expect(await upper.exists("/data")).toBe(false);
+		const stat = await overlay.stat("/data");
+		expect(stat.mode & 0o7777).toBe(0o2755);
+	});
+
+	test("writeFile copies lower parent directory metadata into upper", async () => {
+		await lower.chmod("/data", 0o2755);
+		await lower.chown("/data", 1000, 1000);
+
+		await overlay.writeFile("/data/new.txt", "new content");
+
+		const parentStat = await upper.stat("/data");
+		expect(parentStat.mode & 0o7777).toBe(0o2755);
+		expect(parentStat.uid).toBe(1000);
+		expect(parentStat.gid).toBe(1000);
+	});
+
+	test("mkdir -p on a lower symlink-to-directory preserves the symlink", async () => {
+		await lower.mkdir("/run/lock", { recursive: true });
+		await lower.symlink("../run/lock", "/var-lock");
+
+		await expect(
+			overlay.mkdir("/var-lock", { recursive: true }),
+		).rejects.toThrow("EEXIST");
+
+		const stat = await overlay.lstat("/var-lock");
+		expect(stat.isSymbolicLink).toBe(true);
+		expect(await overlay.readlink("/var-lock")).toBe("../run/lock");
+		expect(await upper.exists("/var-lock")).toBe(false);
+	});
+
+	test("multiple lowers resolve highest-precedence layer first", async () => {
+		const higher = createInMemoryFileSystem();
+		const deeper = createInMemoryFileSystem();
+
+		await higher.mkdir("/etc", { recursive: true });
+		await deeper.mkdir("/etc", { recursive: true });
+		await higher.writeFile("/etc/config.txt", "from higher");
+		await deeper.writeFile("/etc/config.txt", "from deeper");
+		await deeper.writeFile("/etc/deep-only.txt", "deep only");
+
+		const multiLowerOverlay = createOverlayBackend({
+			lowers: [higher, deeper],
+		});
+
+		expect(await multiLowerOverlay.readTextFile("/etc/config.txt")).toBe(
+			"from higher",
+		);
+		expect(await multiLowerOverlay.readTextFile("/etc/deep-only.txt")).toBe(
+			"deep only",
+		);
+	});
+
+	test("read-only overlays allow reads and reject writes", async () => {
+		const readOnlyOverlay = createOverlayBackend({
+			mode: "read-only",
+			lowers: [lower],
+		});
+
+		expect(await readOnlyOverlay.readTextFile("/data/base.txt")).toBe(
+			"base content",
+		);
+		await expect(
+			readOnlyOverlay.writeFile("/data/new.txt", "blocked"),
+		).rejects.toThrow("EROFS");
+	});
+
+	test("read-only mkdir -p on an existing lower directory is a no-op", async () => {
+		const readOnlyOverlay = createOverlayBackend({
+			mode: "read-only",
+			lowers: [lower],
+		});
+
+		await expect(
+			readOnlyOverlay.mkdir("/data", { recursive: true }),
+		).resolves.toBeUndefined();
 	});
 });
