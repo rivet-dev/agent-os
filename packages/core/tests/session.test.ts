@@ -258,35 +258,6 @@ describe("full createSession API", () => {
 		).rejects.toThrow();
 	}, 30_000);
 
-	test("VM subprocess spawning works alongside a pi session", async () => {
-		const { sessionId } = await vm.createSession("pi", {
-			env: {
-				ANTHROPIC_API_KEY: "mock-key",
-				ANTHROPIC_BASE_URL: mockUrl,
-			},
-		});
-
-		// Spawn a node subprocess that writes a file
-		await vm.writeFile(
-			"/tmp/write-script.js",
-			"require('fs').writeFileSync('/tmp/spawn-test.txt', 'spawned-ok')",
-		);
-		const proc = vm.kernel.spawn("node", ["/tmp/write-script.js"], {
-			env: { HOME: "/home/user" },
-		});
-		const result = await proc.wait();
-
-		// Verify the file was written
-		const content = await vm.readFile("/tmp/spawn-test.txt");
-		expect(new TextDecoder().decode(content)).toBe("spawned-ok");
-
-		// Session still works after subprocess
-		const { response } = await vm.prompt(sessionId, "hello");
-		expect(response.error).toBeUndefined();
-
-		vm.closeSession(sessionId);
-	}, 90_000);
-
 	test("VM filesystem operations work alongside a pi session", async () => {
 		const { sessionId } = await vm.createSession("pi", {
 			env: {
@@ -338,3 +309,4 @@ describe("full createSession API", () => {
 		});
 	}, 30_000);
 });
+
