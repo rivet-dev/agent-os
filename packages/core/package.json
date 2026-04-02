@@ -67,6 +67,7 @@
 		"@rivet-dev/agent-os-ripgrep": "link:../../registry/software/ripgrep",
 		"@rivet-dev/agent-os-sed": "link:../../registry/software/sed",
 		"@rivet-dev/agent-os-tar": "link:../../registry/software/tar",
+		"@rivet-dev/agent-os-slack-cli": "link:../../registry/software/slack-cli",
 		"@rivet-dev/agent-os-tree": "link:../../registry/software/tree",
 		"@rivet-dev/agent-os-yq": "link:../../registry/software/yq",
 		"@types/node": "^22.10.2",

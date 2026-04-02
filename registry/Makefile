@@ -8,13 +8,14 @@ COMMANDS_DIR := $(NATIVE_DIR)/target/wasm32-wasip1/release/commands
 MARKER_DIR  := .build-markers
 RUST_MARKER := $(MARKER_DIR)/rust-wasm-built
 C_MARKER    := $(MARKER_DIR)/c-wasm-built
+GO_MARKER   := $(MARKER_DIR)/go-wasm-built
 COPY_MARKER := $(MARKER_DIR)/wasm-copied
 META_MARKER := $(MARKER_DIR)/meta-generated
 TS_MARKER   := $(MARKER_DIR)/ts-built
 
 # Command packages (excludes _types and meta-packages)
 CMD_PACKAGES := coreutils sed grep gawk findutils diffutils tar gzip \
-                curl http-get wget zip unzip jq ripgrep fd tree file sqlite3 duckdb yq codex git
+                curl http-get wget zip unzip jq ripgrep fd tree file sqlite3 duckdb yq codex git slack-cli
 
 # Meta-packages
 META_PACKAGES := common build-essential everything
@@ -22,7 +23,7 @@ META_PACKAGES := common build-essential everything
 # All publishable packages
 ALL_PACKAGES := $(CMD_PACKAGES) $(META_PACKAGES)
 
-.PHONY: all build-wasm build-wasm-rust build-wasm-c copy-wasm generate-meta build test \
+.PHONY: all build-wasm build-wasm-rust build-wasm-c build-wasm-go copy-wasm generate-meta build test \
         publish publish-dry publish-force publish-clean clean rebuild
 
 all: build
@@ -36,7 +37,7 @@ $(MARKER_DIR):
 # ---------------------------------------------------------------------------
 # Build WASM binaries from source (in native/)
 # ---------------------------------------------------------------------------
-build-wasm: build-wasm-rust build-wasm-c
+build-wasm: build-wasm-rust build-wasm-c build-wasm-go
 
 build-wasm-rust: $(RUST_MARKER)
 $(RUST_MARKER): $(MARKER_DIR)
@@ -51,11 +52,17 @@ $(C_MARKER): $(MARKER_DIR)
 	cd $(NATIVE_DIR)/c && make install COMMANDS_DIR=../target/wasm32-wasip1/release/commands
 	@touch $(C_MARKER)
 
+build-wasm-go: $(GO_MARKER)
+$(GO_MARKER): $(MARKER_DIR)
+	@echo "=== Building Go WASM commands ==="
+	cd $(NATIVE_DIR)/go && make wasm
+	@touch $(GO_MARKER)
+
 # ---------------------------------------------------------------------------
 # Copy WASM binaries from native build output into per-package wasm/ dirs
 # ---------------------------------------------------------------------------
 copy-wasm: $(COPY_MARKER)
-$(COPY_MARKER): $(RUST_MARKER) $(C_MARKER)
+$(COPY_MARKER): $(RUST_MARKER) $(C_MARKER) $(GO_MARKER)
 	@echo "=== Copying WASM binaries to packages ==="
 
 	@# --- coreutils ---
@@ -185,6 +192,10 @@ $(COPY_MARKER): $(RUST_MARKER) $(C_MARKER)
 	@# --- git ---
 	@mkdir -p software/git/wasm
 	@[ -f "$(COMMANDS_DIR)/git" ] && cp -f "$(COMMANDS_DIR)/git" software/git/wasm/ || echo "  WARN: git not found"
+
+	@# --- slack-cli (Go build, GOOS=wasip1) ---
+	@mkdir -p software/slack-cli/wasm
+	@[ -f "$(COMMANDS_DIR)/slack" ] && cp -f "$(COMMANDS_DIR)/slack" software/slack-cli/wasm/ || echo "  WARN: slack not found (Go WASI build)"
 
 	@echo "=== Copy complete ==="
 	@touch $(COPY_MARKER)
@@ -321,6 +332,7 @@ clean-native:
 	@rm -rf $(NATIVE_DIR)/target
 	@rm -rf $(NATIVE_DIR)/vendor
 	@rm -rf $(NATIVE_DIR)/c/build $(NATIVE_DIR)/c/vendor $(NATIVE_DIR)/c/libs $(NATIVE_DIR)/c/.cache
+	@rm -rf $(NATIVE_DIR)/go/vendor
 	@rm -rf $(MARKER_DIR)
 	@echo "Cleaned native build artifacts"
 

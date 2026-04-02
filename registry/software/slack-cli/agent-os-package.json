@@ -1,0 +1,7 @@
+{
+  "name": "@rivet-dev/agent-os-slack-cli",
+  "type": "wasm",
+  "description": "Slack CLI for building apps on the Slack Platform",
+  "aptName": "slack-cli",
+  "source": "go"
+}

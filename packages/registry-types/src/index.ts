@@ -32,8 +32,8 @@ export interface WasmCommandPackage {
 	aptName: string;
 	/** Human-readable description. */
 	description: string;
-	/** Build source: "rust" or "c". */
-	source: "rust" | "c";
+	/** Build source: "rust", "c", or "go". */
+	source: "rust" | "c" | "go";
 	/** Commands provided by this package. */
 	commands: WasmCommandEntry[];
 	/** Absolute path to the directory containing WASM command binaries. */
