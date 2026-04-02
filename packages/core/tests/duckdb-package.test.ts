@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import coreutils from "@rivet-dev/agent-os-coreutils";
 import duckdb from "../../../registry/software/duckdb/dist/index.js";
 import httpGet from "../../../registry/software/http-get/dist/index.js";
-import { AgentOs } from "../src/index.js";
+import { AgentOs } from "../dist/index.js";
 
 const hasDuckdbPackage = existsSync(`${duckdb.commandDir}/duckdb`);
 const hasHttpGetPackage = existsSync(`${httpGet.commandDir}/http_get`);
@@ -36,12 +36,12 @@ describe.skipIf(!hasDuckdbPackage || !hasHttpGetPackage || !hasCoreutilsPackage)
 			let result = await vm.exec(
 				`duckdb -csv /tmp/app.duckdb -c "CREATE TABLE items(id INTEGER, value INTEGER); INSERT INTO items VALUES (1, 10), (2, 20); UPDATE items SET value = value + 1 WHERE id = 2;"`,
 			);
-			expect(result.exitCode).toBe(0);
+			expect(result.exitCode, result.stderr || result.stdout).toBe(0);
 
 			result = await vm.exec(
 				`duckdb -csv /tmp/app.duckdb -c "SELECT id, value FROM items ORDER BY id;"`,
 			);
-			expect(result.exitCode).toBe(0);
+			expect(result.exitCode, result.stderr || result.stdout).toBe(0);
 			expect(result.stdout.trim()).toBe("id,value\n1,10\n2,21");
 			expect(await vm.exists("/tmp/app.duckdb")).toBe(true);
 		});
@@ -69,12 +69,12 @@ describe.skipIf(!hasDuckdbPackage || !hasHttpGetPackage || !hasCoreutilsPackage)
 				let result = await vm.exec(
 					`http_get ${address.port} /remote.csv /tmp/remote.csv`,
 				);
-				expect(result.exitCode).toBe(0);
+				expect(result.exitCode, result.stderr || result.stdout).toBe(0);
 
 				result = await vm.exec(
 					`duckdb -csv -c "SELECT SUM(value) AS total FROM read_csv_auto('/tmp/remote.csv');"`,
 				);
-				expect(result.exitCode).toBe(0);
+				expect(result.exitCode, result.stderr || result.stdout).toBe(0);
 				expect(result.stdout.trim()).toBe("total\n8");
 			} finally {
 				await closeServer(server);

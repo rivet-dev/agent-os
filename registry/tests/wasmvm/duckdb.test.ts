@@ -239,14 +239,14 @@ describe.skipIf(!hasWasmDuckDB)('duckdb command', { timeout: 120_000 }, () => {
         }
 
         let result;
-        if (hasWasmCurl) {
+        if (hasWasmHttpGet) {
           result = await kernel.exec(
-            `curl -fsS -o /tmp/remote.csv http://127.0.0.1:${address.port}/remote.csv`
+            `http_get ${address.port} /remote.csv /tmp/remote.csv`
           );
           expect(result.exitCode).toBe(0);
         } else {
           result = await kernel.exec(
-            `http_get ${address.port} /remote.csv /tmp/remote.csv`
+            `curl -fsS -o /tmp/remote.csv http://127.0.0.1:${address.port}/remote.csv`
           );
           expect(result.exitCode).toBe(0);
         }
