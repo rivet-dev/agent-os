@@ -27,6 +27,9 @@ import {
   ERRNO_EBADF,
   FDFLAG_NONBLOCK,
   RIGHT_FD_FDSTAT_SET_FLAGS,
+  ERRNO_ENOENT,
+  RIGHT_FD_READ,
+  RIGHT_FD_WRITE,
 } from './wasi-constants.js';
 import { VfsError } from './wasi-types.js';
 import type { WasiVFS, WasiInode, VfsStat, VfsSnapshotEntry } from './wasi-types.js';
@@ -251,6 +254,7 @@ function createKernelFileIO(): WasiFileIO {
       return { errno: res.errno, written: res.intResult };
     },
     fdOpen(path, dirflags, oflags, fdflags, rightsBase, rightsInheriting) {
+      const createIfMissing = !!(oflags & 0x1); // OFLAG_CREAT
       const wantDirectory = !!(oflags & 0x2); // OFLAG_DIRECTORY
 
       // Permission check: isolated tier restricts reads to cwd subtree
@@ -259,7 +263,9 @@ function createKernelFileIO(): WasiFileIO {
       }
 
       // Permission check: block write flags for read-only/isolated tiers
-      const hasWriteIntent = !!(oflags & 0x1) || !!(oflags & 0x8) || !!(fdflags & 0x1) || !!(rightsBase & 2n);
+      const wantsRead = !!(rightsBase & RIGHT_FD_READ);
+      const wantsWrite = !!(rightsBase & RIGHT_FD_WRITE);
+      const hasWriteIntent = !!(oflags & 0x1) || !!(oflags & 0x8) || !!(fdflags & 0x1) || wantsWrite;
       if (isWriteBlocked() && hasWriteIntent) {
         return { errno: ERRNO_EACCES, fd: -1, filetype: 0 };
       }
@@ -293,13 +299,24 @@ function createKernelFileIO(): WasiFileIO {
         return { errno: 0, fd: localFd, filetype: FILETYPE_DIRECTORY };
       }
 
+      // The kernel FD layer only materializes missing paths for O_CREAT/O_EXCL/O_TRUNC
+      // via prepareOpenSync. For a plain open on a nonexistent file, reject here so
+      // callers observe POSIX/WASI ENOENT instead of receiving an unusable descriptor.
+      if (!createIfMissing) {
+        const statRes = rpcCall('vfsStat', { path });
+        if (statRes.errno !== 0) {
+          return { errno: ERRNO_ENOENT, fd: -1, filetype: 0 };
+        }
+      }
+
       // Map WASI oflags to POSIX open flags for kernel
       let flags = 0;
       if (oflags & 0x1) flags |= 0o100;   // O_CREAT
       if (oflags & 0x4) flags |= 0o200;   // O_EXCL
       if (oflags & 0x8) flags |= 0o1000;  // O_TRUNC
       if (fdflags & 0x1) flags |= 0o2000; // O_APPEND
-      if (rightsBase & 2n) flags |= 1;     // O_WRONLY
+      if (wantsRead && wantsWrite) flags |= 2; // O_RDWR
+      else if (wantsWrite) flags |= 1;         // O_WRONLY
 
       const res = rpcCall('fdOpen', { path, flags, mode: 0o666 });
       if (res.errno !== 0) return { errno: res.errno, fd: -1, filetype: 0 };
@@ -452,6 +469,33 @@ function createKernelVfs(): WasiVFS {
     return ino;
   }
 
+  function refreshCachedInode(ino: number): void {
+    const path = inoToPath.get(ino);
+    const node = inoCache.get(ino);
+    if (!path || !node) return;
+
+    if (permissionTier === 'isolated' && !isPathInCwd(path)) return;
+
+    const res = rpcCall('vfsStat', { path });
+    if (res.errno !== 0) return;
+
+    const raw = JSON.parse(decoder.decode(res.data)) as Record<string, unknown>;
+    const nodeType = (raw.type as string) ?? 'file';
+    node.type = nodeType;
+    node.mode = (raw.mode as number) ?? node.mode;
+    node.uid = (raw.uid as number) ?? node.uid;
+    node.gid = (raw.gid as number) ?? node.gid;
+    node.nlink = (raw.nlink as number) ?? node.nlink;
+    node.atime = (raw.atime as number) ?? node.atime;
+    node.mtime = (raw.mtime as number) ?? node.mtime;
+    node.ctime = (raw.ctime as number) ?? node.ctime;
+    (node as WasiInode & { size: number }).size = (raw.size as number) ?? node.size;
+
+    if (nodeType === 'dir') {
+      node.entries ??= new Map();
+    }
+  }
+
   /** Lazy-populate directory entries from kernel VFS readdir. */
   function populateDirEntries(ino: number, node: WasiInode): void {
     if (populatedDirs.has(ino)) return;
@@ -503,6 +547,22 @@ function createKernelVfs(): WasiVFS {
       if (isWriteBlocked()) throw new VfsError('EACCES', path);
       const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
       rpcCall('vfsWriteFile', { path, data: Array.from(bytes) });
+    },
+    truncate(path: string, length: number): void {
+      if (isWriteBlocked()) throw new VfsError('EACCES', path);
+      const res = rpcCall('vfsTruncate', { path, length });
+      if (res.errno !== 0) throw new VfsError('EINVAL', path);
+
+      const cachedIno = pathToIno.get(path);
+      if (cachedIno !== undefined) {
+        const node = inoCache.get(cachedIno);
+        if (node) {
+          const mutableNode = node as WasiInode & { size: number };
+          mutableNode.size = length;
+          mutableNode.mtime = Date.now();
+          mutableNode.ctime = Date.now();
+        }
+      }
     },
     readFile(path: string): Uint8Array {
       // Isolated tier: restrict reads to cwd subtree
@@ -583,6 +643,7 @@ function createKernelVfs(): WasiVFS {
     getInodeByIno(ino: number): WasiInode | null {
       const node = inoCache.get(ino);
       if (!node) return null;
+      refreshCachedInode(ino);
       // Lazy-populate directory entries from kernel VFS
       if (node.type === 'dir' && node.entries) {
         populateDirEntries(ino, node);

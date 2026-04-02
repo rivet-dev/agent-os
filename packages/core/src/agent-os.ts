@@ -699,7 +699,10 @@ export class AgentOs {
 		await kernel.mount(
 			createWasmVmRuntime(
 				processed.commandDirs.length > 0
-					? { commandDirs: processed.commandDirs }
+					? {
+						commandDirs: processed.commandDirs,
+						permissions: processed.commandPermissions,
+					}
 					: undefined,
 			),
 		);

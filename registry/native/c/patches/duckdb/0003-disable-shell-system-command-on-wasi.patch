@@ -1,0 +1,24 @@
+diff --git a/tools/shell/shell_metadata_command.cpp b/tools/shell/shell_metadata_command.cpp
+index 09d81cf..53c5357 100644
+--- a/tools/shell/shell_metadata_command.cpp
++++ b/tools/shell/shell_metadata_command.cpp
+@@ -406,6 +406,11 @@ MetadataResult DisplaySchemas(ShellState &state, const vector<string> &args) {
+ }
+ 
+ MetadataResult RunShellCommand(ShellState &state, const vector<string> &args) {
++#ifdef SQLITE_NOHAVE_SYSTEM
++	(void)args;
++	state.Print(PrintOutput::STDERR, ".sh/.system is not supported in this WASI DuckDB build\n");
++	return MetadataResult::FAIL;
++#else
+ 	if (state.safe_mode) {
+ 		state.Print(PrintOutput::STDERR, ".sh/.system cannot be used in -safe mode\n");
+ 		return MetadataResult::FAIL;
+@@ -422,6 +427,7 @@ MetadataResult RunShellCommand(ShellState &state, const vector<string> &args) {
+ 		state.PrintF(PrintOutput::STDERR, "System command returns %d\n", x);
+ 	}
+ 	return MetadataResult::SUCCESS;
++#endif
+ }
+ 
+ MetadataResult ShowConfiguration(ShellState &state, const vector<string> &args) {

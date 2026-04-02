@@ -1,0 +1,15 @@
+diff --git a/src/main/database.cpp b/src/main/database.cpp
+index a2aab0d..7c6ea97 100644
+--- a/src/main/database.cpp
++++ b/src/main/database.cpp
+@@ -54,7 +54,9 @@ DBConfig::DBConfig() {
+ 	collation_bindings = make_uniq<CollationBinding>();
+ 	index_types = make_uniq<IndexTypeSet>();
+ 	error_manager = make_uniq<ErrorManager>();
+ 	secret_manager = make_uniq<SecretManager>();
++#ifndef DUCKDB_DISABLE_EXTENSION_LOAD
+ 	http_util = make_shared_ptr<HTTPUtil>();
++#endif
+ 	callback_manager = make_uniq<ExtensionCallbackManager>();
+ 	callback_manager->Register("__open_file__", OpenFileStorageExtension::Create());
+ }

@@ -63,7 +63,7 @@ NATIVE_CFLAGS := -O0 -g -I include/
 COMMANDS_DIR ?= ../target/wasm32-wasip1/release/commands
 
 # Real commands to install (add command names as they are opted in)
-COMMANDS := zip unzip envsubst sqlite3 curl wget
+COMMANDS := zip unzip envsubst sqlite3 curl wget duckdb
 
 # Programs requiring patched sysroot (Tier 2+ custom host imports)
 PATCHED_PROGRAMS := isatty_test getpid_test getppid_test getppid_verify userinfo pipe_test dup_test spawn_child spawn_exit_code pipeline kill_child waitpid_return waitpid_edge syscall_coverage getpwuid_test signal_tests sigaction_behavior delayed_tcp_echo delayed_kill pipe_edge tcp_echo tcp_server udp_echo unix_socket signal_handler http_get dns_lookup sqlite3_cli curl wget
@@ -88,9 +88,11 @@ endif
 
 WASM_PROG_NAMES := $(sort $(basename $(notdir $(SOURCES))) $(CUSTOM_WASM_PROG_NAMES))
 NATIVE_PROG_NAMES := $(basename $(notdir $(SOURCES)))
+PROGRAM_REPORT_NAMES := $(WASM_PROG_NAMES) duckdb
 
 # Default WASM output targets
-WASM_OUTPUTS := $(addprefix $(BUILD_DIR)/,$(WASM_PROG_NAMES))
+EXTRA_WASM_OUTPUTS := $(BUILD_DIR)/duckdb
+WASM_OUTPUTS := $(addprefix $(BUILD_DIR)/,$(WASM_PROG_NAMES)) $(EXTRA_WASM_OUTPUTS)
 # Native output targets
 NATIVE_OUTPUTS := $(addprefix $(NATIVE_DIR)/,$(NATIVE_PROG_NAMES))
 
@@ -137,6 +139,11 @@ CURL_UPSTREAM_BUILD_DIR := $(BUILD_DIR)/curl-upstream
 CURL_UPSTREAM_OVERLAY_DIR := curl-upstream-overlay
 CURL_UPSTREAM_OVERLAY_FILES := $(wildcard $(CURL_UPSTREAM_OVERLAY_DIR)/lib/*.c $(CURL_UPSTREAM_OVERLAY_DIR)/lib/*.h $(CURL_UPSTREAM_OVERLAY_DIR)/lib/vtls/*.c $(CURL_UPSTREAM_OVERLAY_DIR)/lib/vtls/*.h)
 MINIZIP_URL := https://github.com/madler/zlib/archive/refs/tags/v1.3.1.zip
+# duckdb-wasm currently documents DuckDB v1.5.0 in its README. We build the
+# matching upstream DuckDB tag ourselves with our patched WASI/POSIX sysroot.
+DUCKDB_VERSION := v1.5.0
+DUCKDB_GIT_DESCRIBE := $(DUCKDB_VERSION)-0-g0123456789
+DUCKDB_URL := https://github.com/duckdb/duckdb/archive/refs/tags/$(DUCKDB_VERSION).tar.gz
 
 LIBS_DIR    := libs
 LIBS_CACHE  := .cache/libs
@@ -183,8 +190,16 @@ libs/curl/lib/easy.c:
 	@rm -rf $(LIBS_DIR)/curl
 	@mv $(LIBS_CACHE)/secure-exec-curl-* $(LIBS_DIR)/curl
 
+libs/duckdb/CMakeLists.txt:
+	@echo "Fetching DuckDB ($(DUCKDB_VERSION))..."
+	@mkdir -p $(LIBS_CACHE)
+	@curl -fSL "$(DUCKDB_URL)" -o "$(LIBS_CACHE)/duckdb.tar.gz"
+	@rm -rf $(LIBS_DIR)/duckdb
+	@mkdir -p $(LIBS_DIR)/duckdb
+	@tar -xzf "$(LIBS_CACHE)/duckdb.tar.gz" --strip-components=1 -C $(LIBS_DIR)/duckdb
+
 .PHONY: fetch-libs clean-libs
-fetch-libs: libs/sqlite3/sqlite3.c libs/zlib/zutil.c libs/minizip/ioapi.c libs/cjson/cJSON.c libs/curl/lib/easy.c
+fetch-libs: libs/sqlite3/sqlite3.c libs/zlib/zutil.c libs/minizip/ioapi.c libs/cjson/cJSON.c libs/curl/lib/easy.c libs/duckdb/CMakeLists.txt
 
 clean-libs:
 	rm -rf $(LIBS_DIR) $(LIBS_CACHE)
@@ -383,8 +398,14 @@ libc-test-native: fetch-libc-test
 
 # --- Patched sysroot (delegates to patch-wasi-libc.sh) ---
 
-sysroot: wasi-sdk
+WASI_LIBC_PATCHES := $(wildcard ../patches/wasi-libc/*.patch)
+WASI_LIBC_OVERRIDES := $(wildcard ../patches/wasi-libc-overrides/*.c)
+LLVM_RUNTIME_PATCHES := $(wildcard patches/llvm-project/*.patch)
+
+$(PATCHED_SYSROOT)/lib/wasm32-wasi/libc.a: wasi-sdk ../scripts/patch-wasi-libc.sh scripts/build-llvm-runtimes.sh $(WASI_LIBC_PATCHES) $(WASI_LIBC_OVERRIDES) $(LLVM_RUNTIME_PATCHES)
 	../scripts/patch-wasi-libc.sh
+
+sysroot: $(PATCHED_SYSROOT)/lib/wasm32-wasi/libc.a
 
 # --- wasm-opt check ---
 
@@ -403,7 +424,7 @@ wasm-opt-check:
 programs: wasi-sdk fetch-libs wasm-opt-check $(WASM_OUTPUTS)
 	@echo ""
 	@echo "=== C WASM Build Report ==="
-	@echo "Programs: $(words $(WASM_PROG_NAMES)) compiled"
+	@echo "Programs: $(words $(PROGRAM_REPORT_NAMES)) compiled"
 	@echo "Sysroot:  $(SYSROOT)"
 	@echo "Output:   $(BUILD_DIR)/"
 	@echo "=== Build complete ==="
@@ -492,11 +513,16 @@ $(NATIVE_DIR)/unzip: programs/unzip.c $(ZLIB_SRCS) $(MINIZIP_UNZIP_SRCS)
 	@mkdir -p $(NATIVE_DIR)
 	$(NATIVE_CC) $(NATIVE_CFLAGS) $(ZIP_INCLUDES) -o $@ programs/unzip.c $(ZLIB_SRCS) $(MINIZIP_UNZIP_SRCS) -lz
 
+# curl_test: links libcurl (HTTP/HTTPS build for WASM via host_net + host_tls)
+# Curl still expects stable local/peer socket-name queries after connect, so
+# keep its WASI compatibility shim but route curl's own references onto private
+# wrapper symbols to avoid colliding with our patched sysroot exports.
 CURL_SRCS := $(wildcard libs/curl/lib/*.c) $(wildcard libs/curl/lib/vauth/*.c) \
              $(wildcard libs/curl/lib/vtls/*.c) $(wildcard libs/curl/lib/vquic/*.c) \
              $(wildcard libs/curl/lib/vssh/*.c)
 CURL_INCLUDES := -Ilibs/curl/include -Ilibs/curl/lib -include libs/curl/lib/curl_setup.h -include libs/curl/lib/curl_printf.h
-CURL_LIB_DEFS := -DHAVE_CONFIG_H -DBUILDING_LIBCURL -D_WASI_EMULATED_SIGNAL -DHAVE_BASENAME -DHAVE_LIBGEN_H
+CURL_LIB_DEFS := -DHAVE_CONFIG_H -DBUILDING_LIBCURL -D_WASI_EMULATED_SIGNAL -DHAVE_BASENAME -DHAVE_LIBGEN_H \
+             -Dgetsockname=curl_wasi_getsockname -Dgetpeername=curl_wasi_getpeername
 
 $(BUILD_DIR)/curl: scripts/build-curl-upstream.sh $(CURL_UPSTREAM_OVERLAY_FILES) $(WASI_SDK_DIR)/bin/clang
 	@mkdir -p $(BUILD_DIR)
@@ -524,6 +550,19 @@ $(BUILD_DIR)/wget: programs/wget.c $(CURL_SRCS) $(WASI_SDK_DIR)/bin/clang
 $(NATIVE_DIR)/wget: programs/wget.c
 	@mkdir -p $(NATIVE_DIR)
 	$(NATIVE_CC) $(NATIVE_CFLAGS) -o $@ programs/wget.c -lcurl
+
+# duckdb: upstream DuckDB CLI built from source with our patched WASI/POSIX sysroot
+$(BUILD_DIR)/duckdb: libs/duckdb/CMakeLists.txt $(PATCHED_SYSROOT)/lib/wasm32-wasi/libc.a $(WASI_SDK_DIR)/bin/clang $(WASI_SDK_DIR)/bin/clang++ cmake/FindThreads.cmake scripts/build-duckdb.sh include/fcntl.h include/ifaddrs.h include/net/if.h include/sys/ioctl.h
+	@mkdir -p $(BUILD_DIR)
+	DUCKDB_SRC_DIR="$(abspath $(LIBS_DIR)/duckdb)" \
+	DUCKDB_BUILD_DIR="$(abspath $(BUILD_DIR)/duckdb-cmake)" \
+	DUCKDB_OUTPUT="$(abspath $(BUILD_DIR)/duckdb)" \
+	WASI_SDK_DIR="$(abspath $(WASI_SDK_DIR))" \
+	SYSROOT_DIR="$(abspath $(PATCHED_SYSROOT))" \
+	MODULE_PATH="$(abspath cmake)" \
+	OVERLAY_INCLUDE_DIR="$(abspath include)" \
+	DUCKDB_GIT_DESCRIBE="$(DUCKDB_GIT_DESCRIBE)" \
+	bash scripts/build-duckdb.sh
 
 # --- Compile all C programs to native binaries (for parity testing) ---
 

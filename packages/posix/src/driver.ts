@@ -1042,6 +1042,13 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
           await kernel.vfs.mkdir(scopedProcPath(pid, msg.args.path as string));
           break;
         }
+        case 'vfsTruncate': {
+          await kernel.vfs.truncate(
+            scopedProcPath(pid, msg.args.path as string),
+            msg.args.length as number,
+          );
+          break;
+        }
         case 'vfsUnlink': {
           await kernel.vfs.removeFile(scopedProcPath(pid, msg.args.path as string));
           break;

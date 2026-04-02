@@ -14,7 +14,7 @@ TS_MARKER   := $(MARKER_DIR)/ts-built
 
 # Command packages (excludes _types and meta-packages)
 CMD_PACKAGES := coreutils sed grep gawk findutils diffutils tar gzip \
-                curl wget zip unzip jq ripgrep fd tree file sqlite3 yq codex git
+                curl wget zip unzip jq ripgrep fd tree file sqlite3 duckdb yq codex git
 
 # Meta-packages
 META_PACKAGES := common build-essential everything
@@ -164,6 +164,10 @@ $(COPY_MARKER): $(RUST_MARKER) $(C_MARKER)
 	@# --- sqlite3 (C build, needs patched sysroot) ---
 	@mkdir -p software/sqlite3/wasm
 	@[ -f "$(COMMANDS_DIR)/sqlite3" ] && cp -f "$(COMMANDS_DIR)/sqlite3" software/sqlite3/wasm/ || echo "  WARN: sqlite3 not found (needs patched sysroot)"
+
+	@# --- duckdb (upstream C++ build, needs patched sysroot) ---
+	@mkdir -p software/duckdb/wasm
+	@[ -f "$(COMMANDS_DIR)/duckdb" ] && cp -f "$(COMMANDS_DIR)/duckdb" software/duckdb/wasm/ || echo "  WARN: duckdb not found (needs patched sysroot)"
 
 	@# --- yq ---
 	@mkdir -p software/yq/wasm

@@ -405,6 +405,28 @@ export class VFS implements WasiVFS {
   }
 
   /**
+   * Resize a file, extending with zero bytes or truncating in place.
+   * @throws If the path does not exist or is not a regular file
+   */
+  truncate(path: string, length: number): void {
+    const ino = this._resolve(path, true);
+    if (ino === null) throw new VfsError('ENOENT', `no such file: ${path}`);
+
+    const node = this._getInode(ino)!;
+    if (node.type !== INODE_FILE) {
+      throw new VfsError(node.type === INODE_DIR ? 'EISDIR' : 'EINVAL', `not a regular file: ${path}`);
+    }
+    if (length < 0) throw new VfsError('EINVAL', `invalid length: ${length}`);
+    if (node.data!.length === length) return;
+
+    const next = new Uint8Array(length);
+    next.set(node.data!.subarray(0, Math.min(node.data!.length, length)));
+    node.data = next;
+    node.mtime = Date.now();
+    node.ctime = Date.now();
+  }
+
+  /**
    * Read a file's contents.
    * @throws If file doesn't exist or is a directory
    */

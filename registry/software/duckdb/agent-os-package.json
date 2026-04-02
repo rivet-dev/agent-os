@@ -1,0 +1,7 @@
+{
+  "name": "@rivet-dev/agent-os-duckdb",
+  "type": "wasm",
+  "description": "DuckDB command-line interface",
+  "aptName": "duckdb",
+  "source": "c"
+}

@@ -1,0 +1,18 @@
+diff --git a/tools/shell/CMakeLists.txt b/tools/shell/CMakeLists.txt
+index 2cc7e13..37853f9 100644
+--- a/tools/shell/CMakeLists.txt
++++ b/tools/shell/CMakeLists.txt
+@@ -1,8 +1,10 @@
+ include_directories(include)
+-add_subdirectory(linenoise)
+-add_definitions(-DHAVE_LINENOISE=1)
++if(NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")
++  add_subdirectory(linenoise)
++  add_definitions(-DHAVE_LINENOISE=1)
++  include_directories(linenoise/include)
++endif()
+ include_directories(../../third_party/utf8proc/include)
+-include_directories(linenoise/include)
+ add_definitions(-DSQLITE_SHELL_IS_UTF8)
+ add_definitions(-DUSE_DUCKDB_SHELL_WRAPPER)
+ 

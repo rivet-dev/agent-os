@@ -1,0 +1,196 @@
+diff --git a/libunwind/include/libunwind.h b/libunwind/include/libunwind.h
+index b2dae8f..63e147a 100644
+--- a/libunwind/include/libunwind.h
++++ b/libunwind/include/libunwind.h
+@@ -15,6 +15,7 @@
+ 
+ #include <__libunwind_config.h>
+ 
++#ifndef __wasm__
+ #include <stdint.h>
+ #include <stddef.h>
+ 
+@@ -1299,5 +1300,6 @@ enum {
+   UNW_LOONGARCH_F30 = 62,
+   UNW_LOONGARCH_F31 = 63,
+ };
++#endif
+ 
+ #endif
+diff --git a/libunwind/src/Unwind-wasm.c b/libunwind/src/Unwind-wasm.c
+index b18b32c..d2f61a3 100644
+--- a/libunwind/src/Unwind-wasm.c
++++ b/libunwind/src/Unwind-wasm.c
+@@ -11,14 +11,10 @@
+ //===----------------------------------------------------------------------===//
+ 
+ #include <stdbool.h>
+-
+ #include "config.h"
+-
+-#ifdef __WASM_EXCEPTIONS__
+-
+ #include "unwind.h"
+-#include <threads.h>
+ 
++#ifdef __wasm__
+ _Unwind_Reason_Code __gxx_personality_wasm0(int version, _Unwind_Action actions,
+                                             uint64_t exceptionClass,
+                                             _Unwind_Exception *unwind_exception,
+@@ -35,7 +31,7 @@ struct _Unwind_LandingPadContext {
+ 
+ // Communication channel between compiler-generated user code and personality
+ // function
+-thread_local struct _Unwind_LandingPadContext __wasm_lpad_context;
++_Thread_local struct _Unwind_LandingPadContext __wasm_lpad_context;
+ 
+ /// Calls to this function is in landing pads in compiler-generated user code.
+ /// In other EH schemes, stack unwinding is done by libunwind library, which
+@@ -120,4 +116,4 @@ _Unwind_GetRegionStart(struct _Unwind_Context *context) {
+   return 0;
+ }
+ 
+-#endif // defined(__WASM_EXCEPTIONS__)
++#endif
+diff --git a/libunwind/src/UnwindRegistersRestore.S b/libunwind/src/UnwindRegistersRestore.S
+index 9d34c79..91b3691 100644
+--- a/libunwind/src/UnwindRegistersRestore.S
++++ b/libunwind/src/UnwindRegistersRestore.S
+@@ -6,6 +6,7 @@
+ //
+ //===----------------------------------------------------------------------===//
+ 
++#if !defined(__wasm__)
+ #include "assembly.h"
+ 
+ #define FROM_0_TO_15 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+@@ -1249,4 +1250,4 @@ DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind19Registers_loongarch6jumptoEv)
+ #endif /* !defined(__USING_SJLJ_EXCEPTIONS__) && !defined(__wasm__) */
+ 
+ NO_EXEC_STACK_DIRECTIVE
+-
++#endif
+diff --git a/libunwind/src/UnwindRegistersSave.S b/libunwind/src/UnwindRegistersSave.S
+index 5bf6055..4397295 100644
+--- a/libunwind/src/UnwindRegistersSave.S
++++ b/libunwind/src/UnwindRegistersSave.S
+@@ -6,6 +6,7 @@
+ //
+ //===----------------------------------------------------------------------===//
+ 
++#ifndef __wasm__
+ #include "assembly.h"
+ 
+ #define FROM_0_TO_15 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+@@ -1180,3 +1181,5 @@ DEFINE_LIBUNWIND_FUNCTION(__unw_getcontext)
+ #endif /* !defined(__USING_SJLJ_EXCEPTIONS__) && !defined(__wasm__) */
+ 
+ NO_EXEC_STACK_DIRECTIVE
++
++#endif
+diff --git a/libunwind/src/assembly.h b/libunwind/src/assembly.h
+index f8e83e1..21b20a8 100644
+--- a/libunwind/src/assembly.h
++++ b/libunwind/src/assembly.h
+@@ -15,6 +15,7 @@
+ #ifndef UNWIND_ASSEMBLY_H
+ #define UNWIND_ASSEMBLY_H
+ 
++#ifndef __wasm__
+ #if defined(__linux__) && defined(__CET__)
+ #include <cet.h>
+ #define _LIBUNWIND_CET_ENDBR _CET_ENDBR
+@@ -299,5 +300,6 @@ aliasname:                                                                     \
+ #if defined(__powerpc__)
+ #define PPC_LEFT_SHIFT(index) << (index)
+ #endif
++#endif
+ 
+ #endif /* UNWIND_ASSEMBLY_H */
+diff --git a/libunwind/src/cet_unwind.h b/libunwind/src/cet_unwind.h
+index 47d7616..dd9bfec 100644
+--- a/libunwind/src/cet_unwind.h
++++ b/libunwind/src/cet_unwind.h
+@@ -10,6 +10,7 @@
+ #ifndef LIBUNWIND_CET_UNWIND_H
+ #define LIBUNWIND_CET_UNWIND_H
+ 
++#ifndef __wasm__
+ #include "libunwind.h"
+ 
+ // Currently, CET is implemented on Linux x86 platforms.
+@@ -61,3 +62,4 @@ extern void *__libunwind_cet_get_registers(unw_cursor_t *);
+ extern void *__libunwind_cet_get_jump_target(void);
+ 
+ #endif
++#endif
+diff --git a/libunwind/src/config.h b/libunwind/src/config.h
+index deb5a4d..2a13969 100644
+--- a/libunwind/src/config.h
++++ b/libunwind/src/config.h
+@@ -66,13 +66,14 @@
+   #define _LIBUNWIND_EXPORT
+   #define _LIBUNWIND_HIDDEN
+ #else
+-  #if !defined(__ELF__) && !defined(__MACH__) && !defined(_AIX)
+-    #define _LIBUNWIND_EXPORT __declspec(dllexport)
+-    #define _LIBUNWIND_HIDDEN
+-  #else
+-    #define _LIBUNWIND_EXPORT __attribute__((visibility("default")))
+-    #define _LIBUNWIND_HIDDEN __attribute__((visibility("hidden")))
+-  #endif
++#if !defined(__ELF__) && !defined(__MACH__) && !defined(_AIX) && \
++    !defined(__wasm__)
++#define _LIBUNWIND_EXPORT __declspec(dllexport)
++#define _LIBUNWIND_HIDDEN
++#else
++#define _LIBUNWIND_EXPORT __attribute__((visibility("default")))
++#define _LIBUNWIND_HIDDEN __attribute__((visibility("hidden")))
++#endif
+ #endif
+ 
+ #define STR(a) #a
+diff --git a/libunwind/src/libunwind.cpp b/libunwind/src/libunwind.cpp
+index cf39ec5..efade46 100644
+--- a/libunwind/src/libunwind.cpp
++++ b/libunwind/src/libunwind.cpp
+@@ -12,6 +12,7 @@
+ #include <libunwind.h>
+ 
+ #include "config.h"
++#ifndef __wasm__
+ #include "libunwind_ext.h"
+ 
+ #include <stdlib.h>
+@@ -430,6 +431,7 @@ int __unw_remove_find_dynamic_unwind_sections(
+ }
+ 
+ #endif // __APPLE__
++#endif
+ 
+ // Add logging hooks in Debug builds only
+ #ifndef NDEBUG
+@@ -472,4 +474,3 @@ bool logDWARF() {
+ }
+ 
+ #endif // NDEBUG
+-
+diff --git a/libunwind/src/libunwind_ext.h b/libunwind/src/libunwind_ext.h
+index 28db43a..3a7ca7c 100644
+--- a/libunwind/src/libunwind_ext.h
++++ b/libunwind/src/libunwind_ext.h
+@@ -12,6 +12,7 @@
+ #ifndef __LIBUNWIND_EXT__
+ #define __LIBUNWIND_EXT__
+ 
++#ifndef __wasm__
+ #include "config.h"
+ #include <libunwind.h>
+ #include <unwind.h>
+@@ -133,5 +134,6 @@ extern _Unwind_Reason_Code _Unwind_VRS_Interpret(_Unwind_Context *context,
+ #ifdef __cplusplus
+ }
+ #endif
++#endif
+ 
+ #endif // __LIBUNWIND_EXT__

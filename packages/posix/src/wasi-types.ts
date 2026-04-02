@@ -101,6 +101,7 @@ export interface WasiVFS {
   mkdir(path: string): void;
   mkdirp(path: string): void;
   writeFile(path: string, content: Uint8Array | string): void;
+  truncate(path: string, length: number): void;
   readFile(path: string): Uint8Array;
   readdir(path: string): string[];
   stat(path: string): VfsStat;

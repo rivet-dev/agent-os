@@ -1,5 +1,72 @@
-diff --git a/libc-bottom-half/headers/public/__struct_sockaddr_un.h b/libc-bottom-half/headers/public/__struct_sockaddr_un.h
-index 6371194..60634cf 100644
+Implement socket(), connect(), bind(), listen(), accept(), send(),
+recv(), sendto(), recvfrom(), getaddrinfo(), freeaddrinfo(),
+gai_strerror(), gethostname(), setsockopt(), poll(), and select()
+via host_net WASM imports.
+
+Replaces the wasi-libc stubs (which return -ENOSYS or are #ifdef'd out)
+with implementations that call our host_net.net_socket, net_connect,
+net_bind, net_listen, net_accept, net_send, net_recv, net_sendto,
+net_recvfrom, net_getaddrinfo, net_close, net_setsockopt, and net_poll
+WASM imports.
+
+Un-omits netdb.h from the sysroot headers so C programs can use
+getaddrinfo/freeaddrinfo/gai_strerror. Un-gates bind() and listen()
+declarations from the wasip2-only guard.
+
+Supports AF_INET, AF_INET6, and AF_UNIX address families in
+sockaddr serialization (sockaddr_to_string / string_to_sockaddr).
+
+Import signatures match wasmvm/crates/wasi-ext/src/lib.rs exactly.
+
+--- a/scripts/install-include-headers.sh	2026-03-20 04:05:48.609869966 -0700
++++ b/scripts/install-include-headers.sh	2026-03-20 04:05:57.781880813 -0700
+@@ -69,10 +69,11 @@
+     "net/ethernet.h" "net/route.h" "netinet/if_ether.h" "netinet/ether.h" \
+     "sys/timerfd.h" "libintl.h" "sys/sysmacros.h" "aio.h")
+ # Exclude `netdb.h` from all of the p1 targets.
+-if [[ $TARGET_TRIPLE == *"wasi" || $TARGET_TRIPLE == *"wasi-threads" || \
+-      $TARGET_TRIPLE == *"wasip1" || $TARGET_TRIPLE == *"wasip1-threads" ]]; then
+-    MUSL_OMIT_HEADERS+=("netdb.h")
+-fi
++# NOTE: commented out by secureexec 0008-sockets patch — we provide getaddrinfo via host_net
++#if [[ $TARGET_TRIPLE == *"wasi" || $TARGET_TRIPLE == *"wasi-threads" || \
++#      $TARGET_TRIPLE == *"wasip1" || $TARGET_TRIPLE == *"wasip1-threads" ]]; then
++#    MUSL_OMIT_HEADERS+=("netdb.h")
++#fi
+ 
+ # Remove all the `MUSL_OMIT_HEADERS` previously copied over.
+ for OMIT_HEADER in "${MUSL_OMIT_HEADERS[@]}"; do
+
+--- a/libc-top-half/musl/include/sys/socket.h	2026-03-20 04:05:48.609869966 -0700
++++ b/libc-top-half/musl/include/sys/socket.h	2026-03-20 04:06:04.989889334 -0700
+@@ -401,3 +401 @@
+-#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
+ int socket (int, int, int);
+-#endif
+@@ -411,5 +409,3 @@
+-#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
+ int connect (int, const struct sockaddr *, socklen_t);
+ int bind (int, const struct sockaddr *, socklen_t);
+ int listen (int, int);
+-#endif
+@@ -420,4 +416,2 @@
+-#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
+ int getsockname (int, struct sockaddr *__restrict, socklen_t *__restrict);
+ int getpeername (int, struct sockaddr *__restrict, socklen_t *__restrict);
+-#endif
+@@ -427,4 +421,2 @@
+-#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
+ ssize_t sendto (int, const void *, size_t, int, const struct sockaddr *, socklen_t);
+ ssize_t recvfrom (int, void *__restrict, size_t, int, struct sockaddr *__restrict, socklen_t *__restrict);
+-#endif
+@@ -437,3 +429 @@
+-#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
+ int setsockopt (int, int, int, const void *, socklen_t);
+-#endif
+
+ #ifdef __wasilibc_unmodified_upstream /* WASI has no sockatmark */
+ int sockatmark (int);
+
 --- a/libc-bottom-half/headers/public/__struct_sockaddr_un.h
 +++ b/libc-bottom-half/headers/public/__struct_sockaddr_un.h
 @@ -5,6 +5,7 @@
@@ -15,7 +82,7 @@ new file mode 100644
 index 0000000..975e62a
 --- /dev/null
 +++ b/libc-bottom-half/sources/host_socket.c
-@@ -0,0 +1,696 @@
+@@ -0,0 +1,779 @@
 +// Socket API via wasmVM host_net imports.
 +//
 +// Replaces wasi-libc's ENOSYS stubs with calls to our custom WASM imports:

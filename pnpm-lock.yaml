@@ -677,6 +677,18 @@ importers:
         specifier: ^5.9.2
         version: 5.9.3
 
+  registry/software/duckdb:
+    devDependencies:
+      '@rivet-dev/agent-os-registry-types':
+        specifier: link:../../../packages/registry-types
+        version: link:../../../packages/registry-types
+      '@types/node':
+        specifier: ^22.15.17
+        version: 22.19.15
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+
   registry/software/everything:
     dependencies:
       '@rivet-dev/agent-os-codex':

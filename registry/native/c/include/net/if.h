@@ -1,0 +1,12 @@
+#ifndef REGISTRY_NATIVE_C_INCLUDE_NET_IF_H
+#define REGISTRY_NATIVE_C_INCLUDE_NET_IF_H
+
+#ifndef IFNAMSIZ
+#define IFNAMSIZ 16
+#endif
+
+#ifndef IF_NAMESIZE
+#define IF_NAMESIZE IFNAMSIZ
+#endif
+
+#endif

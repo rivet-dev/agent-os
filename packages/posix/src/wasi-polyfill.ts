@@ -981,17 +981,15 @@ export class WasiPolyfill {
     if (!(entry.rightsBase & RIGHT_FD_FILESTAT_SET_SIZE)) return ERRNO_EBADF;
     if (entry.resource.type !== 'vfsFile') return ERRNO_EINVAL;
 
-    const node = this.vfs.getInodeByIno(entry.resource.ino);
-    if (!node || node.type !== 'file') return ERRNO_EINVAL;
-
     const newSize = Number(typeof size === 'bigint' ? size : BigInt(size));
-    if (newSize === node.data!.length) return ERRNO_SUCCESS;
+    const ino = entry.resource.ino !== 0
+      ? entry.resource.ino
+      : this.vfs.getIno(entry.resource.path, true);
+    if (ino === null) return ERRNO_EBADF;
 
-    const newData = new Uint8Array(newSize);
-    newData.set(node.data!.subarray(0, Math.min(node.data!.length, newSize)));
-    node.data = newData;
-    node.mtime = Date.now();
-    node.ctime = Date.now();
+    const node = this.vfs.getInodeByIno(ino);
+    if (!node || node.type !== 'file') return ERRNO_EINVAL;
+    this.vfs.truncate(entry.resource.path, newSize);
     return ERRNO_SUCCESS;
   }
 
@@ -1004,7 +1002,11 @@ export class WasiPolyfill {
     if (!(entry.rightsBase & RIGHT_FD_FILESTAT_SET_TIMES)) return ERRNO_EBADF;
 
     if (entry.resource.type === 'vfsFile') {
-      const node = this.vfs.getInodeByIno(entry.resource.ino);
+      const ino = entry.resource.ino !== 0
+        ? entry.resource.ino
+        : this.vfs.getIno(entry.resource.path, true);
+      if (ino === null) return ERRNO_EBADF;
+      const node = this.vfs.getInodeByIno(ino);
       if (!node) return ERRNO_EBADF;
       this._applyTimestamps(node, atim, mtim, fst_flags);
     } else if (entry.resource.type === 'preopen') {

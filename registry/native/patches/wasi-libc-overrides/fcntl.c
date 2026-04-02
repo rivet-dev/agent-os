@@ -143,6 +143,27 @@ int fcntl(int fd, int cmd, ...) {
         break;
     }
 
+    case F_GETLK: {
+        struct flock *lock = va_arg(ap, struct flock *);
+        if (!lock) {
+            errno = EINVAL;
+            result = -1;
+        } else {
+            lock->l_type = F_UNLCK;
+            lock->l_pid = 0;
+            result = 0;
+        }
+        break;
+    }
+
+    case F_SETLK:
+    case F_SETLKW:
+        // WASI has no kernel-level advisory locking. Treat locks as a
+        // successful no-op so single-process workloads like DuckDB can open
+        // writable database files on the VFS-backed filesystem.
+        result = 0;
+        break;
+
     default:
         errno = EINVAL;
         result = -1;

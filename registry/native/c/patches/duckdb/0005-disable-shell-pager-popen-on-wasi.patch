@@ -1,0 +1,13 @@
+diff --git a/tools/shell/shell.cpp b/tools/shell/shell.cpp
+--- a/tools/shell/shell.cpp
++++ b/tools/shell/shell.cpp
+@@ -1416,6 +1416,10 @@ unique_ptr<PagerState> ShellState::SetupPager() {
+ 		SetConsoleCP(CP_UTF8);
+ 	}
+ #endif
++#ifdef SQLITE_OMIT_POPEN
++	Print(PrintOutput::STDERR, "Pager pipes are not supported in this WASI DuckDB build.\n");
++	return nullptr;
++#endif
+ 	StartPagerDisplay();
+ 	auto pager_out = popen(pager_command.c_str(), "w");

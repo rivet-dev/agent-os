@@ -1,5 +1,6 @@
 import { readFileSync, realpathSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
+import type { PermissionTier } from "@rivet-dev/agent-os-posix";
 
 /**
  * Resolve a package directory by walking up the directory tree.
@@ -99,6 +100,7 @@ export interface WasmCommandSoftwareDescriptor extends SoftwareDescriptor {
 		full?: string[];
 		readWrite?: string[];
 		readOnly?: string[] | "*";
+		isolated?: string[];
 	};
 }
 
@@ -228,6 +230,8 @@ export function defineSoftware<T extends AnySoftwareDescriptor>(desc: T): T {
 export interface ProcessedSoftware {
 	/** WASM command directories to pass to the WasmVM driver. */
 	commandDirs: string[];
+	/** Per-command permission tiers propagated into the WasmVM runtime. */
+	commandPermissions: Record<string, PermissionTier>;
 	/** Host-to-VM path mappings for ModuleAccessFileSystem. */
 	softwareRoots: SoftwareRoot[];
 	/** Agent configs registered by agent software. */
@@ -237,6 +241,73 @@ export interface ProcessedSoftware {
 /** Check if a descriptor is a typed software descriptor (has a `type` field). */
 function isTypedDescriptor(desc: AnySoftwareDescriptor): desc is AgentSoftwareDescriptor | ToolSoftwareDescriptor | WasmCommandSoftwareDescriptor {
 	return "type" in desc && typeof (desc as SoftwareDescriptor).type === "string";
+}
+
+const VALID_PERMISSION_TIERS = new Set<PermissionTier>([
+	"full",
+	"read-write",
+	"read-only",
+	"isolated",
+]);
+
+function isPermissionTier(value: unknown): value is PermissionTier {
+	return typeof value === "string" && VALID_PERMISSION_TIERS.has(value as PermissionTier);
+}
+
+function registerPermission(
+	commandPermissions: Record<string, PermissionTier>,
+	commandName: string,
+	tier: PermissionTier,
+): void {
+	if (commandName in commandPermissions) return;
+	commandPermissions[commandName] = tier;
+}
+
+function collectRegistryPackagePermissions(
+	commandPermissions: Record<string, PermissionTier>,
+	pkg: WasmCommandDirDescriptor,
+): void {
+	const rawCommands = (pkg as { commands?: unknown }).commands;
+	if (!Array.isArray(rawCommands)) return;
+
+	for (const rawCommand of rawCommands) {
+		if (
+			typeof rawCommand !== "object" ||
+			rawCommand === null ||
+			!Object.hasOwn(rawCommand, "name") ||
+			!Object.hasOwn(rawCommand, "permissionTier")
+		) {
+			continue;
+		}
+
+		const name = (rawCommand as { name: unknown }).name;
+		const permissionTier = (rawCommand as { permissionTier: unknown }).permissionTier;
+		if (typeof name !== "string" || !isPermissionTier(permissionTier)) continue;
+		registerPermission(commandPermissions, name, permissionTier);
+	}
+}
+
+function collectTypedDescriptorPermissions(
+	commandPermissions: Record<string, PermissionTier>,
+	pkg: WasmCommandSoftwareDescriptor,
+): void {
+	const permissions = pkg.permissions;
+	if (!permissions) return;
+
+	for (const commandName of permissions.full ?? []) {
+		registerPermission(commandPermissions, commandName, "full");
+	}
+	for (const commandName of permissions.readWrite ?? []) {
+		registerPermission(commandPermissions, commandName, "read-write");
+	}
+	if (Array.isArray(permissions.readOnly)) {
+		for (const commandName of permissions.readOnly) {
+			registerPermission(commandPermissions, commandName, "read-only");
+		}
+	}
+	for (const commandName of permissions.isolated ?? []) {
+		registerPermission(commandPermissions, commandName, "isolated");
+	}
 }
 
 /**
@@ -251,6 +322,7 @@ export function processSoftware(
 	software: SoftwareInput[],
 ): ProcessedSoftware {
 	const commandDirs: string[] = [];
+	const commandPermissions: Record<string, PermissionTier> = {};
 	const softwareRoots: SoftwareRoot[] = [];
 	const agentConfigs = new Map<string, AgentConfig>();
 
@@ -261,12 +333,14 @@ export function processSoftware(
 		if (!isTypedDescriptor(pkg)) {
 			// Duck-typed: any object with commandDir is a WASM command source.
 			commandDirs.push(pkg.commandDir);
+			collectRegistryPackagePermissions(commandPermissions, pkg);
 			continue;
 		}
 
 		switch (pkg.type) {
 			case "wasm-commands": {
 				commandDirs.push(pkg.commandDir);
+				collectTypedDescriptorPermissions(commandPermissions, pkg);
 				break;
 			}
 
@@ -313,5 +387,5 @@ export function processSoftware(
 		}
 	}
 
-	return { commandDirs, softwareRoots, agentConfigs };
+	return { commandDirs, commandPermissions, softwareRoots, agentConfigs };
 }

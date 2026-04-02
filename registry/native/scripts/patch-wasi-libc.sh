@@ -21,10 +21,13 @@ PATCHES_DIR="$WASMCORE_DIR/patches/wasi-libc"
 # wasi-libc commit pinned by wasi-sdk-25's git submodule
 WASI_LIBC_COMMIT="574b88da481569b65a237cb80daf9a2d5aeaf82d"
 WASI_LIBC_REPO="https://github.com/WebAssembly/wasi-libc.git"
+LLVM_PROJECT_TAG="llvmorg-19.1.5"
+LLVM_PROJECT_URL="https://github.com/llvm/llvm-project/archive/refs/tags/${LLVM_PROJECT_TAG}.tar.gz"
 
 # Directories
 VENDOR_DIR="$WASMCORE_DIR/c/vendor"
 WASI_LIBC_DIR="$VENDOR_DIR/wasi-libc"
+LLVM_PROJECT_DIR="$VENDOR_DIR/llvm-project"
 WASI_SDK_DIR="$VENDOR_DIR/wasi-sdk"
 SYSROOT_DIR="$WASMCORE_DIR/c/sysroot"
 WASI_LIBC_SRC_DIR="$WASI_LIBC_DIR"
@@ -78,6 +81,31 @@ else
             git -C "$WASI_LIBC_DIR" checkout "$WASI_LIBC_COMMIT"
         fi
     fi
+fi
+
+# Fetch llvm-project sources used to rebuild the exception-capable C++ runtime.
+if [ ! -d "$LLVM_PROJECT_DIR/runtimes" ]; then
+    if [ "$MODE" = "check" ]; then
+        echo "ERROR: llvm-project not vendored at $LLVM_PROJECT_DIR"
+        echo "Run '$0' (without --check) to fetch the runtime sources."
+        exit 1
+    fi
+
+    echo "=== Fetching llvm-project at $LLVM_PROJECT_TAG ==="
+    mkdir -p "$VENDOR_DIR"
+    LLVM_TARBALL="$VENDOR_DIR/${LLVM_PROJECT_TAG}.tar.gz"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fSL "$LLVM_PROJECT_URL" -o "$LLVM_TARBALL"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "$LLVM_PROJECT_URL" -O "$LLVM_TARBALL"
+    else
+        echo "ERROR: neither curl nor wget found"
+        exit 1
+    fi
+    rm -rf "$LLVM_PROJECT_DIR"
+    mkdir -p "$LLVM_PROJECT_DIR"
+    tar -xzf "$LLVM_TARBALL" --strip-components=1 -C "$LLVM_PROJECT_DIR"
+    echo ""
 fi
 
 cleanup() {
@@ -217,6 +245,45 @@ for crt in "$VANILLA_LIB"/crt*.o; do
     [ -f "$crt" ] && cp "$crt" "$SYSROOT_LIB/"
 done
 
+# Install the wasi-sdk libc++ runtime into the patched sysroot so upstream C++
+# projects can target the same sysroot we use for libc. We overlay the
+# thread-capable headers/libs from wasm32-wasi-threads because libc++'s mutex
+# support expects those definitions even when we satisfy pthread calls through
+# wasi-emulated-pthread.
+VANILLA_INCLUDE="$WASI_SDK_DIR/share/wasi-sysroot/include/wasm32-wasi"
+THREADS_INCLUDE="$WASI_SDK_DIR/share/wasi-sysroot/include/wasm32-wasi-threads"
+SYSROOT_INCLUDE="$SYSROOT_DIR/include/wasm32-wasi"
+mkdir -p "$SYSROOT_INCLUDE/c++/v1"
+if [ -d "$VANILLA_INCLUDE/c++/v1" ]; then
+    cp -R "$VANILLA_INCLUDE/c++/v1/." "$SYSROOT_INCLUDE/c++/v1/"
+fi
+if [ -d "$THREADS_INCLUDE/c++/v1" ]; then
+    cp -R "$THREADS_INCLUDE/c++/v1/." "$SYSROOT_INCLUDE/c++/v1/"
+fi
+
+for runtime in libc++.a libc++.modules.json libc++.so libc++abi.a libc++abi.so libc++experimental.a; do
+    [ -f "$VANILLA_LIB/$runtime" ] && cp "$VANILLA_LIB/$runtime" "$SYSROOT_LIB/"
+done
+THREADS_LIB="$WASI_SDK_DIR/share/wasi-sysroot/lib/wasm32-wasi-threads"
+for runtime in libc++.a libc++abi.a libc++experimental.a; do
+    [ -f "$THREADS_LIB/$runtime" ] && cp "$THREADS_LIB/$runtime" "$SYSROOT_LIB/"
+done
+
+# Rebuild the C++ runtime with Wasm EH enabled so upstream C++ projects can use
+# exceptions against the same patched WASI/POSIX sysroot. We also replace the
+# libc++ headers with the rebuilt install so the header ABI namespace matches
+# the custom libc++/libc++abi archives we overlay into the sysroot.
+LLVM_RUNTIME_BUILD_SCRIPT="$WASMCORE_DIR/c/scripts/build-llvm-runtimes.sh"
+LLVM_RUNTIME_BUILD_DIR="$WASMCORE_DIR/c/build/llvm-runtimes"
+LLVM_RUNTIME_INSTALL_DIR="$WASMCORE_DIR/c/build/llvm-runtimes-install"
+echo "Rebuilding libc++/libc++abi/libunwind with -fwasm-exceptions..."
+LLVM_PROJECT_SRC_DIR="$LLVM_PROJECT_DIR" \
+LLVM_RUNTIME_BUILD_DIR="$LLVM_RUNTIME_BUILD_DIR" \
+LLVM_RUNTIME_INSTALL_DIR="$LLVM_RUNTIME_INSTALL_DIR" \
+WASI_SDK_DIR="$WASI_SDK_DIR" \
+SYSROOT_DIR="$SYSROOT_DIR" \
+bash "$LLVM_RUNTIME_BUILD_SCRIPT"
+
 # Create empty dummy libraries (libm, librt, libpthread, etc.)
 for lib in m rt pthread crypt util xnet resolv; do
     "$WASI_AR" crs "$SYSROOT_LIB/lib${lib}.a" 2>/dev/null || true
@@ -254,14 +321,16 @@ done
 
 # === Install sysroot overrides ===
 # Override files in patches/wasi-libc-overrides/ fix broken libc behavior
-# (fcntl, strfmon, open_wmemstream, swprintf, inet_ntop, pthread_attr, pthread_mutex, pthread_key, fmtmsg).
+# (fcntl, sched_getcpu, strfmon, open_wmemstream, swprintf, inet_ntop,
+# pthread_attr, pthread_mutex, pthread_key, fmtmsg).
 # The patched sysroot also provides host_sigaction.o, which must replace musl's
 # original sigaction.o / signal.o so cooperative signal registration flows
 # through the host_process import instead of the upstream rt_sigaction stub.
 # realloc is handled by 0009-realloc-glibc-semantics.patch directly.
 # Overrides are compiled and added to libc.a so ALL WASM programs get the fixes.
 OVERRIDES_DIR="$WASMCORE_DIR/patches/wasi-libc-overrides"
-OVERRIDE_CFLAGS="--target=wasm32-wasip1 --sysroot=$SYSROOT_DIR -O2 -D_GNU_SOURCE"
+OVERRIDE_INCLUDE_DIR="$WASMCORE_DIR/c/include"
+OVERRIDE_CFLAGS="--target=wasm32-wasip1 --sysroot=$SYSROOT_DIR -O2 -D_GNU_SOURCE -I$OVERRIDE_INCLUDE_DIR"
 
 # Extra flags for overrides that need musl internal headers (struct __pthread, etc.)
 MUSL_INTERNAL_DIR="$WASI_LIBC_SRC_DIR/libc-top-half/musl/src/internal"

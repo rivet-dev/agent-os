@@ -545,6 +545,20 @@ describe('WasiPolyfill - Path Operations (US-008)', () => {
       expect(data[4]).toBe(0);
     });
 
+    it('resolves path-backed file descriptors whose inode is synthesized later', () => {
+      const { wasi, vfs, fdTable } = createTestSetup();
+      vfs.writeFile('/tmp/kernel-opened.txt', 'abcdef');
+      const fd = fdTable.open(
+        { type: 'vfsFile', ino: 0, path: '/tmp/kernel-opened.txt' },
+        { filetype: FILETYPE_REGULAR_FILE }
+      );
+
+      const errno = wasi.fd_filestat_set_size(fd, 3n);
+      expect(errno).toBe(ERRNO_SUCCESS);
+      const content = new TextDecoder().decode(vfs.readFile('/tmp/kernel-opened.txt'));
+      expect(content).toBe('abc');
+    });
+
     it('returns EBADF for invalid fd', () => {
       const { wasi } = createTestSetup();
       const errno = wasi.fd_filestat_set_size(99, 0n);
