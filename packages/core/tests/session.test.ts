@@ -194,7 +194,7 @@ describe("full createSession API", () => {
 				events.push(event);
 			});
 
-			const response = await vm.prompt(
+			const { response } = await vm.prompt(
 				sessionId,
 				"Reply with exactly the word hello.",
 			);
@@ -221,7 +221,7 @@ describe("full createSession API", () => {
 			events.push(event);
 		});
 
-		const response = await vm.prompt(sessionId, "test prompt");
+		const { response } = await vm.prompt(sessionId, "test prompt");
 
 		expect(response.error).toBeUndefined();
 		expect(response.result).toBeDefined();
@@ -257,6 +257,64 @@ describe("full createSession API", () => {
 			),
 		).rejects.toThrow();
 	}, 30_000);
+
+	test("VM subprocess spawning works alongside a pi session", async () => {
+		const { sessionId } = await vm.createSession("pi", {
+			env: {
+				ANTHROPIC_API_KEY: "mock-key",
+				ANTHROPIC_BASE_URL: mockUrl,
+			},
+		});
+
+		// Spawn a node subprocess that writes a file
+		await vm.writeFile(
+			"/tmp/write-script.js",
+			"require('fs').writeFileSync('/tmp/spawn-test.txt', 'spawned-ok')",
+		);
+		const proc = vm.kernel.spawn("node", ["/tmp/write-script.js"], {
+			env: { HOME: "/home/user" },
+		});
+		const result = await proc.wait();
+
+		// Verify the file was written
+		const content = await vm.readFile("/tmp/spawn-test.txt");
+		expect(new TextDecoder().decode(content)).toBe("spawned-ok");
+
+		// Session still works after subprocess
+		const { response } = await vm.prompt(sessionId, "hello");
+		expect(response.error).toBeUndefined();
+
+		vm.closeSession(sessionId);
+	}, 90_000);
+
+	test("VM filesystem operations work alongside a pi session", async () => {
+		const { sessionId } = await vm.createSession("pi", {
+			env: {
+				ANTHROPIC_API_KEY: "mock-key",
+				ANTHROPIC_BASE_URL: mockUrl,
+			},
+		});
+
+		// mkdir recursive
+		await vm.mkdir("/home/user/project/src", { recursive: true });
+		expect(await vm.exists("/home/user/project/src")).toBe(true);
+
+		// Write, read, verify
+		await vm.writeFile("/home/user/project/src/index.ts", "console.log('hello')");
+		const content = await vm.readFile("/home/user/project/src/index.ts");
+		expect(new TextDecoder().decode(content)).toBe("console.log('hello')");
+
+		// readdir
+		const entries = (await vm.readdir("/home/user/project/src"))
+			.filter((e) => e !== "." && e !== "..");
+		expect(entries).toContain("index.ts");
+
+		// Session still works after filesystem ops
+		const { response } = await vm.prompt(sessionId, "hello");
+		expect(response.error).toBeUndefined();
+
+		vm.closeSession(sessionId);
+	}, 90_000);
 
 	test("vm.dispose() closes active sessions before kernel", async () => {
 		await createMockSession(vm);

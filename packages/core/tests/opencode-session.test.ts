@@ -138,7 +138,7 @@ describe.skipIf(registrySkipReason)(
 					configOptions.some((option) => option.category === "model"),
 				).toBe(true);
 
-				const response = await vm.prompt(
+				const { response } = await vm.prompt(
 					sessionId,
 					"Create notes.txt with the text hello from tool.",
 				);
@@ -198,7 +198,7 @@ describe.skipIf(registrySkipReason)(
 					})
 				).sessionId;
 
-				const response = await vm.prompt(
+				const { response } = await vm.prompt(
 					sessionId,
 					"Use bash to write bash-ok into bash-output.txt.",
 				);
@@ -266,7 +266,7 @@ describe.skipIf(registrySkipReason)(
 				expect(setModeResponse.error).toBeUndefined();
 				expect(vm.getSessionModes(sessionId)?.currentModeId).toBe("plan");
 
-				const promptResponse = await vm.prompt(
+				const { response: promptResponse } = await vm.prompt(
 					sessionId,
 					"Plan the next step without running tools.",
 				);
@@ -423,7 +423,7 @@ describe.skipIf(registrySkipReason)(
 					void vm.respondPermission(sessionId!, request.permissionId, "once");
 				});
 
-				const response = await vm.prompt(
+				const { response } = await vm.prompt(
 					sessionId,
 					"Use bash to write perm-ok into perm-output.txt.",
 				);
@@ -499,7 +499,7 @@ describe.skipIf(registrySkipReason)(
 					void vm.respondPermission(sessionId!, request.permissionId, "reject");
 				});
 
-				const response = await vm.prompt(
+				const { response } = await vm.prompt(
 					sessionId,
 					"Use bash to write perm-no into perm-output.txt.",
 				);
@@ -562,7 +562,7 @@ describe.skipIf(registrySkipReason)(
 				expect(vm.getSessionModes(sessionId)?.currentModeId).toBe("plan");
 
 				const planPrompt = "Plan once and do not run tools.";
-				const planPromptResponse = await vm.prompt(sessionId, planPrompt);
+				const { response: planPromptResponse } = await vm.prompt(sessionId, planPrompt);
 				expect(planPromptResponse.error).toBeUndefined();
 
 				const rawBuildResponse = await vm.rawSessionSend(
@@ -576,7 +576,7 @@ describe.skipIf(registrySkipReason)(
 				expect(vm.getSessionModes(sessionId)?.currentModeId).toBe("build");
 
 				const buildPrompt = "Answer normally after returning to build mode.";
-				const buildPromptResponse = await vm.prompt(sessionId, buildPrompt);
+				const { response: buildPromptResponse } = await vm.prompt(sessionId, buildPrompt);
 				expect(buildPromptResponse.error).toBeUndefined();
 
 				const modeEvents = vm

@@ -179,7 +179,7 @@ describe("session lifecycle: resume and destroy", () => {
 		vm.resumeSession(sessionId);
 
 		// Prompt on resumed session works
-		const response = await vm.prompt(sessionId, "test after resume");
+		const { response } = await vm.prompt(sessionId, "test after resume");
 		expect(response.error).toBeUndefined();
 		const result = response.result as { status: string };
 		expect(result.status).toBe("complete");

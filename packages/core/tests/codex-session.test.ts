@@ -204,7 +204,7 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 			void runtime.vm.respondPermission(sessionId, request.permissionId, "once");
 		});
 
-		const response = await runtime.vm.prompt(
+		const { response } = await runtime.vm.prompt(
 			sessionId,
 			`Run ${XU_COMMAND} and tell me what it prints.`,
 		);
@@ -318,7 +318,7 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 			void runtime.vm.respondPermission(sessionId, request.permissionId, "once");
 		});
 
-		const response = await runtime.vm.prompt(
+		const { response } = await runtime.vm.prompt(
 			sessionId,
 			"Run both xu alpha and xu beta, then summarize the outputs.",
 		);
@@ -433,7 +433,7 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 		expect(runtime.vm.getSessionModes(sessionId)?.currentModeId).toBe("default");
 		await runtime.vm.setSessionMode(sessionId, "plan");
 
-		const promptResponse = await runtime.vm.prompt(
+		const { response: promptResponse } = await runtime.vm.prompt(
 			sessionId,
 			"Plan the next step without running shell commands.",
 		);
@@ -529,13 +529,13 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 		});
 		const sessionId = session.sessionId;
 
-		const firstResponse = await runtime.vm.prompt(sessionId, firstPrompt);
+		const { response: firstResponse } = await runtime.vm.prompt(sessionId, firstPrompt);
 		expect(firstResponse.error).toBeUndefined();
 		expect(
 			(firstResponse.result as { stopReason?: string }).stopReason,
 		).toBe("end_turn");
 
-		const secondResponse = await runtime.vm.prompt(sessionId, secondPrompt);
+		const { response: secondResponse } = await runtime.vm.prompt(sessionId, secondPrompt);
 		expect(secondResponse.error).toBeUndefined();
 		expect(
 			(secondResponse.result as { stopReason?: string }).stopReason,
@@ -594,7 +594,7 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 			void runtime.vm.respondPermission(sessionId, request.permissionId, "reject");
 		});
 
-		const response = await runtime.vm.prompt(
+		const { response } = await runtime.vm.prompt(
 			sessionId,
 			`Run ${XU_COMMAND} even if permission is denied.`,
 		);
@@ -654,7 +654,7 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 		const cancelResponse = await runtime.vm.cancelSession(sessionId);
 		expect(cancelResponse.error).toBeUndefined();
 
-		const promptResponse = await promptPromise;
+		const { response: promptResponse } = await promptPromise;
 		expect(promptResponse.error).toBeUndefined();
 		expect(
 			(promptResponse.result as { stopReason?: string }).stopReason,

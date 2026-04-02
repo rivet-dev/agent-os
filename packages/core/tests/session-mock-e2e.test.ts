@@ -246,7 +246,7 @@ describe("end-to-end mock agent session with llmock", () => {
 		});
 
 		// Send prompt - triggers multi-turn: tool_use → tool_result → text
-		const response = await vm.prompt(sessionId, "run ls in the current directory");
+		const { response } = await vm.prompt(sessionId, "run ls in the current directory");
 		expect(response.error).toBeUndefined();
 
 		// Verify llmock received at least 2 requests (multi-turn)

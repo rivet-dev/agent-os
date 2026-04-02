@@ -277,7 +277,7 @@ describe("comprehensive session API tests", () => {
 		});
 
 		// Prompt with "permission" triggers the mock to emit request/permission
-		const response = await vm.prompt(sessionId, "test permission flow");
+		const { response } = await vm.prompt(sessionId, "test permission flow");
 
 		expect(response.error).toBeUndefined();
 		// VM stdout can duplicate lines; check at least 1 permission request arrived
@@ -388,7 +388,7 @@ describe("comprehensive session API tests", () => {
 		).toBe(true);
 
 		// Second session still works
-		const resp = await vm.prompt(sessionId2, "independent prompt");
+		const { response: resp } = await vm.prompt(sessionId2, "independent prompt");
 		expect(resp.error).toBeUndefined();
 
 		vm.closeSession(sessionId2);
@@ -595,7 +595,7 @@ describe("comprehensive session API tests", () => {
 		expect(resumed.sessionId).toBe(sessionId);
 
 		// Resumed session is fully functional
-		const response = await vm.prompt(resumed.sessionId, "after resume");
+		const { response } = await vm.prompt(resumed.sessionId, "after resume");
 		expect(response.error).toBeUndefined();
 
 		// Throws for unknown sessionId

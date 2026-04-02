@@ -156,7 +156,7 @@ describe.skipIf(registrySkipReason)("full createSession('claude')", () => {
 				void vm.respondPermission(sessionId!, request.permissionId, "once");
 			});
 
-			const response = await vm.prompt(
+			const { response } = await vm.prompt(
 				sessionId,
 				`Run ${XU_COMMAND} and tell me what it prints.`,
 			);
@@ -218,7 +218,7 @@ describe.skipIf(registrySkipReason)("full createSession('claude')", () => {
 			});
 			sessionId = session.sessionId;
 
-			const response = await promptVm.prompt(
+			const { response } = await promptVm.prompt(
 				sessionId,
 				`Reply with exactly ${TEXT_ONLY_OUTPUT}.`,
 			);
@@ -290,7 +290,7 @@ describe.skipIf(registrySkipReason)("full createSession('claude')", () => {
 				);
 			});
 
-			const response = await promptVm.prompt(
+			const { response } = await promptVm.prompt(
 				sessionId,
 				`Run ${NODE_EXECSYNC_COMMAND} and tell me what it prints.`,
 			);
@@ -367,7 +367,7 @@ describe.skipIf(registrySkipReason)("full createSession('claude')", () => {
 				);
 			});
 
-			const response = await promptVm.prompt(
+			const { response } = await promptVm.prompt(
 				sessionId,
 				`Run ${NODE_ASYNC_SPAWN_COMMAND} and tell me what it prints.`,
 			);
