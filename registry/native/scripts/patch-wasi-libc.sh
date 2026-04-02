@@ -151,32 +151,22 @@ else
         case "$MODE" in
             check)
                 echo -n "Checking $PATCH_NAME ... "
-                if git -C "$WASI_LIBC_SRC_DIR" apply --check --recount "$PATCH" > /dev/null 2>&1; then
-                    git -C "$WASI_LIBC_SRC_DIR" apply --recount "$PATCH" > /dev/null 2>&1
+                if git -C "$WASI_LIBC_SRC_DIR" apply --check "$PATCH" > /dev/null 2>&1; then
+                    git -C "$WASI_LIBC_SRC_DIR" apply "$PATCH" > /dev/null 2>&1
                     echo "OK (applies cleanly)"
-                elif git -C "$WASI_LIBC_SRC_DIR" apply -R --check --recount "$PATCH" > /dev/null 2>&1; then
+                elif git -C "$WASI_LIBC_SRC_DIR" apply -R --check "$PATCH" > /dev/null 2>&1; then
                     echo "OK (already applied)"
                 else
-                    # Check if new files from this patch exist (layered patch scenario)
-                    NEW_FILES=$(
-                        sed -n 's|^+++ b/\([^[:space:]]*\).*|\1|p' "$PATCH" | while read -r f; do
-                            [ -f "$WASI_LIBC_SRC_DIR/$f" ] && echo "$f"
-                        done || true
-                    )
-                    if [ -n "$NEW_FILES" ]; then
-                        echo "OK (applied, modified by later patch)"
-                    else
-                        echo "FAIL (does not apply)"
-                        FAILED=1
-                    fi
+                    echo "FAIL (does not apply)"
+                    FAILED=1
                 fi
                 ;;
             apply)
                 echo -n "Applying $PATCH_NAME ... "
-                if git -C "$WASI_LIBC_SRC_DIR" apply --check --recount "$PATCH" > /dev/null 2>&1; then
-                    git -C "$WASI_LIBC_SRC_DIR" apply --recount "$PATCH" > /dev/null 2>&1
+                if git -C "$WASI_LIBC_SRC_DIR" apply --check "$PATCH" > /dev/null 2>&1; then
+                    git -C "$WASI_LIBC_SRC_DIR" apply "$PATCH" > /dev/null 2>&1
                     echo "applied"
-                elif git -C "$WASI_LIBC_SRC_DIR" apply -R --check --recount "$PATCH" > /dev/null 2>&1; then
+                elif git -C "$WASI_LIBC_SRC_DIR" apply -R --check "$PATCH" > /dev/null 2>&1; then
                     echo "already applied (skipping)"
                 else
                     echo "FAIL (does not apply)"
@@ -185,8 +175,8 @@ else
                 ;;
             reverse)
                 echo -n "Reversing $PATCH_NAME ... "
-                if git -C "$WASI_LIBC_SRC_DIR" apply -R --check --recount "$PATCH" > /dev/null 2>&1; then
-                    git -C "$WASI_LIBC_SRC_DIR" apply -R --recount "$PATCH" > /dev/null 2>&1
+                if git -C "$WASI_LIBC_SRC_DIR" apply -R --check "$PATCH" > /dev/null 2>&1; then
+                    git -C "$WASI_LIBC_SRC_DIR" apply -R "$PATCH" > /dev/null 2>&1
                     echo "reversed"
                 else
                     echo "not applied (skipping)"
