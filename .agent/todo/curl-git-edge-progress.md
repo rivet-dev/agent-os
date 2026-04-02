@@ -1,0 +1,133 @@
+# curl and git clone progress
+
+## Goal
+
+Build comprehensive curl and git clone coverage in agentOS, run the suites, and fix the runtime and command issues that show up.
+
+## Progress log
+
+- 2026-04-01: Started upstream-curl build-pipeline migration work.
+- 2026-04-01: Confirmed upstream curl does not ship a dedicated WASI build path in-tree; the Wasix/WAPM package is a thin wrapper around the normal upstream release-tarball autotools flow (`configure && make`, then copy the built curl binary).
+- 2026-04-01: Verified the upstream curl 8.11.1 release tarball `configure` succeeds against the patched agentOS wasi-libc sysroot when `--disable-threaded-resolver` is used.
+- 2026-04-01: Captured the main upstream compile blockers for a minimal-carry patch set:
+  - TLS backend selection is unknown to upstream and still needs the local `wasi-tls` backend carry patch.
+  - `lib/hostip.h` includes `<setjmp.h>` unconditionally, but wasi-sdk's `setjmp.h` hard-errors without wasm exception handling; this needs a tiny guard patch.
+  - The platform currently provides enough POSIX surface for `pipe()`-based wakeups, so `socketpair()` is not required for the curl multi wakeup path.
+- 2026-04-01: Confirmed upstream `configure` auto-detects more usable POSIX/features than the handwritten local `curl_config.h`, including cookies, proxies, bindlocal, progress-meter, IPv6, and Unix sockets, which reinforces the plan to replace the handwritten config header with generated upstream config.
+- 2026-04-01: Added a release-tarball upstream curl build pipeline in `registry/native/c/scripts/build-curl-upstream.sh` and rewired `registry/native/c/Makefile` so `build/curl_cli` now comes from upstream `configure && make` plus a small overlay, instead of the bespoke wrapper/tool source list.
+- 2026-04-01: Added a small upstream overlay in `registry/native/c/curl-upstream-overlay/` for the carry patches that are still agentOS-specific:
+  - `lib/vtls/wasi_tls.[ch]` and `lib/vtls/vtls.c` to register the host-backed TLS backend
+  - `lib/curl_setup.h` and `lib/hostip.[ch]` to carry the minimal WASI compatibility guards
+- 2026-04-01: Expanded the patched wasi-libc public header surface with `registry/native/patches/wasi-libc/0013-posix-socket-header-surface.patch` so upstream curl can see the POSIX socket/poll constants it expects under `wasm32-wasip1`, including `SO_KEEPALIVE`, `SOL_IP`, `MSG_DONTWAIT`, `MSG_NOSIGNAL`, and `POLLPRI`.
+- 2026-04-01: Rebuilt the sysroot after the header-surface patch and confirmed upstream curl compiles cleanly against it.
+- 2026-04-01: Fixed the upstream carry TLS backend build integration:
+  - patched generated `lib/Makefile` to compile and link `vtls/wasi_tls.c`
+  - added the missing `curl_printf.h` include so the backend uses upstream `msnprintf` like the built-in TLS backends
+- 2026-04-01: Successfully built the upstream curl 8.11.1 WASM binary from the release tarball and resynced it into:
+  - `registry/software/curl/wasm/curl`
+  - `registry/native/target/wasm32-wasip1/release/commands/curl`
+- 2026-04-01: Verified the shipped upstream curl artifact still passes the focused registry curl suite:
+  - `pnpm exec vitest run tests/wasmvm/curl.test.ts --reporter=verbose`
+  - result: 19 passed
+- 2026-04-01: Verified the higher-level shell-path regression still passes with the upstream artifact:
+  - `pnpm exec vitest run tests/wasm-commands.test.ts -t "curl exits promptly after a keep-alive response"`
+  - result: 1 passed
+- 2026-04-01: Continued after the upstream CLI migration to verify real external networking end to end, not just local fixtures.
+- 2026-04-01: Reproduced a post-response HTTPS hang against both a local self-signed HTTPS server and real `https://httpbin.org/get`:
+  - local HTTPS requests printed the full response and `Connection #0 left intact` but the process never exited
+  - external HTTPS to `httpbin.org` reached `HTTP/1.1 200 OK` but then failed/hung in the TLS recv path
+- 2026-04-01: Root cause was the runtime TLS recv implementation in `packages/posix/src/driver.ts`, not curl itself:
+  - the first attempt used `TLSSocket.read()`/`readableLength` directly after `net_tls_connect()`
+  - in practice the upgraded `TLSSocket` could report buffered bytes while repeated `read(maxLen)` calls returned `null`
+  - this caused curl to spin or block in the HTTPS drain/cleanup path after the body had already been received
+- 2026-04-01: Fixed the TLS runtime path by making it match the plain host socket adapter model instead of relying on `TLSSocket.read()` semantics:
+  - detach the Node host adapter listeners before wrapping the raw socket with `tls.connect()`
+  - queue decrypted TLS `data` chunks explicitly on `'data'`
+  - surface EOF via queued `null` on `'end'/'close'/'error'`
+  - drive `netRecv()` and `netPoll()` from that queue, including correct zero-length recv behavior and `EAGAIN` handling
+- 2026-04-01: Important packaging detail: registry/core tests import `@rivet-dev/agent-os-posix` via `dist/`, so after fixing `packages/posix/src/driver.ts` the package also needed `pnpm build` in `packages/posix` before the higher-level suites reflected the fix.
+- 2026-04-01: Verified the HTTPS/TLS fix at three levels:
+  - source-runtime direct repro against a local HTTPS server now returns `exitCode=0` with the JSON body
+  - `pnpm exec vitest run tests/wasmvm/curl.test.ts --reporter=verbose` now passes fully: `20 passed`
+  - `pnpm exec vitest run tests/wasm-commands.test.ts -t "curl exits promptly after a keep-alive response"` still passes: `1 passed`
+- 2026-04-01: Verified real external endpoints end to end through `AgentOs.create()` with the shipped registry software set:
+  - `curl -sS --max-time 20 http://httpbin.org/get` -> `exit 0`
+  - `curl -sS --max-time 20 https://httpbin.org/get` -> `exit 0`
+- 2026-04-01: Verified both the direct process path and the shell `exec()` path against real external endpoints. The shell path still emits the pre-existing warning `could not retrieve pid for child process`, but curl itself succeeds with `exitCode=0` and the expected response body for both HTTP and HTTPS.
+- 2026-04-01: Current shape of the migration:
+  - the curl CLI/tool path is now upstream
+  - the remaining local carry is concentrated in the runtime/sysroot and a very small curl overlay instead of a bespoke wrapper CLI
+- 2026-04-01: Removed the remaining legacy curl wrapper/harness path from the C tree:
+  - deleted `registry/native/c/programs/curl_cli.c`
+  - deleted `registry/native/c/programs/curl_test.c`
+  - cleaned `registry/native/c/Makefile` so the shipped WASM curl artifact is the upstream tool only
+- 2026-04-01: Expanded `registry/tests/wasmvm/curl.test.ts` into a fuller upstream-CLI suite covering:
+  - `-D` with `-o`
+  - `-O`
+  - cwd-sensitive relative `-o`
+  - `--fail-with-body`
+  - multiple URLs
+  - retry behavior
+  - real external HTTP and HTTPS gated by `AGENTOS_E2E_NETWORK=1`
+- 2026-04-01: Found and fixed the last major libc blocker behind `curl -o` and `curl -O`:
+  - forcing direct calls to the weak `__wasilibc_find_relpath_alloc()` helper caused ordinary binaries to trap with `unreachable` whenever they opened a path
+  - restored the weak-symbol fast path and added an always-linked cwd-aware fallback in `preopens.c`/`posix.c` that resolves relative paths through `getcwd()`
+  - verified with rebuilt C probes that both absolute and cwd-relative `fopen()` work again in spawned child processes
+- 2026-04-01: Synced the checked-in wasi-libc patch files to the working vendor changes and fixed `registry/native/scripts/patch-wasi-libc.sh` so `apply` mode no longer reports `already applied` for patches that actually fail to apply.
+- 2026-04-01: End-to-end curl verification now passes cleanly:
+  - `AGENTOS_E2E_NETWORK=1 pnpm exec vitest run tests/wasmvm/curl.test.ts --reporter=verbose` -> `29 passed`
+  - `pnpm exec vitest run tests/wasm-commands.test.ts -t "curl exits promptly after a keep-alive response"` -> `1 passed`
+- 2026-03-31: Started investigation.
+- 2026-03-31: Confirmed existing coverage in:
+  - `packages/core/tests/wasm-commands.test.ts`
+  - `registry/tests/wasmvm/curl.test.ts`
+  - `registry/tests/wasmvm/git.test.ts`
+- 2026-03-31: Confirmed current git implementation lives in:
+  - `registry/native/crates/commands/git/src/main.rs`
+  - `registry/native/crates/libs/git/src/lib.rs`
+- 2026-03-31: Confirmed curl runtime fixes already in progress in the POSIX driver and shell-path regression coverage was added in `packages/core/tests/wasm-commands.test.ts`.
+- 2026-03-31: Expanded `registry/tests/wasmvm/curl.test.ts` with local curl command coverage for redirects, POSTs, file output, binary output, HTTP failures, DNS failures, refused connections, and keep-alive shutdown behavior.
+- 2026-03-31: Expanded `registry/tests/wasmvm/git.test.ts` with git clone edge cases for omitted destinations, destination validation, missing source cleanup, nested trees, non-main default branches, nested branch refs, and relative paths.
+- 2026-03-31: Switched the curl registry tests to mount the packaged `software/curl/wasm` binary ahead of `COMMANDS_DIR`, so the suite exercises the shipped curl artifact instead of a stale native-target copy.
+- 2026-03-31: Fixed curl CLI option parsing for grouped short flags such as `-fsS` and `-sS`, added explicit fail-on-HTTP-error handling, and upgraded fallback error messages for connect, DNS, timeout, and HTTP failures in `registry/native/c/programs/curl_cli.c`.
+- 2026-03-31: Replaced the WASI curl `-F` path with an explicit multipart encoder in `registry/native/c/programs/curl_cli.c` after the libcurl MIME path failed to emit multipart form requests in the WASI build.
+- 2026-03-31: Fixed git clone semantics in `registry/native/crates/libs/git/src/lib.rs`:
+  - omitted destination now infers the source basename and strips a trailing `.git`
+  - non-empty destinations are rejected
+  - missing sources fail before creating the destination
+  - nested branch refs copy recursively into `refs/remotes/origin/...`
+  - empty repositories clone successfully without forcing an impossible checkout
+- 2026-03-31: Synced rebuilt curl and git binaries into both:
+  - `registry/native/target/wasm32-wasip1/release/commands`
+  - `registry/software/*/wasm`
+- 2026-03-31: Extended coverage further:
+  - curl: `-I`, `-u`, `-F`, `-w`
+  - git clone: `.git` basename stripping, existing empty destination, empty repository clone
+- 2026-03-31: Focused registry verification now passes:
+  - `pnpm exec vitest run tests/wasmvm/curl.test.ts tests/wasmvm/git.test.ts --reporter=verbose`
+  - result: 30 passed
+- 2026-03-31: Higher-level curl shell-path regression still passes in `packages/core`:
+  - `pnpm exec vitest run tests/wasm-commands.test.ts -t "curl exits promptly after a keep-alive response"`
+  - result: 1 passed
+- 2026-03-31: Began replacing the custom `programs/curl_cli.c` wrapper with the real upstream curl tool sources.
+- 2026-03-31: Confirmed the local `secure-exec-curl` fork only vendors `lib/` and `include/`, so the full CLI requires importing upstream curl `src/` sources that match libcurl 8.11.1.
+- 2026-03-31: Wired `registry/native/c/Makefile` to fetch upstream curl `src/` from `curl-8_11_1`, copy `tool_hugehelp.c.cvs` into `tool_hugehelp.c`, and compile the upstream tool sources into the `curl_cli` WASM artifact.
+- 2026-03-31: Removed the old multipart workaround path by fixing libcurl MIME initialization at the source:
+  - `registry/native/c/libs/curl/lib/vtls/wasi_tls.c` now implements the TLS backend `random` callback via wasi-libc `getentropy()`, which is backed by WASI `random_get`
+  - upstream `curl_mime_init()` now succeeds, so `-F` works through the real libcurl MIME stack
+- 2026-03-31: Removed temporary multipart debug instrumentation and the ad hoc form-debug test once the upstream MIME path was fixed.
+- 2026-03-31: Expanded `registry/tests/wasmvm/curl.test.ts` beyond the original wrapper coverage to exercise upstream CLI features:
+  - `curl --version`
+  - `curl --json`
+  - `curl -K` config file parsing
+  - `curl -k` HTTPS against a local self-signed TLS server
+- 2026-03-31: Rebuilt and resynced the upstream curl CLI into:
+  - `registry/software/curl/wasm/curl`
+  - `registry/native/target/wasm32-wasip1/release/commands/curl`
+- 2026-03-31: Focused registry curl verification now passes with the real upstream CLI:
+  - `pnpm exec vitest run tests/wasmvm/curl.test.ts --reporter=verbose`
+  - result: 19 passed
+
+## Current failures
+
+- 2026-03-31: No focused curl/git failures remain in the added suites.

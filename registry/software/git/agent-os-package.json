@@ -1,8 +1,8 @@
 {
   "name": "@rivet-dev/agent-os-git",
   "type": "wasm",
-  "description": "git version control (planned)",
+  "description": "git version control",
   "aptName": "git",
   "source": "rust",
-  "status": "planned"
+  "status": "active"
 }

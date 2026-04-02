@@ -62,6 +62,7 @@ To unblock: run `cd native && ./scripts/patch-wasi-libc.sh` to build the patched
 |---|---|
 | @rivet-dev/agent-os-common | coreutils + sed + grep + gawk + findutils + diffutils + tar + gzip |
 | @rivet-dev/agent-os-build-essential | common + make + git |
+| @rivet-dev/agent-os-everything | all available software packages in a single bundle |
 
 ### Permission Tiers
 

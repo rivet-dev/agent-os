@@ -14,13 +14,16 @@
     "test": "vitest run"
   },
   "devDependencies": {
+    "@rivet-dev/agent-os-common": "link:software/common",
+    "@rivet-dev/agent-os-core": "link:../packages/core",
+    "@rivet-dev/agent-os-curl": "link:software/curl",
+    "@rivet-dev/agent-os-posix": "link:../packages/posix",
+    "@rivet-dev/agent-os-python": "link:../packages/python",
     "@secure-exec/core": "^0.2.1",
     "@secure-exec/nodejs": "^0.2.1",
-    "@rivet-dev/agent-os-python": "link:../packages/python",
-    "@rivet-dev/agent-os-posix": "link:../packages/posix",
     "@types/node": "^22.10.2",
     "secure-exec": "^0.2.1",
     "typescript": "^5.9.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.9"
   }
 }

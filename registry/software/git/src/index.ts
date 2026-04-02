@@ -7,7 +7,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = {
 	name: "git",
 	aptName: "git",
-	description: "git version control (planned)",
+	description: "git version control",
 	source: "rust" as const,
 	commands: [
 		{ name: "git", permissionTier: "full" as const },

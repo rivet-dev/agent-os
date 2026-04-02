@@ -1,0 +1,165 @@
+Add a cwd-aware fallback for POSIX path resolution without forcing `chdir.o`.
+
+Upstream wasi-libc keeps cwd-aware path resolution behind the weak
+`__wasilibc_find_relpath_alloc()` symbol from `chdir.c`. Programs that never
+call `chdir()` do not link that object, so relative paths fall back to the root
+preopen. Making the call unconditional fixes the semantics but introduces a new
+problem on WASM: direct calls to a missing weak symbol trap.
+
+Keep the weak-symbol fast path, but add an always-linked fallback in
+`preopens.c` that resolves relative paths against `getcwd()` and reuses
+`__wasilibc_find_abspath()`. `posix.c` uses that fallback whenever the weak
+helper is absent. This makes `curl -o local.txt` and `curl -O` work correctly
+for ordinary programs without dragging `chdir.o` into every binary.
+
+--- a/libc-bottom-half/sources/posix.c
++++ b/libc-bottom-half/sources/posix.c
+@@ -13,16 +13,23 @@
+ #include <wasi/libc-find-relpath.h>
+ #include <wasi/libc-nocwd.h>
+ 
++int __wasilibc_find_relpath_fallback(
++    const char *path,
++    const char **abs_prefix,
++    char **relative_buf,
++    size_t *relative_buf_len,
++    int can_realloc);
++
+ static int find_relpath2(
+     const char *path,
+     char **relative,
+     size_t *relative_len
+ ) {
+-    // See comments in `preopens.c` for what this trick is doing.
+     const char *abs;
+-    if (__wasilibc_find_relpath_alloc)
++    if (__wasilibc_find_relpath_alloc) {
+         return __wasilibc_find_relpath_alloc(path, &abs, relative, relative_len, 1);
+-    return __wasilibc_find_relpath(path, &abs, relative, *relative_len);
++    }
++    return __wasilibc_find_relpath_fallback(path, &abs, relative, relative_len, 1);
+ }
+ 
+ // Helper to call `__wasilibc_find_relpath` and return an already-managed
+--- a/libc-bottom-half/sources/preopens.c
++++ b/libc-bottom-half/sources/preopens.c
+@@ -11,6 +11,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sysexits.h>
++#include <unistd.h>
+ #include <wasi/api.h>
+ #include <wasi/libc-find-relpath.h>
+ #include <wasi/libc.h>
+@@ -98,6 +99,91 @@ static const char *strip_prefixes(const char *path) {
+     return path;
+ }
+ 
++static const char *strip_relative_prefixes(const char *path) {
++    while (1) {
++        if (path[0] == '.' && path[1] == '/') {
++            path += 2;
++        } else if (path[0] == '.' && path[1] == 0) {
++            path++;
++        } else {
++            break;
++        }
++    }
++
++    return path;
++}
++
++static int build_abspath_from_cwd(const char *path, char **abspath_out) {
++    const char *suffix = strip_relative_prefixes(path);
++    char *cwd = getcwd(NULL, 0);
++    if (cwd == NULL)
++        return -1;
++
++    size_t cwd_len = strlen(cwd);
++    size_t suffix_len = strlen(suffix);
++    int need_slash = suffix_len > 0 && cwd_len > 0 && cwd[cwd_len - 1] != '/';
++    char *buf = malloc(cwd_len + need_slash + suffix_len + 1);
++    if (buf == NULL) {
++        free(cwd);
++        errno = ENOMEM;
++        return -1;
++    }
++
++    memcpy(buf, cwd, cwd_len);
++    size_t off = cwd_len;
++    if (need_slash)
++        buf[off++] = '/';
++    memcpy(buf + off, suffix, suffix_len);
++    buf[off + suffix_len] = '\0';
++
++    free(cwd);
++    *abspath_out = buf;
++    return 0;
++}
++
++int __wasilibc_find_relpath_fallback(
++    const char *path,
++    const char **abs_prefix,
++    char **relative_buf,
++    size_t *relative_buf_len,
++    int can_realloc
++) {
++    char *owned_abspath = NULL;
++    const char *abspath = path;
++    if (path[0] != '/') {
++        if (build_abspath_from_cwd(path, &owned_abspath) != 0)
++            return -1;
++        abspath = owned_abspath;
++    }
++
++    const char *rel;
++    int fd = __wasilibc_find_abspath(abspath, abs_prefix, &rel);
++    if (fd == -1) {
++        free(owned_abspath);
++        return -1;
++    }
++
++    size_t rel_len = strlen(rel);
++    if (*relative_buf_len < rel_len + 1) {
++        if (!can_realloc) {
++            free(owned_abspath);
++            errno = ERANGE;
++            return -1;
++        }
++        char *tmp = realloc(*relative_buf, rel_len + 1);
++        if (tmp == NULL) {
++            free(owned_abspath);
++            errno = ENOMEM;
++            return -1;
++        }
++        *relative_buf = tmp;
++        *relative_buf_len = rel_len + 1;
++    }
++    strcpy(*relative_buf, rel);
++    free(owned_abspath);
++    return fd;
++}
++
+ /// Similar to `internal_register_preopened_fd` but does not take a lock.
+ static int internal_register_preopened_fd_unlocked(__wasi_fd_t fd, const char *relprefix) {
+     // Check preconditions.
+@@ -166,12 +252,13 @@ int __wasilibc_find_relpath(const char *path,
+                             const char **abs_prefix,
+                             char **relative_path,
+                             size_t relative_path_len) {
+-    // If `chdir` is linked, whose object file defines this symbol, then we
+-    // call that. Otherwise if the program can't `chdir` then `path` is
+-    // absolute (or relative to the root dir), so we delegate to `find_abspath`
+-    if (__wasilibc_find_relpath_alloc)
+-        return __wasilibc_find_relpath_alloc(path, abs_prefix, relative_path, &relative_path_len, 0);
+-    return __wasilibc_find_abspath(path, abs_prefix, (const char**) relative_path);
++    if (__wasilibc_find_relpath_alloc) {
++        return __wasilibc_find_relpath_alloc(
++            path, abs_prefix, relative_path, &relative_path_len, 0);
++    }
++
++    return __wasilibc_find_relpath_fallback(
++        path, abs_prefix, relative_path, &relative_path_len, 0);
+ }
+ 
+ // See the documentation in libc-find-relpath.h.

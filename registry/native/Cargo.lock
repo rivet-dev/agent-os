@@ -895,6 +895,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmd-git"
+version = "0.1.0"
+dependencies = [
+ "secureexec-git",
+]
+
+[[package]]
 name = "cmd-grep"
 version = "0.1.0"
 dependencies = [
@@ -3794,6 +3801,15 @@ name = "secureexec-find"
 version = "0.1.0"
 dependencies = [
  "regex",
+]
+
+[[package]]
+name = "secureexec-git"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "secureexec-wasi-http",
+ "sha1",
 ]
 
 [[package]]

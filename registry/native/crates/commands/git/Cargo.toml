@@ -1,0 +1,13 @@
+[package]
+name = "cmd-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "git standalone binary for secure-exec WasmVM"
+
+[[bin]]
+name = "git"
+path = "src/main.rs"
+
+[dependencies]
+secureexec-git = { path = "../../libs/git" }

@@ -2,40 +2,63 @@ Fix posix_spawn to propagate cwd to child processes.
 
 posix_spawn previously passed an empty cwd (len=0) to proc_spawn,
 causing children to fall back to the kernel-worker's init.cwd instead
-of the parent's current working directory. This fix:
+of the parent's current working directory. In practice many shells
+track cwd primarily through the `PWD` environment variable, so relying
+on `getcwd()` alone is not sufficient. This fix:
 
 1. Processes FDOP_CHDIR file_actions to capture explicit cwd overrides
-2. Falls back to getcwd() when no explicit cwd is set
-3. Passes the resolved cwd to proc_spawn
+2. Falls back to the inherited `PWD` environment when available
+3. Then falls back to `getcwd()`
+4. Passes the resolved cwd to proc_spawn
 
-This complements the kernel-side fix (setting PWD in env) and the
-init_cwd.c constructor (reading PWD at WASM startup) to ensure
-full cwd propagation from parent shell to spawned commands.
+This complements the follow-up getcwd.c initialization patch (reading
+PWD at WASM startup) to ensure full cwd propagation from parent shell
+to spawned commands.
 
 --- a/libc-bottom-half/sources/host_spawn_wait.c
 +++ b/libc-bottom-half/sources/host_spawn_wait.c
-@@ -252,6 +252,7 @@
+@@ -101,6 +101,16 @@ static int __addfdop(posix_spawn_file_actions_t *fa, struct __fdop *op) {
+     return 0;
+ }
+ 
++static const char *find_pwd_in_env(char *const envp[]) {
++    if (!envp) return NULL;
++    for (int i = 0; envp[i]; i++) {
++        const char *entry = envp[i];
++        if (strncmp(entry, "PWD=", 4) == 0 && entry[4] == '/') {
++            return entry + 4;
++        }
++    }
++    return NULL;
++}
++
+ int posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t *fa, int srcfd, int fd) {
+     if (srcfd < 0 || fd < 0) return EBADF;
+     struct __fdop *op = malloc(sizeof(*op));
+@@ -229,6 +239,7 @@ int posix_spawn(pid_t *restrict res, const char *restrict path,
      }
-
+ 
      // Process file_actions in order: extract stdio overrides and handle close/open
 +    const char *spawn_cwd = NULL;
      uint32_t stdin_fd = 0, stdout_fd = 1, stderr_fd = 2;
      if (fa && fa->__actions) {
          for (struct __fdop *op = fa->__actions; op; op = op->next) {
-@@ -279,15 +280,24 @@
+@@ -253,15 +264,25 @@ int posix_spawn(pid_t *restrict res, const char *restrict path,
+                 else if (op->fd == 2) stderr_fd = (uint32_t)opened;
                  else close(opened);
                  break;
-             }
++            }
 +            case FDOP_CHDIR:
-+                spawn_cwd = op->path;
++                if (op->path[0] == '/') spawn_cwd = op->path;
 +                break;
              }
          }
      }
-
-+    // Resolve cwd: explicit chdir action > current getcwd > empty (kernel fallback)
+ 
++    // Resolve cwd: explicit chdir action > inherited PWD > getcwd() > empty
 +    char cwd_buf[1024];
 +    const char *cwd_str = spawn_cwd;
++    if (!cwd_str) cwd_str = find_pwd_in_env(env);
 +    if (!cwd_str && getcwd(cwd_buf, sizeof(cwd_buf))) {
 +        cwd_str = cwd_buf;
 +    }
@@ -48,5 +71,5 @@ full cwd propagation from parent shell to spawned commands.
 -        (const uint8_t *)"", 0,
 +        cwd_str ? (const uint8_t *)cwd_str : (const uint8_t *)"", cwd_str ? (uint32_t)strlen(cwd_str) : 0,
          &child_pid);
-
+ 
      free(argv_buf);

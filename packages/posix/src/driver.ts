@@ -56,6 +56,13 @@ import { lookup } from 'node:dns/promises';
 
 // wasi-libc bottom-half socket constants differ from the kernel's POSIX-facing
 // constants, so normalize them at the host_net boundary.
+//
+// Both WASI (C programs via wasi-libc) and Rust (wasi-ext) use WASI constants:
+//   WASI AF_INET=1, AF_INET6=2, AF_UNIX=3, SOCK_DGRAM=5, SOCK_STREAM=6
+// The kernel uses POSIX constants:
+//   POSIX AF_INET=2, AF_INET6=10, AF_UNIX=1, SOCK_DGRAM=2, SOCK_STREAM=1
+// Rust wasi-ext also passes POSIX constants directly (AF_INET=2, SOCK_STREAM=1)
+// which fall through to the default case unchanged.
 const WASI_AF_INET = 1;
 const WASI_AF_INET6 = 2;
 const WASI_AF_UNIX = 3;
@@ -69,6 +76,7 @@ const POSIX_SO_ERROR = 4;
 const POSIX_SO_ACCEPTCONN = 30;
 const POSIX_SO_PROTOCOL = 38;
 const POSIX_SO_DOMAIN = 39;
+const MSG_DONTWAIT = 0x40;
 
 function normalizeSocketDomain(domain: number): number {
   switch (domain) {
@@ -150,6 +158,13 @@ function serializeSockAddr(addr: KernelSockAddr): string {
 
 type PollWaitKernel = KernelInterface & {
   fdPollWait?: (pid: number, fd: number, timeoutMs?: number) => Promise<void>;
+};
+
+type TlsSocketState = {
+  socket: TLSSocket;
+  readQueue: Array<Uint8Array | null>;
+  waiters: Array<() => void>;
+  ended: boolean;
 };
 
 function getKernelWorkerUrl(): URL {
@@ -362,7 +377,7 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
   private _workerAdapter = new WorkerAdapter();
   private _moduleCache = new ModuleCache();
   // TLS-upgraded sockets bypass kernel recv — direct host TLS I/O
-  private _tlsSockets = new Map<number, Socket>();
+  private _tlsSockets = new Map<number, TlsSocketState>();
 
   // Per-PID queue of signals pending cooperative delivery to WASM trampoline
   private _wasmPendingSignals = new Map<number, number[]>();
@@ -511,12 +526,48 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
     }
     this._activeWorkers.clear();
     // Clean up TLS-upgraded sockets (kernel sockets cleaned up by kernel.dispose)
-    for (const sock of this._tlsSockets.values()) {
-      try { sock.destroy(); } catch { /* best effort */ }
+    for (const state of this._tlsSockets.values()) {
+      this._closeTlsState(state);
     }
     this._tlsSockets.clear();
     this._moduleCache.clear();
     this._kernel = null;
+  }
+
+  private _wakeTlsWaiters(state: TlsSocketState): void {
+    for (const waiter of state.waiters.splice(0)) {
+      waiter();
+    }
+  }
+
+  private _queueTlsChunk(state: TlsSocketState, chunk: Uint8Array | null): void {
+    if (chunk === null) {
+      state.ended = true;
+    }
+    state.readQueue.push(chunk);
+    this._wakeTlsWaiters(state);
+  }
+
+  private _takeTlsChunk(state: TlsSocketState, maxLen: number): Uint8Array | null | undefined {
+    const queued = state.readQueue.shift();
+    if (queued === undefined || queued === null) {
+      return queued;
+    }
+
+    if (queued.length <= maxLen) {
+      return queued;
+    }
+
+    const head = queued.subarray(0, maxLen);
+    const tail = queued.subarray(maxLen);
+    state.readQueue.unshift(tail);
+    return head;
+  }
+
+  private _closeTlsState(state: TlsSocketState): void {
+    state.ended = true;
+    this._wakeTlsWaiters(state);
+    try { state.socket.destroy(); } catch { /* best effort */ }
   }
 
   // -------------------------------------------------------------------------
@@ -1111,11 +1162,11 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
           const socketId = msg.args.fd as number;
 
           // TLS-upgraded sockets write directly to host TLS socket
-          const tlsSock = this._tlsSockets.get(socketId);
-          if (tlsSock) {
+          const tlsState = this._tlsSockets.get(socketId);
+          if (tlsState) {
             const tlsData = Buffer.from(msg.args.data as number[]);
             await new Promise<void>((resolve, reject) => {
-              tlsSock.write(tlsData, (err) => err ? reject(err) : resolve());
+              tlsState.socket.write(tlsData, (err) => err ? reject(err) : resolve());
             });
             intResult = tlsData.length;
             break;
@@ -1129,31 +1180,49 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
           const socketId = msg.args.fd as number;
           const maxLen = msg.args.length as number;
           const flags = msg.args.flags as number ?? 0;
+          const dontWait = (flags & MSG_DONTWAIT) !== 0;
+
+          if (maxLen === 0) {
+            intResult = 0;
+            responseData = new Uint8Array(0);
+            break;
+          }
 
           // TLS-upgraded sockets read directly from host TLS socket
-          const tlsRecvSock = this._tlsSockets.get(socketId);
-          if (tlsRecvSock) {
-            const tlsRecvData = await new Promise<Uint8Array>((resolve) => {
-              const onData = (chunk: Buffer) => {
-                cleanupTls();
-                if (chunk.length > maxLen) {
-                  tlsRecvSock.unshift(chunk.subarray(maxLen));
-                  resolve(new Uint8Array(chunk.subarray(0, maxLen)));
-                } else {
-                  resolve(new Uint8Array(chunk));
-                }
-              };
-              const onEnd = () => { cleanupTls(); resolve(new Uint8Array(0)); };
-              const onError = () => { cleanupTls(); resolve(new Uint8Array(0)); };
-              const cleanupTls = () => {
-                tlsRecvSock.removeListener('data', onData);
-                tlsRecvSock.removeListener('end', onEnd);
-                tlsRecvSock.removeListener('error', onError);
-              };
-              tlsRecvSock.once('data', onData);
-              tlsRecvSock.once('end', onEnd);
-              tlsRecvSock.once('error', onError);
-            });
+          const tlsState = this._tlsSockets.get(socketId);
+          if (tlsState) {
+            let tlsRecvData = this._takeTlsChunk(tlsState, maxLen);
+            if (tlsRecvData === undefined) {
+              const ksock = kernel.socketTable.get(socketId);
+              const socketNonBlocking = !!ksock?.nonBlocking;
+
+              if (socketNonBlocking || dontWait) {
+                errno = ERRNO_MAP.EAGAIN;
+                break;
+              }
+
+              await new Promise<void>((resolve) => {
+                const finish = () => {
+                  clearTimeout(timer);
+                  const idx = tlsState.waiters.indexOf(finish);
+                  if (idx !== -1) tlsState.waiters.splice(idx, 1);
+                  resolve();
+                };
+                const timer = setTimeout(finish, 30000);
+                tlsState.waiters.push(finish);
+              });
+
+              tlsRecvData = this._takeTlsChunk(tlsState, maxLen);
+              if (tlsRecvData === undefined) {
+                errno = ERRNO_MAP.EAGAIN;
+                break;
+              }
+            }
+
+            if (tlsRecvData === null) {
+              tlsRecvData = new Uint8Array(0);
+            }
+
             if (tlsRecvData.length > DATA_BUFFER_BYTES) { errno = 76; break; }
             if (tlsRecvData.length > 0) data.set(tlsRecvData, 0);
             responseData = tlsRecvData;
@@ -1172,8 +1241,29 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
                 ? !ksock.peerWriteClosed
                 : (ksock.peerId !== undefined && !ksock.peerWriteClosed);
               if (mightHaveMore) {
+                // Non-blocking recv() must surface EAGAIN instead of sleeping
+                // until the peer eventually sends more data or closes. libcurl
+                // relies on this during shutdown drains after a keep-alive HTTP
+                // response has been fully consumed.
+                if (ksock.nonBlocking || dontWait) {
+                  errno = ERRNO_MAP.EAGAIN;
+                  break;
+                }
+
                 await ksock.readWaiters.enqueue(30000).wait();
                 recvResult = kernel.socketTable.recv(socketId, maxLen, flags);
+
+                const afterWait = kernel.socketTable.get(socketId);
+                const stillOpen = afterWait && (
+                  afterWait.state === 'connected' || afterWait.state === 'write-closed'
+                );
+                const stillMightHaveMore = stillOpen && (afterWait.external
+                  ? !afterWait.peerWriteClosed
+                  : (afterWait.peerId !== undefined && !afterWait.peerWriteClosed));
+                if (recvResult === null && stillMightHaveMore) {
+                  errno = ERRNO_MAP.EAGAIN;
+                  break;
+                }
               }
             }
           }
@@ -1199,11 +1289,27 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
             break;
           }
 
-          // Extract underlying net.Socket from host adapter
-          const realSock = (ksockTls.hostSocket as any).socket as Socket | undefined;
+          // Extract underlying net.Socket from the Node host adapter.
+          // The host adapter keeps its own data/end/error listeners attached,
+          // which would otherwise continue draining the raw TCP stream after
+          // the TLS upgrade. Detach those listeners before handing the socket
+          // to node:tls so the TLS layer becomes the sole reader.
+          const hostSocket = ksockTls.hostSocket as {
+            socket?: Socket;
+            readQueue?: unknown[];
+          };
+          const realSock = hostSocket.socket;
           if (!realSock) {
             errno = ERRNO_MAP.EINVAL;
             break;
+          }
+
+          realSock.pause();
+          realSock.removeAllListeners('data');
+          realSock.removeAllListeners('end');
+          realSock.removeAllListeners('error');
+          if (Array.isArray(hostSocket.readQueue)) {
+            hostSocket.readQueue.length = 0;
           }
 
           // Detach kernel read pump by clearing hostSocket
@@ -1222,8 +1328,27 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
               const s = tlsConnect(tlsOpts as any, () => resolve(s));
               s.on('error', reject);
             });
+            const tlsState: TlsSocketState = {
+              socket: tlsSock,
+              readQueue: [],
+              waiters: [],
+              ended: false,
+            };
+
+            tlsSock.on('data', (chunk: Buffer) => {
+              this._queueTlsChunk(tlsState, new Uint8Array(chunk));
+            });
+            const markTlsEnded = () => {
+              if (!tlsState.ended) {
+                this._queueTlsChunk(tlsState, null);
+              }
+            };
+            tlsSock.on('end', markTlsEnded);
+            tlsSock.on('close', markTlsEnded);
+            tlsSock.on('error', markTlsEnded);
+
             // TLS socket bypasses kernel — send/recv go directly through _tlsSockets
-            this._tlsSockets.set(socketId, tlsSock as unknown as Socket);
+            this._tlsSockets.set(socketId, tlsState);
           } catch {
             errno = ERRNO_MAP.ECONNREFUSED;
           }
@@ -1331,6 +1456,13 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
           intResult = encoded.length;
           break;
         }
+        case 'netSetNonBlocking': {
+          kernel.socketTable.setNonBlocking(
+            msg.args.fd as number,
+            !!msg.args.nonBlocking,
+          );
+          break;
+        }
         case 'kernelSocketGetLocalAddr': {
           const socketId = msg.args.fd as number;
           const addrBytes = new TextEncoder().encode(
@@ -1367,21 +1499,40 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
           const revents: number[] = [];
           let ready = 0;
 
-          // WASI poll constants
-          const POLLIN = 0x1;
-          const POLLOUT = 0x2;
-          const POLLHUP = 0x2000;
-          const POLLNVAL = 0x4000;
+          // Poll constants — support both WASI and POSIX conventions.
+          // Rust wasi-ext uses WASI: POLLIN=0x1, POLLOUT=0x2, POLLHUP=0x2000
+          // C wasi-libc uses POSIX: POLLIN=0x1, POLLOUT=0x4, POLLHUP=0x10
+          // We accept either in events and reply using the same convention.
+          const WASI_POLLIN = 0x1;
+          const WASI_POLLOUT = 0x2;
+          const WASI_POLLHUP = 0x2000;
+          const WASI_POLLNVAL = 0x4000;
+          const POSIX_POLLIN = 0x1;
+          const POSIX_POLLOUT = 0x4;
+          const POSIX_POLLHUP = 0x10;
+          const POSIX_POLLNVAL = 0x20;
+
+          const wantsRead = (events: number) => !!(events & (WASI_POLLIN | POSIX_POLLIN));
+          const wantsWrite = (events: number) => !!(events & (WASI_POLLOUT | POSIX_POLLOUT));
+          // Detect which convention to use for revents: if any POSIX-only bit is
+          // set (0x4 for POLLOUT), reply with POSIX constants; otherwise use WASI.
+          const usePosix = (events: number) => !!(events & 0x4);
 
           // Check readiness helper: kernel socket table first, then kernel FD table
           const checkFd = (fd: number, events: number): number => {
+            const posix = usePosix(events);
+            const PIN = posix ? POSIX_POLLIN : WASI_POLLIN;
+            const POUT = posix ? POSIX_POLLOUT : WASI_POLLOUT;
+            const PHUP = posix ? POSIX_POLLHUP : WASI_POLLHUP;
+            const PNVAL = posix ? POSIX_POLLNVAL : WASI_POLLNVAL;
+
             // TLS-upgraded sockets — use host socket readability
-            const tlsSockPoll = this._tlsSockets.get(fd);
-            if (tlsSockPoll) {
+            const tlsState = this._tlsSockets.get(fd);
+            if (tlsState) {
               let rev = 0;
-              if ((events & POLLIN) && tlsSockPoll.readableLength > 0) rev |= POLLIN;
-              if ((events & POLLOUT) && tlsSockPoll.writable) rev |= POLLOUT;
-              if (tlsSockPoll.destroyed) rev |= POLLHUP;
+              if (wantsRead(events) && (tlsState.readQueue.length > 0 || tlsState.ended)) rev |= PIN;
+              if (wantsWrite(events) && tlsState.socket.writable) rev |= POUT;
+              if (tlsState.ended || tlsState.socket.destroyed) rev |= PHUP;
               return rev;
             }
 
@@ -1390,23 +1541,23 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
             if (ksock) {
               const ps = kernel.socketTable.poll(fd);
               let rev = 0;
-              if ((events & POLLIN) && ps.readable) rev |= POLLIN;
-              if ((events & POLLOUT) && ps.writable) rev |= POLLOUT;
-              if (ps.hangup) rev |= POLLHUP;
+              if (wantsRead(events) && ps.readable) rev |= PIN;
+              if (wantsWrite(events) && ps.writable) rev |= POUT;
+              if (ps.hangup) rev |= PHUP;
               return rev;
             }
 
             // Kernel FD table (pipes, files)
             try {
               const ps = kernel.fdPoll(pid, fd);
-              if (ps.invalid) return POLLNVAL;
+              if (ps.invalid) return PNVAL;
               let rev = 0;
-              if ((events & POLLIN) && ps.readable) rev |= POLLIN;
-              if ((events & POLLOUT) && ps.writable) rev |= POLLOUT;
-              if (ps.hangup) rev |= POLLHUP;
+              if (wantsRead(events) && ps.readable) rev |= PIN;
+              if (wantsWrite(events) && ps.writable) rev |= POUT;
+              if (ps.hangup) rev |= PHUP;
               return rev;
             } catch {
-              return POLLNVAL;
+              return PNVAL;
             }
           };
 
@@ -1438,16 +1589,14 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
               cleanups.push(() => clearTimeout(timer));
 
               for (const entry of fds) {
-                const tlsSockWait = this._tlsSockets.get(entry.fd);
-                if (tlsSockWait) {
-                  if (entry.events & POLLIN) {
-                    const onReadable = () => finish();
-                    const onEnd = () => finish();
-                    tlsSockWait.once('readable', onReadable);
-                    tlsSockWait.once('end', onEnd);
+                const tlsState = this._tlsSockets.get(entry.fd);
+                if (tlsState) {
+                  if (wantsRead(entry.events)) {
+                    const onReady = () => finish();
+                    tlsState.waiters.push(onReady);
                     cleanups.push(() => {
-                      tlsSockWait.removeListener('readable', onReadable);
-                      tlsSockWait.removeListener('end', onEnd);
+                      const idx = tlsState.waiters.indexOf(onReady);
+                      if (idx !== -1) tlsState.waiters.splice(idx, 1);
                     });
                   }
                   continue;
@@ -1455,7 +1604,7 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
 
                 const ksock = kernel.socketTable.get(entry.fd);
                 if (ksock) {
-                  if (entry.events & (POLLIN | POLLOUT)) {
+                  if (wantsRead(entry.events) || wantsWrite(entry.events)) {
                     const waitQueue = ksock.state === 'listening'
                       ? ksock.acceptWaiters
                       : ksock.readWaiters;
@@ -1469,7 +1618,7 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
                 if (!pollKernel.fdPollWait) {
                   continue;
                 }
-                if ((entry.events & (POLLIN | POLLOUT)) === 0) {
+                if ((entry.events & (WASI_POLLIN | POSIX_POLLIN | WASI_POLLOUT | POSIX_POLLOUT)) === 0) {
                   continue;
                 }
                 void pollKernel.fdPollWait(pid, entry.fd, waitMs).then(finish).catch(() => {});
@@ -1636,7 +1785,7 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
           // Clean up TLS socket if upgraded
           const tlsCleanup = this._tlsSockets.get(socketId);
           if (tlsCleanup) {
-            tlsCleanup.destroy();
+            this._closeTlsState(tlsCleanup);
             this._tlsSockets.delete(socketId);
           }
 

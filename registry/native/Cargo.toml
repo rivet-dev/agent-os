@@ -139,9 +139,9 @@ members = [
     "crates/commands/http-test",
     # US-104: codex-exec headless agent binary
     "crates/commands/codex-exec",
-    # git: minimal git implementation (not yet created)
-    # "crates/libs/git",
-    # "crates/commands/git",
+    # git: minimal git implementation
+    "crates/libs/git",
+    "crates/commands/git",
 ]
 
 [workspace.package]

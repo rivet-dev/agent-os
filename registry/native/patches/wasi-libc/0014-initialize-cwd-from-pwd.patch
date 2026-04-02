@@ -1,0 +1,105 @@
+Initialize wasi-libc cwd from the process PWD environment lazily.
+
+The earlier constructor-based approach was unreliable for archive-linked WASI
+programs. The constructor object was often omitted entirely, so child
+processes still started with `__wasilibc_cwd = "/"` even though the runtime
+passed `PWD=/some/path`.
+
+Move cwd initialization into `getcwd.c`, which already owns the cwd storage,
+and expose `__wasilibc_ensure_cwd()` so `chdir()` and other cwd-sensitive
+paths can force initialization before touching `__wasilibc_cwd`.
+
+--- a/libc-bottom-half/sources/chdir.c
++++ b/libc-bottom-half/sources/chdir.c
+@@ -15,14 +15,17 @@ void __wasilibc_cwd_unlock(void);
+ #define __wasilibc_cwd_lock() (void)0
+ #define __wasilibc_cwd_unlock() (void)0
+ #endif
++void __wasilibc_ensure_cwd(void);
+ extern char *__wasilibc_cwd;
+-static int __wasilibc_cwd_mallocd = 0;
++extern int __wasilibc_cwd_mallocd;
+ 
+ int chdir(const char *path)
+ {
+     static char *relative_buf = NULL;
+     static size_t relative_buf_len = 0;
+ 
++    __wasilibc_ensure_cwd();
++
+     // Find a preopen'd directory as well as a relative path we're anchored
+     // from which we're changing directories to.
+     const char *abs;
+@@ -77,6 +80,8 @@ static const char *make_absolute(const char *path) {
+     static char *make_absolute_buf = NULL;
+     static size_t make_absolute_len = 0;
+ 
++    __wasilibc_ensure_cwd();
++
+     // If this path is absolute, then we return it as-is.
+     if (path[0] == '/') {
+         return path;
+@@ -100,7 +105,6 @@ static const char *make_absolute(const char *path) {
+     __wasilibc_cwd_lock();
+     size_t cwd_len = strlen(__wasilibc_cwd);
+     size_t path_len = path ? strlen(path) : 0;
+-    __wasilibc_cwd_unlock();
+     int need_slash = __wasilibc_cwd[cwd_len - 1] == '/' ? 0 : 1;
+     size_t alloc_len = cwd_len + path_len + 1 + need_slash;
+     if (alloc_len > make_absolute_len) {
+--- a/libc-bottom-half/sources/getcwd.c
++++ b/libc-bottom-half/sources/getcwd.c
+@@ -1,9 +1,11 @@
+ #include <unistd.h>
+ #include <errno.h>
+ #include <string.h>
++#include <stdlib.h>
+ #include "lock.h"
+ 
+ char *__wasilibc_cwd = "/";
++int __wasilibc_cwd_mallocd = 0;
+ 
+ #ifdef _REENTRANT
+ static volatile int lock[1];
+@@ -14,9 +16,36 @@ void __wasilibc_cwd_unlock(void) { UNLOCK(lock); }
+ #define __wasilibc_cwd_unlock() (void)0
+ #endif
+ 
++static void __wasilibc_init_cwd_from_pwd_locked(void)
++{
++    if (__wasilibc_cwd_mallocd)
++        return;
++    if (__wasilibc_cwd[0] != '/' || __wasilibc_cwd[1] != '\0')
++        return;
++
++    const char *pwd = getenv("PWD");
++    if (pwd == NULL || pwd[0] != '/')
++        return;
++
++    char *dup = strdup(pwd);
++    if (dup == NULL)
++        return;
++
++    __wasilibc_cwd = dup;
++    __wasilibc_cwd_mallocd = 1;
++}
++
++void __wasilibc_ensure_cwd(void)
++{
++    __wasilibc_cwd_lock();
++    __wasilibc_init_cwd_from_pwd_locked();
++    __wasilibc_cwd_unlock();
++}
++
+ char *getcwd(char *buf, size_t size)
+ {
+     __wasilibc_cwd_lock();
++    __wasilibc_init_cwd_from_pwd_locked();
+     if (!buf) {
+         buf = strdup(__wasilibc_cwd);
+         if (!buf) {
+@@ -36,4 +65,3 @@ char *getcwd(char *buf, size_t size)
+     __wasilibc_cwd_unlock();
+     return buf;
+ }
+-

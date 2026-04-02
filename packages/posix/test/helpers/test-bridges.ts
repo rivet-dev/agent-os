@@ -282,6 +282,15 @@ export function createStandaloneProcessIO(
       };
     },
 
+    fdFdstatSetFlags(fd, flags) {
+      const entry = fdTable.get(fd);
+      if (!entry) {
+        return ERRNO_EBADF;
+      }
+      entry.fdflags = flags;
+      return ERRNO_SUCCESS;
+    },
+
     procExit(code) {
       exitCode = code;
     },

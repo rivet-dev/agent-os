@@ -25,6 +25,8 @@ import {
   ERRNO_ECHILD,
   ERRNO_EINVAL,
   ERRNO_EBADF,
+  FDFLAG_NONBLOCK,
+  RIGHT_FD_FDSTAT_SET_FLAGS,
 } from './wasi-constants.js';
 import { VfsError } from './wasi-types.js';
 import type { WasiVFS, WasiInode, VfsStat, VfsSnapshotEntry } from './wasi-types.js';
@@ -365,6 +367,29 @@ function createKernelProcessIO(): WasiProcessIO {
         rightsBase: entry.rightsBase,
         rightsInheriting: entry.rightsInheriting,
       };
+    },
+    fdFdstatSetFlags(fd, flags) {
+      const entry = fdTable.get(fd);
+      if (!entry) {
+        return ERRNO_EBADF;
+      }
+      if (!(entry.rightsBase & RIGHT_FD_FDSTAT_SET_FLAGS)) {
+        return ERRNO_EBADF;
+      }
+
+      entry.fdflags = flags;
+
+      if (entry.resource.type === 'socket') {
+        const res = rpcCall('netSetNonBlocking', {
+          fd: getKernelFd(fd),
+          nonBlocking: (flags & FDFLAG_NONBLOCK) !== 0,
+        });
+        if (res.errno !== 0) {
+          return res.errno;
+        }
+      }
+
+      return ERRNO_SUCCESS;
     },
     procExit(exitCode) {
       // Exit notification handled by WasiProcExit exception path
@@ -1281,13 +1306,6 @@ async function main(): Promise<void> {
     processIO,
     args: [init.command, ...init.args],
     env: init.env,
-    onFdFlagsChanged(fd, flags, entry) {
-      if (entry.resource.type !== 'socket') return;
-      rpcCall('netSetNonBlocking', {
-        fd: getKernelFd(fd),
-        nonBlocking: flags !== 0,
-      });
-    },
   });
 
   // Route stdin through kernel pipe when piped

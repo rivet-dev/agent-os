@@ -57,7 +57,7 @@ vm.closeSession(sessionId);
 await vm.dispose();
 ```
 
-agentOS runs Node.js, Python, and shell scripts inside the VM:
+agentOS can run Node.js, Python, and shell scripts inside the VM:
 
 ```ts
 // Node.js

@@ -1,0 +1,47 @@
+{
+  "name": "@rivet-dev/agent-os-everything",
+  "version": "0.0.260331072558",
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "All available WASM command packages for agentOS in a single bundle",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "check-types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@rivet-dev/agent-os-coreutils": "workspace:*",
+    "@rivet-dev/agent-os-sed": "workspace:*",
+    "@rivet-dev/agent-os-grep": "workspace:*",
+    "@rivet-dev/agent-os-gawk": "workspace:*",
+    "@rivet-dev/agent-os-findutils": "workspace:*",
+    "@rivet-dev/agent-os-diffutils": "workspace:*",
+    "@rivet-dev/agent-os-tar": "workspace:*",
+    "@rivet-dev/agent-os-gzip": "workspace:*",
+    "@rivet-dev/agent-os-curl": "workspace:*",
+    "@rivet-dev/agent-os-zip": "workspace:*",
+    "@rivet-dev/agent-os-unzip": "workspace:*",
+    "@rivet-dev/agent-os-jq": "workspace:*",
+    "@rivet-dev/agent-os-ripgrep": "workspace:*",
+    "@rivet-dev/agent-os-fd": "workspace:*",
+    "@rivet-dev/agent-os-tree": "workspace:*",
+    "@rivet-dev/agent-os-file": "workspace:*",
+    "@rivet-dev/agent-os-yq": "workspace:*",
+    "@rivet-dev/agent-os-codex": "workspace:*"
+  },
+  "devDependencies": {
+    "@rivet-dev/agent-os-registry-types": "link:../../../packages/registry-types",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.9.2"
+  }
+}

@@ -30,6 +30,9 @@ export interface WasiProcessIO {
     rightsInheriting: bigint;
   };
 
+  /** Set FD flags (for example O_NONBLOCK) on the backing resource. */
+  fdFdstatSetFlags(fd: number, flags: number): number;
+
   /**
    * Record process exit. Called before the WasiProcExit exception is thrown.
    * In kernel mode this delegates to process table markExited.

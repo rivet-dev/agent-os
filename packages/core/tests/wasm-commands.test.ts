@@ -1,7 +1,8 @@
-import { readdirSync } from "node:fs";
-import curlPackage from "@rivet-dev/agent-os-curl";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { AgentOs } from "../src/index.js";
+import curlPackage from "@rivet-dev/agent-os-curl";
 import {
 	REGISTRY_SOFTWARE,
 	registrySkipReason,
@@ -575,7 +576,7 @@ EOF`);
 	// ── curl (requires C build) ───────────────────────────────────────
 
 	describe("curl", () => {
-		const hasCurl = readdirSync(curlPackage.commandDir).includes("curl");
+		const hasCurl = existsSync(join(curlPackage.commandDir, "curl"));
 
 		const CURL_SCRIPT = `
 const http = require("http");
@@ -597,10 +598,34 @@ server.listen(0, "0.0.0.0", () => {
 });
 `;
 
+		const CURL_KEEPALIVE_SCRIPT = `
+const net = require("net");
+const server = net.createServer((socket) => {
+  socket.once("data", () => {
+    const body = "hello from keepalive";
+    socket.write(
+      "HTTP/1.1 200 OK\\r\\n" +
+      "Content-Type: text/plain\\r\\n" +
+      "Content-Length: " + Buffer.byteLength(body) + "\\r\\n" +
+      "Connection: keep-alive\\r\\n" +
+      "Keep-Alive: timeout=60\\r\\n" +
+      "\\r\\n" +
+      body,
+    );
+    // Intentionally leave the socket open so curl's shutdown path performs
+    // a non-blocking drain read instead of waiting for EOF.
+  });
+});
+server.listen(0, "0.0.0.0", () => {
+  console.log("PORT:" + server.address().port);
+});
+`;
+
 		async function startServer(
 			testVm: AgentOs,
+			script = CURL_SCRIPT,
 		): Promise<{ pid: number; port: number }> {
-			await testVm.writeFile("/tmp/curl-server.js", CURL_SCRIPT);
+			await testVm.writeFile("/tmp/curl-server.js", script);
 			let resolvePort: (port: number) => void;
 			const portPromise = new Promise<number>((r) => {
 				resolvePort = r;
@@ -644,6 +669,25 @@ server.listen(0, "0.0.0.0", () => {
 				vm.killProcess(pid);
 			}
 		});
+
+		test.skipIf(!hasCurl)(
+			"curl exits promptly after a keep-alive response",
+			async () => {
+				const { pid, port } = await startServer(vm, CURL_KEEPALIVE_SCRIPT);
+				try {
+					const startedAt = Date.now();
+					const r = await vm.exec(`curl -s http://localhost:${port}/`);
+					const elapsedMs = Date.now() - startedAt;
+					expect(r.exitCode).toBe(0);
+					expect(r.stdout).toContain("hello from keepalive");
+					expect(r.stderr).not.toContain("i/o error");
+					expect(elapsedMs).toBeLessThan(8000);
+				} finally {
+					vm.killProcess(pid);
+				}
+			},
+			15000,
+		);
 	});
 
 	// ── file permissions (Bug 1 regression tests) ──────────────────────

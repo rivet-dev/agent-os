@@ -1,0 +1,15 @@
+[package]
+name = "secureexec-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal git implementation for secure-exec WasmVM"
+
+[lib]
+name = "secureexec_git"
+path = "src/lib.rs"
+
+[dependencies]
+sha1 = "0.10.6"
+flate2 = "1.1"
+wasi-http = { package = "secureexec-wasi-http", path = "../wasi-http" }

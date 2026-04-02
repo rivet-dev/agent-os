@@ -17,7 +17,7 @@ CMD_PACKAGES := coreutils sed grep gawk findutils diffutils tar gzip \
                 curl wget zip unzip jq ripgrep fd tree file sqlite3 yq codex git
 
 # Meta-packages
-META_PACKAGES := common build-essential
+META_PACKAGES := common build-essential everything
 
 # All publishable packages
 ALL_PACKAGES := $(CMD_PACKAGES) $(META_PACKAGES)

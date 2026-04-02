@@ -66,7 +66,7 @@ COMMANDS_DIR ?= ../target/wasm32-wasip1/release/commands
 COMMANDS := zip unzip envsubst sqlite3 curl wget
 
 # Programs requiring patched sysroot (Tier 2+ custom host imports)
-PATCHED_PROGRAMS := isatty_test getpid_test getppid_test getppid_verify userinfo pipe_test dup_test spawn_child spawn_exit_code pipeline kill_child waitpid_return waitpid_edge syscall_coverage getpwuid_test signal_tests sigaction_behavior delayed_tcp_echo delayed_kill pipe_edge tcp_echo tcp_server udp_echo unix_socket signal_handler http_get dns_lookup sqlite3_cli curl_test curl_cli wget
+PATCHED_PROGRAMS := isatty_test getpid_test getppid_test getppid_verify userinfo pipe_test dup_test spawn_child spawn_exit_code pipeline kill_child waitpid_return waitpid_edge syscall_coverage getpwuid_test signal_tests sigaction_behavior delayed_tcp_echo delayed_kill pipe_edge tcp_echo tcp_server udp_echo unix_socket signal_handler http_get dns_lookup sqlite3_cli curl wget
 
 # Discover all .c source files in programs/
 ALL_SOURCES := $(wildcard programs/*.c)
@@ -80,12 +80,19 @@ else
 endif
 
 # Program names (without .c extension)
-PROG_NAMES := $(basename $(notdir $(SOURCES)))
+ifeq ($(wildcard $(PATCHED_SYSROOT)/lib/wasm32-wasi/libc.a),)
+  CUSTOM_WASM_PROG_NAMES :=
+else
+  CUSTOM_WASM_PROG_NAMES := curl
+endif
+
+WASM_PROG_NAMES := $(sort $(basename $(notdir $(SOURCES))) $(CUSTOM_WASM_PROG_NAMES))
+NATIVE_PROG_NAMES := $(basename $(notdir $(SOURCES)))
 
 # Default WASM output targets
-WASM_OUTPUTS := $(addprefix $(BUILD_DIR)/,$(PROG_NAMES))
+WASM_OUTPUTS := $(addprefix $(BUILD_DIR)/,$(WASM_PROG_NAMES))
 # Native output targets
-NATIVE_OUTPUTS := $(addprefix $(NATIVE_DIR)/,$(PROG_NAMES))
+NATIVE_OUTPUTS := $(addprefix $(NATIVE_DIR)/,$(NATIVE_PROG_NAMES))
 
 .PHONY: all wasi-sdk programs sysroot install native clean wasm-opt-check os-test os-test-native
 
@@ -121,6 +128,14 @@ ZLIB_URL    := https://github.com/madler/zlib/archive/refs/tags/v1.3.1.zip
 CJSON_URL   := https://github.com/DaveGamble/cJSON/archive/refs/tags/v1.7.18.zip
 CURL_COMMIT := main
 CURL_URL    := https://github.com/rivet-dev/secure-exec-curl/archive/refs/heads/$(CURL_COMMIT).zip
+CURL_TOOL_VERSION := 8_11_1
+CURL_TOOL_URL := https://github.com/curl/curl/archive/refs/tags/curl-$(CURL_TOOL_VERSION).tar.gz
+CURL_RELEASE_VERSION := 8.11.1
+CURL_RELEASE_TAG := 8_11_1
+CURL_RELEASE_URL := https://github.com/curl/curl/releases/download/curl-$(CURL_RELEASE_TAG)/curl-$(CURL_RELEASE_VERSION).tar.xz
+CURL_UPSTREAM_BUILD_DIR := $(BUILD_DIR)/curl-upstream
+CURL_UPSTREAM_OVERLAY_DIR := curl-upstream-overlay
+CURL_UPSTREAM_OVERLAY_FILES := $(wildcard $(CURL_UPSTREAM_OVERLAY_DIR)/lib/*.c $(CURL_UPSTREAM_OVERLAY_DIR)/lib/*.h $(CURL_UPSTREAM_OVERLAY_DIR)/lib/vtls/*.c $(CURL_UPSTREAM_OVERLAY_DIR)/lib/vtls/*.h)
 MINIZIP_URL := https://github.com/madler/zlib/archive/refs/tags/v1.3.1.zip
 
 LIBS_DIR    := libs
@@ -388,7 +403,7 @@ wasm-opt-check:
 programs: wasi-sdk fetch-libs wasm-opt-check $(WASM_OUTPUTS)
 	@echo ""
 	@echo "=== C WASM Build Report ==="
-	@echo "Programs: $(words $(PROG_NAMES)) compiled"
+	@echo "Programs: $(words $(WASM_PROG_NAMES)) compiled"
 	@echo "Sysroot:  $(SYSROOT)"
 	@echo "Output:   $(BUILD_DIR)/"
 	@echo "=== Build complete ==="
@@ -477,42 +492,30 @@ $(NATIVE_DIR)/unzip: programs/unzip.c $(ZLIB_SRCS) $(MINIZIP_UNZIP_SRCS)
 	@mkdir -p $(NATIVE_DIR)
 	$(NATIVE_CC) $(NATIVE_CFLAGS) $(ZIP_INCLUDES) -o $@ programs/unzip.c $(ZLIB_SRCS) $(MINIZIP_UNZIP_SRCS) -lz
 
-# curl_test: links libcurl (HTTP/HTTPS build for WASM via host_net + host_tls)
 CURL_SRCS := $(wildcard libs/curl/lib/*.c) $(wildcard libs/curl/lib/vauth/*.c) \
              $(wildcard libs/curl/lib/vtls/*.c) $(wildcard libs/curl/lib/vquic/*.c) \
              $(wildcard libs/curl/lib/vssh/*.c)
 CURL_INCLUDES := -Ilibs/curl/include -Ilibs/curl/lib -include libs/curl/lib/curl_setup.h -include libs/curl/lib/curl_printf.h
-CURL_DEFS := -DHAVE_CONFIG_H -DBUILDING_LIBCURL -D_WASI_EMULATED_SIGNAL -DHAVE_BASENAME -DHAVE_LIBGEN_H
+CURL_LIB_DEFS := -DHAVE_CONFIG_H -DBUILDING_LIBCURL -D_WASI_EMULATED_SIGNAL -DHAVE_BASENAME -DHAVE_LIBGEN_H
 
-$(BUILD_DIR)/curl_test: programs/curl_test.c $(CURL_SRCS) $(WASI_SDK_DIR)/bin/clang
+$(BUILD_DIR)/curl: scripts/build-curl-upstream.sh $(CURL_UPSTREAM_OVERLAY_FILES) $(WASI_SDK_DIR)/bin/clang
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(WASM_CFLAGS) $(CURL_DEFS) $(CURL_INCLUDES) \
-	    -lwasi-emulated-signal \
-	    -o $@.wasm programs/curl_test.c $(CURL_SRCS)
-	wasm-opt -O3 --strip-debug --all-features $@.wasm -o $@
-	@rm -f $@.wasm
-
-$(NATIVE_DIR)/curl_test: programs/curl_test.c
-	@mkdir -p $(NATIVE_DIR)
-	$(NATIVE_CC) $(NATIVE_CFLAGS) -o $@ programs/curl_test.c -lcurl
-
-# curl_cli: full curl CLI built on libcurl
-$(BUILD_DIR)/curl_cli: programs/curl_cli.c $(CURL_SRCS) $(WASI_SDK_DIR)/bin/clang
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(WASM_CFLAGS) $(CURL_DEFS) $(CURL_INCLUDES) \
-	    -lwasi-emulated-signal \
-	    -o $@.wasm programs/curl_cli.c $(CURL_SRCS)
-	wasm-opt -O3 --strip-debug --all-features $@.wasm -o $@
-	@rm -f $@.wasm
-
-$(NATIVE_DIR)/curl_cli: programs/curl_cli.c
-	@mkdir -p $(NATIVE_DIR)
-	$(NATIVE_CC) $(NATIVE_CFLAGS) -o $@ programs/curl_cli.c -lcurl
+	bash scripts/build-curl-upstream.sh \
+		--version "$(CURL_RELEASE_VERSION)" \
+		--tag "$(CURL_RELEASE_TAG)" \
+		--url "$(CURL_RELEASE_URL)" \
+		--cache-dir "$(abspath $(LIBS_CACHE))" \
+		--build-dir "$(abspath $(CURL_UPSTREAM_BUILD_DIR))" \
+		--overlay-dir "$(abspath $(CURL_UPSTREAM_OVERLAY_DIR))" \
+		--cc "$(abspath $(CC)) --target=wasm32-wasip1 --sysroot=$(abspath $(SYSROOT))" \
+		--ar "$(abspath $(WASI_SDK_DIR)/bin/llvm-ar)" \
+		--ranlib "$(abspath $(WASI_SDK_DIR)/bin/llvm-ranlib)" \
+		--output "$(abspath $@)"
 
 # wget: minimal wget built on libcurl
 $(BUILD_DIR)/wget: programs/wget.c $(CURL_SRCS) $(WASI_SDK_DIR)/bin/clang
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(WASM_CFLAGS) $(CURL_DEFS) $(CURL_INCLUDES) \
+	$(CC) $(WASM_CFLAGS) $(CURL_LIB_DEFS) $(CURL_INCLUDES) \
 	    -lwasi-emulated-signal \
 	    -o $@.wasm programs/wget.c $(CURL_SRCS)
 	wasm-opt -O3 --strip-debug --all-features $@.wasm -o $@
@@ -527,7 +530,7 @@ $(NATIVE_DIR)/wget: programs/wget.c
 native: $(NATIVE_OUTPUTS)
 	@echo ""
 	@echo "=== Native Build Report ==="
-	@echo "Programs: $(words $(PROG_NAMES)) compiled"
+	@echo "Programs: $(words $(NATIVE_PROG_NAMES)) compiled"
 	@echo "Output:   $(NATIVE_DIR)/"
 	@echo "=== Build complete ==="
 
@@ -536,11 +539,6 @@ $(NATIVE_DIR)/%: programs/%.c
 	$(NATIVE_CC) $(NATIVE_CFLAGS) -o $@ $<
 
 # --- Install opted-in commands to COMMANDS_DIR ---
-
-# Command name → build artifact mappings (when they differ)
-# Format: command=build_name (e.g., sqlite3 is built from sqlite3_cli.c)
-COMMAND_MAP_sqlite3 := sqlite3_cli
-COMMAND_MAP_curl := curl_cli
 
 install:
 	@if [ -z "$(COMMANDS)" ]; then \
@@ -557,7 +555,6 @@ install:
 		src="$$cmd"; \
 		case "$$cmd" in \
 			sqlite3) src="sqlite3_cli" ;; \
-			curl) src="curl_cli" ;; \
 		esac; \
 		if [ -f "$(BUILD_DIR)/$$src" ]; then \
 			cp "$(BUILD_DIR)/$$src" "$(COMMANDS_DIR)/$$cmd"; \
