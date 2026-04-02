@@ -1,5 +1,6 @@
 {
   "compilerOptions": {
+    "baseUrl": ".",
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
@@ -8,7 +9,11 @@
     "rootDir": "./src",
     "strict": true,
     "esModuleInterop": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "paths": {
+      "@rivet-dev/agent-os/internal/runtime-compat": ["../core/dist/runtime-compat.d.ts"],
+      "@rivet-dev/agent-os/test/runtime": ["../core/dist/test/runtime.d.ts"]
+    }
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]

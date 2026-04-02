@@ -22,7 +22,7 @@
 	"dependencies": {
 		"@agentclientprotocol/sdk": "^0.16.1",
 		"@rivet-dev/agent-os-codex": "workspace:*",
-		"@rivet-dev/agent-os-core": "workspace:*"
+		"@rivet-dev/agent-os": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/node": "^22.10.2",

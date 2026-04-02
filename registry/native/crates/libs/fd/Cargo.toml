@@ -3,7 +3,7 @@ name = "secureexec-fd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "fd-find compatible file finder for secure-exec standalone binaries"
+description = "fd-find compatible file finder for Agent OS standalone binaries"
 
 [dependencies]
 regex = "1"

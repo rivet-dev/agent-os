@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { LLMock } from "@copilotkit/llmock";
-import type { ManagedProcess } from "@secure-exec/core";
+import type { ManagedProcess } from "../src/runtime-compat.js";
 import {
 	afterAll,
 	afterEach,
@@ -14,6 +14,7 @@ import {
 import { AcpClient } from "../src/acp-client.js";
 import { AgentOs } from "../src/agent-os.js";
 import { createStdoutLineIterable } from "../src/stdout-lines.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 import {
 	DEFAULT_TEXT_FIXTURE,
 	startLlmock,
@@ -31,9 +32,17 @@ const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
  * so we read the host package.json directly and construct the VFS path.
  */
 function resolvePiAcpBinPath(): string {
+	return resolvePackageBinPath("pi-acp", "pi-acp");
+}
+
+function resolvePiBinPath(): string {
+	return resolvePackageBinPath("@mariozechner/pi-coding-agent", "pi");
+}
+
+function resolvePackageBinPath(packageName: string, binName?: string): string {
 	const hostPkgJson = join(
 		MODULE_ACCESS_CWD,
-		"node_modules/pi-acp/package.json",
+		`node_modules/${packageName}/package.json`,
 	);
 	const pkg = JSON.parse(readFileSync(hostPkgJson, "utf-8"));
 
@@ -42,13 +51,14 @@ function resolvePiAcpBinPath(): string {
 		binEntry = pkg.bin;
 	} else if (typeof pkg.bin === "object" && pkg.bin !== null) {
 		binEntry =
-			(pkg.bin as Record<string, string>)["pi-acp"] ??
+			(binName ? (pkg.bin as Record<string, string>)[binName] : undefined) ??
+			(pkg.bin as Record<string, string>)[packageName] ??
 			Object.values(pkg.bin)[0];
 	} else {
-		throw new Error("No bin entry in pi-acp package.json");
+		throw new Error(`No bin entry in ${packageName} package.json`);
 	}
 
-	return `/root/node_modules/pi-acp/${binEntry}`;
+	return `/root/node_modules/${packageName}/${binEntry}`;
 }
 
 describe("pi-acp adapter manual spawn", () => {
@@ -95,7 +105,7 @@ describe("pi-acp adapter manual spawn", () => {
 		const { iterable, onStdout } = createStdoutLineIterable();
 
 		let stderrOutput = "";
-		const spawned = vm.kernel.spawn("node", [binPath], {
+		const spawned = getAgentOsKernel(vm).spawn("node", [binPath], {
 			streamStdin: true,
 			onStdout,
 			onStderr: (data: Uint8Array) => {
@@ -105,6 +115,7 @@ describe("pi-acp adapter manual spawn", () => {
 				HOME: "/home/user",
 				ANTHROPIC_API_KEY: "mock-key",
 				ANTHROPIC_BASE_URL: mockUrl,
+				PI_ACP_PI_COMMAND: resolvePiBinPath(),
 			},
 		});
 

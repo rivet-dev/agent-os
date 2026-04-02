@@ -1,0 +1,506 @@
+use agent_os_kernel::process_table::{
+    DriverProcess, ProcessContext, ProcessExitCallback, ProcessResult, ProcessStatus, ProcessTable,
+};
+use std::collections::BTreeMap;
+use std::fmt::Debug;
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+fn assert_error_code<T: Debug>(result: ProcessResult<T>, expected: &str) {
+    let error = result.expect_err("operation should fail");
+    assert_eq!(error.code(), expected);
+}
+
+#[derive(Default)]
+struct MockProcessState {
+    kills: Vec<i32>,
+    exit_code: Option<i32>,
+    on_exit: Option<ProcessExitCallback>,
+    ignore_sigterm: bool,
+}
+
+#[derive(Default)]
+struct MockDriverProcess {
+    state: Mutex<MockProcessState>,
+    exited: Condvar,
+}
+
+impl MockDriverProcess {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn stubborn() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(MockProcessState {
+                ignore_sigterm: true,
+                ..MockProcessState::default()
+            }),
+            exited: Condvar::new(),
+        })
+    }
+
+    fn schedule_exit(self: &Arc<Self>, delay: Duration, exit_code: i32) {
+        let process = Arc::clone(self);
+        thread::spawn(move || {
+            thread::sleep(delay);
+            process.exit(exit_code);
+        });
+    }
+
+    fn exit(&self, exit_code: i32) {
+        let callback = {
+            let mut state = self.state.lock().expect("mock process lock poisoned");
+            if state.exit_code.is_some() {
+                return;
+            }
+            state.exit_code = Some(exit_code);
+            self.exited.notify_all();
+            state.on_exit.clone()
+        };
+
+        if let Some(callback) = callback {
+            callback(exit_code);
+        }
+    }
+
+    fn kills(&self) -> Vec<i32> {
+        self.state
+            .lock()
+            .expect("mock process lock poisoned")
+            .kills
+            .clone()
+    }
+}
+
+impl DriverProcess for MockDriverProcess {
+    fn kill(&self, signal: i32) {
+        let should_exit = {
+            let mut state = self.state.lock().expect("mock process lock poisoned");
+            state.kills.push(signal);
+            signal == 9 || !state.ignore_sigterm
+        };
+
+        if should_exit {
+            self.exit(128 + signal);
+        }
+    }
+
+    fn wait(&self, timeout: Duration) -> Option<i32> {
+        let state = self.state.lock().expect("mock process lock poisoned");
+        if state.exit_code.is_some() {
+            return state.exit_code;
+        }
+
+        let (state, _) = self
+            .exited
+            .wait_timeout(state, timeout)
+            .expect("mock process wait lock poisoned");
+        state.exit_code
+    }
+
+    fn set_on_exit(&self, callback: ProcessExitCallback) {
+        self.state
+            .lock()
+            .expect("mock process lock poisoned")
+            .on_exit = Some(callback);
+    }
+}
+
+fn create_context(ppid: u32) -> ProcessContext {
+    ProcessContext {
+        pid: 0,
+        ppid,
+        env: BTreeMap::new(),
+        cwd: String::from("/"),
+        ..ProcessContext::default()
+    }
+}
+
+fn wait_for(predicate: impl Fn() -> bool, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if predicate() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(predicate(), "condition should become true before timeout");
+}
+
+#[test]
+fn register_allocates_expected_process_metadata_and_parent_groups() {
+    let table = ProcessTable::new();
+    let parent = MockDriverProcess::new();
+    let child = MockDriverProcess::new();
+
+    let parent_pid = table.allocate_pid();
+    let child_pid = table.allocate_pid();
+
+    let parent_entry = table.register(
+        parent_pid,
+        "wasmvm",
+        "grep",
+        vec![String::from("-r"), String::from("foo")],
+        create_context(0),
+        parent,
+    );
+    let child_entry = table.register(
+        child_pid,
+        "node",
+        "node",
+        vec![String::from("-e"), String::from("1+1")],
+        create_context(parent_pid),
+        child,
+    );
+
+    assert_eq!(parent_entry.pid, 1);
+    assert_eq!(child_entry.pid, 2);
+    assert_eq!(parent_entry.pgid, 1);
+    assert_eq!(parent_entry.sid, 1);
+    assert_eq!(child_entry.pgid, 1);
+    assert_eq!(child_entry.sid, 1);
+    assert_eq!(child_entry.driver, "node");
+}
+
+#[test]
+fn waitpid_resolves_for_exiting_and_already_exited_processes() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let process = MockDriverProcess::new();
+    let pid = table.allocate_pid();
+    table.register(
+        pid,
+        "wasmvm",
+        "echo",
+        vec![String::from("hello")],
+        create_context(0),
+        process.clone(),
+    );
+
+    process.schedule_exit(Duration::from_millis(10), 0);
+    assert_eq!(
+        table.waitpid(pid).expect("waitpid should resolve"),
+        (pid, 0)
+    );
+    assert_eq!(table.zombie_timer_count(), 0);
+    assert!(table.get(pid).is_none(), "waitpid should reap exited processes");
+
+    let exited_pid = table.allocate_pid();
+    table.register(
+        exited_pid,
+        "wasmvm",
+        "true",
+        Vec::new(),
+        create_context(0),
+        MockDriverProcess::new(),
+    );
+    table.mark_exited(exited_pid, 42);
+
+    assert_eq!(
+        table
+            .waitpid(exited_pid)
+            .expect("waitpid should resolve immediately"),
+        (exited_pid, 42)
+    );
+    assert_eq!(table.zombie_timer_count(), 0);
+    assert!(
+        table.get(exited_pid).is_none(),
+        "waitpid should reap already exited processes"
+    );
+}
+
+#[test]
+fn on_process_exit_runs_before_waitpid_waiters_are_notified() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let process = MockDriverProcess::new();
+    let pid = table.allocate_pid();
+    table.register(
+        pid,
+        "wasmvm",
+        "sleep",
+        vec![String::from("1")],
+        create_context(0),
+        process.clone(),
+    );
+
+    let (callback_entered_tx, callback_entered_rx) = mpsc::channel();
+    let callback_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let callback_gate_for_exit = Arc::clone(&callback_gate);
+    table.set_on_process_exit(Some(Arc::new(move |_| {
+        callback_entered_tx
+            .send(())
+            .expect("callback should report entry");
+        let (released, wake) = &*callback_gate_for_exit;
+        let mut released = released.lock().expect("callback gate lock poisoned");
+        while !*released {
+            released = wake
+                .wait(released)
+                .expect("callback gate wait lock poisoned");
+        }
+    })));
+
+    let waiter_table = table.clone();
+    let (wait_result_tx, wait_result_rx) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let result = waiter_table.waitpid(pid).expect("waitpid should resolve");
+        wait_result_tx
+            .send(result)
+            .expect("waiter should report exit result");
+    });
+
+    thread::sleep(Duration::from_millis(10));
+    let process_for_exit = process.clone();
+    let exit_handle = thread::spawn(move || {
+        process_for_exit.exit(0);
+    });
+
+    callback_entered_rx
+        .recv_timeout(Duration::from_millis(100))
+        .expect("exit callback should run");
+    assert!(wait_result_rx.try_recv().is_err());
+
+    let (released, wake) = &*callback_gate;
+    *released.lock().expect("callback gate lock poisoned") = true;
+    wake.notify_all();
+    assert_eq!(
+        wait_result_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("waitpid should resolve after callback"),
+        (pid, 0)
+    );
+    exit_handle.join().expect("exit thread should finish");
+    waiter.join().expect("waiter thread should finish");
+}
+
+#[test]
+fn kill_routes_signals_and_validates_process_existence() {
+    let table = ProcessTable::new();
+    let process = MockDriverProcess::new();
+    let pid = table.allocate_pid();
+    table.register(
+        pid,
+        "wasmvm",
+        "sleep",
+        vec![String::from("1")],
+        create_context(0),
+        process.clone(),
+    );
+
+    table
+        .kill(pid as i32, 0)
+        .expect("signal 0 is an existence check");
+    assert!(process.kills().is_empty());
+
+    table
+        .kill(pid as i32, 15)
+        .expect("signal should be delivered");
+    assert_eq!(process.kills(), vec![15]);
+
+    assert_error_code(table.kill(999, 15), "ESRCH");
+    assert_error_code(table.kill(pid as i32, -1), "EINVAL");
+    assert_error_code(table.kill(pid as i32, 100), "EINVAL");
+}
+
+#[test]
+fn process_groups_and_sessions_follow_legacy_rules() {
+    let table = ProcessTable::new();
+
+    let p1 = table.allocate_pid();
+    let p2 = table.allocate_pid();
+    let p3 = table.allocate_pid();
+    let p4 = table.allocate_pid();
+
+    table.register(
+        p1,
+        "wasmvm",
+        "sh",
+        Vec::new(),
+        create_context(0),
+        MockDriverProcess::new(),
+    );
+    table.register(
+        p2,
+        "wasmvm",
+        "child",
+        Vec::new(),
+        create_context(p1),
+        MockDriverProcess::new(),
+    );
+    table.register(
+        p3,
+        "wasmvm",
+        "peer",
+        Vec::new(),
+        create_context(p1),
+        MockDriverProcess::new(),
+    );
+    table.register(
+        p4,
+        "wasmvm",
+        "other",
+        Vec::new(),
+        create_context(p1),
+        MockDriverProcess::new(),
+    );
+
+    table
+        .setpgid(p2, 0)
+        .expect("process can create its own group");
+    table
+        .setpgid(p3, p2)
+        .expect("peer can join an existing group in the same session");
+    assert_eq!(table.getpgid(p2).expect("pgid"), p2);
+    assert_eq!(table.getpgid(p3).expect("pgid"), p2);
+    assert!(table.has_process_group(p2));
+
+    table.setsid(p4).expect("child can become a session leader");
+    assert_eq!(table.getsid(p4).expect("sid"), p4);
+    assert_error_code(table.setpgid(p3, p4), "EPERM");
+}
+
+#[test]
+fn negative_pid_kill_targets_entire_process_groups() {
+    let table = ProcessTable::new();
+    let leader = MockDriverProcess::new();
+    let peer = MockDriverProcess::new();
+    let pid1 = table.allocate_pid();
+    let pid2 = table.allocate_pid();
+
+    table.register(
+        pid1,
+        "wasmvm",
+        "leader",
+        Vec::new(),
+        create_context(0),
+        leader.clone(),
+    );
+    table.register(
+        pid2,
+        "wasmvm",
+        "peer",
+        Vec::new(),
+        create_context(pid1),
+        peer.clone(),
+    );
+    table.setpgid(pid2, pid1).expect("peer joins leader group");
+
+    table
+        .kill(-(pid1 as i32), 15)
+        .expect("group kill should succeed");
+
+    assert_eq!(leader.kills(), vec![15]);
+    assert_eq!(peer.kills(), vec![15]);
+}
+
+#[test]
+fn terminate_all_escalates_from_sigterm_to_sigkill_for_survivors() {
+    let table = ProcessTable::new();
+    let graceful = MockDriverProcess::new();
+    let stubborn = MockDriverProcess::stubborn();
+
+    let pid1 = table.allocate_pid();
+    let pid2 = table.allocate_pid();
+    table.register(
+        pid1,
+        "wasmvm",
+        "graceful",
+        Vec::new(),
+        create_context(0),
+        graceful.clone(),
+    );
+    table.register(
+        pid2,
+        "wasmvm",
+        "stubborn",
+        Vec::new(),
+        create_context(0),
+        stubborn.clone(),
+    );
+
+    table.terminate_all();
+
+    assert_eq!(graceful.kills(), vec![15]);
+    assert_eq!(stubborn.kills(), vec![15, 9]);
+    assert_eq!(
+        table
+            .get(pid1)
+            .expect("graceful process should remain as zombie")
+            .status,
+        ProcessStatus::Exited
+    );
+    assert_eq!(
+        table
+            .get(pid2)
+            .expect("stubborn process should remain as zombie")
+            .status,
+        ProcessStatus::Exited
+    );
+    assert_eq!(table.zombie_timer_count(), 0);
+}
+
+#[test]
+fn list_processes_returns_a_snapshot_of_registered_processes() {
+    let table = ProcessTable::new();
+    let pid1 = table.allocate_pid();
+    let pid2 = table.allocate_pid();
+
+    table.register(
+        pid1,
+        "wasmvm",
+        "ls",
+        Vec::new(),
+        create_context(0),
+        MockDriverProcess::new(),
+    );
+    table.register(
+        pid2,
+        "node",
+        "node",
+        Vec::new(),
+        create_context(0),
+        MockDriverProcess::new(),
+    );
+
+    let processes = table.list_processes();
+    assert_eq!(processes.len(), 2);
+    assert_eq!(processes.get(&pid1).expect("process info").command, "ls");
+    assert_eq!(processes.get(&pid2).expect("process info").driver, "node");
+}
+
+#[test]
+fn waitpid_rejects_unknown_processes() {
+    let table = ProcessTable::new();
+    assert_error_code(table.waitpid(9999), "ESRCH");
+}
+
+#[test]
+fn zombie_reaper_uses_a_single_worker_for_many_exits() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_millis(100));
+    let mut pids = Vec::new();
+
+    for index in 0..100 {
+        let process = MockDriverProcess::new();
+        let pid = table.allocate_pid();
+        table.register(
+            pid,
+            "wasmvm",
+            format!("proc-{index}"),
+            Vec::new(),
+            create_context(0),
+            process.clone(),
+        );
+        process.exit(0);
+        pids.push(pid);
+    }
+
+    assert_eq!(table.zombie_reaper_thread_spawn_count(), 1);
+    assert_eq!(table.zombie_timer_count(), 100);
+
+    wait_for(|| table.zombie_timer_count() == 0, Duration::from_secs(2));
+
+    for pid in pids {
+        assert!(table.get(pid).is_none(), "process {pid} should be reaped");
+    }
+}

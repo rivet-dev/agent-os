@@ -1,0 +1,14 @@
+[package]
+name = "agent-os-execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native execution plane scaffold for Agent OS"
+
+[dependencies]
+agent-os-bridge = { path = "../bridge" }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+wat = "1"

@@ -3,7 +3,7 @@ name = "cmd-xu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "xu standalone binary for secure-exec WasmVM tests"
+description = "xu standalone binary for Agent OS WasmVM tests"
 
 [[bin]]
 name = "xu"

@@ -3,7 +3,7 @@ name = "cmd-cp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "cp standalone binary for secure-exec WasmVM"
+description = "cp standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "cp"

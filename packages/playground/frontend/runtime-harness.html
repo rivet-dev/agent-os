@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent OS Browser Harness</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: system-ui, sans-serif;
+        background: #0b0e14;
+        color: #f3f4f6;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+      }
+
+      main {
+        width: min(32rem, calc(100vw - 2rem));
+        padding: 1.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 0.75rem;
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.1rem;
+      }
+
+      p {
+        margin: 0;
+        color: #cbd5e1;
+      }
+
+      #harness-status {
+        margin-top: 1rem;
+        font-weight: 600;
+        color: #f59e0b;
+      }
+
+      #harness-status[data-state="ready"] {
+        color: #4ade80;
+      }
+
+      #harness-status[data-state="error"] {
+        color: #f87171;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Agent OS Browser Harness</h1>
+      <p>
+        This page exposes a minimal Playwright-facing API for booting the real
+        browser runtime against the bundled worker asset.
+      </p>
+      <p id="harness-status" data-state="loading">loading</p>
+    </main>
+    <script type="module" src="/dist/runtime-harness.js"></script>
+  </body>
+</html>

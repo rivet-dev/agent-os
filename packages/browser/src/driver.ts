@@ -1,3 +1,11 @@
+import type {
+	Permissions,
+	VirtualFileSystem,
+} from "./runtime.js";
+import type {
+	NetworkAdapter,
+	SystemDriver,
+} from "./runtime.js";
 import {
 	createCommandExecutorStub,
 	createFsStub,
@@ -6,21 +14,13 @@ import {
 	wrapNetworkAdapter,
 	createInMemoryFileSystem,
 	createEnosysError,
-} from "@secure-exec/core";
-import type {
-	Permissions,
-	VirtualFileSystem,
-} from "@secure-exec/core";
-import type {
-	NetworkAdapter,
-	SystemDriver,
-} from "@secure-exec/core";
+} from "./runtime.js";
 
 const S_IFREG = 0o100000;
 const S_IFDIR = 0o040000;
 
 const BROWSER_SYSTEM_DRIVER_OPTIONS = Symbol.for(
-	"secure-exec.browserSystemDriverOptions",
+	"agent-os.browserSystemDriverOptions",
 );
 
 export interface BrowserRuntimeSystemOptions {
@@ -317,7 +317,7 @@ export function createBrowserNetworkAdapter(): NetworkAdapter {
 			const response = await fetch(url, {
 				method: options?.method || "GET",
 				headers: options?.headers,
-				body: options?.body,
+				body: options?.body as RequestInit["body"],
 			});
 			const headers: Record<string, string> = {};
 			response.headers.forEach((v, k) => {
@@ -358,7 +358,7 @@ export function createBrowserNetworkAdapter(): NetworkAdapter {
 			const response = await fetch(url, {
 				method: options?.method || "GET",
 				headers: options?.headers,
-				body: options?.body,
+				body: options?.body as RequestInit["body"],
 			});
 			const headers: Record<string, string> = {};
 			response.headers.forEach((v, k) => {

@@ -1,0 +1,9 @@
+{
+	"name": "project-matrix-peer-deps-pass",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"@peer-test/host": "file:packages/host",
+		"@peer-test/plugin": "file:packages/plugin"
+	}
+}

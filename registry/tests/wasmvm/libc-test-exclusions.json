@@ -7,37 +7,37 @@
       "expected": "fail",
       "category": "wasm-limitation",
       "reason": "dlopen/dlsym not available in wasm32-wasip1 — no dynamic linking support",
-      "issue": "https://github.com/rivet-dev/secure-exec/issues/48"
+      "issue": "https://github.com/rivet-dev/agent-os/pull/48"
     },
     "functional/tls_align_dso": {
       "expected": "fail",
       "category": "wasm-limitation",
       "reason": "Thread-local storage with dynamic shared objects requires dlopen — not available in WASM",
-      "issue": "https://github.com/rivet-dev/secure-exec/issues/48"
+      "issue": "https://github.com/rivet-dev/agent-os/pull/48"
     },
     "functional/tls_init_dso": {
       "expected": "fail",
       "category": "wasm-limitation",
       "reason": "Thread-local storage initialization with DSOs requires dlopen — not available in WASM",
-      "issue": "https://github.com/rivet-dev/secure-exec/issues/48"
+      "issue": "https://github.com/rivet-dev/agent-os/pull/48"
     },
     "functional/strptime": {
       "expected": "fail",
       "category": "implementation-gap",
       "reason": "strptime fails on timezone-related format specifiers (%Z, %z) — musl timezone code is ifdef'd out for WASI",
-      "issue": "https://github.com/rivet-dev/secure-exec/issues/48"
+      "issue": "https://github.com/rivet-dev/agent-os/pull/48"
     },
     "regression/statvfs": {
       "expected": "fail",
       "category": "wasi-gap",
       "reason": "statvfs/fstatvfs not part of WASI — no filesystem statistics interface",
-      "issue": "https://github.com/rivet-dev/secure-exec/issues/48"
+      "issue": "https://github.com/rivet-dev/agent-os/pull/48"
     },
     "regression/tls_get_new-dtv_dso": {
       "expected": "fail",
       "category": "wasm-limitation",
       "reason": "TLS dynamic thread vector with DSOs requires dlopen — not available in WASM",
-      "issue": "https://github.com/rivet-dev/secure-exec/issues/48"
+      "issue": "https://github.com/rivet-dev/agent-os/pull/48"
     }
   }
 }

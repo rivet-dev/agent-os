@@ -3,7 +3,7 @@ name = "cmd-tsort"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "tsort standalone binary for secure-exec WasmVM"
+description = "tsort standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "tsort"

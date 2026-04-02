@@ -1,0 +1,26 @@
+import { unsupportedFunction } from "./unsupported.ts";
+
+export const access = () => unsupportedFunction("node:fs/promises");
+export const appendFile = () => unsupportedFunction("node:fs/promises");
+export const chmod = () => unsupportedFunction("node:fs/promises");
+export const chown = () => unsupportedFunction("node:fs/promises");
+export const copyFile = () => unsupportedFunction("node:fs/promises");
+export const cp = () => unsupportedFunction("node:fs/promises");
+export const lstat = () => unsupportedFunction("node:fs/promises");
+export const mkdir = () => unsupportedFunction("node:fs/promises");
+export const mkdtemp = () => unsupportedFunction("node:fs/promises");
+export const open = () => unsupportedFunction("node:fs/promises");
+export const opendir = () => unsupportedFunction("node:fs/promises");
+export const readFile = () => unsupportedFunction("node:fs/promises");
+export const readdir = () => unsupportedFunction("node:fs/promises");
+export const readlink = () => unsupportedFunction("node:fs/promises");
+export const realpath = () => unsupportedFunction("node:fs/promises");
+export const rename = () => unsupportedFunction("node:fs/promises");
+export const rm = () => unsupportedFunction("node:fs/promises");
+export const rmdir = () => unsupportedFunction("node:fs/promises");
+export const stat = () => unsupportedFunction("node:fs/promises");
+export const symlink = () => unsupportedFunction("node:fs/promises");
+export const truncate = () => unsupportedFunction("node:fs/promises");
+export const unlink = () => unsupportedFunction("node:fs/promises");
+export const utimes = () => unsupportedFunction("node:fs/promises");
+export const writeFile = () => unsupportedFunction("node:fs/promises");

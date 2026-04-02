@@ -3,7 +3,7 @@ name = "cmd-truncate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "truncate standalone binary for secure-exec WasmVM"
+description = "truncate standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "truncate"

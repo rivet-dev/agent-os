@@ -1,4 +1,4 @@
-import { defineSoftware } from "@rivet-dev/agent-os-core";
+import { defineSoftware } from "@rivet-dev/agent-os";
 import codexSoftware from "@rivet-dev/agent-os-codex";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";

@@ -1,12 +1,13 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { resolve } from "node:path";
-import type { KernelSpawnOptions, ManagedProcess } from "@secure-exec/core";
+import type { KernelSpawnOptions, ManagedProcess } from "../src/runtime-compat.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/agent-os.js";
 import { AGENT_CONFIGS } from "../src/agents.js";
-import { createHostDirBackend } from "../src/backends/host-dir-backend.js";
+import { createHostDirBackend } from "../src/host-dir-mount.js";
 import { getOsInstructions } from "../src/os-instructions.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 import {
 	REGISTRY_SOFTWARE,
 	registrySkipReason,
@@ -147,7 +148,7 @@ describe("PI prepareInstructions", () => {
 		const prepare = config.prepareInstructions as NonNullable<
 			typeof config.prepareInstructions
 		>;
-		const result = await prepare(vm.kernel, "/home/user");
+		const result = await prepare(getAgentOsKernel(vm), "/home/user");
 
 		expect(result.args).toBeDefined();
 		expect(result.args).toContain("--append-system-prompt");
@@ -168,7 +169,7 @@ describe("PI prepareInstructions", () => {
 			typeof config.prepareInstructions
 		>;
 		const additional = "CUSTOM_MARKER: extra instructions";
-		const result = await prepare(vm.kernel, "/home/user", additional);
+		const result = await prepare(getAgentOsKernel(vm), "/home/user", additional);
 
 		const argIdx = (result.args as string[]).indexOf(
 			"--append-system-prompt",
@@ -196,7 +197,7 @@ describe("OpenCode prepareInstructions", () => {
 		const prepare = config.prepareInstructions as NonNullable<
 			typeof config.prepareInstructions
 		>;
-		const result = await prepare(vm.kernel, cwd);
+		const result = await prepare(getAgentOsKernel(vm), cwd);
 
 		// Verify env var is set
 		expect(result.env).toBeDefined();
@@ -223,7 +224,7 @@ describe("OpenCode prepareInstructions", () => {
 		const prepare = config.prepareInstructions as NonNullable<
 			typeof config.prepareInstructions
 		>;
-		await prepare(vm.kernel, cwd);
+		await prepare(getAgentOsKernel(vm), cwd);
 
 		// Verify no .agent-os/ directory was created in cwd
 		const cwdExists = await vm.exists(`${cwd}/.agent-os`);
@@ -238,7 +239,7 @@ describe("OpenCode prepareInstructions", () => {
 		const prepare = config.prepareInstructions as NonNullable<
 			typeof config.prepareInstructions
 		>;
-		const result = await prepare(vm.kernel, cwd, additional);
+		const result = await prepare(getAgentOsKernel(vm), cwd, additional);
 
 		// Verify additional instructions written to /tmp/
 		const data = await vm.readFile(
@@ -344,7 +345,7 @@ describe("createSession OS instructions integration", () => {
 			mounts: [
 				{
 					path: "/home/user",
-					driver: createHostDirBackend({
+					plugin: createHostDirBackend({
 						hostPath: hostWorkspaceDir,
 						readOnly: false,
 					}),
@@ -354,8 +355,9 @@ describe("createSession OS instructions integration", () => {
 		spawnCaptures = [];
 
 		// Spy on kernel.spawn to capture args while delegating to the real impl
-		const origSpawn = vm.kernel.spawn.bind(vm.kernel);
-		vm.kernel.spawn = (
+		const kernel = getAgentOsKernel(vm);
+		const origSpawn = kernel.spawn.bind(kernel);
+		kernel.spawn = (
 			command: string,
 			args: string[],
 			options?: KernelSpawnOptions,

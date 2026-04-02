@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-dotenv-pass",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"dotenv": "16.6.1"
+	}
+}

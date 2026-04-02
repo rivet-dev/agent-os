@@ -21,11 +21,9 @@
 		"test": "vitest run"
 	},
 	"dependencies": {
-		"@aws-sdk/client-s3": "^3.1019.0",
-		"@secure-exec/core": "^0.2.1"
+		"@rivet-dev/agent-os": "workspace:*"
 	},
 	"devDependencies": {
-		"@rivet-dev/agent-os-core": "workspace:*",
 		"@types/node": "^22.10.2",
 		"typescript": "^5.7.2",
 		"vitest": "^2.1.8"

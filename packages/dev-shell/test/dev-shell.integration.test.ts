@@ -62,7 +62,7 @@ describe.skipIf(!hasWasmBinaries)("dev-shell integration", { timeout: 60_000 }, 
 	});
 
 	it("boots the sandbox-native dev-shell surface and runs node, pi, and the Wasm shell", async () => {
-		workDir = await mkdtemp(path.join(tmpdir(), "secure-exec-dev-shell-"));
+		workDir = await mkdtemp(path.join(tmpdir(), "agent-os-dev-shell-"));
 		await writeFile(path.join(workDir, "note.txt"), "dev-shell\n");
 
 		shell = await createDevShellKernel({ workDir });
@@ -74,10 +74,11 @@ describe.skipIf(!hasWasmBinaries)("dev-shell integration", { timeout: 60_000 }, 
 				"npm",
 				"npx",
 				"pi",
-				"python",
-				"python3",
 				"sh",
 			]),
+		);
+		expect(shell.loadedCommands).not.toEqual(
+			expect.arrayContaining(["python", "python3", "pip"]),
 		);
 
 		const nodeResult = await runKernelCommand(
@@ -98,9 +99,9 @@ describe.skipIf(!hasWasmBinaries)("dev-shell integration", { timeout: 60_000 }, 
 	});
 
 	it("supports an interactive PTY workflow through the Wasm shell", async () => {
-		workDir = await mkdtemp(path.join(tmpdir(), "secure-exec-dev-shell-pty-"));
+		workDir = await mkdtemp(path.join(tmpdir(), "agent-os-dev-shell-pty-"));
 		await writeFile(path.join(workDir, "note.txt"), "pty-dev-shell\n");
-		shell = await createDevShellKernel({ workDir, mountPython: false });
+		shell = await createDevShellKernel({ workDir });
 		harness = new TerminalHarness(shell.kernel, {
 			command: "bash",
 			cwd: shell.workDir,
@@ -141,8 +142,8 @@ describe("dev-shell debug logger", { timeout: 60_000 }, () => {
 	});
 
 	it("writes structured debug logs to the requested file and keeps stdout/stderr clean", async () => {
-		workDir = await mkdtemp(path.join(tmpdir(), "secure-exec-debug-log-"));
-		logDir = await mkdtemp(path.join(tmpdir(), "secure-exec-debug-log-out-"));
+		workDir = await mkdtemp(path.join(tmpdir(), "agent-os-debug-log-"));
+		logDir = await mkdtemp(path.join(tmpdir(), "agent-os-debug-log-out-"));
 		const logPath = path.join(logDir, "debug.ndjson");
 
 		// Capture process stdout/stderr to detect any contamination.
@@ -164,7 +165,6 @@ describe("dev-shell debug logger", { timeout: 60_000 }, () => {
 		try {
 			shell = await createDevShellKernel({
 				workDir,
-				mountPython: false,
 				mountWasm: false,
 				debugLogPath: logPath,
 			});
@@ -207,13 +207,12 @@ describe("dev-shell debug logger", { timeout: 60_000 }, () => {
 	});
 
 	it("emits kernel diagnostic records for spawn, process exit, and PTY operations", async () => {
-		workDir = await mkdtemp(path.join(tmpdir(), "secure-exec-debug-diag-"));
-		logDir = await mkdtemp(path.join(tmpdir(), "secure-exec-debug-diag-out-"));
+		workDir = await mkdtemp(path.join(tmpdir(), "agent-os-debug-diag-"));
+		logDir = await mkdtemp(path.join(tmpdir(), "agent-os-debug-diag-out-"));
 		const logPath = path.join(logDir, "debug.ndjson");
 
 		shell = await createDevShellKernel({
 			workDir,
-			mountPython: false,
 			mountWasm: false,
 			debugLogPath: logPath,
 		});
@@ -253,13 +252,12 @@ describe("dev-shell debug logger", { timeout: 60_000 }, () => {
 	});
 
 	it("redacts secret keys in log records", async () => {
-		workDir = await mkdtemp(path.join(tmpdir(), "secure-exec-debug-log-redact-"));
-		logDir = await mkdtemp(path.join(tmpdir(), "secure-exec-debug-log-redact-out-"));
+		workDir = await mkdtemp(path.join(tmpdir(), "agent-os-debug-log-redact-"));
+		logDir = await mkdtemp(path.join(tmpdir(), "agent-os-debug-log-redact-out-"));
 		const logPath = path.join(logDir, "debug.ndjson");
 
 		shell = await createDevShellKernel({
 			workDir,
-			mountPython: false,
 			mountWasm: false,
 			debugLogPath: logPath,
 		});

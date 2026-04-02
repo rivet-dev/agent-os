@@ -54,14 +54,16 @@
   "scripts": {
     "check-types": "tsc --noEmit",
     "build": "tsc",
-    "test": "echo 'no tests yet'"
+    "test:browser": "pnpm --dir ../playground build:assets && playwright test --project=chromium --workers=1",
+    "test": "pnpm build && vitest run tests/runtime-driver/permission-validation.test.ts && pnpm run test:browser"
   },
   "dependencies": {
-    "@secure-exec/core": "^0.2.1",
     "sucrase": "^3.35.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.54.2",
     "@types/node": "^22.10.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
   }
 }

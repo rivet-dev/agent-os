@@ -3,7 +3,7 @@ name = "cmd-readlink"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "readlink standalone binary for secure-exec WasmVM"
+description = "readlink standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "readlink"

@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-mysql2-pass",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"mysql2": "3.12.0"
+	}
+}

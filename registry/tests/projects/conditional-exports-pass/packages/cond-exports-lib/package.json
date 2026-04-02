@@ -1,0 +1,14 @@
+{
+	"name": "@cond-test/lib",
+	"version": "1.0.0",
+	"exports": {
+		".": {
+			"require": "./lib/main-cjs.js",
+			"default": "./lib/main-default.js"
+		},
+		"./feature": {
+			"require": "./lib/feature-cjs.js",
+			"default": "./lib/feature-default.js"
+		}
+	}
+}

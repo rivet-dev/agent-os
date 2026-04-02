@@ -1,0 +1,208 @@
+{
+  "project": "agentOS",
+  "branchName": "04-01-feat_rust_kernel_sidecar",
+  "description": "Close remaining parity gaps between the Rust kernel sidecar and the old in-process TypeScript kernel",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Implement real socketTable and processTable on NativeKernel",
+      "description": "As a developer running kernel tests, I need NativeKernel's socketTable and processTable to return real state from the Rust sidecar so that existing callers and tests work correctly.",
+      "acceptanceCriteria": [
+        "socketTable.findListener() queries the sidecar and returns the matching listener or null (not always null)",
+        "socketTable.findBoundUdp() queries the sidecar and returns the matching bound socket or null (not always null)",
+        "processTable.getSignalState() returns the actual signal handler map from the sidecar (not an empty map)",
+        "registry/tests/kernel/cross-runtime-network.test.ts passes against the real sidecar",
+        "registry/tests/wasmvm/signal-handler.test.ts passes against the real sidecar",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "packages/core/src/runtime.ts:1855-1860 — socketTable is a minimal stub, processTable.getSignalState() returns empty map. Callers at registry/tests/kernel/cross-runtime-network.test.ts:43,:153 and registry/tests/wasmvm/signal-handler.test.ts:150 expect real data."
+    },
+    {
+      "id": "US-002",
+      "title": "Add sidecar protocol support for socketTable and processTable queries",
+      "description": "As the NativeKernel implementation, I need sidecar protocol request/response types to query socket listeners, bound UDP sockets, and process signal state so US-001 can proxy real data.",
+      "acceptanceCriteria": [
+        "New protocol request types: FindListener, FindBoundUdp, GetSignalState added to crates/sidecar/src/protocol.rs",
+        "Sidecar handles these requests and returns current kernel state",
+        "NativeSidecarKernelProxy or NativeSidecarProcessClient exposes methods for these queries",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "This is the Rust-side counterpart to US-001. The sidecar protocol currently has no request types for observability queries."
+    },
+    {
+      "id": "US-003",
+      "title": "Implement proper hard link in js_bridge filesystem",
+      "description": "As a user performing link() on a js_bridge-backed mount, I need real hard-link semantics instead of read-then-write so that inode identity and link counts are preserved.",
+      "acceptanceCriteria": [
+        "crates/sidecar/src/service.rs link() uses a proper bridge link operation instead of read_file + write_file",
+        "After link(a, b), both paths share the same inode identity",
+        "Link count reflects the number of hard links",
+        "Writing to one path is visible through the other path",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "crates/sidecar/src/service.rs:520 implements link() as read-then-write, losing hard-link identity and link-count semantics."
+    },
+    {
+      "id": "US-004",
+      "title": "Implement chown and utimes in js_bridge filesystem",
+      "description": "As a user performing chown() or utimes() on a js_bridge-backed mount, I need these operations to actually update metadata instead of silently no-opping.",
+      "acceptanceCriteria": [
+        "chown() updates the owner/group metadata via the bridge",
+        "utimes() updates atime/mtime metadata via the bridge",
+        "stat() after chown/utimes reflects the updated values",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "crates/sidecar/src/service.rs:538 chown() and :542 utimes() are no-ops returning Ok(())."
+    },
+    {
+      "id": "US-005",
+      "title": "Add symlink, readlink, link, chmod, chown, utimes support to sandbox_agent plugin",
+      "description": "As a user of sandbox_agent mounts, I need filesystem operations beyond basic read/write/stat so that tools relying on symlinks, permissions, or timestamps work correctly.",
+      "acceptanceCriteria": [
+        "symlink() creates a symbolic link via the sandbox agent API (or returns a clear not-supported-by-remote error if the API lacks it)",
+        "read_link() resolves symlinks via the sandbox agent API",
+        "realpath() resolves remote symlinks instead of just normalizing the path locally",
+        "link() creates hard links or returns a clear error",
+        "chmod() updates permissions or returns a clear error",
+        "chown() updates ownership or returns a clear error",
+        "utimes() updates timestamps or returns a clear error",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "crates/sidecar/src/sandbox_agent_plugin.rs:283 realpath() doesn't resolve remote symlinks. Lines 287,293,308,314,320,326 return unsupported. Line 332 truncate() uses full-file buffering."
+    },
+    {
+      "id": "US-006",
+      "title": "Improve sandbox_agent truncate to avoid full-file buffering",
+      "description": "As a user truncating large files on sandbox_agent mounts, I need truncate() to work without reading the entire file into memory.",
+      "acceptanceCriteria": [
+        "truncate() for non-zero lengths does not read the entire file contents",
+        "truncate() uses a range-aware API call or server-side truncation",
+        "truncate(path, 0) still works via write_file with empty data",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "crates/sidecar/src/sandbox_agent_plugin.rs:332 reads entire file, truncates in memory, writes back. Unacceptable for large files."
+    },
+    {
+      "id": "US-007",
+      "title": "Configure host filesystem bridge for stdio sidecar path",
+      "description": "As a user of the local/stdin-stdout sidecar workflow, I need the LocalBridge to support host filesystem operations so that bridge-backed host FS behavior works.",
+      "acceptanceCriteria": [
+        "LocalBridge filesystem operations (read_file, write_file, etc.) delegate to the host filesystem instead of returning 'not configured' errors",
+        "A local sidecar session can read and write files on the host through the bridge",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "crates/sidecar/src/stdio.rs:190 starts a LocalBridge whose filesystem operations all return 'host filesystem bridge is not configured' errors."
+    },
+    {
+      "id": "US-008",
+      "title": "Separate stderr from stdout in openShell output",
+      "description": "As a developer using openShell(), I need stderr and stdout to be delivered through separate channels so that error output can be distinguished from normal output.",
+      "acceptanceCriteria": [
+        "openShell() routes stderr to a separate handler set, not the same stdoutHandlers",
+        "Shell onData callback receives only stdout",
+        "A new onStderr callback (or tagged output) delivers stderr separately",
+        "Existing tests that consume shell output continue to pass",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "native-kernel-proxy.ts:368-370 — onStderr handler iterates stdoutHandlers instead of a separate set, merging stderr into stdout."
+    },
+    {
+      "id": "US-009",
+      "title": "Support full signal set in signalProcess instead of SIGKILL/SIGTERM only",
+      "description": "As a developer sending signals to VM processes, I need the sidecar to accept arbitrary POSIX signals so that SIGUSR1, SIGSTOP, SIGCONT, etc. work correctly.",
+      "acceptanceCriteria": [
+        "signalProcess() maps signal numbers to their correct POSIX signal names (not just 9→SIGKILL, everything-else→SIGTERM)",
+        "KillProcess protocol message accepts the full signal name string",
+        "Sending SIGUSR1 (10), SIGSTOP (19), SIGCONT (18) delivers the correct signal to the guest process",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "native-kernel-proxy.ts:631 — signal === 9 ? 'SIGKILL' : 'SIGTERM' discards all other signal types."
+    },
+    {
+      "id": "US-010",
+      "title": "Add integration test for connectTerminal",
+      "description": "As a developer, I need test coverage for connectTerminal() to verify it correctly wires stdin/stdout to a PTY-backed shell.",
+      "acceptanceCriteria": [
+        "New test in packages/core/tests/ calls connectTerminal() and verifies a PID is returned",
+        "Test writes input and verifies output is received",
+        "Test verifies the shell is functional (e.g., echo command produces output)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "connectTerminal() at native-kernel-proxy.ts:400-402 is implemented but has zero test coverage anywhere in the codebase."
+    },
+    {
+      "id": "US-011",
+      "title": "Remove or exercise the dead diagnostics() protocol path",
+      "description": "As a maintainer, I need the diagnostics() client method to either be called from somewhere useful or removed, so there is no dead code in the protocol layer.",
+      "acceptanceCriteria": [
+        "Either: diagnostics() is wired into AgentOs or a health-check path and has a test proving it works",
+        "Or: diagnostics() method and Diagnostics protocol type are removed from client and protocol.rs",
+        "No dead protocol paths remain",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "native-process-client.ts:970-995 implements diagnostics(). Protocol has Diagnostics request type. Neither is called anywhere."
+    },
+    {
+      "id": "US-012",
+      "title": "Replace panics with error returns in sidecar service.rs",
+      "description": "As a sidecar operator, I need unexpected protocol responses to produce errors instead of crashing the process with panic!().",
+      "acceptanceCriteria": [
+        "service.rs:3028 panic on unexpected auth response replaced with Err return",
+        "service.rs:3043 panic on unexpected session response replaced with Err return",
+        "service.rs:3067 panic on unexpected VM response replaced with Err return",
+        "Sidecar does not crash on malformed responses; returns descriptive error instead",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "Three panic!() calls in service.rs crash the entire sidecar process on unexpected protocol responses instead of returning errors."
+    },
+    {
+      "id": "US-013",
+      "title": "Track zombie process count from sidecar instead of hardcoding 0",
+      "description": "As a developer monitoring VM health, I need zombieTimerCount to reflect the actual number of zombie processes tracked by the sidecar.",
+      "acceptanceCriteria": [
+        "zombieTimerCount queries or is updated from the sidecar's process table",
+        "After a child process exits without being waited on, zombieTimerCount reflects the zombie",
+        "After waitpid cleans up, zombieTimerCount decrements",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 13,
+      "passes": true,
+      "notes": "native-kernel-proxy.ts:124 — readonly zombieTimerCount = 0; never updated."
+    }
+  ]
+}

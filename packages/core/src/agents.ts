@@ -1,6 +1,6 @@
 // Agent configurations for ACP-compatible coding agents
 
-import type { Kernel } from "@secure-exec/core";
+import type { Kernel } from "./runtime-compat.js";
 
 const INSTRUCTIONS_PATH = "/etc/agentos/instructions.md";
 

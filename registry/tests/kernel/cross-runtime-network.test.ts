@@ -14,14 +14,16 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  AF_INET,
+  createInMemoryFileSystem,
   COMMANDS_DIR,
   C_BUILD_DIR,
   createKernel,
   createWasmVmRuntime,
   createNodeRuntime,
+  SOCK_STREAM,
 } from './helpers.ts';
 import type { Kernel } from './helpers.ts';
-import { createInMemoryFileSystem, AF_INET, SOCK_STREAM } from '@secure-exec/core';
 
 function skipReasonNetwork(): string | false {
   if (!existsSync(COMMANDS_DIR)) return 'WASM binaries not built (run make wasm in native/)';

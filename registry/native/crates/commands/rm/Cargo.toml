@@ -3,7 +3,7 @@ name = "cmd-rm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "rm standalone binary for secure-exec WasmVM"
+description = "rm standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "rm"

@@ -3,7 +3,7 @@ name = "cmd-nproc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "nproc standalone binary for secure-exec WasmVM"
+description = "nproc standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "nproc"

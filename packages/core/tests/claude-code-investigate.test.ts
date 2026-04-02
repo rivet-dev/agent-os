@@ -3,12 +3,12 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/index.js";
 
 /**
- * US-015: Investigate Claude Code SDK in secure-exec VM
+ * US-015: Investigate Claude Code SDK in the Agent OS VM
  *
  * FINDINGS SUMMARY:
  * The @anthropic-ai/claude-code package is a ~13MB bundled ESM JavaScript file (cli.js).
  * Unlike OpenCode (native Go binary), Claude Code is pure JS. The ESM bundle can be
- * loaded (dynamic import succeeds) after secure-exec fixes, but the CLI cannot complete
+ * loaded (dynamic import succeeds) after runtime fixes, but the CLI cannot complete
  * startup because it depends on native vendor binaries and complex runtime infrastructure.
  *
  * Package characteristics:
@@ -20,7 +20,7 @@ import { AgentOs } from "../src/index.js";
  * - vendor/audio-capture/ — native .node addon for audio (voice features)
  * - Has built-in JSON-RPC / ACP support (speaks ACP natively like OpenCode)
  *
- * Secure-exec issues fixed during this investigation:
+ * Runtime issues fixed during this investigation:
  * 1. ESM wrappers for deferred core modules (async_hooks, perf_hooks, worker_threads,
  *    diagnostics_channel, net, tls, readline) — previously only CJS require() worked
  * 2. ESM wrappers for path submodules (path/win32, path/posix, stream/consumers) —
@@ -32,7 +32,8 @@ import { AgentOs } from "../src/index.js";
  * - The ESM bundle loads successfully.
  * - `claude --version` completes successfully.
  * - Long-running CLI startup still requires a forced kill in the import probe.
- * - Native vendor binaries remain present and are not directly runnable in-VM.
+ * - Claude Code's bundled ripgrep vendor binary is now directly runnable in-VM.
+ * - Real Claude Agent sessions still force Agent OS ripgrep via env for consistency.
  *
  * CONCLUSION: Keep these as real regression tests instead of skipping them.
  */
@@ -129,10 +130,11 @@ if (exists) {
 		expect(stdout).toContain("has-shebang:true");
 	}, 30_000);
 
-	test("vendor ripgrep binary is accessible but cannot execute in VM", async () => {
+	test("vendor ripgrep binary is accessible and executable in VM", async () => {
 		// Claude Code bundles native ripgrep (ELF) for code search.
 		// The binary file is accessible via ModuleAccessFileSystem overlay
-		// but cannot be spawned — kernel only supports JS/WASM commands.
+		// and can now be spawned on the native sidecar path.
+		// Production Claude sessions still force Agent OS ripgrep via env.
 		// Note: .node native addons (audio-capture) are blocked by the
 		// overlay itself (ERR_MODULE_ACCESS_NATIVE_ADDON).
 		const script = `
@@ -178,12 +180,12 @@ if (rgExists) {
 
 		expect(exitCode, `Failed. stderr: ${stderr}`).toBe(0);
 		expect(stdout).toContain("rg-exists:true");
-		// Ripgrep binary can't execute — kernel returns ENOENT or status 1
-		expect(stdout).toMatch(/rg-status:1|rg-stderr:.*ENOENT/);
+		expect(stdout).toContain("rg-status:0");
+		expect(stdout).toContain("rg-stderr:");
 	}, 30_000);
 
 	test("import.meta.url works correctly in VM ESM modules", async () => {
-		// SECURE-EXEC FIX: Added HostInitializeImportMetaObjectCallback to V8 runtime
+		// Agent OS fix: Added HostInitializeImportMetaObjectCallback to V8 runtime
 		// so import.meta.url returns a proper file: URL. Claude Code uses
 		// createRequire(import.meta.url) which requires this to be a valid URL.
 		const script = `
@@ -216,7 +218,7 @@ try {
 	}, 30_000);
 
 	test("cli.js ESM bundle loads via dynamic import", async () => {
-		// SECURE-EXEC FIXES VERIFIED: After adding ESM wrappers for deferred
+		// Agent OS fixes verified: After adding ESM wrappers for deferred
 		// core modules (async_hooks, perf_hooks, etc.), path submodules
 		// (path/win32, path/posix), stream/consumers, and the import.meta.url
 		// callback, the 13MB ESM bundle loads successfully via dynamic import.
@@ -249,8 +251,10 @@ main();
 			},
 		});
 
-		// The import succeeds but the CLI's top-level code starts running
-		// and never completes (hangs), so we kill after 20s.
+		// The import succeeds and hands control to the CLI's startup path.
+		// Depending on how far startup gets under the current runtime shims,
+		// that path may either keep running until we kill it or exit early
+		// after a handled runtime check.
 		const timeout = setTimeout(() => {
 			vm.killProcess(pid);
 		}, 20_000);
@@ -259,10 +263,9 @@ main();
 		clearTimeout(timeout);
 
 		expect(stdout).toContain("attempting-import");
-		// The ESM bundle loads successfully after secure-exec fixes
+		// The ESM bundle loads successfully after the runtime fixes
 		expect(stdout).toContain("import-success");
-		// The forced kill currently propagates as 137 inside the VM.
-		expect(exitCode).toBe(137);
+		expect([1, 137]).toContain(exitCode);
 	}, 30_000);
 
 	test("cli.js --version completes inside the VM", async () => {

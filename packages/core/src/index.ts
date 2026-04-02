@@ -3,7 +3,7 @@
 export {
 	createInMemoryFileSystem,
 	KernelError,
-} from "@secure-exec/core";
+} from "./runtime-compat.js";
 export type {
 	NetworkAccessRequest,
 	OpenShellOptions,
@@ -14,22 +14,30 @@ export type {
 	VirtualDirEntry,
 	VirtualFileSystem,
 	VirtualStat,
-} from "@secure-exec/core";
+} from "./runtime-compat.js";
 export type { NotificationHandler } from "./acp-client.js";
 export { AcpClient } from "./acp-client.js";
 export type {
 	AgentOsOptions,
 	AgentRegistryEntry,
+	AgentOsSidecarConfig,
+	AgentOsCreateSidecarOptions,
+	AgentOsSharedSidecarOptions,
 	BatchReadResult,
 	BatchWriteEntry,
 	BatchWriteResult,
+	ConnectTerminalOptions,
 	CreateSessionOptions,
 	DirEntry,
 	OverlayMountConfig,
 	McpServerConfig,
 	McpServerConfigLocal,
 	McpServerConfigRemote,
+	MountConfigJsonObject,
+	MountConfigJsonValue,
 	MountConfig,
+	NativeMountConfig,
+	NativeMountPluginDescriptor,
 	PlainMountConfig,
 	ProcessTreeNode,
 	ReaddirRecursiveOptions,
@@ -39,6 +47,8 @@ export type {
 	SpawnedProcessInfo,
 } from "./agent-os.js";
 export { AgentOs } from "./agent-os.js";
+export type { AgentOsSidecarDescription } from "./sidecar/handle.js";
+export { AgentOsSidecar } from "./sidecar/handle.js";
 export type {
 	AgentConfig,
 	AgentType,
@@ -57,10 +67,8 @@ export type {
 	WasmCommandSoftwareDescriptor,
 } from "./packages.js";
 export { defineSoftware } from "./packages.js";
-export type { HostDirBackendOptions } from "./backends/host-dir-backend.js";
-export { createHostDirBackend } from "./backends/host-dir-backend.js";
-export type { OverlayBackendOptions } from "./backends/overlay-backend.js";
-export { createOverlayBackend } from "./backends/overlay-backend.js";
+export type { HostDirBackendOptions } from "./host-dir-mount.js";
+export { createHostDirBackend } from "./host-dir-mount.js";
 export type {
 	FilesystemSnapshotExport,
 	LayerHandle,

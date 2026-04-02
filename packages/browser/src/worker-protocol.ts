@@ -4,7 +4,12 @@ import type {
 	ExecResult,
 	RunResult,
 	StdioChannel,
-} from "@secure-exec/core";
+	TimingMitigation,
+} from "./runtime.js";
+import type {
+	BrowserSyncBridgePayload,
+	BrowserWorkerSyncRequestMessage,
+} from "./sync-bridge.js";
 
 export type SerializedPermissions = {
 	fs?: string;
@@ -18,6 +23,7 @@ export type BrowserWorkerExecOptions = {
 	env?: Record<string, string>;
 	cwd?: string;
 	stdin?: string;
+	timingMitigation?: TimingMitigation;
 };
 
 export type BrowserWorkerInitPayload = {
@@ -26,15 +32,26 @@ export type BrowserWorkerInitPayload = {
 	permissions?: SerializedPermissions;
 	filesystem?: "opfs" | "memory";
 	networkEnabled?: boolean;
+	timingMitigation?: TimingMitigation;
 	payloadLimits?: {
 		base64TransferBytes?: number;
 		jsonPayloadBytes?: number;
 	};
+	syncBridge?: BrowserSyncBridgePayload;
+};
+
+type BrowserWorkerControlMessage = {
+	controlToken: string;
 };
 
 export type BrowserWorkerRequestMessage =
-	| { id: number; type: "init"; payload: BrowserWorkerInitPayload }
+	| (BrowserWorkerControlMessage & {
+			id: number;
+			type: "init";
+			payload: BrowserWorkerInitPayload;
+	  })
 	| {
+			controlToken: string;
 			id: number;
 			type: "exec";
 			payload: {
@@ -44,6 +61,7 @@ export type BrowserWorkerRequestMessage =
 			};
 	  }
 	| {
+			controlToken: string;
 			id: number;
 			type: "run";
 			payload: {
@@ -52,18 +70,24 @@ export type BrowserWorkerRequestMessage =
 				captureStdio?: boolean;
 			};
 	  }
-	| { id: number; type: "dispose" };
+	| (BrowserWorkerControlMessage & { id: number; type: "dispose" });
 
 export type BrowserWorkerResponseMessage =
-	| { type: "response"; id: number; ok: true; result: ExecResult | RunResult | true }
+	| (BrowserWorkerControlMessage & {
+			type: "response";
+			id: number;
+			ok: true;
+			result: ExecResult | RunResult | true;
+	  })
 	| {
+			controlToken: string;
 			type: "response";
 			id: number;
 			ok: false;
 			error: { message: string; stack?: string; code?: string };
 	  };
 
-export type BrowserWorkerStdioMessage = {
+export type BrowserWorkerStdioMessage = BrowserWorkerControlMessage & {
 	type: "stdio";
 	requestId: number;
 	channel: StdioChannel;
@@ -72,4 +96,5 @@ export type BrowserWorkerStdioMessage = {
 
 export type BrowserWorkerOutboundMessage =
 	| BrowserWorkerResponseMessage
-	| BrowserWorkerStdioMessage;
+	| BrowserWorkerStdioMessage
+	| BrowserWorkerSyncRequestMessage;

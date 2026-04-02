@@ -3,7 +3,7 @@ name = "cmd-sh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "sh standalone binary for secure-exec WasmVM"
+description = "sh standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "sh"

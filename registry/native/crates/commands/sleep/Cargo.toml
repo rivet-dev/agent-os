@@ -3,7 +3,7 @@ name = "cmd-sleep"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "sleep standalone binary for secure-exec WasmVM"
+description = "sleep standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "sleep"

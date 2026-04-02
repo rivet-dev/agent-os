@@ -3,7 +3,7 @@ name = "cmd-fd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "fd standalone binary for secure-exec WasmVM"
+description = "fd standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "fd"

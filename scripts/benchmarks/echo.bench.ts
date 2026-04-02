@@ -13,7 +13,7 @@
  * Usage: npx tsx benchmarks/echo.bench.ts
  */
 
-import type { AgentOs } from "@rivet-dev/agent-os-core";
+import type { AgentOs } from "@rivet-dev/agent-os";
 import {
 	BATCH_SIZES,
 	ECHO_COMMAND,

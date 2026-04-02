@@ -19,7 +19,7 @@
  *   npx tsx --expose-gc benchmarks/memory.bench.ts --workload=claude-session --count=1
  */
 
-import type { AgentOs } from "@rivet-dev/agent-os-core";
+import type { AgentOs } from "@rivet-dev/agent-os";
 import { readFileSync, readdirSync } from "node:fs";
 import {
 	WORKLOADS,

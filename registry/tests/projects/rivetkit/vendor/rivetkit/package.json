@@ -1,0 +1,11 @@
+{
+  "name": "rivetkit",
+  "version": "0.0.0-fixture",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/mod.js",
+      "require": "./dist/mod.cjs"
+    }
+  }
+}

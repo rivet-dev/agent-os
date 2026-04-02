@@ -1,0 +1,1198 @@
+use agent_os_execution::{
+    CreateJavascriptContextRequest, JavascriptExecutionEngine, JavascriptExecutionEvent,
+    StartJavascriptExecutionRequest,
+};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+use tempfile::tempdir;
+
+const NODE_IMPORT_CACHE_METRICS_PREFIX: &str = "__AGENT_OS_NODE_IMPORT_CACHE_METRICS__:";
+const NODE_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_NODE_WARMUP_METRICS__:";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NodeImportCacheMetrics {
+    resolve_hits: usize,
+    resolve_misses: usize,
+    package_type_hits: usize,
+    package_type_misses: usize,
+    module_format_hits: usize,
+    module_format_misses: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NodeWarmupMetrics {
+    executed: bool,
+    reason: String,
+    import_count: usize,
+    asset_root: String,
+}
+
+fn assert_node_available() {
+    let binary = std::env::var("AGENT_OS_NODE_BINARY").unwrap_or_else(|_| String::from("node"));
+    let output = Command::new(binary)
+        .arg("--version")
+        .output()
+        .expect("spawn node --version");
+    assert!(output.status.success(), "node --version failed");
+}
+
+fn write_fixture(path: &Path, contents: &str) {
+    fs::write(path, contents).expect("write fixture");
+}
+
+fn collect_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+
+    if !root.exists() {
+        return files;
+    }
+
+    for entry in fs::read_dir(root).expect("read cache dir") {
+        let entry = entry.expect("cache entry");
+        let path = entry.path();
+        let metadata = entry.metadata().expect("cache metadata");
+
+        if metadata.is_dir() {
+            files.extend(collect_files(&path));
+        } else if metadata.is_file() {
+            files.push(path);
+        }
+    }
+
+    files.sort();
+    files
+}
+
+fn parse_import_cache_metrics(stderr: &str) -> NodeImportCacheMetrics {
+    let metrics_line = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix(NODE_IMPORT_CACHE_METRICS_PREFIX))
+        .last()
+        .expect("import cache metrics line");
+
+    NodeImportCacheMetrics {
+        resolve_hits: parse_metric_value(metrics_line, "resolveHits"),
+        resolve_misses: parse_metric_value(metrics_line, "resolveMisses"),
+        package_type_hits: parse_metric_value(metrics_line, "packageTypeHits"),
+        package_type_misses: parse_metric_value(metrics_line, "packageTypeMisses"),
+        module_format_hits: parse_metric_value(metrics_line, "moduleFormatHits"),
+        module_format_misses: parse_metric_value(metrics_line, "moduleFormatMisses"),
+    }
+}
+
+fn parse_warmup_metrics(stderr: &str) -> NodeWarmupMetrics {
+    let metrics_line = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix(NODE_WARMUP_METRICS_PREFIX))
+        .last()
+        .expect("warmup metrics line");
+
+    NodeWarmupMetrics {
+        executed: parse_boolean_metric(metrics_line, "executed"),
+        reason: parse_string_metric(metrics_line, "reason"),
+        import_count: parse_metric_value(metrics_line, "importCount"),
+        asset_root: parse_string_metric(metrics_line, "assetRoot"),
+    }
+}
+
+fn parse_metric_value(metrics_line: &str, key: &str) -> usize {
+    let marker = format!("\"{key}\":");
+    let start = metrics_line.find(&marker).expect("metric key") + marker.len();
+    let digits: String = metrics_line[start..]
+        .chars()
+        .skip_while(|ch| !ch.is_ascii_digit())
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+
+    digits.parse().expect("metric value")
+}
+
+fn parse_boolean_metric(metrics_line: &str, key: &str) -> bool {
+    let marker = format!("\"{key}\":");
+    let start = metrics_line.find(&marker).expect("metric key") + marker.len();
+    let remaining = &metrics_line[start..];
+
+    if remaining.starts_with("true") {
+        true
+    } else if remaining.starts_with("false") {
+        false
+    } else {
+        panic!("invalid boolean metric for {key}: {metrics_line}");
+    }
+}
+
+fn parse_string_metric(metrics_line: &str, key: &str) -> String {
+    let marker = format!("\"{key}\":\"");
+    let start = metrics_line.find(&marker).expect("metric key") + marker.len();
+    let mut value = String::new();
+    let mut escaped = false;
+
+    for ch in metrics_line[start..].chars() {
+        if escaped {
+            value.push(match ch {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '"' => '"',
+                '\\' => '\\',
+                other => other,
+            });
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => escaped = true,
+            '"' => return value,
+            other => value.push(other),
+        }
+    }
+
+    panic!("unterminated string metric for {key}: {metrics_line}");
+}
+
+fn run_javascript_execution(
+    engine: &mut JavascriptExecutionEngine,
+    context_id: String,
+    cwd: &Path,
+    argv: Vec<String>,
+    env: BTreeMap<String, String>,
+) -> (String, String, i32) {
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id,
+            argv,
+            env,
+            cwd: cwd.to_path_buf(),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stdout = String::from_utf8(result.stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+
+    (stdout, stderr, result.exit_code)
+}
+
+#[test]
+fn javascript_contexts_preserve_vm_and_bootstrap_configuration() {
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: Some(String::from("./bootstrap.mjs")),
+        compile_cache_root: None,
+    });
+
+    assert_eq!(context.context_id, "js-ctx-1");
+    assert_eq!(context.vm_id, "vm-js");
+    assert_eq!(context.bootstrap_module.as_deref(), Some("./bootstrap.mjs"));
+    assert_eq!(context.compile_cache_dir, None);
+}
+
+#[test]
+fn javascript_execution_runs_bootstrap_and_streams_stdio() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("bootstrap.mjs"),
+        r#"
+globalThis.__agentOsBootstrapLoaded = true;
+console.log("bootstrap:ready");
+"#,
+    );
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+if (!globalThis.__agentOsBootstrapLoaded) {
+  throw new Error("bootstrap missing");
+}
+
+let input = "";
+process.stdin.setEncoding("utf8");
+for await (const chunk of process.stdin) {
+  input += chunk;
+}
+
+console.log(`stdout:${process.env.AGENT_OS_TEST_ENV}:${input}`);
+console.error(`stderr:${process.argv.slice(2).join(",")}`);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: Some(String::from("./bootstrap.mjs")),
+        compile_cache_root: None,
+    });
+
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![
+                String::from("./entry.mjs"),
+                String::from("alpha"),
+                String::from("beta"),
+            ],
+            env: BTreeMap::from([(String::from("AGENT_OS_TEST_ENV"), String::from("ok"))]),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
+
+    assert_eq!(execution.execution_id(), "exec-1");
+
+    execution
+        .write_stdin(b"hello from stdin")
+        .expect("write stdin");
+    execution.close_stdin().expect("close stdin");
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code = None;
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
+
+    assert_eq!(exit_code, Some(0));
+
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(stderr).expect("stderr utf8");
+
+    assert!(stdout.contains("bootstrap:ready"));
+    assert!(stdout.contains("stdout:ok:hello from stdin"));
+    assert!(stderr.contains("stderr:alpha,beta"));
+}
+
+#[test]
+fn javascript_execution_keeps_streaming_stdin_sessions_alive_until_closed() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+});
+process.stdin.on("end", () => {
+  console.log(`stdin:${input}`);
+});
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::from([(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"))]),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
+
+    assert!(
+        execution
+            .poll_event(Duration::from_millis(200))
+            .expect("poll execution event before stdin write")
+            .is_none(),
+        "streaming-stdin execution should stay alive until stdin closes"
+    );
+
+    execution
+        .write_stdin(b"still-open")
+        .expect("write stdin after idle period");
+    execution.close_stdin().expect("close stdin");
+
+    let mut stdout = Vec::new();
+    let mut exit_code = None;
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(_chunk)) => {}
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
+
+    assert_eq!(exit_code, Some(0));
+    assert!(String::from_utf8(stdout)
+        .expect("stdout utf8")
+        .contains("stdin:still-open"));
+}
+
+#[test]
+fn javascript_execution_ignores_guest_overrides_for_internal_node_env() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+console.log(`entrypoint:${process.argv[1]}`);
+console.log(`args:${process.argv.slice(2).join(",")}`);
+console.log(`node-options:${process.env.NODE_OPTIONS ?? "missing"}`);
+console.log(`loader-path:${process.env.AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH ?? "missing"}`);
+"#,
+    );
+    write_fixture(
+        &temp.path().join("evil.mjs"),
+        r#"
+console.log("evil override executed");
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs"), String::from("safe-arg")],
+        BTreeMap::from([
+            (
+                String::from("AGENT_OS_ENTRYPOINT"),
+                String::from("./evil.mjs"),
+            ),
+            (
+                String::from("AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH"),
+                String::from("./evil-loader.mjs"),
+            ),
+            (String::from("NODE_OPTIONS"), String::from("--no-warnings")),
+        ]),
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("entrypoint:") && line.ends_with("entry.mjs")),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("args:safe-arg"), "stdout: {stdout}");
+    assert!(stdout.contains("node-options:missing"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("evil override executed"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("loader-path:./evil-loader.mjs"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn javascript_execution_freezes_guest_time_sources() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const firstDate = Date.now();
+const firstConstructed = new Date().getTime();
+const firstPerformance = performance.now();
+
+await new Promise((resolve) => setTimeout(resolve, 25));
+
+const secondDate = Date.now();
+const secondConstructed = new Date().getTime();
+const secondPerformance = performance.now();
+
+console.log(
+  JSON.stringify({
+    sameDate: firstDate === secondDate,
+    sameConstructed: firstConstructed === secondConstructed,
+    samePerformance: firstPerformance === secondPerformance,
+    performanceZero: firstPerformance === 0 && secondPerformance === 0,
+  }),
+);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        BTreeMap::new(),
+    );
+
+    assert_eq!(exit_code, 0);
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+    assert!(stdout.contains("\"sameDate\":true"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("\"sameConstructed\":true"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"samePerformance\":true"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"performanceZero\":true"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn javascript_date_function_without_new_uses_frozen_time() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const expected = new Date(Date.now()).toString();
+await new Promise((resolve) => setTimeout(resolve, 1200));
+const actual = Date();
+
+console.log(
+  JSON.stringify({
+    actual,
+    expected,
+    matches: actual === expected,
+  }),
+);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        BTreeMap::new(),
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+    assert!(stdout.contains("\"matches\":true"), "stdout: {stdout}");
+}
+
+#[test]
+fn javascript_execution_generates_and_reuses_compile_cache_without_leaking_module_state() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let cache_root = temp.path().join("compile-cache");
+    write_fixture(
+        &temp.path().join("dep.mjs"),
+        r#"
+globalThis.__agentOsDepInitCount = (globalThis.__agentOsDepInitCount ?? 0) + 1;
+console.log(`dep-init:${globalThis.__agentOsDepInitCount}`);
+export const answer = 41;
+"#,
+    );
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import { answer } from "./dep.mjs";
+console.log(`entry:${answer + 1}:${globalThis.__agentOsDepInitCount}`);
+"#,
+    );
+
+    let mut first_engine = JavascriptExecutionEngine::default();
+    let first_context = first_engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: Some(cache_root.clone()),
+    });
+    let first_cache_dir = first_context
+        .compile_cache_dir
+        .clone()
+        .expect("compile cache dir");
+
+    let (first_stdout, first_stderr, first_exit) = run_javascript_execution(
+        &mut first_engine,
+        first_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        BTreeMap::from([(
+            String::from("NODE_DEBUG_NATIVE"),
+            String::from("COMPILE_CACHE"),
+        )]),
+    );
+
+    assert_eq!(first_exit, 0);
+    assert!(first_stdout.contains("dep-init:1"));
+    assert!(first_stdout.contains("entry:42:1"));
+    assert!(first_stderr.contains("was not initialized"));
+
+    let cache_files = collect_files(&first_cache_dir);
+    assert!(
+        cache_files.len() >= 2,
+        "expected cache files in {first_cache_dir:?}, got {cache_files:?}"
+    );
+
+    let mut second_engine = JavascriptExecutionEngine::default();
+    let second_context = second_engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: Some(cache_root),
+    });
+
+    assert_eq!(second_context.compile_cache_dir, Some(first_cache_dir));
+
+    let (second_stdout, second_stderr, second_exit) = run_javascript_execution(
+        &mut second_engine,
+        second_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        BTreeMap::from([(
+            String::from("NODE_DEBUG_NATIVE"),
+            String::from("COMPILE_CACHE"),
+        )]),
+    );
+
+    assert_eq!(second_exit, 0);
+    assert!(second_stdout.contains("dep-init:1"));
+    assert!(second_stdout.contains("entry:42:1"));
+    assert!(second_stderr.contains("was accepted"));
+    assert!(second_stderr.contains("skip persisting"));
+}
+
+#[test]
+fn javascript_execution_invalidates_compile_cache_when_imported_source_changes() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let cache_root = temp.path().join("compile-cache");
+    write_fixture(&temp.path().join("dep.mjs"), "export const answer = 41;\n");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import { answer } from "./dep.mjs";
+console.log(`entry:${answer}`);
+"#,
+    );
+
+    let mut first_engine = JavascriptExecutionEngine::default();
+    let first_context = first_engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: Some(cache_root.clone()),
+    });
+
+    let (first_stdout, first_stderr, first_exit) = run_javascript_execution(
+        &mut first_engine,
+        first_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        BTreeMap::from([(
+            String::from("NODE_DEBUG_NATIVE"),
+            String::from("COMPILE_CACHE"),
+        )]),
+    );
+
+    assert_eq!(first_exit, 0);
+    assert!(first_stdout.contains("entry:41"));
+    assert!(first_stderr.contains("was not initialized"));
+
+    write_fixture(&temp.path().join("dep.mjs"), "export const answer = 42;\n");
+
+    let mut second_engine = JavascriptExecutionEngine::default();
+    let second_context = second_engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: Some(cache_root),
+    });
+
+    let (second_stdout, second_stderr, second_exit) = run_javascript_execution(
+        &mut second_engine,
+        second_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        BTreeMap::from([(
+            String::from("NODE_DEBUG_NATIVE"),
+            String::from("COMPILE_CACHE"),
+        )]),
+    );
+
+    assert_eq!(second_exit, 0);
+    assert!(second_stdout.contains("entry:42"));
+    assert!(second_stderr.contains("code hash mismatch"));
+    assert!(second_stderr.contains("was not initialized"));
+}
+
+#[test]
+fn javascript_execution_prewarms_builtin_wrappers_across_contexts() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let cache_root = temp.path().join("compile-cache");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import pathDefault, {
+  basename,
+  __agentOsInitCount as pathInit,
+} from "agent-os:builtin/path";
+import {
+  pathToFileURL,
+  __agentOsInitCount as urlInit,
+} from "agent-os:builtin/url";
+import {
+  readFile,
+  __agentOsInitCount as fsInit,
+} from "agent-os:builtin/fs-promises";
+
+console.log(`path:${basename("/tmp/example.txt")}:${pathInit}`);
+console.log(`url:${pathToFileURL("/tmp/example.txt").href}:${urlInit}`);
+console.log(`fs:${typeof readFile}:${fsInit}`);
+console.log(`sep:${pathDefault.sep}`);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let first_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: Some(cache_root.clone()),
+    });
+    let compile_cache_dir = first_context
+        .compile_cache_dir
+        .clone()
+        .expect("compile cache dir");
+    let second_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: Some(cache_root),
+    });
+
+    let debug_env = BTreeMap::from([(
+        String::from("AGENT_OS_NODE_WARMUP_DEBUG"),
+        String::from("1"),
+    )]);
+
+    let (first_stdout, first_stderr, first_exit) = run_javascript_execution(
+        &mut engine,
+        first_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env.clone(),
+    );
+    let first_warmup = parse_warmup_metrics(&first_stderr);
+
+    assert_eq!(first_exit, 0);
+    assert!(first_stdout.contains("path:example.txt:1"));
+    assert!(first_stdout.contains("url:file:///tmp/example.txt:1"));
+    assert!(first_stdout.contains("fs:function:1"));
+    assert!(first_stdout.contains("sep:/"));
+    assert!(first_warmup.executed);
+    assert_eq!(first_warmup.reason, "executed");
+    assert_eq!(first_warmup.import_count, 4);
+
+    let cache_files = collect_files(&compile_cache_dir);
+    assert!(
+        !cache_files.is_empty(),
+        "expected compile cache files in {compile_cache_dir:?}"
+    );
+
+    let (second_stdout, second_stderr, second_exit) = run_javascript_execution(
+        &mut engine,
+        second_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env,
+    );
+    let second_warmup = parse_warmup_metrics(&second_stderr);
+
+    assert_eq!(second_exit, 0);
+    assert!(second_stdout.contains("path:example.txt:1"));
+    assert!(second_stdout.contains("url:file:///tmp/example.txt:1"));
+    assert!(second_stdout.contains("fs:function:1"));
+    assert!(second_stdout.contains("sep:/"));
+    assert!(!second_warmup.executed);
+    assert_eq!(second_warmup.reason, "cached");
+}
+
+#[test]
+fn javascript_execution_repairs_tampered_polyfill_assets_before_execution() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let cache_root = temp.path().join("compile-cache");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import pathPolyfill, {
+  basename,
+  join,
+  __agentOsInitCount,
+} from "agent-os:polyfill/path";
+
+console.log(
+  `polyfill:${basename("/tmp/example.txt")}:${join("/tmp", "example.txt")}:${pathPolyfill.sep}:${__agentOsInitCount}`,
+);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let first_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: Some(cache_root.clone()),
+    });
+    let second_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: Some(cache_root),
+    });
+    let debug_env = BTreeMap::from([(
+        String::from("AGENT_OS_NODE_WARMUP_DEBUG"),
+        String::from("1"),
+    )]);
+
+    let (first_stdout, first_stderr, first_exit) = run_javascript_execution(
+        &mut engine,
+        first_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env.clone(),
+    );
+    let first_warmup = parse_warmup_metrics(&first_stderr);
+
+    assert_eq!(first_exit, 0);
+    assert!(first_stdout.contains("polyfill:example.txt:/tmp/example.txt:/:1"));
+    assert!(first_warmup.executed);
+
+    let tampered_polyfill = PathBuf::from(&first_warmup.asset_root).join("polyfills/path.mjs");
+    write_fixture(
+        &tampered_polyfill,
+        "throw new Error('tampered polyfill');\n",
+    );
+
+    let (second_stdout, second_stderr, second_exit) = run_javascript_execution(
+        &mut engine,
+        second_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env,
+    );
+    let second_warmup = parse_warmup_metrics(&second_stderr);
+
+    assert_eq!(second_exit, 0);
+    assert!(second_stdout.contains("polyfill:example.txt:/tmp/example.txt:/:1"));
+    assert!(!second_stderr.contains("tampered polyfill"));
+    assert!(!second_warmup.executed);
+    assert_eq!(second_warmup.reason, "cached");
+}
+
+#[test]
+fn javascript_execution_reuses_resolution_and_metadata_caches_across_contexts() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("package.json"),
+        "{\n  \"name\": \"agent-os-js-cache-test\",\n  \"type\": \"module\"\n}\n",
+    );
+    write_fixture(&temp.path().join("dep.js"), "export const answer = 41;\n");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const dep = await import("./dep.js");
+console.log(`answer:${dep.answer}`);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let first_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let second_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let debug_env = BTreeMap::from([(
+        String::from("AGENT_OS_NODE_IMPORT_CACHE_DEBUG"),
+        String::from("1"),
+    )]);
+
+    let (first_stdout, first_stderr, first_exit) = run_javascript_execution(
+        &mut engine,
+        first_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env.clone(),
+    );
+    let first_metrics = parse_import_cache_metrics(&first_stderr);
+
+    assert_eq!(first_exit, 0);
+    assert!(first_stdout.contains("answer:41"));
+    assert_eq!(first_metrics.resolve_hits, 0);
+    assert!(first_metrics.resolve_misses >= 1);
+
+    let (second_stdout, second_stderr, second_exit) = run_javascript_execution(
+        &mut engine,
+        second_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env,
+    );
+    let second_metrics = parse_import_cache_metrics(&second_stderr);
+
+    assert_eq!(second_exit, 0);
+    assert!(second_stdout.contains("answer:41"));
+    assert!(second_metrics.resolve_hits >= 2);
+    assert!(second_metrics.package_type_hits >= 1);
+    assert!(second_metrics.module_format_hits >= 1);
+}
+
+#[test]
+fn javascript_execution_invalidates_bare_package_resolution_when_package_metadata_changes() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let package_dir = temp.path().join("node_modules/demo-pkg");
+    fs::create_dir_all(&package_dir).expect("create package dir");
+
+    write_fixture(
+        &temp.path().join("package.json"),
+        "{\n  \"name\": \"agent-os-js-cache-test\",\n  \"type\": \"module\"\n}\n",
+    );
+    write_fixture(
+        &package_dir.join("package.json"),
+        "{\n  \"name\": \"demo-pkg\",\n  \"type\": \"module\",\n  \"exports\": \"./entry.js\"\n}\n",
+    );
+    write_fixture(&package_dir.join("entry.js"), "export const answer = 41;\n");
+    write_fixture(
+        &package_dir.join("replacement.js"),
+        "export const answer = 42;\n",
+    );
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const pkg = await import("demo-pkg");
+console.log(`pkg:${pkg.answer}`);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let first_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let debug_env = BTreeMap::from([(
+        String::from("AGENT_OS_NODE_IMPORT_CACHE_DEBUG"),
+        String::from("1"),
+    )]);
+
+    let (first_stdout, first_stderr, first_exit) = run_javascript_execution(
+        &mut engine,
+        first_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env.clone(),
+    );
+    let first_metrics = parse_import_cache_metrics(&first_stderr);
+
+    assert_eq!(first_exit, 0);
+    assert!(first_stdout.contains("pkg:41"));
+    assert!(first_metrics.resolve_misses >= 1);
+
+    write_fixture(
+        &package_dir.join("package.json"),
+        "{\n  \"name\": \"demo-pkg\",\n  \"type\": \"module\",\n  \"exports\": \"./replacement.js\"\n}\n",
+    );
+
+    let second_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let (second_stdout, second_stderr, second_exit) = run_javascript_execution(
+        &mut engine,
+        second_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env,
+    );
+    let second_metrics = parse_import_cache_metrics(&second_stderr);
+
+    assert_eq!(second_exit, 0);
+    assert!(second_stdout.contains("pkg:42"));
+    assert!(second_metrics.resolve_misses >= 1);
+}
+
+#[test]
+fn javascript_execution_invalidates_package_type_and_module_format_caches() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("package.json"),
+        "{\n  \"name\": \"agent-os-js-cache-test\",\n  \"type\": \"module\"\n}\n",
+    );
+    write_fixture(&temp.path().join("dep.js"), "export const answer = 41;\n");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const dep = await import("./dep.js");
+const answer = dep.answer ?? dep.default.answer;
+console.log(`answer:${answer}`);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let first_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let debug_env = BTreeMap::from([(
+        String::from("AGENT_OS_NODE_IMPORT_CACHE_DEBUG"),
+        String::from("1"),
+    )]);
+
+    let (first_stdout, _, first_exit) = run_javascript_execution(
+        &mut engine,
+        first_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env.clone(),
+    );
+
+    assert_eq!(first_exit, 0);
+    assert!(first_stdout.contains("answer:41"));
+
+    write_fixture(
+        &temp.path().join("package.json"),
+        "{\n  \"name\": \"agent-os-js-cache-test\",\n  \"type\": \"commonjs\"\n}\n",
+    );
+    write_fixture(
+        &temp.path().join("dep.js"),
+        "module.exports = { answer: 42 };\n",
+    );
+
+    let second_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let (second_stdout, second_stderr, second_exit) = run_javascript_execution(
+        &mut engine,
+        second_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env,
+    );
+    let second_metrics = parse_import_cache_metrics(&second_stderr);
+
+    assert_eq!(second_exit, 0);
+    assert!(second_stdout.contains("answer:42"));
+    assert!(second_metrics.package_type_misses >= 1);
+    assert!(second_metrics.module_format_misses >= 1);
+}
+
+#[test]
+fn javascript_execution_keeps_cjs_fs_requires_extensible_when_loaded_via_esm() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("dep.cjs"),
+        r#"
+const fs = require("fs");
+const marker = Symbol.for("agent-os.fs-marker");
+let extensible = Object.isExtensible(fs);
+let canDefine = false;
+
+try {
+  Object.defineProperty(fs, marker, {
+    configurable: true,
+    value: true,
+  });
+  canDefine = fs[marker] === true;
+} catch {
+  canDefine = false;
+}
+
+module.exports = {
+  extensible,
+  canDefine,
+  existsSyncType: typeof fs.existsSync,
+};
+"#,
+    );
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import result from "./dep.cjs";
+console.log(JSON.stringify(result));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let (stdout, _, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        BTreeMap::new(),
+    );
+
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains(r#""extensible":true"#), "{stdout}");
+    assert!(stdout.contains(r#""canDefine":true"#), "{stdout}");
+    assert!(
+        stdout.contains(r#""existsSyncType":"function""#),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn javascript_execution_preserves_source_changes_with_cached_resolution() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(&temp.path().join("dep.mjs"), "export const answer = 41;\n");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const dep = await import("./dep.mjs");
+console.log(`answer:${dep.answer}`);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let first_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let debug_env = BTreeMap::from([(
+        String::from("AGENT_OS_NODE_IMPORT_CACHE_DEBUG"),
+        String::from("1"),
+    )]);
+
+    let (first_stdout, _, first_exit) = run_javascript_execution(
+        &mut engine,
+        first_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env.clone(),
+    );
+
+    assert_eq!(first_exit, 0);
+    assert!(first_stdout.contains("answer:41"));
+
+    write_fixture(&temp.path().join("dep.mjs"), "export const answer = 42;\n");
+
+    let second_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let (second_stdout, second_stderr, second_exit) = run_javascript_execution(
+        &mut engine,
+        second_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env,
+    );
+    let second_metrics = parse_import_cache_metrics(&second_stderr);
+
+    assert_eq!(second_exit, 0);
+    assert!(second_stdout.contains("answer:42"));
+    assert!(second_metrics.resolve_hits >= 2);
+}
+
+#[test]
+fn javascript_execution_redirects_computed_node_fs_imports_through_builtin_assets() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let guest_mount = temp.path().join("guest-mount");
+    fs::create_dir_all(&guest_mount).expect("create guest mount");
+    write_fixture(&guest_mount.join("flag.txt"), "mapped\n");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const fs = await import("node:" + "fs");
+const text = fs.readFileSync("/guest/flag.txt", "utf8").trim();
+const missing = fs.existsSync("/guest/missing.txt");
+console.log(`text:${text}`);
+console.log(`missing:${missing}`);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let guest_mount_host_path = guest_mount.to_string_lossy().replace('\\', "\\\\");
+    let env = BTreeMap::from([(
+        String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+        format!("[{{\"guestPath\":\"/guest\",\"hostPath\":\"{guest_mount_host_path}\"}}]"),
+    )]);
+
+    let (stdout, _stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        env,
+    );
+
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("text:mapped"));
+    assert!(stdout.contains("missing:false"));
+}

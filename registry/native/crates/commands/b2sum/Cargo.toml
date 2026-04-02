@@ -3,7 +3,7 @@ name = "cmd-b2sum"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "b2sum standalone binary for secure-exec WasmVM"
+description = "b2sum standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "b2sum"

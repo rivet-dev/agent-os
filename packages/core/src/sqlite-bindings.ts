@@ -14,8 +14,7 @@ import {
 	join,
 	posix as posixPath,
 } from "node:path";
-import type { Kernel } from "@secure-exec/core";
-import type { BindingTree } from "@secure-exec/nodejs";
+import type { BindingTree, Kernel } from "./runtime-compat.js";
 
 const require = createRequire(import.meta.url);
 const sqliteBuiltin = require("node:sqlite") as {

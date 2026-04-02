@@ -1,0 +1,8 @@
+{
+	"name": "@peer-test/plugin",
+	"version": "1.0.0",
+	"main": "index.js",
+	"peerDependencies": {
+		"@peer-test/host": ">=1.0.0"
+	}
+}

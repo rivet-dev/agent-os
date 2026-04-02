@@ -9,6 +9,7 @@
 		"start": "npx turbo watch build",
 		"build": "npx turbo build",
 		"test": "npx turbo test",
+		"test:post-python-parity": "pnpm --dir packages/core exec vitest run tests/agent-os-base-filesystem.test.ts && pnpm --dir packages/dev-shell exec vitest run test/dev-shell.integration.test.ts && ./node_modules/.bin/vitest run --testTimeout=55000 --hookTimeout=30000 registry/tests/kernel/cross-runtime-terminal.test.ts registry/tests/kernel/ctrl-c-shell-behavior.test.ts registry/tests/kernel/node-binary-behavior.test.ts registry/tests/kernel/e2e-project-matrix.test.ts",
 		"test:watch": "npx turbo watch test",
 		"check-types": "npx turbo check-types",
 		"lint": "pnpm biome check .",
@@ -21,13 +22,13 @@
 		"@rivet-dev/agent-os-claude": "workspace:*",
 		"@rivet-dev/agent-os-common": "workspace:*",
 		"@rivet-dev/agent-os-codex-agent": "workspace:*",
-		"@rivet-dev/agent-os-core": "workspace:*",
+		"@rivet-dev/agent-os": "workspace:*",
 		"@rivet-dev/agent-os-pi": "workspace:*",
 		"@types/node": "^22.19.15",
 		"turbo": "^2.5.6",
 		"typescript": "^5.9.2"
 	},
 	"resolutions": {
-		"@rivet-dev/agent-os-core": "workspace:*"
+		"@rivet-dev/agent-os": "workspace:*"
 	}
 }

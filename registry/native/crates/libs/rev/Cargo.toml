@@ -3,6 +3,6 @@ name = "secureexec-rev"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "rev implementation for secure-exec standalone binaries"
+description = "rev implementation for Agent OS standalone binaries"
 
 [dependencies]

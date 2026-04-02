@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-ssh2-sftp-client-pass",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"ssh2-sftp-client": "12.1.0"
+	}
+}

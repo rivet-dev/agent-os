@@ -3,7 +3,7 @@ name = "cmd-base64"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "base64 standalone binary for secure-exec WasmVM"
+description = "base64 standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "base64"

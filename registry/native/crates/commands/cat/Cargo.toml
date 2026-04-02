@@ -3,7 +3,7 @@ name = "cmd-cat"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "cat standalone binary for secure-exec WasmVM"
+description = "cat standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "cat"

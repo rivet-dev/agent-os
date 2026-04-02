@@ -3,7 +3,7 @@ name = "secureexec-grep"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "grep/egrep/fgrep/rg implementations for secure-exec standalone binaries"
+description = "grep/egrep/fgrep/rg implementations for Agent OS standalone binaries"
 
 [dependencies]
 regex = "1"

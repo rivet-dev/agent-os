@@ -3,7 +3,7 @@ name = "cmd-pwd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "pwd standalone binary for secure-exec WasmVM"
+description = "pwd standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "pwd"

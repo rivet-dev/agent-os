@@ -3,7 +3,7 @@ name = "cmd-jq"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "jq standalone binary for secure-exec WasmVM"
+description = "jq standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "jq"

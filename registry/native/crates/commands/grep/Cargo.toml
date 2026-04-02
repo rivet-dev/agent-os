@@ -3,7 +3,7 @@ name = "cmd-grep"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "grep standalone binary for secure-exec WasmVM"
+description = "grep standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "grep"

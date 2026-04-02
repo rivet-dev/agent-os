@@ -6,7 +6,6 @@ import { createDevShellKernel } from "./kernel.js";
 interface CliOptions {
 	workDir?: string;
 	debugLogPath?: string;
-	mountPython: boolean;
 	mountWasm: boolean;
 	command: string;
 	args: string[];
@@ -16,7 +15,7 @@ function printUsage(): void {
 	console.error(
 		[
 			"Usage:",
-			"  secure-exec-dev-shell [--work-dir <path>] [--debug-log <path>] [--no-python] [--no-wasm] [--] [command] [args...]",
+			"  agent-os-dev-shell [--work-dir <path>] [--debug-log <path>] [--no-wasm] [--] [command] [args...]",
 			"",
 			"Examples:",
 			"  just dev-shell",
@@ -35,7 +34,6 @@ function shQuote(value: string): string {
 function parseArgs(argv: string[]): CliOptions {
 	const normalizedArgv = argv[0] === "--" ? argv.slice(1) : argv;
 	const options: CliOptions = {
-		mountPython: true,
 		mountWasm: true,
 		command: "bash",
 		args: [],
@@ -71,9 +69,6 @@ function parseArgs(argv: string[]): CliOptions {
 				}
 				options.debugLogPath = path.resolve(normalizedArgv[++index]);
 				break;
-			case "--no-python":
-				options.mountPython = false;
-				break;
 			case "--no-wasm":
 				options.mountWasm = false;
 				break;
@@ -96,12 +91,11 @@ if (!cli.mountWasm && (cli.command === "bash" || cli.command === "sh")) {
 
 const shell = await createDevShellKernel({
 	workDir: cli.workDir,
-	mountPython: cli.mountPython,
 	mountWasm: cli.mountWasm,
 	debugLogPath: cli.debugLogPath,
 });
 
-console.error(`secure-exec dev shell`);
+console.error(`agent-os dev shell`);
 console.error(`work dir: ${shell.workDir}`);
 console.error(`loaded commands: ${shell.loadedCommands.join(", ")}`);
 

@@ -5,7 +5,7 @@
 // Node scripts inside the VM can call the server directly with fetch.
 
 import { z } from "zod";
-import { AgentOs, hostTool, toolKit } from "@rivet-dev/agent-os-core";
+import { AgentOs, hostTool, toolKit } from "@rivet-dev/agent-os";
 import common from "@rivet-dev/agent-os-common";
 
 const weatherToolkit = toolKit({

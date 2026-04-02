@@ -1,6 +1,6 @@
 import { readFileSync, realpathSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import type { PermissionTier } from "@rivet-dev/agent-os-posix";
+import type { PermissionTier } from "./runtime.js";
 
 /**
  * Resolve a package directory by walking up the directory tree.
@@ -36,7 +36,7 @@ function resolvePackageDir(startDir: string, packageName: string): string {
 			`Ensure it is installed.`,
 	);
 }
-import type { Kernel } from "@secure-exec/core";
+import type { Kernel } from "./runtime-compat.js";
 import type { AgentConfig } from "./agents.js";
 
 // ── Software Descriptor Types ────────────────────────────────────────
@@ -150,6 +150,12 @@ export interface SoftwareRoot {
 	vmPath: string;
 }
 
+export interface CommandPackageMetadata {
+	commandDir: string;
+	declaredCommands: string[];
+	aliases: Record<string, string>;
+}
+
 /**
  * Create a SoftwareContext for a software descriptor.
  * Resolves npm package paths relative to the descriptor's packageDir.
@@ -230,6 +236,8 @@ export function defineSoftware<T extends AnySoftwareDescriptor>(desc: T): T {
 export interface ProcessedSoftware {
 	/** WASM command directories to pass to the WasmVM driver. */
 	commandDirs: string[];
+	/** Per-package command metadata used to preserve command availability on the sidecar path. */
+	commandPackages: CommandPackageMetadata[];
 	/** Per-command permission tiers propagated into the WasmVM runtime. */
 	commandPermissions: Record<string, PermissionTier>;
 	/** Host-to-VM path mappings for ModuleAccessFileSystem. */
@@ -261,6 +269,82 @@ function registerPermission(
 ): void {
 	if (commandName in commandPermissions) return;
 	commandPermissions[commandName] = tier;
+}
+
+function appendDeclaredCommand(
+	declaredCommands: string[],
+	seen: Set<string>,
+	commandName: unknown,
+): void {
+	if (typeof commandName !== "string" || seen.has(commandName)) {
+		return;
+	}
+
+	seen.add(commandName);
+	declaredCommands.push(commandName);
+}
+
+function collectCommandMetadata(
+	pkg: WasmCommandDirDescriptor | WasmCommandSoftwareDescriptor,
+): CommandPackageMetadata {
+	const declaredCommands: string[] = [];
+	const seen = new Set<string>();
+	const aliases: Record<string, string> = {};
+
+	if ("aliases" in pkg && pkg.aliases) {
+		for (const [aliasName, targetName] of Object.entries(pkg.aliases)) {
+			if (typeof targetName !== "string") {
+				continue;
+			}
+			aliases[aliasName] = targetName;
+			appendDeclaredCommand(declaredCommands, seen, aliasName);
+			appendDeclaredCommand(declaredCommands, seen, targetName);
+		}
+	}
+
+	const rawCommands = (pkg as { commands?: unknown }).commands;
+	if (Array.isArray(rawCommands)) {
+		for (const rawCommand of rawCommands) {
+			if (typeof rawCommand !== "object" || rawCommand === null) {
+				continue;
+			}
+
+			const name = (rawCommand as { name?: unknown }).name;
+			const aliasOf = (rawCommand as { aliasOf?: unknown }).aliasOf;
+			appendDeclaredCommand(declaredCommands, seen, name);
+			appendDeclaredCommand(declaredCommands, seen, aliasOf);
+
+			if (typeof name === "string" && typeof aliasOf === "string") {
+				aliases[name] = aliasOf;
+			}
+		}
+	}
+
+	const permissions = (pkg as {
+		permissions?: WasmCommandSoftwareDescriptor["permissions"];
+	}).permissions;
+	if (permissions) {
+		for (const commandName of permissions.full ?? []) {
+			appendDeclaredCommand(declaredCommands, seen, commandName);
+		}
+		for (const commandName of permissions.readWrite ?? []) {
+			appendDeclaredCommand(declaredCommands, seen, commandName);
+		}
+		if (Array.isArray(permissions.readOnly)) {
+			for (const commandName of permissions.readOnly) {
+				appendDeclaredCommand(declaredCommands, seen, commandName);
+			}
+		}
+		for (const commandName of permissions.isolated ?? []) {
+			appendDeclaredCommand(declaredCommands, seen, commandName);
+		}
+	}
+
+	return {
+		commandDir: pkg.commandDir,
+		declaredCommands,
+		aliases,
+	};
 }
 
 function collectRegistryPackagePermissions(
@@ -322,6 +406,7 @@ export function processSoftware(
 	software: SoftwareInput[],
 ): ProcessedSoftware {
 	const commandDirs: string[] = [];
+	const commandPackages: CommandPackageMetadata[] = [];
 	const commandPermissions: Record<string, PermissionTier> = {};
 	const softwareRoots: SoftwareRoot[] = [];
 	const agentConfigs = new Map<string, AgentConfig>();
@@ -333,6 +418,7 @@ export function processSoftware(
 		if (!isTypedDescriptor(pkg)) {
 			// Duck-typed: any object with commandDir is a WASM command source.
 			commandDirs.push(pkg.commandDir);
+			commandPackages.push(collectCommandMetadata(pkg));
 			collectRegistryPackagePermissions(commandPermissions, pkg);
 			continue;
 		}
@@ -340,6 +426,7 @@ export function processSoftware(
 		switch (pkg.type) {
 			case "wasm-commands": {
 				commandDirs.push(pkg.commandDir);
+				commandPackages.push(collectCommandMetadata(pkg));
 				collectTypedDescriptorPermissions(commandPermissions, pkg);
 				break;
 			}
@@ -387,5 +474,11 @@ export function processSoftware(
 		}
 	}
 
-	return { commandDirs, commandPermissions, softwareRoots, agentConfigs };
+	return {
+		commandDirs,
+		commandPackages,
+		commandPermissions,
+		softwareRoots,
+		agentConfigs,
+	};
 }

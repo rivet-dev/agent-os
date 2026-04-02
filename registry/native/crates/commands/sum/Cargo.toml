@@ -3,7 +3,7 @@ name = "cmd-sum"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "sum standalone binary for secure-exec WasmVM"
+description = "sum standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "sum"

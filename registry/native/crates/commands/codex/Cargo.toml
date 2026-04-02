@@ -3,7 +3,7 @@ name = "cmd-codex"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "codex standalone binary for secure-exec WasmVM"
+description = "codex standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "codex"

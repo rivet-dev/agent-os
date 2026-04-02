@@ -3,7 +3,7 @@ name = "cmd-uname"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "uname standalone binary for secure-exec WasmVM"
+description = "uname standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "uname"

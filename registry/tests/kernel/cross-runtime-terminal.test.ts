@@ -1,23 +1,20 @@
 /**
- * Cross-runtime terminal tests. node -e and python3 -c from brush-shell.
+ * Cross-runtime terminal tests for the post-Python WasmVM + Node surface.
  *
- * Mounts WasmVM + Node + Python into the same kernel and verifies
- * interactive output through TerminalHarness.
+ * Mounts WasmVM + Node into the same kernel and verifies interactive output
+ * through TerminalHarness.
  *
- * Gated: WasmVM binary required for all tests, Pyodide import for Python.
+ * Gated: WasmVM binaries must be built.
  *
- * NOTE: TerminalHarness is imported from the secure-exec core test utilities
- * via the linked package. If this import fails, verify that @secure-exec/core
- * is linked and the test directory exists.
+ * Uses the repo-owned TerminalHarness exported through the Agent OS core
+ * test runtime surface.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-// TerminalHarness lives in core's test directory, not in the package exports.
-// Import via the linked path.
-import { TerminalHarness } from '../../../secure-exec-1/packages/core/test/kernel/terminal-harness.ts';
 import {
   createIntegrationKernel,
   skipUnlessWasmBuilt,
+  TerminalHarness,
 } from './helpers.ts';
 import type { IntegrationKernelResult } from './helpers.ts';
 
@@ -25,15 +22,6 @@ import type { IntegrationKernelResult } from './helpers.ts';
 const PROMPT = 'sh-0.4$ ';
 
 const wasmSkip = skipUnlessWasmBuilt();
-
-// Dynamic import check. require.resolve finds pyodide but ESM import may fail.
-let pyodideImportable = false;
-try {
-  await import('pyodide');
-  pyodideImportable = true;
-} catch {
-  // pyodide can't be imported as ESM. Skip Python tests.
-}
 
 /**
  * Find a line in the screen output that exactly matches the expected text.
@@ -276,35 +264,4 @@ describe.skipIf(wasmSkip)('cross-runtime terminal: node stderr', () => {
     const screen = harness.screenshotTrimmed();
     expect(screen).toContain('STDERRTEST');
   }, 15_000);
-});
-
-// ---------------------------------------------------------------------------
-// Python cross-runtime terminal tests
-// ---------------------------------------------------------------------------
-
-describe.skipIf(wasmSkip || !pyodideImportable)('cross-runtime terminal: python', () => {
-  let harness: TerminalHarness;
-  let ctx: IntegrationKernelResult;
-
-  afterEach(async () => {
-    await harness?.dispose();
-    await ctx?.dispose();
-  });
-
-  it('python3 -c "print(99)" -> 99 appears on screen', async () => {
-    ctx = await createIntegrationKernel({
-      runtimes: ['wasmvm', 'python'],
-    });
-    harness = new TerminalHarness(ctx.kernel);
-
-    await harness.waitFor(PROMPT);
-    await harness.type('python3 -c "print(99)"\n');
-    await harness.waitFor(PROMPT, 2, 30_000);
-
-    const screen = harness.screenshotTrimmed();
-    expect(screen).toContain('99');
-    // Verify prompt returned
-    const lines = screen.split('\n');
-    expect(lines[lines.length - 1]).toBe(PROMPT);
-  }, 45_000);
 });

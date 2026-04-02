@@ -1,14 +1,14 @@
 // S3 File System: mount an S3 bucket and use it like a local filesystem.
 //
 // Uses createS3Backend from @rivet-dev/agent-os-s3 to mount an S3-compatible
-// bucket at /mnt/data. Demonstrates pluggable filesystem backends.
+// bucket at /mnt/data through the native S3 plugin descriptor.
 //
 // Required env vars:
 //   S3_BUCKET, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY
 // Optional:
 //   S3_ENDPOINT (for MinIO or other S3-compatible services)
 
-import { AgentOs } from "@rivet-dev/agent-os-core";
+import { AgentOs } from "@rivet-dev/agent-os";
 import { createS3Backend } from "@rivet-dev/agent-os-s3";
 
 const { S3_BUCKET, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_ENDPOINT } = process.env;
@@ -25,7 +25,7 @@ const s3Fs = createS3Backend({
 });
 
 const vm = await AgentOs.create({
-	mounts: [{ path: "/mnt/data", driver: s3Fs }],
+	mounts: [{ path: "/mnt/data", plugin: s3Fs }],
 });
 
 // Write a file into the S3-backed mount

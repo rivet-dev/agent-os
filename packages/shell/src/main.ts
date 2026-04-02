@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { AgentOs } from "@rivet-dev/agent-os-core";
+import { AgentOs } from "@rivet-dev/agent-os";
 
 // Software packages — uses npm-published versions which include pre-built
 // WASM binaries. Workspace copies have empty wasm/ dirs since the native
@@ -107,7 +107,7 @@ const cwd = cli.workDir ?? "/home/user";
 console.error("agent-os shell");
 console.error(`cwd: ${cwd}`);
 
-const exitCode = await vm.kernel.connectTerminal({
+const exitCode = await vm.connectTerminal({
 	command: cli.command,
 	args: cli.args,
 	cwd,

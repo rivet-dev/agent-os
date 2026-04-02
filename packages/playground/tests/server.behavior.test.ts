@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,13 +16,16 @@ async function createVendorFixture(): Promise<string> {
 	const linkPath = resolve(vendorDir, "test-fixture.js");
 
 	await mkdir(vendorDir, { recursive: true });
+	await rm(linkPath, { force: true });
 	await writeFile(sourcePath, 'console.log("fixture");\n');
 	await symlink(sourcePath, linkPath);
 
 	return "/vendor/test-fixture.js";
 }
 
-function listenOnRandomPort(s: ReturnType<typeof createBrowserPlaygroundServer>): Promise<number> {
+function listenOnRandomPort(
+	s: ReturnType<typeof createBrowserPlaygroundServer>,
+): Promise<number> {
 	return new Promise((resolve, reject) => {
 		s.listen(0, () => {
 			const address = s.address();
@@ -62,14 +65,18 @@ describe("browser playground server", () => {
 		const port = await listenOnRandomPort(server);
 		const assetPath = await createVendorFixture();
 
-		const response = await fetch(
-			`http://127.0.0.1:${port}${assetPath}`,
-		);
+		const response = await fetch(`http://127.0.0.1:${port}${assetPath}`);
 
 		expect(response.status).toBe(200);
-		expect(response.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
-		expect(response.headers.get("cross-origin-embedder-policy")).toBe("require-corp");
-		expect(response.headers.get("cross-origin-opener-policy")).toBe("same-origin");
+		expect(response.headers.get("content-type")).toBe(
+			"text/javascript; charset=utf-8",
+		);
+		expect(response.headers.get("cross-origin-embedder-policy")).toBe(
+			"require-corp",
+		);
+		expect(response.headers.get("cross-origin-opener-policy")).toBe(
+			"same-origin",
+		);
 		const body = await response.text();
 		expect(body.length).toBeGreaterThan(0);
 	});
@@ -78,12 +85,32 @@ describe("browser playground server", () => {
 		server = createBrowserPlaygroundServer();
 		const port = await listenOnRandomPort(server);
 
-		const response = await fetch(
-			`http://127.0.0.1:${port}/frontend`,
-			{ redirect: "manual" },
-		);
+		const response = await fetch(`http://127.0.0.1:${port}/frontend`, {
+			redirect: "manual",
+		});
 
 		expect(response.status).toBe(308);
 		expect(response.headers.get("location")).toBe("/frontend/");
+	});
+
+	it("serves the runtime harness page with the browser isolation headers", async () => {
+		server = createBrowserPlaygroundServer();
+		const port = await listenOnRandomPort(server);
+
+		const response = await fetch(
+			`http://127.0.0.1:${port}/frontend/runtime-harness.html`,
+		);
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("content-type")).toBe(
+			"text/html; charset=utf-8",
+		);
+		expect(response.headers.get("cross-origin-embedder-policy")).toBe(
+			"require-corp",
+		);
+		expect(response.headers.get("cross-origin-opener-policy")).toBe(
+			"same-origin",
+		);
+		expect(await response.text()).toContain("/dist/runtime-harness.js");
 	});
 });

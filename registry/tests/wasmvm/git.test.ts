@@ -11,11 +11,16 @@ import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer, type Server as HttpServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { createWasmVmRuntime } from '@rivet-dev/agent-os-posix';
-import { createKernel, createInMemoryFileSystem, allowAll } from '@secure-exec/core';
-import { createNodeHostNetworkAdapter } from '@secure-exec/nodejs';
-import { COMMANDS_DIR, hasWasmBinaries } from '../helpers.js';
-import type { Kernel } from '@secure-exec/core';
+import { createWasmVmRuntime } from '@rivet-dev/agent-os/test/runtime';
+import {
+  allowAll,
+  COMMANDS_DIR,
+  createInMemoryFileSystem,
+  createKernel,
+  createNodeHostNetworkAdapter,
+  hasWasmBinaries,
+} from '../helpers.js';
+import type { Kernel } from '../helpers.js';
 
 /** Check git binary exists in addition to base WASM binaries */
 const hasGit = hasWasmBinaries && existsSync(resolve(COMMANDS_DIR, 'git'));

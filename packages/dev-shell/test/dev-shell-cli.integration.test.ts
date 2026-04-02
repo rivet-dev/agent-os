@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { resolveWorkspacePaths } from "../src/shared.ts";
 
 interface CommandResult {
 	exitCode: number;
@@ -13,6 +15,8 @@ interface CommandResult {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(__dirname, "..", "..", "..");
+const paths = resolveWorkspacePaths(__dirname);
+const hasWasmBinaries = existsSync(path.join(paths.wasmCommandsDir, "bash"));
 
 function stripJustPreamble(output: string): string {
 	return output
@@ -70,22 +74,27 @@ describe("dev-shell justfile wrapper", { timeout: 60_000 }, () => {
 	});
 
 	it("runs the default work dir through the just wrapper", async () => {
-		const result = await runJustDevShell(["--", "sh", "-lc", "pwd"]);
+		const result = await runJustDevShell([
+			"--",
+			"node",
+			"-e",
+			"process.stdout.write(process.cwd())",
+		]);
 		expect(result.exitCode).toBe(0);
-		expect(result.stderr).toContain("secure-exec dev shell");
+		expect(result.stderr).toContain("agent-os dev shell");
 		expect(result.stderr).toContain("loaded commands:");
 		expect(stripJustPreamble(result.stdout)).toBe(path.resolve(workspaceRoot, "packages", "dev-shell"));
 	});
 
 	it("passes --work-dir through the just wrapper", async () => {
-		workDir = await mkdtemp(path.join(tmpdir(), "secure-exec-dev-shell-just-"));
+		workDir = await mkdtemp(path.join(tmpdir(), "agent-os-dev-shell-just-"));
 		const result = await runJustDevShell([
 			"--work-dir",
 			workDir,
 			"--",
-			"sh",
-			"-lc",
-			"pwd",
+			"node",
+			"-e",
+			"process.stdout.write(process.cwd())",
 		]);
 		expect(result.exitCode).toBe(0);
 		expect(result.stderr).toContain(`work dir: ${workDir}`);
@@ -103,8 +112,8 @@ describe("dev-shell justfile wrapper", { timeout: 60_000 }, () => {
 		expect(stripJustPreamble(result.stdout)).toContain("JUST_DEV_SHELL_NODE_OK");
 	});
 
-	it("runs Wasm shell builtins and coreutils through the just wrapper", async () => {
-		workDir = await mkdtemp(path.join(tmpdir(), "secure-exec-dev-shell-just-wasm-"));
+	it.skipIf(!hasWasmBinaries)("runs Wasm shell builtins and coreutils through the just wrapper", async () => {
+		workDir = await mkdtemp(path.join(tmpdir(), "agent-os-dev-shell-just-wasm-"));
 		const result = await runJustDevShell([
 			"--work-dir",
 			workDir,

@@ -1,0 +1,9 @@
+{
+	"name": "project-matrix-yarn-berry-layout-pass",
+	"private": true,
+	"type": "commonjs",
+	"packageManager": "yarn@4.13.0",
+	"dependencies": {
+		"left-pad": "0.0.3"
+	}
+}

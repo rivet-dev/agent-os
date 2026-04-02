@@ -1,4 +1,4 @@
-//! Minimal `which` implementation for the secure-exec WasmVM.
+//! Minimal `which` implementation for the Agent OS WasmVM.
 //!
 //! Searches the current PATH for one or more command names and prints the first
 //! matching executable path for each command. This is primarily needed for

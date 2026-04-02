@@ -11,11 +11,9 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { createWasmVmRuntime } from '@rivet-dev/agent-os-posix';
-import { createKernel } from '@secure-exec/core';
-import { COMMANDS_DIR, hasWasmBinaries } from '../helpers.js';
-import type { Kernel } from '@secure-exec/core';
-
+import { createWasmVmRuntime } from '@rivet-dev/agent-os/test/runtime';
+import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import type { Kernel } from '../helpers.js';
 
 // Minimal in-memory VFS for kernel tests
 class SimpleVFS {

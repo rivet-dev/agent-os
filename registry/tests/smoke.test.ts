@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
+  createInMemoryFileSystem,
   createKernel,
   createWasmVmRuntime,
   hasWasmBinaries,
@@ -7,7 +8,6 @@ import {
   COMMANDS_DIR,
 } from "./helpers.ts";
 import type { Kernel } from "./helpers.ts";
-import { createInMemoryFileSystem } from "@secure-exec/core";
 
 describe.skipIf(skipReason())("smoke", () => {
   let kernel: Kernel;

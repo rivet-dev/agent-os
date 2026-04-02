@@ -1,13 +1,14 @@
 /**
  * E2E project-matrix test: run existing fixture projects through the kernel.
  *
- * For each fixture in the secure-exec tests/projects/ directory:
+ * For each fixture in the repo-owned tests/projects/ directory:
  *   1. Prepare project (npm install, cached by content hash)
  *   2. Run entry via host Node (baseline)
  *   3. Run entry via kernel (NodeFileSystem rooted at project dir, WasmVM + Node)
  *   4. Compare output parity
  *
- * Adapted from secure-exec-1 to use package imports instead of relative paths.
+ * Adapted from the legacy runtime suite to use package imports and
+ * repo-local fixtures.
  */
 
 import { execFile } from 'node:child_process';
@@ -20,11 +21,11 @@ import { describe, expect, it } from 'vitest';
 import {
   COMMANDS_DIR,
   createKernel,
+  NodeFileSystem,
   createWasmVmRuntime,
   createNodeRuntime,
   skipUnlessWasmBuilt,
 } from './helpers.ts';
-import { NodeFileSystem } from '@secure-exec/nodejs';
 
 const execFileAsync = promisify(execFile);
 const TEST_TIMEOUT_MS = 55_000;
@@ -33,10 +34,8 @@ const CACHE_READY_MARKER = '.ready';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Fixtures live in the secure-exec-1 repo (linked via devDependencies)
-const SECURE_EXEC_ROOT = path.resolve(__dirname, '../../../secure-exec-1/packages/secure-exec');
-const WORKSPACE_ROOT = path.resolve(SECURE_EXEC_ROOT, '..', '..');
-const FIXTURES_ROOT = path.join(SECURE_EXEC_ROOT, 'tests', 'projects');
+const WORKSPACE_ROOT = path.resolve(__dirname, '../../..');
+const FIXTURES_ROOT = path.resolve(__dirname, '../projects');
 const CACHE_ROOT = path.join(__dirname, '../../.cache', 'project-matrix');
 
 // ---------------------------------------------------------------------------
@@ -77,6 +76,10 @@ async function discoverFixtures(): Promise<FixtureProject[]> {
   for (const name of fixtureDirs) {
     const sourceDir = path.join(FIXTURES_ROOT, name);
     const metaPath = path.join(sourceDir, 'fixture.json');
+    const packageJsonPath = path.join(sourceDir, 'package.json');
+    if (!(await pathExists(metaPath)) || !(await pathExists(packageJsonPath))) {
+      continue;
+    }
     const raw = JSON.parse(await readFile(metaPath, 'utf8'));
     const metadata = parseMetadata(raw, name);
     fixtures.push({ name, sourceDir, metadata });

@@ -1,4 +1,4 @@
-/// Codex headless agent for secure-exec WasmVM.
+/// Codex headless agent for Agent OS WasmVM.
 ///
 /// This binary supports two modes:
 /// - Legacy prompt mode (`codex-exec "prompt"`) which remains a placeholder.
@@ -523,7 +523,7 @@ fn extract_assistant_text(response: &Value) -> io::Result<String> {
 }
 
 fn print_help() {
-    println!("codex-exec {} — headless Codex agent for secure-exec WasmVM", VERSION);
+    println!("codex-exec {} — headless Codex agent for Agent OS WasmVM", VERSION);
     println!();
     println!("USAGE:");
     println!("    codex-exec [OPTIONS] [PROMPT]");

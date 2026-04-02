@@ -1,0 +1,8 @@
+{
+	"entry": "src/index.js",
+	"expectation": "fail",
+	"fail": {
+		"code": 1,
+		"stderrIncludes": "net.createServer is not supported in sandbox"
+	}
+}

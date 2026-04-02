@@ -3,7 +3,7 @@ name = "cmd-expr"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "expr standalone binary for secure-exec WasmVM"
+description = "expr standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "expr"

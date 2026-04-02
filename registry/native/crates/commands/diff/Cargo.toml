@@ -3,7 +3,7 @@ name = "cmd-diff"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "diff standalone binary for secure-exec WasmVM"
+description = "diff standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "diff"

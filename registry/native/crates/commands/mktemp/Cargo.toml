@@ -3,7 +3,7 @@ name = "cmd-mktemp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "mktemp standalone binary for secure-exec WasmVM"
+description = "mktemp standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "mktemp"

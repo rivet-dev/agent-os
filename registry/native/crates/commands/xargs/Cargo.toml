@@ -3,7 +3,7 @@ name = "cmd-xargs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "xargs standalone binary for secure-exec WasmVM"
+description = "xargs standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "xargs"

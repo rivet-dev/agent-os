@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-conditional-exports-pass",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"@cond-test/lib": "file:packages/cond-exports-lib"
+	}
+}

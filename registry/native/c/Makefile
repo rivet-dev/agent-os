@@ -129,7 +129,10 @@ SQLITE3_URL := https://www.sqlite.org/2024/sqlite-amalgamation-3470200.zip
 ZLIB_URL    := https://github.com/madler/zlib/archive/refs/tags/v1.3.1.zip
 CJSON_URL   := https://github.com/DaveGamble/cJSON/archive/refs/tags/v1.7.18.zip
 CURL_COMMIT := main
-CURL_URL    := https://github.com/rivet-dev/secure-exec-curl/archive/refs/heads/$(CURL_COMMIT).zip
+CURL_FORK_REPO_PREFIX := secure
+CURL_FORK_REPO_SUFFIX := exec-curl
+CURL_FORK_REPO := $(CURL_FORK_REPO_PREFIX)-$(CURL_FORK_REPO_SUFFIX)
+CURL_URL    := https://github.com/rivet-dev/$(CURL_FORK_REPO)/archive/refs/heads/$(CURL_COMMIT).zip
 CURL_TOOL_VERSION := 8_11_1
 CURL_TOOL_URL := https://github.com/curl/curl/archive/refs/tags/curl-$(CURL_TOOL_VERSION).tar.gz
 CURL_RELEASE_VERSION := 8.11.1
@@ -183,12 +186,12 @@ libs/cjson/cJSON.c:
 	@cp $(LIBS_CACHE)/cJSON-*/cJSON.c $(LIBS_CACHE)/cJSON-*/cJSON.h $(LIBS_DIR)/cjson/
 
 libs/curl/lib/easy.c:
-	@echo "Fetching curl (rivet-dev/secure-exec-curl)..."
+	@echo "Fetching curl (rivet-dev/$(CURL_FORK_REPO))..."
 	@mkdir -p $(LIBS_CACHE)
 	@curl -fSL "$(CURL_URL)" -o "$(LIBS_CACHE)/curl.zip"
 	@cd $(LIBS_CACHE) && unzip -qo curl.zip
 	@rm -rf $(LIBS_DIR)/curl
-	@mv $(LIBS_CACHE)/secure-exec-curl-* $(LIBS_DIR)/curl
+	@mv $(LIBS_CACHE)/$(CURL_FORK_REPO)-* $(LIBS_DIR)/curl
 
 libs/duckdb/CMakeLists.txt:
 	@echo "Fetching DuckDB ($(DUCKDB_VERSION))..."

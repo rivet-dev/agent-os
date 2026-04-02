@@ -3,6 +3,6 @@ name = "secureexec-strings-cmd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "strings command implementation for secure-exec standalone binaries"
+description = "strings command implementation for Agent OS standalone binaries"
 
 [dependencies]

@@ -1,0 +1,13 @@
+[package]
+name = "agent-os-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared kernel plane for Agent OS native and browser sidecars"
+
+[dependencies]
+agent-os-bridge = { path = "../bridge" }
+base64 = "0.22"
+getrandom = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

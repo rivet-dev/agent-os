@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { z } from "zod";
 import { AgentOs, hostTool, toolKit } from "../src/index.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 import {
 	REGISTRY_SOFTWARE,
 	hasRegistryCommands,
@@ -86,7 +87,7 @@ describe("host tools RPC server", () => {
 		vm = await AgentOs.create({
 			toolKits: [testToolKit],
 		});
-		port = Number(vm.kernel.env.AGENTOS_TOOLS_PORT);
+		port = Number(getAgentOsKernel(vm).env.AGENTOS_TOOLS_PORT);
 	});
 
 	afterEach(async () => {
@@ -235,7 +236,7 @@ describe("host tools RPC server", () => {
 
 	test("no server started when toolKits is empty", async () => {
 		const vmNoTools = await AgentOs.create();
-		expect(vmNoTools.kernel.env.AGENTOS_TOOLS_PORT).toBeUndefined();
+		expect(getAgentOsKernel(vmNoTools).env.AGENTOS_TOOLS_PORT).toBeUndefined();
 		await vmNoTools.dispose();
 	});
 });
@@ -248,7 +249,7 @@ describe("host tools list and describe endpoints", () => {
 		vm = await AgentOs.create({
 			toolKits: [testToolKit, textToolKit],
 		});
-		port = Number(vm.kernel.env.AGENTOS_TOOLS_PORT);
+		port = Number(getAgentOsKernel(vm).env.AGENTOS_TOOLS_PORT);
 	});
 
 	afterEach(async () => {

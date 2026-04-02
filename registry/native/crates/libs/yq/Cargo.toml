@@ -3,7 +3,7 @@ name = "secureexec-yq"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "yq (YAML/XML/TOML/JSON processor) implementation for secure-exec standalone binaries"
+description = "yq (YAML/XML/TOML/JSON processor) implementation for Agent OS standalone binaries"
 
 [dependencies]
 jaq-core = "2.2"

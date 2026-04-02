@@ -3,7 +3,7 @@ name = "cmd-paste"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "paste standalone binary for secure-exec WasmVM"
+description = "paste standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "paste"

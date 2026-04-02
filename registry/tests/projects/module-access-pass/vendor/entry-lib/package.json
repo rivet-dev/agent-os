@@ -1,0 +1,8 @@
+{
+  "name": "entry-lib",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "transitive-lib": "file:../transitive-lib"
+  }
+}

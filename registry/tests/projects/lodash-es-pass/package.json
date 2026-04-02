@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-lodash-es-pass",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"lodash-es": "4.17.21"
+	}
+}

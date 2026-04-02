@@ -2,7 +2,7 @@ import * as posixPath from "node:path/posix";
 import {
 	createInMemoryFileSystem,
 	type VirtualFileSystem,
-} from "@secure-exec/core";
+} from "./runtime-compat.js";
 
 export interface FilesystemEntry {
 	path: string;

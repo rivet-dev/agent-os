@@ -1,0 +1,19 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"baseUrl": ".",
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"esModuleInterop": true,
+		"declaration": true,
+		"outDir": "./dist",
+		"rootDir": "./src",
+		"paths": {
+			"@rivet-dev/agent-os/internal/runtime-compat": [
+				"../core/dist/runtime-compat.d.ts"
+			]
+		}
+	},
+	"include": ["src/**/*"],
+	"exclude": ["node_modules", "dist", "tests"]
+}

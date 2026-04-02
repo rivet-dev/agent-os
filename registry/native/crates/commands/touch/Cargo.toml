@@ -3,7 +3,7 @@ name = "cmd-touch"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "touch standalone binary for secure-exec WasmVM"
+description = "touch standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "touch"

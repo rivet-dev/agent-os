@@ -1,85 +1,80 @@
-/**
- * Google Drive block store conformance tests.
- *
- * These tests require real Google Drive API credentials and a folder ID.
- * Set the following environment variables to run:
- *   GOOGLE_DRIVE_CLIENT_EMAIL - Service account email
- *   GOOGLE_DRIVE_PRIVATE_KEY  - Service account private key (PEM)
- *   GOOGLE_DRIVE_FOLDER_ID    - Folder ID where test files are stored
- *
- * When credentials are not set, tests are skipped with a descriptive message.
- */
-
-import { describe, it } from "vitest";
-import { defineBlockStoreTests } from "@secure-exec/core/test/block-store-conformance";
-import { defineVfsConformanceTests } from "@secure-exec/core/test/vfs-conformance";
-import { createChunkedVfs, SqliteMetadataStore } from "@secure-exec/core";
-import { GoogleDriveBlockStore } from "../src/index.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { AgentOs } from "@rivet-dev/agent-os";
+import { createGoogleDriveBackend } from "../src/index.js";
 
 const clientEmail = process.env.GOOGLE_DRIVE_CLIENT_EMAIL;
 const privateKey = process.env.GOOGLE_DRIVE_PRIVATE_KEY;
 const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
-
 const hasCredentials = !!(clientEmail && privateKey && folderId);
 
-if (hasCredentials) {
-	function createStore(): GoogleDriveBlockStore {
-		const prefix = `test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}/`;
-		return new GoogleDriveBlockStore({
-			credentials: {
-				clientEmail: clientEmail!,
-				privateKey: privateKey!,
-			},
-			folderId: folderId!,
-			keyPrefix: prefix,
-		});
+let vm: AgentOs | null = null;
+
+afterEach(async () => {
+	if (vm) {
+		await vm.dispose();
+		vm = null;
 	}
+});
 
-	// Block store conformance tests.
-	defineBlockStoreTests({
-		name: "GoogleDriveBlockStore",
-		createStore,
-		capabilities: {
-			copy: true,
-		},
-	});
-
-	// VFS conformance tests with ChunkedVFS(SqliteMetadataStore + GoogleDriveBlockStore).
-	const INLINE_THRESHOLD = 256;
-	const CHUNK_SIZE = 1024;
-
-	defineVfsConformanceTests({
-		name: "ChunkedVFS (SqliteMetadata + GoogleDriveBlockStore)",
-		createFs: () =>
-			createChunkedVfs({
-				metadata: new SqliteMetadataStore({ dbPath: ":memory:" }),
-				blocks: createStore(),
-				inlineThreshold: INLINE_THRESHOLD,
-				chunkSize: CHUNK_SIZE,
+describe("@rivet-dev/agent-os-google-drive", () => {
+	it("serializes a native google_drive mount descriptor", () => {
+		expect(
+			createGoogleDriveBackend({
+				credentials: {
+					clientEmail: "service-account@example.com",
+					privateKey: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
+				},
+				folderId: "folder-123",
+				keyPrefix: "agent-os/test",
+				chunkSize: 16,
+				inlineThreshold: 8,
 			}),
-		capabilities: {
-			symlinks: true,
-			hardLinks: true,
-			permissions: true,
-			utimes: true,
-			truncate: true,
-			pread: true,
-			pwrite: true,
-			mkdir: true,
-			removeDir: true,
-			fsync: false,
-			copy: true,
-			readDirStat: true,
-		},
-		inlineThreshold: INLINE_THRESHOLD,
-		chunkSize: CHUNK_SIZE,
-	});
-} else {
-	describe("GoogleDriveBlockStore", () => {
-		it.skip("skipped: set GOOGLE_DRIVE_CLIENT_EMAIL, GOOGLE_DRIVE_PRIVATE_KEY, and GOOGLE_DRIVE_FOLDER_ID to run", () => {});
+		).toEqual({
+			id: "google_drive",
+			config: {
+				credentials: {
+					clientEmail: "service-account@example.com",
+					privateKey: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
+				},
+				folderId: "folder-123",
+				keyPrefix: "agent-os/test",
+				chunkSize: 16,
+				inlineThreshold: 8,
+			},
+		});
 	});
 
-	describe("ChunkedVFS (SqliteMetadata + GoogleDriveBlockStore)", () => {
-		it.skip("skipped: set GOOGLE_DRIVE_CLIENT_EMAIL, GOOGLE_DRIVE_PRIVATE_KEY, and GOOGLE_DRIVE_FOLDER_ID to run", () => {});
-	});
-}
+	if (hasCredentials) {
+		it("mounts a Google Drive-backed filesystem through AgentOs", async () => {
+			vm = await AgentOs.create({
+				mounts: [
+					{
+						path: "/data",
+						plugin: createGoogleDriveBackend({
+							credentials: {
+								clientEmail: clientEmail!,
+								privateKey: privateKey!,
+							},
+							folderId: folderId!,
+							keyPrefix: `agent-os-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+							chunkSize: 16,
+							inlineThreshold: 8,
+						}),
+					},
+				],
+			});
+
+			const payload = "0123456789abcdef".repeat(32);
+			await vm.writeFile("/data/notes.txt", payload);
+			const content = await vm.readFile("/data/notes.txt");
+
+			expect(new TextDecoder().decode(content)).toBe(payload);
+			expect(await vm.readdir("/data")).toContain("notes.txt");
+		});
+	} else {
+		it.skip(
+			"skipped: set GOOGLE_DRIVE_CLIENT_EMAIL, GOOGLE_DRIVE_PRIVATE_KEY, and GOOGLE_DRIVE_FOLDER_ID to run the live Google Drive mount test",
+			() => {},
+		);
+	}
+});

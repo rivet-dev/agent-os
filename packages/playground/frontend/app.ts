@@ -1,14 +1,13 @@
 import {
-	NodeRuntime,
 	allowAll,
-} from "secure-exec";
-import type { StdioChannel, StdioEvent } from "secure-exec";
-import {
 	createBrowserDriver,
 	createBrowserRuntimeDriverFactory,
+	type NodeRuntimeDriver,
+	type StdioChannel,
+	type StdioEvent,
 } from "@rivet-dev/agent-os-browser";
 
-type Language = "nodejs" | "python";
+type Language = "nodejs";
 type TypeScriptApi = typeof import("typescript");
 type TypeScriptDiagnostic = import("typescript").Diagnostic;
 
@@ -36,7 +35,7 @@ type MonacoEditorOptions = {
 	value: string;
 };
 
-interface MonacoModel {}
+type MonacoModel = object;
 
 interface MonacoEditorInstance {
 	addCommand(keybinding: number, handler: () => void): void;
@@ -50,7 +49,10 @@ interface MonacoApi {
 	KeyCode: { Enter: number };
 	KeyMod: { CtrlCmd: number };
 	editor: {
-		create(container: HTMLElement, options: MonacoEditorOptions): MonacoEditorInstance;
+		create(
+			container: HTMLElement,
+			options: MonacoEditorOptions,
+		): MonacoEditorInstance;
 		defineTheme(name: string, theme: MonacoTheme): void;
 		setModelLanguage(model: MonacoModel, language: string): void;
 	};
@@ -65,22 +67,12 @@ interface MonacoApi {
 }
 
 interface MonacoRequire {
-	(dependencies: string[], onLoad: () => void, onError: (error: unknown) => void): void;
+	(
+		dependencies: string[],
+		onLoad: () => void,
+		onError: (error: unknown) => void,
+	): void;
 	config(options: { paths: { vs: string } }): void;
-}
-
-interface PyodideApi {
-	runPythonAsync(source: string): Promise<unknown>;
-}
-
-interface PyodideLoaderOptions {
-	indexURL: string;
-	stderr(message: unknown): void;
-	stdout(message: unknown): void;
-}
-
-interface PyodideModule {
-	loadPyodide(options: PyodideLoaderOptions): Promise<PyodideApi>;
 }
 
 type OutputLine = {
@@ -92,17 +84,6 @@ type PlaygroundRunResult = {
 	code: number;
 	errorMessage: string | null;
 	lines: OutputLine[];
-};
-
-type PyodideCapture = {
-	lines: OutputLine[];
-};
-
-type PyodideRunner = {
-	pyodide: PyodideApi;
-	streamState: {
-		activeCapture: PyodideCapture | null;
-	};
 };
 
 type Example = {
@@ -127,6 +108,11 @@ type Process = {
 	isRunning: boolean;
 };
 
+type PlaygroundRuntime = Pick<
+	NodeRuntimeDriver,
+	"exec" | "dispose" | "terminate"
+>;
+
 declare global {
 	interface Window {
 		monaco?: MonacoApi;
@@ -136,13 +122,19 @@ declare global {
 }
 
 const MONACO_VS_URL = new URL("/vendor/monaco/vs", import.meta.url).href;
-const PYODIDE_BASE_URL = new URL("/vendor/pyodide/", import.meta.url).href;
+const PLAYGROUND_RUNTIME_CWD = "/root";
+const PLAYGROUND_RUNTIME_HOME = "/root";
+const PLAYGROUND_RUNTIME_TMPDIR = "/tmp";
+const playgroundWorkerUrl = new URL("/agent-os-worker.js", import.meta.url);
+const playgroundRuntimeFactory = createBrowserRuntimeDriverFactory({
+	workerUrl: playgroundWorkerUrl,
+});
 const LANGUAGE_CONFIG: Record<Language, LanguageConfig> = {
 	nodejs: {
 		label: "Node.js",
 		monacoLanguage: "typescript",
 		fileName: "/playground.ts",
-		hint: "Runs through secure-exec browser runtime",
+		hint: "Runs through the Agent OS browser runtime",
 		examples: [
 			{
 				name: "Counter",
@@ -166,43 +158,25 @@ const path = "/counter.txt";
 			},
 		],
 	},
-	python: {
-		label: "Python",
-		monacoLanguage: "python",
-		fileName: "/playground.py",
-		hint: "Runs through Pyodide in the browser",
-		examples: [
-			{
-				name: "Counter",
-				code: `import sys
-
-counter = getattr(sys.modules[__name__], "_counter", 0) + 1
-sys.modules[__name__]._counter = counter
-print(f"Counter: {counter}")
-`,
-			},
-			{
-				name: "File System",
-				code: `import os
-
-path = "/counter.txt"
-prev = int(open(path).read()) if os.path.exists(path) else 0
-count = prev + 1
-open(path, "w").write(str(count))
-print(f"File counter: {count}")
-`,
-			},
-		],
-	},
 };
 
 const LANGUAGE_ICONS: Record<Language, string> = {
 	nodejs: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M11.998.006a1.27 1.27 0 0 0-.63.174L2.032 5.49a1.27 1.27 0 0 0-.634 1.1v10.818a1.27 1.27 0 0 0 .634 1.1l9.336 5.312a1.27 1.27 0 0 0 1.26 0l9.336-5.312a1.27 1.27 0 0 0 .634-1.1V6.59a1.27 1.27 0 0 0-.634-1.1L12.628.18a1.27 1.27 0 0 0-.63-.174z"/></svg>`,
-	python: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M11.914 0C5.82 0 6.2 2.656 6.2 2.656l.007 2.752h5.814v.826H3.9S0 5.789 0 11.969c0 6.18 3.403 5.96 3.403 5.96h2.03v-2.867s-.109-3.42 3.35-3.42h5.766s3.24.052 3.24-3.148V3.202S18.28 0 11.914 0zM8.708 1.85a1.06 1.06 0 1 1 0 2.118 1.06 1.06 0 0 1 0-2.118z"/><path d="M12.086 24c6.094 0 5.714-2.656 5.714-2.656l-.007-2.752h-5.814v-.826h8.123S24 18.211 24 12.031c0-6.18-3.403-5.96-3.403-5.96h-2.03v2.867s.109 3.42-3.35 3.42H9.451s-3.24-.052-3.24 3.148v5.292S5.72 24 12.086 24zm3.206-1.85a1.06 1.06 0 1 1 0-2.118 1.06 1.06 0 0 1 0 2.118z"/></svg>`,
 };
 
 function getElement<T extends Element>(selector: string): T {
 	const element = document.querySelector<T>(selector);
+	if (!element) {
+		throw new Error(`Missing required element: ${selector}`);
+	}
+	return element;
+}
+
+function getChildElement<T extends Element>(
+	root: ParentNode,
+	selector: string,
+): T {
+	const element = root.querySelector<T>(selector);
 	if (!element) {
 		throw new Error(`Missing required element: ${selector}`);
 	}
@@ -220,8 +194,7 @@ const addProcessMenu = getElement<HTMLElement>("#add-process-menu");
 /* State */
 let monaco: MonacoApi | null = null;
 let editor: MonacoEditorInstance | null = null;
-let nodejsRuntimePromise: Promise<NodeRuntime> | null = null;
-let pyodideRunnerPromise: Promise<PyodideRunner> | null = null;
+let nodejsRuntimePromise: Promise<PlaygroundRuntime> | null = null;
 let nextProcessId = 1;
 const processes: Process[] = [];
 let activeProcessId: string | null = null;
@@ -234,12 +207,14 @@ let editorLabelEl: HTMLElement | null = null;
 let editorHintEl: HTMLElement | null = null;
 let outputEl: HTMLElement | null = null;
 let runButtonEl: HTMLButtonElement | null = null;
-let clearButtonEl: HTMLButtonElement | null = null;
 
 /* Status */
-function setStatus(text: string, tone: "pending" | "ready" | "error" = "pending"): void {
+function setStatus(
+	text: string,
+	tone: "pending" | "ready" | "error" = "pending",
+): void {
 	if (prewarming && tone === "ready") return;
-	if (prewarming && tone === "pending") text = "Warming up runtimes...";
+	if (prewarming && tone === "pending") text = "Warming up runtime...";
 	runtimeStatus.textContent = text;
 	runtimeStatus.classList.remove("ready", "error");
 	if (tone === "ready") runtimeStatus.classList.add("ready");
@@ -247,7 +222,11 @@ function setStatus(text: string, tone: "pending" | "ready" | "error" = "pending"
 }
 
 /* Output helpers */
-function appendOutputToProcess(proc: Process, channel: OutputLine["channel"], message: string): void {
+function appendOutputToProcess(
+	proc: Process,
+	channel: OutputLine["channel"],
+	message: string,
+): void {
 	proc.outputLines.push({ channel, message });
 	if (proc.id === activeProcessId && outputEl) {
 		const line = document.createElement("div");
@@ -275,7 +254,10 @@ function stripAnsi(text: string): string {
 	return text.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
-function waitForGlobal<T>(checker: () => T | null | undefined, label: string): Promise<NonNullable<T>> {
+function waitForGlobal<T>(
+	checker: () => T | null | undefined,
+	label: string,
+): Promise<NonNullable<T>> {
 	return new Promise((resolve, reject) => {
 		const startedAt = Date.now();
 		const tick = (): void => {
@@ -297,16 +279,23 @@ function waitForGlobal<T>(checker: () => T | null | undefined, label: string): P
 /* Monaco */
 async function loadMonaco(): Promise<MonacoApi> {
 	if (window.monaco?.editor) return window.monaco;
-	const monacoRequire = await waitForGlobal(() => window.require, "Monaco loader");
+	const monacoRequire = await waitForGlobal(
+		() => window.require,
+		"Monaco loader",
+	);
 	monacoRequire.config({ paths: { vs: MONACO_VS_URL } });
 	return new Promise((resolve, reject) => {
-		monacoRequire(["vs/editor/editor.main"], () => {
-			if (!window.monaco) {
-				reject(new Error("Monaco did not initialize"));
-				return;
-			}
-			resolve(window.monaco);
-		}, reject);
+		monacoRequire(
+			["vs/editor/editor.main"],
+			() => {
+				if (!window.monaco) {
+					reject(new Error("Monaco did not initialize"));
+					return;
+				}
+				resolve(window.monaco);
+			},
+			reject,
+		);
 	});
 }
 
@@ -350,7 +339,7 @@ function applyMonacoTheme(monacoInstance: MonacoApi): void {
 }
 
 /* Runtimes */
-async function ensureNodejsRuntime(): Promise<NodeRuntime> {
+async function ensureNodejsRuntime(): Promise<PlaygroundRuntime> {
 	if (!nodejsRuntimePromise) {
 		nodejsRuntimePromise = (async () => {
 			setStatus("Booting Node.js runtime...");
@@ -359,11 +348,19 @@ async function ensureNodejsRuntime(): Promise<NodeRuntime> {
 				permissions: allowAll,
 				useDefaultNetwork: true,
 			});
-			const runtime = new NodeRuntime({
-				systemDriver,
-				runtimeDriverFactory: createBrowserRuntimeDriverFactory({
-					workerUrl: new URL("/secure-exec-worker.js", import.meta.url),
-				}),
+			const runtime = playgroundRuntimeFactory.createRuntimeDriver({
+				system: systemDriver,
+				runtime: {
+					process: {
+						...systemDriver.runtime.process,
+						cwd: systemDriver.runtime.process.cwd ?? PLAYGROUND_RUNTIME_CWD,
+					},
+					os: {
+						...systemDriver.runtime.os,
+						homedir: systemDriver.runtime.os.homedir ?? PLAYGROUND_RUNTIME_HOME,
+						tmpdir: systemDriver.runtime.os.tmpdir ?? PLAYGROUND_RUNTIME_TMPDIR,
+					},
+				},
 			});
 			setStatus("Node.js runtime ready", "ready");
 			return runtime;
@@ -376,34 +373,10 @@ async function ensureNodejsRuntime(): Promise<NodeRuntime> {
 	return nodejsRuntimePromise;
 }
 
-async function ensurePyodideRunner(): Promise<PyodideRunner> {
-	if (!pyodideRunnerPromise) {
-		pyodideRunnerPromise = (async () => {
-			setStatus("Loading Pyodide...");
-			const { loadPyodide } = (await import(`${PYODIDE_BASE_URL}pyodide.mjs`)) as PyodideModule;
-			const streamState: PyodideRunner["streamState"] = { activeCapture: null };
-			const pyodide = await loadPyodide({
-				indexURL: PYODIDE_BASE_URL,
-				stdout: (message) => {
-					streamState.activeCapture?.lines.push({ channel: "stdout", message: String(message) });
-				},
-				stderr: (message) => {
-					streamState.activeCapture?.lines.push({ channel: "stderr", message: String(message) });
-				},
-			});
-			setStatus("Python runtime ready", "ready");
-			return { pyodide, streamState };
-		})().catch((error) => {
-			pyodideRunnerPromise = null;
-			setStatus("Python runtime failed", "error");
-			throw error;
-		});
-	}
-	return pyodideRunnerPromise;
-}
-
 /* TypeScript transpilation */
-function formatTypeScriptDiagnostics(diagnostics: readonly TypeScriptDiagnostic[]): string {
+function formatTypeScriptDiagnostics(
+	diagnostics: readonly TypeScriptDiagnostic[],
+): string {
 	if (diagnostics.length === 0) return "";
 	const tsApi = window.ts;
 	if (!tsApi) return "TypeScript transpiler is not available";
@@ -412,7 +385,9 @@ function formatTypeScriptDiagnostics(diagnostics: readonly TypeScriptDiagnostic[
 		getCurrentDirectory: () => "/",
 		getNewLine: () => "\n",
 	};
-	return stripAnsi(tsApi.formatDiagnosticsWithColorAndContext(diagnostics, host));
+	return stripAnsi(
+		tsApi.formatDiagnosticsWithColorAndContext(diagnostics, host),
+	);
 }
 
 function transpileTypeScript(source: string): string {
@@ -432,12 +407,13 @@ function transpileTypeScript(source: string): string {
 		transpileResult.diagnostics?.filter(
 			(diagnostic) => diagnostic.category === tsApi.DiagnosticCategory.Error,
 		) ?? [];
-	if (diagnostics.length > 0) throw new Error(formatTypeScriptDiagnostics(diagnostics));
+	if (diagnostics.length > 0)
+		throw new Error(formatTypeScriptDiagnostics(diagnostics));
 	return transpileResult.outputText;
 }
 
 /* Execution */
-async function runNodejs(proc: Process, source: string): Promise<PlaygroundRunResult> {
+async function runNodejs(source: string): Promise<PlaygroundRunResult> {
 	const runtime = await ensureNodejsRuntime();
 	const outputLines: OutputLine[] = [];
 	const compiledSource = transpileTypeScript(source);
@@ -447,29 +423,11 @@ async function runNodejs(proc: Process, source: string): Promise<PlaygroundRunRe
 			outputLines.push({ channel: event.channel, message: event.message });
 		},
 	});
-	return { code: result.code, errorMessage: result.errorMessage ?? null, lines: outputLines };
-}
-
-async function runPython(proc: Process, source: string): Promise<PlaygroundRunResult> {
-	const runner = await ensurePyodideRunner();
-	const capture: PyodideCapture = { lines: [] };
-	runner.streamState.activeCapture = capture;
-	try {
-		await runner.pyodide.runPythonAsync(source);
-		return { code: 0, errorMessage: null, lines: capture.lines };
-	} catch (error) {
-		capture.lines.push({
-			channel: "stderr",
-			message: error instanceof Error ? error.message : String(error),
-		});
-		return {
-			code: 1,
-			errorMessage: capture.lines.at(-1)?.message ?? "Python execution failed",
-			lines: capture.lines,
-		};
-	} finally {
-		runner.streamState.activeCapture = null;
-	}
+	return {
+		code: result.code,
+		errorMessage: result.errorMessage ?? null,
+		lines: outputLines,
+	};
 }
 
 async function executeProcess(proc: Process): Promise<void> {
@@ -484,13 +442,14 @@ async function executeProcess(proc: Process): Promise<void> {
 	proc.outputLines = [];
 	updateRunButton(proc);
 	renderProcessOutput(proc);
-	appendOutputToProcess(proc, "system", `Running ${LANGUAGE_CONFIG[proc.language].label}...`);
+	appendOutputToProcess(
+		proc,
+		"system",
+		`Running ${LANGUAGE_CONFIG[proc.language].label}...`,
+	);
 
 	try {
-		const result =
-			proc.language === "nodejs"
-				? await runNodejs(proc, proc.code)
-				: await runPython(proc, proc.code);
+		const result = await runNodejs(proc.code);
 
 		for (const line of result.lines) {
 			appendOutputToProcess(proc, line.channel, line.message);
@@ -498,9 +457,16 @@ async function executeProcess(proc: Process): Promise<void> {
 		if (result.errorMessage && result.lines.length === 0) {
 			appendOutputToProcess(proc, "stderr", result.errorMessage);
 		}
-		appendOutputToProcess(proc, "system", result.code === 0 ? "Exit code 0" : `Exit code ${result.code}`);
+		appendOutputToProcess(
+			proc,
+			"system",
+			result.code === 0 ? "Exit code 0" : `Exit code ${result.code}`,
+		);
 		if (result.code === 0) {
-			setStatus(`${LANGUAGE_CONFIG[proc.language].label} run completed`, "ready");
+			setStatus(
+				`${LANGUAGE_CONFIG[proc.language].label} run completed`,
+				"ready",
+			);
 		} else {
 			setStatus(`${LANGUAGE_CONFIG[proc.language].label} run failed`, "error");
 		}
@@ -512,7 +478,6 @@ async function executeProcess(proc: Process): Promise<void> {
 	} finally {
 		proc.isRunning = false;
 		updateRunButton(proc);
-	
 	}
 }
 
@@ -597,14 +562,21 @@ function ensureWorkspacePanels(): void {
 			<div class="panel-header">
 				<div class="panel-title">SDK Usage</div>
 			</div>
-			<div class="snippet-code"><span class="sk">import</span> { <span class="st">NodeRuntime</span>, <span class="sf">createNodeDriver</span>,
-  <span class="sf">createNodeRuntimeDriverFactory</span>,
-  <span class="sv">allowAll</span> } <span class="sk">from</span> <span class="ss">"secure-exec"</span>;
+			<div class="snippet-code"><span class="sk">import</span> { <span class="sv">allowAll</span>, <span class="sf">createBrowserDriver</span>, <span class="sf">createBrowserRuntimeDriverFactory</span> } <span class="sk">from</span> <span class="ss">"@rivet-dev/agent-os-browser"</span>;
 
-<span class="sc">// Create a sandboxed runtime</span>
-<span class="sk">const</span> <span class="sv">runtime</span> = <span class="sk">new</span> <span class="st">NodeRuntime</span>({
-  <span class="sv">systemDriver</span>: <span class="sf">createNodeDriver</span>({ <span class="sv">permissions</span>: <span class="sv">allowAll</span> }),
-  <span class="sv">runtimeDriverFactory</span>: <span class="sf">createNodeRuntimeDriverFactory</span>(),
+<span class="sc">// Create a browser-backed runtime</span>
+<span class="sk">const</span> <span class="sv">system</span> = <span class="sk">await</span> <span class="sf">createBrowserDriver</span>({
+  <span class="sv">filesystem</span>: <span class="ss">"memory"</span>,
+  <span class="sv">permissions</span>: <span class="sv">allowAll</span>,
+  <span class="sv">useDefaultNetwork</span>: <span class="sk">true</span>,
+});
+
+<span class="sk">const</span> <span class="sv">runtime</span> = <span class="sf">createBrowserRuntimeDriverFactory</span>().<span class="sf">createRuntimeDriver</span>({
+  <span class="sv">system</span>,
+  <span class="sv">runtime</span>: {
+    <span class="sv">process</span>: { <span class="sv">cwd</span>: <span class="ss">"/root"</span> },
+    <span class="sv">os</span>: { <span class="sv">homedir</span>: <span class="ss">"/root"</span>, <span class="sv">tmpdir</span>: <span class="ss">"/tmp"</span> },
+  },
 });
 
 <span class="sc">// Execute code with streaming output</span>
@@ -618,18 +590,39 @@ function ensureWorkspacePanels(): void {
 	workspaceEl.appendChild(rightSidebar);
 
 	/* Grab references */
-	editorContainer = workspaceEl.querySelector<HTMLElement>("#editor")!;
-	editorLabelEl = workspaceEl.querySelector<HTMLElement>("#editor-label")!;
-	editorHintEl = workspaceEl.querySelector<HTMLElement>("#editor-hint")!;
-	outputEl = workspaceEl.querySelector<HTMLElement>("#output")!;
-	runButtonEl = workspaceEl.querySelector<HTMLButtonElement>("#run-button")!;
-	clearButtonEl = workspaceEl.querySelector<HTMLButtonElement>("#clear-button")!;
+	const nextEditorContainer = getChildElement<HTMLElement>(
+		workspaceEl,
+		"#editor",
+	);
+	const nextEditorLabel = getChildElement<HTMLElement>(
+		workspaceEl,
+		"#editor-label",
+	);
+	const nextEditorHint = getChildElement<HTMLElement>(
+		workspaceEl,
+		"#editor-hint",
+	);
+	const nextOutput = getChildElement<HTMLElement>(workspaceEl, "#output");
+	const nextRunButton = getChildElement<HTMLButtonElement>(
+		workspaceEl,
+		"#run-button",
+	);
+	const nextClearButton = getChildElement<HTMLButtonElement>(
+		workspaceEl,
+		"#clear-button",
+	);
 
-	runButtonEl.addEventListener("click", () => {
+	editorContainer = nextEditorContainer;
+	editorLabelEl = nextEditorLabel;
+	editorHintEl = nextEditorHint;
+	outputEl = nextOutput;
+	runButtonEl = nextRunButton;
+
+	nextRunButton.addEventListener("click", () => {
 		const proc = getActiveProcess();
 		if (proc) void executeProcess(proc);
 	});
-	clearButtonEl.addEventListener("click", () => {
+	nextClearButton.addEventListener("click", () => {
 		const proc = getActiveProcess();
 		if (!proc) return;
 		proc.outputLines = [];
@@ -659,7 +652,6 @@ function hideWorkspacePanels(): void {
 	editorHintEl = null;
 	outputEl = null;
 	runButtonEl = null;
-	clearButtonEl = null;
 }
 
 /* Process management */
@@ -699,7 +691,6 @@ function removeProcess(id: string): void {
 	}
 
 	renderProcessList();
-
 }
 
 function switchToProcess(id: string): void {
@@ -709,7 +700,6 @@ function switchToProcess(id: string): void {
 	const current = getActiveProcess();
 	if (current && editor) {
 		current.code = editor.getValue();
-	
 	}
 
 	activeProcessId = id;
@@ -724,7 +714,10 @@ function switchToProcess(id: string): void {
 		editor.setValue(proc.code);
 		const model = editor.getModel();
 		if (model) {
-			monaco.editor.setModelLanguage(model, LANGUAGE_CONFIG[proc.language].monacoLanguage);
+			monaco.editor.setModelLanguage(
+				model,
+				LANGUAGE_CONFIG[proc.language].monacoLanguage,
+			);
 		}
 	} else if (editorContainer) {
 		createEditor(proc);
@@ -733,7 +726,6 @@ function switchToProcess(id: string): void {
 	updateEditorLabels(proc);
 	renderProcessOutput(proc);
 	updateRunButton(proc);
-
 }
 
 function createEditor(proc: Process): void {
@@ -767,7 +759,7 @@ function updateEditorLabels(proc: Process): void {
 }
 
 function buildMenuHTML(): string {
-	const languages: Language[] = ["nodejs", "python"];
+	const languages: Language[] = ["nodejs"];
 	return languages
 		.map((lang) => {
 			const config = LANGUAGE_CONFIG[lang];
@@ -789,7 +781,9 @@ function buildMenuHTML(): string {
 
 function wireMenuClicks(menu: HTMLElement, onDone: () => void): void {
 	menu.addEventListener("click", (e) => {
-		const target = (e.target as HTMLElement).closest<HTMLButtonElement>(".add-process-submenu-item");
+		const target = (e.target as HTMLElement).closest<HTMLButtonElement>(
+			".add-process-submenu-item",
+		);
 		if (!target) return;
 		e.stopPropagation();
 		const language = target.dataset.language as Language;
@@ -839,9 +833,9 @@ async function init(): Promise<void> {
 
 	/* Configure TypeScript language service for Node.js module resolution */
 	monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
-		target: 99, /* ScriptTarget.ESNext */
-		module: 1, /* ModuleKind.CommonJS */
-		moduleResolution: 2, /* ModuleResolutionKind.Node */
+		target: 99 /* ScriptTarget.ESNext */,
+		module: 1 /* ModuleKind.CommonJS */,
+		moduleResolution: 2 /* ModuleResolutionKind.Node */,
 		strict: true,
 		esModuleInterop: true,
 		allowSyntheticDefaultImports: true,
@@ -856,12 +850,9 @@ async function init(): Promise<void> {
 
 	setStatus("Editor ready", "ready");
 
-	/* Pre-initialize both runtimes in background */
+	/* Pre-initialize the runtime in the background */
 	prewarming = true;
-	void Promise.all([
-		ensureNodejsRuntime().catch(() => {}),
-		ensurePyodideRunner().catch(() => {}),
-	]).then(() => {
+	void Promise.all([ensureNodejsRuntime().catch(() => {})]).then(() => {
 		prewarming = false;
 		setStatus("Ready", "ready");
 	});
@@ -869,7 +860,7 @@ async function init(): Promise<void> {
 
 window.addEventListener("beforeunload", () => {
 	void Promise.resolve(nodejsRuntimePromise)
-		.then((runtime) => runtime?.terminate())
+		.then((runtime) => runtime?.terminate?.())
 		.catch(() => {});
 });
 
@@ -877,6 +868,10 @@ init().catch((error) => {
 	setStatus("Editor failed to load", "error");
 	const proc = getActiveProcess();
 	if (proc) {
-		appendOutputToProcess(proc, "stderr", error instanceof Error ? error.message : String(error));
+		appendOutputToProcess(
+			proc,
+			"stderr",
+			error instanceof Error ? error.message : String(error),
+		);
 	}
 });

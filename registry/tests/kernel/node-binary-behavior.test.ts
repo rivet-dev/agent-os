@@ -13,10 +13,10 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { TerminalHarness } from '../../../secure-exec-1/packages/core/test/kernel/terminal-harness.ts';
 import {
   createIntegrationKernel,
   skipUnlessWasmBuilt,
+  TerminalHarness,
 } from './helpers.ts';
 import type { IntegrationKernelResult } from './helpers.ts';
 

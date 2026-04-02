@@ -12,15 +12,16 @@
  */
 
 import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
-import { createWasmVmRuntime } from '@rivet-dev/agent-os-posix';
-import { createKernel, allowAll, createInMemoryFileSystem } from '@secure-exec/core';
-import { createNodeHostNetworkAdapter } from '@secure-exec/nodejs';
-import type { Kernel } from '@secure-exec/core';
-import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { COMMANDS_DIR, hasWasmBinaries } from '../helpers.js';
+import { createWasmVmRuntime } from '@rivet-dev/agent-os/test/runtime';
+import {
+  allowAll,
+  COMMANDS_DIR,
+  createInMemoryFileSystem,
+  createKernel,
+  createNodeHostNetworkAdapter,
+  hasWasmBinaries,
+} from '../helpers.js';
+import type { Kernel } from '../helpers.js';
 import {
   createServer as createHttpServer,
   type IncomingMessage,
@@ -30,6 +31,10 @@ import {
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import { createServer as createTcpServer, type Server as TcpServer } from 'node:net';
 import { execSync } from 'node:child_process';
+import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CURL_PACKAGE_DIR = resolve(__dirname, '../../software/curl/wasm');

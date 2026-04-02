@@ -7,7 +7,7 @@
  */
 
 import { Terminal } from "@xterm/headless";
-import type { Kernel } from "@secure-exec/core";
+import type { Kernel } from "../helpers.js";
 
 type ShellHandle = ReturnType<Kernel["openShell"]>;
 

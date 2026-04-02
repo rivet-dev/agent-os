@@ -3,7 +3,7 @@ name = "cmd-nl"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "nl standalone binary for secure-exec WasmVM"
+description = "nl standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "nl"

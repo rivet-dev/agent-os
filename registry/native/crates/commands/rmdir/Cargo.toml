@@ -3,7 +3,7 @@ name = "cmd-rmdir"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "rmdir standalone binary for secure-exec WasmVM"
+description = "rmdir standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "rmdir"

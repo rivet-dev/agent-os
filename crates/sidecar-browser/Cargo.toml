@@ -1,0 +1,10 @@
+[package]
+name = "agent-os-sidecar-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Browser-side Agent OS sidecar scaffold"
+
+[dependencies]
+agent-os-bridge = { path = "../bridge" }
+agent-os-kernel = { path = "../kernel" }

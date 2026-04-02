@@ -3,7 +3,7 @@ name = "secureexec-jq"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "jq implementation for secure-exec standalone binaries"
+description = "jq implementation for Agent OS standalone binaries"
 
 [dependencies]
 jaq-core = "2.2"

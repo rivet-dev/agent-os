@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { z } from "zod";
 import { AgentOs, hostTool, parseArgv, toolKit } from "../src/index.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 
 // ── Unit tests for parseArgv ──
 
@@ -197,7 +198,7 @@ describe("host tools RPC server (argv)", () => {
 		vm = await AgentOs.create({
 			toolKits: [browserToolKit],
 		});
-		port = Number(vm.kernel.env.AGENTOS_TOOLS_PORT);
+		port = Number(getAgentOsKernel(vm).env.AGENTOS_TOOLS_PORT);
 	});
 
 	afterEach(async () => {

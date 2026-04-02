@@ -20,11 +20,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   COMMANDS_DIR,
   createKernel,
+  NodeFileSystem,
   createWasmVmRuntime,
   createNodeRuntime,
   skipUnlessWasmBuilt,
 } from './helpers.ts';
-import { NodeFileSystem } from '@secure-exec/nodejs';
 
 const wasmSkip = skipUnlessWasmBuilt();
 

@@ -1,4 +1,4 @@
-/// Codex TUI for secure-exec WasmVM.
+/// Codex TUI for Agent OS WasmVM.
 ///
 /// Full terminal UI using ratatui + crossterm backend, rendering through
 /// the WasmVM PTY. This is the interactive entry point — for headless
@@ -229,7 +229,7 @@ fn draw_ui(f: &mut Frame, input: &str, messages: &[String], model: Option<&str>)
 }
 
 fn print_help() {
-    println!("codex {} — interactive Codex TUI for secure-exec WasmVM", VERSION);
+    println!("codex {} — interactive Codex TUI for Agent OS WasmVM", VERSION);
     println!();
     println!("USAGE:");
     println!("    codex [OPTIONS]");

@@ -3,7 +3,7 @@ name = "secureexec-git"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Minimal git implementation for secure-exec WasmVM"
+description = "Minimal git implementation for Agent OS WasmVM"
 
 [lib]
 name = "secureexec_git"

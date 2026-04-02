@@ -3,7 +3,7 @@ name = "cmd-codex-exec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "codex-exec headless agent binary for secure-exec WasmVM"
+description = "codex-exec headless agent binary for Agent OS WasmVM"
 
 [[bin]]
 name = "codex-exec"

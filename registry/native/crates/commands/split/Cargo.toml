@@ -3,7 +3,7 @@ name = "cmd-split"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "split standalone binary for secure-exec WasmVM"
+description = "split standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "split"

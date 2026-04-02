@@ -3,7 +3,7 @@ name = "cmd-which"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "which standalone binary for secure-exec WasmVM"
+description = "which standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "which"

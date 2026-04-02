@@ -9,13 +9,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { createWasmVmRuntime } from '@rivet-dev/agent-os-posix';
-import { createKernel } from '@secure-exec/core';
-import { COMMANDS_DIR, hasWasmBinaries } from '../helpers.js';
-import type { Kernel } from '@secure-exec/core';
+import { createWasmVmRuntime } from '@rivet-dev/agent-os/test/runtime';
+import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import type { Kernel } from '../helpers.js';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-
 
 function skipReason(): string | false {
   if (!hasWasmBinaries) return 'WASM binaries not built (run make wasm in native/wasmvm/)';

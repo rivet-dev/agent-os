@@ -16,7 +16,7 @@
 		"check-types": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@rivet-dev/agent-os-core": "workspace:*",
+		"@rivet-dev/agent-os": "workspace:*",
 		"@mariozechner/pi-coding-agent": "^0.60.0",
 		"pi-acp": "^0.0.23"
 	},

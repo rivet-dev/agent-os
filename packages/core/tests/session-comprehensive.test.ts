@@ -1,4 +1,4 @@
-import type { ManagedProcess } from "@secure-exec/core";
+import type { ManagedProcess } from "../src/runtime-compat.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AcpClient } from "../src/acp-client.js";
 import { AgentOs } from "../src/agent-os.js";
@@ -9,6 +9,7 @@ import type {
 } from "../src/session.js";
 import { Session, type SessionInitData } from "../src/session.js";
 import { createStdoutLineIterable } from "../src/stdout-lines.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 
 /**
  * Comprehensive mock ACP adapter that supports all protocol methods and returns
@@ -195,7 +196,7 @@ async function createTrackedSession(
 	);
 	await vm.writeFile(scriptPath, script);
 	const { iterable, onStdout } = createStdoutLineIterable();
-	const proc = vm.kernel.spawn("node", [scriptPath], {
+	const proc = getAgentOsKernel(vm).spawn("node", [scriptPath], {
 		streamStdin: true,
 		onStdout,
 		env: { HOME: "/home/user" },
@@ -487,7 +488,7 @@ describe("comprehensive session API tests", () => {
 		// Use manual adapter spawn to verify mcpServers are sent in session/new
 		await vm.writeFile("/tmp/mcp-mock.mjs", COMPREHENSIVE_MOCK);
 		const { iterable, onStdout } = createStdoutLineIterable();
-		const proc = vm.kernel.spawn("node", ["/tmp/mcp-mock.mjs"], {
+		const proc = getAgentOsKernel(vm).spawn("node", ["/tmp/mcp-mock.mjs"], {
 			streamStdin: true,
 			onStdout,
 			env: { HOME: "/home/user" },
@@ -635,7 +636,7 @@ describe("comprehensive session API tests", () => {
 		).replace(/configOptions: \[[\s\S]*?\],\n/, "configOptions: [],\n");
 		await vm.writeFile("/tmp/no-config-mock.mjs", script);
 		const { iterable, onStdout } = createStdoutLineIterable();
-		const proc = vm.kernel.spawn("node", ["/tmp/no-config-mock.mjs"], {
+		const proc = getAgentOsKernel(vm).spawn("node", ["/tmp/no-config-mock.mjs"], {
 			streamStdin: true,
 			onStdout,
 			env: { HOME: "/home/user" },
@@ -760,7 +761,7 @@ describe("comprehensive session API tests", () => {
 		await vm.writeFile("/tmp/no-modes-mock.mjs", noModesScript);
 		const { iterable: iterable2, onStdout: onStdout2 } =
 			createStdoutLineIterable();
-		const proc2 = vm.kernel.spawn("node", ["/tmp/no-modes-mock.mjs"], {
+		const proc2 = getAgentOsKernel(vm).spawn("node", ["/tmp/no-modes-mock.mjs"], {
 			streamStdin: true,
 			onStdout: onStdout2,
 			env: { HOME: "/home/user" },

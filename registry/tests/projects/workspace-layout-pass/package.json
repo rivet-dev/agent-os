@@ -1,0 +1,7 @@
+{
+	"name": "project-matrix-workspace-layout-pass",
+	"private": true,
+	"workspaces": [
+		"packages/*"
+	]
+}
