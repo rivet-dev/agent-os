@@ -37,7 +37,8 @@
     "@rivet-dev/agent-os-tree": "workspace:*",
     "@rivet-dev/agent-os-file": "workspace:*",
     "@rivet-dev/agent-os-yq": "workspace:*",
-    "@rivet-dev/agent-os-codex": "workspace:*"
+    "@rivet-dev/agent-os-codex": "workspace:*",
+    "@rivet-dev/agent-os-pngcrush": "workspace:*"
   },
   "devDependencies": {
     "@rivet-dev/agent-os-registry-types": "link:../../../packages/registry-types",

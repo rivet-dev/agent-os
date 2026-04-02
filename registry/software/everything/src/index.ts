@@ -16,6 +16,7 @@ import tree from "@rivet-dev/agent-os-tree";
 import file from "@rivet-dev/agent-os-file";
 import yq from "@rivet-dev/agent-os-yq";
 import codex from "@rivet-dev/agent-os-codex";
+import pngcrush from "@rivet-dev/agent-os-pngcrush";
 
 const everything = [
 	coreutils,
@@ -36,6 +37,7 @@ const everything = [
 	file,
 	yq,
 	codex,
+	pngcrush,
 ];
 
 export default everything;
@@ -58,4 +60,5 @@ export {
 	file,
 	yq,
 	codex,
+	pngcrush,
 };
