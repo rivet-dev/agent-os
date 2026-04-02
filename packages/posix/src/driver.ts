@@ -50,7 +50,7 @@ import { ModuleCache } from './module-cache.js';
 import { readdir, stat } from 'node:fs/promises';
 import { existsSync, statSync } from 'node:fs';
 import { basename, isAbsolute, join } from 'node:path';
-import { type Socket } from 'node:net';
+import { type Socket, isIP } from 'node:net';
 import { connect as tlsConnect, type TLSSocket } from 'node:tls';
 import { lookup } from 'node:dns/promises';
 
@@ -1325,8 +1325,11 @@ class WasmVmRuntimeDriver implements RuntimeDriver {
           const hostname = msg.args.hostname as string;
           const tlsOpts: Record<string, unknown> = {
             socket: realSock,
-            servername: hostname, // SNI
           };
+          // SNI is not allowed for IP addresses in Node.js
+          if (!isIP(hostname)) {
+            tlsOpts.servername = hostname;
+          }
           if (msg.args.verifyPeer === false) {
             tlsOpts.rejectUnauthorized = false;
           }
