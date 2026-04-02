@@ -63,7 +63,7 @@ NATIVE_CFLAGS := -O0 -g -I include/
 COMMANDS_DIR ?= ../target/wasm32-wasip1/release/commands
 
 # Real commands to install (add command names as they are opted in)
-COMMANDS := zip unzip envsubst sqlite3 curl wget duckdb
+COMMANDS := zip unzip envsubst sqlite3 curl wget duckdb pngcrush
 
 # Programs requiring patched sysroot (Tier 2+ custom host imports)
 PATCHED_PROGRAMS := isatty_test getpid_test getppid_test getppid_verify userinfo pipe_test dup_test spawn_child spawn_exit_code pipeline kill_child waitpid_return waitpid_edge syscall_coverage getpwuid_test signal_tests sigaction_behavior delayed_tcp_echo delayed_kill pipe_edge tcp_echo tcp_server udp_echo unix_socket signal_handler http_get dns_lookup sqlite3_cli curl wget
@@ -88,10 +88,10 @@ endif
 
 WASM_PROG_NAMES := $(sort $(basename $(notdir $(SOURCES))) $(CUSTOM_WASM_PROG_NAMES))
 NATIVE_PROG_NAMES := $(basename $(notdir $(SOURCES)))
-PROGRAM_REPORT_NAMES := $(WASM_PROG_NAMES) duckdb
+PROGRAM_REPORT_NAMES := $(WASM_PROG_NAMES) duckdb pngcrush
 
 # Default WASM output targets
-EXTRA_WASM_OUTPUTS := $(BUILD_DIR)/duckdb
+EXTRA_WASM_OUTPUTS := $(BUILD_DIR)/duckdb $(BUILD_DIR)/pngcrush
 WASM_OUTPUTS := $(addprefix $(BUILD_DIR)/,$(WASM_PROG_NAMES)) $(EXTRA_WASM_OUTPUTS)
 # Native output targets
 NATIVE_OUTPUTS := $(addprefix $(NATIVE_DIR)/,$(NATIVE_PROG_NAMES))
@@ -144,6 +144,9 @@ MINIZIP_URL := https://github.com/madler/zlib/archive/refs/tags/v1.3.1.zip
 DUCKDB_VERSION := v1.5.0
 DUCKDB_GIT_DESCRIBE := $(DUCKDB_VERSION)-0-g0123456789
 DUCKDB_URL := https://github.com/duckdb/duckdb/archive/refs/tags/$(DUCKDB_VERSION).tar.gz
+# pngcrush — PNG optimizer with bundled libpng and zlib
+PNGCRUSH_TAG := pngcrush-20171101
+PNGCRUSH_URL := https://github.com/pnggroup/pngcrush/archive/refs/tags/$(PNGCRUSH_TAG).tar.gz
 
 LIBS_DIR    := libs
 LIBS_CACHE  := .cache/libs
@@ -198,8 +201,17 @@ libs/duckdb/CMakeLists.txt:
 	@mkdir -p $(LIBS_DIR)/duckdb
 	@tar -xzf "$(LIBS_CACHE)/duckdb.tar.gz" --strip-components=1 -C $(LIBS_DIR)/duckdb
 
+libs/pngcrush/pngcrush.c:
+	@echo "Fetching pngcrush $(PNGCRUSH_TAG)..."
+	@mkdir -p $(LIBS_CACHE)
+	@curl -fSL "$(PNGCRUSH_URL)" -o "$(LIBS_CACHE)/pngcrush.tar.gz"
+	@rm -rf $(LIBS_DIR)/pngcrush
+	@mkdir -p $(LIBS_DIR)/pngcrush
+	@tar -xzf "$(LIBS_CACHE)/pngcrush.tar.gz" --strip-components=1 -C $(LIBS_DIR)/pngcrush
+	@cp pngcrush-overlay/pnglibconf.h pngcrush-overlay/cexcept.h $(LIBS_DIR)/pngcrush/
+
 .PHONY: fetch-libs clean-libs
-fetch-libs: libs/sqlite3/sqlite3.c libs/zlib/zutil.c libs/minizip/ioapi.c libs/cjson/cJSON.c libs/curl/lib/easy.c libs/duckdb/CMakeLists.txt
+fetch-libs: libs/sqlite3/sqlite3.c libs/zlib/zutil.c libs/minizip/ioapi.c libs/cjson/cJSON.c libs/curl/lib/easy.c libs/duckdb/CMakeLists.txt libs/pngcrush/pngcrush.c
 
 clean-libs:
 	rm -rf $(LIBS_DIR) $(LIBS_CACHE)
@@ -512,6 +524,26 @@ $(BUILD_DIR)/unzip: programs/unzip.c $(ZLIB_SRCS) $(MINIZIP_UNZIP_SRCS) $(WASI_S
 $(NATIVE_DIR)/unzip: programs/unzip.c $(ZLIB_SRCS) $(MINIZIP_UNZIP_SRCS)
 	@mkdir -p $(NATIVE_DIR)
 	$(NATIVE_CC) $(NATIVE_CFLAGS) $(ZIP_INCLUDES) -o $@ programs/unzip.c $(ZLIB_SRCS) $(MINIZIP_UNZIP_SRCS) -lz
+
+# pngcrush: PNG optimizer — compiles pngcrush.c with bundled libpng (unified) and zlib
+PNGCRUSH_ZLIB_SRCS := $(addprefix libs/pngcrush/,adler32.c compress.c crc32.c deflate.c \
+                       infback.c inffast.c inflate.c inftrees.c trees.c uncompr.c zutil.c)
+PNGCRUSH_CFLAGS    := -DLIBPNG_UNIFIED -DNO_GZ -isystem pngcrush-overlay -Ilibs/pngcrush \
+                      -D_WASI_EMULATED_PROCESS_CLOCKS
+
+$(BUILD_DIR)/pngcrush: libs/pngcrush/pngcrush.c $(WASI_SDK_DIR)/bin/clang
+	@mkdir -p $(BUILD_DIR)
+	$(CC) --target=wasm32-wasip1 --sysroot=$(WASI_SDK_DIR)/share/wasi-sysroot -O2 -I include/ \
+	    $(PNGCRUSH_CFLAGS) -o $@.wasm \
+	    libs/pngcrush/pngcrush.c $(PNGCRUSH_ZLIB_SRCS) -lm \
+	    -lwasi-emulated-process-clocks
+	wasm-opt -O3 --strip-debug $@.wasm -o $@
+	@rm -f $@.wasm
+
+$(NATIVE_DIR)/pngcrush: libs/pngcrush/pngcrush.c
+	@mkdir -p $(NATIVE_DIR)
+	$(NATIVE_CC) $(NATIVE_CFLAGS) $(PNGCRUSH_CFLAGS) -o $@ \
+	    libs/pngcrush/pngcrush.c $(PNGCRUSH_ZLIB_SRCS) -lm -lz
 
 # curl_test: links libcurl (HTTP/HTTPS build for WASM via host_net + host_tls)
 CURL_SRCS := $(wildcard libs/curl/lib/*.c) $(wildcard libs/curl/lib/vauth/*.c) \

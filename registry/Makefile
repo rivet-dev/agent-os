@@ -14,7 +14,7 @@ TS_MARKER   := $(MARKER_DIR)/ts-built
 
 # Command packages (excludes _types and meta-packages)
 CMD_PACKAGES := coreutils sed grep gawk findutils diffutils tar gzip \
-                curl http-get wget zip unzip jq ripgrep fd tree file sqlite3 duckdb yq codex git
+                curl http-get wget zip unzip jq ripgrep fd tree file sqlite3 duckdb yq codex git pngcrush
 
 # Meta-packages
 META_PACKAGES := common build-essential everything
@@ -185,6 +185,10 @@ $(COPY_MARKER): $(RUST_MARKER) $(C_MARKER)
 	@# --- git ---
 	@mkdir -p software/git/wasm
 	@[ -f "$(COMMANDS_DIR)/git" ] && cp -f "$(COMMANDS_DIR)/git" software/git/wasm/ || echo "  WARN: git not found"
+
+	@# --- pngcrush (C build) ---
+	@mkdir -p software/pngcrush/wasm
+	@[ -f "$(COMMANDS_DIR)/pngcrush" ] && cp -f "$(COMMANDS_DIR)/pngcrush" software/pngcrush/wasm/ || echo "  WARN: pngcrush not found"
 
 	@echo "=== Copy complete ==="
 	@touch $(COPY_MARKER)

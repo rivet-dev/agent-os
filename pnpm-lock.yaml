@@ -724,6 +724,9 @@ importers:
       '@rivet-dev/agent-os-jq':
         specifier: workspace:*
         version: link:../jq
+      '@rivet-dev/agent-os-pngcrush':
+        specifier: workspace:*
+        version: link:../pngcrush
       '@rivet-dev/agent-os-ripgrep':
         specifier: workspace:*
         version: link:../ripgrep
@@ -757,6 +760,18 @@ importers:
         version: 5.9.3
 
   registry/software/fd:
+    devDependencies:
+      '@rivet-dev/agent-os-registry-types':
+        specifier: link:../../../packages/registry-types
+        version: link:../../../packages/registry-types
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.15
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+
+  registry/software/ffmpeg:
     devDependencies:
       '@rivet-dev/agent-os-registry-types':
         specifier: link:../../../packages/registry-types
@@ -805,6 +820,18 @@ importers:
         version: 5.9.3
 
   registry/software/git:
+    devDependencies:
+      '@rivet-dev/agent-os-registry-types':
+        specifier: link:../../../packages/registry-types
+        version: link:../../../packages/registry-types
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.15
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+
+  registry/software/gog:
     devDependencies:
       '@rivet-dev/agent-os-registry-types':
         specifier: link:../../../packages/registry-types
@@ -876,6 +903,18 @@ importers:
         specifier: ^5.9.2
         version: 5.9.3
 
+  registry/software/pngcrush:
+    devDependencies:
+      '@rivet-dev/agent-os-registry-types':
+        specifier: link:../../../packages/registry-types
+        version: link:../../../packages/registry-types
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.15
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+
   registry/software/ripgrep:
     devDependencies:
       '@rivet-dev/agent-os-registry-types':
@@ -889,6 +928,18 @@ importers:
         version: 5.9.3
 
   registry/software/sed:
+    devDependencies:
+      '@rivet-dev/agent-os-registry-types':
+        specifier: link:../../../packages/registry-types
+        version: link:../../../packages/registry-types
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.15
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+
+  registry/software/slack-cli:
     devDependencies:
       '@rivet-dev/agent-os-registry-types':
         specifier: link:../../../packages/registry-types

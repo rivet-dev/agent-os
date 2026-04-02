@@ -1,0 +1,28 @@
+{
+  "name": "@rivet-dev/agent-os-pngcrush",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "PNG optimizer for agentOS (pngcrush)",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "wasm"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "check-types": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@rivet-dev/agent-os-registry-types": "link:../../../packages/registry-types",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.9.2"
+  }
+}
