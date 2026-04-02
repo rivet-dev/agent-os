@@ -2,12 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { existsSync } from "node:fs";
 import coreutils from "@rivet-dev/agent-os-coreutils";
-import curl from "@rivet-dev/agent-os-curl";
 import duckdb from "../../../registry/software/duckdb/dist/index.js";
+import httpGet from "../../../registry/software/http-get/dist/index.js";
 import { AgentOs } from "../src/index.js";
 
 const hasDuckdbPackage = existsSync(`${duckdb.commandDir}/duckdb`);
-const hasCurlPackage = existsSync(`${curl.commandDir}/curl`);
+const hasHttpGetPackage = existsSync(`${httpGet.commandDir}/http_get`);
 const hasCoreutilsPackage = existsSync(`${coreutils.commandDir}/sh`);
 
 function closeServer(server: Server) {
@@ -19,13 +19,13 @@ function closeServer(server: Server) {
 	});
 }
 
-describe.skipIf(!hasDuckdbPackage || !hasCurlPackage || !hasCoreutilsPackage)(
+describe.skipIf(!hasDuckdbPackage || !hasHttpGetPackage || !hasCoreutilsPackage)(
 	"duckdb registry package",
 	() => {
 		let vm: AgentOs;
 
 		beforeEach(async () => {
-			vm = await AgentOs.create({ software: [coreutils, curl, duckdb] });
+			vm = await AgentOs.create({ software: [coreutils, httpGet, duckdb] });
 		});
 
 		afterEach(async () => {
@@ -46,7 +46,7 @@ describe.skipIf(!hasDuckdbPackage || !hasCurlPackage || !hasCoreutilsPackage)(
 			expect(await vm.exists("/tmp/app.duckdb")).toBe(true);
 		});
 
-		test("fetches remote CSV data with curl and queries it from DuckDB", async () => {
+		test("fetches remote CSV data into the VFS and queries it from DuckDB", async () => {
 			const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 				if (req.url === "/remote.csv") {
 					res.writeHead(200, { "Content-Type": "text/csv" });
@@ -67,7 +67,7 @@ describe.skipIf(!hasDuckdbPackage || !hasCurlPackage || !hasCoreutilsPackage)(
 				}
 
 				let result = await vm.exec(
-					`curl -fsS -o /tmp/remote.csv http://127.0.0.1:${address.port}/remote.csv`,
+					`http_get ${address.port} /remote.csv /tmp/remote.csv`,
 				);
 				expect(result.exitCode).toBe(0);
 
@@ -81,7 +81,7 @@ describe.skipIf(!hasDuckdbPackage || !hasCurlPackage || !hasCoreutilsPackage)(
 			}
 		});
 
-		test("keeps DuckDB itself file-scoped while curl handles remote fetches", async () => {
+		test("keeps DuckDB itself file-scoped while the network helper handles remote fetches", async () => {
 			let requests = 0;
 			const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 				requests += 1;
@@ -116,11 +116,11 @@ describe.skipIf(!hasDuckdbPackage || !hasCurlPackage || !hasCoreutilsPackage)(
 		test("propagates registry package command permission tiers into the runtime", async () => {
 			await vm.dispose();
 
-			const curlReadOnly = {
-				...curl,
-				commands: [{ name: "curl", permissionTier: "read-only" as const }],
+			const httpGetReadOnly = {
+				...httpGet,
+				commands: [{ name: "http_get", permissionTier: "read-only" as const }],
 			};
-			vm = await AgentOs.create({ software: [coreutils, curlReadOnly] });
+			vm = await AgentOs.create({ software: [coreutils, httpGetReadOnly] });
 
 			const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 				res.writeHead(200, { "Content-Type": "text/plain" });
@@ -135,9 +135,7 @@ describe.skipIf(!hasDuckdbPackage || !hasCurlPackage || !hasCoreutilsPackage)(
 					throw new Error("failed to bind test HTTP server");
 				}
 
-				const result = await vm.exec(
-					`curl -fsS http://127.0.0.1:${address.port}/blocked`,
-				);
+				const result = await vm.exec(`http_get ${address.port} /blocked`);
 				expect(result.exitCode).not.toBe(0);
 			} finally {
 				await closeServer(server);

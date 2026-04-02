@@ -14,7 +14,7 @@ TS_MARKER   := $(MARKER_DIR)/ts-built
 
 # Command packages (excludes _types and meta-packages)
 CMD_PACKAGES := coreutils sed grep gawk findutils diffutils tar gzip \
-                curl wget zip unzip jq ripgrep fd tree file sqlite3 duckdb yq codex git
+                curl http-get wget zip unzip jq ripgrep fd tree file sqlite3 duckdb yq codex git
 
 # Meta-packages
 META_PACKAGES := common build-essential everything
@@ -128,6 +128,10 @@ $(COPY_MARKER): $(RUST_MARKER) $(C_MARKER)
 	@# --- curl (C build, needs patched sysroot) ---
 	@mkdir -p software/curl/wasm
 	@[ -f "$(COMMANDS_DIR)/curl" ] && cp -f "$(COMMANDS_DIR)/curl" software/curl/wasm/ || echo "  WARN: curl not found (needs patched sysroot)"
+
+	@# --- http-get ---
+	@mkdir -p software/http-get/wasm
+	@[ -f "$(COMMANDS_DIR)/http_get" ] && cp -f "$(COMMANDS_DIR)/http_get" software/http-get/wasm/ || echo "  WARN: http_get not found"
 
 	@# --- wget (C build, needs patched sysroot) ---
 	@mkdir -p software/wget/wasm

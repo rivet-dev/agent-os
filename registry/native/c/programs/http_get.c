@@ -9,11 +9,13 @@
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "usage: http_get <port>\n");
+        fprintf(stderr, "usage: http_get <port> [path] [output_file]\n");
         return 1;
     }
 
     int port = atoi(argv[1]);
+    const char *path = argc >= 3 ? argv[2] : "/";
+    const char *output_file = argc >= 4 ? argv[3] : NULL;
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -33,8 +35,20 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    const char *request = "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n";
-    ssize_t sent = send(fd, request, strlen(request), 0);
+    char request[1024];
+    int request_len = snprintf(
+        request,
+        sizeof(request),
+        "GET %s HTTP/1.0\r\nHost: localhost\r\n\r\n",
+        path
+    );
+    if (request_len < 0 || (size_t)request_len >= sizeof(request)) {
+        fprintf(stderr, "request path too long\n");
+        close(fd);
+        return 1;
+    }
+
+    ssize_t sent = send(fd, request, (size_t)request_len, 0);
     if (sent < 0) {
         perror("send");
         close(fd);
@@ -56,7 +70,22 @@ int main(int argc, char *argv[]) {
     const char *body = strstr(response, "\r\n\r\n");
     if (body) {
         body += 4;
-        printf("body: %s\n", body);
+        if (output_file) {
+            FILE *out = fopen(output_file, "wb");
+            if (!out) {
+                perror("fopen");
+                return 1;
+            }
+            size_t body_len = total - (size_t)(body - response);
+            if (fwrite(body, 1, body_len, out) != body_len) {
+                perror("fwrite");
+                fclose(out);
+                return 1;
+            }
+            fclose(out);
+        } else {
+            printf("body: %s\n", body);
+        }
     } else {
         printf("body: (no separator found)\n");
         return 1;

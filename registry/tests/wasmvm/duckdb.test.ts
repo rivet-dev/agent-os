@@ -245,10 +245,10 @@ describe.skipIf(!hasWasmDuckDB)('duckdb command', { timeout: 120_000 }, () => {
           );
           expect(result.exitCode).toBe(0);
         } else {
-          result = await kernel.exec(`http_get ${address.port}`);
+          result = await kernel.exec(
+            `http_get ${address.port} /remote.csv /tmp/remote.csv`
+          );
           expect(result.exitCode).toBe(0);
-          const body = result.stdout.replace(/^body:\s*/, '').trimStart();
-          await filesystem.writeFile('/tmp/remote.csv', body.endsWith('\n') ? body : `${body}\n`);
         }
 
         expect(await filesystem.readTextFile('/tmp/remote.csv')).toContain('city,value');

@@ -1,0 +1,7 @@
+{
+  "name": "@rivet-dev/agent-os-http-get",
+  "type": "wasm",
+  "description": "Minimal HTTP GET fetch helper",
+  "aptName": "http-get",
+  "source": "c"
+}
