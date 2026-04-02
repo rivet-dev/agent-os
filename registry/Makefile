@@ -15,7 +15,6 @@ TS_MARKER   := $(MARKER_DIR)/ts-built
 # Command packages (excludes _types and meta-packages)
 CMD_PACKAGES := coreutils sed grep gawk findutils diffutils tar gzip \
                 curl http-get wget zip unzip jq ripgrep fd tree file sqlite3 duckdb yq codex git
-                curl http-get wget zip unzip jq ripgrep fd tree file sqlite3 duckdb yq codex git
 
 # Meta-packages
 META_PACKAGES := common build-essential everything
