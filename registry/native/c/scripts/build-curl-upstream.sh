@@ -207,16 +207,20 @@ if "#define CURL_DISABLE_OPENSSL_AUTO_LOAD_CONFIG 1" not in text:
 config.write_text(text)
 PY
 
-echo "Patching generated lib/Makefile to compile wasi_tls.c..."
+echo "Patching generated lib/Makefile to compile wasi_tls.c and wasi_getsockopt.c..."
 cat >> lib/Makefile <<'EOF'
 
-am_libcurl_la_OBJECTS += vtls/libcurl_la-wasi_tls.lo
-libcurl_la_LIBADD += vtls/libcurl_la-wasi_tls.lo
-libcurl.la: vtls/libcurl_la-wasi_tls.lo
+am_libcurl_la_OBJECTS += vtls/libcurl_la-wasi_tls.lo libcurl_la-wasi_getsockopt.lo
+libcurl_la_LIBADD += vtls/libcurl_la-wasi_tls.lo libcurl_la-wasi_getsockopt.lo
+libcurl.la: vtls/libcurl_la-wasi_tls.lo libcurl_la-wasi_getsockopt.lo
 
 vtls/libcurl_la-wasi_tls.lo: vtls/$(am__dirstamp) vtls/$(DEPDIR)/$(am__dirstamp) vtls/wasi_tls.c
 	$(AM_V_CC)$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(libcurl_la_CPPFLAGS) $(CPPFLAGS) $(libcurl_la_CFLAGS) $(CFLAGS) -MT vtls/libcurl_la-wasi_tls.lo -MD -MP -MF vtls/$(DEPDIR)/libcurl_la-wasi_tls.Tpo -c -o vtls/libcurl_la-wasi_tls.lo `test -f 'vtls/wasi_tls.c' || echo '$(srcdir)/'`vtls/wasi_tls.c
 	$(AM_V_at)$(am__mv) vtls/$(DEPDIR)/libcurl_la-wasi_tls.Tpo vtls/$(DEPDIR)/libcurl_la-wasi_tls.Plo
+
+libcurl_la-wasi_getsockopt.lo: wasi_getsockopt.c
+	$(AM_V_CC)$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(libcurl_la_CPPFLAGS) $(CPPFLAGS) $(libcurl_la_CFLAGS) $(CFLAGS) -MT libcurl_la-wasi_getsockopt.lo -MD -MP -MF $(DEPDIR)/libcurl_la-wasi_getsockopt.Tpo -c -o libcurl_la-wasi_getsockopt.lo `test -f 'wasi_getsockopt.c' || echo '$(srcdir)/'`wasi_getsockopt.c
+	$(AM_V_at)$(am__mv) $(DEPDIR)/libcurl_la-wasi_getsockopt.Tpo $(DEPDIR)/libcurl_la-wasi_getsockopt.Plo
 EOF
 
 echo "Building upstream libcurl..."
