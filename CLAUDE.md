@@ -98,6 +98,7 @@ The registry software packages depend on `@rivet-dev/agent-os-registry-types` (i
 ## Dependencies
 
 - **secure-exec** is published on npm as `secure-exec`, `@secure-exec/core`, `@secure-exec/nodejs`, `@secure-exec/v8`, etc. Pinned at `^0.2.1`.
+- **SQLite host bindings** — The VM proxies SQLite through the host runtime. On Node.js, requires `node:sqlite` (Node >= 22.5.0 with `--experimental-sqlite`, or Node >= 23.4.0 where it is stable). On Bun, uses `bun:sqlite` (>= 1.0.0) via an adapter layer that normalizes to the `node:sqlite` API shape. The module is lazy-loaded on first `AgentOs.create()` — importing `@rivet-dev/agent-os-core` never eagerly loads SQLite.
 - **Rivet repo** — A modifiable copy lives at `~/r-aos`. Use this when you need to make changes to the Rivet codebase.
 - Mount host `node_modules` read-only for agent packages (pi-acp, etc.)
 
@@ -146,6 +147,7 @@ Each agent type needs:
 - Kernel child_process.spawn can't resolve bare commands from PATH (e.g., `pi`). Use `PI_ACP_PI_COMMAND` env var to point to the `.js` entry directly. The Node runtime resolves `.js`/`.mjs`/`.cjs` file paths as node scripts.
 - `kernel.readFile()` does NOT see the ModuleAccessFileSystem overlay — read host files directly with `readFileSync` for package.json resolution
 - Native ELF binaries cannot execute in the VM — the kernel's command resolver only handles `.js`/`.mjs`/`.cjs` scripts and WASM commands. `child_process.spawnSync` returns `{ status: 1, stderr: "ENOENT: command not found" }` for native binaries.
+- **bun:sqlite adapter parity gaps** — When running on Bun, the SQLite bindings use an adapter layer with known behavioral differences: `setReadBigInts()` is a no-op (Bun handles big integers at the database level via `safeIntegers`), `columns()` returns `[{ name }]` only (no `table`, `type`, `database`, or `column` fields), and `get()` normalizes Bun's `null`-for-no-rows to `undefined` to match `node:sqlite`. Database constructor options are not translated between runtimes (`readOnly` vs `readonly`).
 
 ### Debugging Policy
 
