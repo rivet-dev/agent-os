@@ -265,7 +265,7 @@ function createKernelFileIO(): WasiFileIO {
       // Permission check: block write flags for read-only/isolated tiers
       const wantsRead = !!(rightsBase & RIGHT_FD_READ);
       const wantsWrite = !!(rightsBase & RIGHT_FD_WRITE);
-      const hasWriteIntent = !!(oflags & 0x1) || !!(oflags & 0x8) || !!(fdflags & 0x1) || wantsWrite;
+      const hasWriteIntent = !!(oflags & 0x1) || !!(oflags & 0x8) || !!(fdflags & 0x1);
       if (isWriteBlocked() && hasWriteIntent) {
         return { errno: ERRNO_EACCES, fd: -1, filetype: 0 };
       }
