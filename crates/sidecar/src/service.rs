@@ -2,8 +2,9 @@ use crate::google_drive_plugin::GoogleDriveMountPlugin;
 use crate::host_dir_plugin::HostDirMountPlugin;
 use crate::protocol::{
     AuthenticatedResponse, BoundUdpSnapshotResponse, CloseStdinRequest, ConfigureVmRequest,
-    DisposeReason, DisposeVmRequest, EventFrame, EventPayload, ExecuteRequest, FindBoundUdpRequest,
-    FindListenerRequest, GetSignalStateRequest, GetZombieTimerCountRequest,
+    DiagnosticsRequest, DiagnosticsSnapshotResponse, DisposeReason, DisposeVmRequest, EventFrame,
+    EventPayload, ExecuteRequest, FindBoundUdpRequest, FindListenerRequest, GetSignalStateRequest,
+    GetZombieTimerCountRequest,
     GuestFilesystemCallRequest, GuestFilesystemOperation, GuestFilesystemResultResponse,
     GuestFilesystemStat, GuestRuntimeKind, KillProcessRequest, ListenerSnapshotResponse,
     OpenSessionRequest, OwnershipScope, ProcessExitedEvent, ProcessKilledResponse,
@@ -29,10 +30,13 @@ use agent_os_bridge::{
     RenameRequest, SymlinkRequest, TruncateRequest, WriteFileRequest,
 };
 use agent_os_execution::{
-    CreateJavascriptContextRequest, CreateWasmContextRequest, JavascriptExecution,
-    JavascriptExecutionEngine, JavascriptExecutionError, JavascriptExecutionEvent,
-    StartJavascriptExecutionRequest, StartWasmExecutionRequest, WasmExecution, WasmExecutionEngine,
-    WasmExecutionError, WasmExecutionEvent,
+    CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
+    JavascriptExecution, JavascriptExecutionEngine, JavascriptExecutionError,
+    JavascriptExecutionEvent, PythonExecution, PythonExecutionEngine, PythonExecutionError,
+    PythonExecutionEvent, PythonVfsRpcMethod, PythonVfsRpcRequest, PythonVfsRpcResponsePayload,
+    PythonVfsRpcStat, StartJavascriptExecutionRequest, StartPythonExecutionRequest,
+    StartWasmExecutionRequest, WasmExecution, WasmExecutionEngine, WasmExecutionError,
+    WasmExecutionEvent,
 };
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{
@@ -75,6 +79,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const EXECUTION_DRIVER_NAME: &str = "agent-os-sidecar-execution";
 const JAVASCRIPT_COMMAND: &str = "node";
+const PYTHON_COMMAND: &str = "python";
 const WASM_COMMAND: &str = "wasm";
 const HOST_REALPATH_MAX_SYMLINK_DEPTH: usize = 40;
 const DISPOSE_VM_SIGTERM_GRACE: Duration = Duration::from_millis(100);
@@ -1301,6 +1306,7 @@ struct ActiveProcess {
 #[derive(Debug)]
 enum ActiveExecution {
     Javascript(JavascriptExecution),
+    Python(PythonExecution),
     Wasm(WasmExecution),
 }
 
@@ -1308,6 +1314,7 @@ enum ActiveExecution {
 enum ActiveExecutionEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
+    PythonVfsRpcRequest(PythonVfsRpcRequest),
     Exited(i32),
 }
 
@@ -1327,6 +1334,7 @@ impl ActiveExecution {
     fn child_pid(&self) -> u32 {
         match self {
             Self::Javascript(execution) => execution.child_pid(),
+            Self::Python(execution) => execution.child_pid(),
             Self::Wasm(execution) => execution.child_pid(),
         }
     }
@@ -1334,6 +1342,9 @@ impl ActiveExecution {
     fn write_stdin(&mut self, chunk: &[u8]) -> Result<(), SidecarError> {
         match self {
             Self::Javascript(execution) => execution
+                .write_stdin(chunk)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Python(execution) => execution
                 .write_stdin(chunk)
                 .map_err(|error| SidecarError::Execution(error.to_string())),
             Self::Wasm(execution) => execution
@@ -1347,9 +1358,43 @@ impl ActiveExecution {
             Self::Javascript(execution) => execution
                 .close_stdin()
                 .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Python(execution) => execution
+                .close_stdin()
+                .map_err(|error| SidecarError::Execution(error.to_string())),
             Self::Wasm(execution) => execution
                 .close_stdin()
                 .map_err(|error| SidecarError::Execution(error.to_string())),
+        }
+    }
+
+    fn respond_python_vfs_rpc_success(
+        &mut self,
+        id: u64,
+        payload: PythonVfsRpcResponsePayload,
+    ) -> Result<(), SidecarError> {
+        match self {
+            Self::Python(execution) => execution
+                .respond_vfs_rpc_success(id, payload)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            _ => Err(SidecarError::InvalidState(String::from(
+                "only Python executions can service Python VFS RPC responses",
+            ))),
+        }
+    }
+
+    fn respond_python_vfs_rpc_error(
+        &mut self,
+        id: u64,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<(), SidecarError> {
+        match self {
+            Self::Python(execution) => execution
+                .respond_vfs_rpc_error(id, code, message)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            _ => Err(SidecarError::InvalidState(String::from(
+                "only Python executions can service Python VFS RPC responses",
+            ))),
         }
     }
 
@@ -1368,6 +1413,19 @@ impl ActiveExecution {
                         JavascriptExecutionEvent::Exited(code) => {
                             ActiveExecutionEvent::Exited(code)
                         }
+                    })
+                })
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Python(execution) => execution
+                .poll_event(timeout)
+                .map(|event| {
+                    event.map(|event| match event {
+                        PythonExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
+                        PythonExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
+                        PythonExecutionEvent::VfsRpcRequest(request) => {
+                            ActiveExecutionEvent::PythonVfsRpcRequest(request)
+                        }
+                        PythonExecutionEvent::Exited(code) => ActiveExecutionEvent::Exited(code),
                     })
                 })
                 .map_err(|error| SidecarError::Execution(error.to_string())),
@@ -1391,6 +1449,7 @@ pub struct NativeSidecar<B> {
     mount_plugins: FileSystemPluginRegistry<MountPluginContext<B>>,
     cache_root: PathBuf,
     javascript_engine: JavascriptExecutionEngine,
+    python_engine: PythonExecutionEngine,
     wasm_engine: WasmExecutionEngine,
     next_connection_id: usize,
     next_session_id: usize,
@@ -1454,6 +1513,7 @@ where
             mount_plugins,
             cache_root,
             javascript_engine: JavascriptExecutionEngine::default(),
+            python_engine: PythonExecutionEngine::default(),
             wasm_engine: WasmExecutionEngine::default(),
             next_connection_id: 0,
             next_session_id: 0,
@@ -1689,7 +1749,7 @@ where
         kernel
             .register_driver(CommandDriver::new(
                 EXECUTION_DRIVER_NAME,
-                [JAVASCRIPT_COMMAND, WASM_COMMAND],
+                [JAVASCRIPT_COMMAND, PYTHON_COMMAND, WASM_COMMAND],
             ))
             .map_err(kernel_error)?;
         kernel
@@ -2188,6 +2248,7 @@ where
 
         let command = match payload.runtime {
             GuestRuntimeKind::JavaScript => JAVASCRIPT_COMMAND,
+            GuestRuntimeKind::Python => PYTHON_COMMAND,
             GuestRuntimeKind::WebAssembly => WASM_COMMAND,
         };
         let mut env = vm.guest_env.clone();
@@ -2242,6 +2303,29 @@ where
                     })
                     .map_err(javascript_error)?;
                 ActiveExecution::Javascript(execution)
+            }
+            GuestRuntimeKind::Python => {
+                let python_file_path = python_file_entrypoint(&payload.entrypoint);
+                let pyodide_dist_path =
+                    self.python_engine.bundled_pyodide_dist_path().to_path_buf();
+                let context = self
+                    .python_engine
+                    .create_context(CreatePythonContextRequest {
+                        vm_id: vm_id.clone(),
+                        pyodide_dist_path,
+                    });
+                let execution = self
+                    .python_engine
+                    .start_execution(StartPythonExecutionRequest {
+                        vm_id: vm_id.clone(),
+                        context_id: context.context_id,
+                        code: payload.entrypoint.clone(),
+                        file_path: python_file_path,
+                        env: env.clone(),
+                        cwd: cwd.clone(),
+                    })
+                    .map_err(python_error)?;
+                ActiveExecution::Python(execution)
             }
             GuestRuntimeKind::WebAssembly => {
                 let context = self.wasm_engine.create_context(CreateWasmContextRequest {
@@ -2715,6 +2799,10 @@ where
                     }),
                 )))
             }
+            ActiveExecutionEvent::PythonVfsRpcRequest(request) => {
+                self.handle_python_vfs_rpc_request(vm_id, process_id, request)?;
+                Ok(None)
+            }
             ActiveExecutionEvent::Exited(exit_code) => {
                 let became_idle = {
                     let vm = self.vms.get_mut(vm_id).expect("VM should exist");
@@ -2740,6 +2828,85 @@ where
                     }),
                 )))
             }
+        }
+    }
+
+    fn handle_python_vfs_rpc_request(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        request: PythonVfsRpcRequest,
+    ) -> Result<(), SidecarError> {
+        let response = {
+            let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+            match request.method {
+                PythonVfsRpcMethod::Read => vm
+                    .kernel
+                    .read_file(&request.path)
+                    .map(|content| PythonVfsRpcResponsePayload::Read {
+                        content_base64: base64::engine::general_purpose::STANDARD.encode(content),
+                    })
+                    .map_err(kernel_error),
+                PythonVfsRpcMethod::Write => {
+                    let content_base64 = request.content_base64.as_deref().ok_or_else(|| {
+                        SidecarError::InvalidState(format!(
+                            "python VFS fsWrite for {} requires contentBase64",
+                            request.path
+                        ))
+                    })?;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(content_base64)
+                        .map_err(|error| {
+                            SidecarError::InvalidState(format!(
+                                "invalid base64 python VFS content for {}: {error}",
+                                request.path
+                            ))
+                        })?;
+                    vm.kernel
+                        .write_file(&request.path, bytes)
+                        .map(|()| PythonVfsRpcResponsePayload::Empty)
+                        .map_err(kernel_error)
+                }
+                PythonVfsRpcMethod::Stat => vm
+                    .kernel
+                    .stat(&request.path)
+                    .map(|stat| PythonVfsRpcResponsePayload::Stat {
+                        stat: PythonVfsRpcStat {
+                            mode: stat.mode,
+                            size: stat.size,
+                            is_directory: stat.is_directory,
+                            is_symbolic_link: stat.is_symbolic_link,
+                        },
+                    })
+                    .map_err(kernel_error),
+                PythonVfsRpcMethod::ReadDir => vm
+                    .kernel
+                    .read_dir(&request.path)
+                    .map(|entries| PythonVfsRpcResponsePayload::ReadDir { entries })
+                    .map_err(kernel_error),
+                PythonVfsRpcMethod::Mkdir => vm
+                    .kernel
+                    .mkdir(&request.path, request.recursive)
+                    .map(|()| PythonVfsRpcResponsePayload::Empty)
+                    .map_err(kernel_error),
+            }
+        };
+
+        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let process = vm
+            .active_processes
+            .get_mut(process_id)
+            .expect("process should still exist");
+
+        match response {
+            Ok(payload) => process
+                .execution
+                .respond_python_vfs_rpc_success(request.id, payload),
+            Err(error) => process.execution.respond_python_vfs_rpc_error(
+                request.id,
+                "ERR_AGENT_OS_PYTHON_VFS_RPC",
+                error.to_string(),
+            ),
         }
     }
 
@@ -3670,6 +3837,12 @@ fn dirname(path: &str) -> String {
     }
 }
 
+fn python_file_entrypoint(entrypoint: &str) -> Option<PathBuf> {
+    let path = Path::new(entrypoint);
+    (path.extension().and_then(|extension| extension.to_str()) == Some("py"))
+        .then(|| path.to_path_buf())
+}
+
 fn kernel_error(error: KernelError) -> SidecarError {
     SidecarError::Kernel(error.to_string())
 }
@@ -3683,6 +3856,10 @@ fn javascript_error(error: JavascriptExecutionError) -> SidecarError {
 }
 
 fn wasm_error(error: WasmExecutionError) -> SidecarError {
+    SidecarError::Execution(error.to_string())
+}
+
+fn python_error(error: PythonExecutionError) -> SidecarError {
     SidecarError::Execution(error.to_string())
 }
 
@@ -3823,7 +4000,8 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const TEST_AUTH_TOKEN: &str = "sidecar-test-token";
@@ -3937,6 +4115,21 @@ mod tests {
         let path = std::env::temp_dir().join(format!("{prefix}-{suffix}"));
         fs::create_dir_all(&path).expect("create temp dir");
         path
+    }
+
+    fn write_fixture(path: &Path, contents: &str) {
+        fs::write(path, contents).expect("write fixture");
+    }
+
+    fn assert_node_available() {
+        let output = Command::new("node")
+            .arg("--version")
+            .output()
+            .expect("spawn node --version");
+        assert!(
+            output.status.success(),
+            "node must be available for python dispatch tests"
+        );
     }
 
     #[test]
@@ -4805,5 +4998,182 @@ mod tests {
         assert_eq!(error.code(), "EACCES");
 
         fs::remove_dir_all(host_dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn execute_starts_python_runtime_instead_of_rejecting_it() {
+        assert_node_available();
+
+        let cache_root = temp_dir("agent-os-sidecar-python-cache");
+
+        let mut sidecar = NativeSidecar::with_config(
+            RecordingBridge::default(),
+            NativeSidecarConfig {
+                sidecar_id: String::from("sidecar-python-test"),
+                compile_cache_root: Some(cache_root),
+                expected_auth_token: Some(String::from(TEST_AUTH_TOKEN)),
+                ..NativeSidecarConfig::default()
+            },
+        )
+        .expect("create sidecar");
+        let (connection_id, session_id) = authenticate_and_open_session(&mut sidecar);
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id);
+
+        let result = sidecar
+            .dispatch(request(
+                4,
+                OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                RequestPayload::Execute(crate::protocol::ExecuteRequest {
+                    process_id: String::from("proc-python"),
+                    runtime: GuestRuntimeKind::Python,
+                    entrypoint: String::from("print('hello from python')"),
+                    args: Vec::new(),
+                    env: BTreeMap::new(),
+                    cwd: None,
+                }),
+            ))
+            .expect("dispatch python execute");
+
+        match result.response.payload {
+            ResponsePayload::ProcessStarted(response) => {
+                assert_eq!(response.process_id, "proc-python");
+                assert!(
+                    response.pid.is_some(),
+                    "python runtime should expose a child pid"
+                );
+            }
+            other => panic!("unexpected execute response: {other:?}"),
+        }
+
+        let vm = sidecar.vms.get(&vm_id).expect("python vm");
+        let process = vm
+            .active_processes
+            .get("proc-python")
+            .expect("python process should be tracked");
+        assert_eq!(process.runtime, GuestRuntimeKind::Python);
+        match &process.execution {
+            ActiveExecution::Python(_) => {}
+            other => panic!("unexpected active execution variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn python_vfs_rpc_requests_proxy_into_the_vm_kernel_filesystem() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) = authenticate_and_open_session(&mut sidecar);
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id);
+        let cwd = temp_dir("agent-os-sidecar-python-vfs-rpc-cwd");
+        let pyodide_dir = temp_dir("agent-os-sidecar-python-vfs-rpc-pyodide");
+        write_fixture(
+            &pyodide_dir.join("pyodide.mjs"),
+            r#"
+export async function loadPyodide() {
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync(_code) {
+      await new Promise(() => {});
+    },
+  };
+}
+"#,
+        );
+        write_fixture(
+            &pyodide_dir.join("pyodide-lock.json"),
+            "{\"packages\":[]}\n",
+        );
+
+        let context = sidecar
+            .python_engine
+            .create_context(CreatePythonContextRequest {
+                vm_id: vm_id.clone(),
+                pyodide_dist_path: pyodide_dir,
+            });
+        let execution = sidecar
+            .python_engine
+            .start_execution(StartPythonExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                code: String::from("print('hold-open')"),
+                file_path: None,
+                env: BTreeMap::new(),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake python execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("python vm");
+            vm.kernel
+                .spawn_process(
+                    PYTHON_COMMAND,
+                    vec![String::from("print('hold-open')")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel python process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("python vm");
+            vm.active_processes.insert(
+                String::from("proc-python-vfs"),
+                ActiveProcess {
+                    kernel_pid: kernel_handle.pid(),
+                    kernel_handle,
+                    runtime: GuestRuntimeKind::Python,
+                    execution: ActiveExecution::Python(execution),
+                },
+            );
+        }
+
+        sidecar
+            .handle_python_vfs_rpc_request(
+                &vm_id,
+                "proc-python-vfs",
+                PythonVfsRpcRequest {
+                    id: 1,
+                    method: PythonVfsRpcMethod::Mkdir,
+                    path: String::from("/rpc"),
+                    content_base64: None,
+                    recursive: false,
+                },
+            )
+            .expect("handle python mkdir rpc");
+        sidecar
+            .handle_python_vfs_rpc_request(
+                &vm_id,
+                "proc-python-vfs",
+                PythonVfsRpcRequest {
+                    id: 2,
+                    method: PythonVfsRpcMethod::Write,
+                    path: String::from("/rpc/note.txt"),
+                    content_base64: Some(String::from("aGVsbG8gZnJvbSBzaWRlY2FyIHJwYw==")),
+                    recursive: false,
+                },
+            )
+            .expect("handle python write rpc");
+
+        let content = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("python vm");
+            String::from_utf8(
+                vm.kernel
+                    .read_file("/rpc/note.txt")
+                    .expect("read bridged file from kernel"),
+            )
+            .expect("utf8 file contents")
+        };
+        assert_eq!(content, "hello from sidecar rpc");
+
+        let process = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("python vm");
+            vm.active_processes
+                .remove("proc-python-vfs")
+                .expect("remove fake python process")
+        };
+        let _ = signal_runtime_process(process.execution.child_pid(), SIGTERM);
     }
 }

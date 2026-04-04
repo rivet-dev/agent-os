@@ -208,6 +208,7 @@ pub enum SidecarPlacement {
 #[serde(rename_all = "snake_case")]
 pub enum GuestRuntimeKind {
     JavaScript,
+    Python,
     WebAssembly,
 }
 

@@ -277,6 +277,7 @@ impl WasmExecutionEngine {
             child,
             stdout_reader,
             stderr_reader,
+            true,
             sender,
             WasmExecutionEvent::Exited,
             |message| WasmExecutionEvent::Stderr(message.into_bytes()),
@@ -448,6 +449,7 @@ fn configure_wasm_node_sandbox(
         &request.cwd,
         &read_paths,
         &write_paths,
+        true,
         true,
         false,
     );

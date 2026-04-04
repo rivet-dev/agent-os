@@ -213,8 +213,26 @@ pub fn collect_process_output(
     vm_id: &str,
     process_id: &str,
 ) -> (String, String, i32) {
+    collect_process_output_with_timeout(
+        sidecar,
+        connection_id,
+        session_id,
+        vm_id,
+        process_id,
+        Duration::from_secs(10),
+    )
+}
+
+pub fn collect_process_output_with_timeout(
+    sidecar: &mut NativeSidecar<RecordingBridge>,
+    connection_id: &str,
+    session_id: &str,
+    vm_id: &str,
+    process_id: &str,
+    timeout: Duration,
+) -> (String, String, i32) {
     let ownership = OwnershipScope::session(connection_id, session_id);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + timeout;
     let mut stdout = String::new();
     let mut stderr = String::new();
 

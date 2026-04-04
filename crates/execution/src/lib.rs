@@ -8,6 +8,7 @@ mod node_process;
 
 pub mod benchmark;
 pub mod javascript;
+pub mod python;
 pub mod wasm;
 
 pub use agent_os_bridge::GuestRuntime;
@@ -15,6 +16,12 @@ pub use javascript::{
     CreateJavascriptContextRequest, JavascriptContext, JavascriptExecution,
     JavascriptExecutionEngine, JavascriptExecutionError, JavascriptExecutionEvent,
     JavascriptExecutionResult, StartJavascriptExecutionRequest,
+};
+pub use python::{
+    CreatePythonContextRequest, PythonContext, PythonExecution, PythonExecutionEngine,
+    PythonExecutionError, PythonExecutionEvent, PythonExecutionResult, PythonVfsRpcMethod,
+    PythonVfsRpcRequest, PythonVfsRpcResponsePayload, PythonVfsRpcStat,
+    StartPythonExecutionRequest,
 };
 pub use wasm::{
     CreateWasmContextRequest, StartWasmExecutionRequest, WasmContext, WasmExecution,

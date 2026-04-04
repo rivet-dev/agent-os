@@ -12,9 +12,53 @@ const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
 const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "5";
-const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "1";
+const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "2";
+const PYODIDE_DIST_DIR: &str = "pyodide-dist";
 const AGENT_OS_BUILTIN_SPECIFIER_PREFIX: &str = "agent-os:builtin/";
 const AGENT_OS_POLYFILL_SPECIFIER_PREFIX: &str = "agent-os:polyfill/";
+const BUNDLED_PYODIDE_MJS: &[u8] = include_bytes!("../assets/pyodide/pyodide.mjs");
+const BUNDLED_PYODIDE_ASM_JS: &[u8] = include_bytes!("../assets/pyodide/pyodide.asm.js");
+const BUNDLED_PYODIDE_ASM_WASM: &[u8] = include_bytes!("../assets/pyodide/pyodide.asm.wasm");
+const BUNDLED_PYODIDE_LOCK: &[u8] = include_bytes!("../assets/pyodide/pyodide-lock.json");
+const BUNDLED_PYTHON_STDLIB_ZIP: &[u8] = include_bytes!("../assets/pyodide/python_stdlib.zip");
+const BUNDLED_NUMPY_WHL: &[u8] =
+    include_bytes!("../assets/pyodide/numpy-2.2.5-cp313-cp313-pyodide_2025_0_wasm32.whl");
+const BUNDLED_PANDAS_WHL: &[u8] =
+    include_bytes!("../assets/pyodide/pandas-2.3.3-cp313-cp313-pyodide_2025_0_wasm32.whl");
+const BUNDLED_PYTHON_DATEUTIL_WHL: &[u8] =
+    include_bytes!("../assets/pyodide/python_dateutil-2.9.0.post0-py2.py3-none-any.whl");
+const BUNDLED_PYTZ_WHL: &[u8] =
+    include_bytes!("../assets/pyodide/pytz-2025.2-py2.py3-none-any.whl");
+const BUNDLED_SIX_WHL: &[u8] = include_bytes!("../assets/pyodide/six-1.17.0-py2.py3-none-any.whl");
+
+#[derive(Clone, Copy)]
+struct BundledPyodidePackageAsset {
+    file_name: &'static str,
+    bytes: &'static [u8],
+}
+
+const BUNDLED_PYODIDE_PACKAGE_ASSETS: &[BundledPyodidePackageAsset] = &[
+    BundledPyodidePackageAsset {
+        file_name: "numpy-2.2.5-cp313-cp313-pyodide_2025_0_wasm32.whl",
+        bytes: BUNDLED_NUMPY_WHL,
+    },
+    BundledPyodidePackageAsset {
+        file_name: "pandas-2.3.3-cp313-cp313-pyodide_2025_0_wasm32.whl",
+        bytes: BUNDLED_PANDAS_WHL,
+    },
+    BundledPyodidePackageAsset {
+        file_name: "python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+        bytes: BUNDLED_PYTHON_DATEUTIL_WHL,
+    },
+    BundledPyodidePackageAsset {
+        file_name: "pytz-2025.2-py2.py3-none-any.whl",
+        bytes: BUNDLED_PYTZ_WHL,
+    },
+    BundledPyodidePackageAsset {
+        file_name: "six-1.17.0-py2.py3-none-any.whl",
+        bytes: BUNDLED_SIX_WHL,
+    },
+];
 const NODE_IMPORT_CACHE_LOADER_TEMPLATE: &str = r#"
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -2377,6 +2421,875 @@ if (typeof instance.exports._start === 'function') {
 }
 "#;
 
+const NODE_PYTHON_RUNNER_SOURCE: &str = r#"
+import { closeSync, createReadStream, readSync, writeSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { register } from 'node:module';
+import { performance as realPerformance } from 'node:perf_hooks';
+import path from 'node:path';
+import readline from 'node:readline';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const ACCESS_DENIED_CODE = 'ERR_ACCESS_DENIED';
+const ASSET_ROOT_ENV = 'AGENT_OS_NODE_IMPORT_CACHE_ASSET_ROOT';
+const PYODIDE_INDEX_URL_ENV = 'AGENT_OS_PYODIDE_INDEX_URL';
+const PYTHON_CODE_ENV = 'AGENT_OS_PYTHON_CODE';
+const PYTHON_FILE_ENV = 'AGENT_OS_PYTHON_FILE';
+const PYTHON_PREWARM_ONLY_ENV = 'AGENT_OS_PYTHON_PREWARM_ONLY';
+const PYTHON_WARMUP_DEBUG_ENV = 'AGENT_OS_PYTHON_WARMUP_DEBUG';
+const PYTHON_WARMUP_METRICS_PREFIX = '__AGENT_OS_PYTHON_WARMUP_METRICS__:';
+const PYTHON_EXIT_CONTROL_PREFIX = '__AGENT_OS_PYTHON_EXIT__:';
+const PYTHON_PRELOAD_PACKAGES_ENV = 'AGENT_OS_PYTHON_PRELOAD_PACKAGES';
+const PYTHON_VFS_RPC_REQUEST_FD_ENV = 'AGENT_OS_PYTHON_VFS_RPC_REQUEST_FD';
+const PYTHON_VFS_RPC_RESPONSE_FD_ENV = 'AGENT_OS_PYTHON_VFS_RPC_RESPONSE_FD';
+const STDIN_FD = 0;
+const SUPPORTED_PRELOAD_PACKAGES = ['numpy', 'pandas'];
+const SUPPORTED_PRELOAD_PACKAGE_SET = new Set(SUPPORTED_PRELOAD_PACKAGES);
+const DENIED_BUILTINS = new Set([
+  'child_process',
+  'dgram',
+  'dns',
+  'http',
+  'http2',
+  'https',
+  'inspector',
+  'net',
+  'tls',
+  'v8',
+  'vm',
+  'worker_threads',
+]);
+const originalFetch =
+  typeof globalThis.fetch === 'function'
+    ? globalThis.fetch.bind(globalThis)
+    : null;
+const originalRequire =
+  typeof globalThis.require === 'function'
+    ? globalThis.require.bind(globalThis)
+    : null;
+const originalGetBuiltinModule =
+  typeof process.getBuiltinModule === 'function'
+    ? process.getBuiltinModule.bind(process)
+    : null;
+
+function requiredEnv(name) {
+  const value = process.env[name];
+  if (value == null) {
+    throw new Error(`${name} is required`);
+  }
+  return value;
+}
+
+function normalizeDirectoryPath(value) {
+  return value.endsWith(path.sep) ? value : `${value}${path.sep}`;
+}
+
+function resolveIndexLocation(value) {
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) {
+    const normalizedUrl = value.endsWith('/') ? value : `${value}/`;
+    if (!normalizedUrl.startsWith('file:')) {
+      return {
+        indexPath: normalizedUrl,
+        indexUrl: normalizedUrl,
+      };
+    }
+
+    const indexPath = normalizeDirectoryPath(fileURLToPath(normalizedUrl));
+    return {
+      indexPath,
+      indexUrl: pathToFileURL(indexPath).href,
+    };
+  }
+
+  const indexPath = normalizeDirectoryPath(path.resolve(value));
+  return {
+    indexPath,
+    indexUrl: pathToFileURL(indexPath).href,
+  };
+}
+
+function writeStream(stream, message) {
+  if (message == null) {
+    return;
+  }
+
+  const value = typeof message === 'string' ? message : String(message);
+  stream.write(value.endsWith('\n') ? value : `${value}\n`);
+}
+
+function formatError(error) {
+  if (error instanceof Error) {
+    return error.stack || error.message || String(error);
+  }
+
+  return String(error);
+}
+
+function emitPythonStartupMetrics({
+  prewarmOnly,
+  startupMs,
+  loadPyodideMs,
+  packageLoadMs,
+  packageCount,
+  source,
+}) {
+  if (process.env[PYTHON_WARMUP_DEBUG_ENV] !== '1') {
+    return;
+  }
+
+  writeStream(
+    process.stderr,
+    `${PYTHON_WARMUP_METRICS_PREFIX}${JSON.stringify({
+      phase: 'startup',
+      prewarmOnly,
+      startupMs,
+      loadPyodideMs,
+      packageLoadMs,
+      packageCount,
+      source,
+    })}`,
+  );
+}
+
+function parsePreloadPackages(value) {
+  if (value == null || value.trim() === '') {
+    return [];
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error(
+      `${PYTHON_PRELOAD_PACKAGES_ENV} must be a JSON array of package names: ${formatError(error)}`,
+    );
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${PYTHON_PRELOAD_PACKAGES_ENV} must be a JSON array of package names`);
+  }
+
+  const packages = [];
+  const seen = new Set();
+
+  for (const entry of parsed) {
+    if (typeof entry !== 'string') {
+      throw new Error(`${PYTHON_PRELOAD_PACKAGES_ENV} entries must be strings`);
+    }
+
+    const name = entry.trim();
+    if (name.length === 0) {
+      throw new Error(`${PYTHON_PRELOAD_PACKAGES_ENV} entries must not be empty`);
+    }
+
+    if (!SUPPORTED_PRELOAD_PACKAGE_SET.has(name)) {
+      throw new Error(
+        `Unsupported bundled Python package "${name}". Available packages: ${SUPPORTED_PRELOAD_PACKAGES.join(', ')}`,
+      );
+    }
+
+    if (!seen.has(name)) {
+      seen.add(name);
+      packages.push(name);
+    }
+  }
+
+  return packages;
+}
+
+function parseOptionalFd(name) {
+  const value = process.env[name];
+  if (value == null || value.trim() === '') {
+    return null;
+  }
+
+  const fd = Number.parseInt(value, 10);
+  if (!Number.isInteger(fd) || fd < 0) {
+    throw new Error(`${name} must be a non-negative integer file descriptor`);
+  }
+
+  return fd;
+}
+
+function rejectPendingRpcRequests(pending, error) {
+  for (const { reject } of pending.values()) {
+    reject(error);
+  }
+  pending.clear();
+}
+
+function createPythonVfsRpcBridge() {
+  const requestFd = parseOptionalFd(PYTHON_VFS_RPC_REQUEST_FD_ENV);
+  const responseFd = parseOptionalFd(PYTHON_VFS_RPC_RESPONSE_FD_ENV);
+
+  if (requestFd == null && responseFd == null) {
+    return null;
+  }
+
+  if (requestFd == null || responseFd == null) {
+    throw new Error(
+      `both ${PYTHON_VFS_RPC_REQUEST_FD_ENV} and ${PYTHON_VFS_RPC_RESPONSE_FD_ENV} are required`,
+    );
+  }
+
+  let nextRequestId = 1;
+  let responseBuffer = '';
+  const queuedResponses = new Map();
+
+  function readResponseLineSync() {
+    while (true) {
+      const newlineIndex = responseBuffer.indexOf('\n');
+      if (newlineIndex >= 0) {
+        const line = responseBuffer.slice(0, newlineIndex);
+        responseBuffer = responseBuffer.slice(newlineIndex + 1);
+        return line;
+      }
+
+      const chunk = Buffer.alloc(4096);
+      const bytesRead = readSync(responseFd, chunk, 0, chunk.length, null);
+      if (bytesRead === 0) {
+        throw new Error('Agent OS Python VFS RPC response channel closed unexpectedly');
+      }
+      responseBuffer += chunk.subarray(0, bytesRead).toString('utf8');
+    }
+  }
+
+  function parseResponseLine(line) {
+    try {
+      return JSON.parse(line);
+    } catch (error) {
+      throw new Error(`invalid Agent OS Python VFS RPC response: ${formatError(error)}`);
+    }
+  }
+
+  function waitForResponseSync(id) {
+    const queued = queuedResponses.get(id);
+    if (queued) {
+      queuedResponses.delete(id);
+      return queued;
+    }
+
+    while (true) {
+      const line = readResponseLineSync();
+      if (line.trim() === '') {
+        continue;
+      }
+
+      const message = parseResponseLine(line);
+      if (message?.id === id) {
+        return message;
+      }
+      queuedResponses.set(message?.id, message);
+    }
+  }
+
+  function requestSync(method, payload = {}) {
+    const id = nextRequestId++;
+    writeSync(
+      requestFd,
+      `${JSON.stringify({
+        id,
+        method,
+        ...payload,
+      })}\n`,
+    );
+
+    const message = waitForResponseSync(id);
+    if (message?.ok) {
+      return message.result ?? {};
+    }
+
+    const error = new Error(message?.error?.message || `Agent OS Python VFS RPC request ${id} failed`);
+    error.code = message?.error?.code || 'ERR_AGENT_OS_PYTHON_VFS_RPC';
+    throw error;
+  }
+
+  function request(method, payload = {}) {
+    return Promise.resolve().then(() => requestSync(method, payload));
+  }
+
+  function normalizeWriteContent(content) {
+    if (typeof content === 'string') {
+      return content;
+    }
+    if (ArrayBuffer.isView(content)) {
+      return Buffer.from(content.buffer, content.byteOffset, content.byteLength).toString('base64');
+    }
+    if (content instanceof ArrayBuffer) {
+      return Buffer.from(content).toString('base64');
+    }
+    throw new Error('fsWrite requires a base64 string or Uint8Array');
+  }
+
+  return {
+    fsReadSync(path) {
+      const result = requestSync('fsRead', { path });
+      return result.contentBase64 ?? '';
+    },
+    async fsRead(path) {
+      return this.fsReadSync(path);
+    },
+    fsWriteSync(path, content) {
+      requestSync('fsWrite', {
+        path,
+        contentBase64: normalizeWriteContent(content),
+      });
+    },
+    async fsWrite(path, content) {
+      this.fsWriteSync(path, content);
+    },
+    fsStatSync(path) {
+      const result = requestSync('fsStat', { path });
+      return result.stat ?? null;
+    },
+    async fsStat(path) {
+      return this.fsStatSync(path);
+    },
+    fsReaddirSync(path) {
+      const result = requestSync('fsReaddir', { path });
+      return result.entries ?? [];
+    },
+    async fsReaddir(path) {
+      return this.fsReaddirSync(path);
+    },
+    fsMkdirSync(path, options = {}) {
+      requestSync('fsMkdir', {
+        path,
+        recursive: options?.recursive === true,
+      });
+    },
+    async fsMkdir(path, options = {}) {
+      this.fsMkdirSync(path, options);
+    },
+    dispose() {
+      try {
+        closeSync(requestFd);
+      } catch {
+        // Ignore repeated-close shutdown races.
+      }
+      try {
+        closeSync(responseFd);
+      } catch {
+        // Ignore repeated-close shutdown races.
+      }
+    },
+  };
+}
+
+function accessDenied(subject) {
+  const error = new Error(`${subject} is not available in the Agent OS guest Python runtime`);
+  error.code = ACCESS_DENIED_CODE;
+  return error;
+}
+
+function hardenProperty(target, key, value) {
+  try {
+    Object.defineProperty(target, key, {
+      value,
+      writable: false,
+      configurable: false,
+    });
+    return;
+  } catch {
+    // Fall back to assignment below.
+  }
+
+  try {
+    target[key] = value;
+  } catch {
+    // Ignore immutable properties.
+  }
+}
+
+function normalizeBuiltin(specifier) {
+  if (typeof specifier !== 'string') {
+    return null;
+  }
+
+  return specifier.startsWith('node:') ? specifier.slice('node:'.length) : specifier;
+}
+
+function installPythonGuestHardening() {
+  const assetRoot = process.env[ASSET_ROOT_ENV];
+  if (assetRoot) {
+    register(new URL('./loader.mjs', import.meta.url), import.meta.url);
+  }
+
+  hardenProperty(process, 'binding', () => {
+    throw accessDenied('process.binding');
+  });
+  hardenProperty(process, '_linkedBinding', () => {
+    throw accessDenied('process._linkedBinding');
+  });
+  hardenProperty(process, 'dlopen', () => {
+    throw accessDenied('process.dlopen');
+  });
+
+  if (originalGetBuiltinModule) {
+    hardenProperty(process, 'getBuiltinModule', (specifier) => {
+      const normalized = normalizeBuiltin(specifier);
+      if (normalized && DENIED_BUILTINS.has(normalized)) {
+        throw accessDenied(`node:${normalized}`);
+      }
+      return originalGetBuiltinModule(specifier);
+    });
+  }
+
+  if (originalRequire) {
+    hardenProperty(globalThis, 'require', () => {
+      throw accessDenied('require');
+    });
+  }
+
+  if (originalFetch) {
+    const restrictedFetch = (resource, init) => {
+      const candidate =
+        typeof resource === 'string'
+          ? resource
+          : resource instanceof URL
+            ? resource.href
+            : resource?.url;
+
+      let url;
+      try {
+        url = new URL(String(candidate ?? ''));
+      } catch {
+        throw accessDenied('network access');
+      }
+
+      if (url.protocol !== 'data:') {
+        throw accessDenied(`network access to ${url.protocol}`);
+      }
+
+      return originalFetch(resource, init);
+    };
+
+    hardenProperty(globalThis, 'fetch', restrictedFetch);
+  }
+}
+
+function installPythonVfsRpcBridge() {
+  const bridge = createPythonVfsRpcBridge();
+  if (!bridge) {
+    return null;
+  }
+
+  hardenProperty(globalThis, '__agentOsPythonVfsRpc', bridge);
+  return bridge;
+}
+
+function installPythonWorkspaceFs(pyodide, bridge) {
+  if (!bridge) {
+    return;
+  }
+
+  const { FS, ERRNO_CODES } = pyodide;
+  if (!FS?.mount || !FS?.filesystems?.MEMFS || !ERRNO_CODES) {
+    return;
+  }
+
+  const MEMFS = FS.filesystems.MEMFS;
+  const memfsDirNodeOps = MEMFS.ops_table.dir.node;
+  const memfsDirStreamOps = MEMFS.ops_table.dir.stream;
+  const memfsFileNodeOps = MEMFS.ops_table.file.node;
+  const memfsFileStreamOps = MEMFS.ops_table.file.stream;
+  const workspaceDirStreamOps = memfsDirStreamOps;
+
+  function joinGuestPath(parentPath, name) {
+    return parentPath === '/' ? `/${name}` : `${parentPath}/${name}`;
+  }
+
+  function nodeGuestPath(node) {
+    return node.agentOsGuestPath || node.mount?.mountpoint || '/workspace';
+  }
+
+  function createFsError(error) {
+    if (error instanceof FS.ErrnoError) {
+      return error;
+    }
+
+    const message = String(error?.message || error);
+    let errno = ERRNO_CODES.EIO;
+    if (/permission denied|access denied|denied/i.test(message)) {
+      errno = ERRNO_CODES.EACCES;
+    } else if (/read-only|erofs/i.test(message)) {
+      errno = ERRNO_CODES.EROFS;
+    } else if (/not a directory|enotdir/i.test(message)) {
+      errno = ERRNO_CODES.ENOTDIR;
+    } else if (/is a directory|eisdir/i.test(message)) {
+      errno = ERRNO_CODES.EISDIR;
+    } else if (/exists|already exists|eexist/i.test(message)) {
+      errno = ERRNO_CODES.EEXIST;
+    } else if (/not found|no such file|enoent/i.test(message)) {
+      errno = ERRNO_CODES.ENOENT;
+    }
+
+    return new FS.ErrnoError(errno);
+  }
+
+  function withFsErrors(operation) {
+    try {
+      return operation();
+    } catch (error) {
+      throw createFsError(error);
+    }
+  }
+
+  function updateNodeFromRemoteStat(node, stat) {
+    if (!stat) {
+      throw new FS.ErrnoError(ERRNO_CODES.ENOENT);
+    }
+
+    node.mode = stat.mode;
+    node.timestamp = Date.now();
+    if (FS.isFile(stat.mode) && !node.agentOsDirty) {
+      node.agentOsRemoteSize = stat.size;
+    }
+  }
+
+  function createWorkspaceNode(parent, name, mode, dev, guestPath) {
+    const node = MEMFS.createNode(parent, name, mode, dev);
+    node.agentOsGuestPath = guestPath;
+    node.agentOsDirty = false;
+    node.agentOsLoaded = FS.isDir(mode);
+    node.agentOsRemoteSize = 0;
+    if (FS.isDir(mode)) {
+      node.node_ops = workspaceDirNodeOps;
+      node.stream_ops = workspaceDirStreamOps;
+    } else if (FS.isFile(mode)) {
+      node.node_ops = workspaceFileNodeOps;
+      node.stream_ops = workspaceFileStreamOps;
+    }
+    return node;
+  }
+
+  function syncDirectory(node) {
+    const guestPath = nodeGuestPath(node);
+    const entries = withFsErrors(() => bridge.fsReaddirSync(guestPath));
+    const remoteNames = new Set(entries);
+
+    for (const name of Object.keys(node.contents || {})) {
+      if (remoteNames.has(name)) {
+        continue;
+      }
+
+      const child = node.contents[name];
+      if (FS.isDir(child.mode)) {
+        memfsDirNodeOps.rmdir(node, name);
+      } else {
+        memfsDirNodeOps.unlink(node, name);
+      }
+    }
+
+    for (const name of entries) {
+      const childPath = joinGuestPath(guestPath, name);
+      const stat = withFsErrors(() => bridge.fsStatSync(childPath));
+      const existing = node.contents[name];
+
+      if (existing) {
+        const existingIsDir = FS.isDir(existing.mode);
+        const remoteIsDir = Boolean(stat?.isDirectory);
+        if (existingIsDir !== remoteIsDir) {
+          if (existingIsDir) {
+            memfsDirNodeOps.rmdir(node, name);
+          } else {
+            memfsDirNodeOps.unlink(node, name);
+          }
+        } else {
+          existing.agentOsGuestPath = childPath;
+          updateNodeFromRemoteStat(existing, stat);
+          if (FS.isFile(existing.mode) && !existing.agentOsDirty) {
+            existing.agentOsLoaded = false;
+          }
+          continue;
+        }
+      }
+
+      const mode = stat?.mode ?? (stat?.isDirectory ? 0o040755 : 0o100644);
+      const child = createWorkspaceNode(node, name, mode, 0, childPath);
+      updateNodeFromRemoteStat(child, stat);
+    }
+  }
+
+  function loadFileContents(node) {
+    if (node.agentOsDirty) {
+      return;
+    }
+
+    const stat = withFsErrors(() => bridge.fsStatSync(nodeGuestPath(node)));
+    updateNodeFromRemoteStat(node, stat);
+    const contentBase64 = withFsErrors(() => bridge.fsReadSync(nodeGuestPath(node)));
+    const bytes = Uint8Array.from(Buffer.from(contentBase64, 'base64'));
+    node.contents = bytes;
+    node.usedBytes = bytes.length;
+    node.agentOsLoaded = true;
+    node.agentOsRemoteSize = bytes.length;
+  }
+
+  function persistFile(node) {
+    const contents = node.contents ? MEMFS.getFileDataAsTypedArray(node) : new Uint8Array(0);
+    withFsErrors(() => bridge.fsWriteSync(nodeGuestPath(node), contents));
+    node.agentOsDirty = false;
+    node.agentOsLoaded = true;
+    node.agentOsRemoteSize = contents.length;
+    node.timestamp = Date.now();
+  }
+
+  function makeStat(node, stat) {
+    const mode = stat?.mode ?? node.mode;
+    const size = FS.isDir(mode) ? 4096 : (node.agentOsDirty ? node.usedBytes : (stat?.size ?? node.usedBytes ?? 0));
+    const timestamp = new Date(node.timestamp || Date.now());
+
+    return {
+      dev: 1,
+      ino: node.id,
+      mode,
+      nlink: FS.isDir(mode) ? 2 : 1,
+      uid: 0,
+      gid: 0,
+      rdev: 0,
+      size,
+      atime: timestamp,
+      mtime: timestamp,
+      ctime: timestamp,
+      blksize: 4096,
+      blocks: Math.max(1, Math.ceil(size / 4096)),
+    };
+  }
+
+  const workspaceFileNodeOps = {
+    getattr(node) {
+      const stat = node.agentOsDirty
+        ? null
+        : withFsErrors(() => bridge.fsStatSync(nodeGuestPath(node)));
+      if (stat) {
+        updateNodeFromRemoteStat(node, stat);
+      }
+      return makeStat(node, stat);
+    },
+    setattr(node, attr) {
+      memfsFileNodeOps.setattr(node, attr);
+      if (attr?.size != null) {
+        node.agentOsDirty = true;
+        node.agentOsLoaded = true;
+      }
+    },
+  };
+
+  const workspaceFileStreamOps = {
+    llseek(stream, offset, whence) {
+      return memfsFileStreamOps.llseek(stream, offset, whence);
+    },
+    read(stream, buffer, offset, length, position) {
+      if (!stream.node.agentOsLoaded && !stream.node.agentOsDirty) {
+        loadFileContents(stream.node);
+      }
+      return memfsFileStreamOps.read(stream, buffer, offset, length, position);
+    },
+    write(stream, buffer, offset, length, position, canOwn) {
+      if (!stream.node.agentOsLoaded && !stream.node.agentOsDirty) {
+        loadFileContents(stream.node);
+      }
+      const written = memfsFileStreamOps.write(stream, buffer, offset, length, position, canOwn);
+      stream.node.agentOsDirty = true;
+      persistFile(stream.node);
+      return written;
+    },
+    mmap(stream, length, position, prot, flags) {
+      if (!stream.node.agentOsLoaded && !stream.node.agentOsDirty) {
+        loadFileContents(stream.node);
+      }
+      return memfsFileStreamOps.mmap(stream, length, position, prot, flags);
+    },
+    msync(stream, buffer, offset, length, mmapFlags) {
+      const result = memfsFileStreamOps.msync(stream, buffer, offset, length, mmapFlags);
+      stream.node.agentOsDirty = true;
+      persistFile(stream.node);
+      return result;
+    },
+  };
+
+  const workspaceDirNodeOps = {
+    getattr(node) {
+      const stat = withFsErrors(() => bridge.fsStatSync(nodeGuestPath(node)));
+      updateNodeFromRemoteStat(node, stat);
+      return makeStat(node, stat);
+    },
+    setattr(node, attr) {
+      memfsDirNodeOps.setattr(node, attr);
+    },
+    lookup(parent, name) {
+      syncDirectory(parent);
+      try {
+        return memfsDirNodeOps.lookup(parent, name);
+      } catch (error) {
+        if (!(error instanceof FS.ErrnoError) || error.errno !== ERRNO_CODES.ENOENT) {
+          throw error;
+        }
+
+        const guestPath = joinGuestPath(nodeGuestPath(parent), name);
+        const stat = withFsErrors(() => bridge.fsStatSync(guestPath));
+        const child = createWorkspaceNode(parent, name, stat.mode, 0, guestPath);
+        updateNodeFromRemoteStat(child, stat);
+        return child;
+      }
+    },
+    mknod(parent, name, mode, dev) {
+      const guestPath = joinGuestPath(nodeGuestPath(parent), name);
+      const node = createWorkspaceNode(parent, name, mode, dev, guestPath);
+      if (FS.isDir(mode)) {
+        withFsErrors(() => bridge.fsMkdirSync(guestPath, { recursive: false }));
+      } else if (FS.isFile(mode)) {
+        node.contents = new Uint8Array(0);
+        node.usedBytes = 0;
+        node.agentOsDirty = true;
+        persistFile(node);
+      }
+      return node;
+    },
+    rename() {
+      throw new FS.ErrnoError(ERRNO_CODES.ENOSYS);
+    },
+    unlink() {
+      throw new FS.ErrnoError(ERRNO_CODES.ENOSYS);
+    },
+    rmdir() {
+      throw new FS.ErrnoError(ERRNO_CODES.ENOSYS);
+    },
+    readdir(node) {
+      syncDirectory(node);
+      return memfsDirNodeOps.readdir(node);
+    },
+    symlink() {
+      throw new FS.ErrnoError(ERRNO_CODES.ENOSYS);
+    },
+  };
+
+  try {
+    FS.mkdir('/workspace');
+  } catch (error) {
+    if (!(error instanceof FS.ErrnoError) || error.errno !== ERRNO_CODES.EEXIST) {
+      throw error;
+    }
+  }
+
+  FS.mount(
+    {
+      mount(mount) {
+        const root = MEMFS.mount(mount);
+        root.agentOsGuestPath = mount.mountpoint;
+        root.agentOsDirty = false;
+        root.agentOsLoaded = true;
+        root.agentOsRemoteSize = 0;
+        root.node_ops = workspaceDirNodeOps;
+        root.stream_ops = workspaceDirStreamOps;
+        return root;
+      },
+    },
+    {},
+    '/workspace',
+  );
+}
+
+async function readLockFileContents(indexURL) {
+  const lockFileUrl = new URL('pyodide-lock.json', indexURL);
+  return readFile(lockFileUrl, 'utf8');
+}
+
+function installPythonStdin(pyodide) {
+  if (typeof pyodide?.setStdin !== 'function') {
+    return;
+  }
+
+  pyodide.setStdin({
+    isatty: false,
+    read(buffer) {
+      return readSync(STDIN_FD, buffer, 0, buffer.length, null);
+    },
+  });
+}
+
+function resolvePythonSource(pyodide) {
+  const filePath = process.env[PYTHON_FILE_ENV];
+  if (filePath != null) {
+    if (typeof pyodide?.FS?.readFile !== 'function') {
+      throw new Error(`Pyodide FS.readFile() is required to execute ${filePath}`);
+    }
+
+    return pyodide.FS.readFile(filePath, { encoding: 'utf8' });
+  }
+
+  return requiredEnv(PYTHON_CODE_ENV);
+}
+
+let pythonVfsRpcBridge = null;
+
+try {
+  const startupStarted = realPerformance.now();
+  const { indexPath, indexUrl } = resolveIndexLocation(requiredEnv(PYODIDE_INDEX_URL_ENV));
+  const prewarmOnly = process.env[PYTHON_PREWARM_ONLY_ENV] === '1';
+  const preloadPackages = parsePreloadPackages(process.env[PYTHON_PRELOAD_PACKAGES_ENV]);
+  const lockFileContents = await readLockFileContents(indexUrl);
+  const pyodideModuleUrl = new URL('pyodide.mjs', indexUrl).href;
+  const { loadPyodide } = await import(pyodideModuleUrl);
+
+  if (typeof loadPyodide !== 'function') {
+    throw new Error(`pyodide.mjs at ${indexUrl} does not export loadPyodide()`);
+  }
+
+  const loadPyodideStarted = realPerformance.now();
+  const pyodide = await loadPyodide({
+    indexURL: indexPath,
+    lockFileContents,
+    packageBaseUrl: indexPath,
+    stdout: (message) => writeStream(process.stdout, message),
+    stderr: (message) => writeStream(process.stderr, message),
+  });
+  const loadPyodideMs = realPerformance.now() - loadPyodideStarted;
+  let packageLoadMs = 0;
+
+  if (prewarmOnly) {
+    emitPythonStartupMetrics({
+      prewarmOnly: true,
+      startupMs: realPerformance.now() - startupStarted,
+      loadPyodideMs,
+      packageLoadMs,
+      packageCount: 0,
+      source: 'prewarm',
+    });
+    process.exitCode = 0;
+  } else {
+  installPythonStdin(pyodide);
+  pythonVfsRpcBridge = installPythonVfsRpcBridge();
+  installPythonWorkspaceFs(pyodide, pythonVfsRpcBridge);
+  installPythonGuestHardening();
+  if (preloadPackages.length > 0) {
+    const packageLoadStarted = realPerformance.now();
+    await pyodide.loadPackage(preloadPackages);
+    packageLoadMs = realPerformance.now() - packageLoadStarted;
+  }
+  const source = process.env[PYTHON_FILE_ENV] != null ? 'file' : 'inline';
+  emitPythonStartupMetrics({
+    prewarmOnly: false,
+    startupMs: realPerformance.now() - startupStarted,
+    loadPyodideMs,
+    packageLoadMs,
+    packageCount: preloadPackages.length,
+    source,
+  });
+  const code = resolvePythonSource(pyodide);
+  await pyodide.runPythonAsync(code);
+  }
+} catch (error) {
+  writeStream(process.stderr, formatError(error));
+  process.exitCode = 1;
+} finally {
+  pythonVfsRpcBridge?.dispose();
+  writeStream(process.stderr, `${PYTHON_EXIT_CONTROL_PREFIX}${process.exitCode ?? 0}`);
+}
+process.exit(process.exitCode ?? 0);
+"#;
+
 static NEXT_NODE_IMPORT_CACHE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy)]
@@ -2481,10 +3394,12 @@ pub(crate) struct NodeImportCache {
     loader_path: PathBuf,
     register_path: PathBuf,
     runner_path: PathBuf,
+    python_runner_path: PathBuf,
     timing_bootstrap_path: PathBuf,
     prewarm_path: PathBuf,
     wasm_runner_path: PathBuf,
     asset_root: PathBuf,
+    pyodide_dist_path: PathBuf,
     prewarm_marker_dir: PathBuf,
 }
 
@@ -2502,10 +3417,12 @@ impl Default for NodeImportCache {
             loader_path: root_dir.join("loader.mjs"),
             register_path: root_dir.join("register.mjs"),
             runner_path: root_dir.join("runner.mjs"),
+            python_runner_path: root_dir.join("python-runner.mjs"),
             timing_bootstrap_path: root_dir.join("timing-bootstrap.mjs"),
             prewarm_path: root_dir.join("prewarm.mjs"),
             wasm_runner_path: root_dir.join("wasm-runner.mjs"),
             asset_root: root_dir.join("assets"),
+            pyodide_dist_path: root_dir.join("assets").join(PYODIDE_DIST_DIR),
             prewarm_marker_dir: root_dir.join("warmup"),
         }
     }
@@ -2528,6 +3445,11 @@ impl NodeImportCache {
         &self.runner_path
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn python_runner_path(&self) -> &Path {
+        &self.python_runner_path
+    }
+
     pub(crate) fn timing_bootstrap_path(&self) -> &Path {
         &self.timing_bootstrap_path
     }
@@ -2544,6 +3466,10 @@ impl NodeImportCache {
         &self.asset_root
     }
 
+    pub(crate) fn pyodide_dist_path(&self) -> &Path {
+        &self.pyodide_dist_path
+    }
+
     pub(crate) fn prewarm_marker_dir(&self) -> &Path {
         &self.prewarm_marker_dir
     }
@@ -2557,11 +3483,13 @@ impl NodeImportCache {
         fs::create_dir_all(self.asset_root.join("builtins"))?;
         fs::create_dir_all(self.asset_root.join("denied"))?;
         fs::create_dir_all(self.asset_root.join("polyfills"))?;
+        fs::create_dir_all(&self.pyodide_dist_path)?;
         fs::create_dir_all(&self.prewarm_marker_dir)?;
 
         write_file_if_changed(&self.loader_path, &render_loader_source())?;
         write_file_if_changed(&self.register_path, &render_register_source())?;
         write_file_if_changed(&self.runner_path, NODE_EXECUTION_RUNNER_SOURCE)?;
+        write_file_if_changed(&self.python_runner_path, NODE_PYTHON_RUNNER_SOURCE)?;
         write_file_if_changed(&self.timing_bootstrap_path, NODE_TIMING_BOOTSTRAP_SOURCE)?;
         write_file_if_changed(&self.prewarm_path, NODE_PREWARM_SOURCE)?;
         write_file_if_changed(&self.wasm_runner_path, NODE_WASM_RUNNER_SOURCE)?;
@@ -2593,6 +3521,29 @@ impl NodeImportCache {
                 .join(format!("{PATH_POLYFILL_ASSET_NAME}.mjs")),
             &render_path_polyfill_source(),
         )?;
+        write_bytes_if_changed(
+            &self.pyodide_dist_path.join("pyodide.mjs"),
+            BUNDLED_PYODIDE_MJS,
+        )?;
+        write_bytes_if_changed(
+            &self.pyodide_dist_path.join("pyodide.asm.js"),
+            BUNDLED_PYODIDE_ASM_JS,
+        )?;
+        write_bytes_if_changed(
+            &self.pyodide_dist_path.join("pyodide.asm.wasm"),
+            BUNDLED_PYODIDE_ASM_WASM,
+        )?;
+        write_bytes_if_changed(
+            &self.pyodide_dist_path.join("pyodide-lock.json"),
+            BUNDLED_PYODIDE_LOCK,
+        )?;
+        write_bytes_if_changed(
+            &self.pyodide_dist_path.join("python_stdlib.zip"),
+            BUNDLED_PYTHON_STDLIB_ZIP,
+        )?;
+        for asset in BUNDLED_PYODIDE_PACKAGE_ASSETS {
+            write_bytes_if_changed(&self.pyodide_dist_path.join(asset.file_name), asset.bytes)?;
+        }
         Ok(())
     }
 }
@@ -3409,11 +4360,531 @@ export default path;\n"
     )
 }
 
-fn write_file_if_changed(path: &Path, contents: &str) -> Result<(), io::Error> {
-    match fs::read_to_string(path) {
+fn write_bytes_if_changed(path: &Path, contents: &[u8]) -> Result<(), io::Error> {
+    match fs::read(path) {
         Ok(existing) if existing == contents => return Ok(()),
         Ok(_) | Err(_) => {}
     }
 
     fs::write(path, contents)
+}
+
+fn write_file_if_changed(path: &Path, contents: &str) -> Result<(), io::Error> {
+    write_bytes_if_changed(path, contents.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NodeImportCache;
+    use crate::node_process::node_binary;
+    use std::fs;
+    use std::io::Write;
+    use std::path::Path;
+    use std::process::{Command, Output, Stdio};
+    use tempfile::tempdir;
+
+    fn assert_node_available() {
+        let output = Command::new(node_binary())
+            .arg("--version")
+            .output()
+            .expect("spawn node --version");
+        assert!(output.status.success(), "node --version failed");
+    }
+
+    fn write_fixture(path: &Path, contents: &str) {
+        fs::write(path, contents).expect("write fixture");
+    }
+
+    fn run_python_runner(
+        import_cache: &NodeImportCache,
+        pyodide_index_url: &Path,
+        code: &str,
+    ) -> Output {
+        run_python_runner_with_env(import_cache, pyodide_index_url, code, &[])
+    }
+
+    fn run_python_runner_with_env(
+        import_cache: &NodeImportCache,
+        pyodide_index_url: &Path,
+        code: &str,
+        env: &[(&str, &str)],
+    ) -> Output {
+        let mut command = Command::new(node_binary());
+        command
+            .arg(import_cache.python_runner_path())
+            .env("AGENT_OS_PYODIDE_INDEX_URL", pyodide_index_url)
+            .env("AGENT_OS_PYTHON_CODE", code);
+
+        for (key, value) in env {
+            command.env(key, value);
+        }
+
+        command.output().expect("run python runner")
+    }
+
+    fn run_python_runner_prewarm(
+        import_cache: &NodeImportCache,
+        pyodide_index_url: &Path,
+        env: &[(&str, &str)],
+    ) -> Output {
+        let mut command = Command::new(node_binary());
+        command
+            .arg(import_cache.python_runner_path())
+            .env("AGENT_OS_PYODIDE_INDEX_URL", pyodide_index_url)
+            .env("AGENT_OS_PYTHON_PREWARM_ONLY", "1");
+
+        for (key, value) in env {
+            command.env(key, value);
+        }
+
+        command.output().expect("run python runner prewarm")
+    }
+
+    fn run_python_runner_with_env_and_stdin(
+        import_cache: &NodeImportCache,
+        pyodide_index_url: &Path,
+        code: &str,
+        env: &[(&str, &str)],
+        stdin_chunks: &[&[u8]],
+    ) -> Output {
+        let mut command = Command::new(node_binary());
+        command
+            .arg(import_cache.python_runner_path())
+            .env("AGENT_OS_PYODIDE_INDEX_URL", pyodide_index_url)
+            .env("AGENT_OS_PYTHON_CODE", code)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        for (key, value) in env {
+            command.env(key, value);
+        }
+
+        let mut child = command.spawn().expect("spawn python runner");
+        {
+            let mut stdin = child.stdin.take().expect("python runner stdin");
+            for chunk in stdin_chunks {
+                stdin
+                    .write_all(chunk)
+                    .expect("write python runner stdin chunk");
+            }
+        }
+
+        child.wait_with_output().expect("wait for python runner")
+    }
+
+    #[test]
+    fn materialized_python_runner_executes_python_code_via_pyodide_callbacks() {
+        assert_node_available();
+
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let pyodide_dir = tempdir().expect("create pyodide fixture dir");
+        write_fixture(
+            &pyodide_dir.path().join("pyodide.mjs"),
+            r#"
+export async function loadPyodide(options) {
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync(code) {
+      options.stdout(`stdout:${code}`);
+      options.stderr(`stderr:${options.indexURL}:${options.lockFileContents}`);
+    },
+  };
+}
+"#,
+        );
+        write_fixture(
+            &pyodide_dir.path().join("pyodide-lock.json"),
+            "{\"packages\":[]}\n",
+        );
+
+        let output = run_python_runner(&import_cache, pyodide_dir.path(), "print('hello')");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let expected_index_path = format!(
+            "stderr:{}{}",
+            pyodide_dir.path().display(),
+            std::path::MAIN_SEPARATOR
+        );
+
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(stdout, "stdout:print('hello')\n");
+        assert!(
+            stderr.starts_with(&expected_index_path),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("{\"packages\":[]}"),
+            "lock file contents should be passed to loadPyodide: {stderr}"
+        );
+    }
+
+    #[test]
+    fn materialized_python_runner_prefers_python_file_over_inline_code() {
+        assert_node_available();
+
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let pyodide_dir = tempdir().expect("create pyodide fixture dir");
+        write_fixture(
+            &pyodide_dir.path().join("pyodide.mjs"),
+            r#"
+export async function loadPyodide(options) {
+  return {
+    FS: {
+      readFile(path, config = {}) {
+        options.stderr(`file:${path}:${config.encoding ?? 'binary'}`);
+        return "print('from file')";
+      },
+    },
+    setStdin(_stdin) {},
+    async runPythonAsync(code) {
+      options.stdout(`stdout:${code}`);
+    },
+  };
+}
+"#,
+        );
+        write_fixture(
+            &pyodide_dir.path().join("pyodide-lock.json"),
+            "{\"packages\":[]}\n",
+        );
+
+        let output = run_python_runner_with_env(
+            &import_cache,
+            pyodide_dir.path(),
+            "print('ignored')",
+            &[("AGENT_OS_PYTHON_FILE", "/workspace/script.py")],
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+        assert_eq!(stdout, "stdout:print('from file')\n");
+        assert!(
+            stderr.contains("file:/workspace/script.py:utf8"),
+            "unexpected stderr: {stderr}"
+        );
+    }
+
+    #[test]
+    fn materialized_python_runner_prewarm_loads_pyodide_without_running_guest_code() {
+        assert_node_available();
+
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let pyodide_dir = tempdir().expect("create pyodide fixture dir");
+        write_fixture(
+            &pyodide_dir.path().join("pyodide.mjs"),
+            r#"
+export async function loadPyodide(options) {
+  options.stderr(`prewarm:${options.indexURL}`);
+  return {
+    setStdin() {
+      throw new Error('setStdin should not run during prewarm');
+    },
+    async runPythonAsync() {
+      throw new Error('runPythonAsync should not run during prewarm');
+    },
+  };
+}
+"#,
+        );
+        write_fixture(
+            &pyodide_dir.path().join("pyodide-lock.json"),
+            "{\"packages\":[]}\n",
+        );
+
+        let output = run_python_runner_prewarm(
+            &import_cache,
+            pyodide_dir.path(),
+            &[("AGENT_OS_PYTHON_CODE", "print('ignored')")],
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+        assert!(stdout.is_empty(), "unexpected stdout: {stdout}");
+        assert!(
+            stderr.contains("prewarm:"),
+            "expected Pyodide load during prewarm: {stderr}"
+        );
+        assert!(
+            !stderr.contains("setStdin should not run during prewarm"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("runPythonAsync should not run during prewarm"),
+            "unexpected stderr: {stderr}"
+        );
+    }
+
+    #[test]
+    fn materialized_python_runner_reports_syntax_errors_to_stderr_and_exits_nonzero() {
+        assert_node_available();
+
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let pyodide_dir = tempdir().expect("create pyodide fixture dir");
+        write_fixture(
+            &pyodide_dir.path().join("pyodide.mjs"),
+            r#"
+export async function loadPyodide() {
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync(code) {
+      throw new Error(`SyntaxError: invalid syntax near ${code}`);
+    },
+  };
+}
+"#,
+        );
+        write_fixture(
+            &pyodide_dir.path().join("pyodide-lock.json"),
+            "{\"packages\":[]}\n",
+        );
+
+        let output = run_python_runner(&import_cache, pyodide_dir.path(), "print(");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            stderr.contains("SyntaxError: invalid syntax near print("),
+            "unexpected stderr: {stderr}"
+        );
+    }
+
+    #[test]
+    fn materialized_python_runner_preloads_bundled_packages_from_local_disk() {
+        assert_node_available();
+
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let pyodide_dir = tempdir().expect("create pyodide fixture dir");
+        write_fixture(
+            &pyodide_dir.path().join("pyodide.mjs"),
+            r#"
+export async function loadPyodide(options) {
+  return {
+    setStdin(_stdin) {},
+    async loadPackage(packages) {
+      options.stdout(`packages:${packages.join(',')}`);
+      options.stderr(`base:${options.packageBaseUrl}`);
+    },
+    async runPythonAsync(code) {
+      options.stdout(`code:${code}`);
+    },
+  };
+}
+"#,
+        );
+        write_fixture(
+            &pyodide_dir.path().join("pyodide-lock.json"),
+            "{\"packages\":[]}\n",
+        );
+
+        let output = run_python_runner_with_env(
+            &import_cache,
+            pyodide_dir.path(),
+            "print('hello')",
+            &[("AGENT_OS_PYTHON_PRELOAD_PACKAGES", "[\"numpy\",\"pandas\"]")],
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let expected_package_base = format!(
+            "base:{}{}",
+            pyodide_dir.path().display(),
+            std::path::MAIN_SEPARATOR
+        );
+
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(stdout, "packages:numpy,pandas\ncode:print('hello')\n");
+        assert!(
+            stderr.contains(&expected_package_base),
+            "expected local package base path in stderr, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn materialized_python_runner_rejects_unknown_preload_packages() {
+        assert_node_available();
+
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let pyodide_dir = tempdir().expect("create pyodide fixture dir");
+        write_fixture(
+            &pyodide_dir.path().join("pyodide.mjs"),
+            r#"
+export async function loadPyodide() {
+  return {
+    setStdin(_stdin) {},
+    async loadPackage() {
+      throw new Error('loadPackage should not be called');
+    },
+    async runPythonAsync(_code) {},
+  };
+}
+"#,
+        );
+        write_fixture(
+            &pyodide_dir.path().join("pyodide-lock.json"),
+            "{\"packages\":[]}\n",
+        );
+
+        let output = run_python_runner_with_env(
+            &import_cache,
+            pyodide_dir.path(),
+            "print('hello')",
+            &[("AGENT_OS_PYTHON_PRELOAD_PACKAGES", "[\"requests\"]")],
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            stderr.contains("Unsupported bundled Python package \"requests\""),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("Available packages: numpy, pandas"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("loadPackage should not be called"),
+            "runner should validate packages before calling loadPackage: {stderr}"
+        );
+    }
+
+    #[test]
+    fn materialized_python_runner_streams_multiple_stdin_reads_through_pyodide() {
+        assert_node_available();
+
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let pyodide_dir = tempdir().expect("create pyodide fixture dir");
+        write_fixture(
+            &pyodide_dir.path().join("pyodide.mjs"),
+            r#"
+const decoder = new TextDecoder();
+
+export async function loadPyodide(options) {
+  let stdin = null;
+
+  function createInputReader() {
+    let buffered = '';
+
+    return () => {
+      while (true) {
+        const newlineIndex = buffered.indexOf('\n');
+        if (newlineIndex >= 0) {
+          const line = buffered.slice(0, newlineIndex);
+          buffered = buffered.slice(newlineIndex + 1);
+          return line;
+        }
+
+        const chunk = new Uint8Array(64);
+        const bytesRead = stdin.read(chunk);
+        if (bytesRead === 0) {
+          const tail = buffered;
+          buffered = '';
+          return tail;
+        }
+
+        buffered += decoder.decode(chunk.subarray(0, bytesRead));
+      }
+    };
+  }
+
+  return {
+    setStdin(config) {
+      stdin = config;
+    },
+    async runPythonAsync(code) {
+      const input = createInputReader();
+      options.stdout(`first:${input()}`);
+      options.stdout(`second:${input()}`);
+      options.stdout(`tail:${JSON.stringify(input())}`);
+      options.stdout(`code:${code}`);
+    },
+  };
+}
+"#,
+        );
+        write_fixture(
+            &pyodide_dir.path().join("pyodide-lock.json"),
+            "{\"packages\":[]}\n",
+        );
+
+        let output = run_python_runner_with_env_and_stdin(
+            &import_cache,
+            pyodide_dir.path(),
+            "print('interactive')",
+            &[],
+            &[b"first line\n", b"second line\n"],
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+        assert!(
+            stdout.contains("first:first line\n"),
+            "unexpected stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("second:second line\n"),
+            "unexpected stdout: {stdout}"
+        );
+        assert!(stdout.contains("tail:\"\""), "unexpected stdout: {stdout}");
+        assert!(
+            stdout.contains("code:print('interactive')"),
+            "unexpected stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn ensure_materialized_writes_bundled_pyodide_distribution_assets() {
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        for file_name in [
+            "pyodide.mjs",
+            "pyodide.asm.js",
+            "pyodide.asm.wasm",
+            "pyodide-lock.json",
+            "python_stdlib.zip",
+            "numpy-2.2.5-cp313-cp313-pyodide_2025_0_wasm32.whl",
+            "pandas-2.3.3-cp313-cp313-pyodide_2025_0_wasm32.whl",
+            "python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+            "pytz-2025.2-py2.py3-none-any.whl",
+            "six-1.17.0-py2.py3-none-any.whl",
+        ] {
+            assert!(
+                import_cache.pyodide_dist_path().join(file_name).is_file(),
+                "expected bundled Pyodide asset {file_name} to be materialized"
+            );
+        }
+    }
 }

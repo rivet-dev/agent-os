@@ -33,27 +33,32 @@ pub fn harden_node_command(
     cwd: &Path,
     read_paths: &[PathBuf],
     write_paths: &[PathBuf],
+    enable_permissions: bool,
     allow_wasi: bool,
     allow_child_process: bool,
 ) {
-    command.arg(NODE_PERMISSION_FLAG);
-    command.arg(NODE_ALLOW_WORKER_FLAG);
-    command.arg(NODE_DISABLE_SECURITY_WARNING_FLAG);
-    if allow_wasi {
-        command.arg(NODE_ALLOW_WASI_FLAG);
-    }
-    if allow_child_process {
-        command.arg(NODE_ALLOW_CHILD_PROCESS_FLAG);
-    }
+    if enable_permissions {
+        command.arg(NODE_PERMISSION_FLAG);
+        command.arg(NODE_ALLOW_WORKER_FLAG);
+        command.arg(NODE_DISABLE_SECURITY_WARNING_FLAG);
+        if allow_wasi {
+            command.arg(NODE_ALLOW_WASI_FLAG);
+        }
+        if allow_child_process {
+            command.arg(NODE_ALLOW_CHILD_PROCESS_FLAG);
+        }
 
-    for path in allowed_paths(std::iter::once(cwd.to_path_buf()).chain(read_paths.iter().cloned()))
-    {
-        command.arg(format!("{NODE_ALLOW_FS_READ_FLAG}{}", path.display()));
-    }
+        for path in
+            allowed_paths(std::iter::once(cwd.to_path_buf()).chain(read_paths.iter().cloned()))
+        {
+            command.arg(format!("{NODE_ALLOW_FS_READ_FLAG}{}", path.display()));
+        }
 
-    for path in allowed_paths(std::iter::once(cwd.to_path_buf()).chain(write_paths.iter().cloned()))
-    {
-        command.arg(format!("{NODE_ALLOW_FS_WRITE_FLAG}{}", path.display()));
+        for path in
+            allowed_paths(std::iter::once(cwd.to_path_buf()).chain(write_paths.iter().cloned()))
+        {
+            command.arg(format!("{NODE_ALLOW_FS_WRITE_FLAG}{}", path.display()));
+        }
     }
 
     command.env_clear();
@@ -193,6 +198,7 @@ pub fn spawn_waiter<E, FE, FW>(
     mut child: Child,
     stdout_reader: JoinHandle<()>,
     stderr_reader: JoinHandle<()>,
+    wait_for_streams_before_exit: bool,
     sender: Sender<E>,
     exit_event: FE,
     wait_error_event: FW,
@@ -212,8 +218,11 @@ pub fn spawn_waiter<E, FE, FW>(
             }
         };
 
-        let _ = stdout_reader.join();
-        let _ = stderr_reader.join();
         let _ = sender.send(exit_event(exit_code));
+
+        if wait_for_streams_before_exit {
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+        }
     });
 }

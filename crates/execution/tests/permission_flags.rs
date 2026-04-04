@@ -1,8 +1,9 @@
 #![cfg(unix)]
 
 use agent_os_execution::{
-    CreateJavascriptContextRequest, CreateWasmContextRequest, JavascriptExecutionEngine,
-    StartJavascriptExecutionRequest, StartWasmExecutionRequest, WasmExecutionEngine,
+    CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
+    JavascriptExecutionEngine, PythonExecutionEngine, StartJavascriptExecutionRequest,
+    StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecutionEngine,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -145,6 +146,35 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
     fs::create_dir_all(&wasm_module_dir).expect("create wasm module dir");
     fs::write(wasm_module_dir.join("guest.wasm"), []).expect("write wasm module");
 
+    let pyodide_dir = temp.path().join("pyodide-dist");
+    fs::create_dir_all(&pyodide_dir).expect("create pyodide dist dir");
+    fs::write(
+        pyodide_dir.join("pyodide.mjs"),
+        "export async function loadPyodide() { return { async runPythonAsync() {} }; }\n",
+    )
+    .expect("write pyodide fixture");
+    fs::write(pyodide_dir.join("pyodide-lock.json"), "{\"packages\":[]}\n")
+        .expect("write pyodide lock fixture");
+
+    let mut python_engine = PythonExecutionEngine::default();
+    let python_context = python_engine.create_context(CreatePythonContextRequest {
+        vm_id: String::from("vm-python"),
+        pyodide_dist_path: pyodide_dir.clone(),
+    });
+    let python_result = python_engine
+        .start_execution(StartPythonExecutionRequest {
+            vm_id: String::from("vm-python"),
+            context_id: python_context.context_id,
+            code: String::from("print('ignored')"),
+            file_path: None,
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start python execution")
+        .wait()
+        .expect("wait for python execution");
+    assert_eq!(python_result.exit_code, 0);
+
     let mut wasm_engine = WasmExecutionEngine::default();
     let wasm_context = wasm_engine.create_context(CreateWasmContextRequest {
         vm_id: String::from("vm-wasm"),
@@ -166,8 +196,8 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
     let invocations = parse_invocations(&log_path);
     assert_eq!(
         invocations.len(),
-        3,
-        "expected javascript exec plus wasm prewarm and exec"
+        5,
+        "expected javascript exec plus python prewarm and exec plus wasm prewarm and exec"
     );
 
     let workspace_root = canonical(&workspace_root()).display().to_string();
@@ -196,7 +226,24 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
         "javascript write flags should not include the entrypoint parent: {javascript_args:?}"
     );
 
-    for wasm_args in &invocations[1..] {
+    for python_args in &invocations[1..3] {
+        let python_reads = read_flags(python_args);
+        let python_writes = write_flags(python_args);
+        assert!(
+            !python_args.iter().any(|arg| arg == "--permission"),
+            "python should not run under Node permission mode because Pyodide requires process.binding: {python_args:?}"
+        );
+        assert!(
+            python_reads.is_empty(),
+            "python should not receive Node fs read flags without permission mode: {python_args:?}"
+        );
+        assert!(
+            python_writes.is_empty(),
+            "python should not receive Node fs write flags without permission mode: {python_args:?}"
+        );
+    }
+
+    for wasm_args in &invocations[3..] {
         let wasm_reads = read_flags(wasm_args);
         let wasm_writes = write_flags(wasm_args);
         assert!(

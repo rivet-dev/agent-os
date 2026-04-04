@@ -10,6 +10,16 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 #[test]
+fn guest_runtime_kind_serializes_python_in_snake_case() {
+    let encoded = serde_json::to_value(GuestRuntimeKind::Python).expect("serialize runtime");
+    assert_eq!(encoded, json!("python"));
+
+    let decoded: GuestRuntimeKind =
+        serde_json::from_value(json!("python")).expect("decode runtime");
+    assert_eq!(decoded, GuestRuntimeKind::Python);
+}
+
+#[test]
 fn codec_round_trips_authenticated_setup_and_session_messages() {
     let codec = NativeFrameCodec::default();
     let frame = ProtocolFrame::Request(RequestFrame::new(

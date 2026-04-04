@@ -312,6 +312,7 @@ impl JavascriptExecutionEngine {
             child,
             stdout_reader,
             stderr_reader,
+            true,
             sender,
             JavascriptExecutionEvent::Exited,
             |message| JavascriptExecutionEvent::Stderr(message.into_bytes()),
@@ -507,6 +508,7 @@ fn configure_node_sandbox(
         &request.cwd,
         &read_paths,
         &write_paths,
+        true,
         false,
         env_builtin_enabled(&request.env, "child_process"),
     );
