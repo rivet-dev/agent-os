@@ -4,19 +4,26 @@
  * Measures time from AgentOs.create() through workload ready:
  *   --workload=echo             Minimal VM + first exec("echo hello") completing
  *   --workload=pi-session       VM + createSession("pi") completing (ACP handshake done)
+ *   --workload=pi-prompt-turn   VM + createSession("pi-cli") + first prompt turn completing
  *   --workload=claude-session   VM + createSession("claude") completing (ACP handshake done)
  *   --workload=codex-session    VM + createSession("codex") completing (ACP handshake done)
+ *
+ * `pi-prompt-turn` now benchmarks the native PI CLI path through
+ * `createSession("pi-cli")`, which uses `pi-acp` to drive the real PI CLI in
+ * RPC mode. The same PI headless test file documents that raw `spawn("pi", ...)`
+ * is still not exposed on the native sidecar PATH.
  *
  * Pass --iterations=N to override default (5).
  *
  * Usage:
- *   npx tsx scripts/benchmarks/coldstart.bench.ts --workload=echo
- *   npx tsx scripts/benchmarks/coldstart.bench.ts --workload=pi-session --iterations=3
- *   npx tsx scripts/benchmarks/coldstart.bench.ts --workload=claude-session --iterations=3
+ *   pnpm exec tsx scripts/benchmarks/coldstart.bench.ts --workload=echo
+ *   pnpm exec tsx scripts/benchmarks/coldstart.bench.ts --workload=pi-session --iterations=3
+ *   pnpm exec tsx scripts/benchmarks/coldstart.bench.ts --workload=claude-session --iterations=3
  */
 
 import {
 	ITERATIONS,
+	type WorkloadObservation,
 	WARMUP_ITERATIONS,
 	WORKLOADS,
 	createBenchVm,
@@ -29,9 +36,19 @@ import {
 	stopLlmock,
 } from "./bench-utils.js";
 
-const VALID_WORKLOADS = ["echo", ...Object.keys(WORKLOADS).filter((k) => k.endsWith("-session"))];
+const VALID_WORKLOADS = [
+	"echo",
+	...Object.keys(WORKLOADS).filter(
+		(k) => k.endsWith("-session") || k.endsWith("-turn"),
+	),
+];
 
-async function measureEcho(): Promise<number> {
+interface Measurement {
+	ms: number;
+	observation?: WorkloadObservation;
+}
+
+async function measureEcho(): Promise<Measurement> {
 	const t0 = performance.now();
 	const vm = await createBenchVm();
 	const result = await vm.exec(ECHO_COMMAND);
@@ -40,17 +57,17 @@ async function measureEcho(): Promise<number> {
 		throw new Error(`Unexpected output: ${JSON.stringify(result.stdout)}`);
 	}
 	await vm.dispose();
-	return ms;
+	return { ms };
 }
 
-async function measureAgentSession(workloadName: string): Promise<number> {
+async function measureAgentSession(workloadName: string): Promise<Measurement> {
 	const workload = WORKLOADS[workloadName];
 	const t0 = performance.now();
 	const vm = await workload.createVm();
-	await workload.start(vm);
+	const observation = await workload.start(vm);
 	const ms = performance.now() - t0;
 	await vm.dispose();
-	return ms;
+	return { ms, observation };
 }
 
 function parseArgs(): { workload: string; iterations: number } {
@@ -59,7 +76,7 @@ function parseArgs(): { workload: string; iterations: number } {
 
 	if (!wArg) {
 		console.error(
-			`Usage: npx tsx coldstart.bench.ts --workload=${VALID_WORKLOADS.join("|")} [--iterations=N]`,
+			`Usage: pnpm exec tsx coldstart.bench.ts --workload=${VALID_WORKLOADS.join("|")} [--iterations=N]`,
 		);
 		process.exit(1);
 	}
@@ -91,11 +108,15 @@ async function main() {
 	console.error(`Iterations: ${iterations} (+ ${WARMUP_ITERATIONS} warmup)`);
 
 	const samples: number[] = [];
+	let lastObservation: WorkloadObservation | undefined;
 
 	for (let i = 0; i < WARMUP_ITERATIONS + iterations; i++) {
-		const ms = await measure();
+		const { ms, observation } = await measure();
 		if (i >= WARMUP_ITERATIONS) {
 			samples.push(ms);
+			if (observation) {
+				lastObservation = observation;
+			}
 		}
 		console.error(
 			`  iter ${i}: ${round(ms)}ms${i < WARMUP_ITERATIONS ? " (warmup)" : ""}`,
@@ -109,8 +130,27 @@ async function main() {
 		[["cold start", `${s.mean}ms`, `${s.p50}ms`, `${s.p95}ms`, `${s.min}ms`, `${s.max}ms`]],
 	);
 
+	if (lastObservation) {
+		console.error(
+			`observed work: providerRequests=${lastObservation.providerRequestCount ?? 0} textEvents=${lastObservation.textEventCount ?? 0} stopReason=${lastObservation.stopReason ?? "n/a"}`,
+		);
+		if (lastObservation.finalText) {
+			console.error(`final text: ${JSON.stringify(lastObservation.finalText)}`);
+		}
+	}
+
 	console.log(
-		JSON.stringify({ hardware, workload, iterations, coldStart: s }, null, 2),
+		JSON.stringify(
+			{
+				hardware,
+				workload,
+				iterations,
+				coldStart: s,
+				observation: lastObservation,
+			},
+			null,
+			2,
+		),
 	);
 
 	await stopLlmock();

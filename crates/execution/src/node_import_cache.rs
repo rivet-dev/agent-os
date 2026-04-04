@@ -11,7 +11,7 @@ pub(crate) const NODE_IMPORT_CACHE_ASSET_ROOT_ENV: &str = "AGENT_OS_NODE_IMPORT_
 const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
-const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "4";
+const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "5";
 const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "1";
 const AGENT_OS_BUILTIN_SPECIFIER_PREFIX: &str = "agent-os:builtin/";
 const AGENT_OS_POLYFILL_SPECIFIER_PREFIX: &str = "agent-os:polyfill/";
@@ -24,6 +24,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const GUEST_PATH_MAPPINGS = parseGuestPathMappings(process.env.AGENT_OS_GUEST_PATH_MAPPINGS);
 const ALLOWED_BUILTINS = new Set(parseJsonArray(process.env.AGENT_OS_ALLOWED_NODE_BUILTINS));
 const CACHE_PATH = process.env.__NODE_IMPORT_CACHE_PATH_ENV__;
+const PROJECTED_SOURCE_CACHE_ROOT = CACHE_PATH
+  ? path.join(path.dirname(CACHE_PATH), 'projected-sources')
+  : null;
 const ASSET_ROOT = process.env.__NODE_IMPORT_CACHE_ASSET_ROOT_ENV__;
 const DEBUG_ENABLED = process.env.__NODE_IMPORT_CACHE_DEBUG_ENV__ === '1';
 const METRICS_PREFIX = '__NODE_IMPORT_CACHE_METRICS_PREFIX__';
@@ -60,6 +63,8 @@ const metrics = {
   packageTypeMisses: 0,
   moduleFormatHits: 0,
   moduleFormatMisses: 0,
+  sourceHits: 0,
+  sourceMisses: 0,
 };
 
 export async function resolve(specifier, context, nextResolve) {
@@ -184,6 +189,17 @@ export async function load(url, context, nextLoad) {
     return nextLoad(url, context);
   }
 
+  const projectedPackageSource = loadProjectedPackageSource(url, filePath, format);
+  if (projectedPackageSource != null) {
+    flushCacheState();
+    emitMetrics();
+    return {
+      shortCircuit: true,
+      format,
+      source: projectedPackageSource,
+    };
+  }
+
   const source =
     format === 'wasm'
       ? fs.readFileSync(filePath)
@@ -266,6 +282,7 @@ function emptyCacheState() {
     resolutions: {},
     packageTypes: {},
     moduleFormats: {},
+    projectedSources: {},
   };
 }
 
@@ -286,6 +303,7 @@ function normalizeCacheState(value) {
     resolutions: isRecord(value.resolutions) ? value.resolutions : {},
     packageTypes: isRecord(value.packageTypes) ? value.packageTypes : {},
     moduleFormats: isRecord(value.moduleFormats) ? value.moduleFormats : {},
+    projectedSources: isRecord(value.projectedSources) ? value.projectedSources : {},
   };
 }
 
@@ -304,7 +322,62 @@ function mergeCacheStates(base, current) {
       ...base.moduleFormats,
       ...current.moduleFormats,
     },
+    projectedSources: {
+      ...base.projectedSources,
+      ...current.projectedSources,
+    },
   };
+}
+
+function loadProjectedPackageSource(url, filePath, format) {
+  if (
+    format === 'wasm' ||
+    !isProjectedPackageSource(filePath) ||
+    !PROJECTED_SOURCE_CACHE_ROOT
+  ) {
+    return null;
+  }
+
+  const cached = cacheState.projectedSources[url];
+  if (cached && validateProjectedSourceEntry(cached, filePath, format)) {
+    metrics.sourceHits += 1;
+    return fs.readFileSync(cached.cachedPath, 'utf8');
+  }
+
+  metrics.sourceMisses += 1;
+
+  const stat = statForPath(filePath);
+  if (!stat) {
+    return null;
+  }
+
+  const source = rewriteBuiltinImports(fs.readFileSync(filePath, 'utf8'), filePath);
+  const cacheKey = hashString(
+    JSON.stringify({
+      url,
+      format,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+    }),
+  );
+  const extension = path.extname(filePath) || '.js';
+  const cachedPath = path.join(
+    PROJECTED_SOURCE_CACHE_ROOT,
+    `${cacheKey}${extension}.cached`,
+  );
+  fs.mkdirSync(path.dirname(cachedPath), { recursive: true });
+  fs.writeFileSync(cachedPath, source);
+
+  cacheState.projectedSources[url] = {
+    kind: 'text',
+    filePath,
+    format,
+    cachedPath,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+  };
+  dirty = true;
+  return source;
 }
 
 function resolveAgentOsAsset(specifier) {
@@ -530,6 +603,15 @@ function buildResolutionEntry(specifier, context, resolved) {
   return null;
 }
 
+function isProjectedPackageSource(filePath) {
+  if (typeof filePath !== 'string' || isAssetPath(filePath)) {
+    return false;
+  }
+
+  const guestPath = guestPathFromHostPath(filePath);
+  return typeof guestPath === 'string' && guestPath.includes('/node_modules/');
+}
+
 function validateResolutionEntry(entry) {
   if (!isRecord(entry) || typeof entry.kind !== 'string') {
     return false;
@@ -685,6 +767,29 @@ function validateModuleFormatEntry(entry) {
   }
 
   return true;
+}
+
+function validateProjectedSourceEntry(entry, filePath, format) {
+  if (
+    !isRecord(entry) ||
+    entry.kind !== 'text' ||
+    typeof entry.filePath !== 'string' ||
+    typeof entry.cachedPath !== 'string' ||
+    typeof entry.format !== 'string'
+  ) {
+    return false;
+  }
+
+  if (entry.filePath !== filePath || entry.format !== format) {
+    return false;
+  }
+
+  const stat = statForPath(filePath);
+  if (!stat || stat.size !== entry.size || stat.mtimeMs !== entry.mtimeMs) {
+    return false;
+  }
+
+  return statForPath(entry.cachedPath)?.isFile() ?? false;
 }
 
 function lookupPackageType(filePath) {

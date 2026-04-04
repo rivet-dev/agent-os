@@ -20,6 +20,8 @@ struct NodeImportCacheMetrics {
     package_type_misses: usize,
     module_format_hits: usize,
     module_format_misses: usize,
+    source_hits: usize,
+    source_misses: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +82,8 @@ fn parse_import_cache_metrics(stderr: &str) -> NodeImportCacheMetrics {
         package_type_misses: parse_metric_value(metrics_line, "packageTypeMisses"),
         module_format_hits: parse_metric_value(metrics_line, "moduleFormatHits"),
         module_format_misses: parse_metric_value(metrics_line, "moduleFormatMisses"),
+        source_hits: parse_metric_value(metrics_line, "sourceHits"),
+        source_misses: parse_metric_value(metrics_line, "sourceMisses"),
     }
 }
 
@@ -1151,6 +1155,126 @@ console.log(`answer:${dep.answer}`);
     assert_eq!(second_exit, 0);
     assert!(second_stdout.contains("answer:42"));
     assert!(second_metrics.resolve_hits >= 2);
+}
+
+#[test]
+fn javascript_execution_reuses_and_invalidates_projected_package_source_cache() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let projected_root = temp.path().join("projected-node-modules");
+    let package_dir = projected_root.join("demo-projected");
+    fs::create_dir_all(&package_dir).expect("create projected package dir");
+    write_fixture(
+        &package_dir.join("package.json"),
+        "{\n  \"name\": \"demo-projected\",\n  \"type\": \"module\"\n}\n",
+    );
+    write_fixture(
+        &package_dir.join("entry.js"),
+        "import { readFileSync } from 'node:fs';\nexport const answer = 41;\nexport const fsReady = typeof readFileSync === 'function';\n",
+    );
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const mod = await import("/root/node_modules/demo-projected/entry.js");
+console.log(`answer:${mod.answer}`);
+console.log(`fsReady:${mod.fsReady}`);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let first_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let projected_root_host_path = projected_root.to_string_lossy().replace('\\', "\\\\");
+    let extra_fs_read_paths_json = format!(
+        "[\"{}\"]",
+        projected_root.to_string_lossy().replace('\\', "\\\\")
+    );
+    let debug_env = BTreeMap::from([
+        (
+            String::from("AGENT_OS_EXTRA_FS_READ_PATHS"),
+            extra_fs_read_paths_json,
+        ),
+        (
+            String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+            format!(
+                "[{{\"guestPath\":\"/root/node_modules\",\"hostPath\":\"{projected_root_host_path}\"}}]"
+            ),
+        ),
+        (
+            String::from("AGENT_OS_NODE_IMPORT_CACHE_DEBUG"),
+            String::from("1"),
+        ),
+    ]);
+
+    let (first_stdout, first_stderr, first_exit) = run_javascript_execution(
+        &mut engine,
+        first_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env.clone(),
+    );
+    let first_metrics = parse_import_cache_metrics(&first_stderr);
+
+    assert_eq!(first_exit, 0, "stderr: {first_stderr}");
+    assert!(first_stdout.contains("answer:41"), "stdout: {first_stdout}");
+    assert!(
+        first_stdout.contains("fsReady:true"),
+        "stdout: {first_stdout}"
+    );
+    assert_eq!(first_metrics.source_hits, 0, "stderr: {first_stderr}");
+    assert!(first_metrics.source_misses >= 1, "stderr: {first_stderr}");
+
+    let second_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let (second_stdout, second_stderr, second_exit) = run_javascript_execution(
+        &mut engine,
+        second_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env.clone(),
+    );
+    let second_metrics = parse_import_cache_metrics(&second_stderr);
+
+    assert_eq!(second_exit, 0, "stderr: {second_stderr}");
+    assert!(
+        second_stdout.contains("answer:41"),
+        "stdout: {second_stdout}"
+    );
+    assert!(second_metrics.source_hits >= 1, "stderr: {second_stderr}");
+
+    write_fixture(
+        &package_dir.join("entry.js"),
+        "import { readFileSync } from 'node:fs';\nexport const answer = 42;\nexport const fsReady = typeof readFileSync === 'function';\n",
+    );
+
+    let third_context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let (third_stdout, third_stderr, third_exit) = run_javascript_execution(
+        &mut engine,
+        third_context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        debug_env,
+    );
+    let third_metrics = parse_import_cache_metrics(&third_stderr);
+
+    assert_eq!(third_exit, 0, "stderr: {third_stderr}");
+    assert!(third_stdout.contains("answer:42"), "stdout: {third_stdout}");
+    assert!(
+        third_stdout.contains("fsReady:true"),
+        "stdout: {third_stdout}"
+    );
+    assert!(third_metrics.source_misses >= 1, "stderr: {third_stderr}");
 }
 
 #[test]

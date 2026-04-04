@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
-import { afterEach, describe, expect, test } from "vitest";
 import common, { coreutils } from "@rivet-dev/agent-os-common";
 import pi from "@rivet-dev/agent-os-pi";
+import { afterEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/agent-os.js";
 
 const hasRegistryCommands = existsSync(coreutils.commandDir);
@@ -69,6 +69,44 @@ describe("software projection on the sidecar path", () => {
 		expect(stdout).toContain("adapter true");
 		expect(stdout).toContain("adapterResolved true");
 		expect(stdout).toContain("agent true");
+	});
+
+	test("keeps projected package roots read-only on the sidecar path", async () => {
+		vm = await AgentOs.create({
+			moduleAccessCwd: "/tmp",
+			software: [pi],
+		});
+
+		let stdout = "";
+		let stderr = "";
+		const { pid } = vm.spawn(
+			"node",
+			[
+				"-e",
+				[
+					"const fs = require('node:fs');",
+					"try {",
+					"  fs.appendFileSync('/root/node_modules/@rivet-dev/agent-os-pi/package.json', '\\nblocked');",
+					"  console.log('write:unexpected-success');",
+					"} catch (error) {",
+					"  console.log('writeError', error && error.code);",
+					"}",
+				].join(" "),
+			],
+			{
+				onStdout: (chunk) => {
+					stdout += Buffer.from(chunk).toString("utf8");
+				},
+				onStderr: (chunk) => {
+					stderr += Buffer.from(chunk).toString("utf8");
+				},
+			},
+		);
+
+		const exitCode = await waitForExit(vm, pid);
+		expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+		expect(stdout).not.toContain("write:unexpected-success");
+		expect(stdout).toMatch(/writeError (ERR_ACCESS_DENIED|EACCES|EPERM|EROFS)/);
 	});
 
 	test.skipIf(!hasRegistryCommands)(

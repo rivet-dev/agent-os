@@ -16,7 +16,7 @@ run() {
   shift
   echo "" >&2
   echo "=== Running $name ===" >&2
-  npx tsx "$@" \
+  pnpm exec tsx "$@" \
     1> "$RESULTS_DIR/${name}.json" \
     2> >(tee "$RESULTS_DIR/${name}.log" >&2)
 }
@@ -24,6 +24,9 @@ run() {
 # Cold-start benchmarks
 run "coldstart-echo" \
   scripts/benchmarks/coldstart.bench.ts --workload=echo
+
+run "coldstart-pi-prompt-turn" \
+  scripts/benchmarks/coldstart.bench.ts --workload=pi-prompt-turn --iterations=3
 
 # Memory benchmarks
 # run "memory-sleep" \

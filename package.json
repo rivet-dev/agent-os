@@ -19,12 +19,14 @@
 	"devDependencies": {
 		"@biomejs/biome": "^2.3",
 		"@copilotkit/llmock": "^1.6.0",
-		"@rivet-dev/agent-os-claude": "workspace:*",
-		"@rivet-dev/agent-os-common": "workspace:*",
-		"@rivet-dev/agent-os-codex-agent": "workspace:*",
 		"@rivet-dev/agent-os": "workspace:*",
+		"@rivet-dev/agent-os-claude": "workspace:*",
+		"@rivet-dev/agent-os-codex-agent": "workspace:*",
+		"@rivet-dev/agent-os-common": "workspace:*",
 		"@rivet-dev/agent-os-pi": "workspace:*",
 		"@types/node": "^22.19.15",
+		"jszip": "^3.10.1",
+		"pdf-lib": "^1.17.1",
 		"turbo": "^2.5.6",
 		"typescript": "^5.9.2"
 	},

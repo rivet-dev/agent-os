@@ -7,6 +7,7 @@ description = "Native execution plane scaffold for Agent OS"
 
 [dependencies]
 agent-os-bridge = { path = "../bridge" }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]

@@ -126,14 +126,63 @@ console.log("messages:" + JSON.stringify(parsed.messages));
 		expect(stdout).toContain('messages:["hello"]');
 	}, 30_000);
 
-	// TODO: Full PI headless execution is blocked by two current VM limitations:
-	// 1. ESM module linking: V8 Rust runtime doesn't forward named exports from
-	//    host-loaded modules (ModuleAccessFileSystem overlay). VFS modules work fine.
-	//    PI's CLI must run as ESM (has async top-level main()), but ESM mode can't
-	//    load host modules with named exports.
-	// 2. CJS mode: Works for loading PI's modules, but the V8 session doesn't
-	//    process the event loop after synchronous code finishes, so async main()
-	//    never completes.
-	// Fix: Either fix V8 module linking for overlay modules, or add event loop
-	// processing to CJS session mode.
+	test("CLI-backed PI headless session completes a real prompt turn", async () => {
+		const { sessionId } = await vm.createSession("pi-cli", {
+			env: {
+				ANTHROPIC_API_KEY: "mock-key",
+				ANTHROPIC_BASE_URL: mockUrl,
+			},
+		});
+
+		try {
+			const response = await vm.prompt(
+				sessionId,
+				"Reply with exactly: Hello from llmock",
+			);
+
+			expect(response.error).toBeUndefined();
+			expect((response.result as { stopReason?: string }).stopReason).toBe(
+				"end_turn",
+			);
+			expect(response.result).toBeDefined();
+			expect(
+				vm
+					.listProcesses()
+					.some(
+						(process) =>
+							process.running &&
+							process.command === "node" &&
+							process.args.some((arg) => arg.includes("pi-acp")),
+					),
+			).toBe(true);
+		} finally {
+			vm.closeSession(sessionId);
+		}
+	}, 90_000);
+
+	test("standalone PI CLI is not exposed on the native sidecar PATH", async () => {
+		let stdout = "";
+		let stderr = "";
+
+		const { pid } = vm.spawn("pi", ["-p", "--no-session", "hello"], {
+			onStdout: (data: Uint8Array) => {
+				stdout += new TextDecoder().decode(data);
+			},
+			onStderr: (data: Uint8Array) => {
+				stderr += new TextDecoder().decode(data);
+			},
+			env: {
+				HOME: "/home/user",
+				PI_OFFLINE: "1",
+				ANTHROPIC_API_KEY: "mock-key",
+				ANTHROPIC_BASE_URL: mockUrl,
+			},
+		});
+
+		const exitCode = await vm.waitProcess(pid);
+
+		expect(exitCode).toBe(1);
+		expect(stdout).toBe("");
+		expect(stderr).toContain("command not found on native sidecar path: pi");
+	}, 30_000);
 });

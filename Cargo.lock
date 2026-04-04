@@ -17,6 +17,7 @@ name = "agent-os-execution"
 version = "0.1.0"
 dependencies = [
  "agent-os-bridge",
+ "serde",
  "serde_json",
  "tempfile",
  "wat",
