@@ -9,11 +9,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import {
+	sep as hostPathSeparator,
 	join,
 	posix as posixPath,
 	relative as relativeHostPath,
 	resolve as resolveHostPath,
-	sep as hostPathSeparator,
 } from "node:path";
 import {
 	allowAll,
@@ -34,8 +34,8 @@ import {
 import { type ToolKit, validateToolkits } from "./host-tools.js";
 import { generateToolReference } from "./host-tools-prompt.js";
 import {
-	startHostToolsServer,
 	type HostToolsServer,
+	startHostToolsServer,
 } from "./host-tools-server.js";
 import {
 	createShimFilesystem,
@@ -92,38 +92,20 @@ export interface AgentRegistryEntry {
 	installed: boolean;
 }
 
+import { createWasmVmRuntime } from "@rivet-dev/agent-os-posix";
+import { createPythonRuntime } from "@rivet-dev/agent-os-python";
 import {
 	createNodeHostNetworkAdapter,
 	createNodeRuntime,
 } from "@secure-exec/nodejs";
-import { createPythonRuntime } from "@rivet-dev/agent-os-python";
-import { createWasmVmRuntime } from "@rivet-dev/agent-os-posix";
 import { AcpClient } from "./acp-client.js";
+import { AGENT_CONFIGS, type AgentConfig, type AgentType } from "./agents.js";
+import { getHostDirBackendMeta } from "./backends/host-dir-backend.js";
 import {
 	createBootstrapAwareFilesystem,
 	getBaseEnvironment,
 	getBaseFilesystemEntries,
 } from "./base-filesystem.js";
-import {
-	snapshotVirtualFilesystem,
-	type FilesystemEntry,
-} from "./filesystem-snapshot.js";
-import {
-	createDefaultRootLowerInput,
-	createInMemoryLayerStore,
-	createSnapshotExport,
-	type LayerStore,
-	type OverlayFilesystemMode,
-	type RootSnapshotExport,
-	type SnapshotLayerHandle,
-} from "./layers.js";
-import { AGENT_CONFIGS, type AgentConfig, type AgentType } from "./agents.js";
-import { getHostDirBackendMeta } from "./backends/host-dir-backend.js";
-import {
-	type SoftwareInput,
-	type SoftwareRoot,
-	processSoftware,
-} from "./packages.js";
 import { CronManager } from "./cron/cron-manager.js";
 import type { ScheduleDriver } from "./cron/schedule-driver.js";
 import { TimerScheduleDriver } from "./cron/timer-driver.js";
@@ -134,23 +116,41 @@ import type {
 	CronJobInfo,
 	CronJobOptions,
 } from "./cron/types.js";
+import {
+	type FilesystemEntry,
+	snapshotVirtualFilesystem,
+} from "./filesystem-snapshot.js";
+import {
+	createDefaultRootLowerInput,
+	createInMemoryLayerStore,
+	createSnapshotExport,
+	type LayerStore,
+	type OverlayFilesystemMode,
+	type RootSnapshotExport,
+	type SnapshotLayerHandle,
+} from "./layers.js";
 import { getOsInstructions } from "./os-instructions.js";
 import {
-	Session,
-	type SessionInitData,
+	processSoftware,
+	type SoftwareInput,
+	type SoftwareRoot,
+} from "./packages.js";
+import type { JsonRpcRequest, JsonRpcResponse } from "./protocol.js";
+import {
 	type AgentCapabilities,
 	type AgentInfo,
 	type GetEventsOptions,
 	type PermissionReply,
+	type PermissionRequestHandler,
 	type SequencedEvent,
+	Session,
 	type SessionConfigOption,
 	type SessionEventHandler,
+	type SessionInitData,
 	type SessionModeState,
-	type PermissionRequestHandler,
 } from "./session.js";
-import type { JsonRpcRequest, JsonRpcResponse } from "./protocol.js";
-import { createStdoutLineIterable } from "./stdout-lines.js";
 import { createSqliteBindings } from "./sqlite-bindings.js";
+import { createStdoutLineIterable } from "./stdout-lines.js";
 
 interface HostMountInfo {
 	vmPath: string;
@@ -231,6 +231,13 @@ export interface AgentOsOptions {
 	 * network, child process, and environment operations. Defaults to allowAll.
 	 */
 	permissions?: Permissions;
+	/**
+	 * Default ACP request inactivity timeout in milliseconds for all
+	 * sessions created by this VM. The timer resets whenever the agent
+	 * sends any JSON-RPC message. Per-session override available via
+	 * CreateSessionOptions.acpTimeoutMs. Defaults to 900 000 (15 min).
+	 */
+	acpTimeoutMs?: number;
 }
 
 /** Configuration for a local MCP server (spawned as a child process). */
@@ -266,6 +273,13 @@ export interface CreateSessionOptions {
 	skipOsInstructions?: boolean;
 	/** Additional instructions appended to the base OS instructions. */
 	additionalInstructions?: string;
+	/**
+	 * ACP request inactivity timeout in milliseconds for this session.
+	 * The timer resets whenever the agent sends any JSON-RPC message
+	 * (responses, notifications, inbound requests). Overrides the
+	 * VM-level AgentOsOptions.acpTimeoutMs. Defaults to 900 000 (15 min).
+	 */
+	acpTimeoutMs?: number;
 }
 
 export interface SessionInfo {
@@ -290,7 +304,9 @@ export interface SpawnedProcessInfo {
 	exitCode: number | null;
 }
 
-function isOverlayMountConfig(config: MountConfig): config is OverlayMountConfig {
+function isOverlayMountConfig(
+	config: MountConfig,
+): config is OverlayMountConfig {
 	return "filesystem" in config;
 }
 
@@ -343,11 +359,11 @@ function isWasmBinaryFile(path: string): boolean {
 	try {
 		const header = readFileSync(path);
 		return (
-			header.length >= 4
-			&& header[0] === 0x00
-			&& header[1] === 0x61
-			&& header[2] === 0x73
-			&& header[3] === 0x6d
+			header.length >= 4 &&
+			header[0] === 0x00 &&
+			header[1] === 0x61 &&
+			header[2] === 0x73 &&
+			header[3] === 0x6d
 		);
 	} catch {
 		return false;
@@ -392,7 +408,9 @@ function collectBootstrapWasmCommands(commandDirs: string[]): string[] {
 	return commands;
 }
 
-function collectConfiguredLowerPaths(config?: RootFilesystemConfig): Set<string> {
+function collectConfiguredLowerPaths(
+	config?: RootFilesystemConfig,
+): Set<string> {
 	const paths = new Set<string>();
 
 	for (const lower of config?.lowers ?? []) {
@@ -453,7 +471,9 @@ function createKernelBootstrapLower(
 		});
 	}
 
-	const uniqueCommands = [...new Set(commandNames)].sort((a, b) => a.localeCompare(b));
+	const uniqueCommands = [...new Set(commandNames)].sort((a, b) =>
+		a.localeCompare(b),
+	);
 	for (const command of uniqueCommands) {
 		const stubPath = `/bin/${command}`;
 		if (existingPaths.has(stubPath)) {
@@ -496,22 +516,25 @@ async function createRootFilesystem(
 	}
 
 	const lowers = await Promise.all(
-		lowerInputs.map((lower) => rootStore.importSnapshot(
-			lower.kind === "bundled-base-filesystem"
-				? createDefaultRootLowerInput()
-				: lower,
-		)),
+		lowerInputs.map((lower) =>
+			rootStore.importSnapshot(
+				lower.kind === "bundled-base-filesystem"
+					? createDefaultRootLowerInput()
+					: lower,
+			),
+		),
 	);
 
-	const rootView = normalizedConfig.mode === "read-only"
-		? rootStore.createOverlayFilesystem({
-			mode: "read-only",
-			lowers,
-		})
-		: rootStore.createOverlayFilesystem({
-			upper: await rootStore.createWritableLayer(),
-			lowers,
-		});
+	const rootView =
+		normalizedConfig.mode === "read-only"
+			? rootStore.createOverlayFilesystem({
+					mode: "read-only",
+					lowers,
+				})
+			: rootStore.createOverlayFilesystem({
+					upper: await rootStore.createWritableLayer(),
+					lowers,
+				});
 
 	if (normalizedConfig.mode === "read-only") {
 		return {
@@ -540,32 +563,35 @@ async function resolveMounts(
 		return [];
 	}
 
-	return Promise.all(mounts.map(async (mount) => {
-		if (!isOverlayMountConfig(mount)) {
+	return Promise.all(
+		mounts.map(async (mount) => {
+			if (!isOverlayMountConfig(mount)) {
+				return {
+					path: mount.path,
+					fs: mount.driver,
+					readOnly: mount.readOnly,
+				};
+			}
+
+			const mode = mount.filesystem.mode ?? "ephemeral";
+			const fs =
+				mode === "read-only"
+					? mount.filesystem.store.createOverlayFilesystem({
+							mode: "read-only",
+							lowers: mount.filesystem.lowers,
+						})
+					: mount.filesystem.store.createOverlayFilesystem({
+							upper: await mount.filesystem.store.createWritableLayer(),
+							lowers: mount.filesystem.lowers,
+						});
+
 			return {
 				path: mount.path,
-				fs: mount.driver,
-				readOnly: mount.readOnly,
+				fs,
+				readOnly: mode === "read-only",
 			};
-		}
-
-		const mode = mount.filesystem.mode ?? "ephemeral";
-		const fs = mode === "read-only"
-			? mount.filesystem.store.createOverlayFilesystem({
-				mode: "read-only",
-				lowers: mount.filesystem.lowers,
-			})
-			: mount.filesystem.store.createOverlayFilesystem({
-				upper: await mount.filesystem.store.createWritableLayer(),
-				lowers: mount.filesystem.lowers,
-			});
-
-		return {
-			path: mount.path,
-			fs,
-			readOnly: mode === "read-only",
-		};
-	}));
+		}),
+	);
 }
 
 export class AgentOs {
@@ -600,6 +626,7 @@ export class AgentOs {
 	private _hostMounts: HostMountInfo[];
 	private _acpTerminals = new Map<string, AcpTerminalState>();
 	private _acpTerminalCounter = 0;
+	private _acpTimeoutMs: number | undefined;
 	private _env: Record<string, string>;
 	private _rootFilesystem: VirtualFileSystem;
 
@@ -625,19 +652,13 @@ export class AgentOs {
 		// Process software descriptors first so the root lower can include the
 		// exact command stubs Secure Exec will register during boot.
 		const processed = processSoftware(options?.software ?? []);
-		const bootstrapLower = createKernelBootstrapLower(
-			options?.rootFilesystem,
-			[
-				...collectBootstrapWasmCommands(processed.commandDirs),
-				...NODE_RUNTIME_BOOTSTRAP_COMMANDS,
-				...PYTHON_RUNTIME_BOOTSTRAP_COMMANDS,
-			],
-		);
-		const {
-			filesystem,
-			finishKernelBootstrap,
-			rootView,
-		} = await createRootFilesystem(options?.rootFilesystem, bootstrapLower);
+		const bootstrapLower = createKernelBootstrapLower(options?.rootFilesystem, [
+			...collectBootstrapWasmCommands(processed.commandDirs),
+			...NODE_RUNTIME_BOOTSTRAP_COMMANDS,
+			...PYTHON_RUNTIME_BOOTSTRAP_COMMANDS,
+		]);
+		const { filesystem, finishKernelBootstrap, rootView } =
+			await createRootFilesystem(options?.rootFilesystem, bootstrapLower);
 		const hostNetworkAdapter = createNodeHostNetworkAdapter();
 		const moduleAccessCwd = options?.moduleAccessCwd ?? process.cwd();
 
@@ -708,9 +729,9 @@ export class AgentOs {
 			createWasmVmRuntime(
 				processed.commandDirs.length > 0
 					? {
-						commandDirs: processed.commandDirs,
-						permissions: processed.commandPermissions,
-					}
+							commandDirs: processed.commandDirs,
+							permissions: processed.commandPermissions,
+						}
 					: undefined,
 			),
 		);
@@ -719,9 +740,10 @@ export class AgentOs {
 				bindings: createSqliteBindings(kernel),
 				loopbackExemptPorts,
 				moduleAccessCwd,
-				packageRoots: processed.softwareRoots.length > 0
-					? processed.softwareRoots
-					: undefined,
+				packageRoots:
+					processed.softwareRoots.length > 0
+						? processed.softwareRoots
+						: undefined,
 			}),
 		);
 		await kernel.mount(createPythonRuntime());
@@ -739,6 +761,7 @@ export class AgentOs {
 		vm._toolsServer = toolsServer;
 		vm._toolKits = toolKits ?? [];
 		vm._shimFs = shimFs;
+		vm._acpTimeoutMs = options?.acpTimeoutMs;
 		vm._cronManager = new CronManager(
 			vm,
 			options?.scheduleDriver ?? new TimerScheduleDriver(),
@@ -853,10 +876,7 @@ export class AgentOs {
 	}
 
 	/** Subscribe to process exit. Returns an unsubscribe function. */
-	onProcessExit(
-		pid: number,
-		handler: (exitCode: number) => void,
-	): () => void {
+	onProcessExit(pid: number, handler: (exitCode: number) => void): () => void {
 		const entry = this._processes.get(pid);
 		if (!entry) throw new Error(`Process not found: ${pid}`);
 		// If already exited, call immediately.
@@ -935,10 +955,7 @@ export class AgentOs {
 			try {
 				this._assertSafeAbsolutePath(entry.path);
 				// Create parent directories as needed
-				const parentDir = entry.path.substring(
-					0,
-					entry.path.lastIndexOf("/"),
-				);
+				const parentDir = entry.path.substring(0, entry.path.lastIndexOf("/"));
 				if (parentDir) {
 					await this._mkdirp(parentDir);
 				}
@@ -986,10 +1003,7 @@ export class AgentOs {
 		}
 	}
 
-	async mkdir(
-		path: string,
-		options?: { recursive?: boolean },
-	): Promise<void> {
+	async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
 		if (options?.recursive) {
 			return this._mkdirp(path);
 		}
@@ -1024,8 +1038,7 @@ export class AgentOs {
 				if (name === "." || name === "..") continue;
 				if (exclude?.has(name)) continue;
 
-				const fullPath =
-					dirPath === "/" ? `/${name}` : `${dirPath}/${name}`;
+				const fullPath = dirPath === "/" ? `/${name}` : `${dirPath}/${name}`;
 				const s = await this.kernel.stat(fullPath);
 
 				if (s.isSymbolicLink) {
@@ -1072,7 +1085,11 @@ export class AgentOs {
 		);
 	}
 
-	mountFs(path: string, driver: VirtualFileSystem, options?: { readOnly?: boolean }): void {
+	mountFs(
+		path: string,
+		driver: VirtualFileSystem,
+		options?: { readOnly?: boolean },
+	): void {
 		this._assertSafeAbsolutePath(path);
 		this.kernel.mountFs(path, driver, { readOnly: options?.readOnly });
 	}
@@ -1093,10 +1110,7 @@ export class AgentOs {
 		await this.delete(from, { recursive: true });
 	}
 
-	async delete(
-		path: string,
-		options?: { recursive?: boolean },
-	): Promise<void> {
+	async delete(path: string, options?: { recursive?: boolean }): Promise<void> {
 		this._assertSafeAbsolutePath(path);
 		const s = await this.kernel.stat(path);
 		if (s.isDirectory) {
@@ -1188,10 +1202,7 @@ export class AgentOs {
 				if (!relativePath) {
 					return mount.hostPath;
 				}
-				return join(
-					mount.hostPath,
-					...relativePath.split("/").filter(Boolean),
-				);
+				return join(mount.hostPath, ...relativePath.split("/").filter(Boolean));
 			}
 		}
 		return null;
@@ -1202,9 +1213,7 @@ export class AgentOs {
 		for (const mount of this._hostMounts) {
 			if (
 				normalizedHostPath === mount.hostPath ||
-				normalizedHostPath.startsWith(
-					`${mount.hostPath}${hostPathSeparator}`,
-				)
+				normalizedHostPath.startsWith(`${mount.hostPath}${hostPathSeparator}`)
 			) {
 				const relativePath = relativeHostPath(
 					mount.hostPath,
@@ -1243,7 +1252,9 @@ export class AgentOs {
 			return;
 		}
 
-		while (Buffer.byteLength(terminal.output, "utf8") > terminal.outputByteLimit) {
+		while (
+			Buffer.byteLength(terminal.output, "utf8") > terminal.outputByteLimit
+		) {
 			terminal.output = terminal.output.slice(1);
 			terminal.truncated = true;
 		}
@@ -1252,11 +1263,10 @@ export class AgentOs {
 	private async _handleInboundAcpRequest(
 		request: JsonRpcRequest,
 	): Promise<{ result?: unknown } | null> {
-		const params = (
+		const params =
 			request.params && typeof request.params === "object"
 				? (request.params as Record<string, unknown>)
-				: {}
-		);
+				: {};
 
 		switch (request.method) {
 			case "fs/read_text_file": {
@@ -1315,10 +1325,8 @@ export class AgentOs {
 										(entry as { value: string }).value,
 									];
 								})
-								.filter(
-									(
-										entry,
-									): entry is [string, string] => Array.isArray(entry),
+								.filter((entry): entry is [string, string] =>
+									Array.isArray(entry),
 								),
 						)
 					: undefined;
@@ -1522,41 +1530,43 @@ export class AgentOs {
 			...Object.keys(AGENT_CONFIGS),
 		]);
 
-		return [...allIds].map((id) => {
-			const config = this._resolveAgentConfig(id);
-			if (!config) return null;
+		return [...allIds]
+			.map((id) => {
+				const config = this._resolveAgentConfig(id);
+				if (!config) return null;
 
-			let installed = false;
-			try {
-				// Check package roots first, then CWD-based node_modules.
-				const vmPrefix = `/root/node_modules/${config.acpAdapter}`;
-				let hostPkgJsonPath: string | null = null;
-				for (const root of this._softwareRoots) {
-					if (root.vmPath === vmPrefix) {
-						hostPkgJsonPath = join(root.hostPath, "package.json");
-						break;
+				let installed = false;
+				try {
+					// Check package roots first, then CWD-based node_modules.
+					const vmPrefix = `/root/node_modules/${config.acpAdapter}`;
+					let hostPkgJsonPath: string | null = null;
+					for (const root of this._softwareRoots) {
+						if (root.vmPath === vmPrefix) {
+							hostPkgJsonPath = join(root.hostPath, "package.json");
+							break;
+						}
 					}
+					if (!hostPkgJsonPath) {
+						hostPkgJsonPath = join(
+							this._moduleAccessCwd,
+							"node_modules",
+							config.acpAdapter,
+							"package.json",
+						);
+					}
+					readFileSync(hostPkgJsonPath);
+					installed = true;
+				} catch {
+					// Package not installed
 				}
-				if (!hostPkgJsonPath) {
-					hostPkgJsonPath = join(
-						this._moduleAccessCwd,
-						"node_modules",
-						config.acpAdapter,
-						"package.json",
-					);
-				}
-				readFileSync(hostPkgJsonPath);
-				installed = true;
-			} catch {
-				// Package not installed
-			}
-			return {
-				id: id as AgentType,
-				acpAdapter: config.acpAdapter,
-				agentPackage: config.agentPackage,
-				installed,
-			};
-		}).filter((entry): entry is AgentRegistryEntry => entry !== null);
+				return {
+					id: id as AgentType,
+					acpAdapter: config.acpAdapter,
+					agentPackage: config.agentPackage,
+					installed,
+				};
+			})
+			.filter((entry): entry is AgentRegistryEntry => entry !== null);
 	}
 
 	private _deriveSessionConfigOptions(
@@ -1664,8 +1674,8 @@ export class AgentOs {
 		// Create stdout line iterable wired via onStdout callback
 		const { iterable, onStdout } = createStdoutLineIterable();
 		const launchArgs = [...(config.launchArgs ?? []), ...extraArgs];
-		let launchEnv = { ...config.defaultEnv, ...extraEnv, ...options?.env };
-		let sessionCwd = options?.cwd ?? "/home/user";
+		const launchEnv = { ...config.defaultEnv, ...extraEnv, ...options?.env };
+		const sessionCwd = options?.cwd ?? "/home/user";
 		const binPath = this._resolveAdapterBin(config.acpAdapter);
 		const pid = this.spawn("node", [binPath, ...launchArgs], {
 			streamStdin: true,
@@ -1675,7 +1685,9 @@ export class AgentOs {
 		}).pid;
 
 		const proc = this._processes.get(pid)!.proc;
+		const acpTimeout = options?.acpTimeoutMs ?? this._acpTimeoutMs;
 		const client = new AcpClient(proc, iterable, {
+			...(acpTimeout !== undefined && { timeoutMs: acpTimeout }),
 			requestHandler: (request) => this._handleInboundAcpRequest(request),
 		});
 
@@ -1759,24 +1771,18 @@ export class AgentOs {
 			];
 		}
 
-		const session = new Session(
-			client,
-			sessionId,
-			agentType,
-			initData,
-			() => {
-				for (const [terminalId, terminal] of this._acpTerminals) {
-					if (terminal.sessionId !== sessionId) {
-						continue;
-					}
-					if (this.getProcess(terminal.pid).exitCode === null) {
-						this.killProcess(terminal.pid);
-					}
-					this._acpTerminals.delete(terminalId);
+		const session = new Session(client, sessionId, agentType, initData, () => {
+			for (const [terminalId, terminal] of this._acpTerminals) {
+				if (terminal.sessionId !== sessionId) {
+					continue;
 				}
-				this._sessions.delete(sessionId);
-			},
-		);
+				if (this.getProcess(terminal.pid).exitCode === null) {
+					this.killProcess(terminal.pid);
+				}
+				this._acpTerminals.delete(terminalId);
+			}
+			this._sessions.delete(sessionId);
+		});
 		this._sessions.set(sessionId, session);
 
 		return { sessionId };
@@ -1817,9 +1823,7 @@ export class AgentOs {
 		}
 
 		if (!binEntry) {
-			throw new Error(
-				`No bin entry found in ${adapterPackage}/package.json`,
-			);
+			throw new Error(`No bin entry found in ${adapterPackage}/package.json`);
 		}
 
 		return `${vmPrefix}/${binEntry}`;
@@ -1870,10 +1874,7 @@ export class AgentOs {
 
 	/** Send a prompt to the agent and wait for the final response.
 	 *  Returns the raw JSON-RPC response and the accumulated agent text. */
-	async prompt(
-		sessionId: string,
-		text: string,
-	): Promise<PromptResult> {
+	async prompt(sessionId: string, text: string): Promise<PromptResult> {
 		const session = this._requireSession(sessionId);
 
 		// Collect streamed text while the prompt is running
@@ -1981,10 +1982,7 @@ export class AgentOs {
 	}
 
 	/** Subscribe to session/update notifications for a session. Returns an unsubscribe function. */
-	onSessionEvent(
-		sessionId: string,
-		handler: SessionEventHandler,
-	): () => void {
+	onSessionEvent(sessionId: string, handler: SessionEventHandler): () => void {
 		const session = this._requireSession(sessionId);
 		session.onSessionEvent(handler);
 		return () => {
