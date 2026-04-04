@@ -832,9 +832,7 @@ describe("ACP protocol comprehensive tests", () => {
 
 		// VM stdout can deliver lines twice (known duplication); check >=2 and verify content
 		expect(notifications.length).toBeGreaterThanOrEqual(2);
-		const updates = notifications.filter(
-			(n) => n.method === "session/update",
-		);
+		const updates = notifications.filter((n) => n.method === "session/update");
 		expect(updates.length).toBeGreaterThanOrEqual(2);
 		const types = updates.map((n) => (n.params as { type: string }).type);
 		expect(types).toContain("status");
@@ -890,7 +888,11 @@ describe("ACP protocol comprehensive tests", () => {
 
 		expect(response.error).toBeUndefined();
 		expect(
-			response.result as { cancelled: boolean; requested: boolean; via: string },
+			response.result as {
+				cancelled: boolean;
+				requested: boolean;
+				via: string;
+			},
 		).toMatchObject({
 			cancelled: false,
 			requested: true,
@@ -899,7 +901,9 @@ describe("ACP protocol comprehensive tests", () => {
 
 		const countResponse = await client.request("custom/cancel-count");
 		expect(countResponse.error).toBeUndefined();
-		expect((countResponse.result as { cancelCount: number }).cancelCount).toBe(1);
+		expect((countResponse.result as { cancelCount: number }).cancelCount).toBe(
+			1,
+		);
 
 		client.close();
 	}, 30_000);
@@ -1051,7 +1055,8 @@ describe("ACP protocol comprehensive tests", () => {
 
 		expect(permResponse.error).toBeUndefined();
 		expect(
-			(permResponse.result as { outcome: { optionId: string } }).outcome.optionId,
+			(permResponse.result as { outcome: { optionId: string } }).outcome
+				.optionId,
 		).toBe("allow_always");
 
 		const promptResponse = await promptPromise;
@@ -1068,7 +1073,10 @@ describe("ACP protocol comprehensive tests", () => {
 	}, 30_000);
 
 	test("duplicate session/request_permission requests are deduped by request ID", async () => {
-		const { client } = await spawnAdapter(vm, DUPLICATE_MODERN_PERMISSION_MOCK_ADAPTER);
+		const { client } = await spawnAdapter(
+			vm,
+			DUPLICATE_MODERN_PERMISSION_MOCK_ADAPTER,
+		);
 
 		await client.request("initialize", {
 			protocolVersion: 1,
@@ -1111,7 +1119,8 @@ describe("ACP protocol comprehensive tests", () => {
 
 		expect(permResponse.error).toBeUndefined();
 		expect(
-			(permResponse.result as { outcome: { optionId: string } }).outcome.optionId,
+			(permResponse.result as { outcome: { optionId: string } }).outcome
+				.optionId,
 		).toBe("allow_once");
 
 		const promptResponse = await promptPromise;
@@ -1167,7 +1176,8 @@ describe("ACP protocol comprehensive tests", () => {
 
 		expect(permResponse.error).toBeUndefined();
 		expect(
-			(permResponse.result as { outcome: { optionId: string } }).outcome.optionId,
+			(permResponse.result as { outcome: { optionId: string } }).outcome
+				.optionId,
 		).toBe("once");
 
 		const promptResponse = await promptPromise;
@@ -1341,6 +1351,145 @@ process.stdin.on('data', () => {
 		client.close();
 	}, 30_000);
 
+	test("activity-aware timeout resets on inbound notifications", async () => {
+		// Mock adapter that sends periodic notifications for ~1200ms total,
+		// then responds. With a 2000ms inactivity timeout, this should NOT
+		// time out because each 300ms gap is well within the timeout window.
+		// Without activity-aware reset, the total 1200ms would exceed a
+		// hypothetical 500ms fixed timeout — but we use 2000ms for CI margin.
+		const periodicNotificationScript = `
+let buffer = '';
+process.stdin.resume();
+process.stdin.on('data', (chunk) => {
+  const str = chunk instanceof Uint8Array ? new TextDecoder().decode(chunk) : String(chunk);
+  buffer += str;
+  while (true) {
+    const idx = buffer.indexOf('\\n');
+    if (idx === -1) break;
+    const line = buffer.substring(0, idx);
+    buffer = buffer.substring(idx + 1);
+    if (!line.trim()) continue;
+    try {
+      const msg = JSON.parse(line);
+      if (msg.method === 'initialize') {
+        process.stdout.write(JSON.stringify({
+          jsonrpc: '2.0', id: msg.id,
+          result: { protocolVersion: 1, agentInfo: { name: 'periodic-agent' } },
+        }) + '\\n');
+      } else if (msg.method === 'session/prompt') {
+        // Send 4 notifications at 300ms intervals (1200ms total),
+        // then respond. Total > 2000ms is not the point — the point is
+        // each gap (300ms) is within the timeout window (2000ms).
+        let count = 0;
+        const iv = setInterval(() => {
+          count++;
+          process.stdout.write(JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'chunk' + count } } },
+          }) + '\\n');
+          if (count >= 4) {
+            clearInterval(iv);
+            process.stdout.write(JSON.stringify({
+              jsonrpc: '2.0', id: msg.id,
+              result: { text: 'done' },
+            }) + '\\n');
+          }
+        }, 300);
+      }
+    } catch (e) {}
+  }
+});
+`;
+
+		const { client } = await spawnAdapterWithTimeout(
+			vm,
+			periodicNotificationScript,
+			2000,
+			"/tmp/periodic-adapter.mjs",
+		);
+
+		await client.request("initialize", { protocolVersion: 1 });
+
+		// This takes ~1200ms total but each gap is only ~300ms.
+		// With a 2000ms activity-aware timeout, it should succeed.
+		const response = await client.request("session/prompt", {
+			sessionId: "test",
+			prompt: [{ type: "text", text: "go" }],
+		});
+
+		expect(response.error).toBeUndefined();
+		expect((response.result as { text: string }).text).toBe("done");
+
+		client.close();
+	}, 30_000);
+
+	test("activity-aware timeout still fires after activity then silence", async () => {
+		// Mock adapter that sends a notification after 400ms, then goes silent.
+		// With a 500ms inactivity timeout and the notification at T+400ms:
+		//   - Without reset: timeout fires at T+500ms (~500ms total)
+		//   - With reset: timeout fires at T+400ms+500ms (~900ms total)
+		// We assert elapsed >= 750ms to prove the timer was actually reset.
+		const activityThenSilenceScript = `
+let buffer = '';
+process.stdin.resume();
+process.stdin.on('data', (chunk) => {
+  const str = chunk instanceof Uint8Array ? new TextDecoder().decode(chunk) : String(chunk);
+  buffer += str;
+  while (true) {
+    const idx = buffer.indexOf('\\n');
+    if (idx === -1) break;
+    const line = buffer.substring(0, idx);
+    buffer = buffer.substring(idx + 1);
+    if (!line.trim()) continue;
+    try {
+      const msg = JSON.parse(line);
+      if (msg.method === 'initialize') {
+        process.stdout.write(JSON.stringify({
+          jsonrpc: '2.0', id: msg.id,
+          result: { protocolVersion: 1, agentInfo: { name: 'silence-agent' } },
+        }) + '\\n');
+      } else if (msg.method === 'session/prompt') {
+        // Send one notification after 400ms, then go silent — never respond.
+        // The 400ms delay ensures the timer reset is observable via wall-clock.
+        setTimeout(() => {
+          process.stdout.write(JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'thinking...' } } },
+          }) + '\\n');
+        }, 400);
+      }
+    } catch (e) {}
+  }
+});
+`;
+
+		const { client } = await spawnAdapterWithTimeout(
+			vm,
+			activityThenSilenceScript,
+			500,
+			"/tmp/silence-adapter.mjs",
+		);
+
+		await client.request("initialize", { protocolVersion: 1 });
+
+		const start = Date.now();
+		await expect(
+			client.request("session/prompt", {
+				sessionId: "test",
+				prompt: [{ type: "text", text: "go" }],
+			}),
+		).rejects.toThrow(/timed out after 500ms/);
+		const elapsed = Date.now() - start;
+
+		// Without reset: timeout at ~500ms. With reset: timeout at ~900ms.
+		// Assert >= 750ms to prove the timer was actually reset by the notification.
+		expect(elapsed).toBeGreaterThan(750);
+
+		client.close();
+	}, 30_000);
+
 	test("concurrent requests are correlated correctly by id", async () => {
 		const { client } = await spawnAdapter(vm, FULL_MOCK_ACP_ADAPTER);
 
@@ -1369,17 +1518,13 @@ process.stdin.on('data', () => {
 
 		// Each response should have the correct result for its method
 		expect(cancelRes.error).toBeUndefined();
-		expect((cancelRes.result as { cancelled: boolean }).cancelled).toBe(
-			true,
-		);
+		expect((cancelRes.result as { cancelled: boolean }).cancelled).toBe(true);
 
 		expect(modeRes.error).toBeUndefined();
 		expect((modeRes.result as { modeId: string }).modeId).toBe("plan");
 
 		expect(configRes.error).toBeUndefined();
-		expect((configRes.result as { configId: string }).configId).toBe(
-			"model",
-		);
+		expect((configRes.result as { configId: string }).configId).toBe("model");
 		expect((configRes.result as { value: string }).value).toBe("opus");
 
 		client.close();
@@ -1442,10 +1587,7 @@ process.stdin.on('data', () => {
 		for (const n of notifications) {
 			expect(n.method).toBe("session/update");
 			const seq = (n.params as { seq: number }).seq;
-			if (
-				seenSeqs.length === 0 ||
-				seenSeqs[seenSeqs.length - 1] !== seq
-			) {
+			if (seenSeqs.length === 0 || seenSeqs[seenSeqs.length - 1] !== seq) {
 				seenSeqs.push(seq);
 			}
 		}

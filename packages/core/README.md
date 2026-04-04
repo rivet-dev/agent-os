@@ -136,8 +136,8 @@ await vm.dispose();
 ### Exported Types
 
 **VM & Options**
-- `AgentOsOptions` — VM creation options (commandDirs, loopbackExemptPorts, moduleAccessCwd, mounts, additionalInstructions)
-- `CreateSessionOptions` — Session options (cwd, env, mcpServers, skipOsInstructions, additionalInstructions)
+- `AgentOsOptions` — VM creation options (software, loopbackExemptPorts, moduleAccessCwd, rootFilesystem, mounts, additionalInstructions, scheduleDriver, toolKits, permissions, acpTimeoutMs)
+- `CreateSessionOptions` — Session options (cwd, env, mcpServers, skipOsInstructions, additionalInstructions, acpTimeoutMs)
 
 **Mount Configurations**
 - `MountConfig` — Union of all mount types
