@@ -378,6 +378,18 @@ function emitControlMessage(message) {
   }
 }
 
+function debugLog(...args) {
+  if (!DEBUG_ENABLED) {
+    return;
+  }
+
+  try {
+    console.error('[agent-os wasm runner]', ...args);
+  } catch {
+    // Ignore debug logging failures.
+  }
+}
+
 function emptyCacheState() {
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -7703,15 +7715,71 @@ for (const specifier of imports) {
 
 const NODE_WASM_RUNNER_SOURCE: &str = r#"
 import fs from 'node:fs/promises';
-import { writeSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  constants as FS_CONSTANTS,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+  writeSync as writeSyncFs,
+  writeSync,
+} from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { WASI } from 'node:wasi';
 
 const WASI_ERRNO_SUCCESS = 0;
 const WASI_ERRNO_ROFS = 69;
 const WASI_ERRNO_FAULT = 21;
+const WASI_RIGHT_FD_READ = 2n;
 const WASI_RIGHT_FD_WRITE = 64n;
 const WASM_PAGE_BYTES = 65536;
+const WASI_ERRNO_BADF = 8;
+const WASI_ERRNO_INVAL = 28;
+const WASI_ERRNO_NOENT = 44;
+const WASI_ERRNO_NOSYS = 52;
+const WASI_ERRNO_SRCH = 71;
+const WASI_OFLAGS_CREAT = 1;
+const WASI_OFLAGS_DIRECTORY = 2;
+const WASI_OFLAGS_EXCL = 4;
+const WASI_OFLAGS_TRUNC = 8;
+const WASI_FDFLAGS_APPEND = 1;
+const WASI_FILETYPE_UNKNOWN = 0;
+const WASI_FILETYPE_BLOCK_DEVICE = 1;
+const WASI_FILETYPE_CHARACTER_DEVICE = 2;
+const WASI_FILETYPE_DIRECTORY = 3;
+const WASI_FILETYPE_REGULAR_FILE = 4;
+const WASI_FILETYPE_SOCKET_DGRAM = 5;
+const WASI_FILETYPE_SOCKET_STREAM = 6;
+const WASI_FILETYPE_SYMBOLIC_LINK = 7;
+const WASI_WHENCE_SET = 0;
+const WASI_WHENCE_CUR = 1;
+const WASI_WHENCE_END = 2;
+const hostFsModule = process.getBuiltinModule?.('node:fs');
+const hostFsPromisesModule = process.getBuiltinModule?.('node:fs/promises');
+const hostChildProcessModule = process.getBuiltinModule?.('node:child_process');
+const hostFsChmodSync = hostFsModule?.chmodSync?.bind(hostFsModule) ?? chmodSync;
+const hostFsCloseSync = hostFsModule?.closeSync?.bind(hostFsModule) ?? closeSync;
+const hostFsExistsSync = hostFsModule?.existsSync?.bind(hostFsModule) ?? existsSync;
+const hostFsFstatSync = hostFsModule?.fstatSync?.bind(hostFsModule) ?? fstatSync;
+const hostFsLstatSync = hostFsModule?.lstatSync?.bind(hostFsModule) ?? lstatSync;
+const hostFsMkdirSync = hostFsModule?.mkdirSync?.bind(hostFsModule) ?? mkdirSync;
+const hostFsOpenSync = hostFsModule?.openSync?.bind(hostFsModule) ?? openSync;
+const hostFsReadSync = hostFsModule?.readSync?.bind(hostFsModule) ?? readSync;
+const hostFsStatSync = hostFsModule?.statSync?.bind(hostFsModule) ?? statSync;
+const hostFsUnlinkSync = hostFsModule?.unlinkSync?.bind(hostFsModule) ?? unlinkSync;
+const hostFsWriteSync = hostFsModule?.writeSync?.bind(hostFsModule) ?? writeSyncFs;
+const hostFsReadFile =
+  hostFsPromisesModule?.readFile?.bind(hostFsPromisesModule) ?? fs.readFile.bind(fs);
+const hostSpawnSync =
+  hostChildProcessModule?.spawnSync?.bind(hostChildProcessModule) ?? spawnSync;
 
 function isPathLike(specifier) {
   return specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('file:');
@@ -7744,6 +7812,26 @@ const frozenTimeValue = Number(process.env.AGENT_OS_FROZEN_TIME_MS);
 const frozenTimeMs = Number.isFinite(frozenTimeValue) ? Math.trunc(frozenTimeValue) : Date.now();
 const frozenTimeNs = BigInt(frozenTimeMs) * 1000000n;
 const CONTROL_PIPE_FD = parseControlPipeFd(process.env.AGENT_OS_CONTROL_PIPE_FD);
+const SANDBOX_ROOT =
+  process.env.AGENT_OS_SANDBOX_ROOT ??
+  guestEnv.AGENT_OS_SANDBOX_ROOT ??
+  process.cwd();
+const GUEST_PATH_MAPPINGS = parseGuestPathMappings(process.env.AGENT_OS_GUEST_PATH_MAPPINGS);
+const RUNNER_PATH = process.argv[1];
+const PROCESS_EXEC_ARGV = [...process.execArgv];
+const TEXT_ENCODER = new TextEncoder();
+const TEXT_DECODER = new TextDecoder();
+const hostProcessState = {
+  nextPid: 4000,
+  completedChildren: new Map(),
+};
+const virtualFdState = {
+  nextFd: 1000,
+  nextDescriptionId: 1,
+  guestFds: new Map(),
+  closedGuestFds: new Set(),
+  descriptions: new Map(),
+};
 
 function buildPreopens() {
   switch (permissionTier) {
@@ -7754,9 +7842,49 @@ function buildPreopens() {
     case 'full':
     default:
       return {
+        '/': SANDBOX_ROOT,
         '/workspace': process.cwd(),
+        ...Object.fromEntries(
+          GUEST_PATH_MAPPINGS.map((mapping) => [mapping.guestPath, mapping.hostPath]),
+        ),
       };
   }
+}
+
+function parseGuestPathMappings(value) {
+  return parseJsonArrayLikeObjects(value)
+    .map((entry) => {
+      const guestPath =
+        typeof entry.guestPath === 'string'
+          ? path.posix.normalize(entry.guestPath)
+          : null;
+      const hostPath =
+        typeof entry.hostPath === 'string' ? path.resolve(entry.hostPath) : null;
+      return guestPath && hostPath ? { guestPath, hostPath } : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => {
+      if (right.guestPath.length !== left.guestPath.length) {
+        return right.guestPath.length - left.guestPath.length;
+      }
+      return right.hostPath.length - left.hostPath.length;
+    });
+}
+
+function parseJsonArrayLikeObjects(value) {
+  if (!value) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter(isRecord) : [];
+  } catch {
+    return [];
+  }
+}
+
+function isRecord(value) {
+  return value != null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function readVarUint(bytes, offset, label) {
@@ -7883,7 +8011,7 @@ function enforceMemoryLimit(moduleBytes, limitPages) {
 }
 
 const moduleBytes = enforceMemoryLimit(
-  await fs.readFile(resolveModulePath(modulePath)),
+  await hostFsReadFile(resolveModulePath(modulePath)),
   maxMemoryPages,
 );
 const module = await WebAssembly.compile(moduleBytes);
@@ -7918,9 +8046,37 @@ const delegateFdWrite =
   typeof wasi.wasiImport.fd_write === 'function'
     ? wasi.wasiImport.fd_write.bind(wasi.wasiImport)
     : null;
+const delegateFdRead =
+  typeof wasi.wasiImport.fd_read === 'function'
+    ? wasi.wasiImport.fd_read.bind(wasi.wasiImport)
+    : null;
 const delegateFdPwrite =
   typeof wasi.wasiImport.fd_pwrite === 'function'
     ? wasi.wasiImport.fd_pwrite.bind(wasi.wasiImport)
+    : null;
+const delegateFdPread =
+  typeof wasi.wasiImport.fd_pread === 'function'
+    ? wasi.wasiImport.fd_pread.bind(wasi.wasiImport)
+    : null;
+const delegateFdClose =
+  typeof wasi.wasiImport.fd_close === 'function'
+    ? wasi.wasiImport.fd_close.bind(wasi.wasiImport)
+    : null;
+const delegateFdFdstatGet =
+  typeof wasi.wasiImport.fd_fdstat_get === 'function'
+    ? wasi.wasiImport.fd_fdstat_get.bind(wasi.wasiImport)
+    : null;
+const delegateFdFilestatGet =
+  typeof wasi.wasiImport.fd_filestat_get === 'function'
+    ? wasi.wasiImport.fd_filestat_get.bind(wasi.wasiImport)
+    : null;
+const delegateFdSeek =
+  typeof wasi.wasiImport.fd_seek === 'function'
+    ? wasi.wasiImport.fd_seek.bind(wasi.wasiImport)
+    : null;
+const delegateFdTell =
+  typeof wasi.wasiImport.fd_tell === 'function'
+    ? wasi.wasiImport.fd_tell.bind(wasi.wasiImport)
     : null;
 
 function decodeSignalMask(maskLo, maskHi) {
@@ -7940,6 +8096,949 @@ function decodeSignalMask(maskLo, maskHi) {
   return values;
 }
 
+const PREOPEN_FDS = Object.entries(buildPreopens()).map(([guestPath, hostPath], index) => ({
+  fd: index + 3,
+  guestPath,
+  hostPath,
+}));
+
+function virtualProcessNumber(key, fallback) {
+  const value = Number(process.env[key]);
+  return Number.isInteger(value) ? value : fallback;
+}
+
+function guestUser() {
+  const uid = virtualProcessNumber('AGENT_OS_VIRTUAL_PROCESS_UID', 1000);
+  const gid = virtualProcessNumber('AGENT_OS_VIRTUAL_PROCESS_GID', uid);
+  const username = process.env.AGENT_OS_VIRTUAL_OS_USER ?? 'user';
+  const home = process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR ?? `/home/${username}`;
+  const shell = process.env.AGENT_OS_VIRTUAL_OS_SHELL ?? '/bin/sh';
+  return { uid, gid, username, home, shell };
+}
+
+function signalNameToNumber(signal) {
+  const mapping = {
+    SIGHUP: 1,
+    SIGINT: 2,
+    SIGQUIT: 3,
+    SIGILL: 4,
+    SIGABRT: 6,
+    SIGKILL: 9,
+    SIGALRM: 14,
+    SIGTERM: 15,
+    SIGUSR1: 10,
+    SIGUSR2: 12,
+  };
+  return mapping[signal];
+}
+
+function rawWaitStatusFromResult(status, signal) {
+  if (Number.isInteger(status)) {
+    return (Number(status) & 0xff) << 8;
+  }
+
+  const signalNumber = signalNameToNumber(signal);
+  return Number.isInteger(signalNumber) ? signalNumber & 0x7f : 1 << 8;
+}
+
+function readMemoryBytes(ptr, len) {
+  if (!(instanceMemory instanceof WebAssembly.Memory)) {
+    return null;
+  }
+  try {
+    const start = Number(ptr);
+    const length = Number(len);
+    if (!Number.isInteger(start) || !Number.isInteger(length) || start < 0 || length < 0) {
+      return null;
+    }
+    const buffer = new Uint8Array(instanceMemory.buffer);
+    const end = start + length;
+    if (end > buffer.length) {
+      return null;
+    }
+    return buffer.slice(start, end);
+  } catch {
+    return null;
+  }
+}
+
+function writeMemoryBytes(ptr, bytes) {
+  if (!(instanceMemory instanceof WebAssembly.Memory)) {
+    return false;
+  }
+  try {
+    const start = Number(ptr);
+    const payload = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const buffer = new Uint8Array(instanceMemory.buffer);
+    const end = start + payload.length;
+    if (!Number.isInteger(start) || start < 0 || end > buffer.length) {
+      return false;
+    }
+    buffer.set(payload, start);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeU32(ptr, value) {
+  if (!(instanceMemory instanceof WebAssembly.Memory)) {
+    return false;
+  }
+  try {
+    new DataView(instanceMemory.buffer).setUint32(Number(ptr), Number(value) >>> 0, true);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeU8(ptr, value) {
+  if (!(instanceMemory instanceof WebAssembly.Memory)) {
+    return false;
+  }
+  try {
+    new DataView(instanceMemory.buffer).setUint8(Number(ptr), Number(value) >>> 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeU16(ptr, value) {
+  if (!(instanceMemory instanceof WebAssembly.Memory)) {
+    return false;
+  }
+  try {
+    new DataView(instanceMemory.buffer).setUint16(Number(ptr), Number(value) >>> 0, true);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeU64(ptr, value) {
+  if (!(instanceMemory instanceof WebAssembly.Memory)) {
+    return false;
+  }
+  try {
+    new DataView(instanceMemory.buffer).setBigUint64(Number(ptr), BigInt(value), true);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function decodeMemoryString(ptr, len) {
+  const bytes = readMemoryBytes(ptr, len);
+  return bytes == null ? null : TEXT_DECODER.decode(bytes);
+}
+
+function decodeNullSeparatedStrings(ptr, len) {
+  const bytes = readMemoryBytes(ptr, len);
+  if (bytes == null) {
+    return null;
+  }
+  const values = [];
+  let start = 0;
+  for (let index = 0; index < bytes.length; index += 1) {
+    if (bytes[index] !== 0) {
+      continue;
+    }
+    if (index > start) {
+      values.push(TEXT_DECODER.decode(bytes.slice(start, index)));
+    }
+    start = index + 1;
+  }
+  if (start < bytes.length) {
+    values.push(TEXT_DECODER.decode(bytes.slice(start)));
+  }
+  return values;
+}
+
+function parseSerializedEnv(ptr, len) {
+  const entries = decodeNullSeparatedStrings(ptr, len);
+  if (entries == null) {
+    return null;
+  }
+  const result = {};
+  for (const entry of entries) {
+    const separator = entry.indexOf('=');
+    if (separator === -1) {
+      continue;
+    }
+    result[entry.slice(0, separator)] = entry.slice(separator + 1);
+  }
+  return result;
+}
+
+function resolveGuestPath(guestPath, cwd = process.cwd()) {
+  if (!guestPath) {
+    return cwd;
+  }
+  if (guestPath.startsWith('file:')) {
+    return new URL(guestPath);
+  }
+  if (guestPath.startsWith('/')) {
+    const normalizedGuestPath = path.posix.normalize(guestPath);
+    for (const mapping of GUEST_PATH_MAPPINGS) {
+      if (
+        normalizedGuestPath !== mapping.guestPath &&
+        !normalizedGuestPath.startsWith(`${mapping.guestPath}/`)
+      ) {
+        continue;
+      }
+      const suffix =
+        normalizedGuestPath === mapping.guestPath
+          ? ''
+          : normalizedGuestPath.slice(mapping.guestPath.length + 1);
+      return suffix ? path.join(mapping.hostPath, suffix) : mapping.hostPath;
+    }
+    const guestAnchor =
+      typeof process.env.PWD === 'string' && process.env.PWD.startsWith('/')
+        ? path.posix.normalize(process.env.PWD)
+        : typeof process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR === 'string' &&
+            process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR.startsWith('/')
+          ? path.posix.normalize(process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR)
+          : null;
+    if (!process.env.AGENT_OS_SANDBOX_ROOT && guestAnchor) {
+      return path.resolve(process.cwd(), path.posix.relative(guestAnchor, normalizedGuestPath));
+    }
+  }
+  if (guestPath.startsWith('/')) {
+    return path.join(SANDBOX_ROOT, guestPath.replace(/^\/+/, ''));
+  }
+  return path.resolve(cwd, guestPath);
+}
+
+function resolvePathOpenHostPath(fd, guestPath) {
+  if (typeof guestPath !== 'string' || guestPath.length === 0) {
+    return null;
+  }
+  if (guestPath.startsWith('/')) {
+    return resolveGuestPath(guestPath).toString();
+  }
+  const preopen = PREOPEN_FDS.find((entry) => entry.fd === Number(fd));
+  if (preopen) {
+    return path.resolve(preopen.hostPath, guestPath);
+  }
+  return null;
+}
+
+function filetypeFromHostStat(stat) {
+  if (typeof stat?.isDirectory === 'function' && stat.isDirectory()) {
+    return WASI_FILETYPE_DIRECTORY;
+  }
+  if (typeof stat?.isFile === 'function' && stat.isFile()) {
+    return WASI_FILETYPE_REGULAR_FILE;
+  }
+  if (typeof stat?.isSymbolicLink === 'function' && stat.isSymbolicLink()) {
+    return WASI_FILETYPE_SYMBOLIC_LINK;
+  }
+  if (typeof stat?.isBlockDevice === 'function' && stat.isBlockDevice()) {
+    return WASI_FILETYPE_BLOCK_DEVICE;
+  }
+  if (typeof stat?.isCharacterDevice === 'function' && stat.isCharacterDevice()) {
+    return WASI_FILETYPE_CHARACTER_DEVICE;
+  }
+  if (typeof stat?.isSocket === 'function' && stat.isSocket()) {
+    return WASI_FILETYPE_SOCKET_STREAM;
+  }
+  return WASI_FILETYPE_UNKNOWN;
+}
+
+function wasiErrnoFromFsError(error) {
+  const code = error?.code;
+  switch (code) {
+    case 'EBADF':
+      return WASI_ERRNO_BADF;
+    case 'ENOENT':
+      return WASI_ERRNO_NOENT;
+    case 'EROFS':
+      return WASI_ERRNO_ROFS;
+    default:
+      return WASI_ERRNO_FAULT;
+  }
+}
+
+function openFlagsFromPathOpen(oflags, rightsBase, fdflags) {
+  const wantsRead = (BigInt(rightsBase) & WASI_RIGHT_FD_READ) !== 0n;
+  const wantsWrite = (BigInt(rightsBase) & WASI_RIGHT_FD_WRITE) !== 0n;
+  let flags = wantsWrite
+    ? wantsRead
+      ? FS_CONSTANTS.O_RDWR
+      : FS_CONSTANTS.O_WRONLY
+    : FS_CONSTANTS.O_RDONLY;
+  if ((Number(oflags) & WASI_OFLAGS_CREAT) !== 0) {
+    flags |= FS_CONSTANTS.O_CREAT;
+  }
+  if ((Number(oflags) & WASI_OFLAGS_EXCL) !== 0) {
+    flags |= FS_CONSTANTS.O_EXCL;
+  }
+  if ((Number(oflags) & WASI_OFLAGS_TRUNC) !== 0) {
+    flags |= FS_CONSTANTS.O_TRUNC;
+  }
+  if ((Number(fdflags) & WASI_FDFLAGS_APPEND) !== 0) {
+    flags |= FS_CONSTANTS.O_APPEND;
+  }
+  return { flags, wantsRead, wantsWrite };
+}
+
+function performPathOpen(
+  fd,
+  dirflags,
+  pathPtr,
+  pathLen,
+  oflags,
+  rightsBase,
+  rightsInheriting,
+  fdflags,
+  openedFdPtr,
+) {
+  if ((Number(oflags) & WASI_OFLAGS_DIRECTORY) !== 0) {
+    return delegatePathOpen
+      ? delegatePathOpen(
+          fd,
+          dirflags,
+          pathPtr,
+          pathLen,
+          oflags,
+          rightsBase,
+          rightsInheriting,
+          fdflags,
+          openedFdPtr,
+        )
+      : WASI_ERRNO_FAULT;
+  }
+
+  try {
+    const guestPath = decodeMemoryString(pathPtr, pathLen);
+    if (guestPath == null) {
+      return WASI_ERRNO_FAULT;
+    }
+    const hostPath = resolvePathOpenHostPath(fd, guestPath);
+    if (!hostPath) {
+      return delegatePathOpen
+        ? delegatePathOpen(
+            fd,
+            dirflags,
+            pathPtr,
+            pathLen,
+            oflags,
+            rightsBase,
+            rightsInheriting,
+            fdflags,
+            openedFdPtr,
+          )
+        : WASI_ERRNO_FAULT;
+    }
+
+    const { flags, wantsRead, wantsWrite } = openFlagsFromPathOpen(
+      oflags,
+      rightsBase,
+      fdflags,
+    );
+    const hostFd = hostFsOpenSync(hostPath, flags, 0o666);
+    const stat = hostFsFstatSync(hostFd);
+    if (typeof stat?.isDirectory === 'function' && stat.isDirectory()) {
+      hostFsCloseSync(hostFd);
+      return delegatePathOpen
+        ? delegatePathOpen(
+            fd,
+            dirflags,
+            pathPtr,
+            pathLen,
+            oflags,
+            rightsBase,
+            rightsInheriting,
+            fdflags,
+            openedFdPtr,
+          )
+        : WASI_ERRNO_FAULT;
+    }
+
+    const guestFd = allocateVirtualFd({
+      hostFd,
+      readable: wantsRead,
+      writable: wantsWrite,
+      append: (Number(fdflags) & WASI_FDFLAGS_APPEND) !== 0,
+      filetype: filetypeFromHostStat(stat),
+      position: (Number(fdflags) & WASI_FDFLAGS_APPEND) !== 0 ? null : 0,
+    });
+    return writeU32(openedFdPtr, guestFd) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+  } catch (error) {
+    return wasiErrnoFromFsError(error);
+  }
+}
+
+function isKernelCommandStub(hostPath) {
+  try {
+    const stat = hostFsStatSync(hostPath);
+    return stat.isFile() && stat.size <= 64;
+  } catch {
+    return false;
+  }
+}
+
+function findMountedCommandPath(name) {
+  const commandMounts = GUEST_PATH_MAPPINGS.filter((mapping) =>
+    mapping.guestPath.startsWith('/__agentos/commands/'),
+  ).sort((left, right) => left.guestPath.localeCompare(right.guestPath));
+  for (const mapping of commandMounts) {
+    const candidate = path.join(mapping.hostPath, name);
+    if (hostFsExistsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function resolveSpawnTarget(argv, envMap) {
+  const command = argv[0];
+  if (!command) {
+    return null;
+  }
+
+  const basename = path.posix.basename(command);
+  if (basename === 'node') {
+    const args = [...argv.slice(1)];
+    if (args[0] && isPathLike(args[0])) {
+      args[0] = resolveGuestPath(args[0]).toString();
+    }
+    return { kind: 'node', command: process.execPath, args };
+  }
+
+  const mountedCommandPath = findMountedCommandPath(basename);
+  if (mountedCommandPath) {
+    return { kind: 'wasm', modulePath: mountedCommandPath };
+  }
+
+  const searchPath = envMap.PATH ?? guestEnv.PATH ?? '/bin:/usr/bin';
+  if (!isPathLike(command)) {
+    for (const segment of searchPath.split(':')) {
+      const candidate = findMountedCommandPath(basename) ?? resolveGuestPath(path.posix.join(segment || '.', command)).toString();
+      if (hostFsExistsSync(candidate) && !isKernelCommandStub(candidate)) {
+        return { kind: 'host', command: candidate, args: argv.slice(1) };
+      }
+    }
+  }
+
+  const resolvedHostPath = resolveGuestPath(command).toString();
+  if (command.startsWith('/__agentos/commands/') && hostFsExistsSync(resolvedHostPath)) {
+    return { kind: 'wasm', modulePath: resolvedHostPath };
+  }
+  if (isKernelCommandStub(resolvedHostPath) && mountedCommandPath) {
+    return { kind: 'wasm', modulePath: mountedCommandPath };
+  }
+  if (hostFsExistsSync(resolvedHostPath)) {
+    return { kind: 'host', command: resolvedHostPath, args: argv.slice(1) };
+  }
+
+  return null;
+}
+
+function isClosedGuestFd(fd) {
+  return virtualFdState.closedGuestFds.has(Number(fd));
+}
+
+function getVirtualFdEntry(fd) {
+  const guestFd = Number(fd);
+  const descriptorId = virtualFdState.guestFds.get(guestFd);
+  if (descriptorId == null) {
+    return null;
+  }
+  const description = virtualFdState.descriptions.get(descriptorId);
+  return description ? { guestFd, descriptorId, description } : null;
+}
+
+function discardVirtualGuestFd(fd) {
+  const guestFd = Number(fd);
+  const descriptorId = virtualFdState.guestFds.get(guestFd);
+  if (descriptorId == null) {
+    return false;
+  }
+
+  virtualFdState.guestFds.delete(guestFd);
+  const description = virtualFdState.descriptions.get(descriptorId);
+  if (!description) {
+    return true;
+  }
+
+  description.refCount -= 1;
+  if (description.refCount <= 0) {
+    virtualFdState.descriptions.delete(descriptorId);
+    try {
+      hostFsCloseSync(description.hostFd);
+    } catch {
+      // Ignore close failures during teardown.
+    }
+  }
+  return true;
+}
+
+function closeVirtualGuestFd(fd) {
+  const guestFd = Number(fd);
+  const removed = discardVirtualGuestFd(guestFd);
+  virtualFdState.closedGuestFds.add(guestFd);
+  return removed;
+}
+
+function allocateVirtualFd(description, requestedFd = null) {
+  let guestFd = requestedFd == null ? virtualFdState.nextFd : Number(requestedFd);
+  if (!Number.isInteger(guestFd) || guestFd < 0) {
+    throw new Error(`invalid guest fd ${requestedFd}`);
+  }
+
+  if (requestedFd == null) {
+    while (virtualFdState.guestFds.has(guestFd) || virtualFdState.closedGuestFds.has(guestFd)) {
+      guestFd += 1;
+    }
+    virtualFdState.nextFd = guestFd + 1;
+  } else {
+    discardVirtualGuestFd(guestFd);
+  }
+
+  virtualFdState.closedGuestFds.delete(guestFd);
+  const descriptorId = virtualFdState.nextDescriptionId++;
+  virtualFdState.descriptions.set(descriptorId, {
+    ...description,
+    refCount: 1,
+  });
+  virtualFdState.guestFds.set(guestFd, descriptorId);
+  return guestFd;
+}
+
+function aliasVirtualFd(descriptionId, requestedFd = null) {
+  let guestFd = requestedFd == null ? virtualFdState.nextFd : Number(requestedFd);
+  if (!Number.isInteger(guestFd) || guestFd < 0) {
+    throw new Error(`invalid guest fd ${requestedFd}`);
+  }
+
+  if (requestedFd == null) {
+    while (virtualFdState.guestFds.has(guestFd) || virtualFdState.closedGuestFds.has(guestFd)) {
+      guestFd += 1;
+    }
+    virtualFdState.nextFd = guestFd + 1;
+  } else {
+    discardVirtualGuestFd(guestFd);
+  }
+
+  const description = virtualFdState.descriptions.get(descriptionId);
+  if (!description) {
+    throw new Error(`unknown virtual fd description ${descriptionId}`);
+  }
+  description.refCount += 1;
+  virtualFdState.closedGuestFds.delete(guestFd);
+  virtualFdState.guestFds.set(guestFd, descriptionId);
+  return guestFd;
+}
+
+function duplicateGuestFd(fd, requestedFd = null) {
+  const entry = getVirtualFdEntry(fd);
+  if (entry) {
+    return requestedFd != null && Number(fd) === Number(requestedFd)
+      ? Number(requestedFd)
+      : aliasVirtualFd(entry.descriptorId, requestedFd);
+  }
+  if (isClosedGuestFd(fd)) {
+    throw new Error(`guest fd ${fd} is closed`);
+  }
+
+  const duplicatedHostFd = duplicateProcFd(fd);
+  return allocateVirtualFd(
+    {
+      hostFd: duplicatedHostFd,
+      readable: true,
+      writable: true,
+      append: false,
+      filetype: Number(fd) <= 2 ? WASI_FILETYPE_CHARACTER_DEVICE : WASI_FILETYPE_UNKNOWN,
+    },
+    requestedFd,
+  );
+}
+
+function translateGuestFdToHostFd(fd) {
+  const entry = getVirtualFdEntry(fd);
+  if (entry) {
+    return entry.description.hostFd;
+  }
+  if (isClosedGuestFd(fd)) {
+    throw new Error(`guest fd ${fd} is closed`);
+  }
+  return Number(fd);
+}
+
+function readIovecs(iovs, iovsLen) {
+  if (!(instanceMemory instanceof WebAssembly.Memory)) {
+    return null;
+  }
+  try {
+    const view = new DataView(instanceMemory.buffer);
+    const vectors = [];
+    for (let index = 0; index < Number(iovsLen); index += 1) {
+      const offset = Number(iovs) + index * 8;
+      vectors.push({
+        ptr: view.getUint32(offset, true),
+        len: view.getUint32(offset + 4, true),
+      });
+    }
+    return vectors;
+  } catch {
+    return null;
+  }
+}
+
+function handleVirtualFdRead(fd, iovs, iovsLen, nreadPtr) {
+  const entry = getVirtualFdEntry(fd);
+  if (!entry) {
+    return isClosedGuestFd(fd) ? WASI_ERRNO_BADF : null;
+  }
+  if (!entry.description.readable) {
+    return WASI_ERRNO_BADF;
+  }
+
+  const vectors = readIovecs(iovs, iovsLen);
+  if (vectors == null) {
+    return WASI_ERRNO_FAULT;
+  }
+
+  let totalRead = 0;
+  try {
+    for (const vector of vectors) {
+      if (vector.len === 0) {
+        continue;
+      }
+      const chunk = Buffer.allocUnsafe(vector.len);
+      const position =
+        typeof entry.description.position === 'number' ? entry.description.position : null;
+      const bytesRead = hostFsReadSync(
+        entry.description.hostFd,
+        chunk,
+        0,
+        vector.len,
+        position,
+      );
+      if (position != null && bytesRead > 0) {
+        entry.description.position += bytesRead;
+      }
+      if (bytesRead > 0 && !writeMemoryBytes(vector.ptr, chunk.subarray(0, bytesRead))) {
+        return WASI_ERRNO_FAULT;
+      }
+      totalRead += bytesRead;
+      if (bytesRead < vector.len) {
+        break;
+      }
+    }
+    return writeU32(nreadPtr, totalRead) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+  } catch {
+    return WASI_ERRNO_FAULT;
+  }
+}
+
+function handleVirtualFdWrite(fd, iovs, iovsLen, nwrittenPtr) {
+  const entry = getVirtualFdEntry(fd);
+  if (!entry) {
+    return isClosedGuestFd(fd) ? WASI_ERRNO_BADF : null;
+  }
+  if (!entry.description.writable) {
+    return WASI_ERRNO_BADF;
+  }
+
+  const vectors = readIovecs(iovs, iovsLen);
+  if (vectors == null) {
+    return WASI_ERRNO_FAULT;
+  }
+
+  let totalWritten = 0;
+  try {
+    for (const vector of vectors) {
+      if (vector.len === 0) {
+        continue;
+      }
+      const bytes = readMemoryBytes(vector.ptr, vector.len);
+      if (bytes == null) {
+        return WASI_ERRNO_FAULT;
+      }
+      const position =
+        entry.description.append || typeof entry.description.position !== 'number'
+          ? null
+          : entry.description.position;
+      const written = hostFsWriteSync(
+        entry.description.hostFd,
+        bytes,
+        0,
+        bytes.length,
+        position,
+      );
+      totalWritten += written;
+      if (position != null && written > 0) {
+        entry.description.position += written;
+      }
+    }
+    return writeU32(nwrittenPtr, totalWritten) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+  } catch {
+    return WASI_ERRNO_FAULT;
+  }
+}
+
+function handleVirtualFdClose(fd) {
+  if (getVirtualFdEntry(fd) == null && !isClosedGuestFd(fd)) {
+    return null;
+  }
+  return closeVirtualGuestFd(fd) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_BADF;
+}
+
+function handleVirtualFdStat(fd, resultPtr) {
+  const entry = getVirtualFdEntry(fd);
+  if (!entry) {
+    return isClosedGuestFd(fd) ? WASI_ERRNO_BADF : null;
+  }
+  const rightsBase =
+    (entry.description.readable ? WASI_RIGHT_FD_READ : 0n) |
+    (entry.description.writable ? WASI_RIGHT_FD_WRITE : 0n);
+  return writeU8(resultPtr, entry.description.filetype ?? WASI_FILETYPE_UNKNOWN) &&
+    writeU16(Number(resultPtr) + 2, entry.description.append ? WASI_FDFLAGS_APPEND : 0) &&
+    writeU64(Number(resultPtr) + 8, rightsBase) &&
+    writeU64(Number(resultPtr) + 16, rightsBase)
+      ? WASI_ERRNO_SUCCESS
+      : WASI_ERRNO_FAULT;
+}
+
+function writeU64Number(ptr, value) {
+  if (!(instanceMemory instanceof WebAssembly.Memory)) {
+    return false;
+  }
+  try {
+    const numeric = Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+    new DataView(instanceMemory.buffer).setBigUint64(Number(ptr), BigInt(numeric), true);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function timestampMsToNs(value) {
+  return Math.max(0, Math.trunc(Number(value) * 1_000_000));
+}
+
+function handleVirtualFdFilestatGet(fd, resultPtr) {
+  const entry = getVirtualFdEntry(fd);
+  if (!entry) {
+    return isClosedGuestFd(fd) ? WASI_ERRNO_BADF : null;
+  }
+  try {
+    const stat = hostFsFstatSync(entry.description.hostFd);
+    return writeU64Number(resultPtr, stat.dev ?? 0) &&
+      writeU64Number(Number(resultPtr) + 8, stat.ino ?? 0) &&
+      writeU8(Number(resultPtr) + 16, filetypeFromHostStat(stat)) &&
+      writeU64Number(Number(resultPtr) + 24, stat.nlink ?? 0) &&
+      writeU64Number(Number(resultPtr) + 32, stat.size ?? 0) &&
+      writeU64Number(Number(resultPtr) + 40, timestampMsToNs(stat.atimeMs ?? 0)) &&
+      writeU64Number(Number(resultPtr) + 48, timestampMsToNs(stat.mtimeMs ?? 0)) &&
+      writeU64Number(Number(resultPtr) + 56, timestampMsToNs(stat.ctimeMs ?? 0))
+      ? WASI_ERRNO_SUCCESS
+      : WASI_ERRNO_FAULT;
+  } catch {
+    return WASI_ERRNO_FAULT;
+  }
+}
+
+function handleVirtualFdSeek(fd, offset, whence, newOffsetPtr) {
+  const entry = getVirtualFdEntry(fd);
+  if (!entry) {
+    return isClosedGuestFd(fd) ? WASI_ERRNO_BADF : null;
+  }
+  try {
+    const current = typeof entry.description.position === 'number' ? entry.description.position : 0;
+    const stat = hostFsFstatSync(entry.description.hostFd);
+    let nextOffset;
+    switch (Number(whence)) {
+      case WASI_WHENCE_SET:
+        nextOffset = Number(offset);
+        break;
+      case WASI_WHENCE_CUR:
+        nextOffset = current + Number(offset);
+        break;
+      case WASI_WHENCE_END:
+        nextOffset = Number(stat.size ?? 0) + Number(offset);
+        break;
+      default:
+        return WASI_ERRNO_INVAL;
+    }
+    if (!Number.isFinite(nextOffset) || nextOffset < 0) {
+      return WASI_ERRNO_INVAL;
+    }
+    entry.description.position = nextOffset;
+    return writeU64Number(newOffsetPtr, nextOffset) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+  } catch {
+    return WASI_ERRNO_FAULT;
+  }
+}
+
+function handleVirtualFdTell(fd, newOffsetPtr) {
+  const entry = getVirtualFdEntry(fd);
+  if (!entry) {
+    return isClosedGuestFd(fd) ? WASI_ERRNO_BADF : null;
+  }
+  const current = typeof entry.description.position === 'number' ? entry.description.position : 0;
+  return writeU64Number(newOffsetPtr, current) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+}
+
+function handleVirtualFdPread(fd, iovs, iovsLen, offset, nreadPtr) {
+  const entry = getVirtualFdEntry(fd);
+  if (!entry) {
+    return isClosedGuestFd(fd) ? WASI_ERRNO_BADF : null;
+  }
+  if (!entry.description.readable) {
+    return WASI_ERRNO_BADF;
+  }
+  const vectors = readIovecs(iovs, iovsLen);
+  if (vectors == null) {
+    return WASI_ERRNO_FAULT;
+  }
+  let totalRead = 0;
+  let cursor = Number(offset);
+  try {
+    for (const vector of vectors) {
+      if (vector.len === 0) {
+        continue;
+      }
+      const chunk = Buffer.allocUnsafe(vector.len);
+      const bytesRead = hostFsReadSync(
+        entry.description.hostFd,
+        chunk,
+        0,
+        vector.len,
+        cursor,
+      );
+      if (bytesRead > 0 && !writeMemoryBytes(vector.ptr, chunk.subarray(0, bytesRead))) {
+        return WASI_ERRNO_FAULT;
+      }
+      totalRead += bytesRead;
+      cursor += bytesRead;
+      if (bytesRead < vector.len) {
+        break;
+      }
+    }
+    return writeU32(nreadPtr, totalRead) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+  } catch {
+    return WASI_ERRNO_FAULT;
+  }
+}
+
+function handleVirtualFdPwrite(fd, iovs, iovsLen, offset, nwrittenPtr) {
+  const entry = getVirtualFdEntry(fd);
+  if (!entry) {
+    return isClosedGuestFd(fd) ? WASI_ERRNO_BADF : null;
+  }
+  if (!entry.description.writable) {
+    return WASI_ERRNO_BADF;
+  }
+  const vectors = readIovecs(iovs, iovsLen);
+  if (vectors == null) {
+    return WASI_ERRNO_FAULT;
+  }
+  let totalWritten = 0;
+  let cursor = Number(offset);
+  try {
+    for (const vector of vectors) {
+      if (vector.len === 0) {
+        continue;
+      }
+      const bytes = readMemoryBytes(vector.ptr, vector.len);
+      if (bytes == null) {
+        return WASI_ERRNO_FAULT;
+      }
+      const written = hostFsWriteSync(
+        entry.description.hostFd,
+        bytes,
+        0,
+        bytes.length,
+        cursor,
+      );
+      totalWritten += written;
+      cursor += written;
+    }
+    return writeU32(nwrittenPtr, totalWritten) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+  } catch {
+    return WASI_ERRNO_FAULT;
+  }
+}
+
+function createNamedPipe() {
+  hostFsMkdirSync(path.dirname(path.join(SANDBOX_ROOT, 'tmp', 'placeholder')), { recursive: true });
+  const pipePath = path.join(SANDBOX_ROOT, 'tmp', `agent-os-pipe-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  debugLog('fd_pipe create', pipePath);
+  hostSpawnSync('mkfifo', [pipePath], { stdio: 'ignore' });
+  const holdingFd = hostFsOpenSync(pipePath, FS_CONSTANTS.O_RDWR);
+  const readFd = hostFsOpenSync(pipePath, FS_CONSTANTS.O_RDONLY);
+  const writeFd = hostFsOpenSync(pipePath, FS_CONSTANTS.O_WRONLY);
+  hostFsCloseSync(holdingFd);
+  try {
+    hostFsUnlinkSync(pipePath);
+  } catch {
+    // Ignore cleanup failures; the FDs are already open.
+  }
+  debugLog('fd_pipe ready', String(readFd), String(writeFd));
+  return { readFd, writeFd };
+}
+
+function duplicateProcFd(fd) {
+  const numericFd = Number(fd);
+  for (const flags of [FS_CONSTANTS.O_RDWR, FS_CONSTANTS.O_RDONLY, FS_CONSTANTS.O_WRONLY]) {
+    try {
+      const duplicated = hostFsOpenSync(`/proc/self/fd/${numericFd}`, flags);
+      debugLog('fd_dup open', String(numericFd), '->', String(duplicated), 'flags', String(flags));
+      return duplicated;
+    } catch {
+      // Try the next access mode.
+    }
+  }
+  throw new Error(`unable to duplicate fd ${numericFd}`);
+}
+
+function duplicateProcFdTo(oldFd, newFd) {
+  const targetFd = Number(newFd);
+  const placeholders = [];
+  debugLog('fd_dup2 start', String(oldFd), '->', String(targetFd));
+  try {
+    try {
+      hostFsCloseSync(targetFd);
+    } catch {
+      // Ignore closed / unopened target FDs.
+    }
+
+    while (true) {
+      const duplicated = duplicateProcFd(oldFd);
+      if (duplicated === targetFd) {
+        for (const placeholder of placeholders) {
+          hostFsCloseSync(placeholder);
+        }
+        debugLog('fd_dup2 success', String(oldFd), '->', String(targetFd));
+        return true;
+      }
+      if (duplicated > targetFd) {
+        hostFsCloseSync(duplicated);
+        debugLog('fd_dup2 overshoot', String(oldFd), '->', String(targetFd), 'got', String(duplicated));
+        break;
+      }
+      placeholders.push(duplicated);
+    }
+  } catch {
+    // Fall through to cleanup below.
+  }
+
+  for (const placeholder of placeholders) {
+    try {
+      hostFsCloseSync(placeholder);
+    } catch {
+      // Ignore cleanup failures.
+    }
+  }
+  debugLog('fd_dup2 failed', String(oldFd), '->', String(targetFd));
+  return false;
+}
+
 function parseControlPipeFd(value) {
   if (typeof value !== 'string' || value.trim() === '') {
     return null;
@@ -7955,9 +9054,21 @@ function emitControlMessage(message) {
   }
 
   try {
-    writeSync(CONTROL_PIPE_FD, `${JSON.stringify(message)}\n`);
+    hostFsWriteSync(CONTROL_PIPE_FD, `${JSON.stringify(message)}\n`);
   } catch {
     // Ignore control-channel write failures during teardown.
+  }
+}
+
+function debugLog(...args) {
+  if (process.env.AGENT_OS_NODE_IMPORT_CACHE_DEBUG !== '1') {
+    return;
+  }
+
+  try {
+    console.error('[agent-os wasm runner]', ...args);
+  } catch {
+    // Ignore debug logging failures.
   }
 }
 
@@ -7977,9 +9088,286 @@ function denyReadOnlyMutation() {
   return WASI_ERRNO_ROFS;
 }
 
+const hostUserImport = {
+  getuid(retUidPtr) {
+    return writeU32(retUidPtr, guestUser().uid) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+  },
+  getgid(retGidPtr) {
+    return writeU32(retGidPtr, guestUser().gid) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+  },
+  geteuid(retUidPtr) {
+    return writeU32(retUidPtr, guestUser().uid) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+  },
+  getegid(retGidPtr) {
+    return writeU32(retGidPtr, guestUser().gid) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+  },
+  isatty(fd, retBoolPtr) {
+    try {
+      const isTty = Number(fd) <= 2 ? 1 : 0;
+      return writeU32(retBoolPtr, isTty) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+    } catch (error) {
+      console.error('[agent-os proc_spawn error]', String(error));
+      return WASI_ERRNO_FAULT;
+    }
+  },
+  getpwuid(uid, bufPtr, bufLen, retLenPtr) {
+    try {
+      const user = guestUser();
+      const passwdLine = `${user.username}:x:${Number(uid) >>> 0}:${user.gid}::${user.home}:${user.shell}`;
+      const bytes = TEXT_ENCODER.encode(passwdLine);
+      if (bytes.length > Number(bufLen)) {
+        return WASI_ERRNO_INVAL;
+      }
+      if (!writeMemoryBytes(bufPtr, bytes) || !writeU32(retLenPtr, bytes.length)) {
+        return WASI_ERRNO_FAULT;
+      }
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      console.error('[agent-os proc_spawn exception]', String(error));
+      return WASI_ERRNO_FAULT;
+    }
+  },
+};
+
+const hostFsImport = {
+  path_mode(pathPtr, pathLen, followSymlinks) {
+    try {
+      const guestPath = decodeMemoryString(pathPtr, pathLen);
+      if (guestPath == null) {
+        return 0;
+      }
+      const hostPath = resolveGuestPath(guestPath).toString();
+      const stat =
+        Number(followSymlinks) === 0
+          ? hostFsLstatSync(hostPath)
+          : hostFsStatSync(hostPath);
+      return stat.mode >>> 0;
+    } catch {
+      return 0;
+    }
+  },
+  fd_mode(fd) {
+    try {
+      return hostFsFstatSync(translateGuestFdToHostFd(fd)).mode >>> 0;
+    } catch {
+      return 0;
+    }
+  },
+  chmod(pathPtr, pathLen, mode) {
+    if (permissionTier === 'read-only' || permissionTier === 'isolated') {
+      return denyReadOnlyMutation();
+    }
+    try {
+      const guestPath = decodeMemoryString(pathPtr, pathLen);
+      if (guestPath == null) {
+        return WASI_ERRNO_FAULT;
+      }
+      hostFsChmodSync(resolveGuestPath(guestPath).toString(), Number(mode) & 0o7777);
+      return WASI_ERRNO_SUCCESS;
+    } catch {
+      return WASI_ERRNO_FAULT;
+    }
+  },
+};
+
 const hostProcessImport =
   permissionTier === 'full'
     ? {
+        proc_spawn(
+          argvPtr,
+          argvLen,
+          envPtr,
+          envLen,
+          stdinFd,
+          stdoutFd,
+          stderrFd,
+          cwdPtr,
+          cwdLen,
+          retPidPtr,
+        ) {
+          try {
+            const argv = decodeNullSeparatedStrings(argvPtr, argvLen);
+            const envMap = parseSerializedEnv(envPtr, envLen);
+            if (argv == null || envMap == null || argv.length === 0) {
+              return WASI_ERRNO_FAULT;
+            }
+
+            const childPid = hostProcessState.nextPid++;
+            const childCwdGuest = Number(cwdLen) > 0 ? decodeMemoryString(cwdPtr, cwdLen) : null;
+            const childCwdHost = resolveGuestPath(childCwdGuest ?? '.').toString();
+            const target = resolveSpawnTarget(argv, envMap);
+            if (target == null) {
+              debugLog('proc_spawn missing target', JSON.stringify(argv));
+              return WASI_ERRNO_NOENT;
+            }
+
+            let command;
+            let args;
+            if (target.kind === 'wasm') {
+              command = process.execPath;
+              args = [...PROCESS_EXEC_ARGV, RUNNER_PATH];
+            } else {
+              command = target.command;
+              args = target.args;
+            }
+
+            const childEnv = {
+              ...process.env,
+              ...envMap,
+              AGENT_OS_VIRTUAL_PROCESS_PID: String(childPid),
+              AGENT_OS_VIRTUAL_PROCESS_PPID: String(virtualProcessNumber('AGENT_OS_VIRTUAL_PROCESS_PID', process.pid)),
+            };
+            if (target.kind === 'wasm') {
+              childEnv.AGENT_OS_WASM_MODULE_PATH = target.modulePath;
+              childEnv.AGENT_OS_GUEST_ARGV = JSON.stringify([
+                target.modulePath,
+                ...argv.slice(1),
+              ]);
+              childEnv.AGENT_OS_GUEST_ENV = JSON.stringify(envMap);
+              childEnv.AGENT_OS_WASM_PERMISSION_TIER = permissionTier;
+              delete childEnv.AGENT_OS_WASM_PREWARM_ONLY;
+            }
+
+            debugLog(
+              'proc_spawn',
+              JSON.stringify(argv),
+              'stdin',
+              String(stdinFd),
+              'stdout',
+              String(stdoutFd),
+              'stderr',
+              String(stderrFd),
+              'cwd',
+              childCwdHost,
+              'kind',
+              target.kind,
+            );
+            const result = hostSpawnSync(command, args, {
+              cwd: childCwdHost,
+              env: childEnv,
+              stdio: [
+                translateGuestFdToHostFd(stdinFd),
+                translateGuestFdToHostFd(stdoutFd),
+                translateGuestFdToHostFd(stderrFd),
+              ],
+            });
+
+            debugLog(
+              'proc_spawn result',
+              JSON.stringify(argv),
+              'status',
+              String(result.status),
+              'signal',
+              String(result.signal),
+              'error',
+              result.error ? String(result.error.stack ?? result.error) : 'none',
+            );
+            hostProcessState.completedChildren.set(childPid, {
+              status: rawWaitStatusFromResult(result.status, result.signal),
+            });
+
+            return writeU32(retPidPtr, childPid) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+          } catch (error) {
+            return WASI_ERRNO_FAULT;
+          }
+        },
+        proc_waitpid(pid, options, retStatusPtr, retPidPtr) {
+          try {
+            const requestedPid = Number(pid) >>> 0;
+            const allowAny = requestedPid === 0xffffffff;
+            let resolvedPid = requestedPid;
+            if (allowAny) {
+              const iterator = hostProcessState.completedChildren.keys().next();
+              if (iterator.done) {
+                return WASI_ERRNO_CHILD;
+              }
+              resolvedPid = iterator.value;
+            }
+            const child = hostProcessState.completedChildren.get(resolvedPid);
+            if (!child) {
+              return WASI_ERRNO_CHILD;
+            }
+            if (!Number(options)) {
+              hostProcessState.completedChildren.delete(resolvedPid);
+            }
+            if (!writeU32(retStatusPtr, child.status) || !writeU32(retPidPtr, resolvedPid)) {
+              return WASI_ERRNO_FAULT;
+            }
+            return WASI_ERRNO_SUCCESS;
+          } catch {
+            return WASI_ERRNO_FAULT;
+          }
+        },
+        proc_kill(pid) {
+          return hostProcessState.completedChildren.has(Number(pid) >>> 0)
+            ? WASI_ERRNO_SUCCESS
+            : WASI_ERRNO_SRCH;
+        },
+        proc_getpid(retPidPtr) {
+          return writeU32(retPidPtr, virtualProcessNumber('AGENT_OS_VIRTUAL_PROCESS_PID', process.pid))
+            ? WASI_ERRNO_SUCCESS
+            : WASI_ERRNO_FAULT;
+        },
+        proc_getppid(retPidPtr) {
+          return writeU32(retPidPtr, virtualProcessNumber('AGENT_OS_VIRTUAL_PROCESS_PPID', 0))
+            ? WASI_ERRNO_SUCCESS
+            : WASI_ERRNO_FAULT;
+        },
+        fd_pipe(retReadFdPtr, retWriteFdPtr) {
+          try {
+            const { readFd, writeFd } = createNamedPipe();
+            const guestReadFd = allocateVirtualFd({
+              hostFd: readFd,
+              readable: true,
+              writable: false,
+              append: false,
+              filetype: WASI_FILETYPE_UNKNOWN,
+            });
+            const guestWriteFd = allocateVirtualFd({
+              hostFd: writeFd,
+              readable: false,
+              writable: true,
+              append: false,
+              filetype: WASI_FILETYPE_UNKNOWN,
+            });
+            return writeU32(retReadFdPtr, guestReadFd) && writeU32(retWriteFdPtr, guestWriteFd)
+              ? WASI_ERRNO_SUCCESS
+              : WASI_ERRNO_FAULT;
+          } catch {
+            return WASI_ERRNO_FAULT;
+          }
+        },
+        fd_dup(fd, retNewFdPtr) {
+          try {
+            const duplicated = duplicateGuestFd(fd);
+            debugLog('fd_dup result', String(fd), '->', String(duplicated));
+            return writeU32(retNewFdPtr, duplicated) ? WASI_ERRNO_SUCCESS : WASI_ERRNO_FAULT;
+          } catch (error) {
+            return WASI_ERRNO_BADF;
+          }
+        },
+        fd_dup2(oldFd, newFd) {
+          try {
+            if (Number(oldFd) === Number(newFd)) {
+              return WASI_ERRNO_SUCCESS;
+            }
+            duplicateGuestFd(oldFd, newFd);
+            debugLog('fd_dup2 result', String(oldFd), '->', String(newFd), 'ok');
+            return WASI_ERRNO_SUCCESS;
+          } catch {
+            // Fall through to BADF below.
+          }
+          return WASI_ERRNO_BADF;
+        },
+        sleep_ms(milliseconds) {
+          const buffer = new SharedArrayBuffer(4);
+          const view = new Int32Array(buffer);
+          Atomics.wait(view, 0, 0, Math.max(0, Number(milliseconds) || 0));
+          return WASI_ERRNO_SUCCESS;
+        },
+        pty_open() {
+          return WASI_ERRNO_NOSYS;
+        },
         proc_sigaction(signal, action, maskLo, maskHi, flags) {
           try {
             const registration = {
@@ -8032,6 +9420,103 @@ wasiImport.clock_res_get = (clockId, resultPtr) => {
   }
 };
 
+wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
+  const handled = handleVirtualFdRead(fd, iovs, iovsLen, nreadPtr);
+  if (handled != null) {
+    return handled;
+  }
+  return delegateFdRead ? delegateFdRead(fd, iovs, iovsLen, nreadPtr) : WASI_ERRNO_FAULT;
+};
+
+wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
+  const handled = handleVirtualFdWrite(fd, iovs, iovsLen, nwrittenPtr);
+  if (handled != null) {
+    return handled;
+  }
+  return delegateFdWrite ? delegateFdWrite(fd, iovs, iovsLen, nwrittenPtr) : WASI_ERRNO_FAULT;
+};
+
+wasiImport.fd_close = (fd) => {
+  const handled = handleVirtualFdClose(fd);
+  if (handled != null) {
+    return handled;
+  }
+  return delegateFdClose ? delegateFdClose(fd) : WASI_ERRNO_FAULT;
+};
+
+wasiImport.fd_fdstat_get = (fd, resultPtr) => {
+  const handled = handleVirtualFdStat(fd, resultPtr);
+  if (handled != null) {
+    return handled;
+  }
+  return delegateFdFdstatGet ? delegateFdFdstatGet(fd, resultPtr) : WASI_ERRNO_FAULT;
+};
+
+wasiImport.fd_filestat_get = (fd, resultPtr) => {
+  const handled = handleVirtualFdFilestatGet(fd, resultPtr);
+  if (handled != null) {
+    return handled;
+  }
+  return delegateFdFilestatGet ? delegateFdFilestatGet(fd, resultPtr) : WASI_ERRNO_FAULT;
+};
+
+wasiImport.fd_seek = (fd, offset, whence, newOffsetPtr) => {
+  const handled = handleVirtualFdSeek(fd, offset, whence, newOffsetPtr);
+  if (handled != null) {
+    return handled;
+  }
+  return delegateFdSeek ? delegateFdSeek(fd, offset, whence, newOffsetPtr) : WASI_ERRNO_FAULT;
+};
+
+wasiImport.fd_tell = (fd, newOffsetPtr) => {
+  const handled = handleVirtualFdTell(fd, newOffsetPtr);
+  if (handled != null) {
+    return handled;
+  }
+  return delegateFdTell ? delegateFdTell(fd, newOffsetPtr) : WASI_ERRNO_FAULT;
+};
+
+wasiImport.fd_pread = (fd, iovs, iovsLen, offset, nreadPtr) => {
+  const handled = handleVirtualFdPread(fd, iovs, iovsLen, offset, nreadPtr);
+  if (handled != null) {
+    return handled;
+  }
+  return delegateFdPread ? delegateFdPread(fd, iovs, iovsLen, offset, nreadPtr) : WASI_ERRNO_FAULT;
+};
+
+wasiImport.fd_pwrite = (fd, iovs, iovsLen, offset, nwrittenPtr) => {
+  const handled = handleVirtualFdPwrite(fd, iovs, iovsLen, offset, nwrittenPtr);
+  if (handled != null) {
+    return handled;
+  }
+  return delegateFdPwrite
+    ? delegateFdPwrite(fd, iovs, iovsLen, offset, nwrittenPtr)
+    : WASI_ERRNO_FAULT;
+};
+
+wasiImport.path_open = (
+  fd,
+  dirflags,
+  pathPtr,
+  pathLen,
+  oflags,
+  rightsBase,
+  rightsInheriting,
+  fdflags,
+  openedFdPtr,
+) =>
+  performPathOpen(
+    fd,
+    dirflags,
+    pathPtr,
+    pathLen,
+    oflags,
+    rightsBase,
+    rightsInheriting,
+    fdflags,
+    openedFdPtr,
+  );
+
 if (isWorkspaceReadOnly()) {
   wasiImport.path_open = (
     fd,
@@ -8048,22 +9533,24 @@ if (isWorkspaceReadOnly()) {
       return denyReadOnlyMutation();
     }
 
-    return delegatePathOpen
-      ? delegatePathOpen(
-          fd,
-          dirflags,
-          pathPtr,
-          pathLen,
-          oflags,
-          rightsBase,
-          rightsInheriting,
-          fdflags,
-          openedFdPtr,
-        )
-      : WASI_ERRNO_FAULT;
+    return performPathOpen(
+      fd,
+      dirflags,
+      pathPtr,
+      pathLen,
+      oflags,
+      rightsBase,
+      rightsInheriting,
+      fdflags,
+      openedFdPtr,
+    );
   };
 
   wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
+    const handled = handleVirtualFdWrite(fd, iovs, iovsLen, nwrittenPtr);
+    if (handled != null) {
+      return handled;
+    }
     if (Number(fd) > 2) {
       return denyReadOnlyMutation();
     }
@@ -8103,6 +9590,8 @@ const instance = await WebAssembly.instantiate(module, {
   wasi_snapshot_preview1: wasiImport,
   wasi_unstable: wasiImport,
   host_process: hostProcessImport,
+  host_user: hostUserImport,
+  host_fs: hostFsImport,
 });
 
 if (instance.exports.memory instanceof WebAssembly.Memory) {

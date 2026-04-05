@@ -66,7 +66,7 @@ COMMANDS_DIR ?= ../target/wasm32-wasip1/release/commands
 COMMANDS := zip unzip envsubst sqlite3 curl wget duckdb
 
 # Programs requiring patched sysroot (Tier 2+ custom host imports)
-PATCHED_PROGRAMS := isatty_test getpid_test getppid_test getppid_verify userinfo pipe_test dup_test spawn_child spawn_exit_code pipeline kill_child waitpid_return waitpid_edge syscall_coverage getpwuid_test signal_tests sigaction_behavior delayed_tcp_echo delayed_kill pipe_edge tcp_echo tcp_server udp_echo unix_socket signal_handler http_get dns_lookup sqlite3_cli curl wget
+PATCHED_PROGRAMS := isatty_test getpid_test getppid_test getppid_verify userinfo pipe_test dup_test spawn_child spawn_exit_code pipeline kill_child waitpid_return waitpid_edge syscall_coverage getpwuid_test signal_tests sigaction_behavior delayed_tcp_echo delayed_kill pipe_edge tcp_echo tcp_server udp_echo unix_socket signal_handler http_get http_get_test dns_lookup sqlite3_cli curl wget
 
 # Discover all .c source files in programs/
 ALL_SOURCES := $(wildcard programs/*.c)
@@ -88,10 +88,17 @@ endif
 
 WASM_PROG_NAMES := $(sort $(basename $(notdir $(SOURCES))) $(CUSTOM_WASM_PROG_NAMES))
 NATIVE_PROG_NAMES := $(basename $(notdir $(SOURCES)))
-PROGRAM_REPORT_NAMES := $(WASM_PROG_NAMES) duckdb
+PROGRAM_REPORT_NAMES := $(WASM_PROG_NAMES)
+ifneq ($(EXTRA_WASM_OUTPUTS),)
+  PROGRAM_REPORT_NAMES += duckdb
+endif
 
 # Default WASM output targets
-EXTRA_WASM_OUTPUTS := $(BUILD_DIR)/duckdb
+ifeq ($(wildcard $(PATCHED_SYSROOT)/lib/wasm32-wasi/libc.a),)
+  EXTRA_WASM_OUTPUTS :=
+else
+  EXTRA_WASM_OUTPUTS := $(BUILD_DIR)/duckdb
+endif
 WASM_OUTPUTS := $(addprefix $(BUILD_DIR)/,$(WASM_PROG_NAMES)) $(EXTRA_WASM_OUTPUTS)
 # Native output targets
 NATIVE_OUTPUTS := $(addprefix $(NATIVE_DIR)/,$(NATIVE_PROG_NAMES))

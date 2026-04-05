@@ -1,5 +1,5 @@
 {
-	"name": "@rivet-dev/agent-os-core",
+	"name": "@rivet-dev/agent-os",
 	"version": "0.1.1",
 	"type": "module",
 	"license": "Apache-2.0",

@@ -235,6 +235,7 @@ export function getBaseEnvironment(): Record<string, string> {
 
 	return {
 		...snapshot.environment.env,
+		PATH: "/bin:/usr/bin:/usr/local/bin:/sbin:/usr/sbin:/usr/local/sbin",
 		PS1: snapshot.environment.prompt,
 	};
 }

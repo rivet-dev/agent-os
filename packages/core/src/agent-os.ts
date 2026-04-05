@@ -1,6 +1,7 @@
 import { execFileSync, spawn as spawnChildProcess } from "node:child_process";
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
@@ -940,6 +941,14 @@ function latestMtimeMs(path: string): number {
 	return latest;
 }
 
+function materializeShadowBootstrapDirs(shadowRoot: string): void {
+	for (const guestPath of KERNEL_POSIX_BOOTSTRAP_DIRS) {
+		mkdirSync(join(shadowRoot, guestPath.replace(/^\/+/, "")), {
+			recursive: true,
+		});
+	}
+}
+
 function collectGuestCommandPaths(commandDirs: string[]): Map<string, string> {
 	const guestPaths = new Map<string, string>();
 
@@ -1291,6 +1300,7 @@ export class AgentOs {
 					frameTimeoutMs: 60_000,
 				});
 				shadowRoot = mkdtempSync(join(tmpdir(), "agent-os-native-shadow-"));
+				materializeShadowBootstrapDirs(shadowRoot);
 				const session = await client.authenticateAndOpenSession();
 				const sidecarPermissions = serializePermissionsForSidecar(
 					options?.permissions,

@@ -1962,6 +1962,12 @@ class NativeKernel implements Kernel {
 		await this.client.configureVm(this.session, this.vm, {
 			mounts: sidecarMounts,
 		});
+		this.proxy.registerHostPathMappings(
+			commandDirs.map((commandDir, index) => ({
+				guestPath: `/__agentos/commands/${startIndex + index}`,
+				hostPath: commandDir,
+			})),
+		);
 		this.proxy.registerCommandGuestPaths(newGuestPaths);
 		this.mountedCommandDirs.push(...commandDirs);
 		for (const command of newGuestPaths.keys()) {

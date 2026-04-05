@@ -3362,6 +3362,13 @@ where
 
         let execution = match payload.runtime {
             GuestRuntimeKind::JavaScript => {
+                let mut execution_env = env.clone();
+                let entrypoint = resolve_javascript_execution_entrypoint(
+                    vm,
+                    &cwd,
+                    &payload.entrypoint,
+                    &mut execution_env,
+                );
                 let context =
                     self.javascript_engine
                         .create_context(CreateJavascriptContextRequest {
@@ -3374,10 +3381,10 @@ where
                     .start_execution(StartJavascriptExecutionRequest {
                         vm_id: vm_id.clone(),
                         context_id: context.context_id,
-                        argv: std::iter::once(payload.entrypoint.clone())
+                        argv: std::iter::once(entrypoint)
                             .chain(payload.args.iter().cloned())
                             .collect(),
-                        env: env.clone(),
+                        env: execution_env,
                         cwd: cwd.clone(),
                     })
                     .map_err(javascript_error)?;
@@ -6529,6 +6536,48 @@ fn host_mount_path_for_guest_path(vm: &VmState, guest_path: &str) -> Option<Path
     }
 
     None
+}
+
+fn host_path_for_guest_path(vm: &VmState, guest_path: &str) -> PathBuf {
+    if let Some(host_path) = host_mount_path_for_guest_path(vm, guest_path) {
+        return host_path;
+    }
+
+    let normalized = normalize_path(guest_path);
+    let mut path = normalize_host_path(&vm.cwd);
+    let suffix = normalized.trim_start_matches('/');
+    if !suffix.is_empty() {
+        path.push(suffix);
+    }
+    path
+}
+
+fn resolve_javascript_execution_entrypoint(
+    vm: &VmState,
+    host_cwd: &Path,
+    entrypoint: &str,
+    env: &mut BTreeMap<String, String>,
+) -> String {
+    if !is_path_like_specifier(entrypoint) {
+        return entrypoint.to_owned();
+    }
+
+    if entrypoint.starts_with("./") || entrypoint.starts_with("../") {
+        return host_cwd.join(entrypoint).to_string_lossy().into_owned();
+    }
+
+    let guest_entrypoint = if entrypoint.starts_with("file:") {
+        normalize_path(entrypoint.trim_start_matches("file:"))
+    } else {
+        normalize_path(entrypoint)
+    };
+    env.insert(
+        String::from("AGENT_OS_GUEST_ENTRYPOINT"),
+        guest_entrypoint.clone(),
+    );
+    host_path_for_guest_path(vm, &guest_entrypoint)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn host_mount_path_for_guest_path_from_mounts(

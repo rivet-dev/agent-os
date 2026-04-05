@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
 import {
+	copyFileSync,
 	existsSync,
+	linkSync,
 	mkdirSync,
 	mkdtempSync,
 	realpathSync,
@@ -12,8 +14,10 @@ import { constants as osConstants, tmpdir } from "node:os";
 import {
 	basename as basenameHostPath,
 	dirname as dirnameHostPath,
+	isAbsolute as isAbsoluteHostPath,
 	join as joinHostPath,
 	posix as posixPath,
+	relative as relativeHostPath,
 } from "node:path";
 import type {
 	ConnectTerminalOptions,
@@ -324,6 +328,28 @@ export class NativeSidecarKernelProxy {
 			this.commandGuestPaths.set(name, guestPath);
 			(this.commands as Map<string, string>).set(name, "wasmvm");
 		}
+		this.materializeHostPathMappings();
+	}
+
+	registerHostPathMappings(
+		hostPathMappings: readonly HostPathMapping[],
+	): void {
+		for (const mapping of hostPathMappings) {
+			if (
+				this.hostPathMappings.some(
+					(existing) =>
+						existing.guestPath === mapping.guestPath &&
+						existing.hostPath === mapping.hostPath,
+				)
+			) {
+				continue;
+			}
+			this.hostPathMappings.push(mapping);
+		}
+		this.hostPathMappings.sort(
+			(left, right) => right.guestPath.length - left.guestPath.length,
+		);
+		this.materializeHostPathMappings();
 	}
 
 	async dispose(): Promise<void> {
@@ -832,7 +858,7 @@ export class NativeSidecarKernelProxy {
 			entrypoint: execution.entrypoint,
 			args: execution.args,
 			env: execution.env,
-			cwd: execution.cwd,
+			cwd: this.resolveExecutionCwd(execution.cwd),
 			wasmPermissionTier: execution.wasmPermissionTier,
 		});
 		entry.hostPid = started.pid;
@@ -1026,7 +1052,7 @@ export class NativeSidecarKernelProxy {
 		runtime: "java_script" | "web_assembly";
 		entrypoint: string;
 		args: string[];
-		cwd?: string;
+		cwd: string;
 		env?: Record<string, string>;
 		wasmPermissionTier?: PermissionTier;
 		bootstrap?: () => Promise<void>;
@@ -1066,15 +1092,18 @@ export class NativeSidecarKernelProxy {
 
 		const wasmEntrypoint = this.commandGuestPaths.get(entry.command);
 		if (wasmEntrypoint) {
-				return {
-					runtime: "web_assembly",
-					entrypoint: wasmEntrypoint,
-					args: entry.args,
-					cwd: entry.cwd,
-					env: entry.env,
-					wasmPermissionTier: this.wasmCommandPermissions[entry.command],
-				};
-			}
+			const hostEntrypoint =
+				this.resolveHostPath(wasmEntrypoint) ??
+				(await this.materializeGuestFile(wasmEntrypoint));
+			return {
+				runtime: "web_assembly",
+				entrypoint: hostEntrypoint,
+				args: entry.args,
+				cwd: entry.cwd,
+				env: this.buildWasmExecutionEnv(entry),
+				wasmPermissionTier: this.wasmCommandPermissions[entry.command],
+			};
+		}
 
 		throw new Error(
 			`command not found on native sidecar path: ${entry.command}`,
@@ -1103,7 +1132,32 @@ export class NativeSidecarKernelProxy {
 	}
 
 	private resolveNodeCwd(cwd: string): string {
+		return this.resolveExecutionCwd(cwd);
+	}
+
+	private resolveExecutionCwd(cwd: string): string {
+		if (this.isResolvedHostPath(cwd)) {
+			return cwd;
+		}
 		return this.resolveHostPath(cwd) ?? this.shadowPathForGuest(cwd, true);
+	}
+
+	private isResolvedHostPath(candidate: string): boolean {
+		if (!isAbsoluteHostPath(candidate)) {
+			return false;
+		}
+
+		const roots = [
+			this.shadowRoot,
+			...this.hostPathMappings.map((mapping) => mapping.hostPath),
+		];
+		return roots.some((root) => {
+			const relative = relativeHostPath(root, candidate);
+			return (
+				relative === "" ||
+				(!relative.startsWith("..") && !isAbsoluteHostPath(relative))
+			);
+		});
 	}
 
 	private resolveHostPath(guestPath: string): string | null {
@@ -1151,6 +1205,21 @@ export class NativeSidecarKernelProxy {
 			rmSync(linkPath, { recursive: true, force: true });
 			symlinkSync(mapping.hostPath, linkPath);
 		}
+		for (const [name, guestPath] of this.commandGuestPaths) {
+			const hostPath = this.resolveHostPath(guestPath);
+			if (!hostPath) {
+				continue;
+			}
+			for (const guestBinPath of [`/bin/${name}`, `/usr/bin/${name}`]) {
+				const linkPath = this.shadowPathForGuest(guestBinPath, false);
+				rmSync(linkPath, { recursive: true, force: true });
+				try {
+					linkSync(hostPath, linkPath);
+				} catch {
+					copyFileSync(hostPath, linkPath);
+				}
+			}
+		}
 	}
 
 	private buildNodeExecutionEnv(
@@ -1191,6 +1260,18 @@ export class NativeSidecarKernelProxy {
 				this.loopbackExemptPorts.map((port) => String(port)),
 			),
 			AGENT_OS_GUEST_ENTRYPOINT: guestEntrypoint,
+		};
+	}
+
+	private buildWasmExecutionEnv(
+		entry: TrackedProcessEntry,
+	): Record<string, string> {
+		return {
+			...entry.env,
+			AGENT_OS_SANDBOX_ROOT: this.shadowRoot,
+			[GUEST_PATH_MAPPINGS_ENV]: JSON.stringify(
+				this.hostPathMappings.filter((mapping) => mapping.guestPath !== "/"),
+			),
 		};
 	}
 

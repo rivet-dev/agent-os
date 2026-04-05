@@ -54,8 +54,7 @@ $(C_MARKER): $(MARKER_DIR)
 # ---------------------------------------------------------------------------
 # Copy WASM binaries from native build output into per-package wasm/ dirs
 # ---------------------------------------------------------------------------
-copy-wasm: $(COPY_MARKER)
-$(COPY_MARKER): $(RUST_MARKER) $(C_MARKER)
+copy-wasm: $(RUST_MARKER) $(C_MARKER)
 	@echo "=== Copying WASM binaries to packages ==="
 
 	@# --- coreutils ---
@@ -187,13 +186,11 @@ $(COPY_MARKER): $(RUST_MARKER) $(C_MARKER)
 	@[ -f "$(COMMANDS_DIR)/git" ] && cp -f "$(COMMANDS_DIR)/git" software/git/wasm/ || echo "  WARN: git not found"
 
 	@echo "=== Copy complete ==="
-	@touch $(COPY_MARKER)
 
 # ---------------------------------------------------------------------------
 # Generate agent-os-package.meta.json with artifact sizes
 # ---------------------------------------------------------------------------
-generate-meta: $(META_MARKER)
-$(META_MARKER): $(COPY_MARKER)
+generate-meta: copy-wasm
 	@echo "=== Generating agent-os-package.meta.json ==="
 	@for pkg in $(CMD_PACKAGES); do \
 		wasmdir="software/$$pkg/wasm"; \
@@ -218,15 +215,14 @@ $(META_MARKER): $(COPY_MARKER)
 			> "$$metafile"; \
 		echo "  META: $$metafile"; \
 	done
-	@touch $(META_MARKER)
 
 # ---------------------------------------------------------------------------
 # Build TypeScript
 # ---------------------------------------------------------------------------
-build: $(TS_MARKER)
-$(TS_MARKER): $(META_MARKER)
+build: copy-wasm generate-meta $(TS_MARKER)
+$(TS_MARKER): $(MARKER_DIR)
 	pnpm install
-	pnpm -r run build
+	pnpm run build
 	@touch $(TS_MARKER)
 
 # ---------------------------------------------------------------------------

@@ -9,8 +9,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "pnpm -r run build",
-    "check-types": "pnpm -r run check-types",
+    "build": "pnpm --filter @rivet-dev/agent-os --filter @rivet-dev/agent-os-registry-types --filter './software/*' --filter './agent/*' --filter './file-system/*' --filter './tool/*' -r run build",
+    "check-types": "pnpm --filter @rivet-dev/agent-os --filter @rivet-dev/agent-os-registry-types --filter './software/*' --filter './agent/*' --filter './file-system/*' --filter './tool/*' -r run check-types",
     "test": "vitest run"
   },
   "devDependencies": {

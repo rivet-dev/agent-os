@@ -39,7 +39,7 @@ STUB_COMMANDS := \
 
 .PHONY: all wasm wasm-opt-check host test clean patch-std patch-check vendor patch-vendor vendor-patch-check size-report install c-wasm
 
-all: wasm host
+all: wasm
 
 # Apply std patches if they exist
 patch-std:
@@ -214,8 +214,7 @@ host:
 		echo "Building JS host runtime..."; \
 		cd host && npm run build; \
 	else \
-		echo "Error: host/package.json not found"; \
-		exit 1; \
+		echo "Skipping host build: host/package.json not found"; \
 	fi
 
 test:

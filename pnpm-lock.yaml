@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@rivet-dev/agent-os': workspace:@rivet-dev/agent-os-core@*
+  '@rivet-dev/agent-os': workspace:*
 
 importers:
 
@@ -18,7 +18,7 @@ importers:
         specifier: ^1.6.0
         version: 1.6.0
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:packages/core
       '@rivet-dev/agent-os-claude':
         specifier: workspace:*
@@ -79,7 +79,7 @@ importers:
   examples/quickstart:
     dependencies:
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:../../packages/core
       '@rivet-dev/agent-os-claude':
         specifier: workspace:*
@@ -274,7 +274,7 @@ importers:
   packages/dev-shell:
     dependencies:
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:../core
       pino:
         specifier: ^10.3.1
@@ -299,7 +299,7 @@ importers:
   packages/playground:
     dependencies:
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:../core
       '@rivet-dev/agent-os-browser':
         specifier: workspace:*
@@ -380,7 +380,7 @@ importers:
   packages/secure-exec:
     dependencies:
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:../core
     devDependencies:
       '@types/node':
@@ -412,7 +412,7 @@ importers:
   packages/shell:
     dependencies:
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:../core
       '@rivet-dev/agent-os-codex':
         specifier: 0.0.260331072558
@@ -464,7 +464,7 @@ importers:
         specifier: ^0.2.87
         version: 0.2.87(zod@4.3.6)
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:../../../packages/core
       zod:
         specifier: ^4.1.11
@@ -483,7 +483,7 @@ importers:
         specifier: ^0.16.1
         version: 0.16.1(zod@4.3.6)
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:../../../packages/core
       '@rivet-dev/agent-os-codex':
         specifier: workspace:*
@@ -499,7 +499,7 @@ importers:
   registry/agent/opencode:
     dependencies:
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:../../../packages/core
     devDependencies:
       '@types/node':
@@ -524,7 +524,7 @@ importers:
         specifier: ^0.60.0
         version: 0.60.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:../../../packages/core
     devDependencies:
       '@types/node':
@@ -540,7 +540,7 @@ importers:
         specifier: ^0.60.0
         version: 0.60.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:../../../packages/core
       pi-acp:
         specifier: ^0.0.23
@@ -556,7 +556,7 @@ importers:
   registry/file-system/google-drive:
     dependencies:
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:../../../packages/core
     devDependencies:
       '@types/node':
@@ -572,7 +572,7 @@ importers:
   registry/file-system/s3:
     dependencies:
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:../../../packages/core
     devDependencies:
       '@types/node':
@@ -1005,7 +1005,7 @@ importers:
   registry/tool/sandbox:
     dependencies:
       '@rivet-dev/agent-os':
-        specifier: workspace:@rivet-dev/agent-os-core@*
+        specifier: workspace:*
         version: link:../../../packages/core
       sandbox-agent:
         specifier: ^0.4.2

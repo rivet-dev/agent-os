@@ -8,6 +8,8 @@
 - Native-sidecar Node launches must share the same host shadow root between `createVm` metadata `cwd` and `NativeSidecarKernelProxy.shadowRoot`; otherwise sidecar execute rejects the Node cwd as escaping the VM sandbox root.
 - External mounts must be excluded from root filesystem quotas both when measuring usage and when enforcing per-path write/mkdir/truncate limits, or host-dir mounts will consume guest quota.
 - Node import prewarm should use `node:` builtin specifiers instead of `agent-os:` synthetic URLs to stay compatible with newer Node ESM warmup behavior.
+- Native-sidecar WASM executions read and write against the host `shadowRoot`, so the shadow root must include the standard POSIX bootstrap directories up front; missing `/tmp` breaks shell redirection and file-based command tests even when the guest root filesystem contains `/tmp`.
+- If the WASM runner virtualizes `path_open`, it also needs matching virtual-FD handlers for follow-on syscalls such as `fd_read`, `fd_write`, `fd_seek`, `fd_tell`, `fd_pread`, `fd_pwrite`, and `fd_filestat_get`; shell redirection and coreutils file commands assume the full open-file-description lifecycle works after `dup`/`dup2`.
 
 Started: Sat Apr  5 2026
 ---
@@ -20,4 +22,15 @@ Started: Sat Apr  5 2026
   - Host-dir mounts need a dedicated `lstat("/")` root case that uses the host root dir FD directly, because there is no parent/name pair to split at the mount root.
   - The native sidecar `CreateVm` `cwd` is a host sandbox root, not a guest cwd string.
   - `AcpClient` process-exit cleanup is timing-sensitive under test load; a slightly larger exit-drain window reduces false `Agent process exited` races after cancel/close.
+---
+## 2026-04-05 16:14:55 PDT - US-101
+- Built and copied the registry WASM binaries into the software packages, then fixed the native-sidecar WASM execution path so shell redirection, file opens, and child command dispatch use the shadow root consistently.
+- Added shadow-root bootstrap directory seeding, expanded the WASM sandbox read-path allowlist for guest path mappings, corrected raw `waitpid` status encoding, normalized the default PATH to prefer `/bin`, and extended the WASM runner's virtual-FD layer to cover `path_open` plus the read/write/seek/filestat operations that shell redirection and coreutils rely on.
+- Quality checks: `pnpm --dir packages/core exec vitest run tests/execute.test.ts tests/wasm-commands.test.ts` now passes `execute.test.ts` and reaches `70` passed / `80` total in `wasm-commands.test.ts`; `pnpm --dir packages/core exec tsc --noEmit` passes.
+- Files changed: `.gitattributes`, `.gitignore`, `CLAUDE.md`, `crates/execution/src/node_import_cache.rs`, `crates/execution/src/wasm.rs`, `crates/sidecar/src/service.rs`, `examples/quickstart/src/pi-extensions.ts`, `packages/core/package.json`, `packages/core/src/agent-os.ts`, `packages/core/src/base-filesystem.ts`, `packages/core/src/runtime.ts`, `packages/core/src/sidecar/native-kernel-proxy.ts`, `packages/core/tests/helpers/registry-commands.ts`, `pnpm-lock.yaml`, `registry/CLAUDE.md`, `registry/Makefile`, `registry/native/Makefile`, `registry/native/c/Makefile`, `registry/package.json`, `registry/software/coreutils/wasm/*`, `registry/software/diffutils/wasm/*`, `registry/software/fd/wasm/*`, `registry/software/file/wasm/*`, `registry/software/findutils/wasm/*`, `registry/software/gawk/wasm/*`, `registry/software/git/wasm/*`, `registry/software/grep/wasm/*`, `registry/software/gzip/wasm/*`, `registry/software/jq/wasm/*`, `registry/software/ripgrep/wasm/*`, `registry/software/sed/wasm/*`, `registry/software/tar/wasm/*`, `registry/software/tree/wasm/*`, `registry/software/unzip/wasm/*`, `registry/software/yq/wasm/*`, `registry/software/zip/wasm/*`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The sidecar kernel's root filesystem and the host `shadowRoot` are separate views; fixing guest filesystem behavior for WASM commands often means updating both.
+  - `brush` shell redirection exercises `path_open` and then immediately `dup`/`dup2`; partial fd virtualization is worse than none because the shell will crash after creating the target file.
+  - The raw status stored for sidecar-managed child processes must use wait-status encoding (`exit_code << 8`), or commands like `grep` will return the wrong exit codes even when their stdout is correct.
+  - The `curl` registry package still has an empty `wasm/` directory, so its tests remain gated on publishing or copying the binary separately from the rest of the registry software set.
 ---

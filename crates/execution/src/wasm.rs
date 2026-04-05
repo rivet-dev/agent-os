@@ -12,6 +12,7 @@ use crate::runtime_support::{
     warmup_marker_path, NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV,
     NODE_FROZEN_TIME_ENV, NODE_SANDBOX_ROOT_ENV,
 };
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -31,6 +32,7 @@ const WASM_GUEST_ENV_ENV: &str = "AGENT_OS_GUEST_ENV";
 const WASM_PERMISSION_TIER_ENV: &str = "AGENT_OS_WASM_PERMISSION_TIER";
 const WASM_PREWARM_ONLY_ENV: &str = "AGENT_OS_WASM_PREWARM_ONLY";
 const WASM_WARMUP_DEBUG_ENV: &str = "AGENT_OS_WASM_WARMUP_DEBUG";
+const WASM_GUEST_PATH_MAPPINGS_ENV: &str = "AGENT_OS_GUEST_PATH_MAPPINGS";
 pub const WASM_PREWARM_TIMEOUT_MS_ENV: &str = "AGENT_OS_WASM_PREWARM_TIMEOUT_MS";
 pub const WASM_MAX_FUEL_ENV: &str = "AGENT_OS_WASM_MAX_FUEL";
 pub const WASM_MAX_MEMORY_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_MEMORY_BYTES";
@@ -159,6 +161,12 @@ pub struct WasmExecutionResult {
 struct ResolvedWasmModule {
     specifier: String,
     resolved_path: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct WasmGuestPathMapping {
+    #[serde(rename = "hostPath")]
+    host_path: String,
 }
 
 #[derive(Debug)]
@@ -460,7 +468,10 @@ fn guest_argv(
     request: &StartWasmExecutionRequest,
 ) -> Result<Vec<String>, WasmExecutionError> {
     if !request.argv.is_empty() {
-        return Ok(request.argv.clone());
+        let mut argv = Vec::with_capacity(request.argv.len() + 1);
+        argv.push(module_path(context, request)?);
+        argv.extend(request.argv.clone());
+        return Ok(argv);
     }
 
     match &context.module_path {
@@ -624,6 +635,7 @@ fn configure_wasm_node_sandbox(
                 .map(Path::to_path_buf),
         ),
     ));
+    read_paths.extend(guest_path_mapping_roots(&request.env));
 
     harden_node_command(
         command,
@@ -633,9 +645,18 @@ fn configure_wasm_node_sandbox(
         true,
         request.permission_tier.wasi_enabled(),
         env_builtin_enabled(&request.env, "worker_threads"),
-        false,
+        matches!(request.permission_tier, WasmPermissionTier::Full),
     );
     Ok(())
+}
+
+fn guest_path_mapping_roots(env: &BTreeMap<String, String>) -> Vec<PathBuf> {
+    env.get(WASM_GUEST_PATH_MAPPINGS_ENV)
+        .and_then(|value| serde_json::from_str::<Vec<WasmGuestPathMapping>>(value).ok())
+        .into_iter()
+        .flatten()
+        .map(|mapping| PathBuf::from(mapping.host_path))
+        .collect()
 }
 
 fn configure_node_command(
@@ -853,7 +874,10 @@ fn warmup_guest_argv(
     request: &StartWasmExecutionRequest,
 ) -> Vec<String> {
     if !request.argv.is_empty() {
-        return request.argv.clone();
+        let mut argv = Vec::with_capacity(request.argv.len() + 1);
+        argv.push(resolved_module.specifier.clone());
+        argv.extend(request.argv.clone());
+        return argv;
     }
 
     vec![resolved_module.specifier.clone()]
