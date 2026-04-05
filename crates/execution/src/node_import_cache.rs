@@ -1582,6 +1582,8 @@ if (!Module || typeof Module.createRequire !== 'function') {
   throw new Error('node:module builtin access is required for the Agent OS guest runtime');
 }
 const hostRequire = Module.createRequire(import.meta.url);
+const NODE_SYNC_RPC_ENABLE = HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_ENABLE === '1';
+const hostWorkerThreads = NODE_SYNC_RPC_ENABLE ? hostRequire('node:worker_threads') : null;
 const SIGNAL_EVENTS = new Set(
   Object.keys(hostRequire('node:os').constants?.signals ?? {}).filter((name) =>
     name.startsWith('SIG'),
@@ -1594,6 +1596,16 @@ const DEFAULT_VIRTUAL_PID = 1;
 const DEFAULT_VIRTUAL_PPID = 0;
 const DEFAULT_VIRTUAL_UID = 0;
 const DEFAULT_VIRTUAL_GID = 0;
+const NODE_SYNC_RPC_REQUEST_FD = parseOptionalFd(HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_REQUEST_FD);
+const NODE_SYNC_RPC_RESPONSE_FD = parseOptionalFd(HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_RESPONSE_FD);
+const NODE_SYNC_RPC_DATA_BYTES = parsePositiveInt(
+  HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_DATA_BYTES,
+  4 * 1024 * 1024,
+);
+const NODE_SYNC_RPC_WAIT_TIMEOUT_MS = parsePositiveInt(
+  HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_WAIT_TIMEOUT_MS,
+  30_000,
+);
 const NODE_IMPORT_CACHE_PATH = HOST_PROCESS_ENV.AGENT_OS_NODE_IMPORT_CACHE_PATH ?? null;
 const NODE_IMPORT_CACHE_ROOT =
   typeof NODE_IMPORT_CACHE_PATH === 'string' && NODE_IMPORT_CACHE_PATH.length > 0
@@ -1689,6 +1701,24 @@ function parseJsonArray(value) {
   } catch {
     return [];
   }
+}
+
+function parseOptionalFd(value) {
+  if (value == null || value === '') {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function parsePositiveInt(value, fallback) {
+  if (value == null || value === '') {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function parseVirtualProcessNumber(value, fallback) {
@@ -2773,6 +2803,334 @@ function hardenProperty(target, key, value) {
   }
 }
 
+function encodeSyncRpcValue(value) {
+  if (value == null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof Buffer === 'function' && Buffer.isBuffer(value)) {
+    return {
+      __agentOsType: 'bytes',
+      base64: value.toString('base64'),
+    };
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    return {
+      __agentOsType: 'bytes',
+      base64: Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('base64'),
+    };
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return {
+      __agentOsType: 'bytes',
+      base64: Buffer.from(value).toString('base64'),
+    };
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => encodeSyncRpcValue(entry));
+  }
+
+  if (typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, encodeSyncRpcValue(entry)]),
+    );
+  }
+
+  return String(value);
+}
+
+function decodeSyncRpcValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => decodeSyncRpcValue(entry));
+  }
+
+  if (value && typeof value === 'object') {
+    if (value.__agentOsType === 'bytes' && typeof value.base64 === 'string') {
+      return Buffer.from(value.base64, 'base64');
+    }
+
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, decodeSyncRpcValue(entry)]),
+    );
+  }
+
+  return value;
+}
+
+function formatSyncRpcError(error) {
+  if (error instanceof Error) {
+    return {
+      message: error.message,
+      code: typeof error.code === 'string' ? error.code : undefined,
+    };
+  }
+
+  return {
+    message: String(error),
+  };
+}
+
+function createNodeSyncRpcBridge() {
+  if (!NODE_SYNC_RPC_ENABLE) {
+    return null;
+  }
+
+  if (NODE_SYNC_RPC_REQUEST_FD == null || NODE_SYNC_RPC_RESPONSE_FD == null) {
+    throw new Error('Agent OS Node sync RPC requires request and response file descriptors');
+  }
+
+  const Worker = hostWorkerThreads?.Worker;
+  if (typeof Worker !== 'function') {
+    throw new Error('Agent OS Node sync RPC requires node:worker_threads support');
+  }
+
+  const STATE_INDEX = 0;
+  const STATUS_INDEX = 1;
+  const KIND_INDEX = 2;
+  const REQUEST_LENGTH_INDEX = 3;
+  const RESPONSE_LENGTH_INDEX = 4;
+  const STATE_IDLE = 0;
+  const STATE_REQUEST_READY = 1;
+  const STATE_RESPONSE_READY = 2;
+  const STATE_SHUTDOWN = 3;
+  const STATUS_OK = 0;
+  const STATUS_ERROR = 1;
+  const KIND_JSON = 3;
+  const signalBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const dataBuffer = new SharedArrayBuffer(NODE_SYNC_RPC_DATA_BYTES);
+  const signal = new Int32Array(signalBuffer);
+  const data = new Uint8Array(dataBuffer);
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  let nextRequestId = 1;
+  let disposed = false;
+
+  const workerSource = `
+    const { parentPort, workerData } = require('node:worker_threads');
+    const { readSync, writeSync, closeSync } = require('node:fs');
+    const STATE_INDEX = 0;
+    const STATUS_INDEX = 1;
+    const KIND_INDEX = 2;
+    const REQUEST_LENGTH_INDEX = 3;
+    const RESPONSE_LENGTH_INDEX = 4;
+    const STATE_IDLE = 0;
+    const STATE_REQUEST_READY = 1;
+    const STATE_RESPONSE_READY = 2;
+    const STATE_SHUTDOWN = 3;
+    const STATUS_OK = 0;
+    const STATUS_ERROR = 1;
+    const KIND_JSON = 3;
+    const signal = new Int32Array(workerData.signalBuffer);
+    const data = new Uint8Array(workerData.dataBuffer);
+    const responseFd = workerData.responseFd;
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    let responseBuffer = '';
+
+    function setResponse(status, bytes) {
+      let payload = bytes;
+      let nextStatus = status;
+      if (payload.byteLength > data.byteLength) {
+        payload = encoder.encode(JSON.stringify({
+          message: 'Agent OS Node sync RPC payload exceeded shared buffer capacity',
+          code: 'ERR_AGENT_OS_NODE_SYNC_RPC_PAYLOAD_TOO_LARGE',
+        }));
+        nextStatus = STATUS_ERROR;
+      }
+
+      data.fill(0);
+      data.set(payload, 0);
+      Atomics.store(signal, STATUS_INDEX, nextStatus);
+      Atomics.store(signal, KIND_INDEX, KIND_JSON);
+      Atomics.store(signal, RESPONSE_LENGTH_INDEX, payload.byteLength);
+      Atomics.store(signal, STATE_INDEX, STATE_RESPONSE_READY);
+      Atomics.notify(signal, STATE_INDEX, 1);
+    }
+
+    function readResponseLineSync() {
+      while (true) {
+        const newlineIndex = responseBuffer.indexOf('\\n');
+        if (newlineIndex >= 0) {
+          const line = responseBuffer.slice(0, newlineIndex);
+          responseBuffer = responseBuffer.slice(newlineIndex + 1);
+          return line;
+        }
+
+        const chunk = Buffer.alloc(4096);
+        const bytesRead = readSync(responseFd, chunk, 0, chunk.length, null);
+        if (bytesRead === 0) {
+          throw new Error('Agent OS Node sync RPC response channel closed unexpectedly');
+        }
+        responseBuffer += chunk.subarray(0, bytesRead).toString('utf8');
+      }
+    }
+
+    function waitForRequest() {
+      while (true) {
+        const state = Atomics.load(signal, STATE_INDEX);
+        if (state === STATE_REQUEST_READY || state === STATE_SHUTDOWN) {
+          return state;
+        }
+
+        Atomics.wait(signal, STATE_INDEX, state);
+      }
+    }
+
+    try {
+      while (true) {
+        const state = waitForRequest();
+        if (state === STATE_SHUTDOWN) {
+          break;
+        }
+
+        try {
+          const responseLine = readResponseLineSync();
+          setResponse(STATUS_OK, encoder.encode(responseLine));
+        } catch (error) {
+          setResponse(
+            STATUS_ERROR,
+            encoder.encode(JSON.stringify({
+              message: error instanceof Error ? error.message : String(error),
+              code: typeof error?.code === 'string' ? error.code : 'ERR_AGENT_OS_NODE_SYNC_RPC',
+            })),
+          );
+        }
+      }
+    } finally {
+      try {
+        closeSync(responseFd);
+      } catch {}
+    }
+  `;
+
+  const worker = new Worker(workerSource, {
+    eval: true,
+    workerData: {
+      signalBuffer,
+      dataBuffer,
+      responseFd: NODE_SYNC_RPC_RESPONSE_FD,
+    },
+  });
+  worker.unref?.();
+
+  const readBytes = (length) => {
+    if (length <= 0) {
+      return new Uint8Array(0);
+    }
+    return data.slice(0, length);
+  };
+
+  const resetSignal = () => {
+    Atomics.store(signal, STATUS_INDEX, STATUS_OK);
+    Atomics.store(signal, KIND_INDEX, KIND_JSON);
+    Atomics.store(signal, REQUEST_LENGTH_INDEX, 0);
+    Atomics.store(signal, RESPONSE_LENGTH_INDEX, 0);
+    Atomics.store(signal, STATE_INDEX, STATE_IDLE);
+    Atomics.notify(signal, STATE_INDEX, 1);
+  };
+
+  const requestRaw = (method, args = []) => {
+    if (disposed) {
+      throw new Error('Agent OS Node sync RPC bridge is already disposed');
+    }
+
+    const payload = encoder.encode(
+      JSON.stringify({
+        id: nextRequestId++,
+        method,
+        args: encodeSyncRpcValue(args),
+      }),
+    );
+    if (payload.byteLength > data.byteLength) {
+      const error = new Error('Agent OS Node sync RPC request exceeded shared buffer capacity');
+      error.code = 'ERR_AGENT_OS_NODE_SYNC_RPC_PAYLOAD_TOO_LARGE';
+      throw error;
+    }
+
+    data.fill(0);
+    data.set(payload, 0);
+    fs.writeSync(
+      NODE_SYNC_RPC_REQUEST_FD,
+      `${decoder.decode(data.subarray(0, payload.byteLength))}\n`,
+    );
+    Atomics.store(signal, STATUS_INDEX, STATUS_OK);
+    Atomics.store(signal, KIND_INDEX, KIND_JSON);
+    Atomics.store(signal, REQUEST_LENGTH_INDEX, payload.byteLength);
+    Atomics.store(signal, RESPONSE_LENGTH_INDEX, 0);
+    Atomics.store(signal, STATE_INDEX, STATE_REQUEST_READY);
+    Atomics.notify(signal, STATE_INDEX, 1);
+
+    while (true) {
+      const result = Atomics.wait(
+        signal,
+        STATE_INDEX,
+        STATE_REQUEST_READY,
+        NODE_SYNC_RPC_WAIT_TIMEOUT_MS,
+      );
+      if (result !== 'timed-out') {
+        break;
+      }
+      throw new Error(`Agent OS Node sync RPC timed out while handling ${method}`);
+    }
+
+    const status = Atomics.load(signal, STATUS_INDEX);
+    const kind = Atomics.load(signal, KIND_INDEX);
+    const length = Atomics.load(signal, RESPONSE_LENGTH_INDEX);
+    const bytes = readBytes(length);
+    resetSignal();
+
+    if (kind !== KIND_JSON) {
+      throw new Error(`Agent OS Node sync RPC returned unsupported payload kind ${kind}`);
+    }
+
+    if (status === STATUS_ERROR) {
+      const payload = JSON.parse(decoder.decode(bytes));
+      const error = new Error(payload?.message || `Agent OS Node sync RPC ${method} failed`);
+      if (typeof payload?.code === 'string') {
+        error.code = payload.code;
+      }
+      throw error;
+    }
+
+    return JSON.parse(decoder.decode(bytes));
+  };
+
+  return {
+    callSync(method, args = []) {
+      const response = requestRaw(method, args);
+      if (response?.ok) {
+        return decodeSyncRpcValue(response.result);
+      }
+
+      const error = new Error(
+        response?.error?.message || `Agent OS Node sync RPC ${method} failed`,
+      );
+      if (typeof response?.error?.code === 'string') {
+        error.code = response.error.code;
+      }
+      throw error;
+    },
+    async call(method, args = []) {
+      return this.callSync(method, args);
+    },
+    dispose() {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      Atomics.store(signal, STATE_INDEX, STATE_SHUTDOWN);
+      Atomics.notify(signal, STATE_INDEX, 1);
+      try {
+        fs.closeSync(NODE_SYNC_RPC_REQUEST_FD);
+      } catch {}
+      worker.terminate().catch(() => {});
+    },
+  };
+}
+
 function installGuestHardening() {
   hardenProperty(process, 'env', createGuestProcessEnv(HOST_PROCESS_ENV));
   hardenProperty(process, 'cwd', () => INITIAL_GUEST_CWD);
@@ -2906,12 +3264,16 @@ if (!entrypoint) {
   throw new Error('AGENT_OS_ENTRYPOINT is required');
 }
 
+const guestSyncRpc = createNodeSyncRpcBridge();
 installGuestHardening();
 rootGuestRequire = createGuestRequire('/root/node_modules');
 if (ALLOWED_BUILTINS.has('child_process')) {
   hardenProperty(globalThis, '__agentOsBuiltinChildProcess', guestChildProcess);
 }
 hardenProperty(globalThis, '__agentOsBuiltinFs', guestFs);
+if (guestSyncRpc) {
+  hardenProperty(globalThis, '__agentOsSyncRpc', guestSyncRpc);
+}
 hardenProperty(globalThis, '_requireFrom', (specifier, fromDir = '/') =>
   createGuestRequire(fromDir)(specifier),
 );
@@ -2954,6 +3316,8 @@ try {
   await import(toImportSpecifier(entrypoint));
 } catch (error) {
   throw translateErrorToGuest(error);
+} finally {
+  guestSyncRpc?.dispose?.();
 }
 "#;
 

@@ -6,11 +6,15 @@ use crate::node_process::{
     node_resolution_read_paths, resolve_path_like_specifier, spawn_node_control_reader,
     spawn_stream_reader, spawn_waiter, LinePrefixFilter, NodeControlMessage,
 };
-use serde_json::from_str;
+use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
+use nix::unistd::pipe2;
+use serde::Deserialize;
+use serde_json::{from_str, json, Value};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{
@@ -43,6 +47,13 @@ const NODE_EXTRA_FS_READ_PATHS_ENV: &str = "AGENT_OS_EXTRA_FS_READ_PATHS";
 const NODE_EXTRA_FS_WRITE_PATHS_ENV: &str = "AGENT_OS_EXTRA_FS_WRITE_PATHS";
 const NODE_ALLOWED_BUILTINS_ENV: &str = "AGENT_OS_ALLOWED_NODE_BUILTINS";
 const NODE_LOOPBACK_EXEMPT_PORTS_ENV: &str = "AGENT_OS_LOOPBACK_EXEMPT_PORTS";
+const NODE_SYNC_RPC_ENABLE_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_ENABLE";
+const NODE_SYNC_RPC_REQUEST_FD_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_REQUEST_FD";
+const NODE_SYNC_RPC_RESPONSE_FD_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_RESPONSE_FD";
+const NODE_SYNC_RPC_DATA_BYTES_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_DATA_BYTES";
+const NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_WAIT_TIMEOUT_MS";
+const NODE_SYNC_RPC_DEFAULT_DATA_BYTES: usize = 4 * 1024 * 1024;
+const NODE_SYNC_RPC_DEFAULT_WAIT_TIMEOUT_MS: u64 = 30_000;
 const NODE_WARMUP_MARKER_VERSION: &str = "1";
 const NODE_WARMUP_SPECIFIERS: &[&str] = &[
     "agent-os:builtin/path",
@@ -74,7 +85,34 @@ const RESERVED_NODE_ENV_KEYS: &[&str] = &[
     NODE_KEEP_STDIN_OPEN_ENV,
     NODE_ALLOWED_BUILTINS_ENV,
     NODE_LOOPBACK_EXEMPT_PORTS_ENV,
+    NODE_SYNC_RPC_ENABLE_ENV,
+    NODE_SYNC_RPC_REQUEST_FD_ENV,
+    NODE_SYNC_RPC_RESPONSE_FD_ENV,
+    NODE_SYNC_RPC_DATA_BYTES_ENV,
+    NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV,
 ];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavascriptSyncRpcRequest {
+    pub id: u64,
+    pub method: String,
+    pub args: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JavascriptSyncRpcRequestWire {
+    id: u64,
+    method: String,
+    #[serde(default)]
+    args: Vec<Value>,
+}
+
+struct JavascriptSyncRpcChannels {
+    parent_request_reader: File,
+    parent_response_writer: Arc<Mutex<BufWriter<File>>>,
+    child_request_writer: OwnedFd,
+    child_response_reader: OwnedFd,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateJavascriptContextRequest {
@@ -104,6 +142,7 @@ pub struct StartJavascriptExecutionRequest {
 pub enum JavascriptExecutionEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
+    SyncRpcRequest(JavascriptSyncRpcRequest),
     Exited(i32),
 }
 
@@ -111,6 +150,7 @@ pub enum JavascriptExecutionEvent {
 enum JavascriptProcessEvent {
     Stdout(Vec<u8>),
     RawStderr(Vec<u8>),
+    SyncRpcRequest(JavascriptSyncRpcRequest),
     Control(NodeControlMessage),
     Exited(i32),
 }
@@ -133,6 +173,9 @@ pub enum JavascriptExecutionError {
     WarmupSpawn(std::io::Error),
     WarmupFailed { exit_code: i32, stderr: String },
     Spawn(std::io::Error),
+    PendingSyncRpcRequest(u64),
+    RpcChannel(String),
+    RpcResponse(String),
     StdinClosed,
     Stdin(std::io::Error),
     EventChannelClosed,
@@ -173,6 +216,24 @@ impl fmt::Display for JavascriptExecutionError {
                 }
             }
             Self::Spawn(err) => write!(f, "failed to start guest JavaScript runtime: {err}"),
+            Self::PendingSyncRpcRequest(id) => {
+                write!(
+                    f,
+                    "guest JavaScript execution requires servicing pending sync RPC request {id}"
+                )
+            }
+            Self::RpcChannel(message) => {
+                write!(
+                    f,
+                    "failed to configure guest JavaScript sync RPC channel: {message}"
+                )
+            }
+            Self::RpcResponse(message) => {
+                write!(
+                    f,
+                    "failed to reply to guest JavaScript sync RPC request: {message}"
+                )
+            }
             Self::StdinClosed => f.write_str("guest JavaScript stdin is already closed"),
             Self::Stdin(err) => write!(f, "failed to write guest stdin: {err}"),
             Self::EventChannelClosed => {
@@ -191,6 +252,7 @@ pub struct JavascriptExecution {
     stdin: Option<ChildStdin>,
     events: Receiver<JavascriptProcessEvent>,
     stderr_filter: Arc<Mutex<LinePrefixFilter>>,
+    sync_rpc_responses: Option<Arc<Mutex<BufWriter<File>>>>,
 }
 
 impl JavascriptExecution {
@@ -220,6 +282,52 @@ impl JavascriptExecution {
         Ok(())
     }
 
+    pub fn respond_sync_rpc_success(
+        &mut self,
+        id: u64,
+        result: Value,
+    ) -> Result<(), JavascriptExecutionError> {
+        let Some(writer) = &self.sync_rpc_responses else {
+            return Err(JavascriptExecutionError::RpcResponse(String::from(
+                "no sync RPC channel is active for this JavaScript execution",
+            )));
+        };
+
+        write_javascript_sync_rpc_response(
+            writer,
+            json!({
+                "id": id,
+                "ok": true,
+                "result": result,
+            }),
+        )
+    }
+
+    pub fn respond_sync_rpc_error(
+        &mut self,
+        id: u64,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<(), JavascriptExecutionError> {
+        let Some(writer) = &self.sync_rpc_responses else {
+            return Err(JavascriptExecutionError::RpcResponse(String::from(
+                "no sync RPC channel is active for this JavaScript execution",
+            )));
+        };
+
+        write_javascript_sync_rpc_response(
+            writer,
+            json!({
+                "id": id,
+                "ok": false,
+                "error": {
+                    "code": code.into(),
+                    "message": message.into(),
+                },
+            }),
+        )
+    }
+
     pub fn poll_event(
         &self,
         timeout: Duration,
@@ -238,6 +346,9 @@ impl JavascriptExecution {
                     return Ok(None);
                 }
                 Ok(Some(JavascriptExecutionEvent::Stderr(filtered)))
+            }
+            Ok(JavascriptProcessEvent::SyncRpcRequest(request)) => {
+                Ok(Some(JavascriptExecutionEvent::SyncRpcRequest(request)))
             }
             Ok(JavascriptProcessEvent::Control(NodeControlMessage::NodeImportCacheMetrics {
                 metrics,
@@ -275,6 +386,9 @@ impl JavascriptExecution {
                         .lock()
                         .map_err(|_| JavascriptExecutionError::EventChannelClosed)?;
                     stderr.extend(filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES));
+                }
+                Ok(JavascriptProcessEvent::SyncRpcRequest(request)) => {
+                    return Err(JavascriptExecutionError::PendingSyncRpcRequest(request.id));
                 }
                 Ok(JavascriptProcessEvent::Control(
                     NodeControlMessage::NodeImportCacheMetrics { metrics },
@@ -358,12 +472,18 @@ impl JavascriptExecutionEngine {
         let execution_id = format!("exec-{}", self.next_execution_id);
         let control_channel =
             create_node_control_channel().map_err(JavascriptExecutionError::Spawn)?;
-        let mut child = create_node_child(
+        let sync_rpc_channels = if node_sync_rpc_enabled(&request.env) {
+            Some(create_javascript_sync_rpc_channels()?)
+        } else {
+            None
+        };
+        let (mut child, sync_rpc_request_reader, sync_rpc_response_writer) = create_node_child(
             &self.import_cache,
             &context,
             &request,
             frozen_time_ms,
             &control_channel.child_writer,
+            sync_rpc_channels,
         )?;
         let child_pid = child.id();
 
@@ -386,6 +506,9 @@ impl JavascriptExecutionEngine {
             spawn_stream_reader(stdout, sender.clone(), JavascriptProcessEvent::Stdout);
         let stderr_reader =
             spawn_stream_reader(stderr, sender.clone(), JavascriptProcessEvent::RawStderr);
+        if let Some(reader) = sync_rpc_request_reader {
+            let _sync_rpc_reader = spawn_javascript_sync_rpc_reader(reader, sender.clone());
+        }
         let _control_reader = spawn_node_control_reader(
             control_channel.parent_reader,
             sender.clone(),
@@ -408,6 +531,7 @@ impl JavascriptExecutionEngine {
             stdin,
             events: receiver,
             stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
+            sync_rpc_responses: sync_rpc_response_writer,
         })
     }
 }
@@ -492,7 +616,15 @@ fn create_node_child(
     request: &StartJavascriptExecutionRequest,
     frozen_time_ms: u128,
     control_fd: &std::os::fd::OwnedFd,
-) -> Result<std::process::Child, JavascriptExecutionError> {
+    sync_rpc_channels: Option<JavascriptSyncRpcChannels>,
+) -> Result<
+    (
+        std::process::Child,
+        Option<File>,
+        Option<Arc<Mutex<BufWriter<File>>>>,
+    ),
+    JavascriptExecutionError,
+> {
     let guest_argv = encode_json_string_array(&request.argv[1..]);
     let mut command = Command::new(node_binary());
     configure_node_sandbox(&mut command, import_cache, context, request)?;
@@ -533,10 +665,47 @@ fn create_node_child(
         command.env(NODE_BOOTSTRAP_ENV, bootstrap_module);
     }
 
+    let (
+        sync_rpc_request_reader,
+        sync_rpc_response_writer,
+        sync_rpc_child_request_writer,
+        sync_rpc_child_response_reader,
+    ) = if let Some(channels) = sync_rpc_channels {
+        command
+            .env(NODE_SYNC_RPC_ENABLE_ENV, "1")
+            .env(
+                NODE_SYNC_RPC_REQUEST_FD_ENV,
+                channels.child_request_writer.as_raw_fd().to_string(),
+            )
+            .env(
+                NODE_SYNC_RPC_RESPONSE_FD_ENV,
+                channels.child_response_reader.as_raw_fd().to_string(),
+            )
+            .env(
+                NODE_SYNC_RPC_DATA_BYTES_ENV,
+                NODE_SYNC_RPC_DEFAULT_DATA_BYTES.to_string(),
+            )
+            .env(
+                NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV,
+                NODE_SYNC_RPC_DEFAULT_WAIT_TIMEOUT_MS.to_string(),
+            );
+        (
+            Some(channels.parent_request_reader),
+            Some(channels.parent_response_writer),
+            Some(channels.child_request_writer),
+            Some(channels.child_response_reader),
+        )
+    } else {
+        (None, None, None, None)
+    };
+
     configure_node_control_channel(&mut command, control_fd);
     configure_node_command(&mut command, import_cache, context, frozen_time_ms)?;
 
-    command.spawn().map_err(JavascriptExecutionError::Spawn)
+    let child = command.spawn().map_err(JavascriptExecutionError::Spawn)?;
+    drop(sync_rpc_child_request_writer);
+    drop(sync_rpc_child_response_reader);
+    Ok((child, sync_rpc_request_reader, sync_rpc_response_writer))
 }
 
 fn configure_node_sandbox(
@@ -602,7 +771,7 @@ fn configure_node_sandbox(
         &write_paths,
         true,
         false,
-        env_builtin_enabled(&request.env, "worker_threads"),
+        true,
         env_builtin_enabled(&request.env, "child_process"),
     );
     Ok(())
@@ -615,6 +784,11 @@ fn parse_env_path_list(env: &BTreeMap<String, String>, key: &str) -> Vec<PathBuf
         .flatten()
         .map(PathBuf::from)
         .collect()
+}
+
+fn node_sync_rpc_enabled(env: &BTreeMap<String, String>) -> bool {
+    env.get(NODE_SYNC_RPC_ENABLE_ENV)
+        .is_some_and(|value| value == "1")
 }
 
 fn configure_node_command(
@@ -708,4 +882,117 @@ fn stable_compile_cache_namespace_hash() -> u64 {
         .join("\n")
         .as_bytes(),
     )
+}
+
+fn create_javascript_sync_rpc_channels(
+) -> Result<JavascriptSyncRpcChannels, JavascriptExecutionError> {
+    let fd_reservations = (0..64)
+        .map(|_| File::open("/dev/null"))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(JavascriptExecutionError::PrepareImportCache)?;
+    let (parent_request_reader, child_request_writer) = pipe2(OFlag::O_CLOEXEC)
+        .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
+    let (child_response_reader, parent_response_writer) = pipe2(OFlag::O_CLOEXEC)
+        .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
+    drop(fd_reservations);
+
+    clear_cloexec(&child_request_writer)?;
+    clear_cloexec(&child_response_reader)?;
+
+    Ok(JavascriptSyncRpcChannels {
+        parent_request_reader: File::from(parent_request_reader),
+        parent_response_writer: Arc::new(Mutex::new(BufWriter::new(File::from(
+            parent_response_writer,
+        )))),
+        child_request_writer,
+        child_response_reader,
+    })
+}
+
+fn clear_cloexec(fd: &OwnedFd) -> Result<(), JavascriptExecutionError> {
+    let current = fcntl(fd.as_raw_fd(), FcntlArg::F_GETFD)
+        .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
+    let mut flags = FdFlag::from_bits_retain(current);
+    flags.remove(FdFlag::FD_CLOEXEC);
+    fcntl(fd.as_raw_fd(), FcntlArg::F_SETFD(flags))
+        .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
+    Ok(())
+}
+
+fn spawn_javascript_sync_rpc_reader(
+    reader: File,
+    sender: mpsc::Sender<JavascriptProcessEvent>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => return,
+                Ok(_) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    match parse_javascript_sync_rpc_request(trimmed) {
+                        Ok(request) => {
+                            if sender
+                                .send(JavascriptProcessEvent::SyncRpcRequest(request))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Err(message) => {
+                            if sender
+                                .send(JavascriptProcessEvent::RawStderr(
+                                    format!("{message}\n").into_bytes(),
+                                ))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(JavascriptProcessEvent::RawStderr(
+                        format!("failed to read JavaScript sync RPC request: {error}\n")
+                            .into_bytes(),
+                    ));
+                    return;
+                }
+            }
+        }
+    })
+}
+
+fn parse_javascript_sync_rpc_request(line: &str) -> Result<JavascriptSyncRpcRequest, String> {
+    let wire: JavascriptSyncRpcRequestWire =
+        serde_json::from_str(line).map_err(|error| error.to_string())?;
+    Ok(JavascriptSyncRpcRequest {
+        id: wire.id,
+        method: wire.method,
+        args: wire.args,
+    })
+}
+
+fn write_javascript_sync_rpc_response(
+    writer: &Arc<Mutex<BufWriter<File>>>,
+    response: Value,
+) -> Result<(), JavascriptExecutionError> {
+    let mut writer = writer.lock().map_err(|_| {
+        JavascriptExecutionError::RpcResponse(String::from(
+            "sync RPC response writer lock poisoned",
+        ))
+    })?;
+    serde_json::to_writer(&mut *writer, &response)
+        .map_err(|error| JavascriptExecutionError::RpcResponse(error.to_string()))?;
+    writer
+        .write_all(b"\n")
+        .and_then(|()| writer.flush())
+        .map_err(|error| JavascriptExecutionError::RpcResponse(error.to_string()))
 }

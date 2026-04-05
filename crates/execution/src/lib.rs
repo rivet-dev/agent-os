@@ -15,7 +15,7 @@ pub use agent_os_bridge::GuestRuntime;
 pub use javascript::{
     CreateJavascriptContextRequest, JavascriptContext, JavascriptExecution,
     JavascriptExecutionEngine, JavascriptExecutionError, JavascriptExecutionEvent,
-    JavascriptExecutionResult, StartJavascriptExecutionRequest,
+    JavascriptExecutionResult, JavascriptSyncRpcRequest, StartJavascriptExecutionRequest,
 };
 pub use python::{
     CreatePythonContextRequest, PythonContext, PythonExecution, PythonExecutionEngine,

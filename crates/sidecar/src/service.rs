@@ -2,16 +2,16 @@ use crate::google_drive_plugin::GoogleDriveMountPlugin;
 use crate::host_dir_plugin::HostDirMountPlugin;
 use crate::protocol::{
     AuthenticatedResponse, BoundUdpSnapshotResponse, CloseStdinRequest, ConfigureVmRequest,
-    DiagnosticsRequest, DiagnosticsSnapshotResponse, DisposeReason, DisposeVmRequest, EventFrame,
-    EventPayload, ExecuteRequest, FindBoundUdpRequest, FindListenerRequest, GetSignalStateRequest,
-    GetZombieTimerCountRequest, GuestFilesystemCallRequest, GuestFilesystemOperation,
-    GuestFilesystemResultResponse, GuestFilesystemStat, GuestRuntimeKind, KillProcessRequest,
-    ListenerSnapshotResponse, OpenSessionRequest, OwnershipScope, ProcessExitedEvent,
-    ProcessKilledResponse, ProcessOutputEvent, ProcessStartedResponse, ProtocolSchema,
-    RejectedResponse, RequestFrame, RequestPayload, ResponseFrame, ResponsePayload,
-    RootFilesystemBootstrappedResponse, RootFilesystemDescriptor, RootFilesystemEntry,
-    RootFilesystemEntryEncoding, RootFilesystemEntryKind, RootFilesystemLowerDescriptor,
-    RootFilesystemMode, RootFilesystemSnapshotResponse, SessionOpenedResponse, SidecarPlacement,
+    DisposeReason, DisposeVmRequest, EventFrame, EventPayload, ExecuteRequest, FindBoundUdpRequest,
+    FindListenerRequest, GetSignalStateRequest, GetZombieTimerCountRequest,
+    GuestFilesystemCallRequest, GuestFilesystemOperation, GuestFilesystemResultResponse,
+    GuestFilesystemStat, GuestRuntimeKind, KillProcessRequest, ListenerSnapshotResponse,
+    OpenSessionRequest, OwnershipScope, ProcessExitedEvent, ProcessKilledResponse,
+    ProcessOutputEvent, ProcessStartedResponse, ProtocolSchema, RejectedResponse, RequestFrame,
+    RequestPayload, ResponseFrame, ResponsePayload, RootFilesystemBootstrappedResponse,
+    RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryEncoding,
+    RootFilesystemEntryKind, RootFilesystemLowerDescriptor, RootFilesystemMode,
+    RootFilesystemSnapshotResponse, SessionOpenedResponse, SidecarPlacement,
     SignalHandlerRegistration, SignalStateResponse, SnapshotRootFilesystemRequest,
     SocketStateEntry, StdinClosedResponse, StdinWrittenResponse, StreamChannel,
     VmConfiguredResponse, VmCreatedResponse, VmDisposedResponse, VmLifecycleEvent,
@@ -31,11 +31,11 @@ use agent_os_bridge::{
 use agent_os_execution::{
     CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
     JavascriptExecution, JavascriptExecutionEngine, JavascriptExecutionError,
-    JavascriptExecutionEvent, PythonExecution, PythonExecutionEngine, PythonExecutionError,
-    PythonExecutionEvent, PythonVfsRpcMethod, PythonVfsRpcRequest, PythonVfsRpcResponsePayload,
-    PythonVfsRpcStat, StartJavascriptExecutionRequest, StartPythonExecutionRequest,
-    StartWasmExecutionRequest, WasmExecution, WasmExecutionEngine, WasmExecutionError,
-    WasmExecutionEvent,
+    JavascriptExecutionEvent, JavascriptSyncRpcRequest, PythonExecution, PythonExecutionEngine,
+    PythonExecutionError, PythonExecutionEvent, PythonVfsRpcMethod, PythonVfsRpcRequest,
+    PythonVfsRpcResponsePayload, PythonVfsRpcStat, StartJavascriptExecutionRequest,
+    StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecution, WasmExecutionEngine,
+    WasmExecutionError, WasmExecutionEvent,
 };
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{
@@ -65,6 +65,7 @@ use base64::Engine;
 use nix::libc;
 use nix::sys::signal::{kill as send_signal, Signal};
 use nix::unistd::Pid;
+use serde_json::json;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -1312,6 +1313,7 @@ enum ActiveExecution {
 enum ActiveExecutionEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
+    JavascriptSyncRpcRequest(JavascriptSyncRpcRequest),
     PythonVfsRpcRequest(PythonVfsRpcRequest),
     SignalState {
         signal: u32,
@@ -1394,6 +1396,37 @@ impl ActiveExecution {
         }
     }
 
+    fn respond_javascript_sync_rpc_success(
+        &mut self,
+        id: u64,
+        result: Value,
+    ) -> Result<(), SidecarError> {
+        match self {
+            Self::Javascript(execution) => execution
+                .respond_sync_rpc_success(id, result)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            _ => Err(SidecarError::InvalidState(String::from(
+                "only JavaScript executions can service JavaScript sync RPC responses",
+            ))),
+        }
+    }
+
+    fn respond_javascript_sync_rpc_error(
+        &mut self,
+        id: u64,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<(), SidecarError> {
+        match self {
+            Self::Javascript(execution) => execution
+                .respond_sync_rpc_error(id, code, message)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            _ => Err(SidecarError::InvalidState(String::from(
+                "only JavaScript executions can service JavaScript sync RPC responses",
+            ))),
+        }
+    }
+
     fn poll_event(&self, timeout: Duration) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
         match self {
             Self::Javascript(execution) => execution
@@ -1405,6 +1438,9 @@ impl ActiveExecution {
                         }
                         JavascriptExecutionEvent::Stderr(chunk) => {
                             ActiveExecutionEvent::Stderr(chunk)
+                        }
+                        JavascriptExecutionEvent::SyncRpcRequest(request) => {
+                            ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
                         }
                         JavascriptExecutionEvent::Exited(code) => {
                             ActiveExecutionEvent::Exited(code)
@@ -2796,6 +2832,10 @@ where
                     chunk: String::from_utf8_lossy(&chunk).into_owned(),
                 }),
             ))),
+            ActiveExecutionEvent::JavascriptSyncRpcRequest(request) => {
+                self.handle_javascript_sync_rpc_request(vm_id, process_id, request)?;
+                Ok(None)
+            }
             ActiveExecutionEvent::PythonVfsRpcRequest(request) => {
                 self.handle_python_vfs_rpc_request(vm_id, process_id, request)?;
                 Ok(None)
@@ -2913,6 +2953,102 @@ where
             Err(error) => process.execution.respond_python_vfs_rpc_error(
                 request.id,
                 "ERR_AGENT_OS_PYTHON_VFS_RPC",
+                error.to_string(),
+            ),
+        }
+    }
+
+    fn handle_javascript_sync_rpc_request(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        request: JavascriptSyncRpcRequest,
+    ) -> Result<(), SidecarError> {
+        let response: Result<Value, SidecarError> = {
+            let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+            match request.method.as_str() {
+                "fs.readFileSync" => {
+                    let path =
+                        javascript_sync_rpc_arg_str(&request.args, 0, "fs.readFileSync path")?;
+                    let encoding = javascript_sync_rpc_encoding(&request.args);
+                    vm.kernel
+                        .read_file(path)
+                        .map(|content| match encoding.as_deref() {
+                            Some("utf8") | Some("utf-8") => {
+                                Value::String(String::from_utf8_lossy(&content).into_owned())
+                            }
+                            _ => javascript_sync_rpc_bytes_value(&content),
+                        })
+                        .map_err(kernel_error)
+                }
+                "fs.writeFileSync" => {
+                    let path =
+                        javascript_sync_rpc_arg_str(&request.args, 0, "fs.writeFileSync path")?;
+                    let contents = javascript_sync_rpc_bytes_arg(
+                        &request.args,
+                        1,
+                        "fs.writeFileSync contents",
+                    )?;
+                    vm.kernel
+                        .write_file(path, contents)
+                        .map(|()| Value::Null)
+                        .map_err(kernel_error)
+                }
+                "fs.statSync" => {
+                    let path = javascript_sync_rpc_arg_str(&request.args, 0, "fs.statSync path")?;
+                    vm.kernel
+                        .stat(path)
+                        .map(|stat| {
+                            json!({
+                                "mode": stat.mode,
+                                "size": stat.size,
+                                "isDirectory": stat.is_directory,
+                                "isSymbolicLink": stat.is_symbolic_link,
+                            })
+                        })
+                        .map_err(kernel_error)
+                }
+                "fs.readdirSync" => {
+                    let path =
+                        javascript_sync_rpc_arg_str(&request.args, 0, "fs.readdirSync path")?;
+                    vm.kernel
+                        .read_dir(path)
+                        .map(|entries| json!(entries))
+                        .map_err(kernel_error)
+                }
+                "fs.mkdirSync" => {
+                    let path = javascript_sync_rpc_arg_str(&request.args, 0, "fs.mkdirSync path")?;
+                    let recursive = request
+                        .args
+                        .get(1)
+                        .and_then(|value| value.get("recursive"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    vm.kernel
+                        .mkdir(path, recursive)
+                        .map(|()| Value::Null)
+                        .map_err(kernel_error)
+                }
+                _ => Err(SidecarError::InvalidState(format!(
+                    "unsupported JavaScript sync RPC method {}",
+                    request.method
+                ))),
+            }
+        };
+
+        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let process = vm
+            .active_processes
+            .get_mut(process_id)
+            .expect("process should still exist");
+
+        match response {
+            Ok(result) => process
+                .execution
+                .respond_javascript_sync_rpc_success(request.id, result),
+            Err(error) => process.execution.respond_javascript_sync_rpc_error(
+                request.id,
+                "ERR_AGENT_OS_NODE_SYNC_RPC",
                 error.to_string(),
             ),
         }
@@ -3842,6 +3978,62 @@ fn python_file_entrypoint(entrypoint: &str) -> Option<PathBuf> {
     let path = Path::new(entrypoint);
     (path.extension().and_then(|extension| extension.to_str()) == Some("py"))
         .then(|| path.to_path_buf())
+}
+
+fn javascript_sync_rpc_arg_str<'a>(
+    args: &'a [Value],
+    index: usize,
+    label: &str,
+) -> Result<&'a str, SidecarError> {
+    args.get(index)
+        .and_then(Value::as_str)
+        .ok_or_else(|| SidecarError::InvalidState(format!("{label} must be a string argument")))
+}
+
+fn javascript_sync_rpc_encoding(args: &[Value]) -> Option<String> {
+    args.get(1)
+        .and_then(|value| value.get("encoding"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn javascript_sync_rpc_bytes_arg(
+    args: &[Value],
+    index: usize,
+    label: &str,
+) -> Result<Vec<u8>, SidecarError> {
+    let Some(value) = args.get(index) else {
+        return Err(SidecarError::InvalidState(format!("{label} is required")));
+    };
+
+    if let Some(text) = value.as_str() {
+        return Ok(text.as_bytes().to_vec());
+    }
+
+    let Some(base64_value) = value
+        .get("__agentOsType")
+        .and_then(Value::as_str)
+        .filter(|kind| *kind == "bytes")
+        .and_then(|_| value.get("base64"))
+        .and_then(Value::as_str)
+    else {
+        return Err(SidecarError::InvalidState(format!(
+            "{label} must be a string or encoded bytes payload"
+        )));
+    };
+
+    base64::engine::general_purpose::STANDARD
+        .decode(base64_value)
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("{label} contains invalid base64: {error}"))
+        })
+}
+
+fn javascript_sync_rpc_bytes_value(bytes: &[u8]) -> Value {
+    json!({
+        "__agentOsType": "bytes",
+        "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
 }
 
 fn kernel_error(error: KernelError) -> SidecarError {
@@ -5017,8 +5209,9 @@ mod tests {
             },
         )
         .expect("create sidecar");
-        let (connection_id, session_id) = authenticate_and_open_session(&mut sidecar);
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id);
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
 
         let result = sidecar
             .dispatch(request(
@@ -5063,8 +5256,9 @@ mod tests {
         assert_node_available();
 
         let mut sidecar = create_test_sidecar();
-        let (connection_id, session_id) = authenticate_and_open_session(&mut sidecar);
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id);
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-python-vfs-rpc-cwd");
         let pyodide_dir = temp_dir("agent-os-sidecar-python-vfs-rpc-pyodide");
         write_fixture(
@@ -5174,6 +5368,113 @@ export async function loadPyodide() {
             vm.active_processes
                 .remove("proc-python-vfs")
                 .expect("remove fake python process")
+        };
+        let _ = signal_runtime_process(process.execution.child_pid(), SIGTERM);
+    }
+
+    #[test]
+    fn javascript_sync_rpc_requests_proxy_into_the_vm_kernel_filesystem() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-sync-rpc-cwd");
+        write_fixture(
+            &cwd.join("entry.mjs"),
+            r#"
+const bridge = globalThis.__agentOsSyncRpc;
+bridge.callSync("fs.writeFileSync", [
+  "/rpc/note.txt",
+  Buffer.from("hello from sidecar rpc", "utf8"),
+]);
+await new Promise(() => {});
+"#,
+        );
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_NODE_SYNC_RPC_ENABLE"),
+                    String::from("1"),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-sync"),
+                ActiveProcess {
+                    kernel_pid: kernel_handle.pid(),
+                    kernel_handle,
+                    runtime: GuestRuntimeKind::JavaScript,
+                    execution: ActiveExecution::Javascript(execution),
+                },
+            );
+        }
+
+        let event = {
+            let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get("proc-js-sync")
+                .expect("javascript process should be tracked");
+            process
+                .execution
+                .poll_event(Duration::from_secs(5))
+                .expect("poll javascript sync rpc event")
+                .expect("javascript sync rpc event")
+        };
+
+        sidecar
+            .handle_execution_event(&vm_id, "proc-js-sync", event)
+            .expect("handle javascript sync rpc event");
+
+        let content = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            String::from_utf8(
+                vm.kernel
+                    .read_file("/rpc/note.txt")
+                    .expect("read bridged file from kernel"),
+            )
+            .expect("utf8 file contents")
+        };
+        assert_eq!(content, "hello from sidecar rpc");
+
+        let process = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes
+                .remove("proc-js-sync")
+                .expect("remove fake javascript process")
         };
         let _ = signal_runtime_process(process.execution.child_pid(), SIGTERM);
     }

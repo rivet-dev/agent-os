@@ -1,7 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
 - Node builtin hardening is split between `packages/core/src/sidecar/native-kernel-proxy.ts` and four generated surfaces in `crates/execution/src/node_import_cache.rs` (loader, Node runner, Python runner, denied asset materialization); update all of them together when changing builtin policy.
-- `AGENT_OS_ALLOWED_NODE_BUILTINS` is the shared source of truth for guest Node capability gating; when you add per-VM builtin overrides, keep the native sidecar bridge env, Rust `harden_node_command(...)`, and generated child-process permission args aligned so `--allow-worker` is only emitted when `worker_threads` is allowed.
+- `AGENT_OS_ALLOWED_NODE_BUILTINS` is the shared source of truth for guest Node capability gating, but permissioned top-level JavaScript executions on Node v24 still need `--allow-worker` because `register(loader)` spins an internal loader worker; keep that runtime requirement separate from guest `worker_threads` exposure, and keep child-process permission args aligned with the allowed builtin set.
 - Pyodide guest hardening that must not rewrite user code belongs in `crates/execution/src/node_import_cache.rs` as a `pyodide.runPython(...)` bootstrap in the embedded Python runner, installed after package preloads and before `runPythonAsync()`.
 - The Pyodide host Node process is hardened with Node `--permission` in `crates/execution/src/python.rs`; keep its read allowlist scoped to the import-cache root, compile-cache dir, Pyodide bundle, and sandbox cwd, and keep writes limited to the cache paths plus sandbox cwd.
 - Node guest env hardening in `crates/execution/src/node_import_cache.rs` should snapshot `AGENT_OS_*` control vars first, then replace `process.env` with a filtered proxy so runtime internals keep working while guest enumeration/access stays scrubbed; when `node:module` is denied, bootstrap the runner via `process.getBuiltinModule('node:module')` instead of importing it through the guest loader.
@@ -11,6 +11,7 @@
 - `wrapChildProcessModule` in `crates/execution/src/node_import_cache.rs` can only sandbox `exec`/`execSync` safely for simple Node-runtime commands; parse shell-free argv and delegate to `execFile`, but deny arbitrary shell strings because host shells bypass Node `--permission`.
 - Guest-visible module path scrubbing in `crates/execution/src/node_import_cache.rs` has to cover both the ESM loader and the generated Node runner: translate `error.message`, `error.stack`, and `requireStack`, and import guest entrypoints through guest-mapped file URLs so top-level stack traces never start on host paths.
 - Execution control data that affects host state should move over the shared `AGENT_OS_CONTROL_PIPE_FD` side channel in `crates/execution/src/node_process.rs`; if a runtime still surfaces compatible debug/control prefixes, strip matching guest `stderr` lines before exposing them so forged prefixes never drive host behavior.
+- The JavaScript sync syscall bridge in `crates/execution/src/node_import_cache.rs` should keep request writes on the guest main thread and use a worker only for blocking response reads plus `SharedArrayBuffer` wakeups; under the current Node permission model, worker-thread writes to the inherited request FD fail with `EBADF`.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -197,4 +198,24 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Per-VM Node builtin overrides are owned by the JS bridge (`NativeSidecarKernelProxy`) rather than VM-create metadata; tests can validate the flow by mocking `NativeSidecarProcessClient.execute(...)` and inspecting the emitted guest env without compiling the Rust sidecar binary.
 - Gotchas encountered: `packages/core` end-to-end VM tests that call `AgentOs.create()` still trip the branch’s unrelated `agent-os-sidecar` compile failure in `crates/sidecar/src/service.rs`, so bridge-level tests are the reliable verification path until that crate is fixed.
 - Useful context: `cargo test -p agent-os-execution --test permission_flags node_permission_flags_only_allow_workers_when_worker_threads_is_enabled -- --exact`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `pnpm --dir packages/core exec tsc --noEmit`, and `pnpm --dir packages/core exec vitest run tests/allowed-node-builtins.test.ts` all pass after this change.
+---
+## 2026-04-04 21:17:24 PDT - US-012
+- What was implemented
+- Added a SharedArrayBuffer-backed JavaScript sync RPC bridge in `agent-os-execution` that surfaces synchronous guest Node fs requests as structured Rust events and accepts structured success/error responses over dedicated sync-RPC pipes.
+- Wired the sidecar execution loop to dispatch `fs.readFileSync`, `fs.writeFileSync`, `fs.statSync`, `fs.readdirSync`, and `fs.mkdirSync` through the kernel VFS, and added focused execution and sidecar regressions that exercise the bridge end to end.
+- Files changed
+- `crates/execution/src/benchmark.rs`
+- `crates/execution/src/javascript.rs`
+- `crates/execution/src/lib.rs`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/execution/tests/permission_flags.rs`
+- `crates/sidecar/src/service.rs`
+- `crates/sidecar/tests/socket_state_queries.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: Permissioned Node v24 guest launches that bootstrap through `register(loader)` need `--allow-worker` even when guest `worker_threads` remains denied, because Node uses an internal loader worker before user code runs.
+- Gotchas encountered: The SAB bridge only worked reliably once the child sync-RPC pipe fds stayed alive through `spawn()`, and the guest had to keep request writes on the main thread while a worker blocked on the response pipe; trying to write requests from the worker hit `EBADF`.
+- Useful context: `cargo test -p agent-os-execution --test javascript javascript_execution_runs_bootstrap_and_streams_stdio -- --exact`, `cargo test -p agent-os-execution --test javascript javascript_execution_surfaces_shared_array_buffer_sync_rpc_requests -- --exact`, `cargo test -p agent-os-execution --test permission_flags node_permission_flags_allow_workers_for_internal_javascript_loader_runtime -- --exact`, `cargo check -p agent-os-sidecar`, and `cargo test -p agent-os-sidecar service::tests::javascript_sync_rpc_requests_proxy_into_the_vm_kernel_filesystem -- --exact` all pass after this change.
 ---

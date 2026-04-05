@@ -297,7 +297,7 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
 }
 
 #[test]
-fn node_permission_flags_only_allow_workers_when_worker_threads_is_enabled() {
+fn node_permission_flags_allow_workers_for_internal_javascript_loader_runtime() {
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
     let log_path = temp.path().join("node-args.log");
@@ -351,17 +351,17 @@ fn node_permission_flags_only_allow_workers_when_worker_threads_is_enabled() {
         "expected one invocation per javascript execution"
     );
     assert!(
-        !invocations[0]
+        invocations[0]
             .iter()
             .any(|arg| arg == NODE_ALLOW_WORKER_FLAG),
-        "worker permission should stay disabled by default: {:?}",
+        "javascript executions should allow internal loader workers even by default: {:?}",
         invocations[0]
     );
     assert!(
         invocations[1]
             .iter()
             .any(|arg| arg == NODE_ALLOW_WORKER_FLAG),
-        "worker permission should be enabled when worker_threads is allowed: {:?}",
+        "javascript executions should keep worker permission enabled when worker_threads is allowed: {:?}",
         invocations[1]
     );
 }

@@ -2,7 +2,7 @@ use agent_os_execution::{
     CreateJavascriptContextRequest, JavascriptExecutionEngine, JavascriptExecutionEvent,
     StartJavascriptExecutionRequest,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -267,6 +267,9 @@ console.error(`stderr:${process.argv.slice(2).join(",")}`);
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
             Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                panic!("unexpected sync RPC request: {}", request.method);
+            }
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             None => panic!("timed out waiting for JavaScript execution event"),
         }
@@ -340,6 +343,9 @@ process.stdin.on("end", () => {
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
             Some(JavascriptExecutionEvent::Stderr(_chunk)) => {}
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                panic!("unexpected sync RPC request: {}", request.method);
+            }
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             None => panic!("timed out waiting for JavaScript execution event"),
         }
@@ -349,6 +355,160 @@ process.stdin.on("end", () => {
     assert!(String::from_utf8(stdout)
         .expect("stdout utf8")
         .contains("stdin:still-open"));
+}
+
+#[test]
+fn javascript_execution_surfaces_shared_array_buffer_sync_rpc_requests() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const bridge = globalThis.__agentOsSyncRpc;
+if (!bridge || typeof bridge.callSync !== "function") {
+  throw new Error("sync RPC bridge missing");
+}
+
+const stat = bridge.callSync("fs.statSync", ["/workspace/note.txt"]);
+const contents = bridge.callSync("fs.readFileSync", [
+  "/workspace/note.txt",
+  { encoding: "utf8" },
+]);
+const raw = Buffer.from(
+  bridge.callSync("fs.readFileSync", ["/workspace/raw.bin"]),
+).toString("hex");
+const entries = bridge.callSync("fs.readdirSync", ["/workspace"]);
+bridge.callSync("fs.mkdirSync", ["/workspace/subdir", { recursive: true }]);
+bridge.callSync("fs.writeFileSync", [
+  "/workspace/out.bin",
+  Buffer.from([1, 2, 3, 4]),
+]);
+console.log(JSON.stringify({ stat, contents, raw, entries }));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::from([(
+                String::from("AGENT_OS_NODE_SYNC_RPC_ENABLE"),
+                String::from("1"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
+
+    let mut stdout = Vec::new();
+    let mut exit_code = None;
+    let mut requests = Vec::new();
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => {
+                panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
+            }
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                requests.push((request.method.clone(), request.args.clone()));
+                match request.method.as_str() {
+                    "fs.statSync" => execution
+                        .respond_sync_rpc_success(
+                            request.id,
+                            json!({
+                                "mode": 0o100644,
+                                "size": 14,
+                                "isDirectory": false,
+                                "isSymbolicLink": false,
+                            }),
+                        )
+                        .expect("respond to stat"),
+                    "fs.readFileSync" => {
+                        let path = request.args[0].as_str().expect("read path");
+                        let result = match path {
+                            "/workspace/note.txt" => json!("hello from rpc"),
+                            "/workspace/raw.bin" => json!({
+                                "__agentOsType": "bytes",
+                                "base64": "q80=",
+                            }),
+                            other => panic!("unexpected read path: {other}"),
+                        };
+                        execution
+                            .respond_sync_rpc_success(request.id, result)
+                            .expect("respond to read");
+                    }
+                    "fs.readdirSync" => execution
+                        .respond_sync_rpc_success(request.id, json!(["note.txt", "raw.bin"]))
+                        .expect("respond to readdir"),
+                    "fs.mkdirSync" => execution
+                        .respond_sync_rpc_success(request.id, json!(null))
+                        .expect("respond to mkdir"),
+                    "fs.writeFileSync" => {
+                        assert_eq!(request.args[0], json!("/workspace/out.bin"));
+                        assert_eq!(
+                            request.args[1],
+                            json!({
+                                "__agentOsType": "bytes",
+                                "base64": "AQIDBA==",
+                            })
+                        );
+                        execution
+                            .respond_sync_rpc_success(request.id, json!(null))
+                            .expect("respond to write");
+                    }
+                    other => panic!("unexpected sync RPC method: {other}"),
+                }
+            }
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
+
+    assert_eq!(exit_code, Some(0));
+    assert_eq!(
+        requests
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "fs.statSync",
+            "fs.readFileSync",
+            "fs.readFileSync",
+            "fs.readdirSync",
+            "fs.mkdirSync",
+            "fs.writeFileSync",
+        ]
+    );
+
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
+    assert!(
+        stdout.contains("\"contents\":\"hello from rpc\""),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"raw\":\"abcd\""),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"entries\":[\"note.txt\",\"raw.bin\"]"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"size\":14"),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[test]

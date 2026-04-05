@@ -101,7 +101,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         30,
         &connection_id,
         &session_id,
-        GuestRuntimeKind::Wasm,
+        GuestRuntimeKind::WebAssembly,
         &cwd,
         BTreeMap::new(),
     );
@@ -153,7 +153,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         &session_id,
         &wasm_vm_id,
         "signal-state",
-        GuestRuntimeKind::Wasm,
+        GuestRuntimeKind::WebAssembly,
         &signal_entry,
         Vec::new(),
     );

@@ -2750,6 +2750,11 @@ fn measure_transport_roundtrip(
             Some(crate::JavascriptExecutionEvent::Stderr(chunk)) => {
                 stderr_buffer.push_str(&String::from_utf8(chunk)?);
             }
+            Some(crate::JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                return Err(JavascriptBenchmarkError::Execution(
+                    JavascriptExecutionError::PendingSyncRpcRequest(request.id),
+                ));
+            }
             Some(crate::JavascriptExecutionEvent::Exited(exit_code)) => {
                 return Err(JavascriptBenchmarkError::TransportProbeExited {
                     exit_code,
