@@ -670,7 +670,7 @@
         "Typecheck passes"
       ],
       "priority": 42,
-      "passes": false,
+      "passes": true,
       "notes": "Large embedded JS strings are hard to maintain. Significant duplication across runtime implementations."
     },
     {
@@ -764,6 +764,530 @@
       "priority": 48,
       "passes": false,
       "notes": "Permission framework exists (NetworkAccessRequest, NetworkOperation enums) but needs audit to confirm callbacks fire at socket operation time, not just policy setup."
+    },
+    {
+      "id": "US-049",
+      "title": "Block remaining process properties that leak host information",
+      "description": "As a security engineer, I want process.config, process.versions, process.memoryUsage(), process.uptime(), process.platform, and process.arch replaced with virtual values so that no host build/runtime info is exposed",
+      "acceptanceCriteria": [
+        "process.config returns a safe stub object (not host build config)",
+        "process.versions returns virtual versions (not host openssl/v8/zlib versions)",
+        "process.memoryUsage() returns virtual memory values",
+        "process.uptime() returns VM uptime, not host process uptime",
+        "process.platform returns 'linux' (not leaking host platform)",
+        "process.arch returns virtual arch value",
+        "process.release returns safe stub (not host release info)",
+        "The Proxy fallback in createGuestProcess no longer uses Reflect.get(source, key, source) for unhandled properties",
+        "Typecheck passes"
+      ],
+      "priority": 49,
+      "passes": false,
+      "notes": "Audit finding: guest process proxy only overrides 5 properties (execPath, pid, ppid, getuid, getgid). All others pass through via Reflect.get() fallback, leaking host build config, memory usage, uptime, etc."
+    },
+    {
+      "id": "US-050",
+      "title": "Prevent CJS require() from resolving host node_modules",
+      "description": "As a security engineer, I want createGuestRequire() to only resolve from guest-visible paths so that host node_modules cannot be loaded by guest code",
+      "acceptanceCriteria": [
+        "createGuestRequire() does not delegate to Module.createRequire() with host paths",
+        "Guest require('lodash') resolves from VM-visible node_modules only, not host node_modules",
+        "Module._resolveFilename is patched to translate paths before resolution",
+        "require.cache keys use guest paths, not host paths",
+        "Existing module resolution tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 50,
+      "passes": false,
+      "notes": "Audit finding: createGuestRequire() uses Module.createRequire() + baseRequire() which resolves packages from HOST node_modules. Guest code can load arbitrary host packages."
+    },
+    {
+      "id": "US-051",
+      "title": "Fix os polyfill fallbacks that default to host values",
+      "description": "As a security engineer, I want os.homedir(), os.userInfo(), os.tmpdir(), and os.hostname() to never fall back to real host environment variables when AGENT_OS_VIRTUAL_OS_* vars are unset",
+      "acceptanceCriteria": [
+        "os.homedir() returns a safe default (e.g. /root) when AGENT_OS_VIRTUAL_OS_HOMEDIR is unset, never HOST_PROCESS_ENV.HOME",
+        "os.userInfo().username returns a safe default (e.g. root) when AGENT_OS_VIRTUAL_OS_USER is unset, never HOST_PROCESS_ENV.USER",
+        "os.tmpdir() returns /tmp when AGENT_OS_VIRTUAL_OS_TMPDIR is unset, never HOST_PROCESS_ENV.TMPDIR",
+        "os.hostname() returns 'agent-os' when AGENT_OS_VIRTUAL_OS_HOSTNAME is unset, never HOST_PROCESS_ENV.HOSTNAME",
+        "Shell returns /bin/sh when AGENT_OS_VIRTUAL_OS_SHELL is unset, never HOST_PROCESS_ENV.SHELL",
+        "Typecheck passes"
+      ],
+      "priority": 51,
+      "passes": false,
+      "notes": "Audit finding: os polyfill uses HOST_PROCESS_ENV.HOME/USER/SHELL/TMPDIR as fallback when AGENT_OS_VIRTUAL_OS_* not set, leaking host username, home dir, temp dir, shell path."
+    },
+    {
+      "id": "US-052",
+      "title": "Strip AGENT_OS_* variables from child process spawn environments",
+      "description": "As a security engineer, I want AGENT_OS_* internal variables stripped from child process environments so that spawned children cannot reconstruct the guest/host path mapping",
+      "acceptanceCriteria": [
+        "Child processes spawned via kernel child_process polyfill do not receive AGENT_OS_GUEST_PATH_MAPPINGS",
+        "Child processes do not receive AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH or AGENT_OS_VIRTUAL_PROCESS_UID/GID",
+        "Child processes do not receive AGENT_OS_VIRTUAL_OS_* configuration variables",
+        "INTERNAL_ENV_KEYS merging in child spawn only passes keys actually needed for child bootstrap",
+        "Typecheck passes"
+      ],
+      "priority": 52,
+      "passes": false,
+      "notes": "Audit finding: child process env merging passes through all AGENT_OS_* and AGENT_OS_VIRTUAL_OS_* variables, allowing child processes to reconstruct the full guest/host mapping."
+    },
+    {
+      "id": "US-053",
+      "title": "Add permission check to unmount_filesystem",
+      "description": "As a security engineer, I want unmount_filesystem to require permission checks so that guest code cannot unmount sensitive paths",
+      "acceptanceCriteria": [
+        "unmount_filesystem() checks fs write permission on the mount path before proceeding",
+        "Unmounting sensitive paths (/, /etc, /proc) requires fs.mount_sensitive permission",
+        "Attempted unmount of denied path returns EACCES",
+        "Existing mount/unmount tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 53,
+      "passes": false,
+      "notes": "Audit finding: unmount_filesystem() calls .inner_mut().inner_mut().unmount() directly, bypassing all permission checks. Guest can unmount any filesystem including /, /etc, /proc."
+    },
+    {
+      "id": "US-054",
+      "title": "Change KernelVmConfig default permissions to deny-all",
+      "description": "As a security engineer, I want KernelVmConfig::new() to default to deny-all permissions so that forgetting to set permissions doesn't grant unrestricted access",
+      "acceptanceCriteria": [
+        "KernelVmConfig::new() uses Permissions::default() (deny-all) instead of Permissions::allow_all()",
+        "All call sites that need allow_all explicitly set it",
+        "Tests that depend on allow_all are updated to explicitly request it",
+        "Typecheck passes"
+      ],
+      "priority": 54,
+      "passes": false,
+      "notes": "Audit finding: KernelVmConfig::new() defaults to Permissions::allow_all(). Any code creating a VM without explicit permissions gets unrestricted access."
+    },
+    {
+      "id": "US-055",
+      "title": "Add SSRF protection with private IP address validation on outbound connections",
+      "description": "As a security engineer, I want outbound TCP/UDP connections validated against private IP ranges so that guest code cannot reach cloud metadata endpoints or internal services",
+      "acceptanceCriteria": [
+        "net.connect() validates target address against blocked ranges before connecting",
+        "Blocked ranges: 169.254.0.0/16 (link-local/cloud metadata), 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 (private), 127.0.0.0/8 (loopback except exempt ports), ::1/128, fc00::/7, fe80::/10",
+        "DNS resolution results are validated against same blocked ranges before returning to guest",
+        "Loopback exempt ports still work (for mock LLM servers etc.)",
+        "Blocked connection attempts return EACCES with clear message",
+        "Typecheck passes"
+      ],
+      "priority": 55,
+      "passes": false,
+      "notes": "Audit finding: DNS resolution and TCP/UDP connections have zero address validation. Guest can SSRF to cloud metadata (169.254.169.254), internal databases, host services, etc."
+    },
+    {
+      "id": "US-056",
+      "title": "Add per-operation size limits for pread, fd_write, env, and argv",
+      "description": "As a security engineer, I want individual read/write operations and process spawn arguments bounded so that a single operation cannot exhaust host memory",
+      "acceptanceCriteria": [
+        "pread() length parameter capped at a configurable max (e.g. 64MB) to prevent OOM",
+        "fd_write() data size capped at a configurable max per-operation",
+        "Environment variables passed to spawn_process have total size limit",
+        "Command arguments passed to spawn_process have total size limit",
+        "readdir results are paginated or have a max batch size",
+        "truncate/pwrite validate target size against max_filesystem_bytes BEFORE allocating memory",
+        "Exceeding limits returns EINVAL or ENOMEM",
+        "Typecheck passes"
+      ],
+      "priority": 56,
+      "passes": false,
+      "notes": "Audit finding: pread(fd, 0, usize::MAX) allocates unbounded memory. fd_write accepts arbitrary data size. spawn_process env/args have no size limit. readdir returns all entries at once. truncate allocates before checking FS limits."
+    },
+    {
+      "id": "US-057",
+      "title": "Protect RPC channel FDs from guest manipulation",
+      "description": "As a security engineer, I want sync RPC and control channel file descriptors protected from guest code so that RPC messages cannot be forged or channels disrupted",
+      "acceptanceCriteria": [
+        "RPC channel FDs are remapped to high FD numbers (e.g. 1000+) out of guest FD range (0-255)",
+        "Guest code cannot close, dup2, read, or write to RPC channel FDs",
+        "Control channel FD is similarly protected",
+        "FD numbers are not exposed in environment variables readable by guest (or are protected by the guest-env proxy)",
+        "Forged writes to RPC request pipe have no effect on sidecar state",
+        "Typecheck passes"
+      ],
+      "priority": 57,
+      "passes": false,
+      "notes": "Audit finding: RPC FD numbers passed via env vars with FD_CLOEXEC cleared. Guest can close(), dup2(), read/write to forge RPC requests/responses, or break sidecar communication."
+    },
+    {
+      "id": "US-058",
+      "title": "Add WASM module parser size limits and DoS protection",
+      "description": "As a security engineer, I want WASM module file size and section counts bounded so that malicious modules cannot cause parser DoS",
+      "acceptanceCriteria": [
+        "WASM module file size capped before reading (e.g. 256MB max)",
+        "Import section count validated against a reasonable max before iteration",
+        "Memory section count validated similarly",
+        "varuint parsing has iteration bounds",
+        "Malformed modules produce clear error messages, not panics",
+        "Typecheck passes"
+      ],
+      "priority": 58,
+      "passes": false,
+      "notes": "Audit finding: fs::read() on module path has no size limit (can OOM). Import section iteration is unbounded if import_count is huge. varuint parsing has shift overflow check but no iteration cap."
+    },
+    {
+      "id": "US-059",
+      "title": "Implement SIGCHLD delivery on child process exit",
+      "description": "As a developer, I want SIGCHLD delivered to parent processes when children exit so that async child reaping works correctly",
+      "acceptanceCriteria": [
+        "SIGCHLD (signal 17) is delivered to parent process when child exits",
+        "SIGCHLD is delivered to parent when child is killed",
+        "Per-process signal handler registry tracks registered signals",
+        "Guest code can register SIGCHLD handler via process.on('SIGCHLD')",
+        "If no handler is registered, signal is silently ignored (POSIX default)",
+        "Typecheck passes"
+      ],
+      "priority": 59,
+      "passes": false,
+      "notes": "Audit finding: No SIGCHLD implementation. Only SIGTERM(15) and SIGKILL(9) are defined. Parent processes cannot receive async notification of child termination."
+    },
+    {
+      "id": "US-060",
+      "title": "Implement SIGPIPE delivery on broken pipe write",
+      "description": "As a developer, I want SIGPIPE delivered when writing to a broken pipe so that the standard POSIX broken-pipe contract is honored",
+      "acceptanceCriteria": [
+        "Writing to a pipe whose read end is closed delivers SIGPIPE to the writer",
+        "If SIGPIPE is ignored/blocked, write returns EPIPE (existing behavior preserved)",
+        "SIGPIPE delivery respects signal masks when implemented",
+        "Typecheck passes"
+      ],
+      "priority": 60,
+      "passes": false,
+      "notes": "Audit finding: pipe_manager returns EPIPE error but does not deliver SIGPIPE signal. Linux requires both signal delivery AND EPIPE error."
+    },
+    {
+      "id": "US-061",
+      "title": "Implement waitpid flags: WNOHANG, WUNTRACED, WCONTINUED, and process group waits",
+      "description": "As a developer, I want full waitpid semantics so that shells and process managers can reap children correctly",
+      "acceptanceCriteria": [
+        "waitpid supports WNOHANG flag (returns immediately if no exited child)",
+        "waitpid supports WUNTRACED flag (also reports stopped children)",
+        "waitpid supports WCONTINUED flag (also report continued children)",
+        "waitpid supports pid=-1 (wait for any child)",
+        "waitpid supports negative PID (wait for any child in process group)",
+        "waitpid supports pid=0 (wait for any child in caller's process group)",
+        "Typecheck passes"
+      ],
+      "priority": 61,
+      "passes": false,
+      "notes": "Audit finding: waitpid(pid: u32) only blocks indefinitely on single process. No WNOHANG, WUNTRACED, WCONTINUED, negative PID, or pid=-1 support."
+    },
+    {
+      "id": "US-062",
+      "title": "Implement advisory file locking (flock)",
+      "description": "As a developer, I want advisory file locking so that git, npm, and other tools that use lock files work correctly inside the VM",
+      "acceptanceCriteria": [
+        "flock() syscall implemented with LOCK_SH (shared), LOCK_EX (exclusive), LOCK_UN (unlock)",
+        "LOCK_NB (non-blocking) flag supported — returns EWOULDBLOCK if lock unavailable",
+        "Locks are per-FD (not per-process) following POSIX semantics",
+        "Locks are released when FD is closed",
+        "Lock conflicts between processes are properly detected",
+        "Typecheck passes"
+      ],
+      "priority": 62,
+      "passes": false,
+      "notes": "Audit finding: Neither flock() nor fcntl(F_SETLK) implemented anywhere. Git, npm, and many tools depend on file locking. This is the #1 compatibility blocker for agent tools."
+    },
+    {
+      "id": "US-063",
+      "title": "Implement O_CREAT|O_EXCL atomicity and O_APPEND atomic writes",
+      "description": "As a developer, I want atomic file creation and atomic append writes so that concurrent operations don't cause data corruption",
+      "acceptanceCriteria": [
+        "O_CREAT|O_EXCL is a single atomic operation (no TOCTOU between exists check and creation)",
+        "O_APPEND writes atomically seek to EOF and write in a single locked operation",
+        "Concurrent O_CREAT|O_EXCL calls on the same path — exactly one succeeds, others get EEXIST",
+        "Concurrent O_APPEND writes don't interleave data",
+        "Typecheck passes"
+      ],
+      "priority": 63,
+      "passes": false,
+      "notes": "Audit finding: O_CREAT|O_EXCL checks exists() then creates (TOCTOU race). O_APPEND reads file size, then seeks, then writes (race condition). Both are critical for git ref creation and concurrent log writes."
+    },
+    {
+      "id": "US-064",
+      "title": "Implement non-blocking I/O (O_NONBLOCK) and PIPE_BUF atomicity",
+      "description": "As a developer, I want non-blocking I/O and atomic pipe writes so that event loops and IPC work correctly",
+      "acceptanceCriteria": [
+        "O_NONBLOCK flag tracked per-FD in the FD table",
+        "Non-blocking read on empty pipe returns EAGAIN instead of blocking",
+        "Non-blocking write on full pipe returns EAGAIN instead of blocking",
+        "Non-blocking connect returns EINPROGRESS",
+        "Pipe writes <= PIPE_BUF (4096 bytes) are atomic — not interleaved with other writes",
+        "Typecheck passes"
+      ],
+      "priority": 64,
+      "passes": false,
+      "notes": "Audit finding: O_NONBLOCK not implemented. Pipe writes not atomic at any size. Non-blocking I/O is required for event loops, Node.js internals, and many CLI tools."
+    },
+    {
+      "id": "US-065",
+      "title": "Implement select/poll for FD multiplexing",
+      "description": "As a developer, I want FD multiplexing so that processes can wait on multiple file descriptors simultaneously",
+      "acceptanceCriteria": [
+        "poll() syscall implemented for pipes, PTYs, and sockets",
+        "POLLIN (readable), POLLOUT (writable), POLLERR, POLLHUP events supported",
+        "Timeout parameter works correctly (0=non-blocking check, -1=block forever, N=timeout in ms)",
+        "Can poll across different FD types (pipe + PTY + socket)",
+        "Typecheck passes"
+      ],
+      "priority": 65,
+      "passes": false,
+      "notes": "Audit finding: No select/poll/epoll mechanism in kernel. Cannot multiplex I/O across FDs. Breaks event loops, shell I/O multiplexing, and server accept loops."
+    },
+    {
+      "id": "US-066",
+      "title": "Implement process reparenting to init and fix process group kill",
+      "description": "As a developer, I want orphaned processes reparented to init and process group kill to reach all process states so that process lifecycle matches Linux",
+      "acceptanceCriteria": [
+        "When a parent process exits, its children are reparented to PID 1 (init/kernel)",
+        "Orphaned process groups receive SIGHUP+SIGCONT per POSIX",
+        "kill(-pgid) reaches processes in Running, Stopped, AND Zombie states (not just Running)",
+        "Zombie processes count against max_processes resource limit (prevent zombie storm bypass)",
+        "Typecheck passes"
+      ],
+      "priority": 66,
+      "passes": false,
+      "notes": "Audit finding: No reparenting — orphaned children become standalone zombies. Process group kill filters for ProcessStatus::Running only, missing stopped/zombie. Zombie processes bypass max_processes since only running_processes is checked."
+    },
+    {
+      "id": "US-067",
+      "title": "Implement OverlayFS opaque directories and persistent whiteouts",
+      "description": "As a developer, I want OverlayFS opaque directory markers and durable whiteouts so that overlay semantics match Linux OverlayFS",
+      "acceptanceCriteria": [
+        "Copy-up of a directory marks it opaque in the upper layer",
+        "Opaque directories hide all entries from lower layers",
+        "Whiteout state is stored durably (in upper layer metadata, not in-memory Set)",
+        "Whiteouts survive snapshot/restore cycles",
+        "S3 and other remote upper layers persist whiteout markers",
+        "Typecheck passes"
+      ],
+      "priority": 67,
+      "passes": false,
+      "notes": "Audit finding: No opaque directory markers — lower layer entries leak through after copy-up. Whiteouts stored in in-memory Set, lost on snapshot/persistence. S3 mount doesn't persist whiteouts."
+    },
+    {
+      "id": "US-068",
+      "title": "Fix overlay hardlink copy-up, rmdir ENOTEMPTY, and cross-mount hardlink",
+      "description": "As a developer, I want overlay hardlink operations and rmdir to be correct so that filesystem operations don't silently corrupt data",
+      "acceptanceCriteria": [
+        "link() after copy-up references the correct upper layer path (not the original lower path)",
+        "rmdir() checks children in BOTH upper and lower layers before removing (returns ENOTEMPTY if lower has children)",
+        "Hardlink across mount boundaries returns EXDEV (mount_table.rs link() checks old_index == new_index)",
+        "rename() in overlay is crash-safe (use rename-in-upper, not read+write+delete)",
+        "Typecheck passes"
+      ],
+      "priority": 68,
+      "passes": false,
+      "notes": "Audit finding: Hardlink copy-up resolves wrong path. removeDir succeeds even when lower layer has children. Hardlink across mounts doesn't check mount index. Rename uses non-atomic read+write+delete."
+    },
+    {
+      "id": "US-069",
+      "title": "Implement /proc filesystem with essential entries",
+      "description": "As a developer, I want a /proc filesystem so that tools that inspect process state work correctly inside the VM",
+      "acceptanceCriteria": [
+        "/proc/self is a symlink to /proc/[current_pid]",
+        "/proc/[pid]/fd/ lists open file descriptors as symlinks",
+        "/proc/[pid]/cmdline contains null-separated command line",
+        "/proc/[pid]/environ contains null-separated environment",
+        "/proc/[pid]/cwd is a symlink to the process working directory",
+        "/proc/[pid]/stat contains basic process status info",
+        "/proc/mounts lists mounted filesystems",
+        "Typecheck passes"
+      ],
+      "priority": 69,
+      "passes": false,
+      "notes": "Audit finding: /proc is read-only and returns generic error. No /proc/self, /proc/[pid]/fd, /proc/[pid]/cmdline, /proc/mounts, etc. Many tools read /proc to discover process state."
+    },
+    {
+      "id": "US-070",
+      "title": "Fix /dev/zero and /dev/urandom to return requested byte count",
+      "description": "As a developer, I want device reads to return the requested number of bytes so that reads from /dev/zero and /dev/urandom behave like Linux",
+      "acceptanceCriteria": [
+        "/dev/zero read returns exactly the requested number of zero bytes (not fixed 4096)",
+        "/dev/urandom read returns exactly the requested number of random bytes (not fixed 4096)",
+        "Reading 5 bytes from /dev/zero returns 5 bytes",
+        "Reading 1MB from /dev/urandom returns 1MB (up to a sane max)",
+        "Typecheck passes"
+      ],
+      "priority": 70,
+      "passes": false,
+      "notes": "Audit finding: device_layer.rs returns vec![0; 4096] and random_bytes(4096) regardless of requested length. Should return requested length."
+    },
+    {
+      "id": "US-071",
+      "title": "Implement shebang parsing for script execution",
+      "description": "As a developer, I want the kernel to parse #! shebangs so that script files can be executed directly",
+      "acceptanceCriteria": [
+        "When exec() encounters a file starting with #!, it parses the interpreter path and arguments",
+        "#!/bin/sh script.sh executes as sh script.sh",
+        "#!/usr/bin/env node executes the script with node",
+        "Shebang line is limited to a reasonable max length (256 bytes)",
+        "Missing interpreter returns ENOENT",
+        "Typecheck passes"
+      ],
+      "priority": 71,
+      "passes": false,
+      "notes": "Audit finding: Kernel doesn't parse shebang lines. Scripts starting with #!/bin/sh won't execute. Common pattern in agent workflows."
+    },
+    {
+      "id": "US-072",
+      "title": "Add JavaScript sync RPC timeout and response backpressure",
+      "description": "As a developer, I want JavaScript sync RPC calls to have timeouts and response writes to have backpressure so that slow guests cannot hang the sidecar",
+      "acceptanceCriteria": [
+        "Sync RPC requests have a configurable timeout (default 30s, matching Python VFS bridge)",
+        "Timeout produces a clear error response, not a hang",
+        "Response writer has backpressure — if guest slow-reads, sidecar does not block indefinitely",
+        "RPC response writer uses a bounded buffer with timeout",
+        "Typecheck passes"
+      ],
+      "priority": 72,
+      "passes": false,
+      "notes": "Audit finding: JavaScript sync RPC in service.rs dispatches to kernel without timeout. Response writer can deadlock if guest slow-reads. Python VFS bridge has 30s timeout but JS bridge does not."
+    },
+    {
+      "id": "US-073",
+      "title": "Add network port binding restrictions and VM network isolation",
+      "description": "As a security engineer, I want port binding restricted and VMs isolated from each other's network so that guest code cannot expose services on host interfaces or interfere with other VMs",
+      "acceptanceCriteria": [
+        "Guest code cannot bind to 0.0.0.0 (only 127.0.0.1 or :: loopback)",
+        "Port range restrictions configurable per-VM (e.g. only ephemeral ports 49152-65535)",
+        "Privileged ports (< 1024) denied unless explicitly allowed",
+        "Two VMs cannot interfere via shared host port bindings",
+        "socket_host_matches() no longer treats 0.0.0.0 as matching loopback",
+        "Typecheck passes"
+      ],
+      "priority": 73,
+      "passes": false,
+      "notes": "Audit finding: Guest can bind to ANY port on ANY interface including 0.0.0.0. Two VMs can interfere via shared host socket table. socket_host_matches() is overly permissive."
+    },
+    {
+      "id": "US-074",
+      "title": "Fix guestVisiblePathFromHostPath to never fall back to raw host path",
+      "description": "As a security engineer, I want path translation to return a safe default instead of the raw host path when mapping fails so that unmapped paths never leak to guest code",
+      "acceptanceCriteria": [
+        "guestVisiblePathFromHostPath returns a safe placeholder (e.g. '/unknown') when no mapping matches, never the raw host path",
+        "INITIAL_GUEST_CWD returns a safe default (e.g. /root or /workspace) when HOST_CWD has no mapping, never HOST_CWD itself",
+        "translateTextToGuest uses the same safe default for unmapped paths in error messages",
+        "Error stack traces never contain host filesystem paths",
+        "Typecheck passes"
+      ],
+      "priority": 74,
+      "passes": false,
+      "notes": "Audit finding: guestVisiblePathFromHostPath ?? value falls back to host path. INITIAL_GUEST_CWD ?? HOST_CWD falls back to host CWD. Both leak host filesystem layout."
+    },
+    {
+      "id": "US-075",
+      "title": "Implement SIGSTOP/SIGCONT job control and SIGWINCH for PTY resize",
+      "description": "As a developer, I want SIGSTOP/SIGCONT for job control and SIGWINCH for terminal resize so that interactive shells and terminal apps work correctly",
+      "acceptanceCriteria": [
+        "SIGSTOP transitions a process to ProcessStatus::Stopped",
+        "SIGCONT resumes a stopped process back to Running",
+        "PTY resize generates SIGWINCH to the foreground process group",
+        "^Z in PTY delivers SIGTSTP (already partially implemented)",
+        "Shell bg/fg commands can use SIGCONT to resume stopped jobs",
+        "Typecheck passes"
+      ],
+      "priority": 75,
+      "passes": false,
+      "notes": "Audit finding: ProcessStatus::Stopped exists but is unreachable. No SIGSTOP/SIGCONT mechanism. No SIGWINCH on PTY resize. Shell job control broken."
+    },
+    {
+      "id": "US-076",
+      "title": "Add missing errno checks: EISDIR, ENOTDIR, ENAMETOOLONG, EROFS",
+      "description": "As a developer, I want correct errno values for common error cases so that tools that check errno values behave correctly",
+      "acceptanceCriteria": [
+        "Writing to a directory returns EISDIR (not ENOENT or generic error)",
+        "Path component that is a file returns ENOTDIR (e.g. stat('/file/child') when /file is regular file)",
+        "Path exceeding max length returns ENAMETOOLONG (add configurable max, e.g. 4096)",
+        "Write to read-only filesystem returns EROFS (not EACCES)",
+        "Typecheck passes"
+      ],
+      "priority": 76,
+      "passes": false,
+      "notes": "Audit finding: EISDIR not returned for write-on-directory. ENOTDIR not checked in path components. ENAMETOOLONG not implemented. EROFS not distinguished from EACCES."
+    },
+    {
+      "id": "US-077",
+      "title": "Implement umask and stat blocks/dev fields",
+      "description": "As a developer, I want umask support and complete stat fields so that file creation modes and stat output match Linux expectations",
+      "acceptanceCriteria": [
+        "umask() syscall implemented per-process (default 0o022)",
+        "File/directory creation applies umask to permission bits",
+        "stat() returns st_blocks field (allocated 512-byte blocks)",
+        "stat() returns st_dev field (device ID identifying the filesystem)",
+        "stat() returns st_rdev for device files (major:minor)",
+        "atime is updated on all read operations (not just pread)",
+        "ctime is updated on all metadata changes",
+        "Typecheck passes"
+      ],
+      "priority": 77,
+      "passes": false,
+      "notes": "Audit finding: No umask implementation. stat missing blocks/dev fields. atime only updated on pread, not general reads. ctime inconsistently updated."
+    },
+    {
+      "id": "US-078",
+      "title": "Add WASM module path symlink TOCTOU protection and prewarm timeout",
+      "description": "As a security engineer, I want WASM module path resolution to be safe from symlink TOCTOU and prewarm to have timeouts so that module loading cannot be exploited or hang",
+      "acceptanceCriteria": [
+        "resolved_module_path() canonicalizes paths consistently with normalize_path() in permission setup",
+        "Module validation and execution use the same resolved path (no TOCTOU window between them)",
+        "File fingerprint uses inode+dev instead of size+mtime to prevent swap attacks",
+        "ensure_materialized() has a configurable timeout (default 30s)",
+        "Prewarm phase has a separate timeout from execution",
+        "Typecheck passes"
+      ],
+      "priority": 78,
+      "passes": false,
+      "notes": "Audit finding: resolved_module_path() doesn't canonicalize while normalize_path() does — TOCTOU between validation and execution. File fingerprint uses size+mtime (swappable). ensure_materialized() can hang with no timeout."
+    },
+    {
+      "id": "US-079",
+      "title": "Add Pyodide process memory and execution timeout limits",
+      "description": "As a security engineer, I want Pyodide processes bounded by memory and execution time so that runaway Python code cannot exhaust host resources",
+      "acceptanceCriteria": [
+        "Configurable memory limit for Pyodide Node.js host process (e.g. --max-old-space-size)",
+        "Configurable execution timeout per Python run (default 5 minutes)",
+        "Timeout kills the process cleanly and returns a timeout error",
+        "Memory limit produces a clear OOM error, not a host crash",
+        "Recursion depth stays at Python default (~1000) or is configurable",
+        "Typecheck passes"
+      ],
+      "priority": 79,
+      "passes": false,
+      "notes": "Audit finding: No memory limit on Pyodide process. No execution timeout at Python level. Recursion depth only limited by Python default. Pyodide is otherwise well-secured but resource limits are missing."
+    },
+    {
+      "id": "US-080",
+      "title": "Enforce WASM runtime memory limits and pass fuel to Node.js runtime",
+      "description": "As a security engineer, I want WASM memory and fuel limits actually enforced at runtime so that guest WASM code cannot exhaust host memory or compute",
+      "acceptanceCriteria": [
+        "WASM_MAX_MEMORY_BYTES_ENV is passed to the Node.js runtime process (not just used for compile-time validation)",
+        "Node.js WASI runtime enforces max memory pages matching the configured limit",
+        "WASM memory.grow() beyond the limit fails at runtime (not just at module load)",
+        "WASM fuel limit is per-instruction metering, not just a coarse process timeout",
+        "If per-instruction fuel is not feasible, document the gap and ensure process timeout is tight",
+        "Typecheck passes"
+      ],
+      "priority": 80,
+      "passes": false,
+      "notes": "Audit finding: WASM_MAX_MEMORY_BYTES_ENV only validated at compile time in validate_module_limits(). Not passed to Node.js runtime. Fuel converted to millisecond timeout with 10ms granularity. Guest WASM can grow memory unbounded at runtime."
+    },
+    {
+      "id": "US-081",
+      "title": "Make WASI conditional based on permission tier",
+      "description": "As a security engineer, I want WASI disabled for restricted permission tiers so that isolated WASM commands cannot access host resources via WASI",
+      "acceptanceCriteria": [
+        "allow_wasi parameter in harden_node_command is derived from permission tier, not hardcoded true",
+        "Isolated tier: WASI disabled (allow_wasi = false)",
+        "ReadOnly tier: WASI enabled with read-only preopens only",
+        "ReadWrite tier: WASI enabled with read-write preopens",
+        "Full tier: WASI enabled with all preopens",
+        "Typecheck passes"
+      ],
+      "priority": 81,
+      "passes": false,
+      "notes": "Audit finding: wasm.rs line 612 hardcodes allow_wasi = true for all WASM execution regardless of permission tier. Even Isolated tier gets WASI."
     }
   ]
 }

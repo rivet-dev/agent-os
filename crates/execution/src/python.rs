@@ -1,9 +1,15 @@
-use crate::common::{encode_json_string, frozen_time_ms, stable_hash64};
+use crate::common::{encode_json_string, frozen_time_ms};
 use crate::node_import_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV};
 use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
     harden_node_command, node_binary, spawn_node_control_reader, spawn_stream_reader,
     LinePrefixFilter, NodeControlMessage,
+};
+use crate::runtime_support::{
+    compile_cache_ready, configure_compile_cache, env_flag_enabled, file_fingerprint,
+    import_cache_root, resolve_execution_path, sandbox_root, warmup_marker_path,
+    NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
+    NODE_SANDBOX_ROOT_ENV,
 };
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
 use nix::unistd::pipe2;
@@ -21,12 +27,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, UNIX_EPOCH};
-
-const NODE_COMPILE_CACHE_ENV: &str = "NODE_COMPILE_CACHE";
-const NODE_DISABLE_COMPILE_CACHE_ENV: &str = "NODE_DISABLE_COMPILE_CACHE";
-const NODE_FROZEN_TIME_ENV: &str = "AGENT_OS_FROZEN_TIME_MS";
-const NODE_SANDBOX_ROOT_ENV: &str = "AGENT_OS_SANDBOX_ROOT";
+use std::time::{Duration, Instant};
 const NODE_ALLOWED_BUILTINS_ENV: &str = "AGENT_OS_ALLOWED_NODE_BUILTINS";
 const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const PYODIDE_INDEX_URL_ENV: &str = "AGENT_OS_PYODIDE_INDEX_URL";
@@ -970,16 +971,8 @@ fn configure_python_node_sandbox(
     context: &PythonContext,
     request: &StartPythonExecutionRequest,
 ) {
-    let sandbox_root = request
-        .env
-        .get(NODE_SANDBOX_ROOT_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| request.cwd.clone());
-    let cache_root = import_cache
-        .cache_path()
-        .parent()
-        .unwrap_or(import_cache.asset_root())
-        .to_path_buf();
+    let sandbox_root = sandbox_root(&request.env, &request.cwd);
+    let cache_root = import_cache_root(import_cache, import_cache.asset_root());
     let compile_cache_dir = import_cache.shared_compile_cache_dir();
     let pyodide_dist_path = resolved_pyodide_dist_path(&context.pyodide_dist_path, &request.cwd);
     let read_paths = vec![
@@ -1006,20 +999,13 @@ fn configure_node_command(
     import_cache: &NodeImportCache,
 ) -> Result<(), PythonExecutionError> {
     let compile_cache_dir = import_cache.shared_compile_cache_dir();
-    fs::create_dir_all(&compile_cache_dir).map_err(PythonExecutionError::PrepareWarmPath)?;
-
-    command
-        .env_remove(NODE_DISABLE_COMPILE_CACHE_ENV)
-        .env(NODE_COMPILE_CACHE_ENV, compile_cache_dir);
+    configure_compile_cache(command, &compile_cache_dir)
+        .map_err(PythonExecutionError::PrepareWarmPath)?;
     Ok(())
 }
 
 fn resolved_pyodide_dist_path(path: &Path, cwd: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    }
+    resolve_execution_path(path, cwd)
 }
 
 fn prewarm_python_path(
@@ -1029,8 +1015,14 @@ fn prewarm_python_path(
     frozen_time_ms: u128,
 ) -> Result<Option<Vec<u8>>, PythonExecutionError> {
     let debug_enabled = python_warmup_metrics_enabled(request);
-    let marker_path = warmup_marker_path(import_cache, context, request);
-    if marker_path.exists() && compile_cache_ready(import_cache) {
+    let marker_contents = warmup_marker_contents(import_cache, context, request);
+    let marker_path = warmup_marker_path(
+        import_cache.prewarm_marker_dir(),
+        "python-runner-prewarm",
+        PYTHON_WARMUP_MARKER_VERSION,
+        &marker_contents,
+    );
+    if marker_path.exists() && compile_cache_ready(&import_cache.shared_compile_cache_dir()) {
         return Ok(warmup_metrics_line(
             debug_enabled,
             false,
@@ -1075,11 +1067,7 @@ fn prewarm_python_path(
         });
     }
 
-    fs::write(
-        &marker_path,
-        warmup_marker_contents(import_cache, context, request),
-    )
-    .map_err(PythonExecutionError::PrepareWarmPath)?;
+    fs::write(&marker_path, marker_contents).map_err(PythonExecutionError::PrepareWarmPath)?;
     Ok(warmup_metrics_line(
         debug_enabled,
         true,
@@ -1088,17 +1076,6 @@ fn prewarm_python_path(
         import_cache,
         context,
         request,
-    ))
-}
-
-fn warmup_marker_path(
-    import_cache: &NodeImportCache,
-    context: &PythonContext,
-    request: &StartPythonExecutionRequest,
-) -> PathBuf {
-    import_cache.prewarm_marker_dir().join(format!(
-        "python-runner-prewarm-v{PYTHON_WARMUP_MARKER_VERSION}-{:016x}.stamp",
-        stable_hash64(warmup_marker_contents(import_cache, context, request).as_bytes()),
     ))
 }
 
@@ -1126,19 +1103,8 @@ fn warmup_marker_contents(
     .join("\n")
 }
 
-fn compile_cache_ready(import_cache: &NodeImportCache) -> bool {
-    let compile_cache_dir = import_cache.shared_compile_cache_dir();
-    fs::read_dir(compile_cache_dir)
-        .ok()
-        .and_then(|mut entries| entries.next())
-        .is_some()
-}
-
 fn python_warmup_metrics_enabled(request: &StartPythonExecutionRequest) -> bool {
-    request
-        .env
-        .get(PYTHON_WARMUP_DEBUG_ENV)
-        .is_some_and(|value| value == "1")
+    env_flag_enabled(&request.env, PYTHON_WARMUP_DEBUG_ENV)
 }
 
 fn warmup_metrics_line(
@@ -1167,22 +1133,6 @@ fn warmup_metrics_line(
         )
         .into_bytes(),
     )
-}
-
-fn file_fingerprint(path: &Path) -> String {
-    match fs::metadata(path) {
-        Ok(metadata) => format!(
-            "{}:{}",
-            metadata.len(),
-            metadata
-                .modified()
-                .ok()
-                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis().to_string())
-                .unwrap_or_else(|| String::from("unknown"))
-        ),
-        Err(_) => String::from("missing"),
-    }
 }
 
 fn create_python_vfs_rpc_channels() -> Result<PythonVfsRpcChannels, PythonExecutionError> {

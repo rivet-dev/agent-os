@@ -1,4 +1,4 @@
-use crate::common::{encode_json_string, frozen_time_ms, stable_hash64};
+use crate::common::{encode_json_string, frozen_time_ms};
 use crate::node_import_cache::NodeImportCache;
 use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
@@ -6,6 +6,11 @@ use crate::node_process::{
     node_binary, node_resolution_read_paths, resolve_path_like_specifier,
     spawn_node_control_reader, spawn_stream_reader, LinePrefixFilter, NodeControlMessage,
     NodeSignalDispositionAction, NodeSignalHandlerRegistration,
+};
+use crate::runtime_support::{
+    configure_compile_cache, env_flag_enabled, file_fingerprint, import_cache_root, sandbox_root,
+    warmup_marker_path, NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV,
+    NODE_FROZEN_TIME_ENV, NODE_SANDBOX_ROOT_ENV,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -18,7 +23,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread::JoinHandle;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 const WASM_MODULE_PATH_ENV: &str = "AGENT_OS_WASM_MODULE_PATH";
 const WASM_GUEST_ARGV_ENV: &str = "AGENT_OS_GUEST_ARGV";
@@ -30,10 +35,6 @@ pub const WASM_MAX_FUEL_ENV: &str = "AGENT_OS_WASM_MAX_FUEL";
 pub const WASM_MAX_MEMORY_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_MEMORY_BYTES";
 pub const WASM_MAX_STACK_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_STACK_BYTES";
 const WASM_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_WASM_WARMUP_METRICS__:";
-const NODE_COMPILE_CACHE_ENV: &str = "NODE_COMPILE_CACHE";
-const NODE_DISABLE_COMPILE_CACHE_ENV: &str = "NODE_DISABLE_COMPILE_CACHE";
-const NODE_FROZEN_TIME_ENV: &str = "AGENT_OS_FROZEN_TIME_MS";
-const NODE_SANDBOX_ROOT_ENV: &str = "AGENT_OS_SANDBOX_ROOT";
 const WASM_WARMUP_MARKER_VERSION: &str = "1";
 const SIGNAL_STATE_CONTROL_PREFIX: &str = "__AGENT_OS_SIGNAL_STATE__:";
 const CONTROLLED_STDERR_PREFIXES: &[&str] = &[SIGNAL_STATE_CONTROL_PREFIX];
@@ -502,11 +503,14 @@ fn prewarm_wasm_path(
     frozen_time_ms: u128,
     execution_timeout: Option<Duration>,
 ) -> Result<Option<Vec<u8>>, WasmExecutionError> {
-    let debug_enabled = request
-        .env
-        .get(WASM_WARMUP_DEBUG_ENV)
-        .is_some_and(|value| value == "1");
-    let marker_path = warmup_marker_path(import_cache, context, request);
+    let debug_enabled = env_flag_enabled(&request.env, WASM_WARMUP_DEBUG_ENV);
+    let marker_contents = warmup_marker_contents(context, request);
+    let marker_path = warmup_marker_path(
+        import_cache.prewarm_marker_dir(),
+        "wasm-runner-prewarm",
+        WASM_WARMUP_MARKER_VERSION,
+        &marker_contents,
+    );
 
     if marker_path.exists() {
         return Ok(warmup_metrics_line(
@@ -550,8 +554,7 @@ fn prewarm_wasm_path(
         });
     }
 
-    fs::write(&marker_path, warmup_marker_contents(context, request))
-        .map_err(WasmExecutionError::PrepareWarmPath)?;
+    fs::write(&marker_path, marker_contents).map_err(WasmExecutionError::PrepareWarmPath)?;
 
     Ok(warmup_metrics_line(
         debug_enabled,
@@ -569,16 +572,8 @@ fn configure_wasm_node_sandbox(
     context: &WasmContext,
     request: &StartWasmExecutionRequest,
 ) -> Result<(), WasmExecutionError> {
-    let sandbox_root = request
-        .env
-        .get(NODE_SANDBOX_ROOT_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| request.cwd.clone());
-    let cache_root = import_cache
-        .cache_path()
-        .parent()
-        .unwrap_or(import_cache.prewarm_marker_dir())
-        .to_path_buf();
+    let sandbox_root = sandbox_root(&request.env, &request.cwd);
+    let cache_root = import_cache_root(import_cache, import_cache.prewarm_marker_dir());
     let compile_cache_dir = import_cache.shared_compile_cache_dir();
     let mut read_paths = vec![cache_root.clone(), compile_cache_dir.clone()];
     let mut write_paths = vec![cache_root, compile_cache_dir];
@@ -623,29 +618,16 @@ fn configure_node_command(
     request: &StartWasmExecutionRequest,
 ) -> Result<(), WasmExecutionError> {
     let compile_cache_dir = import_cache.shared_compile_cache_dir();
-    fs::create_dir_all(&compile_cache_dir).map_err(WasmExecutionError::PrepareWarmPath)?;
+    configure_compile_cache(command, &compile_cache_dir)
+        .map_err(WasmExecutionError::PrepareWarmPath)?;
 
     if let Some(stack_bytes) = wasm_stack_limit_bytes(request)? {
         let stack_kib = (stack_bytes.saturating_add(1023) / 1024).max(64);
         command.arg(format!("--stack-size={stack_kib}"));
     }
 
-    command
-        .env_remove(NODE_DISABLE_COMPILE_CACHE_ENV)
-        .env(NODE_COMPILE_CACHE_ENV, &compile_cache_dir)
-        .env(NODE_FROZEN_TIME_ENV, frozen_time_ms.to_string());
+    command.env(NODE_FROZEN_TIME_ENV, frozen_time_ms.to_string());
     Ok(())
-}
-
-fn warmup_marker_path(
-    import_cache: &NodeImportCache,
-    context: &WasmContext,
-    request: &StartWasmExecutionRequest,
-) -> PathBuf {
-    import_cache.prewarm_marker_dir().join(format!(
-        "wasm-runner-prewarm-v{WASM_WARMUP_MARKER_VERSION}-{:016x}.stamp",
-        stable_hash64(warmup_marker_contents(context, request).as_bytes()),
-    ))
 }
 
 fn warmup_marker_contents(context: &WasmContext, request: &StartWasmExecutionRequest) -> String {
@@ -701,22 +683,6 @@ fn resolved_module_path(specifier: &str, cwd: &Path) -> PathBuf {
 
 fn is_path_like(specifier: &str) -> bool {
     specifier.starts_with('.') || specifier.starts_with('/') || specifier.starts_with("file:")
-}
-
-fn file_fingerprint(path: &Path) -> String {
-    match fs::metadata(path) {
-        Ok(metadata) => format!(
-            "{}:{}",
-            metadata.len(),
-            metadata
-                .modified()
-                .ok()
-                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis().to_string())
-                .unwrap_or_else(|| String::from("unknown"))
-        ),
-        Err(_) => String::from("missing"),
-    }
 }
 
 #[derive(Debug)]

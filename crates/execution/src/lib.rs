@@ -5,6 +5,7 @@
 mod common;
 mod node_import_cache;
 mod node_process;
+mod runtime_support;
 
 pub mod benchmark;
 pub mod javascript;

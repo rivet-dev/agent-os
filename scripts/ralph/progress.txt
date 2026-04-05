@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Execution host-runner scripts that `NodeImportCache` materializes should live in `crates/execution/assets/runners/` and be loaded with `include_str!`; for temp-cache cleanup regressions, construct the cache with `NodeImportCache::new_in(...)` so the one-time sweep is scoped to the test root.
 - Real bundled-Pyodide coverage belongs in `crates/execution/src/node_import_cache.rs` materialized-runner tests, and those helpers should load `timing-bootstrap.mjs` so frozen `Date`/`performance` behavior matches real execution launches; use `crates/execution/tests/python.rs` for fake-`pyodide.mjs` bootstrap regressions.
 - Sidecar `host_dir` mounts should anchor guest path resolution with `openat2(..., RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` and translate kernel `EXDEV` escape rejections back to guest-facing `EACCES`.
 - Python VFS RPCs are intentionally scoped to `/workspace`; normalize and reject anything outside that guest root in `crates/sidecar/src/service.rs` before touching the kernel VFS.
@@ -790,4 +791,25 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Real Pyodide behavior is easiest to validate in `node_import_cache` materialized-runner tests, while bootstrap hardening scenarios are cheaper and clearer with fake `pyodide.mjs` fixtures in `crates/execution/tests/python.rs`.
 - Gotchas encountered: The materialized Python-runner test helpers must import `timing-bootstrap.mjs`; without that, frozen-time assertions measure the bare runner rather than the real execution path.
 - Useful context: Focused checks that passed for this story were `cargo test -p agent-os-execution --test python python_execution_blocks_network_requests_during_pyodide_init -- --exact`, `cargo test -p agent-os-execution node_import_cache::tests::materialized_python_runner_blocks_pyodide_js_escape_modules -- --exact`, `cargo test -p agent-os-execution node_import_cache::tests::materialized_python_runner_exposes_frozen_time_to_python -- --exact`, and `cargo check -p agent-os-execution`.
+---
+## 2026-04-05 04:41:51 PDT - US-042
+- What was implemented
+- Extracted the Pyodide host runner into the checked-in asset `crates/execution/assets/runners/python-runner.mjs` and switched `crates/execution/src/node_import_cache.rs` to materialize it via `include_str!` instead of keeping the runtime embedded inline in Rust.
+- Added `crates/execution/src/runtime_support.rs` to share Node runtime helpers across `python.rs`, `javascript.rs`, and `wasm.rs`, covering compile-cache setup, sandbox-root/cache-root resolution, warmup marker hashing, feature-flag parsing, and shared file fingerprinting.
+- Added startup cleanup for stale `agent-os-node-import-cache-*` directories keyed by temp-root, plus a regression that exercises isolated cleanup through `NodeImportCache::new_in(...)`.
+- Files changed
+- `AGENTS.md`
+- `crates/execution/assets/runners/python-runner.mjs`
+- `crates/execution/src/javascript.rs`
+- `crates/execution/src/lib.rs`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/src/python.rs`
+- `crates/execution/src/runtime_support.rs`
+- `crates/execution/src/wasm.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Execution-host runner scripts are easier to maintain as checked-in assets loaded with `include_str!` than as multi-hundred-line Rust string literals, and the shared runtime helper module is the right place for cross-runtime Node warmup/compile-cache/path utilities.
+  - Gotchas encountered: Temp-cache cleanup needs to be keyed by the chosen base directory instead of a single global one-shot, otherwise tests cannot exercise cleanup safely after other `NodeImportCache::default()` calls have already happened in-process.
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-execution`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1`, `cargo test -p agent-os-execution --test python -- --test-threads=1`, `cargo test -p agent-os-execution --test wasm -- --test-threads=1`, and `cargo test -p agent-os-execution --test javascript -- --test-threads=1` all pass after this change.
 ---

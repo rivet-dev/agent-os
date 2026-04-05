@@ -6,6 +6,11 @@ use crate::node_process::{
     node_resolution_read_paths, resolve_path_like_specifier, spawn_node_control_reader,
     spawn_stream_reader, spawn_waiter, LinePrefixFilter, NodeControlMessage,
 };
+use crate::runtime_support::{
+    configure_compile_cache, env_flag_enabled, import_cache_root, sandbox_root, warmup_marker_path,
+    NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
+    NODE_SANDBOX_ROOT_ENV,
+};
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
 use nix::unistd::pipe2;
 use serde::Deserialize;
@@ -29,12 +34,9 @@ const NODE_GUEST_ARGV_ENV: &str = "AGENT_OS_GUEST_ARGV";
 const NODE_PREWARM_IMPORTS_ENV: &str = "AGENT_OS_NODE_PREWARM_IMPORTS";
 const NODE_WARMUP_DEBUG_ENV: &str = "AGENT_OS_NODE_WARMUP_DEBUG";
 const NODE_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_NODE_WARMUP_METRICS__:";
-const NODE_COMPILE_CACHE_ENV: &str = "NODE_COMPILE_CACHE";
-const NODE_DISABLE_COMPILE_CACHE_ENV: &str = "NODE_DISABLE_COMPILE_CACHE";
 const NODE_IMPORT_COMPILE_CACHE_NAMESPACE_VERSION: &str = "3";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
-const NODE_FROZEN_TIME_ENV: &str = "AGENT_OS_FROZEN_TIME_MS";
 const NODE_KEEP_STDIN_OPEN_ENV: &str = "AGENT_OS_KEEP_STDIN_OPEN";
 const NODE_GUEST_ENTRYPOINT_ENV: &str = "AGENT_OS_GUEST_ENTRYPOINT";
 const NODE_GUEST_PATH_MAPPINGS_ENV: &str = "AGENT_OS_GUEST_PATH_MAPPINGS";
@@ -47,7 +49,6 @@ const NODE_PARENT_ALLOW_CHILD_PROCESS_ENV: &str = "AGENT_OS_PARENT_NODE_ALLOW_CH
 const NODE_PARENT_ALLOW_WORKER_ENV: &str = "AGENT_OS_PARENT_NODE_ALLOW_WORKER";
 const NODE_EXTRA_FS_READ_PATHS_ENV: &str = "AGENT_OS_EXTRA_FS_READ_PATHS";
 const NODE_EXTRA_FS_WRITE_PATHS_ENV: &str = "AGENT_OS_EXTRA_FS_WRITE_PATHS";
-const NODE_SANDBOX_ROOT_ENV: &str = "AGENT_OS_SANDBOX_ROOT";
 const NODE_ALLOWED_BUILTINS_ENV: &str = "AGENT_OS_ALLOWED_NODE_BUILTINS";
 const NODE_LOOPBACK_EXEMPT_PORTS_ENV: &str = "AGENT_OS_LOOPBACK_EXEMPT_PORTS";
 const NODE_SYNC_RPC_ENABLE_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_ENABLE";
@@ -575,10 +576,7 @@ fn prewarm_node_import_path(
     request: &StartJavascriptExecutionRequest,
     frozen_time_ms: u128,
 ) -> Result<Option<Vec<u8>>, JavascriptExecutionError> {
-    let debug_enabled = request
-        .env
-        .get(NODE_WARMUP_DEBUG_ENV)
-        .is_some_and(|value| value == "1");
+    let debug_enabled = env_flag_enabled(&request.env, NODE_WARMUP_DEBUG_ENV);
 
     let Some(_compile_cache_dir) = &context.compile_cache_dir else {
         return Ok(warmup_metrics_line(
@@ -589,7 +587,12 @@ fn prewarm_node_import_path(
         ));
     };
 
-    let marker_path = warmup_marker_path(import_cache);
+    let marker_path = warmup_marker_path(
+        import_cache.prewarm_marker_dir(),
+        "node-import-prewarm",
+        NODE_WARMUP_MARKER_VERSION,
+        &warmup_marker_contents(),
+    );
     if marker_path.exists() {
         return Ok(warmup_metrics_line(
             debug_enabled,
@@ -764,16 +767,8 @@ fn configure_node_sandbox(
     context: &JavascriptContext,
     request: &StartJavascriptExecutionRequest,
 ) -> Result<(), JavascriptExecutionError> {
-    let sandbox_root = request
-        .env
-        .get(NODE_SANDBOX_ROOT_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| request.cwd.clone());
-    let cache_root = import_cache
-        .cache_path()
-        .parent()
-        .unwrap_or(import_cache.asset_root())
-        .to_path_buf();
+    let sandbox_root = sandbox_root(&request.env, &request.cwd);
+    let cache_root = import_cache_root(import_cache, import_cache.asset_root());
     let mut read_paths = vec![cache_root.clone()];
     let mut write_paths = vec![cache_root, sandbox_root.clone()];
 
@@ -867,20 +862,11 @@ fn configure_node_command(
         .env(NODE_FROZEN_TIME_ENV, frozen_time_ms.to_string());
 
     if let Some(compile_cache_dir) = &context.compile_cache_dir {
-        fs::create_dir_all(compile_cache_dir)
+        configure_compile_cache(command, compile_cache_dir)
             .map_err(JavascriptExecutionError::PrepareImportCache)?;
-        command.env_remove(NODE_DISABLE_COMPILE_CACHE_ENV);
-        command.env(NODE_COMPILE_CACHE_ENV, compile_cache_dir);
     }
 
     Ok(())
-}
-
-fn warmup_marker_path(import_cache: &NodeImportCache) -> PathBuf {
-    import_cache.prewarm_marker_dir().join(format!(
-        "node-import-prewarm-v{NODE_WARMUP_MARKER_VERSION}-{:016x}.stamp",
-        stable_hash64(warmup_marker_contents().as_bytes()),
-    ))
 }
 
 fn warmup_marker_contents() -> String {
