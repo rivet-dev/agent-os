@@ -73,7 +73,7 @@ use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -1306,6 +1306,8 @@ struct ActiveProcess {
     execution: ActiveExecution,
     child_processes: BTreeMap<String, ActiveProcess>,
     next_child_process_id: usize,
+    tcp_listeners: BTreeMap<String, ActiveTcpListener>,
+    next_tcp_listener_id: usize,
     tcp_sockets: BTreeMap<String, ActiveTcpSocket>,
     next_tcp_socket_id: usize,
 }
@@ -1324,6 +1326,8 @@ impl ActiveProcess {
             execution,
             child_processes: BTreeMap::new(),
             next_child_process_id: 0,
+            tcp_listeners: BTreeMap::new(),
+            next_tcp_listener_id: 0,
             tcp_sockets: BTreeMap::new(),
             next_tcp_socket_id: 0,
         }
@@ -1334,6 +1338,11 @@ impl ActiveProcess {
         format!("child-{}", self.next_child_process_id)
     }
 
+    fn allocate_tcp_listener_id(&mut self) -> String {
+        self.next_tcp_listener_id += 1;
+        format!("listener-{}", self.next_tcp_listener_id)
+    }
+
     fn allocate_tcp_socket_id(&mut self) -> String {
         self.next_tcp_socket_id += 1;
         format!("socket-{}", self.next_tcp_socket_id)
@@ -1341,11 +1350,32 @@ impl ActiveProcess {
 }
 
 #[derive(Debug)]
+enum JavascriptTcpListenerEvent {
+    Connection(PendingTcpSocket),
+    Error {
+        code: Option<String>,
+        message: String,
+    },
+}
+
+#[derive(Debug)]
+struct PendingTcpSocket {
+    stream: TcpStream,
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+}
+
+#[derive(Debug)]
 enum JavascriptTcpSocketEvent {
     Data(Vec<u8>),
     End,
-    Close { had_error: bool },
-    Error { code: Option<String>, message: String },
+    Close {
+        had_error: bool,
+    },
+    Error {
+        code: Option<String>,
+        message: String,
+    },
 }
 
 #[derive(Debug)]
@@ -1361,7 +1391,12 @@ impl ActiveTcpSocket {
         let remote_addr = resolve_tcp_connect_addr(host, port)?;
         let stream = TcpStream::connect_timeout(&remote_addr, Duration::from_secs(30))
             .map_err(sidecar_net_error)?;
+        Self::from_stream(stream)
+    }
+
+    fn from_stream(stream: TcpStream) -> Result<Self, SidecarError> {
         let local_addr = stream.local_addr().map_err(sidecar_net_error)?;
+        let remote_addr = stream.peer_addr().map_err(sidecar_net_error)?;
         let read_stream = stream.try_clone().map_err(sidecar_net_error)?;
         let stream = Arc::new(Mutex::new(stream));
         let (sender, events) = mpsc::channel();
@@ -1379,9 +1414,9 @@ impl ActiveTcpSocket {
         match self.events.recv_timeout(wait) {
             Ok(event) => Ok(Some(event)),
             Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => Ok(Some(JavascriptTcpSocketEvent::Close {
-                had_error: false,
-            })),
+            Err(RecvTimeoutError::Disconnected) => {
+                Ok(Some(JavascriptTcpSocketEvent::Close { had_error: false }))
+            }
         }
     }
 
@@ -1399,9 +1434,7 @@ impl ActiveTcpSocket {
             .stream
             .lock()
             .map_err(|_| SidecarError::InvalidState(String::from("TCP socket lock poisoned")))?;
-        stream
-            .shutdown(Shutdown::Write)
-            .map_err(sidecar_net_error)
+        stream.shutdown(Shutdown::Write).map_err(sidecar_net_error)
     }
 
     fn close(&self) -> Result<(), SidecarError> {
@@ -1410,6 +1443,63 @@ impl ActiveTcpSocket {
             .lock()
             .map_err(|_| SidecarError::InvalidState(String::from("TCP socket lock poisoned")))?;
         stream.shutdown(Shutdown::Both).map_err(sidecar_net_error)
+    }
+}
+
+#[derive(Debug)]
+struct ActiveTcpListener {
+    listener: TcpListener,
+    local_addr: SocketAddr,
+}
+
+impl ActiveTcpListener {
+    fn bind(host: &str, port: u16) -> Result<Self, SidecarError> {
+        let bind_addr = resolve_tcp_bind_addr(host, port)?;
+        let listener = TcpListener::bind(bind_addr).map_err(sidecar_net_error)?;
+        listener.set_nonblocking(true).map_err(sidecar_net_error)?;
+        let local_addr = listener.local_addr().map_err(sidecar_net_error)?;
+        Ok(Self {
+            listener,
+            local_addr,
+        })
+    }
+
+    fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    fn poll(&mut self, wait: Duration) -> Result<Option<JavascriptTcpListenerEvent>, SidecarError> {
+        let deadline = Instant::now() + wait;
+        loop {
+            match self.listener.accept() {
+                Ok((stream, remote_addr)) => {
+                    let local_addr = stream.local_addr().map_err(sidecar_net_error)?;
+                    return Ok(Some(JavascriptTcpListenerEvent::Connection(
+                        PendingTcpSocket {
+                            stream,
+                            local_addr,
+                            remote_addr,
+                        },
+                    )));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if wait.is_zero() || Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    return Ok(Some(JavascriptTcpListenerEvent::Error {
+                        code: io_error_code(&error),
+                        message: error.to_string(),
+                    }));
+                }
+            }
+        }
+    }
+
+    fn close(&self) -> Result<(), SidecarError> {
+        Ok(())
     }
 }
 
@@ -2029,7 +2119,10 @@ where
         ];
         execution_commands.extend(vm.command_guest_paths.keys().cloned());
         vm.kernel
-            .register_driver(CommandDriver::new(EXECUTION_DRIVER_NAME, execution_commands))
+            .register_driver(CommandDriver::new(
+                EXECUTION_DRIVER_NAME,
+                execution_commands,
+            ))
             .map_err(kernel_error)?;
         vm.configuration = VmConfiguration {
             mounts: payload.mounts.clone(),
@@ -2510,7 +2603,12 @@ where
 
         vm.active_processes.insert(
             payload.process_id.clone(),
-            ActiveProcess::new(kernel_handle.pid(), kernel_handle, payload.runtime, execution),
+            ActiveProcess::new(
+                kernel_handle.pid(),
+                kernel_handle,
+                payload.runtime,
+                execution,
+            ),
         );
         self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
 
@@ -3141,10 +3239,7 @@ where
                         }
                     })
                 };
-                env.insert(
-                    String::from("AGENT_OS_GUEST_ENTRYPOINT"),
-                    guest_entrypoint,
-                );
+                env.insert(String::from("AGENT_OS_GUEST_ENTRYPOINT"), guest_entrypoint);
                 host_entrypoint.to_string_lossy().into_owned()
             } else {
                 entrypoint_specifier.clone()
@@ -3492,21 +3587,19 @@ where
                         ))
                     })
                     .and_then(|value| {
-                        serde_json::from_value::<JavascriptChildProcessSpawnRequest>(value)
-                            .map_err(|error| {
+                        serde_json::from_value::<JavascriptChildProcessSpawnRequest>(value).map_err(
+                            |error| {
                                 SidecarError::InvalidState(format!(
                                     "invalid child_process.spawn payload: {error}"
                                 ))
-                            })
+                            },
+                        )
                     })?;
                 self.spawn_javascript_child_process(vm_id, process_id, payload)
             }
             "child_process.poll" => {
-                let child_process_id = javascript_sync_rpc_arg_str(
-                    &request.args,
-                    0,
-                    "child_process.poll child id",
-                )?;
+                let child_process_id =
+                    javascript_sync_rpc_arg_str(&request.args, 0, "child_process.poll child id")?;
                 let wait_ms = javascript_sync_rpc_arg_u64_optional(
                     &request.args,
                     1,
@@ -3544,11 +3637,8 @@ where
                 Ok(Value::Null)
             }
             "child_process.kill" => {
-                let child_process_id = javascript_sync_rpc_arg_str(
-                    &request.args,
-                    0,
-                    "child_process.kill child id",
-                )?;
+                let child_process_id =
+                    javascript_sync_rpc_arg_str(&request.args, 0, "child_process.kill child id")?;
                 let signal =
                     javascript_sync_rpc_arg_str(&request.args, 1, "child_process.kill signal")?;
                 self.kill_javascript_child_process(vm_id, process_id, child_process_id, signal)?;
@@ -4253,6 +4343,27 @@ fn find_socket_state_entry(
     let vm = vm.ok_or_else(|| SidecarError::InvalidState(String::from("unknown sidecar VM")))?;
 
     for (process_id, process) in &vm.active_processes {
+        if request.path.is_none() {
+            for listener in process.tcp_listeners.values() {
+                let local_addr = listener.local_addr();
+                let local_host = local_addr.ip().to_string();
+                if !socket_host_matches(request.host.as_deref(), &local_host) {
+                    continue;
+                }
+                if let Some(port) = request.port {
+                    if local_addr.port() != port {
+                        continue;
+                    }
+                }
+                return Ok(Some(SocketStateEntry {
+                    process_id: process_id.to_owned(),
+                    host: Some(local_host),
+                    port: Some(local_addr.port()),
+                    path: None,
+                }));
+            }
+        }
+
         let child_pid = process.execution.child_pid();
         let inodes = socket_inodes_for_pid(child_pid)?;
         if inodes.is_empty() {
@@ -4385,10 +4496,8 @@ fn find_inet_socket_for_pid(
         if matches!(kind, SocketQueryKind::TcpListener) && entry.state != "0A" {
             continue;
         }
-        if let Some(host) = requested_host {
-            if entry.local_host != host {
-                continue;
-            }
+        if !socket_host_matches(requested_host, &entry.local_host) {
+            continue;
         }
         if let Some(port) = requested_port {
             if entry.local_port != port {
@@ -4404,6 +4513,40 @@ fn find_inet_socket_for_pid(
     }
 
     Ok(None)
+}
+
+fn is_unspecified_socket_host(host: &str) -> bool {
+    host == "0.0.0.0" || host == "::"
+}
+
+fn is_loopback_socket_host(host: &str) -> bool {
+    host == "127.0.0.1" || host == "::1" || host.eq_ignore_ascii_case("localhost")
+}
+
+fn socket_host_matches(requested: Option<&str>, actual: &str) -> bool {
+    match requested {
+        None => true,
+        Some(requested) if requested == actual => true,
+        Some(requested)
+            if is_unspecified_socket_host(requested) && is_unspecified_socket_host(actual) =>
+        {
+            true
+        }
+        Some(requested)
+            if is_unspecified_socket_host(requested) && is_loopback_socket_host(actual) =>
+        {
+            true
+        }
+        Some(requested)
+            if is_loopback_socket_host(requested) && is_unspecified_socket_host(actual) =>
+        {
+            true
+        }
+        Some(requested) if requested.eq_ignore_ascii_case("localhost") => {
+            is_loopback_socket_host(actual) || is_unspecified_socket_host(actual)
+        }
+        _ => false,
+    }
 }
 
 fn parse_proc_net_entries(table_path: &str) -> Result<Vec<ProcNetEntry>, SidecarError> {
@@ -4575,9 +4718,7 @@ fn host_mount_path_for_guest_path(vm: &VmState, guest_path: &str) -> Option<Path
     mounts.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
 
     for (guest_root, host_root) in mounts {
-        if normalized != guest_root
-            && !normalized.starts_with(&format!("{guest_root}/"))
-        {
+        if normalized != guest_root && !normalized.starts_with(&format!("{guest_root}/")) {
             continue;
         }
 
@@ -4633,6 +4774,26 @@ struct JavascriptNetConnectRequest {
     port: u16,
 }
 
+#[derive(Debug, Deserialize)]
+struct JavascriptNetListenRequest {
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    port: u16,
+    #[serde(default)]
+    backlog: Option<u32>,
+}
+
+fn resolve_tcp_bind_addr(host: &str, port: u16) -> Result<SocketAddr, SidecarError> {
+    (host, port)
+        .to_socket_addrs()
+        .map_err(sidecar_net_error)?
+        .next()
+        .ok_or_else(|| {
+            SidecarError::Execution(format!("failed to resolve TCP bind address {host}:{port}"))
+        })
+}
+
 fn resolve_tcp_connect_addr(host: &str, port: u16) -> Result<SocketAddr, SidecarError> {
     (host, port)
         .to_socket_addrs()
@@ -4652,8 +4813,11 @@ fn socket_addr_family(addr: &SocketAddr) -> &'static str {
 
 fn io_error_code(error: &std::io::Error) -> Option<String> {
     match error.raw_os_error() {
+        Some(libc::EADDRINUSE) => Some(String::from("EADDRINUSE")),
+        Some(libc::EADDRNOTAVAIL) => Some(String::from("EADDRNOTAVAIL")),
         Some(libc::ECONNREFUSED) => Some(String::from("ECONNREFUSED")),
         Some(libc::ECONNRESET) => Some(String::from("ECONNRESET")),
+        Some(libc::EINVAL) => Some(String::from("EINVAL")),
         Some(libc::EPIPE) => Some(String::from("EPIPE")),
         Some(libc::ETIMEDOUT) => Some(String::from("ETIMEDOUT")),
         Some(libc::EHOSTUNREACH) => Some(String::from("EHOSTUNREACH")),
@@ -4683,7 +4847,9 @@ fn spawn_tcp_socket_reader(stream: TcpStream, sender: Sender<JavascriptTcpSocket
                 }
                 Ok(bytes_read) => {
                     if sender
-                        .send(JavascriptTcpSocketEvent::Data(buffer[..bytes_read].to_vec()))
+                        .send(JavascriptTcpSocketEvent::Data(
+                            buffer[..bytes_read].to_vec(),
+                        ))
                         .is_err()
                     {
                         break;
@@ -4704,11 +4870,14 @@ fn spawn_tcp_socket_reader(stream: TcpStream, sender: Sender<JavascriptTcpSocket
 }
 
 fn terminate_child_process_tree(kernel: &mut SidecarKernel, process: &mut ActiveProcess) {
-    let sockets = process
-        .tcp_sockets
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
+    let listener_ids = process.tcp_listeners.keys().cloned().collect::<Vec<_>>();
+    for listener_id in listener_ids {
+        if let Some(listener) = process.tcp_listeners.remove(&listener_id) {
+            let _ = listener.close();
+        }
+    }
+
+    let sockets = process.tcp_sockets.keys().cloned().collect::<Vec<_>>();
     for socket_id in sockets {
         if let Some(socket) = process.tcp_sockets.remove(&socket_id) {
             let _ = socket.close();
@@ -4881,7 +5050,8 @@ fn service_javascript_sync_rpc(
     request: &JavascriptSyncRpcRequest,
 ) -> Result<Value, SidecarError> {
     match request.method.as_str() {
-        "net.connect" | "net.poll" | "net.write" | "net.shutdown" | "net.destroy" => {
+        "net.connect" | "net.listen" | "net.poll" | "net.server_poll" | "net.write"
+        | "net.shutdown" | "net.destroy" | "net.server_close" => {
             service_javascript_net_sync_rpc(process, request)
         }
         _ => service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request),
@@ -4904,13 +5074,9 @@ fn service_javascript_net_sync_rpc(
                     ))
                 })
                 .and_then(|value| {
-                    serde_json::from_value::<JavascriptNetConnectRequest>(value).map_err(
-                        |error| {
-                            SidecarError::InvalidState(format!(
-                                "invalid net.connect payload: {error}"
-                            ))
-                        },
-                    )
+                    serde_json::from_value::<JavascriptNetConnectRequest>(value).map_err(|error| {
+                        SidecarError::InvalidState(format!("invalid net.connect payload: {error}"))
+                    })
                 })?;
             let socket = ActiveTcpSocket::connect(
                 payload.host.as_deref().unwrap_or("localhost"),
@@ -4927,6 +5093,36 @@ fn service_javascript_net_sync_rpc(
                 "remoteAddress": remote_addr.ip().to_string(),
                 "remotePort": remote_addr.port(),
                 "remoteFamily": socket_addr_family(&remote_addr),
+            }))
+        }
+        "net.listen" => {
+            let payload = request
+                .args
+                .first()
+                .cloned()
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from(
+                        "net.listen requires a request payload",
+                    ))
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<JavascriptNetListenRequest>(value).map_err(|error| {
+                        SidecarError::InvalidState(format!("invalid net.listen payload: {error}"))
+                    })
+                })?;
+            let _ = payload.backlog;
+            let listener = ActiveTcpListener::bind(
+                payload.host.as_deref().unwrap_or("0.0.0.0"),
+                payload.port,
+            )?;
+            let listener_id = process.allocate_tcp_listener_id();
+            let local_addr = listener.local_addr();
+            process.tcp_listeners.insert(listener_id.clone(), listener);
+            Ok(json!({
+                "serverId": listener_id,
+                "localAddress": local_addr.ip().to_string(),
+                "localPort": local_addr.port(),
+                "family": socket_addr_family(&local_addr),
             }))
         }
         "net.poll" => {
@@ -4966,6 +5162,42 @@ fn service_javascript_net_sync_rpc(
                 None => Ok(Value::Null),
             }
         }
+        "net.server_poll" => {
+            let listener_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "net.server_poll listener id")?;
+            let wait_ms =
+                javascript_sync_rpc_arg_u64_optional(&request.args, 1, "net.server_poll wait ms")?
+                    .unwrap_or_default();
+            let event = {
+                let listener = process.tcp_listeners.get_mut(listener_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("unknown TCP listener {listener_id}"))
+                })?;
+                listener.poll(Duration::from_millis(wait_ms))?
+            };
+
+            match event {
+                Some(JavascriptTcpListenerEvent::Connection(pending)) => {
+                    let socket = ActiveTcpSocket::from_stream(pending.stream)?;
+                    let socket_id = process.allocate_tcp_socket_id();
+                    process.tcp_sockets.insert(socket_id.clone(), socket);
+                    Ok(json!({
+                        "type": "connection",
+                        "socketId": socket_id,
+                        "localAddress": pending.local_addr.ip().to_string(),
+                        "localPort": pending.local_addr.port(),
+                        "remoteAddress": pending.remote_addr.ip().to_string(),
+                        "remotePort": pending.remote_addr.port(),
+                        "remoteFamily": socket_addr_family(&pending.remote_addr),
+                    }))
+                }
+                Some(JavascriptTcpListenerEvent::Error { code, message }) => Ok(json!({
+                    "type": "error",
+                    "code": code,
+                    "message": message,
+                })),
+                None => Ok(Value::Null),
+            }
+        }
         "net.write" => {
             let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "net.write socket id")?;
             let chunk = javascript_sync_rpc_bytes_arg(&request.args, 1, "net.write chunk")?;
@@ -4984,12 +5216,20 @@ fn service_javascript_net_sync_rpc(
             Ok(Value::Null)
         }
         "net.destroy" => {
-            let socket_id =
-                javascript_sync_rpc_arg_str(&request.args, 0, "net.destroy socket id")?;
+            let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "net.destroy socket id")?;
             let socket = process.tcp_sockets.remove(socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown TCP socket {socket_id}"))
             })?;
             let _ = socket.close();
+            Ok(Value::Null)
+        }
+        "net.server_close" => {
+            let listener_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "net.server_close listener id")?;
+            let listener = process.tcp_listeners.remove(listener_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown TCP listener {listener_id}"))
+            })?;
+            listener.close()?;
             Ok(Value::Null)
         }
         _ => Err(SidecarError::InvalidState(format!(
@@ -5035,7 +5275,8 @@ fn service_javascript_fs_sync_rpc(
                 }
                 None => kernel.fd_read(EXECUTION_DRIVER_NAME, kernel_pid, fd, length),
             };
-            bytes.map(|payload| javascript_sync_rpc_bytes_value(&payload))
+            bytes
+                .map(|payload| javascript_sync_rpc_bytes_value(&payload))
                 .map_err(kernel_error)
         }
         "fs.write" | "fs.writeSync" => {
@@ -5048,13 +5289,9 @@ fn service_javascript_fs_sync_rpc(
                 "filesystem write position",
             )?;
             let written = match position {
-                Some(offset) => kernel.fd_pwrite(
-                    EXECUTION_DRIVER_NAME,
-                    kernel_pid,
-                    fd,
-                    &contents,
-                    offset,
-                ),
+                Some(offset) => {
+                    kernel.fd_pwrite(EXECUTION_DRIVER_NAME, kernel_pid, fd, &contents, offset)
+                }
                 None => kernel.fd_write(EXECUTION_DRIVER_NAME, kernel_pid, fd, &contents),
             };
             written.map(|count| json!(count)).map_err(kernel_error)
@@ -5077,8 +5314,7 @@ fn service_javascript_fs_sync_rpc(
                 .map_err(kernel_error)
         }
         "fs.readFileSync" | "fs.promises.readFile" => {
-            let path =
-                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readFile path")?;
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readFile path")?;
             let encoding = javascript_sync_rpc_encoding(&request.args);
             kernel
                 .read_file(path)
@@ -5091,8 +5327,7 @@ fn service_javascript_fs_sync_rpc(
                 .map_err(kernel_error)
         }
         "fs.writeFileSync" | "fs.promises.writeFile" => {
-            let path =
-                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem writeFile path")?;
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem writeFile path")?;
             let contents =
                 javascript_sync_rpc_bytes_arg(&request.args, 1, "filesystem writeFile contents")?;
             kernel
@@ -5137,11 +5372,8 @@ fn service_javascript_fs_sync_rpc(
         "fs.copyFileSync" | "fs.promises.copyFile" => {
             let source =
                 javascript_sync_rpc_arg_str(&request.args, 0, "filesystem copyFile source")?;
-            let destination = javascript_sync_rpc_arg_str(
-                &request.args,
-                1,
-                "filesystem copyFile destination",
-            )?;
+            let destination =
+                javascript_sync_rpc_arg_str(&request.args, 1, "filesystem copyFile destination")?;
             let contents = kernel.read_file(source).map_err(kernel_error)?;
             kernel
                 .write_file(destination, contents)
@@ -5153,9 +5385,11 @@ fn service_javascript_fs_sync_rpc(
             kernel.exists(path).map(Value::Bool).map_err(kernel_error)
         }
         "fs.readlinkSync" => {
-            let path =
-                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readlink path")?;
-            kernel.read_link(path).map(Value::String).map_err(kernel_error)
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readlink path")?;
+            kernel
+                .read_link(path)
+                .map(Value::String)
+                .map_err(kernel_error)
         }
         "fs.symlinkSync" => {
             let target =
@@ -5168,8 +5402,7 @@ fn service_javascript_fs_sync_rpc(
                 .map_err(kernel_error)
         }
         "fs.linkSync" => {
-            let source =
-                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem link source")?;
+            let source = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem link source")?;
             let destination =
                 javascript_sync_rpc_arg_str(&request.args, 1, "filesystem link path")?;
             kernel
@@ -5178,13 +5411,9 @@ fn service_javascript_fs_sync_rpc(
                 .map_err(kernel_error)
         }
         "fs.renameSync" | "fs.promises.rename" => {
-            let source =
-                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem rename source")?;
-            let destination = javascript_sync_rpc_arg_str(
-                &request.args,
-                1,
-                "filesystem rename destination",
-            )?;
+            let source = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem rename source")?;
+            let destination =
+                javascript_sync_rpc_arg_str(&request.args, 1, "filesystem rename destination")?;
             kernel
                 .rename(source, destination)
                 .map(|()| Value::Null)
@@ -5397,7 +5626,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{Shutdown, TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::thread;
@@ -6940,7 +7169,10 @@ console.log(
         assert!(stdout.contains("\"bytesRead\":5"), "stdout: {stdout}");
         assert!(stdout.contains("\"size\":7"), "stdout: {stdout}");
         assert!(stdout.contains("\"written\":6"), "stdout: {stdout}");
-        assert!(stdout.contains("\"asyncText\":\"abcde\""), "stdout: {stdout}");
+        assert!(
+            stdout.contains("\"asyncText\":\"abcde\""),
+            "stdout: {stdout}"
+        );
         assert!(stdout.contains("\"asyncSize\":7"), "stdout: {stdout}");
         assert!(
             stdout.contains("\"streamChunks\":[\"abc\",\"de\"]"),
@@ -7103,10 +7335,7 @@ await new Promise(() => {});
         assert_node_available();
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind tcp listener");
-        let port = listener
-            .local_addr()
-            .expect("listener address")
-            .port();
+        let port = listener.local_addr().expect("listener address").port();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept tcp client");
             let mut received = Vec::new();
@@ -7253,6 +7482,210 @@ socket.on("close", (hadError) => {{
         assert!(stdout.contains("\"hadError\":false"), "stdout: {stdout}");
         assert!(
             stdout.contains(&format!("\"remotePort\":{port}")),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn javascript_net_rpc_listens_accepts_connections_and_reports_listener_state() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-net-server-cwd");
+        write_fixture(
+            &cwd.join("entry.mjs"),
+            r#"
+import net from "node:net";
+
+const server = net.createServer((socket) => {
+  let data = "";
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk) => {
+    data += chunk;
+    socket.end(`pong:${chunk}`);
+  });
+  socket.on("error", (error) => {
+    console.error(error.stack ?? error.message);
+    process.exit(1);
+  });
+  socket.on("close", () => {
+    const address = server.address();
+    server.close(() => {
+      console.log(JSON.stringify({
+        address,
+        data,
+        localPort: socket.localPort,
+        remoteAddress: socket.remoteAddress,
+        remotePort: socket.remotePort,
+      }));
+      process.exit(0);
+    });
+  });
+});
+server.on("error", (error) => {
+  console.error(error.stack ?? error.message);
+  process.exit(1);
+});
+server.listen(0, "127.0.0.1", () => {
+  console.log(`listening:${server.address().port}`);
+});
+"#,
+        );
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-server"),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
+            );
+        }
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = None;
+        let mut listener_port = None;
+        let mut client_thread = None;
+        for _ in 0..192 {
+            let next_event = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-server")
+                    .map(|process| {
+                        process
+                            .execution
+                            .poll_event(Duration::from_secs(5))
+                            .expect("poll javascript net server event")
+                    })
+                    .flatten()
+            };
+            let Some(event) = next_event else {
+                if exit_code.is_some() {
+                    break;
+                }
+                continue;
+            };
+
+            match &event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    stdout.push_str(&String::from_utf8_lossy(chunk));
+                    if listener_port.is_none() {
+                        listener_port = stdout.lines().find_map(|line| {
+                            line.strip_prefix("listening:")
+                                .and_then(|value| value.trim().parse::<u16>().ok())
+                        });
+                        if let Some(port) = listener_port {
+                            let response = sidecar
+                                .dispatch(request(
+                                    1,
+                                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                                    RequestPayload::FindListener(FindListenerRequest {
+                                        host: Some(String::from("127.0.0.1")),
+                                        port: Some(port),
+                                        path: None,
+                                    }),
+                                ))
+                                .expect("query sidecar listener");
+                            match response.response.payload {
+                                ResponsePayload::ListenerSnapshot(snapshot) => {
+                                    let listener = snapshot.listener.expect("listener snapshot");
+                                    assert_eq!(listener.process_id, "proc-js-server");
+                                    assert_eq!(listener.host.as_deref(), Some("127.0.0.1"));
+                                    assert_eq!(listener.port, Some(port));
+                                }
+                                other => {
+                                    panic!("unexpected find_listener response payload: {other:?}")
+                                }
+                            }
+
+                            client_thread = Some(thread::spawn(move || {
+                                let mut stream = TcpStream::connect(("127.0.0.1", port))
+                                    .expect("connect to Agent OS net server");
+                                stream.write_all(b"ping").expect("write client payload");
+                                stream
+                                    .shutdown(Shutdown::Write)
+                                    .expect("shutdown client write half");
+                                let mut received = Vec::new();
+                                stream
+                                    .read_to_end(&mut received)
+                                    .expect("read server response");
+                                assert_eq!(
+                                    String::from_utf8(received).expect("server response utf8"),
+                                    "pong:ping"
+                                );
+                            }));
+                        }
+                    }
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    stderr.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Exited(code) => {
+                    exit_code = Some(*code);
+                }
+                _ => {}
+            }
+
+            sidecar
+                .handle_execution_event(&vm_id, "proc-js-server", event)
+                .expect("handle javascript net server event");
+        }
+
+        if let Some(client_thread) = client_thread {
+            client_thread.join().expect("join tcp client");
+        } else {
+            panic!("tcp client never started");
+        }
+
+        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        assert!(stdout.contains("\"data\":\"ping\""), "stdout: {stdout}");
+        assert!(
+            stdout.contains("\"address\":{\"address\":\"127.0.0.1\""),
             "stdout: {stdout}"
         );
     }
@@ -7428,7 +7861,10 @@ console.log(JSON.stringify({
 
         assert_eq!(spawn_parts[0], "spawn");
         assert_eq!(spawn_parts[1].parse::<u32>().expect("spawn pid"), child_pid);
-        assert_eq!(spawn_parts[2].parse::<u32>().expect("spawn ppid"), parent_pid);
+        assert_eq!(
+            spawn_parts[2].parse::<u32>().expect("spawn ppid"),
+            parent_pid
+        );
         assert_eq!(spawn_parts[3], "hello from nested child");
         assert_eq!(exec_parts[0], "exec");
         assert_eq!(exec_parts[2].parse::<u32>().expect("exec ppid"), parent_pid);

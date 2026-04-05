@@ -4,6 +4,7 @@
 - `AGENT_OS_ALLOWED_NODE_BUILTINS` is the shared source of truth for guest Node capability gating, but permissioned top-level JavaScript executions on Node v24 still need `--allow-worker` because `register(loader)` spins an internal loader worker; keep that runtime requirement separate from guest `worker_threads` exposure, and keep child-process permission args aligned with the allowed builtin set.
 - Guest-owned Node builtin polyfills that need both ESM and CJS coverage should be wired in three places together: loader import rewriting/asset resolution, the generated Node runner’s `process.getBuiltinModule` and `Module._load` hooks, and the core bridge’s default allowlist in `packages/core/src/sidecar/native-kernel-proxy.ts`.
 - When a Node builtin port is landing in phases, inherit untouched exports from a snapped host module and override only the RPC-backed surface for the current story; this keeps helper APIs working while the follow-on stories replace the remaining host-backed entrypoints.
+- When a guest Node networking port stops using real host listeners, mirror that state in `crates/sidecar/src/service.rs` `ActiveProcess` tracking and consult it from `find_listener`/socket snapshot queries before falling back to `/proc/[pid]/net/*`; procfs only sees host-owned sockets, not sidecar-managed polyfill listeners.
 - Pyodide guest hardening that must not rewrite user code belongs in `crates/execution/src/node_import_cache.rs` as a `pyodide.runPython(...)` bootstrap in the embedded Python runner, installed after package preloads and before `runPythonAsync()`.
 - The Pyodide host Node process is hardened with Node `--permission` in `crates/execution/src/python.rs`; keep its read allowlist scoped to the import-cache root, compile-cache dir, Pyodide bundle, and sandbox cwd, and keep writes limited to the cache paths plus sandbox cwd.
 - Node guest env hardening in `crates/execution/src/node_import_cache.rs` should snapshot `AGENT_OS_*` control vars first, then replace `process.env` with a filtered proxy so runtime internals keep working while guest enumeration/access stays scrubbed; when `node:module` is denied, bootstrap the runner via `process.getBuiltinModule('node:module')` instead of importing it through the guest loader.
@@ -325,4 +326,22 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Partial builtin ports like `net` can safely extend a snapped host module and override only the story-owned RPC surface, which keeps unaffected helpers and later-story APIs available without duplicating the whole builtin up front.
 - Gotchas encountered: `Duplex` must be snapped from `node:stream` explicitly in the generated Node runner, and `socket.end(...)` drives both `net.shutdown` and a later `net.destroy`, so guest-side sync-RPC regressions need to account for both lifecycle calls.
 - Useful context: `cargo check -p agent-os-execution`, `cargo check -p agent-os-sidecar`, `cargo test -p agent-os-execution ensure_materialized_writes_net_builtin_asset -- --exact`, `cargo test -p agent-os-execution --test javascript javascript_execution_routes_net_connect_through_sync_rpc -- --exact`, and `cargo test -p agent-os-sidecar javascript_net_rpc_connects_to_host_tcp_server -- --exact` all pass after this change.
+---
+## 2026-04-04 23:38:01 PDT - US-019
+- What was implemented
+- Added a guest `net.createServer`/`net.Server` polyfill in `crates/execution/src/node_import_cache.rs` that routes `listen`, accept polling, `address()`, and `close()` through the existing JavaScript sync-RPC bridge while handing accepted connections off as kernel-backed `net.Socket` instances.
+- Extended `crates/sidecar/src/service.rs` with sidecar-managed TCP listener state, `net.listen`/`net.server_poll`/`net.server_close` RPC handlers, accepted-socket promotion into the existing TCP socket table, and listener snapshot lookup from `ActiveProcess` state before the legacy `/proc` fallback.
+- Added focused execution and sidecar regressions for `net.createServer`, plus stabilized the socket-state integration test around the new sidecar-managed listener path.
+- Files changed
+- `CLAUDE.md`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/sidecar/src/service.rs`
+- `crates/sidecar/tests/socket_state_queries.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: Sidecar-managed Node listeners must be stored on `ActiveProcess` and surfaced through `find_listener`; once a builtin port stops binding a real host socket, `/proc/[pid]/net/*` no longer reflects guest listener state.
+- Gotchas encountered: Mixed socket-state tests can become noisy once an idle `net.createServer` starts long-polling `net.server_poll`; verify or tear down the listener once its snapshot is asserted, and poll signal-state snapshots until the separate control event has been observed.
+- Useful context: `cargo test -p agent-os-execution --test javascript javascript_execution_routes_net_create_server_through_sync_rpc -- --exact`, `cargo test -p agent-os-sidecar javascript_net_rpc_listens_accepts_connections_and_reports_listener_state -- --exact`, `cargo test -p agent-os-sidecar javascript_net_rpc_connects_to_host_tcp_server -- --exact`, `cargo test -p agent-os-sidecar --test socket_state_queries sidecar_queries_listener_udp_and_signal_state -- --exact`, `cargo check -p agent-os-execution`, and `cargo check -p agent-os-sidecar` all pass after this change.
 ---

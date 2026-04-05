@@ -2,8 +2,8 @@ mod support;
 
 use agent_os_sidecar::protocol::{
     DisposeReason, DisposeVmRequest, EventPayload, FindBoundUdpRequest, FindListenerRequest,
-    GetSignalStateRequest, GuestRuntimeKind, OwnershipScope, RequestPayload, ResponsePayload,
-    SignalDispositionAction,
+    GetSignalStateRequest, GuestRuntimeKind, KillProcessRequest, OwnershipScope, RequestPayload,
+    ResponsePayload, SignalDispositionAction,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -126,6 +126,52 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         "tcp-listening:43111",
     );
 
+    let listener_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let listener = sidecar
+            .dispatch(request(
+                7,
+                OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                RequestPayload::FindListener(FindListenerRequest {
+                    host: Some(String::from("0.0.0.0")),
+                    port: Some(43111),
+                    path: None,
+                }),
+            ))
+            .expect("query tcp listener");
+        match listener.response.payload {
+            ResponsePayload::ListenerSnapshot(snapshot) => {
+                if let Some(listener) = snapshot.listener {
+                    assert_eq!(listener.process_id, "tcp-listener");
+                    assert_eq!(listener.host.as_deref(), Some("0.0.0.0"));
+                    assert_eq!(listener.port, Some(43111));
+                    break;
+                }
+            }
+            other => panic!("unexpected listener response: {other:?}"),
+        }
+        assert!(
+            Instant::now() < listener_deadline,
+            "timed out waiting for listener snapshot"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let kill_listener = sidecar
+        .dispatch(request(
+            70,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::KillProcess(KillProcessRequest {
+                process_id: String::from("tcp-listener"),
+                signal: String::from("SIGTERM"),
+            }),
+        ))
+        .expect("kill tcp listener");
+    assert!(matches!(
+        kill_listener.response.payload,
+        ResponsePayload::ProcessKilled(_)
+    ));
+
     execute(
         &mut sidecar,
         5,
@@ -166,27 +212,6 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         "signal-registered",
     );
 
-    let listener = sidecar
-        .dispatch(request(
-            7,
-            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
-            RequestPayload::FindListener(FindListenerRequest {
-                host: Some(String::from("0.0.0.0")),
-                port: Some(43111),
-                path: None,
-            }),
-        ))
-        .expect("query tcp listener");
-    match listener.response.payload {
-        ResponsePayload::ListenerSnapshot(snapshot) => {
-            let listener = snapshot.listener.expect("listener snapshot");
-            assert_eq!(listener.process_id, "tcp-listener");
-            assert_eq!(listener.host.as_deref(), Some("0.0.0.0"));
-            assert_eq!(listener.port, Some(43111));
-        }
-        other => panic!("unexpected listener response: {other:?}"),
-    }
-
     let bound_udp = sidecar
         .dispatch(request(
             8,
@@ -207,28 +232,37 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         other => panic!("unexpected bound udp response: {other:?}"),
     }
 
-    let signal_state = sidecar
-        .dispatch(request(
-            9,
-            OwnershipScope::vm(&connection_id, &session_id, &wasm_vm_id),
-            RequestPayload::GetSignalState(GetSignalStateRequest {
-                process_id: String::from("signal-state"),
-            }),
-        ))
-        .expect("query signal state");
-    match signal_state.response.payload {
-        ResponsePayload::SignalState(snapshot) => {
-            assert_eq!(snapshot.process_id, "signal-state");
-            assert_eq!(
-                snapshot.handlers.get(&2),
-                Some(&agent_os_sidecar::protocol::SignalHandlerRegistration {
-                    action: SignalDispositionAction::User,
-                    mask: vec![15],
-                    flags: 0x1234,
-                })
-            );
+    let signal_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let signal_state = sidecar
+            .dispatch(request(
+                9,
+                OwnershipScope::vm(&connection_id, &session_id, &wasm_vm_id),
+                RequestPayload::GetSignalState(GetSignalStateRequest {
+                    process_id: String::from("signal-state"),
+                }),
+            ))
+            .expect("query signal state");
+        match signal_state.response.payload {
+            ResponsePayload::SignalState(snapshot) => {
+                assert_eq!(snapshot.process_id, "signal-state");
+                if snapshot.handlers.get(&2)
+                    == Some(&agent_os_sidecar::protocol::SignalHandlerRegistration {
+                        action: SignalDispositionAction::User,
+                        mask: vec![15],
+                        flags: 0x1234,
+                    })
+                {
+                    break;
+                }
+            }
+            other => panic!("unexpected signal state response: {other:?}"),
         }
-        other => panic!("unexpected signal state response: {other:?}"),
+        assert!(
+            Instant::now() < signal_deadline,
+            "timed out waiting for signal state"
+        );
+        std::thread::sleep(Duration::from_millis(25));
     }
 
     let dispose = sidecar

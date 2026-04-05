@@ -137,6 +137,7 @@ The registry software packages depend on `@rivet-dev/agent-os-registry-types` (i
 - Filesystem methods mirror the kernel API 1:1 (readFile, writeFile, mkdir, readdir, stat, exists, move, delete)
 - **readdir returns `.` and `..` entries** — always filter them when iterating children to avoid infinite recursion
 - Guest Node `fs` and `fs/promises` polyfills share the JavaScript sync-RPC transport between `crates/execution/src/node_import_cache.rs` and `crates/sidecar/src/service.rs`; Node-facing `readdir` results must filter `.`/`..`, async methods should dispatch under `fs.promises.*`, fd-based APIs (`open`, `read`, `write`, `close`, `fstat`) plus `createReadStream`/`createWriteStream` should ride the same bridge, and runner-internal pipe/control writes must keep snapped host `node:fs` bindings because `syncBuiltinModuleExports(...)` mutates the builtin module for guests.
+- When a guest Node networking port stops using real host listeners, mirror that state in `crates/sidecar/src/service.rs` `ActiveProcess` tracking and consult it from `find_listener`/socket snapshot queries before falling back to `/proc/[pid]/net/*`; procfs only sees host-owned sockets, not sidecar-managed polyfill listeners.
 - Command execution mirrors the kernel API (exec, spawn)
 - `fetch(port, request)` reaches services running inside the VM using the kernel network adapter pattern (`proc.network.fetch`)
 

@@ -3697,6 +3697,18 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
     }
     return numeric;
   };
+  const normalizeNetBacklog = (value) => {
+    const numeric =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.length > 0
+          ? Number(value)
+          : Number.NaN;
+    if (!Number.isInteger(numeric) || numeric < 0) {
+      throw new RangeError(`Agent OS net backlog must be a non-negative integer`);
+    }
+    return numeric;
+  };
   const normalizeNetConnectInvocation = (args) => {
     const values = [...args];
     const callback =
@@ -3731,6 +3743,74 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
       },
     };
   };
+  const normalizeNetServerCreation = (args) => {
+    let options = {};
+    let connectionListener;
+
+    if (typeof args[0] === 'function') {
+      connectionListener = args[0];
+    } else {
+      if (args[0] != null) {
+        if (typeof args[0] !== 'object') {
+          throw new TypeError('net.createServer options must be an object');
+        }
+        options = { ...args[0] };
+      }
+      if (typeof args[1] === 'function') {
+        connectionListener = args[1];
+      }
+    }
+
+    return {
+      connectionListener,
+      options: {
+        allowHalfOpen: options.allowHalfOpen === true,
+        pauseOnConnect: options.pauseOnConnect === true,
+      },
+    };
+  };
+  const normalizeNetListenInvocation = (args) => {
+    const values = [...args];
+    const callback =
+      typeof values[values.length - 1] === 'function' ? values.pop() : undefined;
+
+    let backlog;
+    if (typeof values[values.length - 1] === 'number') {
+      backlog = normalizeNetBacklog(values.pop());
+    }
+
+    let options;
+    if (values[0] != null && typeof values[0] === 'object') {
+      options = { ...values[0] };
+    } else {
+      options = { port: values[0] };
+      if (typeof values[1] === 'string') {
+        options.host = values[1];
+      }
+    }
+
+    if (typeof options?.path === 'string') {
+      throw createUnsupportedNetError('net.Server.listen({ path })');
+    }
+    if (options?.signal != null) {
+      throw createUnsupportedNetError('net.Server.listen({ signal })');
+    }
+
+    return {
+      callback,
+      options: {
+        backlog:
+          options?.backlog != null
+            ? normalizeNetBacklog(options.backlog)
+            : backlog,
+        host:
+          typeof options?.host === 'string' && options.host.length > 0
+            ? options.host
+            : '0.0.0.0',
+        port: normalizeNetPort(options?.port ?? 0),
+      },
+    };
+  };
   const socketFamilyForAddress = (value) => {
     if (typeof value !== 'string') {
       return undefined;
@@ -3738,11 +3818,15 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
     return value.includes(':') ? 'IPv6' : 'IPv4';
   };
   const callConnect = (options) => bridge().callSync('net.connect', [options]);
+  const callListen = (options) => bridge().callSync('net.listen', [options]);
   const callPoll = (socketId, waitMs = 0) => bridge().callSync('net.poll', [socketId, waitMs]);
+  const callServerPoll = (serverId, waitMs = 0) =>
+    bridge().callSync('net.server_poll', [serverId, waitMs]);
   const callWrite = (socketId, chunk) =>
     bridge().call('net.write', [socketId, toGuestBufferView(chunk, 'net.write chunk')]);
   const callShutdown = (socketId) => bridge().call('net.shutdown', [socketId]);
   const callDestroy = (socketId) => bridge().call('net.destroy', [socketId]);
+  const callServerClose = (serverId) => bridge().call('net.server_close', [serverId]);
 
   const finalizeSocketClose = (socket, hadError = false) => {
     if (socket._agentOsClosed) {
@@ -3823,6 +3907,29 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
     if (!socket._agentOsRefed) {
       socket._pollTimer.unref?.();
     }
+  };
+  const attachSocketState = (socket, result, options = {}, emitConnect = false) => {
+    socket._agentOsAllowHalfOpen = options.allowHalfOpen === true;
+    socket._agentOsSocketId = String(result.socketId);
+    socket.localAddress = result.localAddress;
+    socket.localPort = result.localPort;
+    socket.remoteAddress = result.remoteAddress;
+    socket.remotePort = result.remotePort;
+    socket.remoteFamily =
+      result.remoteFamily ?? socketFamilyForAddress(socket.remoteAddress);
+    socket.connecting = false;
+    socket.pending = false;
+    socket._agentOsClosed = false;
+    if (emitConnect) {
+      queueMicrotask(() => {
+        if (socket._agentOsClosed) {
+          return;
+        }
+        socket.emit('connect');
+        socket.emit('ready');
+      });
+    }
+    scheduleSocketPoll(socket, 0);
   };
 
   class AgentOsSocket extends Duplex {
@@ -3917,23 +4024,16 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
 
       try {
         const result = callConnect(options);
-        this._agentOsSocketId = String(result.socketId);
-        this.localAddress = result.localAddress;
-        this.localPort = result.localPort;
-        this.remoteAddress = result.remoteAddress ?? options.host;
-        this.remotePort = result.remotePort ?? options.port;
-        this.remoteFamily =
-          result.remoteFamily ?? socketFamilyForAddress(this.remoteAddress);
-        this.connecting = false;
-        this.pending = false;
-        queueMicrotask(() => {
-          if (this._agentOsClosed) {
-            return;
-          }
-          this.emit('connect');
-          this.emit('ready');
-        });
-        scheduleSocketPoll(this, 0);
+        attachSocketState(
+          this,
+          {
+            ...result,
+            remoteAddress: result.remoteAddress ?? options.host,
+            remotePort: result.remotePort ?? options.port,
+          },
+          options,
+          true,
+        );
       } catch (error) {
         this.connecting = false;
         this.pending = false;
@@ -3980,12 +4080,189 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
     }
   }
 
+  const finalizeServerClose = (server) => {
+    if (server._agentOsClosed) {
+      return;
+    }
+    server._agentOsClosed = true;
+    server.listening = false;
+    server._agentOsServerId = null;
+    server._pollTimer && clearTimeout(server._pollTimer);
+    server._pollTimer = null;
+    queueMicrotask(() => server.emit('close'));
+  };
+  const scheduleServerPoll = (server, delayMs) => {
+    if (server._agentOsClosed || server._agentOsServerId == null || server._pollTimer != null) {
+      return;
+    }
+
+    server._pollTimer = setTimeout(() => {
+      server._pollTimer = null;
+      if (server._agentOsClosed || server._agentOsServerId == null) {
+        return;
+      }
+
+      let event;
+      try {
+        event = callServerPoll(server._agentOsServerId, RPC_POLL_WAIT_MS);
+      } catch (error) {
+        server.emit('error', error);
+        finalizeServerClose(server);
+        return;
+      }
+
+      if (!event) {
+        scheduleServerPoll(server, RPC_IDLE_POLL_DELAY_MS);
+        return;
+      }
+
+      if (event.type === 'connection') {
+        const socket = new AgentOsSocket({ allowHalfOpen: server.allowHalfOpen });
+        attachSocketState(socket, event, { allowHalfOpen: server.allowHalfOpen });
+        if (server.pauseOnConnect) {
+          socket.pause();
+        }
+        server.emit('connection', socket);
+        scheduleServerPoll(server, 0);
+        return;
+      }
+
+      if (event.type === 'error') {
+        const error = new Error(
+          typeof event.message === 'string' ? event.message : 'Agent OS net server error',
+        );
+        if (typeof event.code === 'string' && event.code.length > 0) {
+          error.code = event.code;
+        }
+        server.emit('error', error);
+        scheduleServerPoll(server, 0);
+        return;
+      }
+
+      if (event.type === 'close') {
+        finalizeServerClose(server);
+        return;
+      }
+
+      scheduleServerPoll(server, 0);
+    }, delayMs);
+
+    if (!server._agentOsRefed) {
+      server._pollTimer.unref?.();
+    }
+  };
+
+  class AgentOsServer extends EventEmitter {
+    constructor(options = {}, connectionListener = undefined) {
+      super();
+      this.allowHalfOpen = options.allowHalfOpen === true;
+      this.pauseOnConnect = options.pauseOnConnect === true;
+      this.listening = false;
+      this.maxConnections = undefined;
+      this._agentOsClosed = false;
+      this._agentOsRefed = true;
+      this._agentOsServerId = null;
+      this._pollTimer = null;
+      this._address = null;
+      if (typeof connectionListener === 'function') {
+        this.on('connection', connectionListener);
+      }
+    }
+
+    address() {
+      return this._address;
+    }
+
+    close(callback) {
+      if (this._agentOsServerId == null || this._agentOsClosed) {
+        const error = new Error('Agent OS net server is not running');
+        error.code = 'ERR_SERVER_NOT_RUNNING';
+        if (typeof callback === 'function') {
+          queueMicrotask(() => callback(error));
+          return this;
+        }
+        throw error;
+      }
+
+      if (typeof callback === 'function') {
+        this.once('close', callback);
+      }
+      const serverId = this._agentOsServerId;
+      callServerClose(serverId).then(
+        () => finalizeServerClose(this),
+        (error) => this.emit('error', error),
+      );
+      return this;
+    }
+
+    getConnections(callback) {
+      if (typeof callback === 'function') {
+        queueMicrotask(() => callback(null, 0));
+      }
+      return Promise.resolve(0);
+    }
+
+    listen(...args) {
+      const { callback, options } = normalizeNetListenInvocation(args);
+      if (typeof callback === 'function') {
+        this.once('listening', callback);
+      }
+      if (this._agentOsServerId != null || this.listening) {
+        throw new Error('Agent OS net server is already listening');
+      }
+
+      this._agentOsClosed = false;
+      try {
+        const result = callListen(options);
+        this._agentOsServerId = String(result.serverId);
+        this._address = {
+          address: result.localAddress,
+          family: result.family ?? socketFamilyForAddress(result.localAddress),
+          port: result.localPort,
+        };
+        this.listening = true;
+        queueMicrotask(() => {
+          if (this._agentOsClosed) {
+            return;
+          }
+          this.emit('listening');
+        });
+        scheduleServerPoll(this, 0);
+      } catch (error) {
+        this._agentOsServerId = null;
+        this._address = null;
+        this.listening = false;
+        throw error;
+      }
+
+      return this;
+    }
+
+    ref() {
+      this._agentOsRefed = true;
+      this._pollTimer?.ref?.();
+      return this;
+    }
+
+    unref() {
+      this._agentOsRefed = false;
+      this._pollTimer?.unref?.();
+      return this;
+    }
+  }
+
   const connect = (...args) => new AgentOsSocket().connect(...args);
+  const createServer = (...args) => {
+    const { connectionListener, options } = normalizeNetServerCreation(args);
+    return new AgentOsServer(options, connectionListener);
+  };
   const module = Object.assign(Object.create(netModule ?? null), {
+    Server: AgentOsServer,
     Socket: AgentOsSocket,
     Stream: AgentOsSocket,
     connect,
     createConnection: connect,
+    createServer,
   });
 
   return module;

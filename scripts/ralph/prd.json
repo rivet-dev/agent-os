@@ -312,7 +312,7 @@
         "Typecheck passes"
       ],
       "priority": 19,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-018 (net.Socket polyfill)."
     },
     {
