@@ -258,7 +258,7 @@
         "Typecheck passes"
       ],
       "priority": 16,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-012. Fd-based ops map to kernel fd_open/fd_read/fd_write/fd_close. Streams built on top of polyfilled fd ops."
     },
     {

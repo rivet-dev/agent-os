@@ -2966,7 +2966,98 @@ where
     ) -> Result<(), SidecarError> {
         let response: Result<Value, SidecarError> = {
             let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+            let kernel_pid = vm
+                .active_processes
+                .get(process_id)
+                .expect("process should still exist")
+                .kernel_pid;
             match request.method.as_str() {
+                "fs.open" | "fs.openSync" => {
+                    let path =
+                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem open path")?;
+                    let flags =
+                        javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem open flags")?;
+                    let mode = javascript_sync_rpc_arg_u32_optional(&request.args, 2, "filesystem open mode")?;
+                    vm.kernel
+                        .fd_open(EXECUTION_DRIVER_NAME, kernel_pid, path, flags, mode)
+                        .map(|fd| json!(fd))
+                        .map_err(kernel_error)
+                }
+                "fs.read" | "fs.readSync" => {
+                    let fd =
+                        javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem read fd")?;
+                    let length = usize::try_from(javascript_sync_rpc_arg_u64(
+                        &request.args,
+                        1,
+                        "filesystem read length",
+                    )?)
+                    .map_err(|_| {
+                        SidecarError::InvalidState(
+                            "filesystem read length must fit within usize".to_string(),
+                        )
+                    })?;
+                    let position = javascript_sync_rpc_arg_u64_optional(
+                        &request.args,
+                        2,
+                        "filesystem read position",
+                    )?;
+                    let bytes = match position {
+                        Some(offset) => vm
+                            .kernel
+                            .fd_pread(EXECUTION_DRIVER_NAME, kernel_pid, fd, length, offset),
+                        None => vm
+                            .kernel
+                            .fd_read(EXECUTION_DRIVER_NAME, kernel_pid, fd, length),
+                    };
+                    bytes.map(|payload| javascript_sync_rpc_bytes_value(&payload))
+                        .map_err(kernel_error)
+                }
+                "fs.write" | "fs.writeSync" => {
+                    let fd =
+                        javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem write fd")?;
+                    let contents = javascript_sync_rpc_bytes_arg(
+                        &request.args,
+                        1,
+                        "filesystem write contents",
+                    )?;
+                    let position = javascript_sync_rpc_arg_u64_optional(
+                        &request.args,
+                        2,
+                        "filesystem write position",
+                    )?;
+                    let written = match position {
+                        Some(offset) => vm.kernel.fd_pwrite(
+                            EXECUTION_DRIVER_NAME,
+                            kernel_pid,
+                            fd,
+                            &contents,
+                            offset,
+                        ),
+                        None => vm
+                            .kernel
+                            .fd_write(EXECUTION_DRIVER_NAME, kernel_pid, fd, &contents),
+                    };
+                    written.map(|count| json!(count)).map_err(kernel_error)
+                }
+                "fs.close" | "fs.closeSync" => {
+                    let fd =
+                        javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem close fd")?;
+                    vm.kernel
+                        .fd_close(EXECUTION_DRIVER_NAME, kernel_pid, fd)
+                        .map(|()| Value::Null)
+                        .map_err(kernel_error)
+                }
+                "fs.fstat" | "fs.fstatSync" => {
+                    let fd =
+                        javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem fstat fd")?;
+                    vm.kernel
+                        .fd_stat(EXECUTION_DRIVER_NAME, kernel_pid, fd)
+                        .map_err(kernel_error)?;
+                    vm.kernel
+                        .dev_fd_stat(EXECUTION_DRIVER_NAME, kernel_pid, fd)
+                        .map(javascript_sync_rpc_stat_value)
+                        .map_err(kernel_error)
+                }
                 "fs.readFileSync" | "fs.promises.readFile" => {
                     let path =
                         javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readFile path")?;
@@ -4140,6 +4231,19 @@ fn javascript_sync_rpc_arg_u32(
         .map_err(|_| SidecarError::InvalidState(format!("{label} must fit within u32")))
 }
 
+fn javascript_sync_rpc_arg_u32_optional(
+    args: &[Value],
+    index: usize,
+    label: &str,
+) -> Result<Option<u32>, SidecarError> {
+    javascript_sync_rpc_arg_u64_optional(args, index, label)?
+        .map(|value| {
+            u32::try_from(value)
+                .map_err(|_| SidecarError::InvalidState(format!("{label} must fit within u32")))
+        })
+        .transpose()
+}
+
 fn javascript_sync_rpc_arg_u64(
     args: &[Value],
     index: usize,
@@ -4158,6 +4262,20 @@ fn javascript_sync_rpc_arg_u64(
                 .map(|number| number as u64)
         })
         .ok_or_else(|| SidecarError::InvalidState(format!("{label} must be a numeric argument")))
+}
+
+fn javascript_sync_rpc_arg_u64_optional(
+    args: &[Value],
+    index: usize,
+    label: &str,
+) -> Result<Option<u64>, SidecarError> {
+    let Some(value) = args.get(index) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    javascript_sync_rpc_arg_u64(args, index, label).map(Some)
 }
 
 fn javascript_sync_rpc_stat_value(stat: VirtualStat) -> Value {
@@ -5711,6 +5829,243 @@ await new Promise(() => {});
                 .expect("remove fake javascript process")
         };
         let _ = signal_runtime_process(process.execution.child_pid(), SIGTERM);
+    }
+
+    #[test]
+    fn javascript_fd_and_stream_rpc_requests_proxy_into_the_vm_kernel_filesystem() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .write_file("/rpc/input.txt", b"abcdefg")
+                .expect("seed input file");
+        }
+        let cwd = temp_dir("agent-os-sidecar-js-fd-rpc-cwd");
+        write_fixture(
+            &cwd.join("entry.mjs"),
+            r#"
+import fs from "node:fs";
+import { once } from "node:events";
+
+const inFd = fs.openSync("/rpc/input.txt", "r");
+const buffer = Buffer.alloc(5);
+const bytesRead = fs.readSync(inFd, buffer, 0, buffer.length, 1);
+const stat = fs.fstatSync(inFd);
+fs.closeSync(inFd);
+
+const outFd = fs.openSync("/rpc/output.txt", "w");
+const written = fs.writeSync(outFd, Buffer.from("kernel"), 0, 6, 0);
+fs.closeSync(outFd);
+
+const asyncSummary = await new Promise((resolve, reject) => {
+  fs.open("/rpc/input.txt", "r", (openError, asyncFd) => {
+    if (openError) {
+      reject(openError);
+      return;
+    }
+
+    const target = Buffer.alloc(5);
+    fs.read(asyncFd, target, 0, 5, 0, (readError, asyncBytesRead) => {
+      if (readError) {
+        reject(readError);
+        return;
+      }
+
+      fs.fstat(asyncFd, (statError, asyncStat) => {
+        if (statError) {
+          reject(statError);
+          return;
+        }
+
+        fs.close(asyncFd, (closeError) => {
+          if (closeError) {
+            reject(closeError);
+            return;
+          }
+
+          resolve({
+            asyncBytesRead,
+            asyncText: target.toString("utf8"),
+            asyncSize: asyncStat.size,
+          });
+        });
+      });
+    });
+  });
+});
+
+const reader = fs.createReadStream("/rpc/input.txt", {
+  encoding: "utf8",
+  start: 0,
+  end: 4,
+  highWaterMark: 3,
+});
+const streamChunks = [];
+reader.on("data", (chunk) => streamChunks.push(chunk));
+await once(reader, "close");
+
+const writer = fs.createWriteStream("/rpc/stream.txt", { start: 0 });
+writer.write("ab");
+writer.end("cd");
+await once(writer, "close");
+
+let watchCode = "";
+let watchFileCode = "";
+try {
+  fs.watch("/rpc/input.txt");
+} catch (error) {
+  watchCode = error.code;
+}
+try {
+  fs.watchFile("/rpc/input.txt", () => {});
+} catch (error) {
+  watchFileCode = error.code;
+}
+
+console.log(
+  JSON.stringify({
+    text: buffer.toString("utf8"),
+    bytesRead,
+    size: stat.size,
+    written,
+    asyncSummary,
+    streamChunks,
+    watchCode,
+    watchFileCode,
+  }),
+);
+"#,
+        );
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::new(),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-fd"),
+                ActiveProcess {
+                    kernel_pid: kernel_handle.pid(),
+                    kernel_handle,
+                    runtime: GuestRuntimeKind::JavaScript,
+                    execution: ActiveExecution::Javascript(execution),
+                },
+            );
+        }
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = None;
+        for _ in 0..64 {
+            let next_event = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-fd")
+                    .map(|process| {
+                        process
+                            .execution
+                            .poll_event(Duration::from_secs(5))
+                            .expect("poll javascript fd rpc event")
+                    })
+                    .flatten()
+            };
+            let Some(event) = next_event else {
+                if exit_code.is_some() {
+                    break;
+                }
+                panic!("javascript fd process disappeared before exit");
+            };
+
+            match &event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    stdout.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    stderr.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Exited(code) => {
+                    exit_code = Some(*code);
+                }
+                _ => {}
+            }
+
+            sidecar
+                .handle_execution_event(&vm_id, "proc-js-fd", event)
+                .expect("handle javascript fd rpc event");
+        }
+
+        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        assert!(stdout.contains("\"text\":\"bcdef\""), "stdout: {stdout}");
+        assert!(stdout.contains("\"bytesRead\":5"), "stdout: {stdout}");
+        assert!(stdout.contains("\"size\":7"), "stdout: {stdout}");
+        assert!(stdout.contains("\"written\":6"), "stdout: {stdout}");
+        assert!(stdout.contains("\"asyncText\":\"abcde\""), "stdout: {stdout}");
+        assert!(stdout.contains("\"asyncSize\":7"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("\"streamChunks\":[\"abc\",\"de\"]"),
+            "stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("\"watchCode\":\"ERR_AGENT_OS_FS_WATCH_UNAVAILABLE\""),
+            "stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("\"watchFileCode\":\"ERR_AGENT_OS_FS_WATCH_UNAVAILABLE\""),
+            "stdout: {stdout}"
+        );
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let output = String::from_utf8(
+                vm.kernel
+                    .read_file("/rpc/output.txt")
+                    .expect("read fd output file"),
+            )
+            .expect("utf8 output contents");
+            assert_eq!(output, "kernel");
+
+            let stream = String::from_utf8(
+                vm.kernel
+                    .read_file("/rpc/stream.txt")
+                    .expect("read stream output file"),
+            )
+            .expect("utf8 stream contents");
+            assert_eq!(stream, "abcd");
+        }
     }
 
     #[test]

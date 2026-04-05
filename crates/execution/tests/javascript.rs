@@ -753,17 +753,333 @@ console.log(
         stdout.contains("\"entries\":[\"note.txt\",\"raw.bin\"]"),
         "unexpected stdout: {stdout}"
     );
+}
+
+#[test]
+fn javascript_execution_routes_fd_fs_and_streams_through_sync_rpc() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import fs from "node:fs";
+import { once } from "node:events";
+
+const fd = fs.openSync("/workspace/data.txt", "r");
+const stat = fs.fstatSync(fd);
+const buffer = Buffer.alloc(5);
+const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 1);
+fs.closeSync(fd);
+
+const fdOut = fs.openSync("/workspace/out.txt", "w");
+const written = fs.writeSync(fdOut, Buffer.from("hello"), 0, 5, 0);
+fs.closeSync(fdOut);
+
+const asyncSummary = await new Promise((resolve, reject) => {
+  fs.open("/workspace/async.txt", "r", (openError, asyncFd) => {
+    if (openError) {
+      reject(openError);
+      return;
+    }
+
+    const target = Buffer.alloc(5);
+    fs.read(asyncFd, target, 0, 5, 0, (readError, asyncBytesRead) => {
+      if (readError) {
+        reject(readError);
+        return;
+      }
+
+      fs.fstat(asyncFd, (statError, asyncStat) => {
+        if (statError) {
+          reject(statError);
+          return;
+        }
+
+        fs.close(asyncFd, (closeError) => {
+          if (closeError) {
+            reject(closeError);
+            return;
+          }
+
+          resolve({
+            asyncBytesRead,
+            asyncText: target.toString("utf8"),
+            asyncSize: asyncStat.size,
+          });
+        });
+      });
+    });
+  });
+});
+
+const callbackWrite = await new Promise((resolve, reject) => {
+  fs.open("/workspace/callback-out.txt", "w", (openError, callbackFd) => {
+    if (openError) {
+      reject(openError);
+      return;
+    }
+
+    fs.write(callbackFd, "done", 0, "utf8", (writeError, callbackBytesWritten) => {
+      if (writeError) {
+        reject(writeError);
+        return;
+      }
+
+      fs.close(callbackFd, (closeError) => {
+        if (closeError) {
+          reject(closeError);
+          return;
+        }
+
+        resolve(callbackBytesWritten);
+      });
+    });
+  });
+});
+
+const reader = fs.createReadStream("/workspace/stream.txt", {
+  encoding: "utf8",
+  start: 0,
+  end: 9,
+  highWaterMark: 4,
+});
+const streamChunks = [];
+reader.on("data", (chunk) => streamChunks.push(chunk));
+await once(reader, "close");
+
+const writer = fs.createWriteStream("/workspace/stream-out.txt", { start: 0 });
+writer.write("ab");
+writer.end("cd");
+await once(writer, "close");
+
+let watchMessage = "";
+let watchFileMessage = "";
+try {
+  fs.watch("/workspace/data.txt");
+} catch (error) {
+  watchMessage = `${error.code}:${error.message}`;
+}
+try {
+  fs.watchFile("/workspace/data.txt", () => {});
+} catch (error) {
+  watchFileMessage = `${error.code}:${error.message}`;
+}
+
+console.log(
+  JSON.stringify({
+    text: buffer.toString("utf8"),
+    bytesRead,
+    size: stat.size,
+    written,
+    asyncSummary,
+    callbackWrite,
+    streamChunks,
+    watchMessage,
+    watchFileMessage,
+  }),
+);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
+
+    let files = BTreeMap::from([
+        (String::from("/workspace/async.txt"), b"async".to_vec()),
+        (String::from("/workspace/data.txt"), b"abcdef".to_vec()),
+        (String::from("/workspace/stream.txt"), b"streamdata".to_vec()),
+    ]);
+    let mut fd_paths = BTreeMap::<u64, String>::new();
+    let mut next_fd = 40_u64;
+    let mut stdout = Vec::new();
+    let mut exit_code = None;
+    let mut requests = Vec::new();
+    let mut writes = Vec::new();
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => {
+                panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
+            }
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                requests.push(request.method.clone());
+                match request.method.as_str() {
+                    "fs.open" | "fs.openSync" => {
+                        let fd = next_fd;
+                        next_fd += 1;
+                        fd_paths.insert(
+                            fd,
+                            request.args[0]
+                                .as_str()
+                                .expect("open path")
+                                .to_string(),
+                        );
+                        execution
+                            .respond_sync_rpc_success(request.id, json!(fd))
+                            .expect("respond to open");
+                    }
+                    "fs.fstat" | "fs.fstatSync" => {
+                        let fd = request.args[0].as_u64().expect("fstat fd");
+                        let path = fd_paths.get(&fd).expect("tracked fd path");
+                        let size = files.get(path).map_or(0, |contents| contents.len());
+                        execution
+                            .respond_sync_rpc_success(
+                                request.id,
+                                json!({
+                                    "mode": 0o100644,
+                                    "size": size,
+                                    "isDirectory": false,
+                                    "isSymbolicLink": false,
+                                }),
+                            )
+                            .expect("respond to fstat");
+                    }
+                    "fs.read" | "fs.readSync" => {
+                        let fd = request.args[0].as_u64().expect("read fd");
+                        let length = request.args[1].as_u64().expect("read length") as usize;
+                        let position = request.args[2].as_u64().expect("read position") as usize;
+                        let path = fd_paths.get(&fd).expect("tracked read fd");
+                        let contents = files.get(path).expect("read file contents");
+                        let end = (position + length).min(contents.len());
+                        let text = String::from_utf8_lossy(&contents[position..end]).to_string();
+                        execution
+                            .respond_sync_rpc_success(request.id, json!(text))
+                            .expect("respond to read");
+                    }
+                    "fs.write" | "fs.writeSync" => {
+                        let fd = request.args[0].as_u64().expect("write fd");
+                        let path = fd_paths.get(&fd).expect("tracked write fd").clone();
+                        let payload = if let Some(text) = request.args[1].as_str() {
+                            text.to_string()
+                        } else {
+                            request.args[1]
+                                .get("base64")
+                                .and_then(Value::as_str)
+                                .expect("buffer write payload")
+                                .to_string()
+                        };
+                        let position = request.args.get(2).and_then(Value::as_u64);
+                        writes.push((path, payload.clone(), position));
+                        let bytes_written = match payload.as_str() {
+                            "done" => 4,
+                            "aGVsbG8=" => 5,
+                            "YWI=" => 2,
+                            "Y2Q=" => 2,
+                            other => panic!("unexpected write payload: {other}"),
+                        };
+                        execution
+                            .respond_sync_rpc_success(request.id, json!(bytes_written))
+                            .expect("respond to write");
+                    }
+                    "fs.close" | "fs.closeSync" => {
+                        let fd = request.args[0].as_u64().expect("close fd");
+                        fd_paths.remove(&fd);
+                        execution
+                            .respond_sync_rpc_success(request.id, json!(null))
+                            .expect("respond to close");
+                    }
+                    other => panic!("unexpected fd RPC method: {other}"),
+                }
+            }
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
+
+    assert_eq!(exit_code, Some(0));
+    assert_eq!(
+        requests,
+        vec![
+            "fs.openSync",
+            "fs.fstatSync",
+            "fs.readSync",
+            "fs.closeSync",
+            "fs.openSync",
+            "fs.writeSync",
+            "fs.closeSync",
+            "fs.open",
+            "fs.read",
+            "fs.fstat",
+            "fs.close",
+            "fs.open",
+            "fs.write",
+            "fs.close",
+            "fs.open",
+            "fs.read",
+            "fs.read",
+            "fs.read",
+            "fs.close",
+            "fs.open",
+            "fs.write",
+            "fs.write",
+            "fs.close",
+        ]
+    );
+    assert_eq!(
+        writes,
+        vec![
+            (
+                String::from("/workspace/out.txt"),
+                String::from("aGVsbG8="),
+                Some(0),
+            ),
+            (
+                String::from("/workspace/callback-out.txt"),
+                String::from("done"),
+                Some(0),
+            ),
+            (
+                String::from("/workspace/stream-out.txt"),
+                String::from("YWI="),
+                Some(0),
+            ),
+            (
+                String::from("/workspace/stream-out.txt"),
+                String::from("Y2Q="),
+                Some(2),
+            ),
+        ]
+    );
+
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
+    assert!(stdout.contains("\"text\":\"bcdef\""), "stdout: {stdout}");
+    assert!(stdout.contains("\"bytesRead\":5"), "stdout: {stdout}");
+    assert!(stdout.contains("\"size\":6"), "stdout: {stdout}");
+    assert!(stdout.contains("\"written\":5"), "stdout: {stdout}");
+    assert!(stdout.contains("\"asyncBytesRead\":5"), "stdout: {stdout}");
+    assert!(stdout.contains("\"asyncText\":\"async\""), "stdout: {stdout}");
+    assert!(stdout.contains("\"asyncSize\":5"), "stdout: {stdout}");
+    assert!(stdout.contains("\"callbackWrite\":4"), "stdout: {stdout}");
     assert!(
-        stdout.contains("\"missing\":false"),
-        "unexpected stdout: {stdout}"
+        stdout.contains("\"streamChunks\":[\"stre\",\"amda\",\"ta\"]"),
+        "stdout: {stdout}"
     );
     assert!(
-        stdout.contains("\"linkTarget\":\"/workspace/note.txt\""),
-        "unexpected stdout: {stdout}"
+        stdout.contains("ERR_AGENT_OS_FS_WATCH_UNAVAILABLE"),
+        "stdout: {stdout}"
     );
     assert!(
-        stdout.contains("\"isSymbolicLink\":true"),
-        "unexpected stdout: {stdout}"
+        stdout.contains("kernel has no file-watching API"),
+        "stdout: {stdout}"
     );
 }
 
