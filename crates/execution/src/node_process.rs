@@ -2,6 +2,7 @@ pub(crate) use crate::common::{encode_json_string_array, encode_json_string_map}
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
 use nix::unistd::pipe2;
 use serde::{Deserialize, Serialize};
+use serde_json::from_str;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -20,6 +21,7 @@ const NODE_ALLOW_CHILD_PROCESS_FLAG: &str = "--allow-child-process";
 const NODE_DISABLE_SECURITY_WARNING_FLAG: &str = "--disable-warning=SecurityWarning";
 const NODE_ALLOW_FS_READ_FLAG: &str = "--allow-fs-read=";
 const NODE_ALLOW_FS_WRITE_FLAG: &str = "--allow-fs-write=";
+const NODE_ALLOWED_BUILTINS_ENV: &str = "AGENT_OS_ALLOWED_NODE_BUILTINS";
 const DANGEROUS_GUEST_ENV_KEYS: &[&str] = &[
     "DYLD_INSERT_LIBRARIES",
     "LD_LIBRARY_PATH",
@@ -100,11 +102,14 @@ pub fn harden_node_command(
     write_paths: &[PathBuf],
     enable_permissions: bool,
     allow_wasi: bool,
+    allow_worker: bool,
     allow_child_process: bool,
 ) {
     if enable_permissions {
         command.arg(NODE_PERMISSION_FLAG);
-        command.arg(NODE_ALLOW_WORKER_FLAG);
+        if allow_worker {
+            command.arg(NODE_ALLOW_WORKER_FLAG);
+        }
         command.arg(NODE_DISABLE_SECURITY_WARNING_FLAG);
         if allow_wasi {
             command.arg(NODE_ALLOW_WASI_FLAG);
@@ -127,6 +132,12 @@ pub fn harden_node_command(
     }
 
     command.env_clear();
+}
+
+pub fn env_builtin_enabled(env: &BTreeMap<String, String>, builtin: &str) -> bool {
+    env.get(NODE_ALLOWED_BUILTINS_ENV)
+        .and_then(|value| from_str::<Vec<String>>(value).ok())
+        .is_some_and(|builtins| builtins.iter().any(|entry| entry == builtin))
 }
 
 pub fn node_resolution_read_paths(roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {

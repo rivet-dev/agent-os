@@ -13,6 +13,7 @@ use tempfile::tempdir;
 
 const ARG_PREFIX: &str = "ARG=";
 const INVOCATION_BREAK: &str = "--END--";
+const NODE_ALLOW_WORKER_FLAG: &str = "--allow-worker";
 const NODE_ALLOW_FS_READ_FLAG: &str = "--allow-fs-read=";
 const NODE_ALLOW_FS_WRITE_FLAG: &str = "--allow-fs-write=";
 
@@ -293,4 +294,74 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
             "wasm write flags should not include the module parent: {wasm_args:?}"
         );
     }
+}
+
+#[test]
+fn node_permission_flags_only_allow_workers_when_worker_threads_is_enabled() {
+    let temp = tempdir().expect("create temp dir");
+    let fake_node_path = temp.path().join("fake-node.sh");
+    let log_path = temp.path().join("node-args.log");
+    write_fake_node_binary(&fake_node_path, &log_path);
+    let _node_binary = EnvVarGuard::set("AGENT_OS_NODE_BINARY", &fake_node_path);
+
+    let js_cwd = temp.path().join("js-project");
+    fs::create_dir_all(&js_cwd).expect("create js cwd");
+    fs::write(js_cwd.join("entry.mjs"), "console.log('ignored');").expect("write js entry");
+
+    let mut js_engine = JavascriptExecutionEngine::default();
+    let context = js_engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let default_result = js_engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id.clone(),
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: js_cwd.clone(),
+        })
+        .expect("start javascript execution without workers")
+        .wait()
+        .expect("wait for javascript execution without workers");
+    assert_eq!(default_result.exit_code, 0);
+
+    let worker_result = js_engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::from([(
+                String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                String::from("[\"worker_threads\"]"),
+            )]),
+            cwd: js_cwd,
+        })
+        .expect("start javascript execution with workers")
+        .wait()
+        .expect("wait for javascript execution with workers");
+    assert_eq!(worker_result.exit_code, 0);
+
+    let invocations = parse_invocations(&log_path);
+    assert_eq!(
+        invocations.len(),
+        2,
+        "expected one invocation per javascript execution"
+    );
+    assert!(
+        !invocations[0]
+            .iter()
+            .any(|arg| arg == NODE_ALLOW_WORKER_FLAG),
+        "worker permission should stay disabled by default: {:?}",
+        invocations[0]
+    );
+    assert!(
+        invocations[1]
+            .iter()
+            .any(|arg| arg == NODE_ALLOW_WORKER_FLAG),
+        "worker permission should be enabled when worker_threads is allowed: {:?}",
+        invocations[1]
+    );
 }

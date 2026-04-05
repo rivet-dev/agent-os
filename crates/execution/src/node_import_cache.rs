@@ -2415,9 +2415,12 @@ function wrapChildProcessModule(childProcessModule, fromGuestDir = '/') {
 
     const permissionArgs = [
       '--allow-child-process',
-      '--allow-worker',
       '--disable-warning=SecurityWarning',
     ];
+
+    if (ALLOWED_BUILTINS.has('worker_threads')) {
+      permissionArgs.push('--allow-worker');
+    }
 
     for (const allowedPath of readPaths) {
       permissionArgs.push(`--allow-fs-read=${allowedPath}`);

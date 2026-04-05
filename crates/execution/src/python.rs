@@ -2,8 +2,8 @@ use crate::common::{encode_json_string, frozen_time_ms, stable_hash64};
 use crate::node_import_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV};
 use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
-    harden_node_command, node_binary, spawn_node_control_reader, spawn_stream_reader,
-    LinePrefixFilter, NodeControlMessage,
+    env_builtin_enabled, harden_node_command, node_binary, spawn_node_control_reader,
+    spawn_stream_reader, LinePrefixFilter, NodeControlMessage,
 };
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
 use nix::unistd::pipe2;
@@ -653,6 +653,7 @@ fn configure_python_node_sandbox(
         &write_paths,
         true,
         false,
+        env_builtin_enabled(&request.env, "worker_threads"),
         false,
     );
 }

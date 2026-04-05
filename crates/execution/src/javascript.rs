@@ -2,9 +2,9 @@ use crate::common::{encode_json_string, frozen_time_ms, stable_hash64};
 use crate::node_import_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV};
 use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
-    encode_json_string_array, harden_node_command, node_binary, node_resolution_read_paths,
-    resolve_path_like_specifier, spawn_node_control_reader, spawn_stream_reader, spawn_waiter,
-    LinePrefixFilter, NodeControlMessage,
+    encode_json_string_array, env_builtin_enabled, harden_node_command, node_binary,
+    node_resolution_read_paths, resolve_path_like_specifier, spawn_node_control_reader,
+    spawn_stream_reader, spawn_waiter, LinePrefixFilter, NodeControlMessage,
 };
 use serde_json::from_str;
 use std::collections::BTreeMap;
@@ -602,6 +602,7 @@ fn configure_node_sandbox(
         &write_paths,
         true,
         false,
+        env_builtin_enabled(&request.env, "worker_threads"),
         env_builtin_enabled(&request.env, "child_process"),
     );
     Ok(())
@@ -614,12 +615,6 @@ fn parse_env_path_list(env: &BTreeMap<String, String>, key: &str) -> Vec<PathBuf
         .flatten()
         .map(PathBuf::from)
         .collect()
-}
-
-fn env_builtin_enabled(env: &BTreeMap<String, String>, builtin: &str) -> bool {
-    env.get(NODE_ALLOWED_BUILTINS_ENV)
-        .and_then(|value| from_str::<Vec<String>>(value).ok())
-        .is_some_and(|builtins| builtins.iter().any(|entry| entry == builtin))
 }
 
 fn configure_node_command(

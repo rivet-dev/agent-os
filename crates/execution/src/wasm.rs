@@ -2,10 +2,10 @@ use crate::common::{encode_json_string, frozen_time_ms, stable_hash64};
 use crate::node_import_cache::NodeImportCache;
 use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
-    encode_json_string_array, encode_json_string_map, harden_node_command, node_binary,
-    node_resolution_read_paths, resolve_path_like_specifier, spawn_node_control_reader,
-    spawn_stream_reader, spawn_waiter, LinePrefixFilter, NodeControlMessage,
-    NodeSignalDispositionAction, NodeSignalHandlerRegistration,
+    encode_json_string_array, encode_json_string_map, env_builtin_enabled, harden_node_command,
+    node_binary, node_resolution_read_paths, resolve_path_like_specifier,
+    spawn_node_control_reader, spawn_stream_reader, spawn_waiter, LinePrefixFilter,
+    NodeControlMessage, NodeSignalDispositionAction, NodeSignalHandlerRegistration,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -524,6 +524,7 @@ fn configure_wasm_node_sandbox(
         &write_paths,
         true,
         true,
+        env_builtin_enabled(&request.env, "worker_threads"),
         false,
     );
     Ok(())
