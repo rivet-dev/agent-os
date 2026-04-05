@@ -3269,15 +3269,14 @@ function wrapRenameLikeAsync(fn, fromGuestDir) {
 function createRpcBackedChildProcessModule(fromGuestDir = '/') {
   const RPC_POLL_WAIT_MS = 50;
   const RPC_IDLE_POLL_DELAY_MS = 10;
-  const INTERNAL_ENV_KEYS = [
+  const INTERNAL_BOOTSTRAP_ENV_KEYS = [
     'AGENT_OS_ALLOWED_NODE_BUILTINS',
     'AGENT_OS_GUEST_PATH_MAPPINGS',
     'AGENT_OS_LOOPBACK_EXEMPT_PORTS',
-    'AGENT_OS_PARENT_NODE_ALLOW_CHILD_PROCESS',
-    'AGENT_OS_PARENT_NODE_ALLOW_WORKER',
     'AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH',
     'AGENT_OS_VIRTUAL_PROCESS_UID',
     'AGENT_OS_VIRTUAL_PROCESS_GID',
+    'AGENT_OS_VIRTUAL_PROCESS_VERSION',
   ];
 
   const bridge = () => requireAgentOsSyncRpcBridge();
@@ -3329,28 +3328,37 @@ function createRpcBackedChildProcessModule(fromGuestDir = '/') {
     const source = env && typeof env === 'object' ? env : {};
     const merged = {
       ...Object.fromEntries(
-        Object.entries(process.env).filter(([, value]) => typeof value === 'string'),
+        Object.entries(process.env).filter(
+          ([key, value]) => typeof value === 'string' && !isInternalProcessEnvKey(key),
+        ),
       ),
       ...Object.fromEntries(
-        Object.entries(source).filter(([, value]) => value != null),
+        Object.entries(source).filter(
+          ([key, value]) => value != null && !isInternalProcessEnvKey(key),
+        ),
       ),
     };
     delete merged.NODE_OPTIONS;
 
-    for (const key of INTERNAL_ENV_KEYS) {
+    return Object.fromEntries(
+      Object.entries(merged).map(([key, value]) => [key, String(value)]),
+    );
+  };
+  const createChildProcessInternalBootstrapEnv = () => {
+    const bootstrapEnv = {};
+
+    for (const key of INTERNAL_BOOTSTRAP_ENV_KEYS) {
       if (typeof HOST_PROCESS_ENV[key] === 'string') {
-        merged[key] = HOST_PROCESS_ENV[key];
+        bootstrapEnv[key] = HOST_PROCESS_ENV[key];
       }
     }
     for (const [key, value] of Object.entries(HOST_PROCESS_ENV)) {
       if (key.startsWith('AGENT_OS_VIRTUAL_OS_') && typeof value === 'string') {
-        merged[key] = value;
+        bootstrapEnv[key] = value;
       }
     }
 
-    return Object.fromEntries(
-      Object.entries(merged).map(([key, value]) => [key, String(value)]),
-    );
+    return bootstrapEnv;
   };
   const normalizeChildProcessStdioEntry = (value, index) => {
     if (value == null) {
@@ -3399,6 +3407,7 @@ function createRpcBackedChildProcessModule(fromGuestDir = '/') {
           ? resolveGuestFsPath(options.cwd, fromGuestDir)
           : fromGuestDir,
       env: normalizeChildProcessEnv(options?.env),
+      internalBootstrapEnv: createChildProcessInternalBootstrapEnv(),
       shell: shell || options?.shell === true,
       stdio: normalizeChildProcessStdio(options?.stdio),
       timeout: normalizeChildProcessTimeout(options),

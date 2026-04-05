@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Guest `child_process` internals should never ride in `options.env`: strip `AGENT_OS_*` keys in `crates/execution/src/node_import_cache.rs`, carry only the Node bootstrap allowlist in `options.internalBootstrapEnv`, and let `crates/sidecar/src/service.rs` re-inject that allowlisted map only for nested JavaScript runtimes.
 - The guest `os` polyfill in `crates/execution/src/node_import_cache.rs` should only honor explicit `AGENT_OS_VIRTUAL_OS_*` overrides; safe defaults like `agent-os`, `/root`, `/tmp`, and `/bin/sh` must not fall back to host env vars.
 - JavaScript sync-RPC networking in `crates/sidecar/src/service.rs` bypasses the kernel permission wrappers, so `dns.lookup`/`net.connect`/`net.listen` must enforce `network.dns`/`network.http`/`network.listen` there directly, and errno-style failures should be preserved into `respond_javascript_sync_rpc_error(...)` so guest code sees `EACCES` instead of a generic sync-RPC code.
 - Guest-visible `process` virtualization in `crates/execution/src/node_import_cache.rs` is safest when you harden properties on the real `process` first and let the guest proxy fall through with `Reflect.get(..., proxy)`; using the host `process` as the fallback receiver can leak unsanitized accessor state.
@@ -961,4 +962,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: `node:os` virtualization should treat host env vars as implementation detail leakage; only explicit `AGENT_OS_VIRTUAL_OS_*` knobs are valid inputs for guest-visible overrides.
   - Gotchas encountered: The JavaScript execution tests can trip the import-cache temp-root cleanup path if multiple `cargo test` invocations run concurrently, so this suite is more reliable when executed sequentially.
   - Useful context: `cargo test -p agent-os-execution javascript_execution_virtualizes_os_module -- --test-threads=1`, `cargo test -p agent-os-execution javascript_execution_os_module_safe_defaults_ignore_host_env -- --test-threads=1`, and `cargo test -p agent-os-execution --test javascript -- --test-threads=1` pass after this change.
+---
+## 2026-04-05 07:07:44 PDT - US-052
+- What was implemented
+- Stripped all `AGENT_OS_*` keys from the guest `child_process` polyfill’s public `options.env` payload in `crates/execution/src/node_import_cache.rs`, including caller-supplied overrides, and moved the nested-Node bootstrap state into a separate `internalBootstrapEnv` RPC field.
+- Updated `crates/sidecar/src/service.rs` to sanitize that sidecar-only bootstrap map with an allowlist and re-inject it only when starting a nested JavaScript runtime, leaving non-Node child environments free of Agent OS control vars.
+- Added regressions that verify the child-process RPC payload excludes internal env keys, that the sidecar bootstrap allowlist rejects stray keys, and that nested Node child-process execution still works after the split.
+- Files changed
+- `AGENTS.md`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Nested Node child processes should receive Agent OS bootstrap state through sidecar-only RPC metadata, not through the child environment that shell/WASM children inherit.
+  - Gotchas encountered: The sidecar child-process regression is more stable when it stays at the RPC/bootstrap layer; trying to assert non-Node env contents through extra command fixtures introduces unrelated import-cache and command-availability noise.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test javascript child_process -- --test-threads=1`, and `cargo test -p agent-os-sidecar javascript_child_process -- --test-threads=1` all pass after this change.
 ---

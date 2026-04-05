@@ -3010,6 +3010,126 @@ console.log(JSON.stringify({
 }
 
 #[test]
+fn javascript_execution_strips_internal_env_from_child_process_rpc_payloads() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const { spawnSync } = require('node:child_process');
+
+spawnSync('node', ['./child.mjs'], {
+  env: {
+    VISIBLE_MARKER: 'child-visible',
+    AGENT_OS_GUEST_PATH_MAPPINGS: 'user-override',
+    AGENT_OS_VIRTUAL_PROCESS_UID: '999',
+    AGENT_OS_VIRTUAL_OS_HOSTNAME: 'leak-attempt',
+  },
+});
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let cwd_host_path = temp.path().to_string_lossy().replace('\\', "\\\\");
+    let env = BTreeMap::from([
+        (
+            String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+            format!("[{{\"guestPath\":\"/root\",\"hostPath\":\"{cwd_host_path}\"}}]"),
+        ),
+        (String::from("VISIBLE_MARKER"), String::from("parent-visible")),
+        (String::from("AGENT_OS_VIRTUAL_PROCESS_UID"), String::from("0")),
+        (
+            String::from("AGENT_OS_VIRTUAL_OS_HOSTNAME"),
+            String::from("agent-os-test"),
+        ),
+        (
+            String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+            String::from(
+                "[\"assert\",\"buffer\",\"console\",\"child_process\",\"crypto\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+            ),
+        ),
+    ]);
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env,
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
+
+    let mut stderr = Vec::new();
+    let mut exit_code = None;
+    let mut observed_env = None;
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(_chunk)) => {}
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                match request.method.as_str() {
+                    "child_process.spawn" => {
+                        let payload = request.args[0].as_object().expect("spawn payload");
+                        observed_env = Some(
+                            payload["options"]["env"]
+                                .as_object()
+                                .expect("spawn env")
+                                .clone(),
+                        );
+                        execution
+                            .respond_sync_rpc_success(
+                                request.id,
+                                json!({
+                                    "childId": "child-1",
+                                    "pid": 41,
+                                    "command": payload["command"],
+                                    "args": payload["args"],
+                                }),
+                            )
+                            .expect("respond to child_process.spawn");
+                    }
+                    "child_process.poll" => {
+                        execution
+                            .respond_sync_rpc_success(
+                                request.id,
+                                json!({
+                                    "type": "exit",
+                                    "exitCode": 0,
+                                }),
+                            )
+                            .expect("respond to child_process.poll");
+                    }
+                    other => panic!("unexpected child_process sync RPC method: {other}"),
+                }
+            }
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
+
+    let stderr = String::from_utf8(stderr).expect("stderr utf8");
+    assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+    let env = observed_env.expect("observed child env");
+    assert_eq!(
+        env.get("VISIBLE_MARKER"),
+        Some(&Value::String(String::from("child-visible")))
+    );
+    assert!(!env.contains_key("AGENT_OS_GUEST_PATH_MAPPINGS"));
+    assert!(!env.contains_key("AGENT_OS_VIRTUAL_PROCESS_UID"));
+    assert!(!env.contains_key("AGENT_OS_VIRTUAL_OS_HOSTNAME"));
+}
+
+#[test]
 fn javascript_execution_routes_net_connect_through_sync_rpc() {
     assert_node_available();
 

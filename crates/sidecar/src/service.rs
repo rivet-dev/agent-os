@@ -4058,17 +4058,20 @@ where
         let kernel_pid = kernel_handle.pid();
 
         let mut execution_env = resolved.env.clone();
-        execution_env.insert(
-            String::from("AGENT_OS_VIRTUAL_PROCESS_PID"),
-            kernel_pid.to_string(),
-        );
-        execution_env.insert(
-            String::from("AGENT_OS_VIRTUAL_PROCESS_PPID"),
-            parent_kernel_pid.to_string(),
-        );
 
         let execution = match resolved.runtime {
             GuestRuntimeKind::JavaScript => {
+                execution_env.extend(sanitize_javascript_child_process_internal_bootstrap_env(
+                    &request.options.internal_bootstrap_env,
+                ));
+                execution_env.insert(
+                    String::from("AGENT_OS_VIRTUAL_PROCESS_PID"),
+                    kernel_pid.to_string(),
+                );
+                execution_env.insert(
+                    String::from("AGENT_OS_VIRTUAL_PROCESS_PPID"),
+                    parent_kernel_pid.to_string(),
+                );
                 let context =
                     self.javascript_engine
                         .create_context(CreateJavascriptContextRequest {
@@ -6171,6 +6174,8 @@ struct JavascriptChildProcessSpawnOptions {
     cwd: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    #[serde(rename = "internalBootstrapEnv", default)]
+    internal_bootstrap_env: BTreeMap<String, String>,
     #[serde(default)]
     shell: bool,
 }
@@ -6195,6 +6200,27 @@ struct ResolvedChildProcessExecution {
     guest_cwd: String,
     host_cwd: PathBuf,
     wasm_permission_tier: Option<WasmPermissionTier>,
+}
+
+fn sanitize_javascript_child_process_internal_bootstrap_env(
+    env: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    const ALLOWED_KEYS: &[&str] = &[
+        "AGENT_OS_ALLOWED_NODE_BUILTINS",
+        "AGENT_OS_GUEST_PATH_MAPPINGS",
+        "AGENT_OS_LOOPBACK_EXEMPT_PORTS",
+        "AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH",
+        "AGENT_OS_VIRTUAL_PROCESS_UID",
+        "AGENT_OS_VIRTUAL_PROCESS_GID",
+        "AGENT_OS_VIRTUAL_PROCESS_VERSION",
+    ];
+
+    env.iter()
+        .filter(|(key, _)| {
+            ALLOWED_KEYS.contains(&key.as_str()) || key.starts_with("AGENT_OS_VIRTUAL_OS_")
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -12803,5 +12829,62 @@ console.log(JSON.stringify({
         assert_eq!(exec_parts[0], "exec");
         assert_eq!(exec_parts[2].parse::<u32>().expect("exec ppid"), parent_pid);
         assert_eq!(exec_parts[3], "hello from nested child");
+    }
+
+    #[test]
+    fn javascript_child_process_internal_bootstrap_env_is_allowlisted() {
+        let filtered = sanitize_javascript_child_process_internal_bootstrap_env(&BTreeMap::from([
+            (
+                String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                String::from("[\"fs\"]"),
+            ),
+            (
+                String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+                String::from("[]"),
+            ),
+            (
+                String::from("AGENT_OS_VIRTUAL_PROCESS_UID"),
+                String::from("0"),
+            ),
+            (
+                String::from("AGENT_OS_VIRTUAL_PROCESS_VERSION"),
+                String::from("v24.0.0"),
+            ),
+            (
+                String::from("AGENT_OS_VIRTUAL_OS_HOSTNAME"),
+                String::from("agent-os-test"),
+            ),
+            (
+                String::from("AGENT_OS_PARENT_NODE_ALLOW_CHILD_PROCESS"),
+                String::from("1"),
+            ),
+            (
+                String::from("VISIBLE_MARKER"),
+                String::from("child-visible"),
+            ),
+        ]));
+
+        assert_eq!(
+            filtered.get("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+            Some(&String::from("[\"fs\"]"))
+        );
+        assert_eq!(
+            filtered.get("AGENT_OS_GUEST_PATH_MAPPINGS"),
+            Some(&String::from("[]"))
+        );
+        assert_eq!(
+            filtered.get("AGENT_OS_VIRTUAL_PROCESS_UID"),
+            Some(&String::from("0"))
+        );
+        assert_eq!(
+            filtered.get("AGENT_OS_VIRTUAL_PROCESS_VERSION"),
+            Some(&String::from("v24.0.0"))
+        );
+        assert_eq!(
+            filtered.get("AGENT_OS_VIRTUAL_OS_HOSTNAME"),
+            Some(&String::from("agent-os-test"))
+        );
+        assert!(!filtered.contains_key("AGENT_OS_PARENT_NODE_ALLOW_CHILD_PROCESS"));
+        assert!(!filtered.contains_key("VISIBLE_MARKER"));
     }
 }

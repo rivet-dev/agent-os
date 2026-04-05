@@ -828,7 +828,7 @@
         "Typecheck passes"
       ],
       "priority": 52,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: child process env merging passes through all AGENT_OS_* and AGENT_OS_VIRTUAL_OS_* variables, allowing child processes to reconstruct the full guest/host mapping."
     },
     {
