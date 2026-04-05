@@ -37,6 +37,7 @@ These are hard rules with no exceptions:
 - **Pipes & PTYs** — Kernel-managed pipes (64KB buffers) enable cross-runtime IPC. PTY master/slave pairs with line discipline support interactive shells. `openShell()` allocates a PTY and spawns sh/bash.
 - **Networking** — Socket table manages TCP/UDP/Unix domain sockets. Loopback connections stay entirely in-kernel. External connections delegate to a `HostNetworkAdapter` (implemented via `node:net`/`node:dgram` on the host). DNS resolution also goes through the adapter.
 - **Permissions** — Deny-by-default access control. Four permission domains: `fs`, `network`, `childProcess`, `env`. Each is a function that returns `{allow, reason}`. The `allowAll` preset grants everything (used in agentOS). See "Node.js Builtin Permission Model" for how these interact with the Node.js builtin interception layer.
+- **Kernel VM configs must opt into broad access explicitly.** `KernelVmConfig::new()` should stay deny-all by default; tests, browser scaffolds, or other callers that need unrestricted behavior must set `config.permissions = Permissions::allow_all()` themselves.
 - **Sensitive mount policy is a separate filesystem capability.** Kernel mount APIs check normal `fs.write` permission on the mount path, and mounts targeting `/`, `/etc`, or `/proc` also require `fs.mount_sensitive`. In the Rust sidecar, `configure_vm` reconciles mounts before it applies `payload.permissions`, so mount-time policy must already be present on the VM (or be injected directly in tests) before `ConfigureVm` runs.
 
 ### Node.js Isolation Model

@@ -1,13 +1,16 @@
 use agent_os_kernel::bridge::LifecycleState;
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
+use agent_os_kernel::permissions::Permissions;
 use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::vfs::MemoryFileSystem;
 use std::time::Duration;
 
 #[test]
 fn minimal_vm_lifecycle_transitions_between_ready_busy_and_terminated() {
-    let mut kernel = KernelVm::new(MemoryFileSystem::new(), KernelVmConfig::new("vm-kernel"));
+    let mut config = KernelVmConfig::new("vm-kernel");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
     kernel
         .register_driver(CommandDriver::new("shell", ["sh"]))
         .expect("register shell");
@@ -62,7 +65,9 @@ fn minimal_vm_lifecycle_transitions_between_ready_busy_and_terminated() {
 
 #[test]
 fn dispose_kills_running_processes_and_cleans_special_resources() {
-    let mut kernel = KernelVm::new(MemoryFileSystem::new(), KernelVmConfig::new("vm-dispose"));
+    let mut config = KernelVmConfig::new("vm-dispose");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
     kernel
         .register_driver(CommandDriver::new("shell", ["sh"]))
         .expect("register shell");
@@ -94,10 +99,9 @@ fn dispose_kills_running_processes_and_cleans_special_resources() {
 
 #[test]
 fn process_exit_cleanup_closes_pipe_writers_and_returns_eof_to_readers() {
-    let mut kernel = KernelVm::new(
-        MemoryFileSystem::new(),
-        KernelVmConfig::new("vm-process-exit-pipe"),
-    );
+    let mut config = KernelVmConfig::new("vm-process-exit-pipe");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
     kernel
         .register_driver(CommandDriver::new("shell", ["sh"]))
         .expect("register shell");
@@ -155,10 +159,9 @@ fn process_exit_cleanup_closes_pipe_writers_and_returns_eof_to_readers() {
 
 #[test]
 fn process_exit_cleanup_removes_fd_tables_before_and_after_reap() {
-    let mut kernel = KernelVm::new(
-        MemoryFileSystem::new(),
-        KernelVmConfig::new("vm-process-exit-fds"),
-    );
+    let mut config = KernelVmConfig::new("vm-process-exit-fds");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
     kernel
         .register_driver(CommandDriver::new("shell", ["sh"]))
         .expect("register shell");

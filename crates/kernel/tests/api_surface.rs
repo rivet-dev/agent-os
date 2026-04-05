@@ -3,6 +3,7 @@ use agent_os_kernel::fd_table::{O_CREAT, O_RDWR};
 use agent_os_kernel::kernel::{
     ExecOptions, KernelVm, KernelVmConfig, OpenShellOptions, SpawnOptions, WaitPidResult, SEEK_SET,
 };
+use agent_os_kernel::permissions::Permissions;
 use agent_os_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
 
 fn spawn_shell(
@@ -22,7 +23,9 @@ fn spawn_shell(
 
 #[test]
 fn kernel_fd_surface_supports_open_seek_positional_io_dup_and_dev_fd_views() {
-    let mut kernel = KernelVm::new(MemoryFileSystem::new(), KernelVmConfig::new("vm-api-fd"));
+    let mut config = KernelVmConfig::new("vm-api-fd");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
     kernel
         .register_driver(CommandDriver::new("shell", ["sh"]))
         .expect("register shell");
@@ -141,7 +144,9 @@ fn kernel_fd_surface_supports_open_seek_positional_io_dup_and_dev_fd_views() {
 
 #[test]
 fn waitpid_returns_structured_result_and_process_introspection_works() {
-    let mut kernel = KernelVm::new(MemoryFileSystem::new(), KernelVmConfig::new("vm-api-proc"));
+    let mut config = KernelVmConfig::new("vm-api-proc");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
     kernel
         .register_driver(CommandDriver::new("shell", ["sh"]))
         .expect("register shell");
@@ -205,7 +210,9 @@ fn waitpid_returns_structured_result_and_process_introspection_works() {
 
 #[test]
 fn open_shell_configures_pty_and_exec_uses_shell_driver() {
-    let mut kernel = KernelVm::new(MemoryFileSystem::new(), KernelVmConfig::new("vm-api-shell"));
+    let mut config = KernelVmConfig::new("vm-api-shell");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
     kernel
         .register_driver(CommandDriver::new("shell", ["sh"]))
         .expect("register shell");
@@ -256,7 +263,9 @@ fn open_shell_configures_pty_and_exec_uses_shell_driver() {
 
 #[test]
 fn shell_foreground_process_group_must_stay_in_the_same_session() {
-    let mut kernel = KernelVm::new(MemoryFileSystem::new(), KernelVmConfig::new("vm-api-shell"));
+    let mut config = KernelVmConfig::new("vm-api-shell");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
     kernel
         .register_driver(CommandDriver::new("shell", ["sh"]))
         .expect("register shell");

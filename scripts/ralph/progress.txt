@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- `KernelVmConfig::new()` is deny-all by default; any kernel or browser-sidecar fixture that expects unrestricted filesystem/process access must opt in with `config.permissions = Permissions::allow_all()`.
 - Kernel mount and unmount entrypoints in `crates/kernel/src/kernel.rs` should both route through `check_mount_permissions(...)` so `fs.write` and `fs.mount_sensitive` stay consistent for `/`, `/etc`, and `/proc`.
 - Guest `child_process` internals should never ride in `options.env`: strip `AGENT_OS_*` keys in `crates/execution/src/node_import_cache.rs`, carry only the Node bootstrap allowlist in `options.internalBootstrapEnv`, and let `crates/sidecar/src/service.rs` re-inject that allowlisted map only for nested JavaScript runtimes.
 - The guest `os` polyfill in `crates/execution/src/node_import_cache.rs` should only honor explicit `AGENT_OS_VIRTUAL_OS_*` overrides; safe defaults like `agent-os`, `/root`, `/tmp`, and `/bin/sh` must not fall back to host env vars.
@@ -224,6 +225,25 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Mount lifecycle policy in the kernel belongs at the `KernelVm` entrypoints; tests can seed mounts through `filesystem_mut().inner_mut().inner_mut().mount(...)` when they need to bypass permission wrappers and assert policy behavior in isolation.
 - Gotchas encountered: `MountTable::unmount` still returns `EINVAL` for non-mount targets and `/`; the permission gate must run before that raw mount-table call so denied paths fail closed with `EACCES`.
 - Useful context: `cargo test -p agent-os-kernel --test permissions` and `cargo test -p agent-os-kernel mount_table` cover the touched behavior and both pass on this branch.
+---
+## 2026-04-05 07:15:15 PDT - US-054
+- What was implemented
+- Changed `KernelVmConfig::new()` in `crates/kernel/src/kernel.rs` to use deny-all `Permissions::default()` instead of implicit `allow_all()`.
+- Updated kernel test fixtures and browser-sidecar tests that need unrestricted behavior to set `config.permissions = Permissions::allow_all()` explicitly, and added a regression in `crates/kernel/tests/permissions.rs` that verifies the default config denies filesystem writes.
+- Files changed
+- `AGENTS.md`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/tests/api_surface.rs`
+- `crates/kernel/tests/kernel_integration.rs`
+- `crates/kernel/tests/permissions.rs`
+- `crates/kernel/tests/resource_accounting.rs`
+- `crates/sidecar-browser/tests/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: `KernelVmConfig::new()` should remain deny-all; broad-access fixtures need to opt into `Permissions::allow_all()` explicitly so security-sensitive defaults do not get reintroduced accidentally.
+  - Gotchas encountered: Kernel tests that only exercise process, PTY, or fd APIs still rely on filesystem and child-process permissions under the hood, so they fail closed after this default flips unless the fixture sets permissions explicitly.
+  - Useful context: `cargo test -p agent-os-kernel`, `cargo test -p agent-os-sidecar-browser`, and `cargo check -p agent-os-kernel -p agent-os-sidecar-browser` all pass after this change.
 ---
 ## 2026-04-04 19:57:51 PDT - US-006
 - What was implemented

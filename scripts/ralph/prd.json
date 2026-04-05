@@ -857,7 +857,7 @@
         "Typecheck passes"
       ],
       "priority": 54,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: KernelVmConfig::new() defaults to Permissions::allow_all(). Any code creating a VM without explicit permissions gets unrestricted access."
     },
     {

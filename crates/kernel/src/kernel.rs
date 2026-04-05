@@ -98,7 +98,7 @@ impl KernelVmConfig {
             vm_id: vm_id.into(),
             env: BTreeMap::new(),
             cwd: String::from("/home/user"),
-            permissions: Permissions::allow_all(),
+            permissions: Permissions::default(),
             resources: ResourceLimits::default(),
             zombie_ttl: Duration::from_secs(60),
         }

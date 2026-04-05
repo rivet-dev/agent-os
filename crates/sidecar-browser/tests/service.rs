@@ -7,6 +7,7 @@ use agent_os_bridge::{
     StartExecutionRequest,
 };
 use agent_os_kernel::kernel::KernelVmConfig;
+use agent_os_kernel::permissions::Permissions;
 use agent_os_sidecar_browser::{
     BrowserSidecar, BrowserSidecarConfig, BrowserWorkerBridge, BrowserWorkerEntrypoint,
     BrowserWorkerHandle, BrowserWorkerHandleRequest, BrowserWorkerSpawnRequest,
@@ -42,9 +43,9 @@ impl BrowserWorkerBridge for RecordingBridge {
 fn browser_sidecar_runs_guest_javascript_from_main_thread_workers() {
     let mut sidecar =
         BrowserSidecar::new(RecordingBridge::default(), BrowserSidecarConfig::default());
-    sidecar
-        .create_vm(KernelVmConfig::new("vm-browser"))
-        .expect("create vm");
+    let mut config = KernelVmConfig::new("vm-browser");
+    config.permissions = Permissions::allow_all();
+    sidecar.create_vm(config).expect("create vm");
 
     let context = sidecar
         .create_javascript_context(CreateJavascriptContextRequest {
@@ -124,9 +125,9 @@ fn browser_sidecar_runs_guest_javascript_from_main_thread_workers() {
 fn browser_sidecar_runs_guest_wasm_from_main_thread_workers() {
     let mut sidecar =
         BrowserSidecar::new(RecordingBridge::default(), BrowserSidecarConfig::default());
-    sidecar
-        .create_vm(KernelVmConfig::new("vm-browser"))
-        .expect("create vm");
+    let mut config = KernelVmConfig::new("vm-browser");
+    config.permissions = Permissions::allow_all();
+    sidecar.create_vm(config).expect("create vm");
 
     let context = sidecar
         .create_wasm_context(CreateWasmContextRequest {

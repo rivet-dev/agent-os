@@ -1,5 +1,6 @@
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
+use agent_os_kernel::permissions::Permissions;
 use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use agent_os_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
@@ -7,7 +8,9 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn resource_snapshot_counts_processes_fds_pipes_and_ptys() {
-    let mut kernel = KernelVm::new(MemoryFileSystem::new(), KernelVmConfig::new("vm-resources"));
+    let mut config = KernelVmConfig::new("vm-resources");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
     kernel
         .register_driver(CommandDriver::new("shell", ["sh"]))
         .expect("register shell");
@@ -67,6 +70,7 @@ fn resource_snapshot_counts_processes_fds_pipes_and_ptys() {
 #[test]
 fn resource_limits_reject_extra_processes_pipes_and_ptys() {
     let mut config = KernelVmConfig::new("vm-limits");
+    config.permissions = Permissions::allow_all();
     config.resources = ResourceLimits {
         max_processes: Some(1),
         max_open_fds: Some(6),
@@ -123,6 +127,7 @@ fn resource_limits_reject_extra_processes_pipes_and_ptys() {
 #[test]
 fn filesystem_limits_reject_inode_growth_and_file_expansion() {
     let mut config = KernelVmConfig::new("vm-filesystem-limits");
+    config.permissions = Permissions::allow_all();
     config.resources = ResourceLimits {
         max_filesystem_bytes: Some(5),
         max_inode_count: Some(4),
@@ -157,6 +162,7 @@ fn filesystem_limits_reject_inode_growth_and_file_expansion() {
 #[test]
 fn filesystem_limits_reject_fd_pwrite_before_resizing_file() {
     let mut config = KernelVmConfig::new("vm-fd-pwrite-limit");
+    config.permissions = Permissions::allow_all();
     config.resources = ResourceLimits {
         max_filesystem_bytes: Some(16),
         ..ResourceLimits::default()
@@ -203,6 +209,7 @@ fn filesystem_limits_reject_fd_pwrite_before_resizing_file() {
 #[test]
 fn blocking_pipe_and_pty_reads_time_out_instead_of_hanging_forever() {
     let mut config = KernelVmConfig::new("vm-read-timeouts");
+    config.permissions = Permissions::allow_all();
     config.resources = ResourceLimits {
         max_blocking_read_ms: Some(25),
         ..ResourceLimits::default()

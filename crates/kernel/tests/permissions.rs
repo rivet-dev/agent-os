@@ -258,6 +258,16 @@ fn child_process_permissions_block_spawn() {
 }
 
 #[test]
+fn kernel_vm_config_defaults_to_deny_all_permissions() {
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), KernelVmConfig::new("vm-defaults"));
+
+    let error = kernel
+        .write_file("/tmp/denied.txt", b"nope".to_vec())
+        .expect_err("default config should deny filesystem writes");
+    assert_eq!(error.code(), "EACCES");
+}
+
+#[test]
 fn kernel_default_spawn_cwd_matches_home_user() {
     let captured_cwd = Arc::new(Mutex::new(None));
     let captured_cwd_for_permission = Arc::clone(&captured_cwd);
@@ -296,7 +306,9 @@ fn kernel_default_spawn_cwd_matches_home_user() {
 
 #[test]
 fn driver_pid_ownership_is_enforced_across_kernel_operations() {
-    let mut kernel = KernelVm::new(MemoryFileSystem::new(), KernelVmConfig::new("vm-auth"));
+    let mut config = KernelVmConfig::new("vm-auth");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
     kernel
         .register_driver(CommandDriver::new("alpha", ["alpha-cmd"]))
         .expect("register alpha");
