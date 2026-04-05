@@ -3,6 +3,7 @@ use agent_os_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
 use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use agent_os_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
+use std::time::{Duration, Instant};
 
 #[test]
 fn resource_snapshot_counts_processes_fds_pipes_and_ptys() {
@@ -193,6 +194,71 @@ fn filesystem_limits_reject_fd_pwrite_before_resizing_file() {
             .read_file("/tmp/data.txt")
             .expect("file should stay unchanged"),
         b"abc".to_vec()
+    );
+
+    process.finish(0);
+    kernel.wait_and_reap(process.pid()).expect("reap shell");
+}
+
+#[test]
+fn blocking_pipe_and_pty_reads_time_out_instead_of_hanging_forever() {
+    let mut config = KernelVmConfig::new("vm-read-timeouts");
+    config.resources = ResourceLimits {
+        max_blocking_read_ms: Some(25),
+        ..ResourceLimits::default()
+    };
+
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let process = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn shell");
+
+    let (read_fd, _write_fd) = kernel.open_pipe("shell", process.pid()).expect("open pipe");
+    let (master_fd, slave_fd, _) = kernel.open_pty("shell", process.pid()).expect("open pty");
+    kernel
+        .pty_set_discipline(
+            "shell",
+            process.pid(),
+            master_fd,
+            LineDisciplineConfig {
+                canonical: Some(false),
+                echo: Some(false),
+                isig: Some(false),
+            },
+        )
+        .expect("set raw pty");
+
+    let started = Instant::now();
+    let pipe_error = kernel
+        .fd_read("shell", process.pid(), read_fd, 16)
+        .expect_err("empty pipe read should time out");
+    assert_eq!(pipe_error.code(), "EAGAIN");
+    assert!(
+        started.elapsed() >= Duration::from_millis(20),
+        "pipe read timed out too early: {:?}",
+        started.elapsed()
+    );
+
+    let started = Instant::now();
+    let pty_error = kernel
+        .fd_read("shell", process.pid(), slave_fd, 16)
+        .expect_err("empty PTY read should time out");
+    assert_eq!(pty_error.code(), "EAGAIN");
+    assert!(
+        started.elapsed() >= Duration::from_millis(20),
+        "PTY read timed out too early: {:?}",
+        started.elapsed()
     );
 
     process.finish(0);

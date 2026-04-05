@@ -1,3 +1,4 @@
+use agent_os_execution::wasm::{WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV};
 use agent_os_execution::{
     CreateWasmContextRequest, StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionEvent,
     WasmPermissionTier,
@@ -319,6 +320,34 @@ fn wasm_write_file_module() -> Vec<u8> {
 "#,
     )
     .expect("compile write-file wasm fixture")
+}
+
+fn wasm_infinite_loop_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+(module
+  (memory (export "memory") 1)
+  (func $_start (export "_start")
+    (loop $spin
+      br $spin
+    )
+  )
+)
+"#,
+    )
+    .expect("compile infinite-loop wasm fixture")
+}
+
+fn wasm_memory_capped_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+(module
+  (memory (export "memory") 1 3)
+  (func $_start (export "_start"))
+)
+"#,
+    )
+    .expect("compile memory-capped wasm fixture")
 }
 
 #[test]
@@ -774,4 +803,73 @@ fn wasm_warmup_metrics_encode_emoji_module_paths_as_json() {
     assert!(warmup.executed, "stderr: {stderr}");
     assert_eq!(warmup.module_path, format!("./{module_name}"));
     assert!(stderr.contains("\\ud83d\\ude00"), "stderr: {stderr}");
+}
+
+#[test]
+fn wasm_execution_times_out_when_fuel_budget_is_exhausted() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &wasm_infinite_loop_module(),
+    );
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let (stdout, stderr, exit_code) = run_wasm_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        Vec::new(),
+        BTreeMap::from([(String::from(WASM_MAX_FUEL_ENV), String::from("25"))]),
+        WasmPermissionTier::Full,
+    );
+
+    assert_eq!(exit_code, 124, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.is_empty(), "stdout={stdout}");
+    assert!(
+        stderr.contains("fuel budget exhausted"),
+        "stderr should mention the exhausted fuel budget: {stderr}"
+    );
+}
+
+#[test]
+fn wasm_execution_rejects_modules_whose_memory_cap_exceeds_limit() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &wasm_memory_capped_module(),
+    );
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let error = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: Vec::new(),
+            env: BTreeMap::from([(
+                String::from(WASM_MAX_MEMORY_BYTES_ENV),
+                (2 * 65_536_u64).to_string(),
+            )]),
+            cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
+        })
+        .expect_err("memory limit should reject oversized module maximum");
+
+    assert!(
+        error.to_string().contains("memory maximum"),
+        "unexpected error: {error}"
+    );
 }

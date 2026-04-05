@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 pub const MAX_PIPE_BUFFER_BYTES: usize = 65_536;
 
@@ -244,6 +245,15 @@ impl PipeManager {
     }
 
     pub fn read(&self, description_id: u64, length: usize) -> PipeResult<Option<Vec<u8>>> {
+        self.read_with_timeout(description_id, length, None)
+    }
+
+    pub fn read_with_timeout(
+        &self,
+        description_id: u64,
+        length: usize,
+        timeout: Option<Duration>,
+    ) -> PipeResult<Option<Vec<u8>>> {
         let mut state = lock_or_recover(&self.inner.state);
         let pipe_ref = state
             .desc_to_pipe
@@ -255,6 +265,7 @@ impl PipeManager {
         }
 
         let mut waiter_id = None;
+        let deadline = timeout.map(|duration| Instant::now() + duration);
 
         loop {
             if let Some(id) = waiter_id {
@@ -299,10 +310,40 @@ impl PipeManager {
                 next
             };
 
-            state = wait_or_recover(&self.inner.waiters, state);
+            let Some(deadline) = deadline else {
+                state = wait_or_recover(&self.inner.waiters, state);
+                if !state.waiters.contains_key(&id) {
+                    waiter_id = None;
+                }
+                continue;
+            };
 
+            let now = Instant::now();
+            if now >= deadline {
+                if let Some(id) = waiter_id.take() {
+                    state.waiters.remove(&id);
+                    if let Some(pipe) = state.pipes.get_mut(&pipe_ref.pipe_id) {
+                        pipe.waiting_reads.retain(|queued| *queued != id);
+                    }
+                }
+                return Err(PipeError::would_block("pipe read timed out"));
+            }
+
+            let remaining = deadline.saturating_duration_since(now);
+            let (next_state, wait_result) =
+                wait_timeout_or_recover(&self.inner.waiters, state, remaining);
+            state = next_state;
             if !state.waiters.contains_key(&id) {
                 waiter_id = None;
+            }
+            if wait_result.timed_out() {
+                if let Some(id) = waiter_id.take() {
+                    state.waiters.remove(&id);
+                    if let Some(pipe) = state.pipes.get_mut(&pipe_ref.pipe_id) {
+                        pipe.waiting_reads.retain(|queued| *queued != id);
+                    }
+                }
+                return Err(PipeError::would_block("pipe read timed out"));
             }
         }
     }
@@ -430,6 +471,17 @@ fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
 fn wait_or_recover<'a, T>(condvar: &Condvar, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
     match condvar.wait(guard) {
         Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn wait_timeout_or_recover<'a, T>(
+    condvar: &Condvar,
+    guard: MutexGuard<'a, T>,
+    timeout: Duration,
+) -> (MutexGuard<'a, T>, std::sync::WaitTimeoutResult) {
+    match condvar.wait_timeout(guard, timeout) {
+        Ok(result) => result,
         Err(poisoned) => poisoned.into_inner(),
     }
 }

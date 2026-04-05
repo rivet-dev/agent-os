@@ -9,6 +9,7 @@ use std::fmt;
 
 pub const DEFAULT_MAX_FILESYSTEM_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_INODE_COUNT: usize = 16_384;
+pub const DEFAULT_BLOCKING_READ_TIMEOUT_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResourceSnapshot {
@@ -29,8 +30,14 @@ pub struct ResourceLimits {
     pub max_open_fds: Option<usize>,
     pub max_pipes: Option<usize>,
     pub max_ptys: Option<usize>,
+    pub max_sockets: Option<usize>,
+    pub max_connections: Option<usize>,
     pub max_filesystem_bytes: Option<u64>,
     pub max_inode_count: Option<usize>,
+    pub max_blocking_read_ms: Option<u64>,
+    pub max_wasm_fuel: Option<u64>,
+    pub max_wasm_memory_bytes: Option<u64>,
+    pub max_wasm_stack_bytes: Option<usize>,
 }
 
 impl Default for ResourceLimits {
@@ -40,8 +47,14 @@ impl Default for ResourceLimits {
             max_open_fds: None,
             max_pipes: None,
             max_ptys: None,
+            max_sockets: None,
+            max_connections: None,
             max_filesystem_bytes: Some(DEFAULT_MAX_FILESYSTEM_BYTES),
             max_inode_count: Some(DEFAULT_MAX_INODE_COUNT),
+            max_blocking_read_ms: Some(DEFAULT_BLOCKING_READ_TIMEOUT_MS),
+            max_wasm_fuel: None,
+            max_wasm_memory_bytes: None,
+            max_wasm_stack_bytes: None,
         }
     }
 }

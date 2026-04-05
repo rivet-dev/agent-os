@@ -38,6 +38,9 @@ use agent_os_execution::{
     StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecution, WasmExecutionEngine,
     WasmExecutionError, WasmExecutionEvent, WasmPermissionTier as ExecutionWasmPermissionTier,
 };
+use agent_os_execution::wasm::{
+    WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV,
+};
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{
     KernelError, KernelProcessHandle, KernelVm, KernelVmConfig, SpawnOptions,
@@ -1467,6 +1470,12 @@ struct ActiveProcess {
     next_udp_socket_id: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct NetworkResourceCounts {
+    sockets: usize,
+    connections: usize,
+}
+
 impl ActiveProcess {
     fn new(
         kernel_pid: u32,
@@ -1508,6 +1517,21 @@ impl ActiveProcess {
     fn allocate_udp_socket_id(&mut self) -> String {
         self.next_udp_socket_id += 1;
         format!("udp-socket-{}", self.next_udp_socket_id)
+    }
+
+    fn network_resource_counts(&self) -> NetworkResourceCounts {
+        let mut counts = NetworkResourceCounts {
+            sockets: self.tcp_listeners.len() + self.tcp_sockets.len() + self.udp_sockets.len(),
+            connections: self.tcp_sockets.len(),
+        };
+
+        for child in self.child_processes.values() {
+            let child_counts = child.network_resource_counts();
+            counts.sockets += child_counts.sockets;
+            counts.connections += child_counts.connections;
+        }
+
+        counts
     }
 }
 
@@ -2900,6 +2924,7 @@ where
                 ActiveExecution::Python(execution)
             }
             GuestRuntimeKind::WebAssembly => {
+                apply_wasm_limit_env(&mut env, vm.kernel.resource_limits());
                 let wasm_permission_tier = resolve_wasm_permission_tier(
                     vm,
                     None,
@@ -3688,6 +3713,7 @@ where
                 ActiveExecution::Javascript(execution)
             }
             GuestRuntimeKind::WebAssembly => {
+                apply_wasm_limit_env(&mut execution_env, vm.kernel.resource_limits());
                 let context = self.wasm_engine.create_context(CreateWasmContextRequest {
                     vm_id: vm_id.to_owned(),
                     module_path: Some(resolved.entrypoint.clone()),
@@ -3797,6 +3823,8 @@ where
                                 "nested child_process calls from a child process are not supported yet",
                             )))
                         } else {
+                            let resource_limits = vm.kernel.resource_limits().clone();
+                            let network_counts = vm_network_resource_counts(vm);
                             let child = vm
                                 .active_processes
                                 .get_mut(process_id)
@@ -3804,7 +3832,13 @@ where
                                 .child_processes
                                 .get_mut(child_process_id)
                                 .expect("child process should still exist");
-                            service_javascript_sync_rpc(&mut vm.kernel, child, &request)
+                            service_javascript_sync_rpc(
+                                &mut vm.kernel,
+                                child,
+                                &request,
+                                &resource_limits,
+                                network_counts,
+                            )
                         }
                     };
 
@@ -3980,11 +4014,19 @@ where
             }
             _ => {
                 let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                let resource_limits = vm.kernel.resource_limits().clone();
+                let network_counts = vm_network_resource_counts(vm);
                 let process = vm
                     .active_processes
                     .get_mut(process_id)
                     .expect("process should still exist");
-                service_javascript_sync_rpc(&mut vm.kernel, process, &request)
+                service_javascript_sync_rpc(
+                    &mut vm.kernel,
+                    process,
+                    &request,
+                    &resource_limits,
+                    network_counts,
+                )
             }
         };
 
@@ -4444,6 +4486,18 @@ fn extract_guest_env(metadata: &BTreeMap<String, String>) -> BTreeMap<String, St
         .collect()
 }
 
+fn apply_wasm_limit_env(env: &mut BTreeMap<String, String>, limits: &ResourceLimits) {
+    if let Some(limit) = limits.max_wasm_fuel {
+        env.insert(String::from(WASM_MAX_FUEL_ENV), limit.to_string());
+    }
+    if let Some(limit) = limits.max_wasm_memory_bytes {
+        env.insert(String::from(WASM_MAX_MEMORY_BYTES_ENV), limit.to_string());
+    }
+    if let Some(limit) = limits.max_wasm_stack_bytes {
+        env.insert(String::from(WASM_MAX_STACK_BYTES_ENV), limit.to_string());
+    }
+}
+
 fn parse_resource_limits(
     metadata: &BTreeMap<String, String>,
 ) -> Result<ResourceLimits, SidecarError> {
@@ -4460,12 +4514,33 @@ fn parse_resource_limits(
     if metadata.contains_key("resource.max_ptys") {
         limits.max_ptys = parse_resource_limit(metadata, "resource.max_ptys")?;
     }
+    if metadata.contains_key("resource.max_sockets") {
+        limits.max_sockets = parse_resource_limit(metadata, "resource.max_sockets")?;
+    }
+    if metadata.contains_key("resource.max_connections") {
+        limits.max_connections = parse_resource_limit(metadata, "resource.max_connections")?;
+    }
     if metadata.contains_key("resource.max_filesystem_bytes") {
         limits.max_filesystem_bytes =
             parse_resource_limit_u64(metadata, "resource.max_filesystem_bytes")?;
     }
     if metadata.contains_key("resource.max_inode_count") {
         limits.max_inode_count = parse_resource_limit(metadata, "resource.max_inode_count")?;
+    }
+    if metadata.contains_key("resource.max_blocking_read_ms") {
+        limits.max_blocking_read_ms =
+            parse_resource_limit_u64(metadata, "resource.max_blocking_read_ms")?;
+    }
+    if metadata.contains_key("resource.max_wasm_fuel") {
+        limits.max_wasm_fuel = parse_resource_limit_u64(metadata, "resource.max_wasm_fuel")?;
+    }
+    if metadata.contains_key("resource.max_wasm_memory_bytes") {
+        limits.max_wasm_memory_bytes =
+            parse_resource_limit_u64(metadata, "resource.max_wasm_memory_bytes")?;
+    }
+    if metadata.contains_key("resource.max_wasm_stack_bytes") {
+        limits.max_wasm_stack_bytes =
+            parse_resource_limit(metadata, "resource.max_wasm_stack_bytes")?;
     }
     Ok(limits)
 }
@@ -4946,6 +5021,32 @@ fn is_unspecified_socket_host(host: &str) -> bool {
 
 fn is_loopback_socket_host(host: &str) -> bool {
     host == "127.0.0.1" || host == "::1" || host.eq_ignore_ascii_case("localhost")
+}
+
+fn vm_network_resource_counts(vm: &VmState) -> NetworkResourceCounts {
+    let mut counts = NetworkResourceCounts::default();
+    for process in vm.active_processes.values() {
+        let process_counts = process.network_resource_counts();
+        counts.sockets += process_counts.sockets;
+        counts.connections += process_counts.connections;
+    }
+    counts
+}
+
+fn check_network_resource_limit(
+    limit: Option<usize>,
+    current: usize,
+    additional: usize,
+    label: &str,
+) -> Result<(), SidecarError> {
+    if let Some(limit) = limit {
+        if current.saturating_add(additional) > limit {
+            return Err(SidecarError::Execution(format!(
+                "EAGAIN: maximum {label} count reached"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn socket_host_matches(requested: Option<&str>, actual: &str) -> bool {
@@ -5644,6 +5745,8 @@ fn service_javascript_sync_rpc(
     kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
+    resource_limits: &ResourceLimits,
+    network_counts: NetworkResourceCounts,
 ) -> Result<Value, SidecarError> {
     match request.method.as_str() {
         "dns.lookup" | "dns.resolve" | "dns.resolve4" | "dns.resolve6" => {
@@ -5651,10 +5754,10 @@ fn service_javascript_sync_rpc(
         }
         "net.connect" | "net.listen" | "net.poll" | "net.server_poll" | "net.write"
         | "net.shutdown" | "net.destroy" | "net.server_close" => {
-            service_javascript_net_sync_rpc(process, request)
+            service_javascript_net_sync_rpc(process, request, resource_limits, network_counts)
         }
         "dgram.createSocket" | "dgram.bind" | "dgram.send" | "dgram.poll" | "dgram.close" => {
-            service_javascript_dgram_sync_rpc(process, request)
+            service_javascript_dgram_sync_rpc(process, request, resource_limits, network_counts)
         }
         _ => service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request),
     }
@@ -5744,9 +5847,17 @@ fn service_javascript_dns_sync_rpc(
 fn service_javascript_dgram_sync_rpc(
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
+    resource_limits: &ResourceLimits,
+    network_counts: NetworkResourceCounts,
 ) -> Result<Value, SidecarError> {
     match request.method.as_str() {
         "dgram.createSocket" => {
+            check_network_resource_limit(
+                resource_limits.max_sockets,
+                network_counts.sockets,
+                1,
+                "socket",
+            )?;
             let payload = request
                 .args
                 .first()
@@ -5878,9 +5989,23 @@ fn service_javascript_dgram_sync_rpc(
 fn service_javascript_net_sync_rpc(
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
+    resource_limits: &ResourceLimits,
+    network_counts: NetworkResourceCounts,
 ) -> Result<Value, SidecarError> {
     match request.method.as_str() {
         "net.connect" => {
+            check_network_resource_limit(
+                resource_limits.max_sockets,
+                network_counts.sockets,
+                1,
+                "socket",
+            )?;
+            check_network_resource_limit(
+                resource_limits.max_connections,
+                network_counts.connections,
+                1,
+                "connection",
+            )?;
             let payload = request
                 .args
                 .first()
@@ -5913,6 +6038,12 @@ fn service_javascript_net_sync_rpc(
             }))
         }
         "net.listen" => {
+            check_network_resource_limit(
+                resource_limits.max_sockets,
+                network_counts.sockets,
+                1,
+                "socket",
+            )?;
             let payload = request
                 .args
                 .first()
@@ -5994,6 +6125,27 @@ fn service_javascript_net_sync_rpc(
 
             match event {
                 Some(JavascriptTcpListenerEvent::Connection(pending)) => {
+                    if let Err(error) = check_network_resource_limit(
+                        resource_limits.max_sockets,
+                        network_counts.sockets,
+                        1,
+                        "socket",
+                    )
+                    .and_then(|()| {
+                        check_network_resource_limit(
+                            resource_limits.max_connections,
+                            network_counts.connections,
+                            1,
+                            "connection",
+                        )
+                    }) {
+                        let _ = pending.stream.shutdown(Shutdown::Both);
+                        return Ok(json!({
+                            "type": "error",
+                            "code": "EAGAIN",
+                            "message": error.to_string(),
+                        }));
+                    }
                     let socket = ActiveTcpSocket::from_stream(pending.stream)?;
                     let socket_id = process.allocate_tcp_socket_id();
                     process.tcp_sockets.insert(socket_id.clone(), socket);
@@ -7392,6 +7544,8 @@ ykAheWCsAteSEWVc0w==\n\
     #[test]
     fn parse_resource_limits_reads_filesystem_limits() {
         let metadata = BTreeMap::from([
+            (String::from("resource.max_sockets"), String::from("8")),
+            (String::from("resource.max_connections"), String::from("4")),
             (
                 String::from("resource.max_filesystem_bytes"),
                 String::from("4096"),
@@ -7400,11 +7554,30 @@ ykAheWCsAteSEWVc0w==\n\
                 String::from("resource.max_inode_count"),
                 String::from("128"),
             ),
+            (
+                String::from("resource.max_blocking_read_ms"),
+                String::from("250"),
+            ),
+            (String::from("resource.max_wasm_fuel"), String::from("5000")),
+            (
+                String::from("resource.max_wasm_memory_bytes"),
+                String::from("131072"),
+            ),
+            (
+                String::from("resource.max_wasm_stack_bytes"),
+                String::from("262144"),
+            ),
         ]);
 
         let limits = parse_resource_limits(&metadata).expect("parse resource limits");
+        assert_eq!(limits.max_sockets, Some(8));
+        assert_eq!(limits.max_connections, Some(4));
         assert_eq!(limits.max_filesystem_bytes, Some(4096));
         assert_eq!(limits.max_inode_count, Some(128));
+        assert_eq!(limits.max_blocking_read_ms, Some(250));
+        assert_eq!(limits.max_wasm_fuel, Some(5000));
+        assert_eq!(limits.max_wasm_memory_bytes, Some(131072));
+        assert_eq!(limits.max_wasm_stack_bytes, Some(262144));
     }
 
     #[test]

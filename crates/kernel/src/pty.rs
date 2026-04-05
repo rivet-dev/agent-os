@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 pub const MAX_PTY_BUFFER_BYTES: usize = 65_536;
 pub const MAX_CANON: usize = 4_096;
@@ -405,6 +406,15 @@ impl PtyManager {
     }
 
     pub fn read(&self, description_id: u64, length: usize) -> PtyResult<Option<Vec<u8>>> {
+        self.read_with_timeout(description_id, length, None)
+    }
+
+    pub fn read_with_timeout(
+        &self,
+        description_id: u64,
+        length: usize,
+        timeout: Option<Duration>,
+    ) -> PtyResult<Option<Vec<u8>>> {
         let mut state = lock_or_recover(&self.inner.state);
         let pty_ref = state
             .desc_to_pty
@@ -412,6 +422,7 @@ impl PtyManager {
             .copied()
             .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
         let mut waiter_id = None;
+        let deadline = timeout.map(|duration| Instant::now() + duration);
 
         loop {
             if let Some(id) = waiter_id {
@@ -489,10 +500,42 @@ impl PtyManager {
                 next
             };
 
-            state = wait_or_recover(&self.inner.waiters, state);
+            let Some(deadline) = deadline else {
+                state = wait_or_recover(&self.inner.waiters, state);
+                if !state.waiters.contains_key(&id) {
+                    waiter_id = None;
+                }
+                continue;
+            };
 
+            let now = Instant::now();
+            if now >= deadline {
+                if let Some(id) = waiter_id.take() {
+                    state.waiters.remove(&id);
+                    if let Some(pty) = state.ptys.get_mut(&pty_ref.pty_id) {
+                        pty.waiting_input_reads.retain(|queued| *queued != id);
+                        pty.waiting_output_reads.retain(|queued| *queued != id);
+                    }
+                }
+                return Err(PtyError::would_block("PTY read timed out"));
+            }
+
+            let remaining = deadline.saturating_duration_since(now);
+            let (next_state, wait_result) =
+                wait_timeout_or_recover(&self.inner.waiters, state, remaining);
+            state = next_state;
             if !state.waiters.contains_key(&id) {
                 waiter_id = None;
+            }
+            if wait_result.timed_out() {
+                if let Some(id) = waiter_id.take() {
+                    state.waiters.remove(&id);
+                    if let Some(pty) = state.ptys.get_mut(&pty_ref.pty_id) {
+                        pty.waiting_input_reads.retain(|queued| *queued != id);
+                        pty.waiting_output_reads.retain(|queued| *queued != id);
+                    }
+                }
+                return Err(PtyError::would_block("PTY read timed out"));
             }
         }
     }
@@ -879,6 +922,17 @@ fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
 fn wait_or_recover<'a, T>(condvar: &Condvar, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
     match condvar.wait(guard) {
         Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn wait_timeout_or_recover<'a, T>(
+    condvar: &Condvar,
+    guard: MutexGuard<'a, T>,
+    timeout: Duration,
+) -> (MutexGuard<'a, T>, std::sync::WaitTimeoutResult) {
+    match condvar.wait_timeout(guard, timeout) {
+        Ok(result) => result,
         Err(poisoned) => poisoned.into_inner(),
     }
 }

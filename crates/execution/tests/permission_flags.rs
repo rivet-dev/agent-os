@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use agent_os_execution::wasm::WASM_MAX_STACK_BYTES_ENV;
 use agent_os_execution::{
     CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
     JavascriptExecutionEngine, PythonExecutionEngine, StartJavascriptExecutionRequest,
@@ -18,6 +19,7 @@ const NODE_ALLOW_CHILD_PROCESS_FLAG: &str = "--allow-child-process";
 const NODE_ALLOW_WORKER_FLAG: &str = "--allow-worker";
 const NODE_ALLOW_FS_READ_FLAG: &str = "--allow-fs-read=";
 const NODE_ALLOW_FS_WRITE_FLAG: &str = "--allow-fs-write=";
+const NODE_STACK_SIZE_FLAG_PREFIX: &str = "--stack-size=";
 
 struct EnvVarGuard {
     key: &'static str,
@@ -188,7 +190,10 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
             vm_id: String::from("vm-wasm"),
             context_id: wasm_context.context_id,
             argv: vec![String::from("./modules/guest.wasm")],
-            env: BTreeMap::new(),
+            env: BTreeMap::from([(
+                String::from(WASM_MAX_STACK_BYTES_ENV),
+                String::from("131072"),
+            )]),
             cwd: wasm_cwd.clone(),
             permission_tier: WasmPermissionTier::Full,
         })
@@ -295,6 +300,12 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
                 .iter()
                 .any(|path| *path == wasm_module_parent.as_str()),
             "wasm write flags should not include the module parent: {wasm_args:?}"
+        );
+        assert!(
+            wasm_args
+                .iter()
+                .any(|arg| arg.starts_with(NODE_STACK_SIZE_FLAG_PREFIX)),
+            "wasm execution should apply the configured Node stack-size flag: {wasm_args:?}"
         );
     }
 }

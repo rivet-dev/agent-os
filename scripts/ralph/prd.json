@@ -550,7 +550,7 @@
         "Typecheck passes"
       ],
       "priority": 31,
-      "passes": false,
+      "passes": true,
       "notes": "No WASM fuel/memory/stack limits. No socket/connection limits. pipe.read/pty.read block forever if write end leaks."
     },
     {

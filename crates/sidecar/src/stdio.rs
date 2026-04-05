@@ -12,7 +12,8 @@ use agent_os_bridge::{
     WriteFileRequest,
 };
 use agent_os_sidecar::protocol::{
-    AuthenticatedResponse, NativeFrameCodec, ProtocolFrame, ResponsePayload, SessionOpenedResponse,
+    AuthenticatedResponse, NativeFrameCodec, ProtocolCodecError, ProtocolFrame, ResponsePayload,
+    SessionOpenedResponse,
 };
 use agent_os_sidecar::{NativeSidecar, NativeSidecarConfig};
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
@@ -145,6 +146,13 @@ fn read_frame(
     }
 
     let declared_len = u32::from_be_bytes(prefix) as usize;
+    if declared_len > codec.max_frame_bytes() {
+        return Err(ProtocolCodecError::FrameTooLarge {
+            size: declared_len,
+            max: codec.max_frame_bytes(),
+        }
+        .into());
+    }
     let total_len = prefix.len().saturating_add(declared_len);
     let mut bytes = Vec::with_capacity(total_len);
     bytes.extend_from_slice(&prefix);
@@ -166,6 +174,27 @@ fn default_compile_cache_root() -> PathBuf {
         "agent-os-sidecar-compile-cache-{}",
         std::process::id()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn read_frame_rejects_oversized_prefix_before_allocating_payload() {
+        let codec = NativeFrameCodec::new(16);
+        let mut reader = Cursor::new((32_u32).to_be_bytes().to_vec());
+
+        let error = read_frame(&codec, &mut reader).expect_err("oversized frame should fail");
+        let error = error
+            .downcast::<ProtocolCodecError>()
+            .expect("protocol codec error");
+        assert!(matches!(
+            *error,
+            ProtocolCodecError::FrameTooLarge { size: 32, max: 16 }
+        ));
+    }
 }
 
 #[derive(Debug, Clone)]

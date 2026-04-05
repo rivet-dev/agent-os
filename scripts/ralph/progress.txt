@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- WASM runtime hardening is split across three layers together: `ResourceLimits` / sidecar metadata parsing, `crates/sidecar/src/service.rs` injecting reserved `AGENT_OS_WASM_*` env keys, and `crates/execution/src/wasm.rs` validating or enforcing the actual limit before guest code runs.
 - Sidecar `ResourceLimits` parsing should start from `ResourceLimits::default()` and only override metadata keys that are present; rebuilding the struct from sparse metadata silently drops default filesystem byte/inode caps.
 - WASM command permission tiers have to be threaded through all three layers together: `packages/core` command metadata, sidecar protocol/service request fields (`command_permissions` and per-exec `wasm_permission_tier`), and `StartWasmExecutionRequest.permission_tier`; top-level exec and JS `child_process` launches use separate paths.
 - Sensitive mount paths are gated separately from ordinary writes: kernel mount APIs require `fs.write` on the mount target, and `/`, `/etc`, `/proc` also require `fs.mount_sensitive`; in sidecar tests, `configure_vm` reconciles mounts before `payload.permissions`, so mount-time policy must already be installed on the VM (for example via `bridge.set_vm_permissions(...)`).
@@ -51,7 +52,31 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - **Learnings for future iterations:**
   - Patterns discovered: Filesystem resource accounting should scan the raw filesystem beneath `PermissionedFileSystem` / `DeviceLayer`; using the permission-wrapped view couples internal accounting to guest read policy and special `/dev/*` entries.
   - Gotchas encountered: Sidecar resource parsing has to preserve `ResourceLimits::default()` when metadata is sparse, or new default caps like filesystem bytes/inodes get silently disabled.
-  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test resource_accounting -- --test-threads=1`, `cargo test -p agent-os-kernel --test api_surface kernel_fd_surface_supports_open_seek_positional_io_dup_and_dev_fd_views -- --exact`, `cargo test -p agent-os-sidecar service::tests::parse_resource_limits_reads_filesystem_limits -- --exact`, and `cargo check -p agent-os-kernel -p agent-os-sidecar` all pass after this change.
+- Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test resource_accounting -- --test-threads=1`, `cargo test -p agent-os-kernel --test api_surface kernel_fd_surface_supports_open_seek_positional_io_dup_and_dev_fd_views -- --exact`, `cargo test -p agent-os-sidecar service::tests::parse_resource_limits_reads_filesystem_limits -- --exact`, and `cargo check -p agent-os-kernel -p agent-os-sidecar` all pass after this change.
+---
+## 2026-04-05 02:56:51 PDT - US-034
+- What was implemented
+- Extended `ResourceLimits` with socket/connection caps, configurable blocking read timeout, and reserved WASM runtime limit fields; kernel `fd_read()` now uses bounded pipe/PTTY reads so leaked write ends return `EAGAIN` instead of hanging forever.
+- Hardened the native sidecar to parse the new resource metadata, count network resources across the active process tree, reject oversized framed stdio prefixes before allocation, and thread `max_wasm_*` limits into the execution layer through reserved `AGENT_OS_WASM_*` env keys.
+- Added execution-side WASM enforcement in `crates/execution/src/wasm.rs`: configurable fuel budget timeout, configurable Node stack-size flag, and pre-spawn module validation for declared memory maximums when a memory cap is set.
+- Files changed
+- `CLAUDE.md`
+- `crates/execution/src/wasm.rs`
+- `crates/execution/tests/permission_flags.rs`
+- `crates/execution/tests/wasm.rs`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/src/pipe_manager.rs`
+- `crates/kernel/src/pty.rs`
+- `crates/kernel/src/resource_accounting.rs`
+- `crates/kernel/tests/resource_accounting.rs`
+- `crates/sidecar/src/service.rs`
+- `crates/sidecar/src/stdio.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: WASM runtime hardening is split across `ResourceLimits`, sidecar env injection, and execution-time validation; changing only one layer silently leaves the limit unenforced.
+  - Gotchas encountered: Node's `WASI.start()` expects the guest module to export `memory`, so even timeout-only WASM regression fixtures need a memory export to exercise the runtime path cleanly.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test resource_accounting -- --test-threads=1`, `cargo test -p agent-os-execution --test wasm -- --test-threads=1`, `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1`, `cargo test -p agent-os-sidecar parse_resource_limits_reads_filesystem_limits -- --exact`, `cargo test -p agent-os-sidecar stdio::tests::read_frame_rejects_oversized_prefix_before_allocating_payload -- --exact`, and `cargo check -p agent-os-kernel -p agent-os-execution -p agent-os-sidecar` all pass after this change.
 ---
 ## 2026-04-05 01:10:03 PDT - US-028
 - What was implemented

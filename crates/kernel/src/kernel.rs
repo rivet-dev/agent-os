@@ -371,6 +371,10 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             .snapshot(&self.processes, &fd_tables, &self.pipes, &self.ptys)
     }
 
+    pub fn resource_limits(&self) -> &ResourceLimits {
+        self.resources.limits()
+    }
+
     pub fn register_driver(&mut self, driver: CommandDriver) -> KernelResult<()> {
         self.assert_not_terminated()?;
         self.driver_pids
@@ -700,14 +704,14 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         if self.pipes.is_pipe(entry.description.id()) {
             return Ok(self
                 .pipes
-                .read(entry.description.id(), length)?
+                .read_with_timeout(entry.description.id(), length, self.blocking_read_timeout())?
                 .unwrap_or_default());
         }
 
         if self.ptys.is_pty(entry.description.id()) {
             return Ok(self
                 .ptys
-                .read(entry.description.id(), length)?
+                .read_with_timeout(entry.description.id(), length, self.blocking_read_timeout())?
                 .unwrap_or_default());
         }
 
@@ -1342,6 +1346,13 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             usage.inode_count,
         )?;
         Ok(())
+    }
+
+    fn blocking_read_timeout(&self) -> Option<Duration> {
+        self.resources
+            .limits()
+            .max_blocking_read_ms
+            .map(Duration::from_millis)
     }
 
     fn close_special_resource_if_needed(&self, description: &Arc<FileDescription>, filetype: u8) {

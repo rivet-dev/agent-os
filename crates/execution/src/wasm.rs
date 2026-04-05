@@ -4,19 +4,20 @@ use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
     encode_json_string_array, encode_json_string_map, env_builtin_enabled, harden_node_command,
     node_binary, node_resolution_read_paths, resolve_path_like_specifier,
-    spawn_node_control_reader, spawn_stream_reader, spawn_waiter, LinePrefixFilter,
-    NodeControlMessage, NodeSignalDispositionAction, NodeSignalHandlerRegistration,
+    spawn_node_control_reader, spawn_stream_reader, LinePrefixFilter, NodeControlMessage,
+    NodeSignalDispositionAction, NodeSignalHandlerRegistration,
 };
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{
     mpsc::{self, Receiver, RecvTimeoutError},
     Arc, Mutex,
 };
+use std::thread::JoinHandle;
 use std::time::{Duration, UNIX_EPOCH};
 
 const WASM_MODULE_PATH_ENV: &str = "AGENT_OS_WASM_MODULE_PATH";
@@ -25,6 +26,9 @@ const WASM_GUEST_ENV_ENV: &str = "AGENT_OS_GUEST_ENV";
 const WASM_PERMISSION_TIER_ENV: &str = "AGENT_OS_WASM_PERMISSION_TIER";
 const WASM_PREWARM_ONLY_ENV: &str = "AGENT_OS_WASM_PREWARM_ONLY";
 const WASM_WARMUP_DEBUG_ENV: &str = "AGENT_OS_WASM_WARMUP_DEBUG";
+pub const WASM_MAX_FUEL_ENV: &str = "AGENT_OS_WASM_MAX_FUEL";
+pub const WASM_MAX_MEMORY_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_MEMORY_BYTES";
+pub const WASM_MAX_STACK_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_STACK_BYTES";
 const WASM_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_WASM_WARMUP_METRICS__:";
 const NODE_COMPILE_CACHE_ENV: &str = "NODE_COMPILE_CACHE";
 const NODE_DISABLE_COMPILE_CACHE_ENV: &str = "NODE_DISABLE_COMPILE_CACHE";
@@ -42,8 +46,13 @@ const RESERVED_WASM_ENV_KEYS: &[&str] = &[
     WASM_GUEST_ARGV_ENV,
     WASM_GUEST_ENV_ENV,
     WASM_MODULE_PATH_ENV,
+    WASM_MAX_FUEL_ENV,
+    WASM_MAX_MEMORY_BYTES_ENV,
+    WASM_MAX_STACK_BYTES_ENV,
     WASM_PREWARM_ONLY_ENV,
 ];
+const WASM_PAGE_BYTES: u64 = 65_536;
+const WASM_TIMEOUT_EXIT_CODE: i32 = 124;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WasmSignalDispositionAction {
@@ -138,9 +147,12 @@ pub enum WasmExecutionError {
     MissingContext(String),
     VmMismatch { expected: String, found: String },
     MissingModulePath,
+    InvalidLimit(String),
+    InvalidModule(String),
     MissingChildStream(&'static str),
     PrepareWarmPath(std::io::Error),
     WarmupSpawn(std::io::Error),
+    WarmupTimeout(Duration),
     WarmupFailed { exit_code: i32, stderr: String },
     Spawn(std::io::Error),
     StdinClosed,
@@ -163,12 +175,21 @@ impl fmt::Display for WasmExecutionError {
             Self::MissingModulePath => {
                 f.write_str("guest WebAssembly execution requires a module path")
             }
+            Self::InvalidLimit(message) => write!(f, "invalid WebAssembly limit: {message}"),
+            Self::InvalidModule(message) => write!(f, "invalid WebAssembly module: {message}"),
             Self::MissingChildStream(name) => write!(f, "node child missing {name} pipe"),
             Self::PrepareWarmPath(err) => {
                 write!(f, "failed to prepare shared WebAssembly warm path: {err}")
             }
             Self::WarmupSpawn(err) => {
                 write!(f, "failed to start WebAssembly warmup process: {err}")
+            }
+            Self::WarmupTimeout(timeout) => {
+                write!(
+                    f,
+                    "WebAssembly warmup exceeded the configured fuel budget after {} ms",
+                    timeout.as_millis()
+                )
             }
             Self::WarmupFailed { exit_code, stderr } => {
                 if stderr.trim().is_empty() {
@@ -331,8 +352,15 @@ impl WasmExecutionEngine {
             .ensure_materialized()
             .map_err(WasmExecutionError::PrepareWarmPath)?;
         let frozen_time_ms = frozen_time_ms();
-        let warmup_metrics =
-            prewarm_wasm_path(&self.import_cache, &context, &request, frozen_time_ms)?;
+        validate_module_limits(&context, &request)?;
+        let execution_timeout = resolve_wasm_execution_timeout(&request)?;
+        let warmup_metrics = prewarm_wasm_path(
+            &self.import_cache,
+            &context,
+            &request,
+            frozen_time_ms,
+            execution_timeout,
+        )?;
 
         self.next_execution_id += 1;
         let execution_id = format!("exec-{}", self.next_execution_id);
@@ -372,14 +400,12 @@ impl WasmExecutionEngine {
             WasmProcessEvent::Control,
             |message| WasmProcessEvent::RawStderr(message.into_bytes()),
         );
-        spawn_waiter(
+        spawn_wasm_waiter(
             child,
             stdout_reader,
             stderr_reader,
-            true,
+            execution_timeout,
             sender,
-            WasmProcessEvent::Exited,
-            |message| WasmProcessEvent::RawStderr(message.into_bytes()),
         );
 
         Ok(WasmExecution {
@@ -451,7 +477,7 @@ fn create_node_child(
         );
 
     configure_node_control_channel(&mut command, control_fd);
-    configure_node_command(&mut command, import_cache, frozen_time_ms)?;
+    configure_node_command(&mut command, import_cache, frozen_time_ms, request)?;
 
     command.spawn().map_err(WasmExecutionError::Spawn)
 }
@@ -461,6 +487,7 @@ fn prewarm_wasm_path(
     context: &WasmContext,
     request: &StartWasmExecutionRequest,
     frozen_time_ms: u128,
+    execution_timeout: Option<Duration>,
 ) -> Result<Option<Vec<u8>>, WasmExecutionError> {
     let debug_enabled = request
         .env
@@ -500,9 +527,9 @@ fn prewarm_wasm_path(
             request.permission_tier.as_env_value(),
         );
 
-    configure_node_command(&mut command, import_cache, frozen_time_ms)?;
+    configure_node_command(&mut command, import_cache, frozen_time_ms, request)?;
 
-    let output = command.output().map_err(WasmExecutionError::WarmupSpawn)?;
+    let output = run_warmup_command(command, execution_timeout)?;
     if !output.status.success() {
         return Err(WasmExecutionError::WarmupFailed {
             exit_code: output.status.code().unwrap_or(1),
@@ -580,9 +607,15 @@ fn configure_node_command(
     command: &mut Command,
     import_cache: &NodeImportCache,
     frozen_time_ms: u128,
+    request: &StartWasmExecutionRequest,
 ) -> Result<(), WasmExecutionError> {
     let compile_cache_dir = import_cache.shared_compile_cache_dir();
     fs::create_dir_all(&compile_cache_dir).map_err(WasmExecutionError::PrepareWarmPath)?;
+
+    if let Some(stack_bytes) = wasm_stack_limit_bytes(request)? {
+        let stack_kib = (stack_bytes.saturating_add(1023) / 1024).max(64);
+        command.arg(format!("--stack-size={stack_kib}"));
+    }
 
     command
         .env_remove(NODE_DISABLE_COMPILE_CACHE_ENV)
@@ -670,6 +703,351 @@ fn file_fingerprint(path: &Path) -> String {
                 .unwrap_or_else(|| String::from("unknown"))
         ),
         Err(_) => String::from("missing"),
+    }
+}
+
+#[derive(Debug)]
+struct WarmupOutput {
+    status: std::process::ExitStatus,
+    stderr: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildWaitError {
+    TimedOut,
+    WaitFailed,
+}
+
+fn run_warmup_command(
+    mut command: Command,
+    timeout: Option<Duration>,
+) -> Result<WarmupOutput, WasmExecutionError> {
+    let mut child = command.spawn().map_err(WasmExecutionError::WarmupSpawn)?;
+    let Some(mut stderr) = child.stderr.take() else {
+        return Err(WasmExecutionError::MissingChildStream("stderr"));
+    };
+
+    let status =
+        wait_for_child_with_optional_timeout(&mut child, timeout).map_err(|timed_out| {
+            if timed_out == ChildWaitError::TimedOut {
+                WasmExecutionError::WarmupTimeout(timeout.expect("timeout should be present"))
+            } else {
+                WasmExecutionError::WarmupSpawn(std::io::Error::other(
+                    "failed to wait for WebAssembly warmup child",
+                ))
+            }
+        })?;
+
+    let mut stderr_bytes = Vec::new();
+    let _ = stderr.read_to_end(&mut stderr_bytes);
+    Ok(WarmupOutput {
+        status,
+        stderr: stderr_bytes,
+    })
+}
+
+fn spawn_wasm_waiter(
+    mut child: Child,
+    stdout_reader: JoinHandle<()>,
+    stderr_reader: JoinHandle<()>,
+    timeout: Option<Duration>,
+    sender: mpsc::Sender<WasmProcessEvent>,
+) {
+    std::thread::spawn(move || {
+        let wait_result = wait_for_child_with_optional_timeout(&mut child, timeout);
+        match wait_result {
+            Ok(status) => {
+                let exit_code = status.code().unwrap_or(1);
+                let _ = sender.send(WasmProcessEvent::Exited(exit_code));
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return;
+            }
+            Err(ChildWaitError::TimedOut) => {
+                let _ = sender.send(WasmProcessEvent::RawStderr(
+                    b"WebAssembly fuel budget exhausted\n".to_vec(),
+                ));
+                let _ = sender.send(WasmProcessEvent::Exited(WASM_TIMEOUT_EXIT_CODE));
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return;
+            }
+            Err(ChildWaitError::WaitFailed) => {
+                let _ = sender.send(WasmProcessEvent::RawStderr(
+                    b"agent-os execution wait error: failed to wait for WebAssembly child\n"
+                        .to_vec(),
+                ));
+                let _ = sender.send(WasmProcessEvent::Exited(1));
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return;
+            }
+        }
+    });
+}
+
+fn wait_for_child_with_optional_timeout(
+    child: &mut Child,
+    timeout: Option<Duration>,
+) -> Result<std::process::ExitStatus, ChildWaitError> {
+    if timeout.is_none() {
+        return child.wait().map_err(|_| ChildWaitError::WaitFailed);
+    }
+
+    let timeout = timeout.expect("timeout should be present");
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ChildWaitError::TimedOut);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return Err(ChildWaitError::WaitFailed),
+        }
+    }
+}
+
+fn resolve_wasm_execution_timeout(
+    request: &StartWasmExecutionRequest,
+) -> Result<Option<Duration>, WasmExecutionError> {
+    Ok(wasm_limit_u64(&request.env, WASM_MAX_FUEL_ENV)?.map(Duration::from_millis))
+}
+
+fn wasm_stack_limit_bytes(
+    request: &StartWasmExecutionRequest,
+) -> Result<Option<usize>, WasmExecutionError> {
+    wasm_limit_usize(&request.env, WASM_MAX_STACK_BYTES_ENV)
+}
+
+fn wasm_memory_limit_bytes(
+    request: &StartWasmExecutionRequest,
+) -> Result<Option<u64>, WasmExecutionError> {
+    wasm_limit_u64(&request.env, WASM_MAX_MEMORY_BYTES_ENV)
+}
+
+fn wasm_limit_u64(
+    env: &BTreeMap<String, String>,
+    key: &str,
+) -> Result<Option<u64>, WasmExecutionError> {
+    let Some(value) = env.get(key) else {
+        return Ok(None);
+    };
+    value
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|error| WasmExecutionError::InvalidLimit(format!("{key}={value}: {error}")))
+}
+
+fn wasm_limit_usize(
+    env: &BTreeMap<String, String>,
+    key: &str,
+) -> Result<Option<usize>, WasmExecutionError> {
+    let Some(value) = env.get(key) else {
+        return Ok(None);
+    };
+    value
+        .parse::<usize>()
+        .map(Some)
+        .map_err(|error| WasmExecutionError::InvalidLimit(format!("{key}={value}: {error}")))
+}
+
+fn validate_module_limits(
+    context: &WasmContext,
+    request: &StartWasmExecutionRequest,
+) -> Result<(), WasmExecutionError> {
+    let Some(memory_limit) = wasm_memory_limit_bytes(request)? else {
+        return Ok(());
+    };
+
+    let resolved_path = resolved_module_path(&module_path(context, request)?, &request.cwd);
+    let bytes = fs::read(&resolved_path).map_err(|error| {
+        WasmExecutionError::InvalidModule(format!(
+            "failed to read {}: {error}",
+            resolved_path.display()
+        ))
+    })?;
+    let module_limits = extract_wasm_module_limits(&bytes)?;
+
+    if module_limits.imports_memory {
+        return Err(WasmExecutionError::InvalidModule(String::from(
+            "configured WebAssembly memory limit does not support imported memories yet",
+        )));
+    }
+
+    if let Some(initial_bytes) = module_limits.initial_memory_bytes {
+        if initial_bytes > memory_limit {
+            return Err(WasmExecutionError::InvalidModule(format!(
+                "initial WebAssembly memory of {initial_bytes} bytes exceeds the configured limit of {memory_limit} bytes"
+            )));
+        }
+    }
+
+    match module_limits.maximum_memory_bytes {
+        Some(maximum_bytes) if maximum_bytes > memory_limit => Err(WasmExecutionError::InvalidModule(
+            format!(
+                "WebAssembly memory maximum of {maximum_bytes} bytes exceeds the configured limit of {memory_limit} bytes"
+            ),
+        )),
+        Some(_) => Ok(()),
+        None if module_limits.initial_memory_bytes.is_some() => Err(WasmExecutionError::InvalidModule(
+            String::from(
+                "configured WebAssembly memory limit requires the module to declare a memory maximum",
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
+#[derive(Debug, Default)]
+struct WasmModuleLimits {
+    imports_memory: bool,
+    initial_memory_bytes: Option<u64>,
+    maximum_memory_bytes: Option<u64>,
+}
+
+fn extract_wasm_module_limits(bytes: &[u8]) -> Result<WasmModuleLimits, WasmExecutionError> {
+    if bytes.len() < 8 || &bytes[..4] != b"\0asm" {
+        return Err(WasmExecutionError::InvalidModule(String::from(
+            "module is not a valid WebAssembly binary",
+        )));
+    }
+
+    let mut offset = 8;
+    let mut limits = WasmModuleLimits::default();
+
+    while offset < bytes.len() {
+        let section_id = bytes[offset];
+        offset += 1;
+        let section_size = read_varuint(bytes, &mut offset)? as usize;
+        let section_end = offset.checked_add(section_size).ok_or_else(|| {
+            WasmExecutionError::InvalidModule(String::from("section size overflow"))
+        })?;
+        if section_end > bytes.len() {
+            return Err(WasmExecutionError::InvalidModule(String::from(
+                "section extends past end of module",
+            )));
+        }
+
+        match section_id {
+            2 => {
+                let mut cursor = offset;
+                let import_count = read_varuint(bytes, &mut cursor)? as usize;
+                for _ in 0..import_count {
+                    skip_name(bytes, &mut cursor)?;
+                    skip_name(bytes, &mut cursor)?;
+                    let kind = read_byte(bytes, &mut cursor)?;
+                    match kind {
+                        0x02 => {
+                            let _ = read_memory_limits(bytes, &mut cursor)?;
+                            limits.imports_memory = true;
+                        }
+                        0x00 => {
+                            let _ = read_varuint(bytes, &mut cursor)?;
+                        }
+                        0x01 => {
+                            skip_table_type(bytes, &mut cursor)?;
+                        }
+                        0x03 => {
+                            let _ = read_byte(bytes, &mut cursor)?;
+                            let _ = read_byte(bytes, &mut cursor)?;
+                        }
+                        other => {
+                            return Err(WasmExecutionError::InvalidModule(format!(
+                                "unsupported import kind {other}"
+                            )));
+                        }
+                    }
+                }
+            }
+            5 => {
+                let mut cursor = offset;
+                let memory_count = read_varuint(bytes, &mut cursor)? as usize;
+                if memory_count > 0 {
+                    let (initial_pages, maximum_pages) = read_memory_limits(bytes, &mut cursor)?;
+                    limits.initial_memory_bytes =
+                        Some(initial_pages.saturating_mul(WASM_PAGE_BYTES));
+                    limits.maximum_memory_bytes =
+                        maximum_pages.map(|pages| pages.saturating_mul(WASM_PAGE_BYTES));
+                }
+            }
+            _ => {}
+        }
+
+        offset = section_end;
+    }
+
+    Ok(limits)
+}
+
+fn read_memory_limits(
+    bytes: &[u8],
+    offset: &mut usize,
+) -> Result<(u64, Option<u64>), WasmExecutionError> {
+    let flags = read_varuint(bytes, offset)?;
+    let initial = read_varuint(bytes, offset)?;
+    let maximum = if flags & 0x01 != 0 {
+        Some(read_varuint(bytes, offset)?)
+    } else {
+        None
+    };
+    Ok((initial, maximum))
+}
+
+fn skip_name(bytes: &[u8], offset: &mut usize) -> Result<(), WasmExecutionError> {
+    let length = read_varuint(bytes, offset)? as usize;
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| WasmExecutionError::InvalidModule(String::from("name length overflow")))?;
+    if end > bytes.len() {
+        return Err(WasmExecutionError::InvalidModule(String::from(
+            "name extends past end of module",
+        )));
+    }
+    *offset = end;
+    Ok(())
+}
+
+fn skip_table_type(bytes: &[u8], offset: &mut usize) -> Result<(), WasmExecutionError> {
+    let _ = read_byte(bytes, offset)?;
+    let flags = read_varuint(bytes, offset)?;
+    let _ = read_varuint(bytes, offset)?;
+    if flags & 0x01 != 0 {
+        let _ = read_varuint(bytes, offset)?;
+    }
+    Ok(())
+}
+
+fn read_byte(bytes: &[u8], offset: &mut usize) -> Result<u8, WasmExecutionError> {
+    let Some(byte) = bytes.get(*offset).copied() else {
+        return Err(WasmExecutionError::InvalidModule(String::from(
+            "unexpected end of module",
+        )));
+    };
+    *offset += 1;
+    Ok(byte)
+}
+
+fn read_varuint(bytes: &[u8], offset: &mut usize) -> Result<u64, WasmExecutionError> {
+    let mut shift = 0_u32;
+    let mut value = 0_u64;
+
+    loop {
+        let byte = read_byte(bytes, offset)?;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift = shift.saturating_add(7);
+        if shift >= 64 {
+            return Err(WasmExecutionError::InvalidModule(String::from(
+                "varuint is too large",
+            )));
+        }
     }
 }
 
