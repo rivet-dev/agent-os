@@ -192,6 +192,7 @@ fn dispose_vm_succeeds_even_when_a_guest_process_is_running() {
                     cwd.to_string_lossy().into_owned(),
                 )]),
                 root_filesystem: Default::default(),
+                permissions: Vec::new(),
             }),
         ))
         .expect("create replacement vm after dispose");
@@ -253,6 +254,7 @@ fn close_session_removes_the_session_and_disposes_owned_vms() {
                     cwd.to_string_lossy().into_owned(),
                 )]),
                 root_filesystem: Default::default(),
+                permissions: Vec::new(),
             }),
         ))
         .expect("dispatch closed-session create_vm");

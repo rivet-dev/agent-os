@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Native sidecar permission policy must be serialized into `CreateVmRequest`, not just `configure_vm`, because guest env filtering and bootstrap driver registration both happen during VM construction.
 - Node builtin hardening is split between `packages/core/src/sidecar/native-kernel-proxy.ts` and four generated surfaces in `crates/execution/src/node_import_cache.rs` (loader, Node runner, Python runner, denied asset materialization); update all of them together when changing builtin policy.
 - Host `node:http`, `node:https`, and `node:http2` do not pick up patched `net`/`tls` internals automatically; keep them guest-owned by wrapping the host client/server surface and forwarding guest sockets into the host server via `connection`/`secureConnection` exactly once.
 - `AGENT_OS_ALLOWED_NODE_BUILTINS` is the shared source of truth for guest Node capability gating, but permissioned top-level JavaScript executions on Node v24 still need `--allow-worker` because `register(loader)` spins an internal loader worker; keep that runtime requirement separate from guest `worker_threads` exposure, and keep child-process permission args aligned with the allowed builtin set.
@@ -255,7 +256,7 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Extended the sidecar JavaScript RPC handler to service `fs.promises.readFile`, `writeFile`, `stat`, `lstat`, `readdir`, `mkdir`, `rmdir`, `unlink`, `rename`, `copyFile`, `chmod`, `chown`, `utimes`, and `access` against the kernel VFS, including Node-facing `readdir` filtering for `.` and `..`.
 - Enabled the JavaScript sync-RPC bridge for guest Node executions by default so `fs.promises` no longer depends on opt-in env wiring, and added focused execution and sidecar regressions for the async path alongside the existing sync bridge checks.
 - Files changed
-- `AGENTS.md`
+- `CLAUDE.md`
 - `crates/execution/src/javascript.rs`
 - `crates/execution/src/node_import_cache.rs`
 - `crates/execution/tests/javascript.rs`
@@ -420,4 +421,32 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Host `http` / `https` / `http2` do not automatically honor patched builtin dependencies, so the stable pattern is to keep the host parser/stream implementation but bridge guest sockets into host servers with `connection` / `secureConnection` forwarding and to force client requests through guest-owned `createConnection`.
 - Gotchas encountered: When bridging host servers to guest transports, do not register both a transport-server callback and a forwarded event for the same socket event; double delivery replays requests for `http` and triggers `ERR_HTTP2_SOCKET_BOUND` for `http2`.
 - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript javascript_execution_imports_http_builtins_when_allowed -- --exact`, `cargo test -p agent-os-sidecar service::tests::javascript_http_rpc_requests_gets_and_serves_over_guest_net -- --exact`, `cargo test -p agent-os-sidecar service::tests::javascript_https_rpc_requests_and_serves_over_guest_tls -- --exact`, `cargo test -p agent-os-sidecar service::tests::javascript_tls_rpc_connects_and_serves_over_guest_net -- --exact`, `pnpm exec tsc --noEmit` (run from `packages/core` after `pnpm install --ignore-workspace --ignore-scripts` there), and `pnpm exec vitest run tests/allowed-node-builtins.test.ts` (also from `packages/core`) all passed after this change.
+---
+## 2026-04-05 01:02:29 PDT - US-027
+- What was implemented
+- Serialized `AgentOsOptions.permissions` into sidecar permission descriptors in `packages/core`, passed them through both `create_vm` and `configure_vm`, and added descriptor inference that rejects resource-dependent callbacks the native sidecar cannot faithfully encode.
+- Extended the sidecar `CreateVmRequest` schema with permissions, applied a per-VM static permission policy before guest env filtering and kernel bootstrap, and cleared that policy on VM disposal.
+- Added focused regression coverage for descriptor serialization, protocol compilation, and sidecar filesystem enforcement under a denied `fs.read` policy.
+- Files changed
+- `AGENTS.md`
+- `crates/sidecar/src/protocol.rs`
+- `crates/sidecar/src/service.rs`
+- `crates/sidecar/src/stdio.rs`
+- `crates/sidecar/tests/connection_auth.rs`
+- `crates/sidecar/tests/kill_cleanup.rs`
+- `crates/sidecar/tests/protocol.rs`
+- `crates/sidecar/tests/python.rs`
+- `crates/sidecar/tests/session_isolation.rs`
+- `crates/sidecar/tests/stdio_binary.rs`
+- `crates/sidecar/tests/support/mod.rs`
+- `packages/core/src/agent-os.ts`
+- `packages/core/src/sidecar/native-process-client.ts`
+- `packages/core/src/sidecar/permission-descriptors.ts`
+- `packages/core/tests/sidecar-permission-descriptors.test.ts`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Native-sidecar permission policy has to be present during `create_vm`; sending it only in `configure_vm` is too late because guest env filtering and bootstrap driver registration both run while the VM is being constructed.
+  - Gotchas encountered: Denying `fs.write` at VM creation time blocks the sidecar’s own `/bin/*` bootstrap stub registration, so enforcement tests should deny `fs.read` or otherwise leave bootstrap writes allowed unless the kernel gains a post-bootstrap permission swap.
+  - Useful context: `pnpm --dir packages/core exec vitest run tests/sidecar-permission-descriptors.test.ts`, `pnpm --dir packages/core exec tsc --noEmit`, `cargo test -p agent-os-sidecar --test protocol`, `cargo test -p agent-os-sidecar service::tests::bridge_permissions_map_symlink_operations_to_symlink_access -- --exact`, and `cargo test -p agent-os-sidecar service::tests::create_vm_applies_filesystem_permission_descriptors_to_kernel_access -- --exact` all pass after this change. `pnpm --dir packages/core exec biome format --write ...` could not run in this checkout because `biome` is not installed.
 ---

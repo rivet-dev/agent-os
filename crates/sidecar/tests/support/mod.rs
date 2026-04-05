@@ -161,6 +161,7 @@ pub fn create_vm_with_metadata(
                 runtime,
                 metadata,
                 root_filesystem: Default::default(),
+                permissions: Vec::new(),
             }),
         ))
         .expect("create sidecar VM");

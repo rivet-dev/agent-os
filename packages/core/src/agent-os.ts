@@ -161,6 +161,7 @@ import {
 	type LocalCompatMount,
 	NativeSidecarKernelProxy,
 } from "./sidecar/native-kernel-proxy.js";
+import { serializePermissionsForSidecar } from "./sidecar/permission-descriptors.js";
 import type { RootFilesystemEntry } from "./sidecar/native-process-client.js";
 import { NativeSidecarProcessClient } from "./sidecar/native-process-client.js";
 import { serializeRootFilesystemForSidecar } from "./sidecar/root-filesystem-descriptors.js";
@@ -1285,6 +1286,9 @@ export class AgentOs {
 					frameTimeoutMs: 60_000,
 				});
 				const session = await client.authenticateAndOpenSession();
+				const sidecarPermissions = serializePermissionsForSidecar(
+					options?.permissions,
+				);
 				const nativeVm = await client.createVm(session, {
 					runtime: "java_script",
 					metadata: {
@@ -1297,6 +1301,7 @@ export class AgentOs {
 						options?.rootFilesystem,
 						bootstrapLower,
 					),
+					permissions: sidecarPermissions,
 				});
 				await client.waitForEvent(
 					(event) =>
@@ -1306,6 +1311,7 @@ export class AgentOs {
 				);
 				await client.configureVm(session, nativeVm, {
 					mounts: sidecarMounts,
+					permissions: sidecarPermissions,
 				});
 
 				rootBridge = new NativeSidecarKernelProxy({

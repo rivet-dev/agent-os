@@ -322,6 +322,8 @@ pub struct CreateVmRequest {
     pub metadata: BTreeMap<String, String>,
     #[serde(default)]
     pub root_filesystem: RootFilesystemDescriptor,
+    #[serde(default)]
+    pub permissions: Vec<PermissionDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

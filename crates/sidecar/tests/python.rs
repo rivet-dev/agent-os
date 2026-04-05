@@ -176,6 +176,7 @@ fn create_vm_with_root_filesystem(
                     cwd.to_string_lossy().into_owned(),
                 )]),
                 root_filesystem,
+                permissions: Vec::new(),
             }),
         ))
         .expect("create sidecar VM");

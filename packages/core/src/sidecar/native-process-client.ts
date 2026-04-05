@@ -144,6 +144,7 @@ type RequestPayload =
 			runtime: GuestRuntimeKind;
 			metadata: Record<string, string>;
 			root_filesystem: WireRootFilesystemDescriptor;
+			permissions: WirePermissionDescriptor[];
 	  }
 	| {
 			type: "configure_vm";
@@ -550,6 +551,7 @@ export class NativeSidecarProcessClient {
 			runtime: GuestRuntimeKind;
 			metadata?: Record<string, string>;
 			rootFilesystem?: RootFilesystemDescriptor;
+			permissions?: SidecarPermissionDescriptor[];
 		},
 	): Promise<CreatedVm> {
 		const response = await this.sendRequest({
@@ -563,6 +565,7 @@ export class NativeSidecarProcessClient {
 				runtime: options.runtime,
 				metadata: options.metadata ?? {},
 				root_filesystem: toWireRootFilesystemDescriptor(options.rootFilesystem),
+				permissions: (options.permissions ?? []).map(toWirePermissionDescriptor),
 			},
 		});
 		if (response.payload.type !== "vm_created") {

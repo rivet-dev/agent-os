@@ -152,12 +152,14 @@ impl Error for SidecarError {}
 
 struct SharedBridge<B> {
     inner: Arc<Mutex<B>>,
+    permissions: Arc<Mutex<BTreeMap<String, BTreeMap<String, crate::protocol::PermissionMode>>>>,
 }
 
 impl<B> SharedBridge<B> {
     fn new(bridge: B) -> Self {
         Self {
             inner: Arc::new(Mutex::new(bridge)),
+            permissions: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -166,6 +168,7 @@ impl<B> Clone for SharedBridge<B> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            permissions: Arc::clone(&self.permissions),
         }
     }
 }
@@ -218,6 +221,11 @@ where
         path: &str,
         access: FilesystemAccess,
     ) -> PermissionDecision {
+        if let Some(decision) =
+            self.static_permission_decision(vm_id, filesystem_permission_capability(access), "fs")
+        {
+            return decision;
+        }
         match self.with_mut(|bridge| {
             bridge.check_filesystem_access(FilesystemPermissionRequest {
                 vm_id: vm_id.to_owned(),
@@ -231,6 +239,11 @@ where
     }
 
     fn command_decision(&self, vm_id: &str, request: &CommandAccessRequest) -> PermissionDecision {
+        if let Some(decision) =
+            self.static_permission_decision(vm_id, "child_process.spawn", "child_process")
+        {
+            return decision;
+        }
         match self.with_mut(|bridge| {
             bridge.check_command_execution(CommandPermissionRequest {
                 vm_id: vm_id.to_owned(),
@@ -246,6 +259,13 @@ where
     }
 
     fn environment_decision(&self, vm_id: &str, request: &EnvAccessRequest) -> PermissionDecision {
+        if let Some(decision) = self.static_permission_decision(
+            vm_id,
+            environment_permission_capability(request.op),
+            "env",
+        ) {
+            return decision;
+        }
         match self.with_mut(|bridge| {
             bridge.check_environment_access(EnvironmentPermissionRequest {
                 vm_id: vm_id.to_owned(),
@@ -263,6 +283,13 @@ where
     }
 
     fn network_decision(&self, vm_id: &str, request: &NetworkAccessRequest) -> PermissionDecision {
+        if let Some(decision) = self.static_permission_decision(
+            vm_id,
+            network_permission_capability(request.op),
+            "network",
+        ) {
+            return decision;
+        }
         match self.with_mut(|bridge| {
             bridge.check_network_access(NetworkPermissionRequest {
                 vm_id: vm_id.to_owned(),
@@ -278,6 +305,125 @@ where
             Ok(decision) => map_bridge_permission(decision),
             Err(error) => PermissionDecision::deny(error.to_string()),
         }
+    }
+
+    fn set_vm_permissions(
+        &self,
+        vm_id: &str,
+        permissions: &[crate::protocol::PermissionDescriptor],
+    ) -> Result<(), SidecarError> {
+        let mut stored = self.permissions.lock().map_err(|_| {
+            SidecarError::Bridge(String::from(
+                "native sidecar permission policy lock poisoned",
+            ))
+        })?;
+        stored.insert(
+            vm_id.to_owned(),
+            normalize_permission_descriptors(permissions),
+        );
+        Ok(())
+    }
+
+    fn clear_vm_permissions(&self, vm_id: &str) -> Result<(), SidecarError> {
+        let mut stored = self.permissions.lock().map_err(|_| {
+            SidecarError::Bridge(String::from(
+                "native sidecar permission policy lock poisoned",
+            ))
+        })?;
+        stored.remove(vm_id);
+        Ok(())
+    }
+
+    fn static_permission_decision(
+        &self,
+        vm_id: &str,
+        capability: &str,
+        domain: &str,
+    ) -> Option<PermissionDecision> {
+        let stored = self.permissions.lock().ok()?;
+        let permissions = stored.get(vm_id)?;
+        let mode = permissions
+            .get(capability)
+            .or_else(|| permissions.get(domain))
+            .cloned()
+            .unwrap_or(crate::protocol::PermissionMode::Deny);
+        Some(permission_mode_to_kernel_decision(mode, capability))
+    }
+}
+
+fn default_allow_all_permissions() -> BTreeMap<String, crate::protocol::PermissionMode> {
+    BTreeMap::from([
+        (String::from("fs"), crate::protocol::PermissionMode::Allow),
+        (
+            String::from("network"),
+            crate::protocol::PermissionMode::Allow,
+        ),
+        (
+            String::from("child_process"),
+            crate::protocol::PermissionMode::Allow,
+        ),
+        (String::from("env"), crate::protocol::PermissionMode::Allow),
+    ])
+}
+
+fn normalize_permission_descriptors(
+    permissions: &[crate::protocol::PermissionDescriptor],
+) -> BTreeMap<String, crate::protocol::PermissionMode> {
+    if permissions.is_empty() {
+        return default_allow_all_permissions();
+    }
+
+    let mut normalized = BTreeMap::new();
+    for permission in permissions {
+        normalized.insert(permission.capability.clone(), permission.mode.clone());
+    }
+    normalized
+}
+
+fn permission_mode_to_kernel_decision(
+    mode: crate::protocol::PermissionMode,
+    capability: &str,
+) -> PermissionDecision {
+    match mode {
+        crate::protocol::PermissionMode::Allow => PermissionDecision::allow(),
+        crate::protocol::PermissionMode::Ask => {
+            PermissionDecision::deny(format!("permission prompt required for {capability}"))
+        }
+        crate::protocol::PermissionMode::Deny => {
+            PermissionDecision::deny(format!("blocked by {capability} policy"))
+        }
+    }
+}
+
+fn filesystem_permission_capability(access: FilesystemAccess) -> &'static str {
+    match access {
+        FilesystemAccess::Read => "fs.read",
+        FilesystemAccess::Write => "fs.write",
+        FilesystemAccess::Stat => "fs.stat",
+        FilesystemAccess::ReadDir => "fs.readdir",
+        FilesystemAccess::CreateDir => "fs.create_dir",
+        FilesystemAccess::Remove => "fs.rm",
+        FilesystemAccess::Rename => "fs.rename",
+        FilesystemAccess::Symlink => "fs.symlink",
+        FilesystemAccess::ReadLink => "fs.readlink",
+        FilesystemAccess::Chmod => "fs.chmod",
+        FilesystemAccess::Truncate => "fs.truncate",
+    }
+}
+
+fn network_permission_capability(operation: NetworkOperation) -> &'static str {
+    match operation {
+        NetworkOperation::Fetch => "network.fetch",
+        NetworkOperation::Http => "network.http",
+        NetworkOperation::Dns => "network.dns",
+        NetworkOperation::Listen => "network.listen",
+    }
+}
+
+fn environment_permission_capability(operation: EnvironmentOperation) -> &'static str {
+    match operation {
+        EnvironmentOperation::Read => "env.read",
+        EnvironmentOperation::Write => "env.write",
     }
 }
 
@@ -2133,10 +2279,12 @@ where
 
         self.next_vm_id += 1;
         let vm_id = format!("vm-{}", self.next_vm_id);
-        let permissions = bridge_permissions(self.bridge.clone(), &vm_id);
         let cwd = resolve_cwd(payload.metadata.get("cwd"))?;
-        let guest_env = filter_env(&vm_id, &extract_guest_env(&payload.metadata), &permissions);
         let resource_limits = parse_resource_limits(&payload.metadata)?;
+        self.bridge
+            .set_vm_permissions(&vm_id, &payload.permissions)?;
+        let permissions = bridge_permissions(self.bridge.clone(), &vm_id);
+        let guest_env = filter_env(&vm_id, &extract_guest_env(&payload.metadata), &permissions);
         let loaded_snapshot = self.bridge.with_mut(|bridge| {
             bridge.load_filesystem_state(LoadFilesystemStateRequest {
                 vm_id: vm_id.clone(),
@@ -2296,6 +2444,10 @@ where
             instructions: payload.instructions.clone(),
             projected_modules: payload.projected_modules.clone(),
         };
+        if !payload.permissions.is_empty() {
+            self.bridge
+                .set_vm_permissions(&vm_id, &payload.permissions)?;
+        }
 
         Ok(DispatchResult {
             response: self.respond(
@@ -3042,6 +3194,7 @@ where
                 snapshot,
             })
         })?;
+        self.bridge.clear_vm_permissions(vm_id)?;
 
         if let Some(session) = self.sessions.get_mut(session_id) {
             session.vm_ids.remove(vm_id);
@@ -6137,8 +6290,9 @@ mod tests {
     use crate::protocol::{
         AuthenticateRequest, BootstrapRootFilesystemRequest, ConfigureVmRequest, CreateVmRequest,
         GetZombieTimerCountRequest, GuestRuntimeKind, MountDescriptor, MountPluginDescriptor,
-        OpenSessionRequest, OwnershipScope, RequestFrame, RequestPayload, ResponsePayload,
-        RootFilesystemEntry, RootFilesystemEntryKind, SidecarPlacement,
+        OpenSessionRequest, OwnershipScope, PermissionDescriptor, PermissionMode, RequestFrame,
+        RequestPayload, ResponsePayload, RootFilesystemEntry, RootFilesystemEntryKind,
+        SidecarPlacement,
     };
     use crate::s3_plugin::test_support::MockS3Server;
     use crate::sandbox_agent_plugin::test_support::MockSandboxAgentServer;
@@ -6290,6 +6444,7 @@ ykAheWCsAteSEWVc0w==\n\
         sidecar: &mut NativeSidecar<RecordingBridge>,
         connection_id: &str,
         session_id: &str,
+        permissions: Vec<PermissionDescriptor>,
     ) -> Result<String, SidecarError> {
         let response = sidecar
             .dispatch(request(
@@ -6299,6 +6454,7 @@ ykAheWCsAteSEWVc0w==\n\
                     runtime: GuestRuntimeKind::JavaScript,
                     metadata: BTreeMap::new(),
                     root_filesystem: Default::default(),
+                    permissions,
                 }),
             ))
             .expect("create vm");
@@ -6336,7 +6492,8 @@ ykAheWCsAteSEWVc0w==\n\
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
 
         let zombie_pid = {
             let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
@@ -6488,7 +6645,8 @@ ykAheWCsAteSEWVc0w==\n\
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
 
         sidecar
             .dispatch(request(
@@ -6574,7 +6732,8 @@ ykAheWCsAteSEWVc0w==\n\
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
 
         sidecar
             .dispatch(request(
@@ -6614,7 +6773,8 @@ ykAheWCsAteSEWVc0w==\n\
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
 
         sidecar
             .dispatch(request(
@@ -6708,7 +6868,8 @@ ykAheWCsAteSEWVc0w==\n\
 
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
 
         sidecar
             .dispatch(request(
@@ -6808,7 +6969,8 @@ ykAheWCsAteSEWVc0w==\n\
 
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
 
         sidecar
             .dispatch(request(
@@ -6880,7 +7042,8 @@ ykAheWCsAteSEWVc0w==\n\
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
 
         sidecar
             .dispatch(request(
@@ -6959,7 +7122,8 @@ ykAheWCsAteSEWVc0w==\n\
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
 
         sidecar
             .dispatch(request(
@@ -7079,6 +7243,54 @@ ykAheWCsAteSEWVc0w==\n\
     }
 
     #[test]
+    fn create_vm_applies_filesystem_permission_descriptors_to_kernel_access() {
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm(
+            &mut sidecar,
+            &connection_id,
+            &session_id,
+            vec![
+                PermissionDescriptor {
+                    capability: String::from("fs.read"),
+                    mode: PermissionMode::Deny,
+                },
+                PermissionDescriptor {
+                    capability: String::from("fs.write"),
+                    mode: PermissionMode::Allow,
+                },
+                PermissionDescriptor {
+                    capability: String::from("network"),
+                    mode: PermissionMode::Allow,
+                },
+                PermissionDescriptor {
+                    capability: String::from("child_process"),
+                    mode: PermissionMode::Allow,
+                },
+                PermissionDescriptor {
+                    capability: String::from("env"),
+                    mode: PermissionMode::Allow,
+                },
+            ],
+        )
+        .expect("create vm");
+
+        let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
+        vm.kernel
+            .filesystem_mut()
+            .write_file("/blocked.txt", b"nope".to_vec())
+            .expect("write should be allowed");
+
+        let read_error = vm
+            .kernel
+            .filesystem_mut()
+            .read_file("/blocked.txt")
+            .expect_err("read should be denied");
+        assert_eq!(read_error.code(), "EACCES");
+    }
+
+    #[test]
     fn scoped_host_filesystem_unscoped_target_requires_exact_guest_root_prefix() {
         let filesystem = ScopedHostFilesystem::new(
             HostFilesystem::new(SharedBridge::new(RecordingBridge::default()), "vm-1"),
@@ -7162,7 +7374,8 @@ ykAheWCsAteSEWVc0w==\n\
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
 
         sidecar
             .dispatch(request(
@@ -7217,7 +7430,8 @@ ykAheWCsAteSEWVc0w==\n\
         .expect("create sidecar");
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
 
         let result = sidecar
             .dispatch(request(
@@ -7264,7 +7478,8 @@ ykAheWCsAteSEWVc0w==\n\
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-python-vfs-rpc-cwd");
         let pyodide_dir = temp_dir("agent-os-sidecar-python-vfs-rpc-pyodide");
         write_fixture(
@@ -7385,7 +7600,8 @@ export async function loadPyodide() {
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-sync-rpc-cwd");
         write_fixture(
             &cwd.join("entry.mjs"),
@@ -7539,7 +7755,8 @@ await new Promise(() => {});
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
         {
             let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
             vm.kernel
@@ -7784,7 +8001,8 @@ console.log(
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-promises-rpc-cwd");
         write_fixture(
             &cwd.join("entry.mjs"),
@@ -7920,7 +8138,8 @@ await new Promise(() => {});
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-net-rpc-cwd");
         write_fixture(
             &cwd.join("entry.mjs"),
@@ -8078,7 +8297,8 @@ socket.on("close", (hadError) => {{
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-dgram-rpc-cwd");
         write_fixture(
             &cwd.join("entry.mjs"),
@@ -8224,7 +8444,8 @@ console.log(JSON.stringify(summary));
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-dns-rpc-cwd");
         write_fixture(
             &cwd.join("entry.mjs"),
@@ -8353,7 +8574,8 @@ console.log(JSON.stringify({ lookup, resolve4 }));
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-tls-rpc-cwd");
         let entry = format!(
             r#"
@@ -8540,7 +8762,8 @@ console.log(JSON.stringify(summary));
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-http-rpc-cwd");
         write_fixture(
             &cwd.join("entry.mjs"),
@@ -8738,7 +8961,8 @@ console.log(JSON.stringify(summary));
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-https-rpc-cwd");
         let entry = format!(
             r#"
@@ -8909,7 +9133,8 @@ console.log(JSON.stringify(summary));
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-net-server-cwd");
         write_fixture(
             &cwd.join("entry.mjs"),
@@ -9113,7 +9338,8 @@ server.listen(0, "127.0.0.1", () => {
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-child-process-cwd");
         write_fixture(
             &cwd.join("child.mjs"),

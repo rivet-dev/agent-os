@@ -36,6 +36,7 @@ fn sessions_and_vms_reject_cross_connection_access() {
                     cwd.to_string_lossy().into_owned(),
                 )]),
                 root_filesystem: Default::default(),
+                permissions: Vec::new(),
             }),
         ))
         .expect("dispatch mismatched session create_vm");

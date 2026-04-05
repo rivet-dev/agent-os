@@ -88,6 +88,7 @@ fn codec_rejects_invalid_ownership_binding() {
             runtime: GuestRuntimeKind::JavaScript,
             metadata: BTreeMap::new(),
             root_filesystem: Default::default(),
+            permissions: Vec::new(),
         }),
     ));
 
@@ -128,6 +129,7 @@ fn response_tracker_enforces_request_response_correlation_and_duplicate_hardenin
             runtime: GuestRuntimeKind::JavaScript,
             metadata: BTreeMap::new(),
             root_filesystem: Default::default(),
+            permissions: Vec::new(),
         }),
     );
     tracker
@@ -169,6 +171,7 @@ fn response_tracker_rejects_kind_and_ownership_mismatches() {
             runtime: GuestRuntimeKind::WebAssembly,
             metadata: BTreeMap::from([(String::from("runtime"), String::from("wasm"))]),
             root_filesystem: Default::default(),
+            permissions: Vec::new(),
         }),
     );
     tracker
