@@ -3,9 +3,9 @@ use crate::node_import_cache::NodeImportCache;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::UNIX_EPOCH;
 
 pub(crate) const NODE_COMPILE_CACHE_ENV: &str = "NODE_COMPILE_CACHE";
 pub(crate) const NODE_DISABLE_COMPILE_CACHE_ENV: &str = "NODE_DISABLE_COMPILE_CACHE";
@@ -70,16 +70,29 @@ pub(crate) fn warmup_marker_path(
 
 pub(crate) fn file_fingerprint(path: &Path) -> String {
     match fs::metadata(path) {
-        Ok(metadata) => format!(
-            "{}:{}",
-            metadata.len(),
-            metadata
-                .modified()
-                .ok()
-                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis().to_string())
-                .unwrap_or_else(|| String::from("unknown"))
-        ),
+        Ok(metadata) => format!("{}:{}", metadata.dev(), metadata.ino()),
         Err(_) => String::from("missing"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_fingerprint;
+    use std::fs;
+    use std::os::unix::fs::MetadataExt;
+    use tempfile::tempdir;
+
+    #[test]
+    fn file_fingerprint_uses_inode_identity() {
+        let temp = tempdir().expect("create temp dir");
+        let path = temp.path().join("module.wasm");
+
+        fs::write(&path, b"first").expect("write wasm file");
+        let metadata = fs::metadata(&path).expect("stat wasm file");
+
+        assert_eq!(
+            file_fingerprint(&path),
+            format!("{}:{}", metadata.dev(), metadata.ino())
+        );
     }
 }

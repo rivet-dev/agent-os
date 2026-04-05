@@ -7,6 +7,7 @@
 - Guest path scrubbing in `crates/execution/src/node_import_cache.rs` should treat `HOST_CWD` as an implicit runtime-only mapping to the virtual guest cwd for entrypoint loading and stack traces, and only fall back to `/unknown` for absolute host paths outside visible mappings or internal cache roots.
 - Sidecar-managed loopback `net.listen` / `dgram.bind` now separate guest-visible ports from hidden host-bound ports; use guest ports in RPC responses and snapshots, but use the actual host listener port when a host-side test client needs to connect directly.
 - JavaScript sync RPC timeout and backpressure belong in `crates/execution/src/javascript.rs`: track the pending request ID on the host, auto-emit `ERR_AGENT_OS_NODE_SYNC_RPC_TIMEOUT` there, queue replies through a bounded async writer so slow guest reads cannot block the sidecar thread, and let `crates/sidecar/src/service.rs` ignore stale `sync RPC request ... is no longer pending` races after timeout.
+- Active JavaScript/Python/WASM executions must retain a `NodeImportCache` cleanup guard until the child exits; otherwise dropping the engine can delete `timing-bootstrap.mjs` and related cached runner assets while the host runtime is still importing them.
 - Direct script execution in `crates/kernel/src/kernel.rs` should first map registered `/bin/*` and `/usr/bin/*` command stubs back to their command drivers, and only parse shebangs for real file paths; otherwise stub executables like `/bin/sh` recurse into their own wrapper.
 - Stream devices in `crates/kernel/src/device_layer.rs` should share one length-aware helper, and exact Linux-style byte-count behavior for `/dev/zero` / `/dev/urandom` should be asserted through `pread` / `fd_read` rather than `read_file()`.
 - Synthetic procfs entries in `crates/kernel/src/kernel.rs` should authorize the guest-visible `/proc/...` path directly; if procfs checks go through `PermissionedFileSystem::check_path(...)`, missing backing `/proc` directories in the mounted root can accidentally break the virtual proc layer.
@@ -244,8 +245,28 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - `scripts/ralph/progress.txt`
 - **Learnings for future iterations:**
   - Patterns discovered: Process-table exit-path changes should keep reparenting, orphaned stopped-group signaling, and zombie-aware process limits aligned or Linux lifecycle behavior drifts in subtle ways.
-  - Gotchas encountered: Tests that use PID 1 as an ordinary parent will trigger init-style orphan-group handling, so lifecycle regressions should create a separate synthetic init process when they need a non-init parent in the same session.
-  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test process_table -- --nocapture`, `cargo test -p agent-os-kernel --test resource_accounting -- --nocapture`, `cargo check -p agent-os-kernel`, and `cargo test -p agent-os-kernel` all pass after this change.
+- Gotchas encountered: Tests that use PID 1 as an ordinary parent will trigger init-style orphan-group handling, so lifecycle regressions should create a separate synthetic init process when they need a non-init parent in the same session.
+- Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test process_table -- --nocapture`, `cargo test -p agent-os-kernel --test resource_accounting -- --nocapture`, `cargo check -p agent-os-kernel`, and `cargo test -p agent-os-kernel` all pass after this change.
+---
+## 2026-04-05 12:06:52 PDT - US-078
+- What was implemented
+- Hardened `crates/execution/src/wasm.rs` so WASM executions resolve the module path once through the same canonicalized path shape used by Node permission setup, reuse that resolved path for validation/warmup/runtime launch, and use a dedicated `AGENT_OS_WASM_PREWARM_TIMEOUT_MS` instead of reusing the execution fuel timeout.
+- Switched warmup fingerprints in `crates/execution/src/runtime_support.rs` to `dev:ino`, added a bounded `ensure_materialized_with_timeout(...)` path in `crates/execution/src/node_import_cache.rs` with a 30s default, and added a keepalive cleanup guard so active JS/Python/WASM executions do not lose their materialized runner assets when the engine drops.
+- Added focused regressions for canonical symlink resolution, import-cache materialization timeout handling, separate prewarm timeout behavior, and symlink-target warmup invalidation with same-size modules.
+- Files changed
+- `AGENTS.md`
+- `crates/execution/src/javascript.rs`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/src/python.rs`
+- `crates/execution/src/runtime_support.rs`
+- `crates/execution/src/wasm.rs`
+- `crates/execution/tests/wasm.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Active runtime handles must retain the `NodeImportCache` cleanup guard until the child exits; otherwise dropping the execution engine can delete `timing-bootstrap.mjs` and related assets during module import.
+  - Gotchas encountered: The broader `agent-os-execution` benchmark integration test currently fails in an unrelated JavaScript permission scenario (`hot-projected-package-file-import` reading `/root/node_modules/typescript/lib/typescript.js`), so WASM verification is more reliable with `--test-threads=1` plus focused execution suites.
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-execution`, `cargo test -p agent-os-execution --lib -- --test-threads=1`, and `cargo test -p agent-os-execution --test wasm -- --test-threads=1` all pass after this change.
 ---
 ## 2026-04-04 19:11:19 PDT - US-001
 - What was implemented

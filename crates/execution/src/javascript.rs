@@ -1,5 +1,7 @@
 use crate::common::{encode_json_string, frozen_time_ms, stable_hash64};
-use crate::node_import_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV};
+use crate::node_import_cache::{
+    NodeImportCache, NodeImportCacheCleanup, NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
+};
 use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
     encode_json_string_array, env_builtin_enabled, harden_node_command, node_binary,
@@ -338,6 +340,7 @@ pub struct JavascriptExecution {
     pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
     sync_rpc_responses: Option<JavascriptSyncRpcResponseWriter>,
     sync_rpc_timeout: Duration,
+    _import_cache_guard: Arc<NodeImportCacheCleanup>,
 }
 
 impl JavascriptExecution {
@@ -627,6 +630,7 @@ impl JavascriptExecutionEngine {
             .import_caches
             .get(&context.vm_id)
             .expect("vm import cache should exist after materialization");
+        let import_cache_guard = import_cache.cleanup_guard();
         let sync_rpc_timeout = javascript_sync_rpc_timeout(&request);
         let (mut child, sync_rpc_request_reader, sync_rpc_response_writer) = create_node_child(
             import_cache,
@@ -685,6 +689,7 @@ impl JavascriptExecutionEngine {
             pending_sync_rpc: Arc::new(Mutex::new(None)),
             sync_rpc_responses: sync_rpc_response_writer,
             sync_rpc_timeout,
+            _import_cache_guard: import_cache_guard,
         })
     }
 

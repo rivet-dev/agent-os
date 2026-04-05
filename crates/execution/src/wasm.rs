@@ -1,5 +1,5 @@
 use crate::common::{encode_json_string, frozen_time_ms};
-use crate::node_import_cache::NodeImportCache;
+use crate::node_import_cache::{NodeImportCache, NodeImportCacheCleanup};
 use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
     encode_json_string_array, encode_json_string_map, env_builtin_enabled, harden_node_command,
@@ -31,6 +31,7 @@ const WASM_GUEST_ENV_ENV: &str = "AGENT_OS_GUEST_ENV";
 const WASM_PERMISSION_TIER_ENV: &str = "AGENT_OS_WASM_PERMISSION_TIER";
 const WASM_PREWARM_ONLY_ENV: &str = "AGENT_OS_WASM_PREWARM_ONLY";
 const WASM_WARMUP_DEBUG_ENV: &str = "AGENT_OS_WASM_WARMUP_DEBUG";
+pub const WASM_PREWARM_TIMEOUT_MS_ENV: &str = "AGENT_OS_WASM_PREWARM_TIMEOUT_MS";
 pub const WASM_MAX_FUEL_ENV: &str = "AGENT_OS_WASM_MAX_FUEL";
 pub const WASM_MAX_MEMORY_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_MEMORY_BYTES";
 pub const WASM_MAX_STACK_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_STACK_BYTES";
@@ -50,6 +51,7 @@ const RESERVED_WASM_ENV_KEYS: &[&str] = &[
     WASM_MAX_FUEL_ENV,
     WASM_MAX_MEMORY_BYTES_ENV,
     WASM_MAX_STACK_BYTES_ENV,
+    WASM_PREWARM_TIMEOUT_MS_ENV,
     WASM_PREWARM_ONLY_ENV,
 ];
 const WASM_PAGE_BYTES: u64 = 65_536;
@@ -58,6 +60,7 @@ const MAX_WASM_MODULE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_WASM_IMPORT_SECTION_ENTRIES: usize = 16_384;
 const MAX_WASM_MEMORY_SECTION_ENTRIES: usize = 1_024;
 const MAX_WASM_VARUINT_BYTES: usize = 10;
+const DEFAULT_WASM_PREWARM_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WasmSignalDispositionAction {
@@ -147,6 +150,12 @@ pub struct WasmExecutionResult {
     pub stderr: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedWasmModule {
+    specifier: String,
+    resolved_path: PathBuf,
+}
+
 #[derive(Debug)]
 pub enum WasmExecutionError {
     MissingContext(String),
@@ -192,7 +201,7 @@ impl fmt::Display for WasmExecutionError {
             Self::WarmupTimeout(timeout) => {
                 write!(
                     f,
-                    "WebAssembly warmup exceeded the configured fuel budget after {} ms",
+                    "WebAssembly warmup exceeded the configured timeout after {} ms",
                     timeout.as_millis()
                 )
             }
@@ -226,6 +235,7 @@ pub struct WasmExecution {
     stdin: Option<ChildStdin>,
     events: Receiver<WasmProcessEvent>,
     stderr_filter: Arc<Mutex<LinePrefixFilter>>,
+    _import_cache_guard: Arc<NodeImportCacheCleanup>,
 }
 
 impl WasmExecution {
@@ -354,25 +364,28 @@ impl WasmExecutionEngine {
             });
         }
 
+        let resolved_module = resolve_wasm_module(&context, &request)?;
+        let prewarm_timeout = resolve_wasm_prewarm_timeout(&request)?;
         {
             let import_cache = self.import_caches.entry(context.vm_id.clone()).or_default();
             import_cache
-                .ensure_materialized()
+                .ensure_materialized_with_timeout(prewarm_timeout)
                 .map_err(WasmExecutionError::PrepareWarmPath)?;
         }
         let frozen_time_ms = frozen_time_ms();
-        validate_module_limits(&context, &request)?;
+        validate_module_limits(&resolved_module, &request)?;
         let execution_timeout = resolve_wasm_execution_timeout(&request)?;
         let import_cache = self
             .import_caches
             .get(&context.vm_id)
             .expect("vm import cache should exist after materialization");
+        let import_cache_guard = import_cache.cleanup_guard();
         let warmup_metrics = prewarm_wasm_path(
             import_cache,
-            &context,
+            &resolved_module,
             &request,
             frozen_time_ms,
-            execution_timeout,
+            prewarm_timeout,
         )?;
 
         self.next_execution_id += 1;
@@ -381,7 +394,7 @@ impl WasmExecutionEngine {
         let control_channel = create_node_control_channel().map_err(WasmExecutionError::Spawn)?;
         let mut child = create_node_child(
             import_cache,
-            &context,
+            &resolved_module,
             &request,
             &guest_argv,
             frozen_time_ms,
@@ -427,6 +440,7 @@ impl WasmExecutionEngine {
             stdin,
             events: receiver,
             stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
+            _import_cache_guard: import_cache_guard,
         })
     }
 
@@ -466,7 +480,7 @@ fn module_path(
 
 fn create_node_child(
     import_cache: &NodeImportCache,
-    context: &WasmContext,
+    resolved_module: &ResolvedWasmModule,
     request: &StartWasmExecutionRequest,
     guest_argv: &[String],
     frozen_time_ms: u128,
@@ -474,7 +488,7 @@ fn create_node_child(
 ) -> Result<std::process::Child, WasmExecutionError> {
     let mut command = Command::new(node_binary());
     let mut exported_fds = ExportedChildFds::default();
-    configure_wasm_node_sandbox(&mut command, import_cache, context, request)?;
+    configure_wasm_node_sandbox(&mut command, import_cache, resolved_module, request)?;
     command
         .arg("--no-warnings")
         .arg("--import")
@@ -484,7 +498,10 @@ fn create_node_child(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env(WASM_MODULE_PATH_ENV, module_path(context, request)?);
+        .env(
+            WASM_MODULE_PATH_ENV,
+            resolved_module.resolved_path.as_os_str(),
+        );
 
     apply_guest_env(&mut command, &request.env, RESERVED_WASM_ENV_KEYS);
     command
@@ -504,13 +521,13 @@ fn create_node_child(
 
 fn prewarm_wasm_path(
     import_cache: &NodeImportCache,
-    context: &WasmContext,
+    resolved_module: &ResolvedWasmModule,
     request: &StartWasmExecutionRequest,
     frozen_time_ms: u128,
-    execution_timeout: Option<Duration>,
+    prewarm_timeout: Duration,
 ) -> Result<Option<Vec<u8>>, WasmExecutionError> {
     let debug_enabled = env_flag_enabled(&request.env, WASM_WARMUP_DEBUG_ENV);
-    let marker_contents = warmup_marker_contents(context, request);
+    let marker_contents = warmup_marker_contents(resolved_module);
     let marker_path = warmup_marker_path(
         import_cache.prewarm_marker_dir(),
         "wasm-runner-prewarm",
@@ -524,14 +541,13 @@ fn prewarm_wasm_path(
             false,
             "cached",
             import_cache,
-            context,
-            request,
+            &resolved_module.specifier,
         ));
     }
 
-    let guest_argv = guest_argv(context, request)?;
+    let guest_argv = warmup_guest_argv(resolved_module, request);
     let mut command = Command::new(node_binary());
-    configure_wasm_node_sandbox(&mut command, import_cache, context, request)?;
+    configure_wasm_node_sandbox(&mut command, import_cache, resolved_module, request)?;
     command
         .arg("--no-warnings")
         .arg("--import")
@@ -542,7 +558,10 @@ fn prewarm_wasm_path(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .env(WASM_PREWARM_ONLY_ENV, "1")
-        .env(WASM_MODULE_PATH_ENV, module_path(context, request)?)
+        .env(
+            WASM_MODULE_PATH_ENV,
+            resolved_module.resolved_path.as_os_str(),
+        )
         .env(WASM_GUEST_ARGV_ENV, encode_json_string_array(&guest_argv))
         .env(WASM_GUEST_ENV_ENV, encode_json_string_map(&request.env))
         .env(
@@ -552,7 +571,7 @@ fn prewarm_wasm_path(
 
     configure_node_command(&mut command, import_cache, frozen_time_ms, request)?;
 
-    let output = run_warmup_command(command, execution_timeout)?;
+    let output = run_warmup_command(command, Some(prewarm_timeout))?;
     if !output.status.success() {
         return Err(WasmExecutionError::WarmupFailed {
             exit_code: output.status.code().unwrap_or(1),
@@ -567,15 +586,14 @@ fn prewarm_wasm_path(
         true,
         "executed",
         import_cache,
-        context,
-        request,
+        &resolved_module.specifier,
     ))
 }
 
 fn configure_wasm_node_sandbox(
     command: &mut Command,
     import_cache: &NodeImportCache,
-    context: &WasmContext,
+    resolved_module: &ResolvedWasmModule,
     request: &StartWasmExecutionRequest,
 ) -> Result<(), WasmExecutionError> {
     let sandbox_root = sandbox_root(&request.env, &request.cwd);
@@ -588,19 +606,17 @@ fn configure_wasm_node_sandbox(
         write_paths.push(sandbox_root.clone());
     }
 
-    if let Some(module_path) =
-        resolve_path_like_specifier(&request.cwd, &module_path(context, request)?)
-    {
-        read_paths.push(module_path.clone());
-        if let Some(parent) = module_path.parent() {
-            read_paths.push(parent.to_path_buf());
-        }
+    read_paths.push(resolved_module.resolved_path.clone());
+    if let Some(parent) = resolved_module.resolved_path.parent() {
+        read_paths.push(parent.to_path_buf());
     }
 
     read_paths.extend(node_resolution_read_paths(
         std::iter::once(request.cwd.clone()).chain(
-            resolve_path_like_specifier(&request.cwd, &module_path(context, request)?)
-                .and_then(|path| path.parent().map(Path::to_path_buf)),
+            resolved_module
+                .resolved_path
+                .parent()
+                .map(Path::to_path_buf),
         ),
     ));
 
@@ -636,17 +652,15 @@ fn configure_node_command(
     Ok(())
 }
 
-fn warmup_marker_contents(context: &WasmContext, request: &StartWasmExecutionRequest) -> String {
-    let module_specifier = module_path(context, request).unwrap_or_default();
-    let resolved_path = resolved_module_path(&module_specifier, &request.cwd);
-    let module_fingerprint = file_fingerprint(&resolved_path);
+fn warmup_marker_contents(resolved_module: &ResolvedWasmModule) -> String {
+    let module_fingerprint = file_fingerprint(&resolved_module.resolved_path);
 
     [
         env!("CARGO_PKG_NAME").to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
         WASM_WARMUP_MARKER_VERSION.to_string(),
-        module_specifier,
-        resolved_path.display().to_string(),
+        resolved_module.specifier.clone(),
+        resolved_module.resolved_path.display().to_string(),
         module_fingerprint,
     ]
     .join("\n")
@@ -657,38 +671,22 @@ fn warmup_metrics_line(
     executed: bool,
     reason: &str,
     import_cache: &NodeImportCache,
-    context: &WasmContext,
-    request: &StartWasmExecutionRequest,
+    module_specifier: &str,
 ) -> Option<Vec<u8>> {
     if !debug_enabled {
         return None;
     }
 
-    let module_specifier = module_path(context, request).ok()?;
     Some(
         format!(
             "{WASM_WARMUP_METRICS_PREFIX}{{\"executed\":{},\"reason\":{},\"modulePath\":{},\"compileCacheDir\":{}}}\n",
             if executed { "true" } else { "false" },
             encode_json_string(reason),
-            encode_json_string(&module_specifier),
+            encode_json_string(module_specifier),
             encode_json_string(&import_cache.shared_compile_cache_dir().display().to_string()),
         )
         .into_bytes(),
     )
-}
-
-fn resolved_module_path(specifier: &str, cwd: &Path) -> PathBuf {
-    if specifier.starts_with("file:") {
-        return PathBuf::from(specifier);
-    }
-    if is_path_like(specifier) {
-        return cwd.join(specifier);
-    }
-    PathBuf::from(specifier)
-}
-
-fn is_path_like(specifier: &str) -> bool {
-    specifier.starts_with('.') || specifier.starts_with('/') || specifier.starts_with("file:")
 }
 
 #[derive(Debug)]
@@ -803,6 +801,44 @@ fn resolve_wasm_execution_timeout(
     Ok(wasm_limit_u64(&request.env, WASM_MAX_FUEL_ENV)?.map(Duration::from_millis))
 }
 
+fn resolve_wasm_prewarm_timeout(
+    request: &StartWasmExecutionRequest,
+) -> Result<Duration, WasmExecutionError> {
+    Ok(Duration::from_millis(
+        wasm_limit_u64(&request.env, WASM_PREWARM_TIMEOUT_MS_ENV)?
+            .unwrap_or(DEFAULT_WASM_PREWARM_TIMEOUT_MS),
+    ))
+}
+
+fn resolve_wasm_module(
+    context: &WasmContext,
+    request: &StartWasmExecutionRequest,
+) -> Result<ResolvedWasmModule, WasmExecutionError> {
+    let specifier = module_path(context, request)?;
+    let resolved_path = resolved_module_path(&specifier, &request.cwd);
+    Ok(ResolvedWasmModule {
+        specifier,
+        resolved_path,
+    })
+}
+
+fn resolved_module_path(specifier: &str, cwd: &Path) -> PathBuf {
+    resolve_path_like_specifier(cwd, specifier)
+        .map(|path| path.canonicalize().unwrap_or(path))
+        .unwrap_or_else(|| PathBuf::from(specifier))
+}
+
+fn warmup_guest_argv(
+    resolved_module: &ResolvedWasmModule,
+    request: &StartWasmExecutionRequest,
+) -> Vec<String> {
+    if !request.argv.is_empty() {
+        return request.argv.clone();
+    }
+
+    vec![resolved_module.specifier.clone()]
+}
+
 fn wasm_stack_limit_bytes(
     request: &StartWasmExecutionRequest,
 ) -> Result<Option<usize>, WasmExecutionError> {
@@ -842,14 +878,14 @@ fn wasm_limit_usize(
 }
 
 fn validate_module_limits(
-    context: &WasmContext,
+    resolved_module: &ResolvedWasmModule,
     request: &StartWasmExecutionRequest,
 ) -> Result<(), WasmExecutionError> {
     let Some(memory_limit) = wasm_memory_limit_bytes(request)? else {
         return Ok(());
     };
 
-    let resolved_path = resolved_module_path(&module_path(context, request)?, &request.cwd);
+    let resolved_path = &resolved_module.resolved_path;
     let metadata = fs::metadata(&resolved_path).map_err(|error| {
         WasmExecutionError::InvalidModule(format!(
             "failed to stat {}: {error}",
@@ -1101,5 +1137,71 @@ impl From<NodeSignalHandlerRegistration> for WasmSignalHandlerRegistration {
             mask: value.mask,
             flags: value.flags,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        resolve_wasm_execution_timeout, resolve_wasm_prewarm_timeout, resolved_module_path,
+        StartWasmExecutionRequest, WasmPermissionTier, WASM_MAX_FUEL_ENV,
+        WASM_PREWARM_TIMEOUT_MS_ENV,
+    };
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::path::Path;
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    fn request_with_env(cwd: &Path, env: BTreeMap<String, String>) -> StartWasmExecutionRequest {
+        StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: String::from("ctx-wasm"),
+            argv: Vec::new(),
+            env,
+            cwd: cwd.to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
+        }
+    }
+
+    #[test]
+    fn resolved_module_path_canonicalizes_path_like_specifiers() {
+        let temp = tempdir().expect("create temp dir");
+        let real = temp.path().join("real.wasm");
+        let alias = temp.path().join("alias.wasm");
+        fs::write(&real, b"\0asm\x01\0\0\0").expect("write wasm file");
+        symlink(&real, &alias).expect("create wasm symlink");
+
+        let resolved = resolved_module_path("./alias.wasm", temp.path());
+
+        assert_eq!(
+            resolved,
+            real.canonicalize().expect("canonicalize wasm target")
+        );
+    }
+
+    #[test]
+    fn wasm_prewarm_timeout_is_separate_from_execution_timeout() {
+        let temp = tempdir().expect("create temp dir");
+        let request = request_with_env(
+            temp.path(),
+            BTreeMap::from([
+                (String::from(WASM_MAX_FUEL_ENV), String::from("25")),
+                (
+                    String::from(WASM_PREWARM_TIMEOUT_MS_ENV),
+                    String::from("750"),
+                ),
+            ]),
+        );
+
+        assert_eq!(
+            resolve_wasm_execution_timeout(&request).expect("execution timeout"),
+            Some(Duration::from_millis(25))
+        );
+        assert_eq!(
+            resolve_wasm_prewarm_timeout(&request).expect("prewarm timeout"),
+            Duration::from_millis(750)
+        );
     }
 }

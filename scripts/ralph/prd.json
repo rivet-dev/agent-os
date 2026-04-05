@@ -1238,7 +1238,7 @@
         "Typecheck passes"
       ],
       "priority": 78,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: resolved_module_path() doesn't canonicalize while normalize_path() does — TOCTOU between validation and execution. File fingerprint uses size+mtime (swappable). ensure_materialized() can hang with no timeout."
     },
     {

@@ -1,10 +1,13 @@
-use agent_os_execution::wasm::{WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV};
+use agent_os_execution::wasm::{
+    WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_PREWARM_TIMEOUT_MS_ENV,
+};
 use agent_os_execution::{
     CreateWasmContextRequest, StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionEvent,
     WasmPermissionTier,
 };
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -796,6 +799,63 @@ fn wasm_execution_reuses_shared_warmup_path_across_contexts() {
 }
 
 #[test]
+fn wasm_execution_rewarms_when_symlink_target_changes_with_same_size_module() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let stable_link = temp.path().join("guest.wasm");
+    write_fixture(&temp.path().join("good.wasm"), &wasm_stdout_module());
+    write_fixture(&temp.path().join("evil.wasm"), &wasm_override_module());
+    symlink("./good.wasm", &stable_link).expect("create initial wasm symlink");
+
+    let mut engine = WasmExecutionEngine::default();
+    let first_context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+    let second_context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+    let debug_env = BTreeMap::from([(
+        String::from("AGENT_OS_WASM_WARMUP_DEBUG"),
+        String::from("1"),
+    )]);
+
+    let (first_stdout, first_stderr, first_exit) = run_wasm_execution(
+        &mut engine,
+        first_context.context_id,
+        temp.path(),
+        Vec::new(),
+        debug_env.clone(),
+        WasmPermissionTier::Full,
+    );
+    let first_warmup = parse_warmup_metrics(&first_stderr);
+
+    assert_eq!(first_exit, 0, "stderr: {first_stderr}");
+    assert!(first_stdout.contains("stdout:wasm-smoke"));
+    assert!(first_warmup.executed, "stderr: {first_stderr}");
+
+    fs::remove_file(&stable_link).expect("remove wasm symlink");
+    symlink("./evil.wasm", &stable_link).expect("retarget wasm symlink");
+
+    let (second_stdout, second_stderr, second_exit) = run_wasm_execution(
+        &mut engine,
+        second_context.context_id,
+        temp.path(),
+        Vec::new(),
+        debug_env,
+        WasmPermissionTier::Full,
+    );
+    let second_warmup = parse_warmup_metrics(&second_stderr);
+
+    assert_eq!(second_exit, 0, "stderr: {second_stderr}");
+    assert!(second_stdout.contains("stdout:evil-smoke"));
+    assert!(second_warmup.executed, "stderr: {second_stderr}");
+    assert_eq!(second_warmup.reason, "executed");
+}
+
+#[test]
 fn wasm_warmup_metrics_encode_emoji_module_paths_as_json() {
     assert_node_available();
 
@@ -851,6 +911,45 @@ fn wasm_execution_times_out_when_fuel_budget_is_exhausted() {
         temp.path(),
         Vec::new(),
         BTreeMap::from([(String::from(WASM_MAX_FUEL_ENV), String::from("25"))]),
+        WasmPermissionTier::Full,
+    );
+
+    assert_eq!(exit_code, 124, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.is_empty(), "stdout={stdout}");
+    assert!(
+        stderr.contains("fuel budget exhausted"),
+        "stderr should mention the exhausted fuel budget: {stderr}"
+    );
+}
+
+#[test]
+fn wasm_execution_allows_prewarm_timeout_to_differ_from_execution_timeout() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &wasm_infinite_loop_module(),
+    );
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let (stdout, stderr, exit_code) = run_wasm_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        Vec::new(),
+        BTreeMap::from([
+            (String::from(WASM_MAX_FUEL_ENV), String::from("25")),
+            (
+                String::from(WASM_PREWARM_TIMEOUT_MS_ENV),
+                String::from("1000"),
+            ),
+        ]),
         WasmPermissionTier::Full,
     );
 

@@ -4,7 +4,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 pub(crate) const NODE_IMPORT_CACHE_DEBUG_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_DEBUG";
 pub(crate) const NODE_IMPORT_CACHE_METRICS_PREFIX: &str = "__AGENT_OS_NODE_IMPORT_CACHE_METRICS__:";
@@ -16,6 +17,7 @@ const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
 const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "7";
 const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "4";
 const NODE_IMPORT_CACHE_DIR_PREFIX: &str = "agent-os-node-import-cache";
+const DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const PYODIDE_DIST_DIR: &str = "pyodide-dist";
 const AGENT_OS_BUILTIN_SPECIFIER_PREFIX: &str = "agent-os:builtin/";
 const AGENT_OS_POLYFILL_SPECIFIER_PREFIX: &str = "agent-os:polyfill/";
@@ -36,6 +38,8 @@ const BUNDLED_SIX_WHL: &[u8] = include_bytes!("../assets/pyodide/six-1.17.0-py2.
 const NODE_PYTHON_RUNNER_SOURCE: &str = include_str!("../assets/runners/python-runner.mjs");
 
 static CLEANED_NODE_IMPORT_CACHE_ROOTS: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+#[cfg(test)]
+static NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
 struct BundledPyodidePackageAsset {
@@ -8137,7 +8141,28 @@ const PATH_POLYFILL_INIT_COUNTER_KEY: &str = "__agentOsPolyfillPathInitCount";
 #[derive(Debug)]
 pub(crate) struct NodeImportCache {
     root_dir: PathBuf,
+    cleanup: Arc<NodeImportCacheCleanup>,
     cache_path: PathBuf,
+    loader_path: PathBuf,
+    register_path: PathBuf,
+    runner_path: PathBuf,
+    python_runner_path: PathBuf,
+    timing_bootstrap_path: PathBuf,
+    prewarm_path: PathBuf,
+    wasm_runner_path: PathBuf,
+    asset_root: PathBuf,
+    pyodide_dist_path: PathBuf,
+    prewarm_marker_dir: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct NodeImportCacheCleanup {
+    root_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct NodeImportCacheMaterialization {
+    root_dir: PathBuf,
     loader_path: PathBuf,
     register_path: PathBuf,
     runner_path: PathBuf,
@@ -8221,6 +8246,9 @@ impl NodeImportCache {
 
         Self {
             root_dir: root_dir.clone(),
+            cleanup: Arc::new(NodeImportCacheCleanup {
+                root_dir: root_dir.clone(),
+            }),
             cache_path: root_dir.join("state.json"),
             loader_path: root_dir.join("loader.mjs"),
             register_path: root_dir.join("register.mjs"),
@@ -8236,7 +8264,7 @@ impl NodeImportCache {
     }
 }
 
-impl Drop for NodeImportCache {
+impl Drop for NodeImportCacheCleanup {
     fn drop(&mut self) {
         if let Err(error) = fs::remove_dir_all(&self.root_dir) {
             if error.kind() != io::ErrorKind::NotFound {
@@ -8252,6 +8280,10 @@ impl Drop for NodeImportCache {
 impl NodeImportCache {
     pub(crate) fn cache_path(&self) -> &Path {
         &self.cache_path
+    }
+
+    pub(crate) fn cleanup_guard(&self) -> Arc<NodeImportCacheCleanup> {
+        Arc::clone(&self.cleanup)
     }
 
     pub(crate) fn loader_path(&self) -> &Path {
@@ -8300,6 +8332,63 @@ impl NodeImportCache {
     }
 
     pub(crate) fn ensure_materialized(&self) -> Result<(), io::Error> {
+        self.ensure_materialized_with_timeout(DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT)
+    }
+
+    pub(crate) fn ensure_materialized_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), io::Error> {
+        let materialization = NodeImportCacheMaterialization::from(self);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(materialization.materialize());
+        });
+
+        match receiver.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "timed out materializing node import cache after {} ms",
+                    timeout.as_millis()
+                ),
+            )),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(
+                "node import cache materialization thread exited unexpectedly",
+            )),
+        }
+    }
+}
+
+impl From<&NodeImportCache> for NodeImportCacheMaterialization {
+    fn from(cache: &NodeImportCache) -> Self {
+        Self {
+            root_dir: cache.root_dir.clone(),
+            loader_path: cache.loader_path.clone(),
+            register_path: cache.register_path.clone(),
+            runner_path: cache.runner_path.clone(),
+            python_runner_path: cache.python_runner_path.clone(),
+            timing_bootstrap_path: cache.timing_bootstrap_path.clone(),
+            prewarm_path: cache.prewarm_path.clone(),
+            wasm_runner_path: cache.wasm_runner_path.clone(),
+            asset_root: cache.asset_root.clone(),
+            pyodide_dist_path: cache.pyodide_dist_path.clone(),
+            prewarm_marker_dir: cache.prewarm_marker_dir.clone(),
+        }
+    }
+}
+
+impl NodeImportCacheMaterialization {
+    fn materialize(self) -> Result<(), io::Error> {
+        #[cfg(test)]
+        {
+            let delay_ms = NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_MS.load(Ordering::Relaxed);
+            if delay_ms > 0 {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+            }
+        }
+
         fs::create_dir_all(&self.root_dir)?;
         fs::create_dir_all(self.asset_root.join("builtins"))?;
         fs::create_dir_all(self.asset_root.join("denied"))?;
@@ -8907,7 +8996,7 @@ fn write_file_if_changed(path: &Path, contents: &str) -> Result<(), io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::NodeImportCache;
+    use super::{NodeImportCache, NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_MS};
     use crate::node_process::node_binary;
     use serde_json::Value;
     use std::collections::BTreeSet;
@@ -8915,6 +9004,8 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
     use std::process::{Command, Output, Stdio};
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn assert_node_available() {
@@ -9621,6 +9712,28 @@ export async function loadPyodide(options) {
                 "expected bundled Pyodide asset {file_name} to be materialized"
             );
         }
+    }
+
+    #[test]
+    fn ensure_materialized_honors_configured_timeout() {
+        let temp_root = tempdir().expect("create node import cache temp root");
+        let import_cache = NodeImportCache::new_in(temp_root.path().to_path_buf());
+
+        NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_MS.store(50, Ordering::Relaxed);
+        let error = import_cache
+            .ensure_materialized_with_timeout(Duration::from_millis(5))
+            .expect_err("materialization should time out");
+        NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_MS.store(0, Ordering::Relaxed);
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            error
+                .to_string()
+                .contains("timed out materializing node import cache"),
+            "unexpected error: {error}"
+        );
+
+        std::thread::sleep(Duration::from_millis(75));
     }
 
     #[test]

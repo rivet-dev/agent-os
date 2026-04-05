@@ -1,5 +1,7 @@
 use crate::common::{encode_json_string, frozen_time_ms};
-use crate::node_import_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV};
+use crate::node_import_cache::{
+    NodeImportCache, NodeImportCacheCleanup, NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
+};
 use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
     harden_node_command, node_binary, spawn_node_control_reader, spawn_stream_reader,
@@ -286,6 +288,7 @@ pub struct PythonExecution {
     stderr_filter: Arc<Mutex<LinePrefixFilter>>,
     output_buffer_max_bytes: usize,
     vfs_rpc_timeout: Duration,
+    _import_cache_guard: Arc<NodeImportCacheCleanup>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -677,6 +680,7 @@ impl PythonExecutionEngine {
             .import_caches
             .get(&context.vm_id)
             .expect("vm import cache should exist after materialization");
+        let import_cache_guard = import_cache.cleanup_guard();
         let pending_vfs_rpc_count = Arc::new(AtomicUsize::new(0));
         let (mut child, rpc_request_reader, rpc_response_writer) = create_node_child(
             import_cache,
@@ -741,6 +745,7 @@ impl PythonExecutionEngine {
             stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
             output_buffer_max_bytes: python_output_buffer_max_bytes(&request),
             vfs_rpc_timeout: python_vfs_rpc_timeout(&request),
+            _import_cache_guard: import_cache_guard,
         })
     }
 
