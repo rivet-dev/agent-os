@@ -426,12 +426,13 @@ pub struct JavascriptExecutionEngine {
     next_context_id: usize,
     next_execution_id: usize,
     contexts: BTreeMap<String, JavascriptContext>,
-    import_cache: NodeImportCache,
+    import_caches: BTreeMap<String, NodeImportCache>,
 }
 
 impl JavascriptExecutionEngine {
     pub fn create_context(&mut self, request: CreateJavascriptContextRequest) -> JavascriptContext {
         self.next_context_id += 1;
+        self.import_caches.entry(request.vm_id.clone()).or_default();
 
         let context = JavascriptContext {
             context_id: format!("js-ctx-{}", self.next_context_id),
@@ -467,20 +468,26 @@ impl JavascriptExecutionEngine {
             return Err(JavascriptExecutionError::EmptyArgv);
         }
 
-        self.import_cache
-            .ensure_materialized()
-            .map_err(JavascriptExecutionError::PrepareImportCache)?;
         let frozen_time_ms = frozen_time_ms();
-        let warmup_metrics =
-            prewarm_node_import_path(&self.import_cache, &context, &request, frozen_time_ms)?;
+        let warmup_metrics = {
+            let import_cache = self.import_caches.entry(context.vm_id.clone()).or_default();
+            import_cache
+                .ensure_materialized()
+                .map_err(JavascriptExecutionError::PrepareImportCache)?;
+            prewarm_node_import_path(import_cache, &context, &request, frozen_time_ms)?
+        };
 
         self.next_execution_id += 1;
         let execution_id = format!("exec-{}", self.next_execution_id);
         let control_channel =
             create_node_control_channel().map_err(JavascriptExecutionError::Spawn)?;
         let sync_rpc_channels = Some(create_javascript_sync_rpc_channels()?);
+        let import_cache = self
+            .import_caches
+            .get(&context.vm_id)
+            .expect("vm import cache should exist after materialization");
         let (mut child, sync_rpc_request_reader, sync_rpc_response_writer) = create_node_child(
-            &self.import_cache,
+            import_cache,
             &context,
             &request,
             frozen_time_ms,
@@ -535,6 +542,30 @@ impl JavascriptExecutionEngine {
             stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
             sync_rpc_responses: sync_rpc_response_writer,
         })
+    }
+
+    pub fn dispose_vm(&mut self, vm_id: &str) {
+        self.contexts.retain(|_, context| context.vm_id != vm_id);
+        self.import_caches.remove(vm_id);
+    }
+
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn materialize_import_cache_for_vm(
+        &mut self,
+        vm_id: &str,
+    ) -> Result<&std::path::Path, std::io::Error> {
+        let import_cache = self.import_caches.entry(vm_id.to_owned()).or_default();
+        import_cache.ensure_materialized()?;
+        Ok(import_cache.cache_path())
+    }
+
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn import_cache_path_for_vm(&self, vm_id: &str) -> Option<&std::path::Path> {
+        self.import_caches
+            .get(vm_id)
+            .map(NodeImportCache::cache_path)
     }
 }
 

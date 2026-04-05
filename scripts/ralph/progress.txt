@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Native execution engines should own `NodeImportCache` state per `vm_id`, and sidecar VM disposal should call each engine's `dispose_vm`; a single engine-wide cache leaks module state across VMs.
 - WASM runtime hardening is split across three layers together: `ResourceLimits` / sidecar metadata parsing, `crates/sidecar/src/service.rs` injecting reserved `AGENT_OS_WASM_*` env keys, and `crates/execution/src/wasm.rs` validating or enforcing the actual limit before guest code runs.
 - Sidecar `ResourceLimits` parsing should start from `ResourceLimits::default()` and only override metadata keys that are present; rebuilding the struct from sparse metadata silently drops default filesystem byte/inode caps.
 - WASM command permission tiers have to be threaded through all three layers together: `packages/core` command metadata, sidecar protocol/service request fields (`command_permissions` and per-exec `wasm_permission_tier`), and `StartWasmExecutionRequest.permission_tier`; top-level exec and JS `child_process` launches use separate paths.
@@ -639,4 +640,22 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: The sidecar needs both durable per-VM command tier metadata and per-execution tier hints, because direct `exec()` and JS `child_process` launches reach WASM through different call paths.
   - Gotchas encountered: Node `--permission` still leaves the process `cwd` writable, so `read-only` WASM tiers must also harden the WASI import surface itself instead of relying on `--allow-fs-write` alone.
   - Useful context: `NODE_WASM_RUNNER_SOURCE` in `crates/execution/src/node_import_cache.rs` is the enforcement point for tier-specific preopens/imports, while `packages/core/tests/wasm-permission-tiers.test.ts` is the focused TS regression that proves the tier reaches sidecar execute requests.
+---
+## 2026-04-05 03:06:56 PDT - US-029
+- What was implemented
+- Replaced the single engine-wide `NodeImportCache` instances in the JavaScript, Python, and WASM execution engines with per-VM caches keyed by `vm_id`, while still reusing the cache across contexts inside the same VM.
+- Wired sidecar VM disposal to drop per-VM execution-engine cache state, and added `NodeImportCache` cleanup on drop so the per-VM cache directories are removed from disk when a VM shuts down.
+- Added a sidecar regression that proves two VMs get different JavaScript import-cache directories and that disposing one VM removes only its own cache root.
+- Files changed
+- `crates/execution/src/javascript.rs`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/src/python.rs`
+- `crates/execution/src/wasm.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Python's bundled Pyodide path should be resolved from the VM-scoped import cache before context creation; otherwise Python silently reintroduces shared cache state even if the JavaScript engine is isolated.
+  - Gotchas encountered: Sidecar unit tests cannot call crate-private execution-engine helpers from another crate, so cross-crate regressions either need public hidden debug accessors or need to live inside the execution crate itself.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --no-run`, `cargo test -p agent-os-sidecar --no-run`, `cargo test -p agent-os-sidecar dispose_vm_removes_per_vm_javascript_import_cache_directory -- --test-threads=1`, `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1`, `cargo test -p agent-os-execution --test python_prewarm -- --test-threads=1`, `cargo test -p agent-os-execution --test wasm wasm_execution_reuses_shared_warmup_path_across_contexts -- --test-threads=1`, and `cargo test -p agent-os-execution --test wasm wasm_execution_times_out_when_fuel_budget_is_exhausted -- --test-threads=1` pass. A full `cargo test -p agent-os-execution --test wasm -- --test-threads=1` run hit a transient timeout in `wasm_execution_times_out_when_fuel_budget_is_exhausted`, but that case passed immediately when rerun in isolation.
 ---

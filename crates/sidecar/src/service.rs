@@ -29,6 +29,9 @@ use agent_os_bridge::{
     NetworkAccess, NetworkPermissionRequest, PathRequest, ReadDirRequest, ReadFileRequest,
     RenameRequest, SymlinkRequest, TruncateRequest, WriteFileRequest,
 };
+use agent_os_execution::wasm::{
+    WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV,
+};
 use agent_os_execution::{
     CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
     JavascriptExecution, JavascriptExecutionEngine, JavascriptExecutionError,
@@ -37,9 +40,6 @@ use agent_os_execution::{
     PythonVfsRpcResponsePayload, PythonVfsRpcStat, StartJavascriptExecutionRequest,
     StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecution, WasmExecutionEngine,
     WasmExecutionError, WasmExecutionEvent, WasmPermissionTier as ExecutionWasmPermissionTier,
-};
-use agent_os_execution::wasm::{
-    WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV,
 };
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{
@@ -2902,8 +2902,10 @@ where
             }
             GuestRuntimeKind::Python => {
                 let python_file_path = python_file_entrypoint(&payload.entrypoint);
-                let pyodide_dist_path =
-                    self.python_engine.bundled_pyodide_dist_path().to_path_buf();
+                let pyodide_dist_path = self
+                    .python_engine
+                    .bundled_pyodide_dist_path_for_vm(&vm_id)
+                    .map_err(python_error)?;
                 let context = self
                     .python_engine
                     .create_context(CreatePythonContextRequest {
@@ -3228,6 +3230,9 @@ where
             })
         })?;
         self.bridge.clear_vm_permissions(vm_id)?;
+        self.javascript_engine.dispose_vm(vm_id);
+        self.python_engine.dispose_vm(vm_id);
+        self.wasm_engine.dispose_vm(vm_id);
 
         if let Some(session) = self.sessions.get_mut(session_id) {
             session.vm_ids.remove(vm_id);
@@ -6581,10 +6586,10 @@ mod tests {
     use super::*;
     use crate::protocol::{
         AuthenticateRequest, BootstrapRootFilesystemRequest, ConfigureVmRequest, CreateVmRequest,
-        GetZombieTimerCountRequest, GuestRuntimeKind, MountDescriptor, MountPluginDescriptor,
-        OpenSessionRequest, OwnershipScope, PermissionDescriptor, PermissionMode, RequestFrame,
-        RequestPayload, ResponsePayload, RootFilesystemEntry, RootFilesystemEntryKind,
-        SidecarPlacement,
+        DisposeReason, GetZombieTimerCountRequest, GuestRuntimeKind, MountDescriptor,
+        MountPluginDescriptor, OpenSessionRequest, OwnershipScope, PermissionDescriptor,
+        PermissionMode, RequestFrame, RequestPayload, ResponsePayload, RootFilesystemEntry,
+        RootFilesystemEntryKind, SidecarPlacement,
     };
     use crate::s3_plugin::test_support::MockS3Server;
     use crate::sandbox_agent_plugin::test_support::MockSandboxAgentServer;
@@ -6776,6 +6781,72 @@ ykAheWCsAteSEWVc0w==\n\
         assert!(
             output.status.success(),
             "node must be available for python dispatch tests"
+        );
+    }
+
+    #[test]
+    fn dispose_vm_removes_per_vm_javascript_import_cache_directory() {
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_a =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm a");
+        let vm_b =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm b");
+
+        let cache_path_a = sidecar
+            .javascript_engine
+            .materialize_import_cache_for_vm(&vm_a)
+            .expect("materialize vm a import cache")
+            .to_path_buf();
+        let cache_path_b = sidecar
+            .javascript_engine
+            .materialize_import_cache_for_vm(&vm_b)
+            .expect("materialize vm b import cache")
+            .to_path_buf();
+        let cache_root_a = cache_path_a
+            .parent()
+            .expect("vm a cache parent")
+            .to_path_buf();
+        let cache_root_b = cache_path_b
+            .parent()
+            .expect("vm b cache parent")
+            .to_path_buf();
+
+        assert_ne!(cache_root_a, cache_root_b);
+        assert!(cache_root_a.exists(), "vm a cache root should exist");
+        assert!(cache_root_b.exists(), "vm b cache root should exist");
+
+        sidecar
+            .dispose_vm_internal(&connection_id, &session_id, &vm_a, DisposeReason::Requested)
+            .expect("dispose vm a");
+
+        assert!(
+            !cache_root_a.exists(),
+            "vm a cache root should be removed on dispose"
+        );
+        assert!(
+            cache_root_b.exists(),
+            "vm b cache root should remain until that VM is disposed"
+        );
+        assert!(
+            sidecar
+                .javascript_engine
+                .import_cache_path_for_vm(&vm_a)
+                .is_none(),
+            "vm a cache entry should be removed from the engine"
+        );
+        assert_eq!(
+            sidecar.javascript_engine.import_cache_path_for_vm(&vm_b),
+            Some(cache_path_b.as_path())
+        );
+
+        sidecar
+            .dispose_vm_internal(&connection_id, &session_id, &vm_b, DisposeReason::Requested)
+            .expect("dispose vm b");
+        assert!(
+            !cache_root_b.exists(),
+            "vm b cache root should be removed on dispose"
         );
     }
 

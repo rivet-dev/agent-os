@@ -469,7 +469,7 @@
         "Typecheck passes"
       ],
       "priority": 32,
-      "passes": false,
+      "passes": true,
       "notes": "flushCacheState reads/merges/writes a shared cache. Two VMs sharing the same cache root enables cross-VM cache poisoning."
     },
     {
@@ -689,6 +689,81 @@
       "priority": 36,
       "passes": false,
       "notes": "Collection of minor issues that individually have low impact but collectively improve robustness."
+    },
+    {
+      "id": "US-044",
+      "title": "Implement kernel-controlled DNS resolver instead of host delegation",
+      "description": "As a security engineer, I want DNS resolution to go through the kernel rather than delegating to the host system resolver so that the isolation invariant (all syscalls through kernel) is maintained",
+      "acceptanceCriteria": [
+        "dns.lookup() and dns.resolve() route through a kernel DNS forwarding layer, not host to_socket_addrs()",
+        "net.connect(hostname) resolves DNS through the kernel resolver, not directly via host",
+        "resolve_tcp_connect_addr in service.rs uses kernel DNS instead of (host, port).to_socket_addrs()",
+        "resolve_dns_ip_addrs in service.rs uses kernel DNS instead of (hostname, 0).to_socket_addrs()",
+        "Per-VM DNS configuration is possible (custom resolvers, overrides)",
+        "DNS results are kernel-observable and auditable",
+        "Existing networking tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 44,
+      "passes": false,
+      "notes": "DNS currently delegates to host system resolver via Rust to_socket_addrs(). Functional but violates isolation invariant. Both net.connect(\"example.com\") and dns.lookup() resolve through host."
+    },
+    {
+      "id": "US-045",
+      "title": "Implement real getConnections() and enforce server backlog",
+      "description": "As a developer, I want net.Server.getConnections() to return actual connection count and listen backlog to be enforced so that server resource management works correctly",
+      "acceptanceCriteria": [
+        "server.getConnections(callback) returns actual active connection count instead of 0",
+        "Sidecar tracks active connections per listener",
+        "server.listen({ backlog }) is validated and enforced by the sidecar",
+        "Typecheck passes"
+      ],
+      "priority": 45,
+      "passes": false,
+      "notes": "getConnections() currently stubs to 0. Backlog parameter accepted but ignored in service.rs (let _ = payload.backlog)."
+    },
+    {
+      "id": "US-046",
+      "title": "Add Unix domain socket support to net polyfill",
+      "description": "As a developer, I want Unix domain sockets supported in the net polyfill so that Node.js apps that use socket files work inside the VM",
+      "acceptanceCriteria": [
+        "net.connect({ path }) creates a kernel-managed Unix domain socket",
+        "net.createServer().listen({ path }) binds a Unix domain socket",
+        "Unix socket files appear in the kernel VFS",
+        "Typecheck passes"
+      ],
+      "priority": 46,
+      "passes": false,
+      "notes": "Currently throws unsupported error. Many Node.js apps and frameworks assume Unix domain socket support."
+    },
+    {
+      "id": "US-047",
+      "title": "Add external networking CI tests",
+      "description": "As a developer, I want external network connectivity tested in CI so that outbound connection regressions are caught automatically",
+      "acceptanceCriteria": [
+        "At least one CI test validates outbound TCP connection to an external host",
+        "At least one CI test validates outbound HTTP/HTTPS request",
+        "Tests are robust to transient network failures (retry, skip on network unavailable)",
+        "curl.test.ts external network tests enabled in CI or equivalent coverage added"
+      ],
+      "priority": 47,
+      "passes": false,
+      "notes": "External network tests in curl.test.ts are skipped unless runExternalNetwork=true. No CI validation of outbound connectivity."
+    },
+    {
+      "id": "US-048",
+      "title": "Audit and verify network permission checks on socket operations",
+      "description": "As a security engineer, I want network permission callbacks verified at socket operation time so that the permission model is actually enforced",
+      "acceptanceCriteria": [
+        "NetworkAccessRequest callbacks are invoked on net.connect(), net.listen(), dns.lookup()",
+        "Permission denial returns proper error to guest code",
+        "Test that a VM with network permissions denied cannot make connections",
+        "Test that a VM with network permissions denied cannot bind servers",
+        "Typecheck passes"
+      ],
+      "priority": 48,
+      "passes": false,
+      "notes": "Permission framework exists (NetworkAccessRequest, NetworkOperation enums) but needs audit to confirm callbacks fire at socket operation time, not just policy setup."
     }
   ]
 }

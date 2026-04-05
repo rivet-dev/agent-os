@@ -8379,7 +8379,7 @@ const DENIED_BUILTIN_ASSETS: &[DeniedBuiltinAsset] = &[
 const PATH_POLYFILL_ASSET_NAME: &str = "path";
 const PATH_POLYFILL_INIT_COUNTER_KEY: &str = "__agentOsPolyfillPathInitCount";
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct NodeImportCache {
     root_dir: PathBuf,
     cache_path: PathBuf,
@@ -8416,6 +8416,19 @@ impl Default for NodeImportCache {
             asset_root: root_dir.join("assets"),
             pyodide_dist_path: root_dir.join("assets").join(PYODIDE_DIST_DIR),
             prewarm_marker_dir: root_dir.join("warmup"),
+        }
+    }
+}
+
+impl Drop for NodeImportCache {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.root_dir) {
+            if error.kind() != io::ErrorKind::NotFound {
+                eprintln!(
+                    "agent-os: failed to clean up node import cache {}: {error}",
+                    self.root_dir.display()
+                );
+            }
         }
     }
 }

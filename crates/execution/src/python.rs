@@ -528,16 +528,24 @@ pub struct PythonExecutionEngine {
     next_context_id: usize,
     next_execution_id: usize,
     contexts: BTreeMap<String, PythonContext>,
-    import_cache: NodeImportCache,
+    import_caches: BTreeMap<String, NodeImportCache>,
 }
 
 impl PythonExecutionEngine {
-    pub fn bundled_pyodide_dist_path(&self) -> &Path {
-        self.import_cache.pyodide_dist_path()
+    pub fn bundled_pyodide_dist_path_for_vm(
+        &mut self,
+        vm_id: &str,
+    ) -> Result<PathBuf, PythonExecutionError> {
+        let import_cache = self.import_caches.entry(vm_id.to_owned()).or_default();
+        import_cache
+            .ensure_materialized()
+            .map_err(PythonExecutionError::PrepareRuntime)?;
+        Ok(import_cache.pyodide_dist_path().to_path_buf())
     }
 
     pub fn create_context(&mut self, request: CreatePythonContextRequest) -> PythonContext {
         self.next_context_id += 1;
+        self.import_caches.entry(request.vm_id.clone()).or_default();
 
         let context = PythonContext {
             context_id: format!("python-ctx-{}", self.next_context_id),
@@ -566,19 +574,25 @@ impl PythonExecutionEngine {
             });
         }
 
-        self.import_cache
-            .ensure_materialized()
-            .map_err(PythonExecutionError::PrepareRuntime)?;
         let frozen_time_ms = frozen_time_ms();
-        let warmup_metrics =
-            prewarm_python_path(&self.import_cache, &context, &request, frozen_time_ms)?;
+        let warmup_metrics = {
+            let import_cache = self.import_caches.entry(context.vm_id.clone()).or_default();
+            import_cache
+                .ensure_materialized()
+                .map_err(PythonExecutionError::PrepareRuntime)?;
+            prewarm_python_path(import_cache, &context, &request, frozen_time_ms)?
+        };
 
         self.next_execution_id += 1;
         let execution_id = format!("exec-{}", self.next_execution_id);
         let rpc_channels = create_python_vfs_rpc_channels()?;
         let control_channel = create_node_control_channel().map_err(PythonExecutionError::Spawn)?;
+        let import_cache = self
+            .import_caches
+            .get(&context.vm_id)
+            .expect("vm import cache should exist after materialization");
         let (mut child, rpc_request_reader, rpc_response_writer) = create_node_child(
-            &self.import_cache,
+            import_cache,
             &context,
             &request,
             rpc_channels,
@@ -632,6 +646,11 @@ impl PythonExecutionEngine {
             stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
             output_buffer_max_bytes: python_output_buffer_max_bytes(&request),
         })
+    }
+
+    pub fn dispose_vm(&mut self, vm_id: &str) {
+        self.contexts.retain(|_, context| context.vm_id != vm_id);
+        self.import_caches.remove(vm_id);
     }
 }
 

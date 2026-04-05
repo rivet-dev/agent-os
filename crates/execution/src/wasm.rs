@@ -314,12 +314,13 @@ pub struct WasmExecutionEngine {
     next_context_id: usize,
     next_execution_id: usize,
     contexts: BTreeMap<String, WasmContext>,
-    import_cache: NodeImportCache,
+    import_caches: BTreeMap<String, NodeImportCache>,
 }
 
 impl WasmExecutionEngine {
     pub fn create_context(&mut self, request: CreateWasmContextRequest) -> WasmContext {
         self.next_context_id += 1;
+        self.import_caches.entry(request.vm_id.clone()).or_default();
 
         let context = WasmContext {
             context_id: format!("wasm-ctx-{}", self.next_context_id),
@@ -348,14 +349,21 @@ impl WasmExecutionEngine {
             });
         }
 
-        self.import_cache
-            .ensure_materialized()
-            .map_err(WasmExecutionError::PrepareWarmPath)?;
+        {
+            let import_cache = self.import_caches.entry(context.vm_id.clone()).or_default();
+            import_cache
+                .ensure_materialized()
+                .map_err(WasmExecutionError::PrepareWarmPath)?;
+        }
         let frozen_time_ms = frozen_time_ms();
         validate_module_limits(&context, &request)?;
         let execution_timeout = resolve_wasm_execution_timeout(&request)?;
+        let import_cache = self
+            .import_caches
+            .get(&context.vm_id)
+            .expect("vm import cache should exist after materialization");
         let warmup_metrics = prewarm_wasm_path(
-            &self.import_cache,
+            import_cache,
             &context,
             &request,
             frozen_time_ms,
@@ -367,7 +375,7 @@ impl WasmExecutionEngine {
         let guest_argv = guest_argv(&context, &request)?;
         let control_channel = create_node_control_channel().map_err(WasmExecutionError::Spawn)?;
         let mut child = create_node_child(
-            &self.import_cache,
+            import_cache,
             &context,
             &request,
             &guest_argv,
@@ -415,6 +423,11 @@ impl WasmExecutionEngine {
             events: receiver,
             stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
         })
+    }
+
+    pub fn dispose_vm(&mut self, vm_id: &str) {
+        self.contexts.retain(|_, context| context.vm_id != vm_id);
+        self.import_caches.remove(vm_id);
     }
 }
 
