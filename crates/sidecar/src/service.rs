@@ -66,6 +66,9 @@ use agent_os_kernel::vfs::{
     MemoryFileSystem, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
 };
 use base64::Engine;
+use hickory_resolver::config::{NameServerConfig, ResolverConfig};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::TokioResolver;
 use nix::libc;
 use nix::sys::signal::{kill as send_signal, Signal};
 use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
@@ -97,6 +100,8 @@ const EXECUTION_SANDBOX_ROOT_ENV: &str = "AGENT_OS_SANDBOX_ROOT";
 const HOST_REALPATH_MAX_SYMLINK_DEPTH: usize = 40;
 const DISPOSE_VM_SIGTERM_GRACE: Duration = Duration::from_millis(100);
 const DISPOSE_VM_SIGKILL_GRACE: Duration = Duration::from_millis(100);
+const VM_DNS_SERVERS_METADATA_KEY: &str = "network.dns.servers";
+const VM_DNS_OVERRIDE_METADATA_PREFIX: &str = "network.dns.override.";
 
 type BridgeError<B> = <B as BridgeTypes>::Error;
 type SidecarKernel = KernelVm<MountTable>;
@@ -1444,6 +1449,7 @@ struct VmState {
     connection_id: String,
     session_id: String,
     metadata: BTreeMap<String, String>,
+    dns: VmDnsConfig,
     guest_env: BTreeMap<String, String>,
     requested_runtime: GuestRuntimeKind,
     cwd: PathBuf,
@@ -1575,8 +1581,18 @@ struct ActiveTcpSocket {
 }
 
 impl ActiveTcpSocket {
-    fn connect(host: &str, port: u16) -> Result<Self, SidecarError> {
-        let remote_addr = resolve_tcp_connect_addr(host, port)?;
+    fn connect<B>(
+        bridge: &SharedBridge<B>,
+        vm_id: &str,
+        dns: &VmDnsConfig,
+        host: &str,
+        port: u16,
+    ) -> Result<Self, SidecarError>
+    where
+        B: NativeSidecarBridge + Send + 'static,
+        BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+    {
+        let remote_addr = resolve_tcp_connect_addr(bridge, vm_id, dns, host, port)?;
         let stream = TcpStream::connect_timeout(&remote_addr, Duration::from_secs(30))
             .map_err(sidecar_net_error)?;
         Self::from_stream(stream)
@@ -1769,7 +1785,7 @@ impl ActiveUdpSocket {
             )));
         }
 
-        let bind_addr = resolve_udp_addr(
+        let bind_addr = resolve_udp_bind_addr(
             host.unwrap_or(self.family.default_bind_host()),
             port,
             self.family,
@@ -1789,13 +1805,20 @@ impl ActiveUdpSocket {
         self.bind(None, 0)
     }
 
-    fn send_to(
+    fn send_to<B>(
         &mut self,
+        bridge: &SharedBridge<B>,
+        vm_id: &str,
+        dns: &VmDnsConfig,
         host: &str,
         port: u16,
         contents: &[u8],
-    ) -> Result<(usize, SocketAddr), SidecarError> {
-        let remote_addr = resolve_udp_addr(host, port, self.family)?;
+    ) -> Result<(usize, SocketAddr), SidecarError>
+    where
+        B: NativeSidecarBridge + Send + 'static,
+        BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+    {
+        let remote_addr = resolve_udp_addr(bridge, vm_id, dns, host, port, self.family)?;
         let _ = self.ensure_bound_for_send()?;
         let socket = self.socket.as_ref().ok_or_else(|| {
             SidecarError::InvalidState(String::from("UDP socket is not initialized"))
@@ -2326,6 +2349,7 @@ where
         let vm_id = format!("vm-{}", self.next_vm_id);
         let cwd = resolve_cwd(payload.metadata.get("cwd"))?;
         let resource_limits = parse_resource_limits(&payload.metadata)?;
+        let dns = parse_vm_dns_config(&payload.metadata)?;
         self.bridge
             .set_vm_permissions(&vm_id, &payload.permissions)?;
         let permissions = bridge_permissions(self.bridge.clone(), &vm_id);
@@ -2374,6 +2398,7 @@ where
                 connection_id: connection_id.clone(),
                 session_id: session_id.clone(),
                 metadata: payload.metadata,
+                dns,
                 guest_env,
                 requested_runtime: payload.runtime,
                 cwd,
@@ -3877,6 +3902,9 @@ where
                                 .get_mut(child_process_id)
                                 .expect("child process should still exist");
                             service_javascript_sync_rpc(
+                                &self.bridge,
+                                vm_id,
+                                &vm.dns,
                                 &mut vm.kernel,
                                 child,
                                 &request,
@@ -4085,6 +4113,9 @@ where
                     .get_mut(process_id)
                     .expect("process should still exist");
                 service_javascript_sync_rpc(
+                    &self.bridge,
+                    vm_id,
+                    &vm.dns,
                     &mut vm.kernel,
                     process,
                     &request,
@@ -4752,6 +4783,210 @@ fn parse_resource_limit_u64(
         SidecarError::InvalidState(format!("invalid resource limit {key}={value}: {error}"))
     })?;
     Ok(Some(parsed))
+}
+
+fn parse_vm_dns_config(metadata: &BTreeMap<String, String>) -> Result<VmDnsConfig, SidecarError> {
+    let mut config = VmDnsConfig::default();
+
+    if let Some(value) = metadata.get(VM_DNS_SERVERS_METADATA_KEY) {
+        config.name_servers = value
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(parse_vm_dns_nameserver)
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+
+    for (key, value) in metadata {
+        let Some(hostname) = key.strip_prefix(VM_DNS_OVERRIDE_METADATA_PREFIX) else {
+            continue;
+        };
+        let normalized_hostname = normalize_dns_hostname(hostname)?;
+        let addresses = value
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                entry.parse::<IpAddr>().map_err(|error| {
+                    SidecarError::InvalidState(format!(
+                        "invalid DNS override {key}={value}: {error}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if addresses.is_empty() {
+            return Err(SidecarError::InvalidState(format!(
+                "DNS override {key} must contain at least one IP address"
+            )));
+        }
+        config.overrides.insert(normalized_hostname, addresses);
+    }
+
+    Ok(config)
+}
+
+fn parse_vm_dns_nameserver(value: &str) -> Result<SocketAddr, SidecarError> {
+    if let Ok(address) = value.parse::<SocketAddr>() {
+        return Ok(address);
+    }
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, 53));
+    }
+    Err(SidecarError::InvalidState(format!(
+        "invalid {} entry {value}; expected IP or IP:port",
+        VM_DNS_SERVERS_METADATA_KEY
+    )))
+}
+
+fn normalize_dns_hostname(hostname: &str) -> Result<String, SidecarError> {
+    let normalized = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(SidecarError::InvalidState(String::from(
+            "DNS hostname must not be empty",
+        )));
+    }
+    Ok(normalized)
+}
+
+fn vm_dns_resolver_config(dns: &VmDnsConfig) -> Option<ResolverConfig> {
+    if dns.name_servers.is_empty() {
+        return None;
+    }
+
+    let name_servers = dns
+        .name_servers
+        .iter()
+        .map(|server| {
+            let mut config = NameServerConfig::udp_and_tcp(server.ip());
+            for connection in &mut config.connections {
+                connection.port = server.port();
+                connection.bind_addr = Some(SocketAddr::new(
+                    if server.is_ipv6() {
+                        IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+                    } else {
+                        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+                    },
+                    0,
+                ));
+            }
+            config
+        })
+        .collect();
+    Some(ResolverConfig::from_parts(None, vec![], name_servers))
+}
+
+fn resolve_dns_with_sidecar_resolver(
+    dns: &VmDnsConfig,
+    hostname: &str,
+) -> Result<Vec<IpAddr>, SidecarError> {
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+        SidecarError::Execution(format!("failed to create DNS runtime: {error}"))
+    })?;
+
+    runtime.block_on(async {
+        let builder = if let Some(config) = vm_dns_resolver_config(dns) {
+            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+        } else {
+            TokioResolver::builder_tokio().map_err(|error| {
+                SidecarError::Execution(format!(
+                    "failed to initialize DNS resolver from system configuration: {error}"
+                ))
+            })?
+        };
+
+        let resolver = builder.build().map_err(|error| {
+            SidecarError::Execution(format!("failed to build DNS resolver: {error}"))
+        })?;
+        let lookup = resolver.lookup_ip(hostname).await.map_err(|error| {
+            SidecarError::Execution(format!("failed to resolve DNS address {hostname}: {error}"))
+        })?;
+
+        let mut addresses = Vec::new();
+        let mut seen = BTreeSet::new();
+        for ip in lookup.iter() {
+            if seen.insert(ip) {
+                addresses.push(ip);
+            }
+        }
+
+        if addresses.is_empty() {
+            return Err(SidecarError::Execution(format!(
+                "failed to resolve DNS address {hostname}"
+            )));
+        }
+
+        Ok(addresses)
+    })
+}
+
+fn emit_dns_resolution_event<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    hostname: &str,
+    source: DnsResolutionSource,
+    addresses: &[IpAddr],
+    dns: &VmDnsConfig,
+) where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let _ = emit_structured_event(
+        bridge,
+        vm_id,
+        "network.dns.resolved",
+        audit_fields([
+            ("hostname", hostname.to_owned()),
+            ("source", source.as_str().to_owned()),
+            (
+                "addresses",
+                addresses
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            ("address_count", addresses.len().to_string()),
+            ("resolver_count", dns.name_servers.len().to_string()),
+            (
+                "resolvers",
+                dns.name_servers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        ]),
+    );
+}
+
+fn emit_dns_resolution_failure_event<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    hostname: &str,
+    dns: &VmDnsConfig,
+    error: &SidecarError,
+) where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let _ = emit_structured_event(
+        bridge,
+        vm_id,
+        "network.dns.resolve_failed",
+        audit_fields([
+            ("hostname", hostname.to_owned()),
+            ("reason", error.to_string()),
+            ("resolver_count", dns.name_servers.len().to_string()),
+            (
+                "resolvers",
+                dns.name_servers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        ]),
+    );
 }
 
 fn build_root_filesystem(
@@ -5604,6 +5839,29 @@ struct JavascriptDnsResolveRequest {
     rrtype: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct VmDnsConfig {
+    name_servers: Vec<SocketAddr>,
+    overrides: BTreeMap<String, Vec<IpAddr>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DnsResolutionSource {
+    Literal,
+    Override,
+    Resolver,
+}
+
+impl DnsResolutionSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Literal => "literal",
+            Self::Override => "override",
+            Self::Resolver => "resolver",
+        }
+    }
+}
+
 fn resolve_tcp_bind_addr(host: &str, port: u16) -> Result<SocketAddr, SidecarError> {
     (host, port)
         .to_socket_addrs()
@@ -5614,36 +5872,77 @@ fn resolve_tcp_bind_addr(host: &str, port: u16) -> Result<SocketAddr, SidecarErr
         })
 }
 
-fn resolve_tcp_connect_addr(host: &str, port: u16) -> Result<SocketAddr, SidecarError> {
-    (host, port)
-        .to_socket_addrs()
-        .map_err(sidecar_net_error)?
+fn resolve_tcp_connect_addr<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    dns: &VmDnsConfig,
+    host: &str,
+    port: u16,
+) -> Result<SocketAddr, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let ip = resolve_dns_ip_addrs(bridge, vm_id, dns, host)?
+        .into_iter()
         .next()
         .ok_or_else(|| {
             SidecarError::Execution(format!("failed to resolve TCP address {host}:{port}"))
-        })
+        })?;
+    Ok(SocketAddr::new(ip, port))
 }
 
-fn resolve_dns_ip_addrs(hostname: &str) -> Result<Vec<IpAddr>, SidecarError> {
+fn resolve_dns_ip_addrs<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    dns: &VmDnsConfig,
+    hostname: &str,
+) -> Result<Vec<IpAddr>, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
     if let Ok(ip_addr) = hostname.parse::<IpAddr>() {
-        return Ok(vec![ip_addr]);
+        let addresses = vec![ip_addr];
+        emit_dns_resolution_event(
+            bridge,
+            vm_id,
+            hostname,
+            DnsResolutionSource::Literal,
+            &addresses,
+            dns,
+        );
+        return Ok(addresses);
     }
 
-    let mut addresses = Vec::new();
-    let mut seen = BTreeSet::new();
-    for addr in (hostname, 0).to_socket_addrs().map_err(sidecar_net_error)? {
-        let ip = addr.ip();
-        if seen.insert(ip) {
-            addresses.push(ip);
+    let normalized_hostname = normalize_dns_hostname(hostname)?;
+    if let Some(addresses) = dns.overrides.get(&normalized_hostname) {
+        emit_dns_resolution_event(
+            bridge,
+            vm_id,
+            hostname,
+            DnsResolutionSource::Override,
+            addresses,
+            dns,
+        );
+        return Ok(addresses.clone());
+    }
+
+    let addresses = match resolve_dns_with_sidecar_resolver(dns, &normalized_hostname) {
+        Ok(addresses) => addresses,
+        Err(error) => {
+            emit_dns_resolution_failure_event(bridge, vm_id, hostname, dns, &error);
+            return Err(error);
         }
-    }
-
-    if addresses.is_empty() {
-        return Err(SidecarError::Execution(format!(
-            "failed to resolve DNS address {hostname}"
-        )));
-    }
-
+    };
+    emit_dns_resolution_event(
+        bridge,
+        vm_id,
+        hostname,
+        DnsResolutionSource::Resolver,
+        &addresses,
+        dns,
+    );
     Ok(addresses)
 }
 
@@ -5677,7 +5976,7 @@ fn filter_dns_ip_addrs(
     Ok(filtered)
 }
 
-fn resolve_udp_addr(
+fn resolve_udp_bind_addr(
     host: &str,
     port: u16,
     family: JavascriptUdpFamily,
@@ -5685,6 +5984,30 @@ fn resolve_udp_addr(
     (host, port)
         .to_socket_addrs()
         .map_err(sidecar_net_error)?
+        .find(|addr| family.matches_addr(addr))
+        .ok_or_else(|| {
+            SidecarError::Execution(format!(
+                "failed to resolve {} UDP bind address {host}:{port}",
+                family.socket_type()
+            ))
+        })
+}
+
+fn resolve_udp_addr<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    dns: &VmDnsConfig,
+    host: &str,
+    port: u16,
+    family: JavascriptUdpFamily,
+) -> Result<SocketAddr, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    resolve_dns_ip_addrs(bridge, vm_id, dns, host)?
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip, port))
         .find(|addr| family.matches_addr(addr))
         .ok_or_else(|| {
             SidecarError::Execution(format!(
@@ -5941,31 +6264,59 @@ fn javascript_sync_rpc_bytes_value(bytes: &[u8]) -> Value {
     })
 }
 
-fn service_javascript_sync_rpc(
+fn service_javascript_sync_rpc<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    dns: &VmDnsConfig,
     kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
     resource_limits: &ResourceLimits,
     network_counts: NetworkResourceCounts,
-) -> Result<Value, SidecarError> {
+) -> Result<Value, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
     match request.method.as_str() {
         "dns.lookup" | "dns.resolve" | "dns.resolve4" | "dns.resolve6" => {
-            service_javascript_dns_sync_rpc(request)
+            service_javascript_dns_sync_rpc(bridge, vm_id, dns, request)
         }
         "net.connect" | "net.listen" | "net.poll" | "net.server_poll" | "net.write"
-        | "net.shutdown" | "net.destroy" | "net.server_close" => {
-            service_javascript_net_sync_rpc(process, request, resource_limits, network_counts)
-        }
+        | "net.shutdown" | "net.destroy" | "net.server_close" => service_javascript_net_sync_rpc(
+            bridge,
+            vm_id,
+            dns,
+            process,
+            request,
+            resource_limits,
+            network_counts,
+        ),
         "dgram.createSocket" | "dgram.bind" | "dgram.send" | "dgram.poll" | "dgram.close" => {
-            service_javascript_dgram_sync_rpc(process, request, resource_limits, network_counts)
+            service_javascript_dgram_sync_rpc(
+                bridge,
+                vm_id,
+                dns,
+                process,
+                request,
+                resource_limits,
+                network_counts,
+            )
         }
         _ => service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request),
     }
 }
 
-fn service_javascript_dns_sync_rpc(
+fn service_javascript_dns_sync_rpc<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    dns: &VmDnsConfig,
     request: &JavascriptSyncRpcRequest,
-) -> Result<Value, SidecarError> {
+) -> Result<Value, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
     match request.method.as_str() {
         "dns.lookup" => {
             let payload = request
@@ -5982,8 +6333,10 @@ fn service_javascript_dns_sync_rpc(
                         SidecarError::InvalidState(format!("invalid dns.lookup payload: {error}"))
                     })
                 })?;
-            let addresses =
-                filter_dns_ip_addrs(resolve_dns_ip_addrs(&payload.hostname)?, payload.family)?;
+            let addresses = filter_dns_ip_addrs(
+                resolve_dns_ip_addrs(bridge, vm_id, dns, &payload.hostname)?,
+                payload.family,
+            )?;
             Ok(Value::Array(
                 addresses
                     .into_iter()
@@ -6030,7 +6383,10 @@ fn service_javascript_dns_sync_rpc(
                     }
                 },
             };
-            let addresses = filter_dns_ip_addrs(resolve_dns_ip_addrs(&payload.hostname)?, family)?;
+            let addresses = filter_dns_ip_addrs(
+                resolve_dns_ip_addrs(bridge, vm_id, dns, &payload.hostname)?,
+                family,
+            )?;
             Ok(Value::Array(
                 addresses
                     .into_iter()
@@ -6044,12 +6400,19 @@ fn service_javascript_dns_sync_rpc(
     }
 }
 
-fn service_javascript_dgram_sync_rpc(
+fn service_javascript_dgram_sync_rpc<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    dns: &VmDnsConfig,
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
     resource_limits: &ResourceLimits,
     network_counts: NetworkResourceCounts,
-) -> Result<Value, SidecarError> {
+) -> Result<Value, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
     match request.method.as_str() {
         "dgram.createSocket" => {
             check_network_resource_limit(
@@ -6133,6 +6496,9 @@ fn service_javascript_dgram_sync_rpc(
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
             let (written, local_addr) = socket.send_to(
+                bridge,
+                vm_id,
+                dns,
                 payload.address.as_deref().unwrap_or("localhost"),
                 payload.port,
                 &chunk,
@@ -6186,12 +6552,19 @@ fn service_javascript_dgram_sync_rpc(
     }
 }
 
-fn service_javascript_net_sync_rpc(
+fn service_javascript_net_sync_rpc<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    dns: &VmDnsConfig,
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
     resource_limits: &ResourceLimits,
     network_counts: NetworkResourceCounts,
-) -> Result<Value, SidecarError> {
+) -> Result<Value, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
     match request.method.as_str() {
         "net.connect" => {
             check_network_resource_limit(
@@ -6221,6 +6594,9 @@ fn service_javascript_net_sync_rpc(
                     })
                 })?;
             let socket = ActiveTcpSocket::connect(
+                bridge,
+                vm_id,
+                dns,
                 payload.host.as_deref().unwrap_or("localhost"),
                 payload.port,
             )?;
@@ -6918,13 +7294,29 @@ ykAheWCsAteSEWVc0w==\n\
         session_id: &str,
         permissions: Vec<PermissionDescriptor>,
     ) -> Result<String, SidecarError> {
+        create_vm_with_metadata(
+            sidecar,
+            connection_id,
+            session_id,
+            permissions,
+            BTreeMap::new(),
+        )
+    }
+
+    fn create_vm_with_metadata(
+        sidecar: &mut NativeSidecar<RecordingBridge>,
+        connection_id: &str,
+        session_id: &str,
+        permissions: Vec<PermissionDescriptor>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<String, SidecarError> {
         let response = sidecar
             .dispatch(request(
                 3,
                 OwnershipScope::session(connection_id, session_id),
                 RequestPayload::CreateVm(CreateVmRequest {
                     runtime: GuestRuntimeKind::JavaScript,
-                    metadata: BTreeMap::new(),
+                    metadata,
                     root_filesystem: Default::default(),
                     permissions,
                 }),
@@ -9300,6 +9692,209 @@ console.log(JSON.stringify({ lookup, resolve4 }));
                 .is_some_and(|entries| entries.iter().any(|entry| entry == "127.0.0.1")),
             "stdout: {stdout}"
         );
+    }
+
+    #[test]
+    fn javascript_dns_rpc_honors_vm_dns_overrides_and_net_connect_uses_sidecar_dns() {
+        assert_node_available();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind tcp listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept tcp client");
+            let mut received = Vec::new();
+            stream
+                .read_to_end(&mut received)
+                .expect("read client payload");
+            assert_eq!(String::from_utf8(received).expect("client utf8"), "ping");
+            stream.write_all(b"pong").expect("write server payload");
+        });
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm_with_metadata(
+            &mut sidecar,
+            &connection_id,
+            &session_id,
+            Vec::new(),
+            BTreeMap::from([
+                (
+                    String::from("network.dns.override.example.test"),
+                    String::from("127.0.0.1"),
+                ),
+                (
+                    String::from(VM_DNS_SERVERS_METADATA_KEY),
+                    String::from("203.0.113.53:5353"),
+                ),
+            ]),
+        )
+        .expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-dns-override-rpc-cwd");
+        write_fixture(
+            &cwd.join("entry.mjs"),
+            &format!(
+                r#"
+import dns from "node:dns";
+import net from "node:net";
+
+const lookup = await dns.promises.lookup("example.test", {{ family: 4 }});
+const resolved = await dns.promises.resolve4("example.test");
+const socketSummary = await new Promise((resolve, reject) => {{
+  const socket = net.createConnection({{ host: "example.test", port: {port} }});
+  let data = "";
+  socket.setEncoding("utf8");
+  socket.on("connect", () => {{
+    socket.end("ping");
+  }});
+  socket.on("data", (chunk) => {{
+    data += chunk;
+  }});
+  socket.on("error", reject);
+  socket.on("close", (hadError) => {{
+    resolve({{
+      data,
+      hadError,
+      remoteAddress: socket.remoteAddress,
+      remotePort: socket.remotePort,
+    }});
+  }});
+}});
+
+console.log(JSON.stringify({{ lookup, resolved, socketSummary }}));
+"#,
+            ),
+        );
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-dns-override"),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
+            );
+        }
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = None;
+        for _ in 0..64 {
+            let next_event = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-dns-override")
+                    .map(|process| {
+                        process
+                            .execution
+                            .poll_event(Duration::from_secs(5))
+                            .expect("poll javascript dns override rpc event")
+                    })
+                    .flatten()
+            };
+            let Some(event) = next_event else {
+                if exit_code.is_some() {
+                    break;
+                }
+                panic!("javascript dns override process disappeared before exit");
+            };
+
+            match &event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    stdout.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    stderr.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Exited(code) => {
+                    exit_code = Some(*code);
+                }
+                _ => {}
+            }
+
+            sidecar
+                .handle_execution_event(&vm_id, "proc-js-dns-override", event)
+                .expect("handle javascript dns override rpc event");
+        }
+
+        server.join().expect("join tcp server");
+        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse dns JSON");
+        assert_eq!(parsed["lookup"]["address"], Value::from("127.0.0.1"));
+        assert_eq!(parsed["lookup"]["family"], Value::from(4));
+        assert_eq!(parsed["resolved"][0], Value::from("127.0.0.1"));
+        assert_eq!(parsed["socketSummary"]["data"], Value::from("pong"));
+        assert_eq!(parsed["socketSummary"]["hadError"], Value::from(false));
+        assert_eq!(
+            parsed["socketSummary"]["remoteAddress"],
+            Value::from("127.0.0.1")
+        );
+        assert_eq!(
+            parsed["socketSummary"]["remotePort"],
+            Value::from(u64::from(port))
+        );
+
+        let events = sidecar
+            .with_bridge_mut(|bridge| bridge.structured_events.clone())
+            .expect("collect structured events");
+        let dns_events = events
+            .iter()
+            .filter(|event| event.name == "network.dns.resolved")
+            .filter(|event| {
+                event.fields.get("hostname").map(String::as_str) == Some("example.test")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            dns_events.len() >= 3,
+            "expected dns events for lookup, resolve4, and net.connect: {dns_events:?}"
+        );
+        for event in dns_events {
+            assert_eq!(event.fields["source"], "override");
+            assert_eq!(event.fields["addresses"], "127.0.0.1");
+            assert_eq!(event.fields["resolver_count"], "1");
+            assert_eq!(event.fields["resolvers"], "203.0.113.53:5353");
+        }
     }
 
     #[test]

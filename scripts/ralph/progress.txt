@@ -1,6 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
 - Native sidecar security telemetry should use `bridge.emit_structured_event(...)` with a `timestamp` field and stable keys like `policy`, `path`, `reason`, `source_pid`, and `target_pid`; this makes sidecar tests assertable without scraping free-form logs.
+- Sidecar VM-scoped DNS policy is driven from `CreateVmRequest.metadata`: use `network.dns.servers` for comma-separated upstream resolvers and `network.dns.override.<hostname>` for fixed answers, and emit `network.dns.resolved` / `network.dns.resolve_failed` structured events so resolution is observable in tests.
 - Execution host-runner scripts that `NodeImportCache` materializes should live in `crates/execution/assets/runners/` and be loaded with `include_str!`; for temp-cache cleanup regressions, construct the cache with `NodeImportCache::new_in(...)` so the one-time sweep is scoped to the test root.
 - Real bundled-Pyodide coverage belongs in `crates/execution/src/node_import_cache.rs` materialized-runner tests, and those helpers should load `timing-bootstrap.mjs` so frozen `Date`/`performance` behavior matches real execution launches; use `crates/execution/tests/python.rs` for fake-`pyodide.mjs` bootstrap regressions.
 - Sidecar `host_dir` mounts should anchor guest path resolution with `openat2(..., RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` and translate kernel `EXDEV` escape rejections back to guest-facing `EACCES`.
@@ -829,4 +830,20 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Native sidecar security telemetry is easiest to keep stable by emitting `StructuredEventRecord`s with a shared `timestamp` field and event-specific keys, rather than trying to parse free-form log messages later.
   - Gotchas encountered: Sidecar kill paths see parsed numeric signals internally, so audit fields that need the caller-facing signal name should capture the original request string before `parse_signal(...)`.
   - Useful context: `cargo fmt --all`, `cargo check -p agent-os-sidecar`, `cargo test -p agent-os-sidecar --test security_audit -- --test-threads=1`, `cargo test -p agent-os-sidecar service::tests::create_vm_applies_filesystem_permission_descriptors_to_kernel_access -- --exact --test-threads=1`, `cargo test -p agent-os-sidecar service::tests::configure_vm_mounts_require_fs_write_permission -- --exact --test-threads=1`, and `cargo test -p agent-os-sidecar service::tests::configure_vm_sensitive_mounts_require_fs_mount_sensitive_permission -- --exact --test-threads=1` all pass.
+---
+## 2026-04-05 05:18:49 PDT - US-044
+- What was implemented
+- Replaced the sidecar’s host `to_socket_addrs()` DNS path with a Hickory-based in-process resolver so `dns.lookup()`, `dns.resolve*()`, and `net.connect(hostname)` now resolve through sidecar-controlled logic instead of delegating to the host resolver.
+- Added VM-scoped DNS metadata parsing in `crates/sidecar/src/service.rs` with `network.dns.servers` for upstream resolvers and `network.dns.override.<hostname>` for fixed answers, and emitted `network.dns.resolved` / `network.dns.resolve_failed` structured events for auditable resolution.
+- Added a focused regression test that proves a VM-local DNS override drives both `node:dns` and `node:net` hostname connects and records the structured DNS events.
+- Files changed
+- `Cargo.lock`
+- `crates/sidecar/Cargo.toml`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: VM-specific sidecar behavior can be added without widening the public API by parsing `CreateVmRequest.metadata`, which is useful when the actor/client parity requirements would otherwise force cross-repo API work.
+  - Gotchas encountered: Hickory’s `Resolver::builder_tokio()` keeps DNS resolution in-process and off the host libc resolver, but custom upstreams still need per-connection port overrides applied to every `NameServerConfig.connections` entry.
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-sidecar`, and `cargo test -p agent-os-sidecar javascript_dns_rpc -- --test-threads=1` all pass after this change. `cargo test -p agent-os-sidecar javascript_ -- --test-threads=1` still shows unrelated/pre-existing instability in older JS net/child-process tests on this branch, but the DNS-focused slice and the new override/connect regression are green.
 ---

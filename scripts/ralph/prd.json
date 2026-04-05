@@ -705,7 +705,7 @@
         "Typecheck passes"
       ],
       "priority": 44,
-      "passes": false,
+      "passes": true,
       "notes": "DNS currently delegates to host system resolver via Rust to_socket_addrs(). Functional but violates isolation invariant. Both net.connect(\"example.com\") and dns.lookup() resolve through host."
     },
     {
