@@ -3975,7 +3975,7 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
         host:
           typeof options?.host === 'string' && options.host.length > 0
             ? options.host
-            : '0.0.0.0',
+            : '127.0.0.1',
         port: normalizeNetPort(options?.port ?? 0),
       },
     };
@@ -5429,8 +5429,8 @@ function createRpcBackedDgramModule(dgramModule, fromGuestDir = '/') {
           typeof options?.address === 'string' && options.address.length > 0
             ? options.address
             : socketType === 'udp6'
-              ? '::'
-              : '0.0.0.0',
+              ? '::1'
+              : '127.0.0.1',
       },
     };
   };

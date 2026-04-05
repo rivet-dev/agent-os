@@ -1158,7 +1158,7 @@
         "Typecheck passes"
       ],
       "priority": 73,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: Guest can bind to ANY port on ANY interface including 0.0.0.0. Two VMs can interfere via shared host socket table. socket_host_matches() is overly permissive."
     },
     {

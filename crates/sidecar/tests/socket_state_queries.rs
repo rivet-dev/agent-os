@@ -63,7 +63,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         [
             "import net from 'node:net';",
             "const server = net.createServer(() => {});",
-            "server.listen(43111, '0.0.0.0', () => {",
+            "server.listen(43111, '127.0.0.1', () => {",
             "  console.log('tcp-listening:43111');",
             "});",
         ]
@@ -74,7 +74,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         [
             "import dgram from 'node:dgram';",
             "const socket = dgram.createSocket('udp4');",
-            "socket.bind(43112, '0.0.0.0', () => {",
+            "socket.bind(43112, '127.0.0.1', () => {",
             "  console.log('udp-bound:43112');",
             "});",
         ]
@@ -134,7 +134,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
                 7,
                 OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                 RequestPayload::FindListener(FindListenerRequest {
-                    host: Some(String::from("0.0.0.0")),
+                    host: Some(String::from("127.0.0.1")),
                     port: Some(43111),
                     path: None,
                 }),
@@ -144,7 +144,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
             ResponsePayload::ListenerSnapshot(snapshot) => {
                 if let Some(listener) = snapshot.listener {
                     assert_eq!(listener.process_id, "tcp-listener");
-                    assert_eq!(listener.host.as_deref(), Some("0.0.0.0"));
+                    assert_eq!(listener.host.as_deref(), Some("127.0.0.1"));
                     assert_eq!(listener.port, Some(43111));
                     break;
                 }
@@ -218,7 +218,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
             8,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::FindBoundUdp(FindBoundUdpRequest {
-                host: Some(String::from("0.0.0.0")),
+                host: Some(String::from("127.0.0.1")),
                 port: Some(43112),
             }),
         ))
@@ -227,7 +227,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         ResponsePayload::BoundUdpSnapshot(snapshot) => {
             let socket = snapshot.socket.expect("bound udp snapshot");
             assert_eq!(socket.process_id, "udp-listener");
-            assert_eq!(socket.host.as_deref(), Some("0.0.0.0"));
+            assert_eq!(socket.host.as_deref(), Some("127.0.0.1"));
             assert_eq!(socket.port, Some(43112));
         }
         other => panic!("unexpected bound udp response: {other:?}"),

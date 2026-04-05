@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Sidecar-managed loopback `net.listen` / `dgram.bind` now separate guest-visible ports from hidden host-bound ports; use guest ports in RPC responses and snapshots, but use the actual host listener port when a host-side test client needs to connect directly.
 - JavaScript sync RPC timeout and backpressure belong in `crates/execution/src/javascript.rs`: track the pending request ID on the host, auto-emit `ERR_AGENT_OS_NODE_SYNC_RPC_TIMEOUT` there, queue replies through a bounded async writer so slow guest reads cannot block the sidecar thread, and let `crates/sidecar/src/service.rs` ignore stale `sync RPC request ... is no longer pending` races after timeout.
 - Direct script execution in `crates/kernel/src/kernel.rs` should first map registered `/bin/*` and `/usr/bin/*` command stubs back to their command drivers, and only parse shebangs for real file paths; otherwise stub executables like `/bin/sh` recurse into their own wrapper.
 - Stream devices in `crates/kernel/src/device_layer.rs` should share one length-aware helper, and exact Linux-style byte-count behavior for `/dev/zero` / `/dev/urandom` should be asserted through `pread` / `fd_read` rather than `read_file()`.
@@ -1360,4 +1361,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Direct script execution should resolve registered `/bin/*` and `/usr/bin/*` command stubs before parsing file contents; otherwise stub executables like `/bin/sh` loop back through their own shebang wrapper.
   - Gotchas encountered: `#!/usr/bin/env ...` shebangs need interpreter extraction at parse time rather than generic basename dispatch if the proc cmdline should reflect the real target interpreter (`node`, not `env`).
   - Useful context: `cargo fmt --all`, `cargo check -p agent-os-kernel`, `cargo test -p agent-os-kernel --test kernel_integration -- --nocapture`, and `cargo test -p agent-os-kernel` all pass after this change.
+---
+## 2026-04-05 11:01:43 PDT - US-073
+- What was implemented
+- Hardened sidecar-managed Node networking in `crates/sidecar/src/service.rs` so TCP and UDP binds only allow loopback hosts, guest listen ports can be constrained per VM with `network.listen.port_min`, `network.listen.port_max`, and `network.listen.allow_privileged`, and `socket_host_matches()` no longer treats `0.0.0.0` as equivalent to loopback.
+- Added guest-port to host-port translation for sidecar-managed loopback listeners so separate VMs can reuse the same guest-visible port without colliding on real host sockets; listener snapshots and RPC responses stay guest-visible while host-side probes use the hidden bound port.
+- Updated the Node import-cache polyfill defaults in `crates/execution/src/node_import_cache.rs` so `server.listen(0)` and `dgram.bind(0)` default to loopback instead of unspecified addresses, and refreshed socket-state coverage to query `127.0.0.1`.
+- Files changed
+- `CLAUDE.md`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/sidecar/src/service.rs`
+- `crates/sidecar/tests/socket_state_queries.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Sidecar-managed loopback listeners should keep a guest-visible port mapping separate from the hidden host-bound port so VM-local semantics and host-side test probes can both work.
+  - Gotchas encountered: Existing unit tests that connect from the host must use the actual listener socket stored in `ActiveProcess.tcp_listeners`, not the guest-visible port returned to Node.
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-sidecar -p agent-os-execution`, `cargo test -p agent-os-sidecar javascript_network_ -- --test-threads=1 --nocapture`, `cargo test -p agent-os-sidecar javascript_net_rpc_listens_accepts_connections_and_reports_listener_state -- --test-threads=1 --nocapture`, `cargo test -p agent-os-sidecar javascript_net_rpc_reports_connection_counts_and_enforces_backlog -- --test-threads=1 --nocapture`, `cargo test -p agent-os-sidecar javascript_net_rpc_listens_and_connects_over_unix_domain_sockets -- --test-threads=1 --nocapture`, and `cargo test -p agent-os-sidecar --test socket_state_queries -- --test-threads=1 --nocapture` all pass after this change.
 ---

@@ -105,6 +105,9 @@ const DISPOSE_VM_SIGTERM_GRACE: Duration = Duration::from_millis(100);
 const DISPOSE_VM_SIGKILL_GRACE: Duration = Duration::from_millis(100);
 const VM_DNS_SERVERS_METADATA_KEY: &str = "network.dns.servers";
 const VM_DNS_OVERRIDE_METADATA_PREFIX: &str = "network.dns.override.";
+const VM_LISTEN_PORT_MIN_METADATA_KEY: &str = "network.listen.port_min";
+const VM_LISTEN_PORT_MAX_METADATA_KEY: &str = "network.listen.port_max";
+const VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY: &str = "network.listen.allow_privileged";
 const DEFAULT_JAVASCRIPT_NET_BACKLOG: u32 = 511;
 const LOOPBACK_EXEMPT_PORTS_ENV: &str = "AGENT_OS_LOOPBACK_EXEMPT_PORTS";
 
@@ -1497,8 +1500,94 @@ struct VmState {
 struct JavascriptSocketPathContext {
     sandbox_root: PathBuf,
     mounts: Vec<crate::protocol::MountDescriptor>,
+    listen_policy: VmListenPolicy,
     loopback_exempt_ports: BTreeSet<u16>,
-    active_loopback_tcp_ports: BTreeSet<u16>,
+    tcp_loopback_guest_to_host_ports: BTreeMap<(JavascriptSocketFamily, u16), u16>,
+    udp_loopback_guest_to_host_ports: BTreeMap<(JavascriptSocketFamily, u16), u16>,
+    udp_loopback_host_to_guest_ports: BTreeMap<(JavascriptSocketFamily, u16), u16>,
+    used_tcp_guest_ports: BTreeMap<JavascriptSocketFamily, BTreeSet<u16>>,
+    used_udp_guest_ports: BTreeMap<JavascriptSocketFamily, BTreeSet<u16>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum JavascriptSocketFamily {
+    Ipv4,
+    Ipv6,
+}
+
+impl JavascriptSocketFamily {
+    fn from_ip(ip: IpAddr) -> Self {
+        match ip {
+            IpAddr::V4(_) => Self::Ipv4,
+            IpAddr::V6(_) => Self::Ipv6,
+        }
+    }
+}
+
+impl From<JavascriptUdpFamily> for JavascriptSocketFamily {
+    fn from(value: JavascriptUdpFamily) -> Self {
+        match value {
+            JavascriptUdpFamily::Ipv4 => Self::Ipv4,
+            JavascriptUdpFamily::Ipv6 => Self::Ipv6,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VmListenPolicy {
+    port_min: u16,
+    port_max: u16,
+    allow_privileged: bool,
+}
+
+impl Default for VmListenPolicy {
+    fn default() -> Self {
+        Self {
+            port_min: 1,
+            port_max: u16::MAX,
+            allow_privileged: false,
+        }
+    }
+}
+
+impl JavascriptSocketPathContext {
+    fn loopback_port_allowed(&self, port: u16) -> bool {
+        self.loopback_exempt_ports.contains(&port)
+            || self
+                .tcp_loopback_guest_to_host_ports
+                .keys()
+                .any(|(_, guest_port)| *guest_port == port)
+    }
+
+    fn translate_tcp_loopback_port(
+        &self,
+        family: JavascriptSocketFamily,
+        port: u16,
+    ) -> Option<u16> {
+        self.tcp_loopback_guest_to_host_ports
+            .get(&(family, port))
+            .copied()
+    }
+
+    fn translate_udp_loopback_port(
+        &self,
+        family: JavascriptSocketFamily,
+        port: u16,
+    ) -> Option<u16> {
+        self.udp_loopback_guest_to_host_ports
+            .get(&(family, port))
+            .copied()
+    }
+
+    fn guest_udp_port_for_host_port(
+        &self,
+        family: JavascriptSocketFamily,
+        port: u16,
+    ) -> Option<u16> {
+        self.udp_loopback_host_to_guest_ports
+            .get(&(family, port))
+            .copied()
+    }
 }
 
 #[allow(dead_code)]
@@ -1616,8 +1705,8 @@ enum JavascriptTcpListenerEvent {
 #[derive(Debug)]
 struct PendingTcpSocket {
     stream: TcpStream,
-    local_addr: SocketAddr,
-    remote_addr: SocketAddr,
+    guest_local_addr: SocketAddr,
+    guest_remote_addr: SocketAddr,
 }
 
 #[derive(Debug)]
@@ -1638,12 +1727,18 @@ struct ActiveTcpSocket {
     stream: Arc<Mutex<TcpStream>>,
     events: Receiver<JavascriptTcpSocketEvent>,
     event_sender: Sender<JavascriptTcpSocketEvent>,
-    local_addr: SocketAddr,
-    remote_addr: SocketAddr,
+    guest_local_addr: SocketAddr,
+    guest_remote_addr: SocketAddr,
     listener_id: Option<String>,
     saw_local_shutdown: Arc<AtomicBool>,
     saw_remote_end: Arc<AtomicBool>,
     close_notified: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedTcpConnectAddr {
+    actual_addr: SocketAddr,
+    guest_remote_addr: SocketAddr,
 }
 
 impl ActiveTcpSocket {
@@ -1659,15 +1754,19 @@ impl ActiveTcpSocket {
         B: NativeSidecarBridge + Send + 'static,
         BridgeError<B>: fmt::Debug + Send + Sync + 'static,
     {
-        let remote_addr = resolve_tcp_connect_addr(bridge, vm_id, dns, host, port, context)?;
-        let stream = TcpStream::connect_timeout(&remote_addr, Duration::from_secs(30))
+        let resolved = resolve_tcp_connect_addr(bridge, vm_id, dns, host, port, context)?;
+        let stream = TcpStream::connect_timeout(&resolved.actual_addr, Duration::from_secs(30))
             .map_err(sidecar_net_error)?;
-        Self::from_stream(stream, None)
+        let guest_local_addr = stream.local_addr().map_err(sidecar_net_error)?;
+        Self::from_stream(stream, None, guest_local_addr, resolved.guest_remote_addr)
     }
 
-    fn from_stream(stream: TcpStream, listener_id: Option<String>) -> Result<Self, SidecarError> {
-        let local_addr = stream.local_addr().map_err(sidecar_net_error)?;
-        let remote_addr = stream.peer_addr().map_err(sidecar_net_error)?;
+    fn from_stream(
+        stream: TcpStream,
+        listener_id: Option<String>,
+        guest_local_addr: SocketAddr,
+        guest_remote_addr: SocketAddr,
+    ) -> Result<Self, SidecarError> {
         let read_stream = stream.try_clone().map_err(sidecar_net_error)?;
         let stream = Arc::new(Mutex::new(stream));
         let (sender, events) = mpsc::channel();
@@ -1686,8 +1785,8 @@ impl ActiveTcpSocket {
             stream,
             events,
             event_sender: sender,
-            local_addr,
-            remote_addr,
+            guest_local_addr,
+            guest_remote_addr,
             listener_id,
             saw_local_shutdown,
             saw_remote_end,
@@ -1744,6 +1843,7 @@ impl ActiveTcpSocket {
 struct ActiveTcpListener {
     listener: TcpListener,
     local_addr: SocketAddr,
+    guest_local_addr: SocketAddr,
     backlog: usize,
     active_connection_ids: BTreeSet<String>,
 }
@@ -1949,14 +2049,15 @@ impl ActiveUnixListener {
 }
 
 impl ActiveTcpListener {
-    fn bind(host: &str, port: u16, backlog: Option<u32>) -> Result<Self, SidecarError> {
-        let bind_addr = resolve_tcp_bind_addr(host, port)?;
+    fn bind(guest_host: &str, guest_port: u16, backlog: Option<u32>) -> Result<Self, SidecarError> {
+        let bind_addr = resolve_tcp_bind_addr(guest_host, 0)?;
         let listener = TcpListener::bind(bind_addr).map_err(sidecar_net_error)?;
         listener.set_nonblocking(true).map_err(sidecar_net_error)?;
         let local_addr = listener.local_addr().map_err(sidecar_net_error)?;
         Ok(Self {
             listener,
             local_addr,
+            guest_local_addr: SocketAddr::new(bind_addr.ip(), guest_port),
             backlog: usize::try_from(backlog.unwrap_or(DEFAULT_JAVASCRIPT_NET_BACKLOG))
                 .expect("default backlog fits within usize"),
             active_connection_ids: BTreeSet::new(),
@@ -1965,6 +2066,10 @@ impl ActiveTcpListener {
 
     fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    fn guest_local_addr(&self) -> SocketAddr {
+        self.guest_local_addr
     }
 
     fn poll(&mut self, wait: Duration) -> Result<Option<JavascriptTcpListenerEvent>, SidecarError> {
@@ -1979,12 +2084,14 @@ impl ActiveTcpListener {
                         }
                         continue;
                     }
-                    let local_addr = stream.local_addr().map_err(sidecar_net_error)?;
                     return Ok(Some(JavascriptTcpListenerEvent::Connection(
                         PendingTcpSocket {
                             stream,
-                            local_addr,
-                            remote_addr,
+                            guest_local_addr: self.guest_local_addr,
+                            guest_remote_addr: SocketAddr::new(
+                                remote_addr.ip(),
+                                remote_addr.port(),
+                            ),
                         },
                     )));
                 }
@@ -2045,13 +2152,6 @@ impl JavascriptUdpFamily {
         }
     }
 
-    fn default_bind_host(self) -> &'static str {
-        match self {
-            Self::Ipv4 => "0.0.0.0",
-            Self::Ipv6 => "::",
-        }
-    }
-
     fn matches_addr(self, addr: &SocketAddr) -> bool {
         match (self, addr) {
             (Self::Ipv4, SocketAddr::V4(_)) | (Self::Ipv6, SocketAddr::V6(_)) => true,
@@ -2076,6 +2176,7 @@ enum JavascriptUdpSocketEvent {
 struct ActiveUdpSocket {
     family: JavascriptUdpFamily,
     socket: Option<UdpSocket>,
+    guest_local_addr: Option<SocketAddr>,
 }
 
 impl ActiveUdpSocket {
@@ -2083,40 +2184,51 @@ impl ActiveUdpSocket {
         Self {
             family,
             socket: None,
+            guest_local_addr: None,
         }
     }
 
     fn local_addr(&self) -> Option<SocketAddr> {
-        self.socket
-            .as_ref()
-            .and_then(|socket| socket.local_addr().ok())
+        self.guest_local_addr
     }
 
-    fn bind(&mut self, host: Option<&str>, port: u16) -> Result<SocketAddr, SidecarError> {
+    fn bind(
+        &mut self,
+        host: Option<&str>,
+        port: u16,
+        context: &JavascriptSocketPathContext,
+    ) -> Result<SocketAddr, SidecarError> {
         if self.socket.is_some() {
             return Err(SidecarError::Execution(String::from(
                 "EINVAL: Agent OS dgram socket is already bound",
             )));
         }
 
-        let bind_addr = resolve_udp_bind_addr(
-            host.unwrap_or(self.family.default_bind_host()),
+        let (guest_host, guest_family) = normalize_udp_bind_host(host, self.family)?;
+        let guest_port = allocate_guest_listen_port(
             port,
-            self.family,
+            guest_family,
+            &context.used_udp_guest_ports,
+            context.listen_policy,
         )?;
+        let bind_addr = resolve_udp_bind_addr(guest_host, 0, self.family)?;
         let socket = UdpSocket::bind(bind_addr).map_err(sidecar_net_error)?;
         socket.set_nonblocking(true).map_err(sidecar_net_error)?;
-        let local_addr = socket.local_addr().map_err(sidecar_net_error)?;
+        let local_addr = SocketAddr::new(bind_addr.ip(), guest_port);
         self.socket = Some(socket);
+        self.guest_local_addr = Some(local_addr);
         Ok(local_addr)
     }
 
-    fn ensure_bound_for_send(&mut self) -> Result<SocketAddr, SidecarError> {
+    fn ensure_bound_for_send(
+        &mut self,
+        context: &JavascriptSocketPathContext,
+    ) -> Result<SocketAddr, SidecarError> {
         if let Some(local_addr) = self.local_addr() {
             return Ok(local_addr);
         }
 
-        self.bind(None, 0)
+        self.bind(None, 0, context)
     }
 
     fn send_to<B>(
@@ -2126,21 +2238,21 @@ impl ActiveUdpSocket {
         dns: &VmDnsConfig,
         host: &str,
         port: u16,
+        context: &JavascriptSocketPathContext,
         contents: &[u8],
     ) -> Result<(usize, SocketAddr), SidecarError>
     where
         B: NativeSidecarBridge + Send + 'static,
         BridgeError<B>: fmt::Debug + Send + Sync + 'static,
     {
-        let remote_addr = resolve_udp_addr(bridge, vm_id, dns, host, port, self.family)?;
-        let _ = self.ensure_bound_for_send()?;
+        let remote_addr = resolve_udp_addr(bridge, vm_id, dns, host, port, self.family, context)?;
+        let local_addr = self.ensure_bound_for_send(context)?;
         let socket = self.socket.as_ref().ok_or_else(|| {
             SidecarError::InvalidState(String::from("UDP socket is not initialized"))
         })?;
         let written = socket
             .send_to(contents, remote_addr)
             .map_err(sidecar_net_error)?;
-        let local_addr = socket.local_addr().map_err(sidecar_net_error)?;
         Ok((written, local_addr))
     }
 
@@ -2178,6 +2290,7 @@ impl ActiveUdpSocket {
 
     fn close(&mut self) {
         self.socket.take();
+        self.guest_local_addr = None;
     }
 }
 
@@ -5204,6 +5317,50 @@ fn parse_vm_dns_config(metadata: &BTreeMap<String, String>) -> Result<VmDnsConfi
     Ok(config)
 }
 
+fn parse_vm_listen_policy(
+    metadata: &BTreeMap<String, String>,
+) -> Result<VmListenPolicy, SidecarError> {
+    let mut policy = VmListenPolicy::default();
+
+    if let Some(value) = metadata.get(VM_LISTEN_PORT_MIN_METADATA_KEY) {
+        policy.port_min = parse_listen_port_metadata(VM_LISTEN_PORT_MIN_METADATA_KEY, value)?;
+    }
+    if let Some(value) = metadata.get(VM_LISTEN_PORT_MAX_METADATA_KEY) {
+        policy.port_max = parse_listen_port_metadata(VM_LISTEN_PORT_MAX_METADATA_KEY, value)?;
+    }
+    if policy.port_min > policy.port_max {
+        return Err(SidecarError::InvalidState(format!(
+            "invalid listen port range {}={} exceeds {}={}",
+            VM_LISTEN_PORT_MIN_METADATA_KEY,
+            policy.port_min,
+            VM_LISTEN_PORT_MAX_METADATA_KEY,
+            policy.port_max
+        )));
+    }
+    if let Some(value) = metadata.get(VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY) {
+        policy.allow_privileged = value.parse::<bool>().map_err(|error| {
+            SidecarError::InvalidState(format!(
+                "invalid {}={value}: {error}",
+                VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY
+            ))
+        })?;
+    }
+
+    Ok(policy)
+}
+
+fn parse_listen_port_metadata(key: &str, value: &str) -> Result<u16, SidecarError> {
+    let parsed = value
+        .parse::<u16>()
+        .map_err(|error| SidecarError::InvalidState(format!("invalid {key}={value}: {error}")))?;
+    if parsed == 0 {
+        return Err(SidecarError::InvalidState(format!(
+            "{key} must be between 1 and 65535"
+        )));
+    }
+    Ok(parsed)
+}
+
 fn parse_loopback_exempt_ports(
     env: &BTreeMap<String, String>,
 ) -> Result<BTreeSet<u16>, SidecarError> {
@@ -5673,7 +5830,7 @@ fn find_socket_state_entry(
             match kind {
                 SocketQueryKind::TcpListener => {
                     for listener in process.tcp_listeners.values() {
-                        let local_addr = listener.local_addr();
+                        let local_addr = listener.guest_local_addr();
                         let local_host = local_addr.ip().to_string();
                         if !socket_host_matches(request.host.as_deref(), &local_host) {
                             continue;
@@ -5890,27 +6047,88 @@ fn vm_network_resource_counts(vm: &VmState) -> NetworkResourceCounts {
     counts
 }
 
-fn active_loopback_tcp_ports(vm: &VmState) -> BTreeSet<u16> {
-    vm.active_processes
-        .values()
-        .flat_map(|process| process.tcp_listeners.values())
-        .filter_map(|listener| {
-            let local_addr = listener.local_addr();
-            (local_addr.ip().is_loopback() || local_addr.ip().is_unspecified())
-                .then_some(local_addr.port())
-        })
-        .collect()
+fn collect_javascript_socket_port_state(
+    process: &ActiveProcess,
+    tcp_guest_to_host: &mut BTreeMap<(JavascriptSocketFamily, u16), u16>,
+    udp_guest_to_host: &mut BTreeMap<(JavascriptSocketFamily, u16), u16>,
+    udp_host_to_guest: &mut BTreeMap<(JavascriptSocketFamily, u16), u16>,
+    used_tcp_ports: &mut BTreeMap<JavascriptSocketFamily, BTreeSet<u16>>,
+    used_udp_ports: &mut BTreeMap<JavascriptSocketFamily, BTreeSet<u16>>,
+) {
+    for listener in process.tcp_listeners.values() {
+        let guest_addr = listener.guest_local_addr();
+        let family = JavascriptSocketFamily::from_ip(guest_addr.ip());
+        used_tcp_ports
+            .entry(family)
+            .or_default()
+            .insert(guest_addr.port());
+        if is_loopback_ip(guest_addr.ip()) {
+            tcp_guest_to_host.insert((family, guest_addr.port()), listener.local_addr().port());
+        }
+    }
+
+    for socket in process.udp_sockets.values() {
+        let Some(guest_addr) = socket.local_addr() else {
+            continue;
+        };
+        let family = JavascriptSocketFamily::from_ip(guest_addr.ip());
+        used_udp_ports
+            .entry(family)
+            .or_default()
+            .insert(guest_addr.port());
+        if let Some(host_addr) = socket
+            .socket
+            .as_ref()
+            .and_then(|socket| socket.local_addr().ok())
+        {
+            if is_loopback_ip(guest_addr.ip()) {
+                udp_guest_to_host.insert((family, guest_addr.port()), host_addr.port());
+                udp_host_to_guest.insert((family, host_addr.port()), guest_addr.port());
+            }
+        }
+    }
+
+    for child in process.child_processes.values() {
+        collect_javascript_socket_port_state(
+            child,
+            tcp_guest_to_host,
+            udp_guest_to_host,
+            udp_host_to_guest,
+            used_tcp_ports,
+            used_udp_ports,
+        );
+    }
 }
 
 fn build_javascript_socket_path_context(
     vm: &VmState,
 ) -> Result<JavascriptSocketPathContext, SidecarError> {
     let internal_env = extract_guest_env(&vm.metadata);
+    let mut tcp_loopback_guest_to_host_ports = BTreeMap::new();
+    let mut udp_loopback_guest_to_host_ports = BTreeMap::new();
+    let mut udp_loopback_host_to_guest_ports = BTreeMap::new();
+    let mut used_tcp_guest_ports = BTreeMap::new();
+    let mut used_udp_guest_ports = BTreeMap::new();
+    for process in vm.active_processes.values() {
+        collect_javascript_socket_port_state(
+            process,
+            &mut tcp_loopback_guest_to_host_ports,
+            &mut udp_loopback_guest_to_host_ports,
+            &mut udp_loopback_host_to_guest_ports,
+            &mut used_tcp_guest_ports,
+            &mut used_udp_guest_ports,
+        );
+    }
     Ok(JavascriptSocketPathContext {
         sandbox_root: vm.cwd.clone(),
         mounts: vm.configuration.mounts.clone(),
+        listen_policy: parse_vm_listen_policy(&vm.metadata)?,
         loopback_exempt_ports: parse_loopback_exempt_ports(&internal_env)?,
-        active_loopback_tcp_ports: active_loopback_tcp_ports(vm),
+        tcp_loopback_guest_to_host_ports,
+        udp_loopback_guest_to_host_ports,
+        udp_loopback_host_to_guest_ports,
+        used_tcp_guest_ports,
+        used_udp_guest_ports,
     })
 }
 
@@ -5930,6 +6148,99 @@ fn check_network_resource_limit(
     Ok(())
 }
 
+fn normalize_tcp_listen_host(
+    host: Option<&str>,
+) -> Result<(JavascriptSocketFamily, &'static str), SidecarError> {
+    match host.unwrap_or("127.0.0.1") {
+        "127.0.0.1" | "localhost" => Ok((JavascriptSocketFamily::Ipv4, "127.0.0.1")),
+        "::1" => Ok((JavascriptSocketFamily::Ipv6, "::1")),
+        "0.0.0.0" | "::" => Err(SidecarError::Execution(String::from(
+            "EACCES: TCP listeners must bind to loopback, not unspecified addresses",
+        ))),
+        other => Err(SidecarError::Execution(format!(
+            "EACCES: TCP listeners must bind to loopback, got {other}"
+        ))),
+    }
+}
+
+fn normalize_udp_bind_host(
+    host: Option<&str>,
+    family: JavascriptUdpFamily,
+) -> Result<(&'static str, JavascriptSocketFamily), SidecarError> {
+    match (family, host) {
+        (JavascriptUdpFamily::Ipv4, None)
+        | (JavascriptUdpFamily::Ipv4, Some("127.0.0.1"))
+        | (JavascriptUdpFamily::Ipv4, Some("localhost")) => {
+            Ok(("127.0.0.1", JavascriptSocketFamily::Ipv4))
+        }
+        (JavascriptUdpFamily::Ipv6, None)
+        | (JavascriptUdpFamily::Ipv6, Some("::1"))
+        | (JavascriptUdpFamily::Ipv6, Some("localhost")) => {
+            Ok(("::1", JavascriptSocketFamily::Ipv6))
+        }
+        (_, Some("0.0.0.0")) | (_, Some("::")) => Err(SidecarError::Execution(String::from(
+            "EACCES: UDP sockets must bind to loopback, not unspecified addresses",
+        ))),
+        (JavascriptUdpFamily::Ipv4, Some(other)) => Err(SidecarError::Execution(format!(
+            "EACCES: udp4 sockets must bind to 127.0.0.1, got {other}"
+        ))),
+        (JavascriptUdpFamily::Ipv6, Some(other)) => Err(SidecarError::Execution(format!(
+            "EACCES: udp6 sockets must bind to ::1, got {other}"
+        ))),
+    }
+}
+
+fn allocate_guest_listen_port(
+    requested_port: u16,
+    family: JavascriptSocketFamily,
+    used_ports: &BTreeMap<JavascriptSocketFamily, BTreeSet<u16>>,
+    policy: VmListenPolicy,
+) -> Result<u16, SidecarError> {
+    let is_allowed = |port: u16| {
+        port >= policy.port_min
+            && port <= policy.port_max
+            && (policy.allow_privileged || port >= 1024)
+    };
+    let used = used_ports.get(&family);
+
+    if requested_port != 0 {
+        if !is_allowed(requested_port) {
+            let reason = if requested_port < 1024 && !policy.allow_privileged {
+                format!(
+                    "EACCES: privileged listen port {requested_port} requires {}=true",
+                    VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY
+                )
+            } else {
+                format!(
+                    "EACCES: listen port {requested_port} is outside the allowed range {}-{}",
+                    policy.port_min, policy.port_max
+                )
+            };
+            return Err(SidecarError::Execution(reason));
+        }
+        if used.is_some_and(|ports| ports.contains(&requested_port)) {
+            return Err(sidecar_net_error(std::io::Error::from_raw_os_error(
+                libc::EADDRINUSE,
+            )));
+        }
+        return Ok(requested_port);
+    }
+
+    let allocation_start = policy
+        .port_min
+        .max(if policy.allow_privileged { 1 } else { 1024 });
+    for candidate in allocation_start..=policy.port_max {
+        if used.is_some_and(|ports| ports.contains(&candidate)) {
+            continue;
+        }
+        return Ok(candidate);
+    }
+
+    Err(sidecar_net_error(std::io::Error::from_raw_os_error(
+        libc::EADDRINUSE,
+    )))
+}
+
 fn socket_host_matches(requested: Option<&str>, actual: &str) -> bool {
     match requested {
         None => true,
@@ -5939,18 +6250,8 @@ fn socket_host_matches(requested: Option<&str>, actual: &str) -> bool {
         {
             true
         }
-        Some(requested)
-            if is_unspecified_socket_host(requested) && is_loopback_socket_host(actual) =>
-        {
-            true
-        }
-        Some(requested)
-            if is_loopback_socket_host(requested) && is_unspecified_socket_host(actual) =>
-        {
-            true
-        }
         Some(requested) if requested.eq_ignore_ascii_case("localhost") => {
-            is_loopback_socket_host(actual) || is_unspecified_socket_host(actual)
+            is_loopback_socket_host(actual)
         }
         _ => false,
     }
@@ -6542,8 +6843,7 @@ fn filter_dns_safe_ip_addrs(
 }
 
 fn loopback_connect_allowed(context: &JavascriptSocketPathContext, port: u16) -> bool {
-    context.loopback_exempt_ports.contains(&port)
-        || context.active_loopback_tcp_ports.contains(&port)
+    context.loopback_port_allowed(port)
 }
 
 fn filter_tcp_connect_ip_addrs(
@@ -6582,23 +6882,40 @@ fn resolve_tcp_connect_addr<B>(
     host: &str,
     port: u16,
     context: &JavascriptSocketPathContext,
-) -> Result<SocketAddr, SidecarError>
+) -> Result<ResolvedTcpConnectAddr, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    let ip = filter_tcp_connect_ip_addrs(
+    let allowed = filter_tcp_connect_ip_addrs(
         resolve_dns_ip_addrs(bridge, vm_id, dns, host)?,
         host,
         port,
         context,
-    )?
-    .into_iter()
-    .next()
-    .ok_or_else(|| {
-        SidecarError::Execution(format!("failed to resolve TCP address {host}:{port}"))
-    })?;
-    Ok(SocketAddr::new(ip, port))
+    )?;
+    let ip = allowed
+        .iter()
+        .copied()
+        .find(|candidate| {
+            let family = JavascriptSocketFamily::from_ip(*candidate);
+            context.translate_tcp_loopback_port(family, port).is_some()
+        })
+        .or_else(|| allowed.first().copied())
+        .ok_or_else(|| {
+            SidecarError::Execution(format!("failed to resolve TCP address {host}:{port}"))
+        })?;
+    let family = JavascriptSocketFamily::from_ip(ip);
+    let actual_port = if is_loopback_ip(ip) {
+        context
+            .translate_tcp_loopback_port(family, port)
+            .unwrap_or(port)
+    } else {
+        port
+    };
+    Ok(ResolvedTcpConnectAddr {
+        actual_addr: SocketAddr::new(ip, actual_port),
+        guest_remote_addr: SocketAddr::new(ip, port),
+    })
 }
 
 fn resolve_dns_ip_addrs<B>(
@@ -6709,6 +7026,7 @@ fn resolve_udp_addr<B>(
     host: &str,
     port: u16,
     family: JavascriptUdpFamily,
+    context: &JavascriptSocketPathContext,
 ) -> Result<SocketAddr, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
@@ -6716,7 +7034,17 @@ where
 {
     resolve_dns_ip_addrs(bridge, vm_id, dns, host)?
         .into_iter()
-        .map(|ip| SocketAddr::new(ip, port))
+        .map(|ip| {
+            let family_key = JavascriptSocketFamily::from_ip(ip);
+            let actual_port = if is_loopback_ip(ip) {
+                context
+                    .translate_udp_loopback_port(family_key, port)
+                    .unwrap_or(port)
+            } else {
+                port
+            };
+            SocketAddr::new(ip, actual_port)
+        })
         .find(|addr| family.matches_addr(addr))
         .ok_or_else(|| {
             SidecarError::Execution(format!(
@@ -7091,6 +7419,7 @@ where
                 bridge,
                 vm_id,
                 dns,
+                socket_paths,
                 process,
                 request,
                 resource_limits,
@@ -7210,6 +7539,7 @@ fn service_javascript_dgram_sync_rpc<B>(
     bridge: &SharedBridge<B>,
     vm_id: &str,
     dns: &VmDnsConfig,
+    socket_paths: &JavascriptSocketPathContext,
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
     resource_limits: &ResourceLimits,
@@ -7274,7 +7604,7 @@ where
             let socket = process.udp_sockets.get_mut(socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
-            let local_addr = socket.bind(payload.address.as_deref(), payload.port)?;
+            let local_addr = socket.bind(payload.address.as_deref(), payload.port, socket_paths)?;
             Ok(json!({
                 "localAddress": local_addr.ip().to_string(),
                 "localPort": local_addr.port(),
@@ -7307,6 +7637,7 @@ where
                 dns,
                 payload.address.as_deref().unwrap_or("localhost"),
                 payload.port,
+                socket_paths,
                 &chunk,
             )?;
             Ok(json!({
@@ -7329,13 +7660,23 @@ where
             };
 
             match event {
-                Some(JavascriptUdpSocketEvent::Message { data, remote_addr }) => Ok(json!({
+                Some(JavascriptUdpSocketEvent::Message { data, remote_addr }) => {
+                    let family = JavascriptSocketFamily::from_ip(remote_addr.ip());
+                    let guest_remote_port = if is_loopback_ip(remote_addr.ip()) {
+                        socket_paths
+                            .guest_udp_port_for_host_port(family, remote_addr.port())
+                            .unwrap_or(remote_addr.port())
+                    } else {
+                        remote_addr.port()
+                    };
+                    Ok(json!({
                     "type": "message",
                     "data": javascript_sync_rpc_bytes_value(&data),
                     "remoteAddress": remote_addr.ip().to_string(),
-                    "remotePort": remote_addr.port(),
+                    "remotePort": guest_remote_port,
                     "remoteFamily": socket_addr_family(&remote_addr),
-                })),
+                    }))
+                }
                 Some(JavascriptUdpSocketEvent::Error { code, message }) => Ok(json!({
                     "type": "error",
                     "code": code,
@@ -7426,8 +7767,8 @@ where
                 let socket =
                     ActiveTcpSocket::connect(bridge, vm_id, dns, host, port, socket_paths)?;
                 let socket_id = process.allocate_tcp_socket_id();
-                let local_addr = socket.local_addr;
-                let remote_addr = socket.remote_addr;
+                let local_addr = socket.guest_local_addr;
+                let remote_addr = socket.guest_remote_addr;
                 process.tcp_sockets.insert(socket_id.clone(), socket);
                 Ok(json!({
                     "socketId": socket_id,
@@ -7486,16 +7827,22 @@ where
                     "path": guest_path,
                 }))
             } else {
-                let host = payload.host.as_deref().unwrap_or("0.0.0.0");
-                let port = payload.port.unwrap_or(0);
+                let (family, host) = normalize_tcp_listen_host(payload.host.as_deref())?;
+                let requested_port = payload.port.unwrap_or(0);
                 bridge.require_network_access(
                     vm_id,
                     NetworkOperation::Listen,
-                    format_tcp_resource(host, port),
+                    format_tcp_resource(host, requested_port),
+                )?;
+                let port = allocate_guest_listen_port(
+                    requested_port,
+                    family,
+                    &socket_paths.used_tcp_guest_ports,
+                    socket_paths.listen_policy,
                 )?;
                 let listener = ActiveTcpListener::bind(host, port, payload.backlog)?;
                 let listener_id = process.allocate_tcp_listener_id();
-                let local_addr = listener.local_addr();
+                let local_addr = listener.guest_local_addr();
                 process.tcp_listeners.insert(listener_id.clone(), listener);
                 Ok(json!({
                     "serverId": listener_id,
@@ -7594,6 +7941,8 @@ where
                         let socket = ActiveTcpSocket::from_stream(
                             pending.stream,
                             Some(listener_id.to_string()),
+                            pending.guest_local_addr,
+                            pending.guest_remote_addr,
                         )?;
                         let socket_id = process.allocate_tcp_socket_id();
                         if let Some(listener) = process.tcp_listeners.get_mut(listener_id) {
@@ -7603,11 +7952,11 @@ where
                         Ok(json!({
                             "type": "connection",
                             "socketId": socket_id,
-                            "localAddress": pending.local_addr.ip().to_string(),
-                            "localPort": pending.local_addr.port(),
-                            "remoteAddress": pending.remote_addr.ip().to_string(),
-                            "remotePort": pending.remote_addr.port(),
-                            "remoteFamily": socket_addr_family(&pending.remote_addr),
+                            "localAddress": pending.guest_local_addr.ip().to_string(),
+                            "localPort": pending.guest_local_addr.port(),
+                            "remoteAddress": pending.guest_remote_addr.ip().to_string(),
+                            "remotePort": pending.guest_remote_addr.port(),
+                            "remoteFamily": socket_addr_family(&pending.guest_remote_addr),
                         }))
                     }
                     Some(JavascriptTcpListenerEvent::Error { code, message }) => Ok(json!({
@@ -8464,6 +8813,99 @@ ykAheWCsAteSEWVc0w==\n\
         }
 
         (stdout, stderr, exit_code)
+    }
+
+    fn start_fake_javascript_process(
+        sidecar: &mut NativeSidecar<RecordingBridge>,
+        vm_id: &str,
+        cwd: &Path,
+        process_id: &str,
+        allowed_node_builtins: &str,
+    ) {
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.to_owned(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.to_owned(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    allowed_node_builtins.to_owned(),
+                )]),
+                cwd: cwd.to_path_buf(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        let vm = sidecar.vms.get_mut(vm_id).expect("javascript vm");
+        vm.active_processes.insert(
+            process_id.to_owned(),
+            ActiveProcess::new(
+                kernel_handle.pid(),
+                kernel_handle,
+                GuestRuntimeKind::JavaScript,
+                ActiveExecution::Javascript(execution),
+            ),
+        );
+    }
+
+    fn call_javascript_sync_rpc(
+        sidecar: &mut NativeSidecar<RecordingBridge>,
+        vm_id: &str,
+        process_id: &str,
+        request: JavascriptSyncRpcRequest,
+    ) -> Result<Value, SidecarError> {
+        let bridge = sidecar.bridge.clone();
+        let (dns, socket_paths, counts, limits) = {
+            let vm = sidecar.vms.get(vm_id).expect("javascript vm");
+            (
+                vm.dns.clone(),
+                build_javascript_socket_path_context(vm).expect("build socket path context"),
+                vm.active_processes
+                    .get(process_id)
+                    .expect("javascript process")
+                    .network_resource_counts(),
+                ResourceLimits::default(),
+            )
+        };
+
+        let vm = sidecar.vms.get_mut(vm_id).expect("javascript vm");
+        let process = vm
+            .active_processes
+            .get_mut(process_id)
+            .expect("javascript process");
+        service_javascript_sync_rpc(
+            &bridge,
+            vm_id,
+            &dns,
+            &socket_paths,
+            &mut vm.kernel,
+            process,
+            &request,
+            &limits,
+            counts,
+        )
     }
 
     #[test]
@@ -12012,199 +12454,139 @@ console.log(JSON.stringify(summary));
         let vm_id =
             create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-net-server-cwd");
-        write_fixture(
-            &cwd.join("entry.mjs"),
-            r#"
-import net from "node:net";
+        write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+        start_fake_javascript_process(&mut sidecar, &vm_id, &cwd, "proc-js-server", "[\"net\"]");
 
-const server = net.createServer((socket) => {
-  let data = "";
-  socket.setEncoding("utf8");
-  socket.on("data", (chunk) => {
-    data += chunk;
-    socket.end(`pong:${chunk}`);
-  });
-  socket.on("error", (error) => {
-    console.error(error.stack ?? error.message);
-    process.exit(1);
-  });
-  socket.on("close", () => {
-    const address = server.address();
-    server.close(() => {
-      console.log(JSON.stringify({
-        address,
-        data,
-        localPort: socket.localPort,
-        remoteAddress: socket.remoteAddress,
-        remotePort: socket.remotePort,
-      }));
-      process.exit(0);
-    });
-  });
-});
-server.on("error", (error) => {
-  console.error(error.stack ?? error.message);
-  process.exit(1);
-});
-server.listen(0, "127.0.0.1", () => {
-  console.log(`listening:${server.address().port}`);
-});
-"#,
-        );
-
-        let context = sidecar
-            .javascript_engine
-            .create_context(CreateJavascriptContextRequest {
-                vm_id: vm_id.clone(),
-                bootstrap_module: None,
-                compile_cache_root: None,
-            });
-        let execution = sidecar
-            .javascript_engine
-            .start_execution(StartJavascriptExecutionRequest {
-                vm_id: vm_id.clone(),
-                context_id: context.context_id,
-                argv: vec![String::from("./entry.mjs")],
-                env: BTreeMap::from([(
-                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
-                    String::from(
-                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
-                    ),
-                )]),
-                cwd: cwd.clone(),
-            })
-            .expect("start fake javascript execution");
-
-        let kernel_handle = {
-            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
-            vm.kernel
-                .spawn_process(
-                    JAVASCRIPT_COMMAND,
-                    vec![String::from("./entry.mjs")],
-                    SpawnOptions {
-                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
-                        cwd: Some(String::from("/")),
-                        ..SpawnOptions::default()
-                    },
-                )
-                .expect("spawn kernel javascript process")
+        let listen = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-server",
+            JavascriptSyncRpcRequest {
+                id: 1,
+                method: String::from("net.listen"),
+                args: vec![json!({
+                    "host": "127.0.0.1",
+                    "port": 0,
+                    "backlog": 2,
+                })],
+            },
+        )
+        .expect("listen through sidecar net RPC");
+        let server_id = listen["serverId"].as_str().expect("server id").to_string();
+        let guest_port = listen["localPort"]
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .expect("guest listener port");
+        let host_port = {
+            let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+            vm.active_processes
+                .get("proc-js-server")
+                .and_then(|process| process.tcp_listeners.get(&server_id))
+                .expect("sidecar tcp listener")
+                .local_addr()
+                .port()
         };
 
-        {
-            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
-            vm.active_processes.insert(
-                String::from("proc-js-server"),
-                ActiveProcess::new(
-                    kernel_handle.pid(),
-                    kernel_handle,
-                    GuestRuntimeKind::JavaScript,
-                    ActiveExecution::Javascript(execution),
-                ),
-            );
-        }
-
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        let mut exit_code = None;
-        let mut listener_port = None;
-        let mut client_thread = None;
-        for _ in 0..192 {
-            let next_event = {
-                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
-                vm.active_processes
-                    .get("proc-js-server")
-                    .map(|process| {
-                        process
-                            .execution
-                            .poll_event(Duration::from_secs(5))
-                            .expect("poll javascript net server event")
-                    })
-                    .flatten()
-            };
-            let Some(event) = next_event else {
-                if exit_code.is_some() {
-                    break;
-                }
-                continue;
-            };
-
-            match &event {
-                ActiveExecutionEvent::Stdout(chunk) => {
-                    stdout.push_str(&String::from_utf8_lossy(chunk));
-                    if listener_port.is_none() {
-                        listener_port = stdout.lines().find_map(|line| {
-                            line.strip_prefix("listening:")
-                                .and_then(|value| value.trim().parse::<u16>().ok())
-                        });
-                        if let Some(port) = listener_port {
-                            let response = sidecar
-                                .dispatch(request(
-                                    1,
-                                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
-                                    RequestPayload::FindListener(FindListenerRequest {
-                                        host: Some(String::from("127.0.0.1")),
-                                        port: Some(port),
-                                        path: None,
-                                    }),
-                                ))
-                                .expect("query sidecar listener");
-                            match response.response.payload {
-                                ResponsePayload::ListenerSnapshot(snapshot) => {
-                                    let listener = snapshot.listener.expect("listener snapshot");
-                                    assert_eq!(listener.process_id, "proc-js-server");
-                                    assert_eq!(listener.host.as_deref(), Some("127.0.0.1"));
-                                    assert_eq!(listener.port, Some(port));
-                                }
-                                other => {
-                                    panic!("unexpected find_listener response payload: {other:?}")
-                                }
-                            }
-
-                            client_thread = Some(thread::spawn(move || {
-                                let mut stream = TcpStream::connect(("127.0.0.1", port))
-                                    .expect("connect to Agent OS net server");
-                                stream.write_all(b"ping").expect("write client payload");
-                                stream
-                                    .shutdown(Shutdown::Write)
-                                    .expect("shutdown client write half");
-                                let mut received = Vec::new();
-                                stream
-                                    .read_to_end(&mut received)
-                                    .expect("read server response");
-                                assert_eq!(
-                                    String::from_utf8(received).expect("server response utf8"),
-                                    "pong:ping"
-                                );
-                            }));
-                        }
-                    }
-                }
-                ActiveExecutionEvent::Stderr(chunk) => {
-                    stderr.push_str(&String::from_utf8_lossy(chunk));
-                }
-                ActiveExecutionEvent::Exited(code) => {
-                    exit_code = Some(*code);
-                }
-                _ => {}
+        let response = sidecar
+            .dispatch(request(
+                1,
+                OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                RequestPayload::FindListener(FindListenerRequest {
+                    host: Some(String::from("127.0.0.1")),
+                    port: Some(guest_port),
+                    path: None,
+                }),
+            ))
+            .expect("query sidecar listener");
+        match response.response.payload {
+            ResponsePayload::ListenerSnapshot(snapshot) => {
+                let listener = snapshot.listener.expect("listener snapshot");
+                assert_eq!(listener.process_id, "proc-js-server");
+                assert_eq!(listener.host.as_deref(), Some("127.0.0.1"));
+                assert_eq!(listener.port, Some(guest_port));
             }
-
-            sidecar
-                .handle_execution_event(&vm_id, "proc-js-server", event)
-                .expect("handle javascript net server event");
+            other => panic!("unexpected find_listener response payload: {other:?}"),
         }
 
-        if let Some(client_thread) = client_thread {
-            client_thread.join().expect("join tcp client");
-        } else {
-            panic!("tcp client never started");
-        }
+        let client = thread::spawn(move || {
+            let mut stream =
+                TcpStream::connect(("127.0.0.1", host_port)).expect("connect to sidecar listener");
+            stream.write_all(b"ping").expect("write client payload");
+            stream
+                .shutdown(Shutdown::Write)
+                .expect("shutdown client write half");
+            let mut received = Vec::new();
+            stream
+                .read_to_end(&mut received)
+                .expect("read server response");
+            assert_eq!(
+                String::from_utf8(received).expect("server response utf8"),
+                "pong:ping"
+            );
+        });
 
-        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
-        assert!(stdout.contains("\"data\":\"ping\""), "stdout: {stdout}");
-        assert!(
-            stdout.contains("\"address\":{\"address\":\"127.0.0.1\""),
-            "stdout: {stdout}"
-        );
+        let accepted = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-server",
+            JavascriptSyncRpcRequest {
+                id: 2,
+                method: String::from("net.server_poll"),
+                args: vec![json!(server_id), json!(250)],
+            },
+        )
+        .expect("accept connection");
+        assert_eq!(accepted["type"], Value::from("connection"));
+        assert_eq!(accepted["localAddress"], Value::from("127.0.0.1"));
+        assert_eq!(accepted["localPort"], Value::from(guest_port));
+        let socket_id = accepted["socketId"]
+            .as_str()
+            .expect("socket id")
+            .to_string();
+
+        let data = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-server",
+            JavascriptSyncRpcRequest {
+                id: 3,
+                method: String::from("net.poll"),
+                args: vec![json!(socket_id.clone()), json!(250)],
+            },
+        )
+        .expect("poll socket data");
+        assert_eq!(data["type"], Value::from("data"));
+
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data["data"]["base64"].as_str().expect("base64 payload"))
+            .expect("decode payload");
+        assert_eq!(bytes, b"ping");
+
+        let written = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-server",
+            JavascriptSyncRpcRequest {
+                id: 4,
+                method: String::from("net.write"),
+                args: vec![json!(socket_id.clone()), json!("pong:ping")],
+            },
+        )
+        .expect("write response");
+        assert_eq!(written, Value::from(9));
+
+        call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-server",
+            JavascriptSyncRpcRequest {
+                id: 5,
+                method: String::from("net.shutdown"),
+                args: vec![json!(socket_id)],
+            },
+        )
+        .expect("shutdown write half");
+        client.join().expect("join tcp client");
     }
 
     #[test]
@@ -12273,11 +12655,9 @@ server.listen(0, "127.0.0.1", () => {
         let bridge = sidecar.bridge.clone();
         let dns = sidecar.vms.get(&vm_id).expect("javascript vm").dns.clone();
         let limits = ResourceLimits::default();
-        let socket_paths = JavascriptSocketPathContext {
-            sandbox_root: cwd.clone(),
-            mounts: Vec::new(),
-            loopback_exempt_ports: BTreeSet::new(),
-            active_loopback_tcp_ports: BTreeSet::new(),
+        let socket_paths = {
+            let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+            build_javascript_socket_path_context(vm).expect("build socket path context")
         };
 
         let listen = {
@@ -12314,14 +12694,23 @@ server.listen(0, "127.0.0.1", () => {
             .expect("listen through sidecar net RPC")
         };
         let server_id = listen["serverId"].as_str().expect("server id").to_string();
-        let port = listen["localPort"]
+        let _port = listen["localPort"]
             .as_u64()
             .and_then(|value| u16::try_from(value).ok())
             .expect("listener port");
+        let host_port = {
+            let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+            vm.active_processes
+                .get("proc-js-backlog")
+                .and_then(|process| process.tcp_listeners.get(&server_id))
+                .expect("host backlog listener")
+                .local_addr()
+                .port()
+        };
 
         let first_client = thread::spawn(move || {
             let mut stream =
-                TcpStream::connect(("127.0.0.1", port)).expect("connect first backlog client");
+                TcpStream::connect(("127.0.0.1", host_port)).expect("connect first backlog client");
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("set first client timeout");
@@ -12401,7 +12790,7 @@ server.listen(0, "127.0.0.1", () => {
         assert_eq!(connection_count, json!(1));
 
         let second_client = thread::spawn(move || {
-            let address = SocketAddr::from(([127, 0, 0, 1], port));
+            let address = SocketAddr::from(([127, 0, 0, 1], host_port));
             let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
                 .expect("connect second backlog client");
             stream
@@ -12565,6 +12954,374 @@ server.listen(0, "127.0.0.1", () => {
     }
 
     #[test]
+    fn javascript_network_bind_policy_restricts_hosts_and_ports() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm_with_metadata(
+            &mut sidecar,
+            &connection_id,
+            &session_id,
+            Vec::new(),
+            BTreeMap::from([
+                (
+                    String::from(VM_LISTEN_PORT_MIN_METADATA_KEY),
+                    String::from("49152"),
+                ),
+                (
+                    String::from(VM_LISTEN_PORT_MAX_METADATA_KEY),
+                    String::from("49160"),
+                ),
+            ]),
+        )
+        .expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-bind-policy-cwd");
+        write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+        start_fake_javascript_process(
+            &mut sidecar,
+            &vm_id,
+            &cwd,
+            "proc-js-bind-policy",
+            "[\"dgram\",\"net\"]",
+        );
+
+        let unspecified = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-bind-policy",
+            JavascriptSyncRpcRequest {
+                id: 1,
+                method: String::from("net.listen"),
+                args: vec![json!({
+                    "host": "0.0.0.0",
+                    "port": 49152,
+                })],
+            },
+        )
+        .expect_err("deny unspecified TCP listen host");
+        assert!(
+            unspecified
+                .to_string()
+                .contains("must bind to loopback, not unspecified"),
+            "{unspecified}"
+        );
+
+        let privileged = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-bind-policy",
+            JavascriptSyncRpcRequest {
+                id: 2,
+                method: String::from("net.listen"),
+                args: vec![json!({
+                    "host": "127.0.0.1",
+                    "port": 80,
+                })],
+            },
+        )
+        .expect_err("deny privileged port");
+        assert!(
+            privileged
+                .to_string()
+                .contains("privileged listen port 80 requires"),
+            "{privileged}"
+        );
+
+        let out_of_range = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-bind-policy",
+            JavascriptSyncRpcRequest {
+                id: 3,
+                method: String::from("net.listen"),
+                args: vec![json!({
+                    "host": "127.0.0.1",
+                    "port": 40000,
+                })],
+            },
+        )
+        .expect_err("deny out-of-range port");
+        assert!(
+            out_of_range
+                .to_string()
+                .contains("outside the allowed range 49152-49160"),
+            "{out_of_range}"
+        );
+
+        let udp_socket = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-bind-policy",
+            JavascriptSyncRpcRequest {
+                id: 4,
+                method: String::from("dgram.createSocket"),
+                args: vec![json!({ "type": "udp4" })],
+            },
+        )
+        .expect("create udp socket");
+        let udp_socket_id = udp_socket["socketId"]
+            .as_str()
+            .expect("udp socket id")
+            .to_string();
+
+        let udp_unspecified = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-bind-policy",
+            JavascriptSyncRpcRequest {
+                id: 5,
+                method: String::from("dgram.bind"),
+                args: vec![
+                    json!(udp_socket_id),
+                    json!({
+                        "address": "0.0.0.0",
+                        "port": 49153,
+                    }),
+                ],
+            },
+        )
+        .expect_err("deny unspecified UDP bind host");
+        assert!(
+            udp_unspecified
+                .to_string()
+                .contains("must bind to loopback, not unspecified"),
+            "{udp_unspecified}"
+        );
+
+        let success = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-bind-policy",
+            JavascriptSyncRpcRequest {
+                id: 6,
+                method: String::from("net.listen"),
+                args: vec![json!({
+                    "host": "127.0.0.1",
+                    "port": 49155,
+                })],
+            },
+        )
+        .expect("allow loopback listener inside configured range");
+        assert_eq!(success["localAddress"], Value::from("127.0.0.1"));
+        assert_eq!(success["localPort"], Value::from(49155));
+    }
+
+    #[test]
+    fn javascript_network_bind_policy_can_allow_privileged_guest_ports() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm_with_metadata(
+            &mut sidecar,
+            &connection_id,
+            &session_id,
+            Vec::new(),
+            BTreeMap::from([
+                (
+                    String::from(VM_LISTEN_PORT_MIN_METADATA_KEY),
+                    String::from("1"),
+                ),
+                (
+                    String::from(VM_LISTEN_PORT_MAX_METADATA_KEY),
+                    String::from("128"),
+                ),
+                (
+                    String::from(VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY),
+                    String::from("true"),
+                ),
+            ]),
+        )
+        .expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-privileged-listen-cwd");
+        write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+        start_fake_javascript_process(
+            &mut sidecar,
+            &vm_id,
+            &cwd,
+            "proc-js-privileged",
+            "[\"net\"]",
+        );
+
+        let listen = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-privileged",
+            JavascriptSyncRpcRequest {
+                id: 1,
+                method: String::from("net.listen"),
+                args: vec![json!({
+                    "host": "127.0.0.1",
+                    "port": 80,
+                })],
+            },
+        )
+        .expect("allow privileged guest port");
+        assert_eq!(listen["localAddress"], Value::from("127.0.0.1"));
+        assert_eq!(listen["localPort"], Value::from(80));
+    }
+
+    #[test]
+    fn javascript_network_listeners_are_isolated_per_vm_even_with_same_guest_port() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_a =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm a");
+        let vm_b =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm b");
+        let cwd_a = temp_dir("agent-os-sidecar-js-net-isolation-a");
+        let cwd_b = temp_dir("agent-os-sidecar-js-net-isolation-b");
+        write_fixture(&cwd_a.join("entry.mjs"), "setInterval(() => {}, 1000);");
+        write_fixture(&cwd_b.join("entry.mjs"), "setInterval(() => {}, 1000);");
+        start_fake_javascript_process(&mut sidecar, &vm_a, &cwd_a, "proc-a", "[\"net\"]");
+        start_fake_javascript_process(&mut sidecar, &vm_b, &cwd_b, "proc-b", "[\"net\"]");
+
+        let listen_a = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_a,
+            "proc-a",
+            JavascriptSyncRpcRequest {
+                id: 1,
+                method: String::from("net.listen"),
+                args: vec![json!({
+                    "host": "127.0.0.1",
+                    "port": 43111,
+                })],
+            },
+        )
+        .expect("listen on vm a");
+        let listen_b = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_b,
+            "proc-b",
+            JavascriptSyncRpcRequest {
+                id: 1,
+                method: String::from("net.listen"),
+                args: vec![json!({
+                    "host": "127.0.0.1",
+                    "port": 43111,
+                })],
+            },
+        )
+        .expect("listen on vm b");
+        assert_eq!(listen_a["localPort"], Value::from(43111));
+        assert_eq!(listen_b["localPort"], Value::from(43111));
+
+        let connect_a = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_a,
+            "proc-a",
+            JavascriptSyncRpcRequest {
+                id: 2,
+                method: String::from("net.connect"),
+                args: vec![json!({
+                    "host": "127.0.0.1",
+                    "port": 43111,
+                })],
+            },
+        )
+        .expect("connect within vm a");
+        let connect_b = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_b,
+            "proc-b",
+            JavascriptSyncRpcRequest {
+                id: 2,
+                method: String::from("net.connect"),
+                args: vec![json!({
+                    "host": "127.0.0.1",
+                    "port": 43111,
+                })],
+            },
+        )
+        .expect("connect within vm b");
+        assert_eq!(connect_a["remotePort"], Value::from(43111));
+        assert_eq!(connect_b["remotePort"], Value::from(43111));
+
+        let server_id_a = listen_a["serverId"]
+            .as_str()
+            .expect("server id a")
+            .to_string();
+        let server_id_b = listen_b["serverId"]
+            .as_str()
+            .expect("server id b")
+            .to_string();
+        let accepted_a = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_a,
+            "proc-a",
+            JavascriptSyncRpcRequest {
+                id: 3,
+                method: String::from("net.server_poll"),
+                args: vec![json!(server_id_a), json!(250)],
+            },
+        )
+        .expect("accept vm a connection");
+        let accepted_b = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_b,
+            "proc-b",
+            JavascriptSyncRpcRequest {
+                id: 3,
+                method: String::from("net.server_poll"),
+                args: vec![json!(server_id_b), json!(250)],
+            },
+        )
+        .expect("accept vm b connection");
+        assert_eq!(accepted_a["type"], Value::from("connection"));
+        assert_eq!(accepted_b["type"], Value::from("connection"));
+        assert_eq!(accepted_a["localPort"], Value::from(43111));
+        assert_eq!(accepted_b["localPort"], Value::from(43111));
+
+        let query_a = sidecar
+            .dispatch(request(
+                50,
+                OwnershipScope::vm(&connection_id, &session_id, &vm_a),
+                RequestPayload::FindListener(FindListenerRequest {
+                    host: Some(String::from("127.0.0.1")),
+                    port: Some(43111),
+                    path: None,
+                }),
+            ))
+            .expect("query vm a listener");
+        let query_b = sidecar
+            .dispatch(request(
+                51,
+                OwnershipScope::vm(&connection_id, &session_id, &vm_b),
+                RequestPayload::FindListener(FindListenerRequest {
+                    host: Some(String::from("127.0.0.1")),
+                    port: Some(43111),
+                    path: None,
+                }),
+            ))
+            .expect("query vm b listener");
+        match query_a.response.payload {
+            ResponsePayload::ListenerSnapshot(snapshot) => {
+                let listener = snapshot.listener.expect("vm a listener");
+                assert_eq!(listener.process_id, "proc-a");
+                assert_eq!(listener.host.as_deref(), Some("127.0.0.1"));
+                assert_eq!(listener.port, Some(43111));
+            }
+            other => panic!("unexpected vm a listener response: {other:?}"),
+        }
+        match query_b.response.payload {
+            ResponsePayload::ListenerSnapshot(snapshot) => {
+                let listener = snapshot.listener.expect("vm b listener");
+                assert_eq!(listener.process_id, "proc-b");
+                assert_eq!(listener.host.as_deref(), Some("127.0.0.1"));
+                assert_eq!(listener.port, Some(43111));
+            }
+            other => panic!("unexpected vm b listener response: {other:?}"),
+        }
+    }
+
+    #[test]
     fn javascript_net_rpc_listens_and_connects_over_unix_domain_sockets() {
         assert_node_available();
 
@@ -12633,8 +13390,13 @@ server.listen(0, "127.0.0.1", () => {
         let socket_paths = JavascriptSocketPathContext {
             sandbox_root: cwd.clone(),
             mounts: Vec::new(),
+            listen_policy: VmListenPolicy::default(),
             loopback_exempt_ports: BTreeSet::new(),
-            active_loopback_tcp_ports: BTreeSet::new(),
+            tcp_loopback_guest_to_host_ports: BTreeMap::new(),
+            udp_loopback_guest_to_host_ports: BTreeMap::new(),
+            udp_loopback_host_to_guest_ports: BTreeMap::new(),
+            used_tcp_guest_ports: BTreeMap::new(),
+            used_udp_guest_ports: BTreeMap::new(),
         };
         let socket_path = "/tmp/agent-os.sock";
         let host_socket_path = cwd.join("tmp/agent-os.sock");
