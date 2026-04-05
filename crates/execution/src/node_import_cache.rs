@@ -1923,6 +1923,92 @@ function wrapChildProcessModule(childProcessModule, fromGuestDir = '/') {
       index === 0 ? translateGuestPath(arg, fromGuestDir) : arg,
     );
   };
+  const SHELL_CONTROL_TOKENS = new Set(['|', '&', ';', '<', '>', '\n', '\r']);
+  const parseSimpleExecCommand = (command) => {
+    if (typeof command !== 'string') {
+      return null;
+    }
+
+    const tokens = [];
+    let current = '';
+    let quote = null;
+    let escaped = false;
+
+    for (const ch of command) {
+      if (escaped) {
+        current += ch;
+        escaped = false;
+        continue;
+      }
+
+      if (quote === "'") {
+        if (ch === "'") {
+          quote = null;
+        } else {
+          current += ch;
+        }
+        continue;
+      }
+
+      if (quote === '"') {
+        if (ch === '"') {
+          quote = null;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else {
+          current += ch;
+        }
+        continue;
+      }
+
+      if (ch === "'" || ch === '"') {
+        quote = ch;
+        continue;
+      }
+
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+
+      if (SHELL_CONTROL_TOKENS.has(ch)) {
+        return null;
+      }
+
+      if (/\s/.test(ch)) {
+        if (current.length > 0) {
+          tokens.push(current);
+          current = '';
+        }
+        continue;
+      }
+
+      current += ch;
+    }
+
+    if (escaped || quote) {
+      return null;
+    }
+
+    if (current.length > 0) {
+      tokens.push(current);
+    }
+
+    return tokens.length > 0 ? tokens : null;
+  };
+  const normalizeExecInvocation = (options, callback) => {
+    if (typeof options === 'function') {
+      return {
+        options: undefined,
+        callback: options,
+      };
+    }
+
+    return {
+      options,
+      callback,
+    };
+  };
   const prependNodePermissionArgs = (command, args, options) => {
     if (!usesNodeRuntime(command)) {
       return args;
@@ -1987,10 +2073,71 @@ function wrapChildProcessModule(childProcessModule, fromGuestDir = '/') {
 
     return [...permissionArgs, ...translatedArgs];
   };
+  const translateExecOptions = (options) => {
+    const translated = translateProcessOptions(options);
+    if (translated == null || typeof translated !== 'object') {
+      return translated;
+    }
+
+    return {
+      ...translated,
+      shell: false,
+    };
+  };
+  const wrapExecDeniedCallback = (subject, callback) => {
+    if (typeof callback !== 'function') {
+      return undefined;
+    }
+
+    return (error, stdout, stderr) => {
+      const denied = accessDenied(subject);
+      if (error && typeof error === 'object') {
+        error.code = denied.code;
+        error.message = denied.message;
+        if (stderr != null) {
+          error.stderr = stderr;
+        }
+      }
+      callback(error ?? denied, stdout, stderr);
+    };
+  };
+  const denyExec = (subject, options, callback) =>
+    childProcessModule.execFile(
+      HOST_EXEC_PATH,
+      [
+        '-e',
+        `process.stderr.write(${JSON.stringify(`${accessDenied(subject).message}\n`)}); process.exit(1);`,
+      ],
+      options,
+      wrapExecDeniedCallback(subject, callback),
+    );
 
   return {
     ...childProcessModule,
-    exec: childProcessModule.exec.bind(childProcessModule),
+    exec: (command, options, callback) => {
+      const {
+        options: execOptions,
+        callback: execCallback,
+      } = normalizeExecInvocation(options, callback);
+      const translatedOptions = translateExecOptions(execOptions);
+      const parsedCommand = parseSimpleExecCommand(command);
+
+      if (!parsedCommand || !usesNodeRuntime(parsedCommand[0])) {
+        return denyExec('child_process.exec', translatedOptions, execCallback);
+      }
+
+      const [file, ...args] = parsedCommand;
+      return childProcessModule.execFile(
+        translateCommand(file),
+        prependNodePermissionArgs(
+          file,
+          translateArgs(file, args),
+          translatedOptions,
+        ),
+        translatedOptions,
+        execCallback,
+      );
+    },
     execFile: (file, args, options, callback) => {
       const translatedOptions = translateProcessOptions(options);
       return childProcessModule.execFile(
@@ -2016,7 +2163,25 @@ function wrapChildProcessModule(childProcessModule, fromGuestDir = '/') {
         translatedOptions,
       );
     },
-    execSync: childProcessModule.execSync.bind(childProcessModule),
+    execSync: (command, options) => {
+      const translatedOptions = translateExecOptions(options);
+      const parsedCommand = parseSimpleExecCommand(command);
+
+      if (!parsedCommand || !usesNodeRuntime(parsedCommand[0])) {
+        throw accessDenied('child_process.execSync');
+      }
+
+      const [file, ...args] = parsedCommand;
+      return childProcessModule.execFileSync(
+        translateCommand(file),
+        prependNodePermissionArgs(
+          file,
+          translateArgs(file, args),
+          translatedOptions,
+        ),
+        translatedOptions,
+      );
+    },
     fork: (modulePath, args, options) => {
       const translatedOptions = translateProcessOptions(options);
       return childProcessModule.fork(

@@ -1574,3 +1574,142 @@ console.log(JSON.stringify(result));
         .expect("native addon message")
         .contains("native addon loading"));
 }
+
+#[test]
+fn javascript_execution_hardens_exec_and_execsync_child_process_calls() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("child.mjs"),
+        r#"
+import fs from 'node:fs';
+
+const result = {
+  marker: process.argv[2] ?? null,
+};
+
+try {
+  result.secret = fs.readFileSync('/etc/passwd', 'utf8').slice(0, 16);
+} catch (error) {
+  result.readError = {
+    code: error.code ?? null,
+    message: error.message,
+  };
+}
+
+console.log(JSON.stringify(result));
+"#,
+    );
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const { exec, execSync } = require('node:child_process');
+const execAsync = (command) =>
+  new Promise((resolve, reject) => {
+    exec(command, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+
+      resolve({ stdout, stderr });
+    });
+  });
+const result = {};
+
+result.execSync = JSON.parse(
+  execSync('node ./child.mjs sync', { encoding: 'utf8' }).trim(),
+);
+result.exec = JSON.parse((await execAsync('node ./child.mjs async')).stdout.trim());
+
+try {
+  execSync('cat /etc/passwd', { encoding: 'utf8' });
+  result.hostExecSync = 'unexpected';
+} catch (error) {
+  result.hostExecSync = {
+    code: error.code ?? null,
+    message: error.message,
+  };
+}
+
+try {
+  await execAsync('cat /etc/passwd');
+  result.hostExec = 'unexpected';
+} catch (error) {
+  result.hostExec = {
+    code: error.code ?? null,
+    message: error.message,
+  };
+}
+
+console.log(JSON.stringify(result));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let cwd_host_path = temp.path().to_string_lossy().replace('\\', "\\\\");
+    let env = BTreeMap::from([
+        (
+            String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+            format!("[{{\"guestPath\":\"/root\",\"hostPath\":\"{cwd_host_path}\"}}]"),
+        ),
+        (
+            String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+            String::from(
+                "[\"assert\",\"buffer\",\"console\",\"child_process\",\"crypto\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+            ),
+        ),
+    ]);
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        env,
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse exec hardening JSON");
+
+    assert_eq!(
+        parsed["execSync"]["marker"],
+        Value::String(String::from("sync"))
+    );
+    assert_eq!(
+        parsed["exec"]["marker"],
+        Value::String(String::from("async"))
+    );
+    assert!(
+        parsed["execSync"]["secret"].is_null(),
+        "execSync should not expose host file contents: {stdout}"
+    );
+    assert!(
+        parsed["exec"]["secret"].is_null(),
+        "exec should not expose host file contents: {stdout}"
+    );
+    assert_eq!(
+        parsed["hostExecSync"]["code"],
+        Value::String(String::from("ERR_ACCESS_DENIED"))
+    );
+    assert!(parsed["hostExecSync"]["message"]
+        .as_str()
+        .expect("execSync denial message")
+        .contains("child_process.execSync"));
+    assert_eq!(
+        parsed["hostExec"]["code"],
+        Value::String(String::from("ERR_ACCESS_DENIED"))
+    );
+    assert!(parsed["hostExec"]["message"]
+        .as_str()
+        .expect("exec denial message")
+        .contains("child_process.exec"));
+}

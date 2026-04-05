@@ -122,7 +122,7 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "exec/execSync are currently passed through as bare .bind() calls with ZERO interception. Guest can run arbitrary host commands."
     },
     {

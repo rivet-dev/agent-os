@@ -7,6 +7,7 @@
 - Node guest process virtualization in `crates/execution/src/node_import_cache.rs` should snapshot the host `process.cwd()` before hardening, use that snapshot for internal module resolution/`createRequire(...)`, and derive guest-visible paths from `AGENT_OS_GUEST_PATH_MAPPINGS` for user-facing `process.*` APIs.
 - Guest-visible `process` identity in `crates/execution/src/node_import_cache.rs` should be virtualized through a `globalThis.process` proxy after bootstrap setup, while `require('node:process')` and `process.getBuiltinModule('node:process')` are routed back to that same proxy; keep internal host-only values in snapped constants like `HOST_EXEC_PATH`.
 - In the generated Node runner, host-only builtin lookups needed for bootstrap/hardening should go through snapped `hostRequire(...)` rather than guest-visible ESM imports, and wrapped `process` methods that return `this` must translate the captured host target back to `guestProcess` after the proxy swap.
+- `wrapChildProcessModule` in `crates/execution/src/node_import_cache.rs` can only sandbox `exec`/`execSync` safely for simple Node-runtime commands; parse shell-free argv and delegate to `execFile`, but deny arbitrary shell strings because host shells bypass Node `--permission`.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -115,4 +116,19 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Runner bootstrap code that needs host-only builtin state should use snapped `hostRequire(...)`, because guest-loader ESM imports can be redirected into denied builtin assets once hardening is active.
 - Gotchas encountered: Wrapped `process` EventEmitter methods return the host `process` object by default; after the guest proxy swap they need to remap that return value back to `guestProcess` or user code will observe the wrong identity.
 - Useful context: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` both pass for this story on the current branch.
+---
+## 2026-04-04 20:13:48 PDT - US-008
+- What was implemented
+- Replaced the guest `child_process.exec` and `execSync` pass-throughs in `wrapChildProcessModule` with a shell-free parser that routes simple Node-runtime commands through `execFile`/`execFileSync`, preserving the existing guest path translation and Node `--permission` injection logic.
+- Denied unsupported shell strings for `exec`/`execSync` so commands like `cat /etc/passwd` no longer fall through to a real host shell.
+- Added a regression test that verifies both async `exec` and sync `execSync` launch hardened Node children, and that direct shell access is rejected with `ERR_ACCESS_DENIED`.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: For guest `child_process.exec` compatibility, preserve the callback-based API by delegating supported commands to `execFile` and wrapping denied async callbacks rather than inventing a parallel child-process path.
+- Gotchas encountered: `util.promisify(exec)` depends on Node’s built-in custom promisify hook, so execution regressions should exercise the raw callback contract instead of assuming a `{ stdout, stderr }` promise shape from wrapped `exec`.
+- Useful context: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` both pass after this change.
 ---
