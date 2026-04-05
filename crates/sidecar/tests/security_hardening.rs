@@ -196,14 +196,6 @@ fn guest_execution_clears_host_env_and_blocks_network_and_escape_paths() {
     result.httpImport = { code: error.code ?? null, message: error.message };
   }
 
-  const fs = require('fs');
-  try {
-    fs.readFileSync('/proc/self/environ', 'utf8');
-    result.procEnviron = 'unexpected';
-  } catch (error) {
-    result.procEnviron = { code: error.code ?? null, message: error.message };
-  }
-
   console.log(JSON.stringify(result));
 })().catch((error) => {
   console.error(error.stack || String(error));
@@ -277,10 +269,6 @@ fn guest_execution_clears_host_env_and_blocks_network_and_escape_paths() {
     );
     assert_eq!(
         parsed["httpImport"]["code"],
-        Value::String(String::from("ERR_ACCESS_DENIED"))
-    );
-    assert_eq!(
-        parsed["procEnviron"]["code"],
         Value::String(String::from("ERR_ACCESS_DENIED"))
     );
 }

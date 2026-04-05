@@ -1096,7 +1096,7 @@
         "Typecheck passes"
       ],
       "priority": 69,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: /proc is read-only and returns generic error. No /proc/self, /proc/[pid]/fd, /proc/[pid]/cmdline, /proc/mounts, etc. Many tools read /proc to discover process state."
     },
     {

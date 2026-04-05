@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Synthetic procfs entries in `crates/kernel/src/kernel.rs` should authorize the guest-visible `/proc/...` path directly; if procfs checks go through `PermissionedFileSystem::check_path(...)`, missing backing `/proc` directories in the mounted root can accidentally break the virtual proc layer.
 - OverlayFS mutating ops should not trust merged `read_dir()` for emptiness once copy-up marks directories opaque; raw upper/lower listings are required for `rmdir`, and rename-like moves should stage source entries into the upper and then use the upper filesystem's native `rename` to preserve hardlinks/inode identity.
 - Process-table exit-path changes should be implemented as one bundle: reparent orphaned children, reevaluate orphaned stopped groups for `SIGHUP`/`SIGCONT`, and keep `max_processes` enforcement counting unreaped zombies so lifecycle semantics and resource limits stay aligned.
 - Overlay whiteout and opaque-directory state should live under a reserved hidden metadata root in the writable upper, and every merged overlay listing or snapshot path must filter that metadata root back out of user-visible results.
@@ -1288,4 +1289,23 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Overlay mutations that preserve identity should first materialize the source subtree in the writable upper and then defer the actual move to the upper filesystem's native `rename`; rebuilding destinations with read/write/delete breaks hardlinks.
   - Gotchas encountered: Once a lower directory is copied up and marked opaque, merged directory iteration intentionally hides lower children, so `rmdir` emptiness checks must inspect raw upper and lower layers directly instead of reusing merged `read_dir()`.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test root_fs -- --nocapture`, `cargo test -p agent-os-kernel --test mount_table -- --nocapture`, `cargo test -p agent-os-kernel -- --nocapture`, and `cargo check -p agent-os-kernel` all pass after this change.
+---
+## 2026-04-05 10:07:52 PDT - US-069
+- What was implemented
+- Added a kernel-backed procfs surface in `crates/kernel/src/kernel.rs` for `/proc`, `/proc/self`, `/proc/[pid]`, `/proc/[pid]/fd`, `/proc/[pid]/cmdline`, `/proc/[pid]/environ`, `/proc/[pid]/cwd`, `/proc/[pid]/stat`, and `/proc/mounts`, with live process/FD/mount metadata and synthetic stats/symlink targets.
+- Made procfs read-only and threaded the virtual path handling through direct kernel filesystem APIs, proc-aware FD opens/reads/stats, and the sidecar JavaScript sync-RPC filesystem bridge.
+- Added focused kernel regressions for live procfs process metadata and mount listings, plus a sidecar unit regression proving JS `fs.readlinkSync('/proc/self')` resolves against the calling kernel PID.
+- Files changed
+- `CLAUDE.md`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/src/permissions.rs`
+- `crates/kernel/tests/api_surface.rs`
+- `crates/sidecar/src/service.rs`
+- `crates/sidecar/tests/security_hardening.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Synthetic procfs entries should authorize the guest-visible `/proc/...` path directly; if procfs checks go through `PermissionedFileSystem::check_path(...)`, missing backing `/proc` directories in the mounted root can accidentally break the virtual proc layer.
+  - Gotchas encountered: The sidecar’s JavaScript sync-RPC procfs coverage is more stable as a direct `service_javascript_fs_sync_rpc(...)` unit test than as a late assertion inside a full guest-runtime security script, because unrelated denied-builtin paths can dispose the Node sync bridge first.
+  - Useful context: `cargo check -p agent-os-kernel -p agent-os-sidecar`, `cargo test -p agent-os-kernel --test api_surface proc_filesystem_exposes_live_process_metadata_and_fd_symlinks -- --nocapture`, `cargo test -p agent-os-kernel --test api_surface proc_mounts_lists_root_and_active_mounts -- --nocapture`, `cargo test -p agent-os-sidecar javascript_fs_sync_rpc_resolves_proc_self_against_the_kernel_process -- --nocapture`, and `cargo test -p agent-os-sidecar --test security_hardening guest_execution_clears_host_env_and_blocks_network_and_escape_paths -- --nocapture` all pass after this change.
 ---

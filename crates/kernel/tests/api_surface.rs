@@ -6,6 +6,7 @@ use agent_os_kernel::kernel::{
     ExecOptions, KernelVm, KernelVmConfig, OpenShellOptions, SpawnOptions, WaitPidFlags,
     WaitPidResult, SEEK_SET,
 };
+use agent_os_kernel::mount_table::{MountOptions, MountTable};
 use agent_os_kernel::permissions::Permissions;
 use agent_os_kernel::pipe_manager::MAX_PIPE_BUFFER_BYTES;
 use agent_os_kernel::process_table::ProcessWaitEvent;
@@ -37,7 +38,7 @@ fn spawn_shell(
         .expect("spawn shell")
 }
 
-fn spawn_shell_in<F: VirtualFileSystem>(
+fn spawn_shell_in<F: VirtualFileSystem + 'static>(
     kernel: &mut KernelVm<F>,
 ) -> agent_os_kernel::kernel::KernelProcessHandle {
     kernel
@@ -761,6 +762,136 @@ fn waitpid_with_options_supports_wnohang_and_any_child_waits() {
 
     parent.finish(0);
     kernel.waitpid(parent.pid()).expect("wait parent");
+}
+
+#[test]
+fn proc_filesystem_exposes_live_process_metadata_and_fd_symlinks() {
+    let mut config = KernelVmConfig::new("vm-api-procfs");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    kernel
+        .filesystem_mut()
+        .write_file("/tmp/data.txt", b"hello".to_vec())
+        .expect("seed procfs data file");
+
+    let process = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                cwd: Some(String::from("/tmp")),
+                env: std::collections::BTreeMap::from([(
+                    String::from("VISIBLE_MARKER"),
+                    String::from("present"),
+                )]),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn procfs shell");
+    let fd = kernel
+        .fd_open("shell", process.pid(), "/tmp/data.txt", O_RDWR, None)
+        .expect("open procfs data file");
+
+    let proc_entries = kernel
+        .read_dir_for_process("shell", process.pid(), "/proc")
+        .expect("read /proc");
+    assert!(proc_entries.contains(&String::from("self")));
+    assert!(proc_entries.contains(&String::from("mounts")));
+    assert!(proc_entries.contains(&process.pid().to_string()));
+
+    assert_eq!(
+        kernel
+            .read_link_for_process("shell", process.pid(), "/proc/self")
+            .expect("read /proc/self link"),
+        format!("/proc/{}", process.pid())
+    );
+    assert_eq!(
+        kernel
+            .realpath_for_process("shell", process.pid(), "/proc/self")
+            .expect("realpath /proc/self"),
+        format!("/proc/{}", process.pid())
+    );
+
+    let self_lstat = kernel
+        .lstat_for_process("shell", process.pid(), "/proc/self")
+        .expect("lstat /proc/self");
+    assert!(self_lstat.is_symbolic_link);
+    let self_stat = kernel
+        .stat_for_process("shell", process.pid(), "/proc/self")
+        .expect("stat /proc/self");
+    assert!(self_stat.is_directory);
+
+    let fd_entries = kernel
+        .read_dir_for_process("shell", process.pid(), "/proc/self/fd")
+        .expect("read /proc/self/fd");
+    assert!(fd_entries.contains(&String::from("0")));
+    assert!(fd_entries.contains(&fd.to_string()));
+    assert_eq!(
+        kernel
+            .read_link_for_process("shell", process.pid(), &format!("/proc/self/fd/{fd}"),)
+            .expect("read proc fd link"),
+        String::from("/tmp/data.txt")
+    );
+
+    assert_eq!(
+        kernel
+            .read_link_for_process("shell", process.pid(), "/proc/self/cwd")
+            .expect("read cwd link"),
+        String::from("/tmp")
+    );
+    assert_eq!(
+        kernel
+            .read_file_for_process("shell", process.pid(), "/proc/self/cmdline")
+            .expect("read cmdline"),
+        b"sh\0".to_vec()
+    );
+
+    let environ = String::from_utf8(
+        kernel
+            .read_file_for_process("shell", process.pid(), "/proc/self/environ")
+            .expect("read environ"),
+    )
+    .expect("proc environ should be utf8");
+    assert!(environ.contains("VISIBLE_MARKER=present"));
+
+    let stat_text = String::from_utf8(
+        kernel
+            .read_file_for_process("shell", process.pid(), "/proc/self/stat")
+            .expect("read stat"),
+    )
+    .expect("proc stat should be utf8");
+    assert!(stat_text.starts_with(&format!("{} (sh) R ", process.pid())));
+
+    let error = kernel
+        .write_file("/proc/mounts", b"blocked".to_vec())
+        .expect_err("procfs should be read-only");
+    assert_eq!(error.code(), "EROFS");
+
+    process.finish(0);
+    kernel.waitpid(process.pid()).expect("wait procfs shell");
+}
+
+#[test]
+fn proc_mounts_lists_root_and_active_mounts() {
+    let mut config = KernelVmConfig::new("vm-api-proc-mounts");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MountTable::new(MemoryFileSystem::new()), config);
+    kernel
+        .mount_filesystem(
+            "/data",
+            MemoryFileSystem::new(),
+            MountOptions::new("memory").read_only(true),
+        )
+        .expect("mount memory filesystem");
+
+    let mounts = String::from_utf8(kernel.read_file("/proc/mounts").expect("read proc mounts"))
+        .expect("proc mounts should be utf8");
+    assert!(mounts.contains("root / root rw 0 0"));
+    assert!(mounts.contains("memory /data memory ro 0 0"));
 }
 
 #[test]

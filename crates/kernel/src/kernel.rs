@@ -2,9 +2,10 @@ use crate::bridge::LifecycleState;
 use crate::command_registry::{CommandDriver, CommandRegistry};
 use crate::device_layer::{create_device_layer, DeviceLayer};
 use crate::fd_table::{
-    FdStat, FdTableError, FdTableManager, FileDescription, FileLockManager, FileLockTarget,
-    FlockOperation, ProcessFdTable, FILETYPE_CHARACTER_DEVICE, FILETYPE_DIRECTORY, FILETYPE_PIPE,
-    FILETYPE_REGULAR_FILE, FILETYPE_SYMBOLIC_LINK, O_APPEND, O_CREAT, O_EXCL, O_NONBLOCK, O_TRUNC,
+    FdEntry, FdStat, FdTableError, FdTableManager, FileDescription, FileLockManager,
+    FileLockTarget, FlockOperation, ProcessFdTable, FILETYPE_CHARACTER_DEVICE, FILETYPE_DIRECTORY,
+    FILETYPE_PIPE, FILETYPE_REGULAR_FILE, FILETYPE_SYMBOLIC_LINK, O_APPEND, O_CREAT, O_EXCL,
+    O_NONBLOCK, O_TRUNC,
 };
 use crate::mount_table::{MountEntry, MountOptions, MountTable, MountedFileSystem};
 use crate::permissions::{
@@ -26,6 +27,7 @@ use crate::resource_accounting::{
 use crate::root_fs::{RootFileSystem, RootFilesystemError, RootFilesystemSnapshot};
 use crate::user::UserManager;
 use crate::vfs::{normalize_path, VfsError, VfsResult, VirtualFileSystem, VirtualStat};
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -303,7 +305,21 @@ fn close_special_resource_if_needed(
     }
 }
 
-impl<F: VirtualFileSystem> KernelVm<F> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProcNode {
+    RootDir,
+    MountsFile,
+    SelfLink { pid: u32 },
+    PidDir { pid: u32 },
+    PidFdDir { pid: u32 },
+    PidCmdline { pid: u32 },
+    PidEnviron { pid: u32 },
+    PidCwdLink { pid: u32 },
+    PidStatFile { pid: u32 },
+    PidFdLink { pid: u32, fd: u32 },
+}
+
+impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     pub fn new(filesystem: F, config: KernelVmConfig) -> Self {
         let vm_id = config.vm_id;
         let permissions = config.permissions.clone();
@@ -455,11 +471,28 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
     pub fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
         self.assert_not_terminated()?;
-        Ok(self.filesystem.read_file(path)?)
+        self.read_file_internal(None, path)
+    }
+
+    pub fn read_file_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+    ) -> KernelResult<Vec<u8>> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.read_file_internal(Some(pid), path)
     }
 
     pub fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        if is_proc_path(path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(path));
+        }
         let content = content.into();
         self.check_write_file_limits(path, content.len() as u64)?;
         Ok(self.filesystem.write_file(path, content)?)
@@ -467,95 +500,232 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
     pub fn create_dir(&mut self, path: &str) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        if is_proc_path(path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(path));
+        }
         self.check_create_dir_limits(path)?;
         Ok(self.filesystem.create_dir(path)?)
     }
 
     pub fn mkdir(&mut self, path: &str, recursive: bool) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        if is_proc_path(path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(path));
+        }
         self.check_mkdir_limits(path, recursive)?;
         Ok(self.filesystem.mkdir(path, recursive)?)
     }
 
     pub fn exists(&self, path: &str) -> KernelResult<bool> {
         self.assert_not_terminated()?;
-        Ok(self.filesystem.exists(path)?)
+        self.exists_internal(None, path)
+    }
+
+    pub fn exists_for_process(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+    ) -> KernelResult<bool> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.exists_internal(Some(pid), path)
     }
 
     pub fn stat(&mut self, path: &str) -> KernelResult<VirtualStat> {
         self.assert_not_terminated()?;
-        Ok(self.filesystem.stat(path)?)
+        self.stat_internal(None, path)
+    }
+
+    pub fn stat_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+    ) -> KernelResult<VirtualStat> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.stat_internal(Some(pid), path)
     }
 
     pub fn lstat(&self, path: &str) -> KernelResult<VirtualStat> {
         self.assert_not_terminated()?;
-        Ok(self.filesystem.lstat(path)?)
+        self.lstat_internal(None, path)
+    }
+
+    pub fn lstat_for_process(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+    ) -> KernelResult<VirtualStat> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.lstat_internal(Some(pid), path)
     }
 
     pub fn read_link(&self, path: &str) -> KernelResult<String> {
         self.assert_not_terminated()?;
-        Ok(self.filesystem.read_link(path)?)
+        self.read_link_internal(None, path)
+    }
+
+    pub fn read_link_for_process(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+    ) -> KernelResult<String> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.read_link_internal(Some(pid), path)
     }
 
     pub fn read_dir(&mut self, path: &str) -> KernelResult<Vec<String>> {
         self.assert_not_terminated()?;
-        let entries = if let Some(limit) = self.resources.max_readdir_entries() {
-            self.filesystem.read_dir_limited(path, limit)?
-        } else {
-            self.filesystem.read_dir(path)?
-        };
+        let entries = self.read_dir_internal(None, path)?;
+        self.resources.check_readdir_entries(entries.len())?;
+        Ok(entries)
+    }
+
+    pub fn read_dir_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+    ) -> KernelResult<Vec<String>> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let entries = self.read_dir_internal(Some(pid), path)?;
         self.resources.check_readdir_entries(entries.len())?;
         Ok(entries)
     }
 
     pub fn remove_file(&mut self, path: &str) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        if is_proc_path(path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(path));
+        }
         Ok(self.filesystem.remove_file(path)?)
     }
 
     pub fn remove_dir(&mut self, path: &str) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        if is_proc_path(path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(path));
+        }
         Ok(self.filesystem.remove_dir(path)?)
     }
 
     pub fn rename(&mut self, old_path: &str, new_path: &str) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        if is_proc_path(old_path) || is_proc_path(new_path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, old_path)
+                .map_err(KernelError::from)?;
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, new_path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(if is_proc_path(new_path) {
+                new_path
+            } else {
+                old_path
+            }));
+        }
         Ok(self.filesystem.rename(old_path, new_path)?)
     }
 
     pub fn realpath(&self, path: &str) -> KernelResult<String> {
         self.assert_not_terminated()?;
-        Ok(self.filesystem.realpath(path)?)
+        self.realpath_internal(None, path)
+    }
+
+    pub fn realpath_for_process(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+    ) -> KernelResult<String> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.realpath_internal(Some(pid), path)
     }
 
     pub fn symlink(&mut self, target: &str, link_path: &str) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        if is_proc_path(target) || is_proc_path(link_path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, link_path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(link_path));
+        }
         self.check_symlink_limits(target, link_path)?;
         Ok(self.filesystem.symlink(target, link_path)?)
     }
 
     pub fn chmod(&mut self, path: &str, mode: u32) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        if is_proc_path(path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(path));
+        }
         Ok(self.filesystem.chmod(path, mode)?)
     }
 
     pub fn link(&mut self, old_path: &str, new_path: &str) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        if is_proc_path(old_path) || is_proc_path(new_path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, new_path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(new_path));
+        }
         Ok(self.filesystem.link(old_path, new_path)?)
     }
 
     pub fn chown(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        if is_proc_path(path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(path));
+        }
         Ok(self.filesystem.chown(path, uid, gid)?)
     }
 
     pub fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        if is_proc_path(path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(path));
+        }
         Ok(self.filesystem.utimes(path, atime_ms, mtime_ms)?)
     }
 
     pub fn truncate(&mut self, path: &str, length: u64) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        if is_proc_path(path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(path));
+        }
         self.check_truncate_limits(path, length)?;
         Ok(self.filesystem.truncate(path, length)?)
     }
@@ -729,6 +899,41 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             )?);
         }
 
+        if let Some(proc_node) = self.resolve_proc_node(path, Some(pid))? {
+            if flags & (O_CREAT | O_EXCL | O_TRUNC) != 0
+                || (flags & 0b11) != crate::fd_table::O_RDONLY
+            {
+                self.filesystem
+                    .check_virtual_path(FsOperation::Write, path)
+                    .map_err(KernelError::from)?;
+                return Err(read_only_filesystem_error(path));
+            }
+
+            if matches!(
+                proc_node,
+                ProcNode::SelfLink { .. }
+                    | ProcNode::PidCwdLink { .. }
+                    | ProcNode::PidFdLink { .. }
+            ) {
+                let target = self.proc_symlink_target(&proc_node)?;
+                return self.fd_open(requester_driver, pid, &target, flags, _mode);
+            }
+
+            self.filesystem
+                .check_virtual_path(FsOperation::Read, path)
+                .map_err(KernelError::from)?;
+            let mut tables = lock_or_recover(&self.fd_tables);
+            let table = tables
+                .get_mut(pid)
+                .ok_or_else(|| KernelError::no_such_process(pid))?;
+            return Ok(table.open_with_details(
+                &self.proc_canonical_path(&proc_node),
+                flags,
+                proc_filetype(&proc_node),
+                None,
+            )?);
+        }
+
         let (filetype, lock_target) = self.prepare_fd_open(path, flags)?;
         let mut tables = lock_or_recover(&self.fd_tables);
         let table = tables
@@ -784,6 +989,24 @@ impl<F: VirtualFileSystem> KernelVm<F> {
                 .unwrap_or_default());
         }
 
+        if is_proc_path(entry.description.path()) {
+            let bytes = self.proc_read_file_from_open_path(Some(pid), entry.description.path())?;
+            let start = entry.description.cursor() as usize;
+            let end = start.saturating_add(length).min(bytes.len());
+            let chunk = if start >= bytes.len() {
+                Vec::new()
+            } else {
+                bytes[start..end].to_vec()
+            };
+            entry.description.set_cursor(
+                entry
+                    .description
+                    .cursor()
+                    .saturating_add(chunk.len() as u64),
+            );
+            return Ok(chunk);
+        }
+
         let cursor = entry.description.cursor();
         let bytes = VirtualFileSystem::pread(
             &mut self.filesystem,
@@ -833,6 +1056,10 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
         if self.ptys.is_pty(entry.description.id()) {
             return Ok(self.ptys.write(entry.description.id(), data)?);
+        }
+
+        if is_proc_path(entry.description.path()) {
+            return Err(read_only_filesystem_error(entry.description.path()));
         }
 
         let path = entry.description.path().to_owned();
@@ -936,7 +1163,15 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         let base = match whence {
             SEEK_SET => 0_i128,
             SEEK_CUR => i128::from(entry.description.cursor()),
-            SEEK_END => i128::from(self.filesystem.stat(entry.description.path())?.size),
+            SEEK_END => {
+                let size = if is_proc_path(entry.description.path()) {
+                    self.proc_stat_from_open_path(Some(pid), entry.description.path())?
+                        .size
+                } else {
+                    self.filesystem.stat(entry.description.path())?.size
+                };
+                i128::from(size)
+            }
             _ => {
                 return Err(KernelError::new(
                     "EINVAL",
@@ -977,6 +1212,18 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             return Err(KernelError::new("ESPIPE", "illegal seek"));
         }
 
+        if is_proc_path(entry.description.path()) {
+            let bytes = self.proc_read_file_from_open_path(Some(pid), entry.description.path())?;
+            let start = usize::try_from(offset)
+                .map_err(|_| KernelError::new("EINVAL", "pread offset out of range"))?;
+            let end = start.saturating_add(length).min(bytes.len());
+            return Ok(if start >= bytes.len() {
+                Vec::new()
+            } else {
+                bytes[start..end].to_vec()
+            });
+        }
+
         Ok(VirtualFileSystem::pread(
             &mut self.filesystem,
             entry.description.path(),
@@ -1006,6 +1253,10 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
         if self.pipes.is_pipe(entry.description.id()) || self.ptys.is_pty(entry.description.id()) {
             return Err(KernelError::new("ESPIPE", "illegal seek"));
+        }
+
+        if is_proc_path(entry.description.path()) {
+            return Err(read_only_filesystem_error(entry.description.path()));
         }
 
         let required_size = self
@@ -1278,6 +1529,10 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             return Ok(synthetic_character_device_stat(entry.description.id()));
         }
 
+        if is_proc_path(entry.description.path()) {
+            return self.proc_stat_from_open_path(Some(pid), entry.description.path());
+        }
+
         Ok(self.filesystem.stat(entry.description.path())?)
     }
 
@@ -1453,6 +1708,442 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
     fn raw_filesystem_mut(&mut self) -> &mut F {
         self.filesystem.inner_mut().inner_mut()
+    }
+
+    fn read_file_internal(
+        &mut self,
+        current_pid: Option<u32>,
+        path: &str,
+    ) -> KernelResult<Vec<u8>> {
+        if let Some(proc_node) = self.resolve_proc_node(path, current_pid)? {
+            self.filesystem
+                .check_virtual_path(FsOperation::Read, path)
+                .map_err(KernelError::from)?;
+            return self.proc_read_file(current_pid, &proc_node);
+        }
+
+        Ok(self.filesystem.read_file(path)?)
+    }
+
+    fn exists_internal(&self, current_pid: Option<u32>, path: &str) -> KernelResult<bool> {
+        match self.resolve_proc_node(path, current_pid) {
+            Ok(Some(_)) => {
+                self.filesystem
+                    .check_virtual_path(FsOperation::Read, path)
+                    .map_err(KernelError::from)?;
+                Ok(true)
+            }
+            Ok(None) => Ok(self.filesystem.exists(path)?),
+            Err(error) if error.code() == "ENOENT" => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn stat_internal(&mut self, current_pid: Option<u32>, path: &str) -> KernelResult<VirtualStat> {
+        if let Some(proc_node) = self.resolve_proc_node(path, current_pid)? {
+            self.filesystem
+                .check_virtual_path(FsOperation::Read, path)
+                .map_err(KernelError::from)?;
+            return self.proc_stat(current_pid, &proc_node);
+        }
+
+        Ok(self.filesystem.stat(path)?)
+    }
+
+    fn lstat_internal(&self, current_pid: Option<u32>, path: &str) -> KernelResult<VirtualStat> {
+        if let Some(proc_node) = self.resolve_proc_node(path, current_pid)? {
+            self.filesystem
+                .check_virtual_path(FsOperation::Read, path)
+                .map_err(KernelError::from)?;
+            return self.proc_lstat(&proc_node);
+        }
+
+        Ok(self.filesystem.lstat(path)?)
+    }
+
+    fn read_link_internal(&self, current_pid: Option<u32>, path: &str) -> KernelResult<String> {
+        if let Some(proc_node) = self.resolve_proc_node(path, current_pid)? {
+            self.filesystem
+                .check_virtual_path(FsOperation::Read, path)
+                .map_err(KernelError::from)?;
+            return self.proc_read_link(&proc_node);
+        }
+
+        Ok(self.filesystem.read_link(path)?)
+    }
+
+    fn read_dir_internal(
+        &mut self,
+        current_pid: Option<u32>,
+        path: &str,
+    ) -> KernelResult<Vec<String>> {
+        if let Some(proc_node) = self.resolve_proc_node(path, current_pid)? {
+            self.filesystem
+                .check_virtual_path(FsOperation::Read, path)
+                .map_err(KernelError::from)?;
+            return self.proc_read_dir(current_pid, &proc_node);
+        }
+
+        if let Some(limit) = self.resources.max_readdir_entries() {
+            Ok(self.filesystem.read_dir_limited(path, limit)?)
+        } else {
+            Ok(self.filesystem.read_dir(path)?)
+        }
+    }
+
+    fn realpath_internal(&self, current_pid: Option<u32>, path: &str) -> KernelResult<String> {
+        if let Some(proc_node) = self.resolve_proc_node(path, current_pid)? {
+            self.filesystem
+                .check_virtual_path(FsOperation::Read, path)
+                .map_err(KernelError::from)?;
+            return self.proc_realpath(current_pid, &proc_node);
+        }
+
+        Ok(self.filesystem.realpath(path)?)
+    }
+
+    fn resolve_proc_node(
+        &self,
+        path: &str,
+        current_pid: Option<u32>,
+    ) -> KernelResult<Option<ProcNode>> {
+        let normalized = normalize_path(path);
+        if !is_proc_path(&normalized) {
+            return Ok(None);
+        }
+
+        if normalized == "/proc" {
+            return Ok(Some(ProcNode::RootDir));
+        }
+
+        let suffix = normalized
+            .strip_prefix("/proc/")
+            .expect("proc path should have /proc prefix");
+        let parts = suffix.split('/').collect::<Vec<_>>();
+        if parts.is_empty() {
+            return Ok(Some(ProcNode::RootDir));
+        }
+
+        if parts == ["mounts"] {
+            return Ok(Some(ProcNode::MountsFile));
+        }
+
+        let pid = match parts[0] {
+            "self" => current_pid.ok_or_else(|| proc_not_found_error(&normalized))?,
+            raw => raw
+                .parse::<u32>()
+                .map_err(|_| proc_not_found_error(&normalized))?,
+        };
+        self.proc_entry(pid)?;
+
+        let node = match parts.as_slice() {
+            ["self"] => ProcNode::SelfLink { pid },
+            [_pid] => ProcNode::PidDir { pid },
+            [_pid, "fd"] => ProcNode::PidFdDir { pid },
+            [_pid, "cmdline"] => ProcNode::PidCmdline { pid },
+            [_pid, "environ"] => ProcNode::PidEnviron { pid },
+            [_pid, "cwd"] => ProcNode::PidCwdLink { pid },
+            [_pid, "stat"] => ProcNode::PidStatFile { pid },
+            [_pid, "fd", fd] => {
+                let fd = fd
+                    .parse::<u32>()
+                    .map_err(|_| proc_not_found_error(&normalized))?;
+                self.proc_fd_entry(pid, fd)?;
+                ProcNode::PidFdLink { pid, fd }
+            }
+            _ => return Err(proc_not_found_error(&normalized)),
+        };
+
+        Ok(Some(node))
+    }
+
+    fn proc_entry(&self, pid: u32) -> KernelResult<crate::process_table::ProcessEntry> {
+        self.processes
+            .get(pid)
+            .ok_or_else(|| proc_not_found_error(&format!("/proc/{pid}")))
+    }
+
+    fn proc_fd_entry(&self, pid: u32, fd: u32) -> KernelResult<FdEntry> {
+        lock_or_recover(&self.fd_tables)
+            .get(pid)
+            .and_then(|table| table.get(fd))
+            .cloned()
+            .ok_or_else(|| proc_not_found_error(&format!("/proc/{pid}/fd/{fd}")))
+    }
+
+    fn proc_read_file(
+        &mut self,
+        current_pid: Option<u32>,
+        node: &ProcNode,
+    ) -> KernelResult<Vec<u8>> {
+        match node {
+            ProcNode::SelfLink { .. }
+            | ProcNode::PidCwdLink { .. }
+            | ProcNode::PidFdLink { .. } => {
+                let target = self.proc_symlink_target(node)?;
+                self.read_file_internal(current_pid, &target)
+            }
+            ProcNode::MountsFile => Ok(self.proc_mounts_bytes()),
+            ProcNode::PidCmdline { pid } => Ok(self.proc_cmdline_bytes(*pid)),
+            ProcNode::PidEnviron { pid } => Ok(self.proc_environ_bytes(*pid)),
+            ProcNode::PidStatFile { pid } => Ok(self.proc_stat_bytes(*pid)),
+            ProcNode::RootDir | ProcNode::PidDir { .. } | ProcNode::PidFdDir { .. } => {
+                Err(KernelError::new(
+                    "EISDIR",
+                    format!(
+                        "illegal operation on a directory, read '{}'",
+                        self.proc_canonical_path(node)
+                    ),
+                ))
+            }
+        }
+    }
+
+    fn proc_stat(
+        &mut self,
+        current_pid: Option<u32>,
+        node: &ProcNode,
+    ) -> KernelResult<VirtualStat> {
+        match node {
+            ProcNode::SelfLink { .. }
+            | ProcNode::PidCwdLink { .. }
+            | ProcNode::PidFdLink { .. } => {
+                let target = self.proc_symlink_target(node)?;
+                self.stat_internal(current_pid, &target)
+            }
+            _ => self.proc_lstat(node),
+        }
+    }
+
+    fn proc_lstat(&self, node: &ProcNode) -> KernelResult<VirtualStat> {
+        match node {
+            ProcNode::RootDir | ProcNode::PidDir { .. } | ProcNode::PidFdDir { .. } => {
+                Ok(proc_dir_stat(proc_inode(node)))
+            }
+            ProcNode::MountsFile => Ok(proc_file_stat(
+                proc_inode(node),
+                self.proc_mounts_bytes().len() as u64,
+            )),
+            ProcNode::PidCmdline { pid } => Ok(proc_file_stat(
+                proc_inode(node),
+                self.proc_cmdline_bytes(*pid).len() as u64,
+            )),
+            ProcNode::PidEnviron { pid } => Ok(proc_file_stat(
+                proc_inode(node),
+                self.proc_environ_bytes(*pid).len() as u64,
+            )),
+            ProcNode::PidStatFile { pid } => Ok(proc_file_stat(
+                proc_inode(node),
+                self.proc_stat_bytes(*pid).len() as u64,
+            )),
+            ProcNode::SelfLink { .. }
+            | ProcNode::PidCwdLink { .. }
+            | ProcNode::PidFdLink { .. } => Ok(proc_symlink_stat(
+                proc_inode(node),
+                self.proc_read_link(node)?.len() as u64,
+            )),
+        }
+    }
+
+    fn proc_read_link(&self, node: &ProcNode) -> KernelResult<String> {
+        match node {
+            ProcNode::SelfLink { .. }
+            | ProcNode::PidCwdLink { .. }
+            | ProcNode::PidFdLink { .. } => self.proc_symlink_target(node),
+            _ => Err(KernelError::new(
+                "EINVAL",
+                format!(
+                    "invalid argument, readlink '{}'",
+                    self.proc_canonical_path(node)
+                ),
+            )),
+        }
+    }
+
+    fn proc_read_dir(
+        &mut self,
+        current_pid: Option<u32>,
+        node: &ProcNode,
+    ) -> KernelResult<Vec<String>> {
+        match node {
+            ProcNode::SelfLink { .. }
+            | ProcNode::PidCwdLink { .. }
+            | ProcNode::PidFdLink { .. } => {
+                let target = self.proc_symlink_target(node)?;
+                self.read_dir_internal(current_pid, &target)
+            }
+            ProcNode::RootDir => {
+                let mut entries = self
+                    .processes
+                    .list_processes()
+                    .keys()
+                    .map(|pid| pid.to_string())
+                    .collect::<Vec<_>>();
+                entries.push(String::from("mounts"));
+                entries.push(String::from("self"));
+                entries.sort();
+                Ok(entries)
+            }
+            ProcNode::PidDir { .. } => Ok(vec![
+                String::from("cmdline"),
+                String::from("cwd"),
+                String::from("environ"),
+                String::from("fd"),
+                String::from("stat"),
+            ]),
+            ProcNode::PidFdDir { pid } => {
+                let tables = lock_or_recover(&self.fd_tables);
+                let table = tables
+                    .get(*pid)
+                    .ok_or_else(|| proc_not_found_error(&format!("/proc/{pid}/fd")))?;
+                Ok(table.iter().map(|entry| entry.fd.to_string()).collect())
+            }
+            _ => Err(KernelError::new(
+                "ENOTDIR",
+                format!(
+                    "not a directory, scandir '{}'",
+                    self.proc_canonical_path(node)
+                ),
+            )),
+        }
+    }
+
+    fn proc_realpath(&self, current_pid: Option<u32>, node: &ProcNode) -> KernelResult<String> {
+        match node {
+            ProcNode::SelfLink { .. }
+            | ProcNode::PidCwdLink { .. }
+            | ProcNode::PidFdLink { .. } => {
+                let target = self.proc_symlink_target(node)?;
+                self.realpath_internal(current_pid, &target)
+            }
+            _ => Ok(self.proc_canonical_path(node)),
+        }
+    }
+
+    fn proc_symlink_target(&self, node: &ProcNode) -> KernelResult<String> {
+        match node {
+            ProcNode::SelfLink { pid } => Ok(format!("/proc/{pid}")),
+            ProcNode::PidCwdLink { pid } => Ok(self.proc_entry(*pid)?.cwd),
+            ProcNode::PidFdLink { pid, fd } => {
+                Ok(self.proc_fd_entry(*pid, *fd)?.description.path().to_owned())
+            }
+            _ => Err(KernelError::new(
+                "EINVAL",
+                format!(
+                    "'{}' is not a symbolic link",
+                    self.proc_canonical_path(node)
+                ),
+            )),
+        }
+    }
+
+    fn proc_canonical_path(&self, node: &ProcNode) -> String {
+        match node {
+            ProcNode::RootDir => String::from("/proc"),
+            ProcNode::MountsFile => String::from("/proc/mounts"),
+            ProcNode::SelfLink { pid } => format!("/proc/{pid}"),
+            ProcNode::PidDir { pid } => format!("/proc/{pid}"),
+            ProcNode::PidFdDir { pid } => format!("/proc/{pid}/fd"),
+            ProcNode::PidCmdline { pid } => format!("/proc/{pid}/cmdline"),
+            ProcNode::PidEnviron { pid } => format!("/proc/{pid}/environ"),
+            ProcNode::PidCwdLink { pid } => format!("/proc/{pid}/cwd"),
+            ProcNode::PidStatFile { pid } => format!("/proc/{pid}/stat"),
+            ProcNode::PidFdLink { pid, fd } => format!("/proc/{pid}/fd/{fd}"),
+        }
+    }
+
+    fn proc_cmdline_bytes(&self, pid: u32) -> Vec<u8> {
+        let entry = self
+            .processes
+            .get(pid)
+            .expect("process must exist while procfs path is resolved");
+        let mut argv = vec![entry.command];
+        argv.extend(entry.args);
+        null_separated_bytes(argv)
+    }
+
+    fn proc_environ_bytes(&self, pid: u32) -> Vec<u8> {
+        let entry = self
+            .processes
+            .get(pid)
+            .expect("process must exist while procfs path is resolved");
+        null_separated_bytes(
+            entry
+                .env
+                .into_iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect(),
+        )
+    }
+
+    fn proc_stat_bytes(&self, pid: u32) -> Vec<u8> {
+        let entry = self
+            .processes
+            .get(pid)
+            .expect("process must exist while procfs path is resolved");
+        let command = entry.command.replace(')', "]");
+        let state = match entry.status {
+            ProcessStatus::Running => 'R',
+            ProcessStatus::Stopped => 'T',
+            ProcessStatus::Exited => 'Z',
+        };
+        format!(
+            "{pid} ({command}) {state} {ppid} {pgid} {sid} 0 0 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+            ppid = entry.ppid,
+            pgid = entry.pgid,
+            sid = entry.sid,
+        )
+        .into_bytes()
+    }
+
+    fn proc_mounts_bytes(&self) -> Vec<u8> {
+        let mounts = if let Some(table) =
+            (self.filesystem.inner().inner() as &dyn Any).downcast_ref::<MountTable>()
+        {
+            table.get_mounts()
+        } else {
+            vec![MountEntry {
+                path: String::from("/"),
+                plugin_id: String::from("root"),
+                read_only: false,
+            }]
+        };
+
+        mounts
+            .into_iter()
+            .map(|mount| {
+                let options = if mount.read_only { "ro" } else { "rw" };
+                format!(
+                    "{source} {target} {fstype} {options} 0 0\n",
+                    source = mount.plugin_id,
+                    target = mount.path,
+                    fstype = mount.plugin_id,
+                )
+            })
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    fn proc_read_file_from_open_path(
+        &mut self,
+        current_pid: Option<u32>,
+        path: &str,
+    ) -> KernelResult<Vec<u8>> {
+        let node = self
+            .resolve_proc_node(path, current_pid)?
+            .ok_or_else(|| proc_not_found_error(path))?;
+        self.proc_read_file(current_pid, &node)
+    }
+
+    fn proc_stat_from_open_path(
+        &mut self,
+        current_pid: Option<u32>,
+        path: &str,
+    ) -> KernelResult<VirtualStat> {
+        let node = self
+            .resolve_proc_node(path, current_pid)?
+            .ok_or_else(|| proc_not_found_error(path))?;
+        self.proc_stat(current_pid, &node)
     }
 
     fn filesystem_usage(&mut self) -> KernelResult<FileSystemUsage> {
@@ -1946,6 +2637,11 @@ fn is_virtual_device_storage_path(path: &str) -> bool {
         || path.starts_with("/dev/pts/")
 }
 
+fn is_proc_path(path: &str) -> bool {
+    let normalized = normalize_path(path);
+    normalized == "/proc" || normalized.starts_with("/proc/")
+}
+
 fn checked_write_end(offset: u64, len: usize) -> KernelResult<u64> {
     offset
         .checked_add(len as u64)
@@ -1980,6 +2676,111 @@ fn synthetic_character_device_stat(ino: u64) -> VirtualStat {
         uid: 0,
         gid: 0,
     }
+}
+
+fn proc_dir_stat(ino: u64) -> VirtualStat {
+    let now = now_ms();
+    VirtualStat {
+        mode: 0o555,
+        size: 0,
+        is_directory: true,
+        is_symbolic_link: false,
+        atime_ms: now,
+        mtime_ms: now,
+        ctime_ms: now,
+        birthtime_ms: now,
+        ino,
+        nlink: 2,
+        uid: 0,
+        gid: 0,
+    }
+}
+
+fn proc_file_stat(ino: u64, size: u64) -> VirtualStat {
+    let now = now_ms();
+    VirtualStat {
+        mode: 0o444,
+        size,
+        is_directory: false,
+        is_symbolic_link: false,
+        atime_ms: now,
+        mtime_ms: now,
+        ctime_ms: now,
+        birthtime_ms: now,
+        ino,
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+    }
+}
+
+fn proc_symlink_stat(ino: u64, size: u64) -> VirtualStat {
+    let now = now_ms();
+    VirtualStat {
+        mode: 0o777,
+        size,
+        is_directory: false,
+        is_symbolic_link: true,
+        atime_ms: now,
+        mtime_ms: now,
+        ctime_ms: now,
+        birthtime_ms: now,
+        ino,
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+    }
+}
+
+fn proc_filetype(node: &ProcNode) -> u8 {
+    match node {
+        ProcNode::RootDir | ProcNode::PidDir { .. } | ProcNode::PidFdDir { .. } => {
+            FILETYPE_DIRECTORY
+        }
+        ProcNode::SelfLink { .. } | ProcNode::PidCwdLink { .. } | ProcNode::PidFdLink { .. } => {
+            FILETYPE_SYMBOLIC_LINK
+        }
+        ProcNode::MountsFile
+        | ProcNode::PidCmdline { .. }
+        | ProcNode::PidEnviron { .. }
+        | ProcNode::PidStatFile { .. } => FILETYPE_REGULAR_FILE,
+    }
+}
+
+fn proc_inode(node: &ProcNode) -> u64 {
+    match node {
+        ProcNode::RootDir => 0xfffe_0001,
+        ProcNode::MountsFile => 0xfffe_0002,
+        ProcNode::SelfLink { pid } => 0xfffe_1000 + u64::from(*pid),
+        ProcNode::PidDir { pid } => 0xfffe_2000 + u64::from(*pid),
+        ProcNode::PidFdDir { pid } => 0xfffe_3000 + u64::from(*pid),
+        ProcNode::PidCmdline { pid } => 0xfffe_4000 + u64::from(*pid),
+        ProcNode::PidEnviron { pid } => 0xfffe_5000 + u64::from(*pid),
+        ProcNode::PidCwdLink { pid } => 0xfffe_6000 + u64::from(*pid),
+        ProcNode::PidStatFile { pid } => 0xfffe_7000 + u64::from(*pid),
+        ProcNode::PidFdLink { pid, fd } => 0xffff_0000 + ((u64::from(*pid)) << 8) + u64::from(*fd),
+    }
+}
+
+fn null_separated_bytes(parts: Vec<String>) -> Vec<u8> {
+    if parts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut bytes = parts.join("\0").into_bytes();
+    bytes.push(0);
+    bytes
+}
+
+fn proc_not_found_error(path: &str) -> KernelError {
+    KernelError::new(
+        "ENOENT",
+        format!("no such file or directory, stat '{path}'"),
+    )
+}
+
+fn read_only_filesystem_error(path: &str) -> KernelError {
+    KernelError::new("EROFS", format!("read-only filesystem: {path}"))
 }
 
 fn now_ms() -> u64 {

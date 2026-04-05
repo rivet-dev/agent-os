@@ -404,6 +404,10 @@ impl<F: VirtualFileSystem> PermissionedFileSystem<F> {
         self.check_subject(op, path)
     }
 
+    pub fn check_virtual_path(&self, op: FsOperation, path: &str) -> VfsResult<()> {
+        self.check(op, path)
+    }
+
     pub fn exists(&self, path: &str) -> VfsResult<bool> {
         if let Err(error) = self.check_subject(FsOperation::Exists, path) {
             if matches!(error.code(), "EACCES" | "ENOENT" | "ENOTDIR" | "ELOOP") {

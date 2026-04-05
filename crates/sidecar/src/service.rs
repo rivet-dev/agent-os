@@ -7833,7 +7833,7 @@ fn service_javascript_fs_sync_rpc(
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readFile path")?;
             let encoding = javascript_sync_rpc_encoding(&request.args);
             kernel
-                .read_file(path)
+                .read_file_for_process(EXECUTION_DRIVER_NAME, kernel_pid, path)
                 .map(|content| match encoding.as_deref() {
                     Some("utf8") | Some("utf-8") => {
                         Value::String(String::from_utf8_lossy(&content).into_owned())
@@ -7854,21 +7854,21 @@ fn service_javascript_fs_sync_rpc(
         "fs.statSync" | "fs.promises.stat" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem stat path")?;
             kernel
-                .stat(path)
+                .stat_for_process(EXECUTION_DRIVER_NAME, kernel_pid, path)
                 .map(javascript_sync_rpc_stat_value)
                 .map_err(kernel_error)
         }
         "fs.lstatSync" | "fs.promises.lstat" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem lstat path")?;
             kernel
-                .lstat(path)
+                .lstat_for_process(EXECUTION_DRIVER_NAME, kernel_pid, path)
                 .map(javascript_sync_rpc_stat_value)
                 .map_err(kernel_error)
         }
         "fs.readdirSync" | "fs.promises.readdir" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readdir path")?;
             kernel
-                .read_dir(path)
+                .read_dir_for_process(EXECUTION_DRIVER_NAME, kernel_pid, path)
                 .map(javascript_sync_rpc_readdir_value)
                 .map_err(kernel_error)
         }
@@ -7883,14 +7883,19 @@ fn service_javascript_fs_sync_rpc(
         }
         "fs.accessSync" | "fs.promises.access" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem access path")?;
-            kernel.stat(path).map(|_| Value::Null).map_err(kernel_error)
+            kernel
+                .stat_for_process(EXECUTION_DRIVER_NAME, kernel_pid, path)
+                .map(|_| Value::Null)
+                .map_err(kernel_error)
         }
         "fs.copyFileSync" | "fs.promises.copyFile" => {
             let source =
                 javascript_sync_rpc_arg_str(&request.args, 0, "filesystem copyFile source")?;
             let destination =
                 javascript_sync_rpc_arg_str(&request.args, 1, "filesystem copyFile destination")?;
-            let contents = kernel.read_file(source).map_err(kernel_error)?;
+            let contents = kernel
+                .read_file_for_process(EXECUTION_DRIVER_NAME, kernel_pid, source)
+                .map_err(kernel_error)?;
             kernel
                 .write_file(destination, contents)
                 .map(|()| Value::Null)
@@ -7898,12 +7903,15 @@ fn service_javascript_fs_sync_rpc(
         }
         "fs.existsSync" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem exists path")?;
-            kernel.exists(path).map(Value::Bool).map_err(kernel_error)
+            kernel
+                .exists_for_process(EXECUTION_DRIVER_NAME, kernel_pid, path)
+                .map(Value::Bool)
+                .map_err(kernel_error)
         }
         "fs.readlinkSync" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readlink path")?;
             kernel
-                .read_link(path)
+                .read_link_for_process(EXECUTION_DRIVER_NAME, kernel_pid, path)
                 .map(Value::String)
                 .map_err(kernel_error)
         }
@@ -9989,6 +9997,67 @@ await new Promise(() => {});
             normalize_python_vfs_rpc_path("workspace/note.txt").is_err(),
             "relative paths should be rejected",
         );
+    }
+
+    #[test]
+    fn javascript_fs_sync_rpc_resolves_proc_self_against_the_kernel_process() {
+        let mut config = KernelVmConfig::new("vm-js-procfs-rpc");
+        config.permissions = Permissions::allow_all();
+        let mut kernel = SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config);
+        kernel
+            .register_driver(CommandDriver::new(
+                EXECUTION_DRIVER_NAME,
+                [JAVASCRIPT_COMMAND],
+            ))
+            .expect("register execution driver");
+
+        let process = kernel
+            .spawn_process(
+                JAVASCRIPT_COMMAND,
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn javascript kernel process");
+
+        let link = service_javascript_fs_sync_rpc(
+            &mut kernel,
+            process.pid(),
+            &JavascriptSyncRpcRequest {
+                id: 1,
+                method: String::from("fs.readlinkSync"),
+                args: vec![json!("/proc/self")],
+            },
+        )
+        .expect("resolve /proc/self");
+        assert_eq!(link, Value::String(format!("/proc/{}", process.pid())));
+
+        let entries = service_javascript_fs_sync_rpc(
+            &mut kernel,
+            process.pid(),
+            &JavascriptSyncRpcRequest {
+                id: 2,
+                method: String::from("fs.readdirSync"),
+                args: vec![json!("/proc/self/fd")],
+            },
+        )
+        .expect("read /proc/self/fd");
+        let entry_names = entries
+            .as_array()
+            .expect("readdir should return an array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(entry_names.contains(&"0"));
+        assert!(entry_names.contains(&"1"));
+        assert!(entry_names.contains(&"2"));
+
+        process.finish(0);
+        kernel
+            .waitpid(process.pid())
+            .expect("wait javascript process");
     }
 
     #[test]
