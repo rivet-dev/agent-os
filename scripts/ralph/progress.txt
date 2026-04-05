@@ -1,6 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
 - Process-table exit-path changes should be implemented as one bundle: reparent orphaned children, reevaluate orphaned stopped groups for `SIGHUP`/`SIGCONT`, and keep `max_processes` enforcement counting unreaped zombies so lifecycle semantics and resource limits stay aligned.
+- Overlay whiteout and opaque-directory state should live under a reserved hidden metadata root in the writable upper, and every merged overlay listing or snapshot path must filter that metadata root back out of user-visible results.
 - Cross-resource kernel readiness waits should use the shared `PollNotifier` in `crates/kernel/src/poll.rs`; when pipe or PTY state changes, notify it alongside the manager condvar so mixed-FD `poll_fds` calls do not miss wakeups.
 - Kernel filesystem semantic additions must be threaded through every wrapper layer together: `VirtualFileSystem`, `PermissionedFileSystem`, `DeviceLayer`, `MountTable`/`MountedFileSystem`, and the root/overlay delegates, or mounted/device-backed paths silently keep the old behavior.
 - Per-FD status bits such as `O_NONBLOCK` belong on `FdEntry` / `ProcessFdTable`, while shared `FileDescription.flags()` should stay limited to open-file-description semantics such as access mode and `O_APPEND`; use `/dev/fd/N` duplication when you need a differently flagged view of the same description before a real `fcntl(F_SETFL)` surface exists.
@@ -1252,4 +1253,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Per-FD status bits such as `O_NONBLOCK` should live on `FdEntry`, while shared `FileDescription.flags()` should keep only open-file-description semantics like access mode and `O_APPEND`.
   - Gotchas encountered: Without a `fcntl(F_SETFL)` API, the practical way to obtain a nonblocking view of an existing pipe in this codebase is duplicating `/dev/fd/N` and layering `O_NONBLOCK` onto the duplicate entry.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test fd_table -- --test-threads=1`, `cargo test -p agent-os-kernel --test pipe_manager -- --test-threads=1`, `cargo test -p agent-os-kernel --test api_surface -- --test-threads=1`, and `cargo check -p agent-os-kernel` all pass after this change.
+---
+## 2026-04-05 09:35:57 PDT - US-067
+- What was implemented
+- Replaced the Rust kernel overlay’s in-memory whiteout tracking with durable marker files in the writable upper, added opaque-directory markers for copied-up directories, and hid the reserved overlay metadata root from merged reads.
+- Applied the same durable-marker scheme to the TypeScript overlay backend so reopening an overlay with the same writable upper preserves whiteouts and opaque-directory state across persistent or remote uppers.
+- Added focused Rust and Vitest regressions for upper-marker persistence, opaque-directory behavior, and metadata-root filtering.
+- Files changed
+- `AGENTS.md`
+- `crates/kernel/src/overlay_fs.rs`
+- `packages/core/src/overlay-filesystem.ts`
+- `packages/core/tests/overlay-backend.test.ts`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Durable overlay state can live in ordinary VFS files as long as it is kept under a reserved hidden metadata root and the merged overlay view consistently filters that root back out.
+  - Gotchas encountered: Overlay durability has two separate concerns: reopening with the same writable upper must preserve live whiteouts and opaque markers, while sealing a layer should still snapshot the merged view so those markers materialize away in frozen lower layers.
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-kernel --quiet`, `cargo test -p agent-os-kernel -- --nocapture`, `pnpm --dir packages/core exec tsc --noEmit --pretty false`, and `pnpm --dir packages/core exec vitest run tests/overlay-backend.test.ts tests/layers.test.ts` all pass after this change.
 ---

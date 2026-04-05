@@ -142,6 +142,22 @@ describe("OverlayBackend (layer behavior)", () => {
 		expect(text).toBe("resurrected");
 	});
 
+	test("whiteouts persist when reopening with the same writable upper", async () => {
+		await overlay.removeFile("/data/base.txt");
+
+		const reopened = createOverlayBackend({ lower, upper });
+
+		expect(await reopened.exists("/data/base.txt")).toBe(false);
+		expect(await reopened.readDir("/data")).not.toContain("base.txt");
+	});
+
+	test("directory copy-up marks the upper directory opaque", async () => {
+		await overlay.chmod("/data", 0o700);
+
+		expect(await overlay.readDir("/data")).toEqual([]);
+		expect(await overlay.readDir("/")).not.toContain(".agent-os-overlay");
+	});
+
 	test("pread falls through to lower", async () => {
 		const chunk = await overlay.pread("/data/base.txt", 5, 6);
 		expect(new TextDecoder().decode(chunk)).toBe("conten");

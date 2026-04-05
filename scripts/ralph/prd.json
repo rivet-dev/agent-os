@@ -1063,7 +1063,7 @@
         "Typecheck passes"
       ],
       "priority": 67,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: No opaque directory markers — lower layer entries leak through after copy-up. Whiteouts stored in in-memory Set, lost on snapshot/persistence. S3 mount doesn't persist whiteouts."
     },
     {
