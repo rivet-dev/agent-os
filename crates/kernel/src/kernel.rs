@@ -26,7 +26,7 @@ use crate::vfs::{normalize_path, VfsError, VfsResult, VirtualFileSystem, Virtual
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, WaitTimeoutResult};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub type KernelResult<T> = Result<T, KernelError>;
@@ -233,7 +233,7 @@ fn cleanup_process_resources(
     pid: u32,
 ) {
     let descriptors = {
-        let tables = fd_tables.lock().expect("FD table lock poisoned");
+        let tables = lock_or_recover(fd_tables);
         tables
             .get(pid)
             .map(|table| {
@@ -247,7 +247,7 @@ fn cleanup_process_resources(
 
     let mut cleanup = Vec::new();
     {
-        let mut tables = fd_tables.lock().expect("FD table lock poisoned");
+        let mut tables = lock_or_recover(fd_tables);
         if let Some(table) = tables.get_mut(pid) {
             for (fd, description, filetype) in &descriptors {
                 table.close(*fd);
@@ -261,7 +261,7 @@ fn cleanup_process_resources(
         close_special_resource_if_needed(pipes, ptys, &description, filetype);
     }
 
-    let mut owners = driver_pids.lock().expect("driver PID lock poisoned");
+    let mut owners = lock_or_recover(driver_pids);
     for pids in owners.values_mut() {
         pids.remove(&pid);
     }
@@ -366,7 +366,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
     }
 
     pub fn resource_snapshot(&self) -> ResourceSnapshot {
-        let fd_tables = self.fd_tables.lock().expect("FD table lock poisoned");
+        let fd_tables = lock_or_recover(&self.fd_tables);
         self.resources
             .snapshot(&self.processes, &fd_tables, &self.pipes, &self.ptys)
     }
@@ -377,9 +377,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
     pub fn register_driver(&mut self, driver: CommandDriver) -> KernelResult<()> {
         self.assert_not_terminated()?;
-        self.driver_pids
-            .lock()
-            .expect("driver PID lock poisoned")
+        lock_or_recover(&self.driver_pids)
             .entry(driver.name().to_owned())
             .or_default();
         self.commands.register(driver);
@@ -570,7 +568,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         )?;
 
         let inherited_fds = {
-            let tables = self.fd_tables.lock().expect("FD table lock poisoned");
+            let tables = lock_or_recover(&self.fd_tables);
             options
                 .parent_pid
                 .and_then(|pid| tables.get(pid).map(ProcessFdTable::len))
@@ -581,7 +579,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
         let pid = self.processes.allocate_pid();
         {
-            let mut tables = self.fd_tables.lock().expect("FD table lock poisoned");
+            let mut tables = lock_or_recover(&self.fd_tables);
             if let Some(parent_pid) = options.parent_pid {
                 tables.fork(parent_pid, pid);
             } else {
@@ -606,7 +604,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             process.clone(),
         );
 
-        let mut owners = self.driver_pids.lock().expect("driver PID lock poisoned");
+        let mut owners = lock_or_recover(&self.driver_pids);
         owners.entry(driver_name.clone()).or_default().insert(pid);
         if let Some(requester) = options.requester_driver {
             owners.entry(requester).or_default().insert(pid);
@@ -635,7 +633,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         self.assert_driver_owns(requester_driver, pid)?;
         self.resources
             .check_pipe_allocation(&self.resource_snapshot())?;
-        let mut tables = self.fd_tables.lock().expect("FD table lock poisoned");
+        let mut tables = lock_or_recover(&self.fd_tables);
         let table = tables
             .get_mut(pid)
             .ok_or_else(|| KernelError::no_such_process(pid))?;
@@ -651,7 +649,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         self.assert_driver_owns(requester_driver, pid)?;
         self.resources
             .check_pty_allocation(&self.resource_snapshot())?;
-        let mut tables = self.fd_tables.lock().expect("FD table lock poisoned");
+        let mut tables = lock_or_recover(&self.fd_tables);
         let table = tables
             .get_mut(pid)
             .ok_or_else(|| KernelError::no_such_process(pid))?;
@@ -669,7 +667,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         self.assert_not_terminated()?;
         self.assert_driver_owns(requester_driver, pid)?;
         if let Some(existing_fd) = parse_dev_fd_path(path)? {
-            let mut tables = self.fd_tables.lock().expect("FD table lock poisoned");
+            let mut tables = lock_or_recover(&self.fd_tables);
             let table = tables
                 .get_mut(pid)
                 .ok_or_else(|| KernelError::no_such_process(pid))?;
@@ -677,7 +675,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         }
 
         let filetype = self.prepare_fd_open(path, flags)?;
-        let mut tables = self.fd_tables.lock().expect("FD table lock poisoned");
+        let mut tables = lock_or_recover(&self.fd_tables);
         let table = tables
             .get_mut(pid)
             .ok_or_else(|| KernelError::no_such_process(pid))?;
@@ -693,7 +691,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
     ) -> KernelResult<Vec<u8>> {
         self.assert_driver_owns(requester_driver, pid)?;
         let entry = {
-            let tables = self.fd_tables.lock().expect("FD table lock poisoned");
+            let tables = lock_or_recover(&self.fd_tables);
             tables
                 .get(pid)
                 .and_then(|table| table.get(fd))
@@ -737,7 +735,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
     ) -> KernelResult<usize> {
         self.assert_driver_owns(requester_driver, pid)?;
         let entry = {
-            let tables = self.fd_tables.lock().expect("FD table lock poisoned");
+            let tables = lock_or_recover(&self.fd_tables);
             tables
                 .get(pid)
                 .and_then(|table| table.get(fd))
@@ -794,7 +792,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
     ) -> KernelResult<u64> {
         self.assert_driver_owns(requester_driver, pid)?;
         let entry = {
-            let tables = self.fd_tables.lock().expect("FD table lock poisoned");
+            let tables = lock_or_recover(&self.fd_tables);
             tables
                 .get(pid)
                 .and_then(|table| table.get(fd))
@@ -837,7 +835,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
     ) -> KernelResult<Vec<u8>> {
         self.assert_driver_owns(requester_driver, pid)?;
         let entry = {
-            let tables = self.fd_tables.lock().expect("FD table lock poisoned");
+            let tables = lock_or_recover(&self.fd_tables);
             tables
                 .get(pid)
                 .and_then(|table| table.get(fd))
@@ -867,7 +865,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
     ) -> KernelResult<usize> {
         self.assert_driver_owns(requester_driver, pid)?;
         let entry = {
-            let tables = self.fd_tables.lock().expect("FD table lock poisoned");
+            let tables = lock_or_recover(&self.fd_tables);
             tables
                 .get(pid)
                 .and_then(|table| table.get(fd))
@@ -894,7 +892,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
     pub fn fd_dup(&mut self, requester_driver: &str, pid: u32, fd: u32) -> KernelResult<u32> {
         self.assert_driver_owns(requester_driver, pid)?;
-        let mut tables = self.fd_tables.lock().expect("FD table lock poisoned");
+        let mut tables = lock_or_recover(&self.fd_tables);
         let table = tables
             .get_mut(pid)
             .ok_or_else(|| KernelError::no_such_process(pid))?;
@@ -910,7 +908,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
     ) -> KernelResult<()> {
         self.assert_driver_owns(requester_driver, pid)?;
         let replaced = {
-            let mut tables = self.fd_tables.lock().expect("FD table lock poisoned");
+            let mut tables = lock_or_recover(&self.fd_tables);
             let table = tables
                 .get_mut(pid)
                 .ok_or_else(|| KernelError::no_such_process(pid))?;
@@ -932,7 +930,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
     pub fn fd_close(&mut self, requester_driver: &str, pid: u32, fd: u32) -> KernelResult<()> {
         self.assert_driver_owns(requester_driver, pid)?;
         let (description, filetype) = {
-            let mut tables = self.fd_tables.lock().expect("FD table lock poisoned");
+            let mut tables = lock_or_recover(&self.fd_tables);
             let table = tables
                 .get_mut(pid)
                 .ok_or_else(|| KernelError::no_such_process(pid))?;
@@ -949,7 +947,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
     pub fn fd_stat(&self, requester_driver: &str, pid: u32, fd: u32) -> KernelResult<FdStat> {
         self.assert_driver_owns(requester_driver, pid)?;
-        let tables = self.fd_tables.lock().expect("FD table lock poisoned");
+        let tables = lock_or_recover(&self.fd_tables);
         Ok(tables
             .get(pid)
             .ok_or_else(|| KernelError::no_such_process(pid))?
@@ -959,7 +957,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
     pub fn isatty(&self, requester_driver: &str, pid: u32, fd: u32) -> KernelResult<bool> {
         self.assert_driver_owns(requester_driver, pid)?;
         let entry = {
-            let tables = self.fd_tables.lock().expect("FD table lock poisoned");
+            let tables = lock_or_recover(&self.fd_tables);
             tables
                 .get(pid)
                 .and_then(|table| table.get(fd))
@@ -1035,6 +1033,24 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
     pub fn setpgid(&self, requester_driver: &str, pid: u32, pgid: u32) -> KernelResult<()> {
         self.assert_driver_owns(requester_driver, pid)?;
+        let target_pgid = if pgid == 0 { pid } else { pgid };
+        if target_pgid != pid {
+            if let Some(group_owner) =
+                self.processes
+                    .list_processes()
+                    .into_values()
+                    .find(|process| {
+                        process.pgid == target_pgid && process.status == ProcessStatus::Running
+                    })
+            {
+                if group_owner.driver != requester_driver {
+                    return Err(KernelError::permission_denied(format!(
+                        "driver \"{requester_driver}\" cannot join process group {target_pgid} owned by \"{}\"",
+                        group_owner.driver
+                    )));
+                }
+            }
+        }
         self.processes.setpgid(pid, pgid)?;
         Ok(())
     }
@@ -1066,7 +1082,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
     pub fn dev_fd_read_dir(&self, requester_driver: &str, pid: u32) -> KernelResult<Vec<String>> {
         self.assert_driver_owns(requester_driver, pid)?;
-        let tables = self.fd_tables.lock().expect("FD table lock poisoned");
+        let tables = lock_or_recover(&self.fd_tables);
         let table = tables
             .get(pid)
             .ok_or_else(|| KernelError::no_such_process(pid))?;
@@ -1081,7 +1097,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
     ) -> KernelResult<VirtualStat> {
         self.assert_driver_owns(requester_driver, pid)?;
         let entry = {
-            let tables = self.fd_tables.lock().expect("FD table lock poisoned");
+            let tables = lock_or_recover(&self.fd_tables);
             tables
                 .get(pid)
                 .and_then(|table| table.get(fd))
@@ -1102,18 +1118,11 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         }
 
         self.processes.terminate_all();
-        let pids = self
-            .fd_tables
-            .lock()
-            .expect("FD table lock poisoned")
-            .pids();
+        let pids = lock_or_recover(&self.fd_tables).pids();
         for pid in pids {
             self.cleanup_process_resources(pid);
         }
-        self.driver_pids
-            .lock()
-            .expect("driver PID lock poisoned")
-            .clear();
+        lock_or_recover(&self.driver_pids).clear();
         self.terminated = true;
         Ok(())
     }
@@ -1150,9 +1159,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         fd: u32,
     ) -> KernelResult<Arc<FileDescription>> {
         self.assert_driver_owns(requester_driver, pid)?;
-        self.fd_tables
-            .lock()
-            .expect("FD table lock poisoned")
+        lock_or_recover(&self.fd_tables)
             .get(pid)
             .and_then(|table| table.get(fd))
             .map(|entry| Arc::clone(&entry.description))
@@ -1168,7 +1175,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
     }
 
     fn assert_driver_owns(&self, requester_driver: &str, pid: u32) -> KernelResult<()> {
-        let driver_pids = self.driver_pids.lock().expect("driver PID lock poisoned");
+        let driver_pids = lock_or_recover(&self.driver_pids);
         if driver_pids
             .get(requester_driver)
             .map(|pids| pids.contains(&pid))
@@ -1459,7 +1466,7 @@ struct StubDriverProcess {
 impl StubDriverProcess {
     fn finish(&self, exit_code: i32) {
         let callback = {
-            let mut state = self.state.lock().expect("stub process lock poisoned");
+            let mut state = lock_or_recover(&self.state);
             if state.exit_code.is_some() {
                 return;
             }
@@ -1474,39 +1481,32 @@ impl StubDriverProcess {
     }
 
     fn kill_signals(&self) -> Vec<i32> {
-        self.state
-            .lock()
-            .expect("stub process lock poisoned")
-            .kill_signals
-            .clone()
+        lock_or_recover(&self.state).kill_signals.clone()
     }
 }
 
 impl DriverProcess for StubDriverProcess {
     fn kill(&self, signal: i32) {
         {
-            let mut state = self.state.lock().expect("stub process lock poisoned");
+            let mut state = lock_or_recover(&self.state);
             state.kill_signals.push(signal);
         }
         self.finish(128 + signal);
     }
 
     fn wait(&self, timeout: Duration) -> Option<i32> {
-        let state = self.state.lock().expect("stub process lock poisoned");
+        let state = lock_or_recover(&self.state);
         if let Some(code) = state.exit_code {
             return Some(code);
         }
 
-        let (state, _) = self
-            .waiters
-            .wait_timeout(state, timeout)
-            .expect("stub process wait lock poisoned");
+        let (state, _) = wait_timeout_or_recover(&self.waiters, state, timeout);
         state.exit_code
     }
 
     fn set_on_exit(&self, callback: ProcessExitCallback) {
         let maybe_exit = {
-            let mut state = self.state.lock().expect("stub process lock poisoned");
+            let mut state = lock_or_recover(&self.state);
             state.on_exit = Some(callback.clone());
             state.exit_code
         };
@@ -1520,6 +1520,24 @@ impl DriverProcess for StubDriverProcess {
 impl From<VfsError> for KernelError {
     fn from(error: VfsError) -> Self {
         map_error(error.code(), error.to_string())
+    }
+}
+
+fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn wait_timeout_or_recover<'a, T>(
+    condvar: &Condvar,
+    guard: MutexGuard<'a, T>,
+    timeout: Duration,
+) -> (MutexGuard<'a, T>, WaitTimeoutResult) {
+    match condvar.wait_timeout(guard, timeout) {
+        Ok(result) => result,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -1711,4 +1729,61 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vfs::MemoryFileSystem;
+
+    #[test]
+    fn setpgid_rejects_joining_a_process_group_owned_by_another_driver() {
+        let kernel = KernelVm::new(MemoryFileSystem::new(), KernelVmConfig::new("vm-setpgid"));
+
+        let leader_pid = kernel.processes.allocate_pid();
+        kernel.processes.register(
+            leader_pid,
+            String::from("driver-a"),
+            String::from("sh"),
+            Vec::new(),
+            ProcessContext {
+                pid: leader_pid,
+                ppid: 0,
+                env: BTreeMap::new(),
+                cwd: String::from("/"),
+                fds: Default::default(),
+            },
+            Arc::new(StubDriverProcess::default()),
+        );
+
+        let peer_pid = kernel.processes.allocate_pid();
+        kernel.processes.register(
+            peer_pid,
+            String::from("driver-b"),
+            String::from("sh"),
+            Vec::new(),
+            ProcessContext {
+                pid: peer_pid,
+                ppid: leader_pid,
+                env: BTreeMap::new(),
+                cwd: String::from("/"),
+                fds: Default::default(),
+            },
+            Arc::new(StubDriverProcess::default()),
+        );
+
+        lock_or_recover(&kernel.driver_pids)
+            .entry(String::from("driver-a"))
+            .or_default()
+            .insert(leader_pid);
+        lock_or_recover(&kernel.driver_pids)
+            .entry(String::from("driver-b"))
+            .or_default()
+            .insert(peer_pid);
+
+        let error = kernel
+            .setpgid("driver-b", peer_pid, leader_pid)
+            .expect_err("cross-driver process-group join should be denied");
+        assert_eq!(error.code(), "EPERM");
+    }
 }

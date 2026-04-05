@@ -628,7 +628,7 @@
         "Typecheck passes"
       ],
       "priority": 34,
-      "passes": false,
+      "passes": true,
       "notes": "fs::canonicalize + ensure_within_root has TOCTOU race. setpgid allows cross-driver group joining. Inconsistent mutex handling."
     },
     {

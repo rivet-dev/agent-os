@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Sidecar `host_dir` mounts should anchor guest path resolution with `openat2(..., RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` and translate kernel `EXDEV` escape rejections back to guest-facing `EACCES`.
 - Python VFS RPCs are intentionally scoped to `/workspace`; normalize and reject anything outside that guest root in `crates/sidecar/src/service.rs` before touching the kernel VFS.
 - Pyodide VFS RPC timeouts are safer to enforce in `crates/execution/src/python.rs` against pending request IDs than inside the embedded runner; touching the bundled Python runner can perturb real Pyodide bootstrap behavior.
 - Non-reaping host child liveness checks in `crates/sidecar/src/service.rs` should use `waitid(..., WNOWAIT | WNOHANG | WEXITED | WSTOPPED | WCONTINUED)`; `waitpid` does not provide a safe non-reaping probe for the PID-reuse hardening path.
@@ -697,4 +698,19 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Python VFS RPC validation belongs on the sidecar boundary, not in the guest bridge alone; normalizing `/workspace` paths centrally prevents `..` escapes before kernel permission checks run.
   - Gotchas encountered: Trying to push the timeout into the embedded Pyodide runner can break real bundled Pyodide bootstrap (`process.binding` access during warmup); the safer timeout enforcement point is the Rust execution layer where pending RPC IDs are already visible.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test python`, and `cargo test -p agent-os-sidecar python_vfs_rpc -- --test-threads=1` pass after this change. `cargo test -p agent-os-sidecar --test python -- --test-threads=1` is still failing on the pre-existing Pyodide hardening-order regression tracked separately by `US-035` (`process.binding` denied during warmup).
+---
+## 2026-04-05 03:49:26 PDT - US-039
+- What was implemented
+- Replaced the sidecar `host_dir` mount’s `canonicalize`-then-open flow with anchored `openat2(..., RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` resolution plus descriptor-relative `mkdirat`/`unlinkat`/`renameat`/`linkat`/`readlinkat` handling, so symlink swaps cannot race guest paths out of the mounted host root.
+- Hardened `KernelVm::setpgid` to reject joining a live process group owned by a different driver, and added a kernel unit test that exercises the cross-driver join attempt directly.
+- Normalized `crates/kernel/src/kernel.rs` onto the recover-on-poison mutex policy already used by the other kernel managers by replacing the remaining lock poisoning `.expect(...)` sites with shared helpers.
+- Files changed
+- `crates/sidecar/src/host_dir_plugin.rs`
+- `crates/kernel/src/kernel.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Safe native `host_dir` operations are easiest to keep correct if the code either stays on the `openat2`-resolved descriptor directly or uses its `/proc/self/fd/<n>` anchor while that descriptor remains open.
+  - Gotchas encountered: Linux reports `RESOLVE_BENEATH` escape attempts as `EXDEV`; the guest-facing sidecar layer should translate that back to `EACCES` so callers keep treating path escapes as access denial.
+  - Useful context: `cargo test -p agent-os-sidecar host_dir_plugin -- --test-threads=1`, `cargo test -p agent-os-kernel setpgid_rejects_joining_a_process_group_owned_by_another_driver -- --test-threads=1`, and `cargo check -p agent-os-kernel -p agent-os-sidecar` pass after this change.
 ---
