@@ -14,6 +14,8 @@ pub const MAX_CANON: usize = 4_096;
 pub const SIGINT: i32 = 2;
 pub const SIGQUIT: i32 = 3;
 pub const SIGTSTP: i32 = 20;
+const DEFAULT_PTY_COLUMNS: u16 = 80;
+const DEFAULT_PTY_ROWS: u16 = 24;
 
 pub type PtyResult<T> = Result<T, PtyError>;
 pub type SignalHandler = Arc<dyn Fn(u32, i32) + Send + Sync>;
@@ -104,6 +106,21 @@ pub struct PartialTermiosControlChars {
     pub vsusp: Option<u8>,
     pub veof: Option<u8>,
     pub verase: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PtyWindowSize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+impl Default for PtyWindowSize {
+    fn default() -> Self {
+        Self {
+            cols: DEFAULT_PTY_COLUMNS,
+            rows: DEFAULT_PTY_ROWS,
+        }
+    }
 }
 
 impl Default for Termios {
@@ -214,6 +231,7 @@ struct PtyState {
     termios: Termios,
     line_buffer: Vec<u8>,
     foreground_pgid: u32,
+    window_size: PtyWindowSize,
 }
 
 #[derive(Debug)]
@@ -308,6 +326,7 @@ impl PtyManager {
             PtyState {
                 path: path.clone(),
                 termios: Termios::default(),
+                window_size: PtyWindowSize::default(),
                 ..PtyState::default()
             },
         );
@@ -746,6 +765,25 @@ impl PtyManager {
             .get(&pty_ref.pty_id)
             .map(|pty| pty.foreground_pgid)
             .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))
+    }
+
+    pub fn resize(&self, description_id: u64, cols: u16, rows: u16) -> PtyResult<Option<u32>> {
+        let mut state = lock_or_recover(&self.inner.state);
+        let pty_ref = state
+            .desc_to_pty
+            .get(&description_id)
+            .copied()
+            .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
+        let pty = state
+            .ptys
+            .get_mut(&pty_ref.pty_id)
+            .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))?;
+        let next_size = PtyWindowSize { cols, rows };
+        if pty.window_size == next_size {
+            return Ok(None);
+        }
+        pty.window_size = next_size;
+        Ok((pty.foreground_pgid > 0).then_some(pty.foreground_pgid))
     }
 
     pub fn pty_count(&self) -> usize {

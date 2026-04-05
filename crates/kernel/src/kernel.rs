@@ -17,7 +17,7 @@ use crate::poll::{
 };
 use crate::process_table::{
     DriverProcess, ProcessContext, ProcessExitCallback, ProcessInfo, ProcessStatus, ProcessTable,
-    ProcessTableError, ProcessWaitResult, SIGPIPE,
+    ProcessTableError, ProcessWaitResult, SIGCONT, SIGPIPE, SIGSTOP, SIGTSTP, SIGWINCH,
 };
 use crate::pty::{LineDisciplineConfig, PartialTermios, PtyError, PtyManager, Termios};
 use crate::resource_accounting::{
@@ -1455,6 +1455,26 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(self.ptys.get_foreground_pgid(description.id())?)
     }
 
+    pub fn pty_resize(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        cols: u16,
+        rows: u16,
+    ) -> KernelResult<()> {
+        let description = self.description_for_fd(requester_driver, pid, fd)?;
+        let target_pgid = self.ptys.resize(description.id(), cols, rows)?;
+        if let Some(pgid) = target_pgid {
+            match self.processes.kill(-(pgid as i32), SIGWINCH) {
+                Ok(()) => {}
+                Err(error) if error.code() == "ESRCH" => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
     pub fn kill_process(&self, requester_driver: &str, pid: u32, signal: i32) -> KernelResult<()> {
         self.assert_driver_owns(requester_driver, pid)?;
         self.processes.kill(pid as i32, signal)?;
@@ -2599,7 +2619,10 @@ impl DriverProcess for StubDriverProcess {
             let mut state = lock_or_recover(&self.state);
             state.kill_signals.push(signal);
         }
-        if signal == crate::process_table::SIGCHLD {
+        if matches!(
+            signal,
+            crate::process_table::SIGCHLD | SIGCONT | SIGSTOP | SIGTSTP | SIGWINCH
+        ) {
             return;
         }
         self.finish(128 + signal);

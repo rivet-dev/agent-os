@@ -1189,7 +1189,7 @@
         "Typecheck passes"
       ],
       "priority": 75,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: ProcessStatus::Stopped exists but is unreachable. No SIGSTOP/SIGCONT mechanism. No SIGWINCH on PTY resize. Shell job control broken."
     },
     {

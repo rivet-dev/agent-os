@@ -1,6 +1,6 @@
 use agent_os_kernel::process_table::{
     DriverProcess, ProcessContext, ProcessExitCallback, ProcessResult, ProcessStatus, ProcessTable,
-    ProcessWaitEvent, WaitPidFlags, SIGCHLD, SIGCONT, SIGHUP, SIGSTOP,
+    ProcessWaitEvent, WaitPidFlags, SIGCHLD, SIGCONT, SIGHUP, SIGSTOP, SIGTSTP,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -448,6 +448,85 @@ fn kill_routes_signals_and_validates_process_existence() {
     assert_error_code(table.kill(999, 15), "ESRCH");
     assert_error_code(table.kill(pid as i32, -1), "EINVAL");
     assert_error_code(table.kill(pid as i32, 100), "EINVAL");
+}
+
+#[test]
+fn kill_updates_job_control_state_for_stop_and_continue_signals() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let parent = MockDriverProcess::new();
+    let child = MockDriverProcess::new();
+
+    let parent_pid = table.allocate_pid();
+    let child_pid = table.allocate_pid();
+    table.register(
+        parent_pid,
+        "wasmvm",
+        "parent",
+        Vec::new(),
+        create_context(0),
+        parent.clone(),
+    );
+    table.register(
+        child_pid,
+        "wasmvm",
+        "child",
+        Vec::new(),
+        create_context(parent_pid),
+        child.clone(),
+    );
+
+    table
+        .kill(child_pid as i32, SIGTSTP)
+        .expect("SIGTSTP should stop the child");
+    assert_eq!(child.kills(), vec![SIGTSTP]);
+    assert_eq!(
+        table
+            .get(child_pid)
+            .expect("child remains registered")
+            .status,
+        ProcessStatus::Stopped
+    );
+    assert_eq!(
+        table
+            .waitpid_for(
+                parent_pid,
+                child_pid as i32,
+                WaitPidFlags::WNOHANG | WaitPidFlags::WUNTRACED,
+            )
+            .expect("stopped child wait should succeed"),
+        Some(agent_os_kernel::process_table::ProcessWaitResult {
+            pid: child_pid,
+            status: SIGTSTP,
+            event: ProcessWaitEvent::Stopped,
+        })
+    );
+
+    table
+        .kill(child_pid as i32, SIGCONT)
+        .expect("SIGCONT should continue the child");
+    assert_eq!(child.kills(), vec![SIGTSTP, SIGCONT]);
+    assert_eq!(
+        table
+            .get(child_pid)
+            .expect("child remains registered")
+            .status,
+        ProcessStatus::Running
+    );
+    assert_eq!(
+        table
+            .waitpid_for(
+                parent_pid,
+                child_pid as i32,
+                WaitPidFlags::WNOHANG | WaitPidFlags::WCONTINUED,
+            )
+            .expect("continued child wait should succeed"),
+        Some(agent_os_kernel::process_table::ProcessWaitResult {
+            pid: child_pid,
+            status: SIGCONT,
+            event: ProcessWaitEvent::Continued,
+        })
+    );
+    assert_eq!(parent.kills(), vec![SIGCHLD, SIGCHLD]);
 }
 
 #[test]

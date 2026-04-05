@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Job-control signal state transitions should be split by layer: `crates/kernel/src/process_table.rs` owns `SIGSTOP`/`SIGTSTP`/`SIGCONT` status changes and `waitpid` notifications, while `crates/kernel/src/kernel.rs` should emit PTY-driven `SIGWINCH` after the PTY layer reports the foreground process group.
 - Guest path scrubbing in `crates/execution/src/node_import_cache.rs` should treat `HOST_CWD` as an implicit runtime-only mapping to the virtual guest cwd for entrypoint loading and stack traces, and only fall back to `/unknown` for absolute host paths outside visible mappings or internal cache roots.
 - Sidecar-managed loopback `net.listen` / `dgram.bind` now separate guest-visible ports from hidden host-bound ports; use guest ports in RPC responses and snapshots, but use the actual host listener port when a host-side test client needs to connect directly.
 - JavaScript sync RPC timeout and backpressure belong in `crates/execution/src/javascript.rs`: track the pending request ID on the host, auto-emit `ERR_AGENT_OS_NODE_SYNC_RPC_TIMEOUT` there, queue replies through a bounded async writer so slow guest reads cannot block the sidecar thread, and let `crates/sidecar/src/service.rs` ignore stale `sync RPC request ... is no longer pending` races after timeout.
@@ -1395,4 +1396,25 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Guest path scrubbing should treat the actual `HOST_CWD` as an implicit runtime-only mapping to the virtual guest cwd so entrypoint loading, `process.cwd()`, and stack traces stay coherent without revealing the host path.
   - Gotchas encountered: Internal Node import-cache asset paths and explicit virtual OS paths are already guest-visible surfaces; scrubbing them to `/unknown` breaks loader startup (`register.mjs` / `timing-bootstrap.mjs`) and regresses `os.userInfo().shell`.
   - Useful context: `cargo fmt --all`, `cargo check -p agent-os-execution`, and `cargo test -p agent-os-execution --test javascript -- --nocapture --test-threads=1` all pass after this change.
+---
+## 2026-04-05 11:23:54 PDT - US-075
+- What was implemented
+- Updated `crates/kernel/src/process_table.rs` so `kill(...)` now treats `SIGSTOP` and `SIGTSTP` as stop transitions, treats `SIGCONT` as a resume transition, and queues the matching `waitpid` stop/continue notifications instead of leaving `ProcessStatus::Stopped` unreachable.
+- Added PTY window-size state in `crates/kernel/src/pty.rs` plus a new `KernelVm::pty_resize(...)` entrypoint in `crates/kernel/src/kernel.rs` that emits `SIGWINCH` to the foreground process group only when the PTY size actually changes.
+- Widened `crates/sidecar/src/service.rs` guest signal parsing so sidecar `killProcess(..., "SIGSTOP")` matches the hardened kernel semantics.
+- Added focused regressions for process-table job control transitions, PTY resize `SIGWINCH`, the PTY unit surface, the sidecar signal parser, and the existing native-sidecar end-to-end `SIGSTOP`/`SIGCONT` process-control path.
+- Files changed
+- `AGENTS.md`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/src/process_table.rs`
+- `crates/kernel/src/pty.rs`
+- `crates/kernel/tests/api_surface.rs`
+- `crates/kernel/tests/process_table.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Job-control signal state transitions should be split by layer: `ProcessTable::kill(...)` owns `SIGSTOP`/`SIGTSTP`/`SIGCONT` status changes and `waitpid` notifications, while `KernelVm` entrypoints should emit PTY-driven `SIGWINCH` after the PTY layer reports the foreground process group.
+  - Gotchas encountered: The kernel’s stub driver treats any signal as fatal unless explicitly exempted, so kernel tests that add non-terminating signals such as `SIGSTOP`, `SIGCONT`, `SIGTSTP`, or `SIGWINCH` must keep `StubDriverProcess::kill(...)` aligned with Linux job-control semantics.
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-kernel -p agent-os-sidecar`, `cargo test -p agent-os-kernel --test process_table -- --nocapture`, `cargo test -p agent-os-kernel --test api_surface -- --nocapture`, `cargo test -p agent-os-kernel --test pty -- --nocapture`, `cargo test -p agent-os-sidecar parse_signal_only_accepts_whitelisted_guest_signals -- --nocapture`, and `pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts -t "delivers SIGSTOP and SIGCONT through killProcess"` all pass after this change.
 ---

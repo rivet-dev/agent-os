@@ -9,7 +9,7 @@ use agent_os_kernel::kernel::{
 use agent_os_kernel::mount_table::{MountOptions, MountTable};
 use agent_os_kernel::permissions::Permissions;
 use agent_os_kernel::pipe_manager::MAX_PIPE_BUFFER_BYTES;
-use agent_os_kernel::process_table::ProcessWaitEvent;
+use agent_os_kernel::process_table::{ProcessWaitEvent, SIGWINCH};
 use agent_os_kernel::vfs::{
     MemoryFileSystem, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
 };
@@ -986,6 +986,35 @@ fn open_shell_configures_pty_and_exec_uses_shell_driver() {
 
     exec.finish(0);
     kernel.waitpid(exec.pid()).expect("wait exec");
+}
+
+#[test]
+fn pty_resize_delivers_sigwinch_to_the_foreground_process_group() {
+    let mut config = KernelVmConfig::new("vm-api-shell");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let shell = kernel
+        .open_shell(OpenShellOptions {
+            requester_driver: Some(String::from("shell")),
+            ..OpenShellOptions::default()
+        })
+        .expect("open shell");
+
+    kernel
+        .pty_resize("shell", shell.pid(), shell.master_fd(), 120, 40)
+        .expect("resize shell pty");
+    kernel
+        .pty_resize("shell", shell.pid(), shell.master_fd(), 120, 40)
+        .expect("repeat shell pty resize");
+
+    assert_eq!(shell.process().kill_signals(), vec![SIGWINCH]);
+
+    shell.process().finish(0);
+    kernel.waitpid(shell.pid()).expect("wait shell");
 }
 
 #[test]

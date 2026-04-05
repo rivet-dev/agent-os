@@ -8379,7 +8379,7 @@ fn parse_signal(signal: &str) -> Result<i32, SidecarError> {
 
     if let Ok(value) = trimmed.parse::<i32>() {
         return match value {
-            0 | libc::SIGINT | SIGKILL | SIGTERM | libc::SIGCONT => Ok(value),
+            0 | libc::SIGINT | SIGKILL | SIGTERM | libc::SIGCONT | libc::SIGSTOP => Ok(value),
             _ => Err(SidecarError::InvalidState(format!(
                 "unsupported kill_process signal {signal}"
             ))),
@@ -8400,6 +8400,7 @@ fn signal_number_from_name(signal: &str) -> Option<i32> {
         "KILL" => Some(SIGKILL),
         "TERM" => Some(SIGTERM),
         "CONT" => Some(libc::SIGCONT),
+        "STOP" => Some(libc::SIGSTOP),
         _ => None,
     }
 }
@@ -9045,9 +9046,12 @@ ykAheWCsAteSEWVc0w==\n\
             parse_signal("SIGCONT").expect("parse SIGCONT"),
             libc::SIGCONT
         );
+        assert_eq!(
+            parse_signal("SIGSTOP").expect("parse SIGSTOP"),
+            libc::SIGSTOP
+        );
         assert_eq!(parse_signal("0").expect("parse signal 0"), 0);
         assert!(parse_signal("SIGUSR1").is_err());
-        assert!(parse_signal("SIGSTOP").is_err());
     }
 
     #[test]

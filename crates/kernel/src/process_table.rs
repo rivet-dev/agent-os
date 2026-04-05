@@ -13,9 +13,11 @@ pub const SIGHUP: i32 = 1;
 pub const SIGCHLD: i32 = 17;
 pub const SIGCONT: i32 = 18;
 pub const SIGSTOP: i32 = 19;
+pub const SIGTSTP: i32 = 20;
 pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
 pub const SIGPIPE: i32 = 13;
+pub const SIGWINCH: i32 = 28;
 
 pub type ProcessResult<T> = Result<T, ProcessTableError>;
 pub type ProcessExitCallback = Arc<dyn Fn(i32) + Send + Sync + 'static>;
@@ -479,7 +481,13 @@ impl ProcessTable {
                     .entries
                     .values()
                     .filter(|record| record.entry.pgid == pgid)
-                    .map(|record| Arc::clone(&record.driver_process))
+                    .map(|record| {
+                        (
+                            record.entry.pid,
+                            record.entry.status,
+                            Arc::clone(&record.driver_process),
+                        )
+                    })
                     .collect();
                 if grouped.is_empty() {
                     return Err(ProcessTableError::no_such_process_group(pgid));
@@ -493,7 +501,11 @@ impl ProcessTable {
                 if record.entry.status == ProcessStatus::Exited || signal == 0 {
                     return Ok(());
                 }
-                vec![Arc::clone(&record.driver_process)]
+                vec![(
+                    record.entry.pid,
+                    record.entry.status,
+                    Arc::clone(&record.driver_process),
+                )]
             }
         };
 
@@ -501,8 +513,22 @@ impl ProcessTable {
             return Ok(());
         }
 
-        for driver in targets {
+        let mut stopped = Vec::new();
+        let mut continued = Vec::new();
+        for (target_pid, status, driver) in &targets {
+            match signal {
+                SIGSTOP | SIGTSTP if *status == ProcessStatus::Running => stopped.push(*target_pid),
+                SIGCONT if *status == ProcessStatus::Stopped => continued.push(*target_pid),
+                _ => {}
+            }
             driver.kill(signal);
+        }
+
+        for pid in stopped {
+            self.mark_stopped(pid, signal);
+        }
+        for pid in continued {
+            self.mark_continued(pid);
         }
         Ok(())
     }
