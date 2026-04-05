@@ -50,6 +50,7 @@ const DEFAULT_ALLOWED_NODE_BUILTINS = [
 	"console",
 	"child_process",
 	"crypto",
+	"dns",
 	"events",
 	"fs",
 	"os",

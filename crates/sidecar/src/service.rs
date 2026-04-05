@@ -74,7 +74,8 @@ use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{
-    Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket,
+    IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
+    UdpSocket,
 };
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -4995,6 +4996,20 @@ struct JavascriptDgramSendRequest {
     port: u16,
 }
 
+#[derive(Debug, Deserialize)]
+struct JavascriptDnsLookupRequest {
+    hostname: String,
+    #[serde(default)]
+    family: Option<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JavascriptDnsResolveRequest {
+    hostname: String,
+    #[serde(default)]
+    rrtype: Option<String>,
+}
+
 fn resolve_tcp_bind_addr(host: &str, port: u16) -> Result<SocketAddr, SidecarError> {
     (host, port)
         .to_socket_addrs()
@@ -5013,6 +5028,59 @@ fn resolve_tcp_connect_addr(host: &str, port: u16) -> Result<SocketAddr, Sidecar
         .ok_or_else(|| {
             SidecarError::Execution(format!("failed to resolve TCP address {host}:{port}"))
         })
+}
+
+fn resolve_dns_ip_addrs(hostname: &str) -> Result<Vec<IpAddr>, SidecarError> {
+    if let Ok(ip_addr) = hostname.parse::<IpAddr>() {
+        return Ok(vec![ip_addr]);
+    }
+
+    let mut addresses = Vec::new();
+    let mut seen = BTreeSet::new();
+    for addr in (hostname, 0).to_socket_addrs().map_err(sidecar_net_error)? {
+        let ip = addr.ip();
+        if seen.insert(ip) {
+            addresses.push(ip);
+        }
+    }
+
+    if addresses.is_empty() {
+        return Err(SidecarError::Execution(format!(
+            "failed to resolve DNS address {hostname}"
+        )));
+    }
+
+    Ok(addresses)
+}
+
+fn filter_dns_ip_addrs(
+    addresses: Vec<IpAddr>,
+    family: Option<u8>,
+) -> Result<Vec<IpAddr>, SidecarError> {
+    let filtered: Vec<_> = match family.unwrap_or(0) {
+        0 => addresses,
+        4 => addresses
+            .into_iter()
+            .filter(|ip| matches!(ip, IpAddr::V4(_)))
+            .collect(),
+        6 => addresses
+            .into_iter()
+            .filter(|ip| matches!(ip, IpAddr::V6(_)))
+            .collect(),
+        other => {
+            return Err(SidecarError::InvalidState(format!(
+                "unsupported dns family {other}"
+            )))
+        }
+    };
+
+    if filtered.is_empty() {
+        return Err(SidecarError::Execution(String::from(
+            "failed to resolve DNS address for requested family",
+        )));
+    }
+
+    Ok(filtered)
 }
 
 fn resolve_udp_addr(
@@ -5285,6 +5353,9 @@ fn service_javascript_sync_rpc(
     request: &JavascriptSyncRpcRequest,
 ) -> Result<Value, SidecarError> {
     match request.method.as_str() {
+        "dns.lookup" | "dns.resolve" | "dns.resolve4" | "dns.resolve6" => {
+            service_javascript_dns_sync_rpc(request)
+        }
         "net.connect" | "net.listen" | "net.poll" | "net.server_poll" | "net.write"
         | "net.shutdown" | "net.destroy" | "net.server_close" => {
             service_javascript_net_sync_rpc(process, request)
@@ -5293,6 +5364,87 @@ fn service_javascript_sync_rpc(
             service_javascript_dgram_sync_rpc(process, request)
         }
         _ => service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request),
+    }
+}
+
+fn service_javascript_dns_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    match request.method.as_str() {
+        "dns.lookup" => {
+            let payload = request
+                .args
+                .first()
+                .cloned()
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from(
+                        "dns.lookup requires a request payload",
+                    ))
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<JavascriptDnsLookupRequest>(value).map_err(|error| {
+                        SidecarError::InvalidState(format!("invalid dns.lookup payload: {error}"))
+                    })
+                })?;
+            let addresses =
+                filter_dns_ip_addrs(resolve_dns_ip_addrs(&payload.hostname)?, payload.family)?;
+            Ok(Value::Array(
+                addresses
+                    .into_iter()
+                    .map(|ip| {
+                        json!({
+                            "address": ip.to_string(),
+                            "family": if ip.is_ipv6() { 6 } else { 4 },
+                        })
+                    })
+                    .collect(),
+            ))
+        }
+        "dns.resolve" | "dns.resolve4" | "dns.resolve6" => {
+            let payload = request
+                .args
+                .first()
+                .cloned()
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from(
+                        "dns.resolve requires a request payload",
+                    ))
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<JavascriptDnsResolveRequest>(value).map_err(|error| {
+                        SidecarError::InvalidState(format!("invalid dns.resolve payload: {error}"))
+                    })
+                })?;
+            let family = match request.method.as_str() {
+                "dns.resolve4" => Some(4),
+                "dns.resolve6" => Some(6),
+                _ => match payload
+                    .rrtype
+                    .as_deref()
+                    .unwrap_or("A")
+                    .to_ascii_uppercase()
+                    .as_str()
+                {
+                    "A" => Some(4),
+                    "AAAA" => Some(6),
+                    other => {
+                        return Err(SidecarError::InvalidState(format!(
+                            "unsupported dns rrtype {other}"
+                        )))
+                    }
+                },
+            };
+            let addresses = filter_dns_ip_addrs(resolve_dns_ip_addrs(&payload.hostname)?, family)?;
+            Ok(Value::Array(
+                addresses
+                    .into_iter()
+                    .map(|ip| Value::String(ip.to_string()))
+                    .collect(),
+            ))
+        }
+        other => Err(SidecarError::InvalidState(format!(
+            "unsupported JavaScript dns sync RPC method {other}"
+        ))),
     }
 }
 
@@ -8014,6 +8166,135 @@ console.log(JSON.stringify(summary));
         );
         assert!(
             stdout.contains(&format!("\"port\":{port}")),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn javascript_dns_rpc_resolves_localhost() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-dns-rpc-cwd");
+        write_fixture(
+            &cwd.join("entry.mjs"),
+            r#"
+import dns from "node:dns";
+
+const lookup = await dns.promises.lookup("localhost", { all: true });
+const resolve4 = await dns.promises.resolve4("localhost");
+
+console.log(JSON.stringify({ lookup, resolve4 }));
+"#,
+        );
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-dns"),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
+            );
+        }
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = None;
+        for _ in 0..64 {
+            let next_event = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-dns")
+                    .map(|process| {
+                        process
+                            .execution
+                            .poll_event(Duration::from_secs(5))
+                            .expect("poll javascript dns rpc event")
+                    })
+                    .flatten()
+            };
+            let Some(event) = next_event else {
+                if exit_code.is_some() {
+                    break;
+                }
+                panic!("javascript dns process disappeared before exit");
+            };
+
+            match &event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    stdout.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    stderr.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Exited(code) => {
+                    exit_code = Some(*code);
+                }
+                _ => {}
+            }
+
+            sidecar
+                .handle_execution_event(&vm_id, "proc-js-dns", event)
+                .expect("handle javascript dns rpc event");
+        }
+
+        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse dns JSON");
+        assert!(
+            parsed["lookup"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty()),
+            "stdout: {stdout}"
+        );
+        assert!(
+            parsed["resolve4"]
+                .as_array()
+                .is_some_and(|entries| entries.iter().any(|entry| entry == "127.0.0.1")),
             "stdout: {stdout}"
         );
     }

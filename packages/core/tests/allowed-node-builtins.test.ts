@@ -102,6 +102,8 @@ describe("AgentOsOptions.allowedNodeBuiltins", () => {
 	});
 
 	test("uses the hardened default allowlist when guest executions do not override it", async () => {
-		expect(JSON.parse(await captureAllowedNodeBuiltins())).toContain("os");
+		const builtins = JSON.parse(await captureAllowedNodeBuiltins());
+		expect(builtins).toContain("os");
+		expect(builtins).toContain("dns");
 	});
 });

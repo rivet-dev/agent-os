@@ -345,7 +345,7 @@
         "Typecheck passes"
       ],
       "priority": 21,
-      "passes": false,
+      "passes": true,
       "notes": "dns.lookup uses libuv getaddrinfo internally, not node:net \u2014 needs its own interception."
     },
     {

@@ -86,6 +86,7 @@ const FS_PROMISES_ASSET_SPECIFIER = `${BUILTIN_PREFIX}fs-promises`;
 const CHILD_PROCESS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}child-process`;
 const NET_ASSET_SPECIFIER = `${BUILTIN_PREFIX}net`;
 const DGRAM_ASSET_SPECIFIER = `${BUILTIN_PREFIX}dgram`;
+const DNS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}dns`;
 const OS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}os`;
 const DENIED_BUILTINS = new Set([
   'child_process',
@@ -569,6 +570,21 @@ function rewriteBuiltinImports(source, filePath) {
     }
   }
 
+  if (ALLOWED_BUILTINS.has('dns')) {
+    for (const specifier of ['node:dns', 'dns']) {
+      rewritten = replaceBuiltinImportSpecifier(
+        rewritten,
+        specifier,
+        DNS_ASSET_SPECIFIER,
+      );
+      rewritten = replaceBuiltinDynamicImportSpecifier(
+        rewritten,
+        specifier,
+        DNS_ASSET_SPECIFIER,
+      );
+    }
+  }
+
   if (ALLOWED_BUILTINS.has('os')) {
     for (const specifier of ['node:os', 'os']) {
       rewritten = replaceBuiltinImportSpecifier(
@@ -668,6 +684,10 @@ function resolveBuiltinAsset(specifier, context) {
     case 'dgram':
       return ALLOWED_BUILTINS.has('dgram')
         ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'dgram.mjs'))
+        : null;
+    case 'dns':
+      return ALLOWED_BUILTINS.has('dns')
+        ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'dns.mjs'))
         : null;
     case 'os':
       return ALLOWED_BUILTINS.has('os')
@@ -1647,6 +1667,7 @@ const hostRequire = Module.createRequire(import.meta.url);
 const hostOs = hostRequire('node:os');
 const hostNet = hostRequire('node:net');
 const hostDgram = hostRequire('node:dgram');
+const hostDns = hostRequire('node:dns');
 const { EventEmitter } = hostRequire('node:events');
 const { Duplex, Readable, Writable } = hostRequire('node:stream');
 const NODE_SYNC_RPC_ENABLE = HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_ENABLE === '1';
@@ -4709,6 +4730,283 @@ function createRpcBackedDgramModule(dgramModule, fromGuestDir = '/') {
   return module;
 }
 
+function createRpcBackedDnsModule(dnsModule) {
+  const bridge = () => requireAgentOsSyncRpcBridge();
+  const dnsConstants = Object.freeze({ ...(dnsModule?.constants ?? {}) });
+  let defaultResultOrder = 'verbatim';
+
+  const createUnsupportedDnsError = (subject) => {
+    const error = new Error(`${subject} is not supported by the Agent OS dns polyfill yet`);
+    error.code = 'ERR_AGENT_OS_DNS_UNSUPPORTED';
+    return error;
+  };
+
+  const normalizeDnsHostname = (hostname, methodName) => {
+    if (typeof hostname !== 'string' || hostname.length === 0) {
+      throw new TypeError(`Agent OS ${methodName} hostname must be a non-empty string`);
+    }
+    return hostname;
+  };
+
+  const normalizeDnsFamily = (value, label, allowAny = true) => {
+    if (value == null) {
+      return allowAny ? 0 : 4;
+    }
+    const numeric =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.length > 0
+          ? Number(value)
+          : Number.NaN;
+    if (
+      !Number.isInteger(numeric) ||
+      (!allowAny && numeric !== 4 && numeric !== 6) ||
+      (allowAny && numeric !== 0 && numeric !== 4 && numeric !== 6)
+    ) {
+      throw new TypeError(
+        `Agent OS ${label} must be ${allowAny ? '0, 4, or 6' : '4 or 6'}`,
+      );
+    }
+    return numeric;
+  };
+
+  const normalizeDnsResultOrder = (value) => {
+    const normalized = value == null ? defaultResultOrder : String(value);
+    if (
+      normalized !== 'verbatim' &&
+      normalized !== 'ipv4first' &&
+      normalized !== 'ipv6first'
+    ) {
+      throw new TypeError(
+        'Agent OS dns result order must be one of verbatim, ipv4first, or ipv6first',
+      );
+    }
+    return normalized;
+  };
+
+  const sortLookupAddresses = (records, order) => {
+    if (!Array.isArray(records) || order === 'verbatim') {
+      return [...records];
+    }
+    const rankFamily = (family) => {
+      if (order === 'ipv4first') {
+        return family === 4 ? 0 : family === 6 ? 1 : 2;
+      }
+      return family === 6 ? 0 : family === 4 ? 1 : 2;
+    };
+    return [...records].sort((left, right) => rankFamily(left.family) - rankFamily(right.family));
+  };
+
+  const normalizeLookupInvocation = (hostname, options, callback) => {
+    let normalizedOptions = {};
+    let done = callback;
+
+    if (typeof options === 'function') {
+      done = options;
+    } else if (typeof options === 'number') {
+      normalizedOptions = { family: options };
+    } else if (options == null) {
+      normalizedOptions = {};
+    } else if (typeof options === 'object') {
+      normalizedOptions = { ...options };
+    } else {
+      throw new TypeError('Agent OS dns.lookup options must be a number, object, or callback');
+    }
+
+    return {
+      callback: done,
+      options: {
+        hostname: normalizeDnsHostname(hostname, 'dns.lookup'),
+        family: normalizeDnsFamily(normalizedOptions.family, 'dns.lookup family'),
+        all: normalizedOptions.all === true,
+        order: normalizeDnsResultOrder(
+          normalizedOptions.order ??
+            (normalizedOptions.verbatim === false ? 'ipv4first' : undefined),
+        ),
+      },
+    };
+  };
+
+  const normalizeResolveInvocation = (methodName, hostname, rrtype, callback) => {
+    let type = rrtype;
+    let done = callback;
+    if (typeof rrtype === 'function') {
+      done = rrtype;
+      type = undefined;
+    }
+    if (type == null) {
+      type = 'A';
+    }
+    const normalizedType = String(type).toUpperCase();
+    if (normalizedType !== 'A' && normalizedType !== 'AAAA') {
+      throw createUnsupportedDnsError(`${methodName}(${normalizedType})`);
+    }
+    return {
+      callback: done,
+      options: {
+        hostname: normalizeDnsHostname(hostname, methodName),
+        rrtype: normalizedType,
+      },
+    };
+  };
+
+  const resolveRecords = (method, options) => bridge().callSync(method, [options]);
+  const lookupRecords = (options) => bridge().callSync('dns.lookup', [options]);
+
+  const lookup = (hostname, options, callback) => {
+    const invocation = normalizeLookupInvocation(hostname, options, callback);
+    const records = sortLookupAddresses(lookupRecords(invocation.options), invocation.options.order);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => {
+        if (invocation.options.all) {
+          invocation.callback(null, records);
+        } else {
+          const first = records[0] ?? { address: null, family: invocation.options.family || 0 };
+          invocation.callback(null, first.address, first.family);
+        }
+      });
+    }
+    return invocation.options.all
+      ? records
+      : {
+          address: records[0]?.address ?? null,
+          family: records[0]?.family ?? (invocation.options.family || 0),
+        };
+  };
+
+  const resolve = (hostname, rrtype, callback) => {
+    const invocation = normalizeResolveInvocation('dns.resolve', hostname, rrtype, callback);
+    const records = resolveRecords('dns.resolve', invocation.options);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => invocation.callback(null, records));
+    }
+    return records;
+  };
+
+  const resolve4 = (hostname, callback) => {
+    const invocation = normalizeResolveInvocation('dns.resolve4', hostname, 'A', callback);
+    const records = resolveRecords('dns.resolve4', invocation.options);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => invocation.callback(null, records));
+    }
+    return records;
+  };
+
+  const resolve6 = (hostname, callback) => {
+    const invocation = normalizeResolveInvocation('dns.resolve6', hostname, 'AAAA', callback);
+    const records = resolveRecords('dns.resolve6', invocation.options);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => invocation.callback(null, records));
+    }
+    return records;
+  };
+
+  class AgentOsResolver {
+    cancel() {}
+
+    getServers() {
+      return [];
+    }
+
+    lookup(hostname, options, callback) {
+      return lookup(hostname, options, callback);
+    }
+
+    resolve(hostname, rrtype, callback) {
+      return resolve(hostname, rrtype, callback);
+    }
+
+    resolve4(hostname, callback) {
+      return resolve4(hostname, callback);
+    }
+
+    resolve6(hostname, callback) {
+      return resolve6(hostname, callback);
+    }
+
+    setServers() {
+      throw createUnsupportedDnsError('dns.Resolver.setServers');
+    }
+  }
+
+  class AgentOsPromisesResolver {
+    cancel() {}
+
+    getServers() {
+      return [];
+    }
+
+    lookup(hostname, options) {
+      return Promise.resolve(lookup(hostname, options));
+    }
+
+    resolve(hostname, rrtype) {
+      return Promise.resolve(resolve(hostname, rrtype));
+    }
+
+    resolve4(hostname) {
+      return Promise.resolve(resolve4(hostname));
+    }
+
+    resolve6(hostname) {
+      return Promise.resolve(resolve6(hostname));
+    }
+
+    setServers() {
+      throw createUnsupportedDnsError('dns.promises.Resolver.setServers');
+    }
+  }
+
+  const promises = Object.freeze({
+    Resolver: AgentOsPromisesResolver,
+    lookup(hostname, options) {
+      return Promise.resolve(lookup(hostname, options));
+    },
+    resolve(hostname, rrtype) {
+      return Promise.resolve(resolve(hostname, rrtype));
+    },
+    resolve4(hostname) {
+      return Promise.resolve(resolve4(hostname));
+    },
+    resolve6(hostname) {
+      return Promise.resolve(resolve6(hostname));
+    },
+  });
+
+  const module = {
+    ADDRCONFIG: dnsConstants.ADDRCONFIG,
+    ALL: dnsConstants.ALL,
+    V4MAPPED: dnsConstants.V4MAPPED,
+    Resolver: AgentOsResolver,
+    constants: dnsConstants,
+    getDefaultResultOrder() {
+      return defaultResultOrder;
+    },
+    getServers() {
+      return [];
+    },
+    lookup,
+    lookupService() {
+      throw createUnsupportedDnsError('dns.lookupService');
+    },
+    promises,
+    resolve,
+    resolve4,
+    resolve6,
+    reverse() {
+      throw createUnsupportedDnsError('dns.reverse');
+    },
+    setDefaultResultOrder(order) {
+      defaultResultOrder = normalizeDnsResultOrder(order);
+    },
+    setServers() {
+      throw createUnsupportedDnsError('dns.setServers');
+    },
+  };
+
+  return module;
+}
+
 const guestRequireCache = new Map();
 let rootGuestRequire = null;
 const hostFs = fs;
@@ -4720,6 +5018,7 @@ globalThis.__agentOsGuestFs = guestFs;
 const guestChildProcess = createRpcBackedChildProcessModule(INITIAL_GUEST_CWD);
 const guestNet = createRpcBackedNetModule(hostNet, INITIAL_GUEST_CWD);
 const guestDgram = createRpcBackedDgramModule(hostDgram, INITIAL_GUEST_CWD);
+const guestDns = createRpcBackedDnsModule(hostDns);
 const guestGetUid = () => VIRTUAL_UID;
 const guestGetGid = () => VIRTUAL_GID;
 const VIRTUAL_OS_HOSTNAME = parseVirtualProcessString(
@@ -5458,6 +5757,9 @@ function installGuestHardening() {
       if (normalized === 'dgram' && ALLOWED_BUILTINS.has('dgram')) {
         return guestDgram;
       }
+      if (normalized === 'dns' && ALLOWED_BUILTINS.has('dns')) {
+        return guestDns;
+      }
       if (normalized === 'child_process' && ALLOWED_BUILTINS.has('child_process')) {
         return guestChildProcess;
       }
@@ -5486,6 +5788,9 @@ function installGuestHardening() {
       }
       if (normalized === 'dgram' && ALLOWED_BUILTINS.has('dgram')) {
         return guestDgram;
+      }
+      if (normalized === 'dns' && ALLOWED_BUILTINS.has('dns')) {
+        return guestDns;
       }
       if (normalized === 'child_process' && ALLOWED_BUILTINS.has('child_process')) {
         return guestChildProcess;
@@ -5556,6 +5861,9 @@ if (ALLOWED_BUILTINS.has('net')) {
 }
 if (ALLOWED_BUILTINS.has('dgram')) {
   hardenProperty(globalThis, '__agentOsBuiltinDgram', guestDgram);
+}
+if (ALLOWED_BUILTINS.has('dns')) {
+  hardenProperty(globalThis, '__agentOsBuiltinDns', guestDns);
 }
 if (ALLOWED_BUILTINS.has('os')) {
   hardenProperty(globalThis, '__agentOsBuiltinOs', guestOs);
@@ -6904,6 +7212,11 @@ const BUILTIN_ASSETS: &[BuiltinAsset] = &[
         init_counter_key: "__agentOsBuiltinDgramInitCount",
     },
     BuiltinAsset {
+        name: "dns",
+        module_specifier: "node:dns",
+        init_counter_key: "__agentOsBuiltinDnsInitCount",
+    },
+    BuiltinAsset {
         name: "os",
         module_specifier: "node:os",
         init_counter_key: "__agentOsBuiltinOsInitCount",
@@ -6926,10 +7239,6 @@ const DENIED_BUILTIN_ASSETS: &[DeniedBuiltinAsset] = &[
     DeniedBuiltinAsset {
         name: "diagnostics_channel",
         module_specifier: "node:diagnostics_channel",
-    },
-    DeniedBuiltinAsset {
-        name: "dns",
-        module_specifier: "node:dns",
     },
     DeniedBuiltinAsset {
         name: "http",
@@ -7192,6 +7501,7 @@ fn render_builtin_asset_source(asset: &BuiltinAsset) -> String {
         "child-process" => render_child_process_builtin_asset_source(asset.init_counter_key),
         "net" => render_net_builtin_asset_source(asset.init_counter_key),
         "dgram" => render_dgram_builtin_asset_source(asset.init_counter_key),
+        "dns" => render_dns_builtin_asset_source(asset.init_counter_key),
         "os" => render_os_builtin_asset_source(asset.init_counter_key),
         _ => {
             render_passthrough_builtin_asset_source(asset.module_specifier, asset.init_counter_key)
@@ -7434,6 +7744,40 @@ export const __agentOsInitCount = initCount;\n\
 export default mod;\n\
 export const Socket = mod.Socket;\n\
 export const createSocket = mod.createSocket;\n"
+    )
+}
+
+fn render_dns_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const ACCESS_DENIED_CODE = \"ERR_ACCESS_DENIED\";\n\
+const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+if (!globalThis.__agentOsBuiltinDns) {{\n\
+  const error = new Error(\"node:dns is not available in the Agent OS guest runtime\");\n\
+  error.code = ACCESS_DENIED_CODE;\n\
+  throw error;\n\
+}}\n\n\
+const mod = globalThis.__agentOsBuiltinDns;\n\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export const ADDRCONFIG = mod.ADDRCONFIG;\n\
+export const ALL = mod.ALL;\n\
+export const Resolver = mod.Resolver;\n\
+export const V4MAPPED = mod.V4MAPPED;\n\
+export const constants = mod.constants;\n\
+export const getDefaultResultOrder = mod.getDefaultResultOrder;\n\
+export const getServers = mod.getServers;\n\
+export const lookup = mod.lookup;\n\
+export const lookupService = mod.lookupService;\n\
+export const promises = mod.promises;\n\
+export const resolve = mod.resolve;\n\
+export const resolve4 = mod.resolve4;\n\
+export const resolve6 = mod.resolve6;\n\
+export const reverse = mod.reverse;\n\
+export const setDefaultResultOrder = mod.setDefaultResultOrder;\n\
+export const setServers = mod.setServers;\n"
     )
 }
 
@@ -8140,7 +8484,6 @@ export async function loadPyodide(options) {
             String::from("cluster"),
             String::from("dgram"),
             String::from("diagnostics_channel"),
-            String::from("dns"),
             String::from("http"),
             String::from("http2"),
             String::from("https"),
@@ -8211,5 +8554,21 @@ export async function loadPyodide(options) {
         assert!(dgram_asset.contains("__agentOsBuiltinDgram"));
         assert!(dgram_asset.contains("export const Socket = mod.Socket"));
         assert!(dgram_asset.contains("export const createSocket = mod.createSocket"));
+    }
+
+    #[test]
+    fn ensure_materialized_writes_dns_builtin_asset() {
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let dns_asset =
+            fs::read_to_string(import_cache.asset_root().join("builtins").join("dns.mjs"))
+                .expect("read dns builtin asset");
+
+        assert!(dns_asset.contains("__agentOsBuiltinDns"));
+        assert!(dns_asset.contains("export const lookup = mod.lookup"));
+        assert!(dns_asset.contains("export const resolve4 = mod.resolve4"));
     }
 }

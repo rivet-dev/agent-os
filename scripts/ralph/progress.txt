@@ -20,6 +20,7 @@
 - Non-fd guest `fs` sync methods should be overridden onto the wrapped module via a dedicated sync-RPC helper in `crates/execution/src/node_import_cache.rs`; keep fd/stream APIs on the translated host module until their kernel-backed port is implemented, and add matching `fs.*Sync` dispatch arms in `crates/sidecar/src/service.rs`.
 - Guest Node `fs` fd/stream support should stay on the shared sync-RPC bridge end-to-end: `open/read/write/close/fstat` and `createReadStream`/`createWriteStream` all use the same RPC surface, while runner-internal sync-RPC pipe writes must use snapped host `node:fs` bindings because `syncBuiltinModuleExports(...)` mutates builtin modules for guest code.
 - Synthetic guest `ChildProcess` handles in `crates/execution/src/node_import_cache.rs` must stay ref'd by default and only `unref()` their poll timer when guest code explicitly asks; otherwise `exec()`/top-level `await` can terminate early with Node's unsettled-top-level-await exit.
+- When a newly allowed Node builtin still exposes bypass-capable host-owned helpers or constructors, replace those exports with guest shims or explicit unsupported stubs before adding the builtin to `DEFAULT_ALLOWED_NODE_BUILTINS`; `dns.Resolver` and `dns.promises.Resolver` are the model for this rule.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -361,4 +362,23 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: UDP ports should mirror the staged `net` approach: keep guest-facing JS state unbound until `bind()` or first `send()`, then route all subsequent message delivery through the shared sync-RPC poll loop instead of host Node’s `dgram` module.
   - Gotchas encountered: Sidecar-managed UDP bindings never show up in `/proc/[pid]/net/udp*`, so `find_bound_udp` has to consult `ActiveProcess` state first, and the existing mixed socket-state integration test can still flake on the unrelated signal-state polling step and may need a rerun.
   - Useful context: `cargo test -p agent-os-execution --test javascript javascript_execution_routes_dgram_through_sync_rpc -- --exact`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-sidecar service::tests::javascript_dgram_rpc_sends_and_receives_host_udp_packets -- --exact`, `cargo test -p agent-os-sidecar --test socket_state_queries sidecar_queries_listener_udp_and_signal_state -- --exact`, and `cargo check -p agent-os-execution -p agent-os-sidecar` all pass after this change.
+---
+## 2026-04-05 00:04:05 PDT - US-021
+- What was implemented
+- Added a guest-owned `node:dns` polyfill in `crates/execution/src/node_import_cache.rs` that routes `dns.lookup`, `dns.resolve`, `dns.resolve4`, `dns.resolve6`, and the matching `dns.promises.*` APIs through the JavaScript sync-RPC bridge, while replacing bypass-capable resolver constructors with guest shims instead of inheriting the host module.
+- Extended `crates/sidecar/src/service.rs` with `dns.lookup` / `dns.resolve*` RPC handlers backed by sidecar DNS resolution, and added focused execution, sidecar, and import-cache coverage for the new builtin asset and runtime path.
+- Added `dns` to the core bridge default allowlist plus a regression in `packages/core/tests/allowed-node-builtins.test.ts` so newly created VMs expose the hardened DNS polyfill by default.
+- Files changed
+- `CLAUDE.md`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/sidecar/src/service.rs`
+- `packages/core/src/sidecar/native-kernel-proxy.ts`
+- `packages/core/tests/allowed-node-builtins.test.ts`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Newly allowed Node builtins must not inherit host-owned constructors or helpers that can bypass the kernel-backed surface; replace them with guest shims or explicit unsupported stubs before exposing the builtin by default.
+  - Gotchas encountered: `packages/core` verification is blocked in this checkout because the workspace is missing installable dependencies and `pnpm install` fails with `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND` for `@rivet-dev/agent-os`, so the TypeScript and Vitest checks for the updated core files could not be executed here.
+  - Useful context: `cargo test -p agent-os-execution --test javascript javascript_execution_routes_dns_through_sync_rpc -- --exact`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-sidecar --lib service::tests::javascript_dns_rpc_resolves_localhost -- --exact`, and `cargo check -p agent-os-execution -p agent-os-sidecar` all pass after this change.
 ---

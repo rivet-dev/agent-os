@@ -3298,6 +3298,162 @@ console.log(JSON.stringify(summary));
 }
 
 #[test]
+fn javascript_execution_routes_dns_through_sync_rpc() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import dns from "node:dns";
+
+const lookup = await new Promise((resolve, reject) => {
+  dns.lookup("example.test", { family: 4 }, (error, address, family) => {
+    if (error) {
+      reject(error);
+      return;
+    }
+    resolve({ address, family });
+  });
+});
+
+const lookupAll = await dns.promises.lookup("example.test", { all: true });
+const resolved = await new Promise((resolve, reject) => {
+  dns.resolve("example.test", "A", (error, records) => {
+    if (error) {
+      reject(error);
+      return;
+    }
+    resolve(records);
+  });
+});
+const resolved4 = await dns.promises.resolve4("example.test");
+const resolved6 = await new Promise((resolve, reject) => {
+  dns.resolve6("example.test", (error, records) => {
+    if (error) {
+      reject(error);
+      return;
+    }
+    resolve(records);
+  });
+});
+const resolvedViaPromises = await dns.promises.resolve("example.test", "AAAA");
+
+console.log(JSON.stringify({
+  lookup,
+  lookupAll,
+  resolved,
+  resolved4,
+  resolved6,
+  resolvedViaPromises,
+}));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let env = BTreeMap::from([(
+        String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+        String::from(
+            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+        ),
+    )]);
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env,
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code = None;
+    let mut methods = Vec::new();
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                methods.push(request.method.clone());
+                match request.method.as_str() {
+                    "dns.lookup" => {
+                        let family = request.args[0]["family"].as_u64().expect("lookup family");
+                        let result = if family == 4 {
+                            json!([{ "address": "203.0.113.10", "family": 4 }])
+                        } else {
+                            json!([
+                                { "address": "203.0.113.10", "family": 4 },
+                                { "address": "2001:db8::10", "family": 6 },
+                            ])
+                        };
+                        execution
+                            .respond_sync_rpc_success(request.id, result)
+                            .expect("respond to dns.lookup");
+                    }
+                    "dns.resolve" => {
+                        let rrtype = request.args[0]["rrtype"].as_str().expect("resolve rrtype");
+                        let result = if rrtype == "AAAA" {
+                            json!(["2001:db8::10"])
+                        } else {
+                            json!(["203.0.113.10"])
+                        };
+                        execution
+                            .respond_sync_rpc_success(request.id, result)
+                            .expect("respond to dns.resolve");
+                    }
+                    "dns.resolve4" => {
+                        execution
+                            .respond_sync_rpc_success(request.id, json!(["203.0.113.10"]))
+                            .expect("respond to dns.resolve4");
+                    }
+                    "dns.resolve6" => {
+                        execution
+                            .respond_sync_rpc_success(request.id, json!(["2001:db8::10"]))
+                            .expect("respond to dns.resolve6");
+                    }
+                    other => panic!("unexpected dns sync RPC method: {other}"),
+                }
+            }
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
+
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(stderr).expect("stderr utf8");
+    assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse dns JSON");
+    assert_eq!(
+        parsed["lookup"]["address"],
+        Value::String(String::from("203.0.113.10"))
+    );
+    assert_eq!(parsed["lookup"]["family"], Value::from(4));
+    assert_eq!(
+        parsed["lookupAll"][1]["address"],
+        Value::String(String::from("2001:db8::10"))
+    );
+    assert_eq!(
+        parsed["resolvedViaPromises"][0],
+        Value::String(String::from("2001:db8::10"))
+    );
+    assert!(methods.iter().any(|method| method == "dns.lookup"));
+    assert!(methods.iter().any(|method| method == "dns.resolve"));
+    assert!(methods.iter().any(|method| method == "dns.resolve4"));
+    assert!(methods.iter().any(|method| method == "dns.resolve6"));
+}
+
+#[test]
 fn javascript_execution_translates_require_resolve_and_cjs_errors_to_guest_paths() {
     assert_node_available();
 
