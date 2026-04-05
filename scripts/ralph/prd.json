@@ -641,7 +641,7 @@
         "Typecheck passes"
       ],
       "priority": 35,
-      "passes": false,
+      "passes": true,
       "notes": "hardenProperty silently falls back to mutable. Zombie reaper loses exit codes."
     },
     {

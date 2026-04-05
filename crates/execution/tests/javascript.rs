@@ -2580,6 +2580,47 @@ console.log(JSON.stringify(result));
 }
 
 #[test]
+fn javascript_execution_still_starts_with_fail_closed_property_hardening() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+console.log(JSON.stringify({
+  envType: typeof process.env,
+  cwdType: typeof process.cwd,
+  execPathType: typeof process.execPath,
+}));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        BTreeMap::new(),
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse hardening JSON");
+    assert_eq!(parsed["envType"], Value::String(String::from("object")));
+    assert_eq!(parsed["cwdType"], Value::String(String::from("function")));
+    assert_eq!(
+        parsed["execPathType"],
+        Value::String(String::from("string"))
+    );
+}
+
+#[test]
 fn javascript_execution_hardens_exec_and_execsync_child_process_calls() {
     assert_node_available();
 

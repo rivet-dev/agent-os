@@ -507,3 +507,74 @@ fn zombie_reaper_uses_a_single_worker_for_many_exits() {
         assert!(table.get(pid).is_none(), "process {pid} should be reaped");
     }
 }
+
+#[test]
+fn zombie_reaper_preserves_child_exit_code_while_parent_is_alive() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_millis(50));
+    let parent = MockDriverProcess::new();
+    let child = MockDriverProcess::new();
+
+    let parent_pid = table.allocate_pid();
+    let child_pid = table.allocate_pid();
+    table.register(
+        parent_pid,
+        "wasmvm",
+        "parent",
+        Vec::new(),
+        create_context(0),
+        parent,
+    );
+    table.register(
+        child_pid,
+        "wasmvm",
+        "child",
+        Vec::new(),
+        create_context(parent_pid),
+        child.clone(),
+    );
+
+    child.exit(41);
+    thread::sleep(Duration::from_millis(200));
+
+    assert_eq!(
+        table
+            .waitpid(child_pid)
+            .expect("child exit code should be preserved"),
+        (child_pid, 41)
+    );
+}
+
+#[test]
+fn zombie_reaper_reaps_exited_children_after_their_parent_exits() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_millis(50));
+    let parent = MockDriverProcess::new();
+    let child = MockDriverProcess::new();
+
+    let parent_pid = table.allocate_pid();
+    let child_pid = table.allocate_pid();
+    table.register(
+        parent_pid,
+        "wasmvm",
+        "parent",
+        Vec::new(),
+        create_context(0),
+        parent.clone(),
+    );
+    table.register(
+        child_pid,
+        "wasmvm",
+        "child",
+        Vec::new(),
+        create_context(parent_pid),
+        child.clone(),
+    );
+
+    child.exit(17);
+    thread::sleep(Duration::from_millis(120));
+    parent.exit(0);
+
+    wait_for(
+        || table.get(parent_pid).is_none() && table.get(child_pid).is_none(),
+        Duration::from_secs(1),
+    );
+}

@@ -570,17 +570,36 @@ fn start_zombie_reaper(inner: Weak<ProcessTableInner>, reaper: Arc<ZombieReaper>
         };
 
         let mut state = inner.lock_state();
-        if state
+        let should_reap = state
+            .entries
+            .get(&pid)
+            .map(|record| {
+                record.entry.status == ProcessStatus::Exited
+                    && !has_living_parent(&state, record.entry.ppid)
+            })
+            .unwrap_or(false);
+        if should_reap {
+            state.entries.remove(&pid);
+        } else if state
             .entries
             .get(&pid)
             .map(|record| record.entry.status == ProcessStatus::Exited)
             .unwrap_or(false)
         {
-            state.entries.remove(&pid);
+            reaper.schedule(pid, state.zombie_ttl);
         }
         drop(state);
         inner.waiters.notify_all();
     });
+}
+
+fn has_living_parent(state: &ProcessTableState, ppid: u32) -> bool {
+    ppid != 0
+        && state
+            .entries
+            .get(&ppid)
+            .map(|record| record.entry.status != ProcessStatus::Exited)
+            .unwrap_or(false)
 }
 
 impl ProcessTableInner {

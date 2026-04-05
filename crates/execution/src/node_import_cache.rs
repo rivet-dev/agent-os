@@ -6277,15 +6277,8 @@ function hardenProperty(target, key, value) {
       writable: false,
       configurable: false,
     });
-    return;
-  } catch {
-    // Fall back to assignment below.
-  }
-
-  try {
-    target[key] = value;
-  } catch {
-    // Ignore immutable properties; the Node permission model still applies.
+  } catch (error) {
+    throw new Error(`Failed to harden property ${String(key)}`, { cause: error });
   }
 }
 
@@ -7724,15 +7717,8 @@ function hardenProperty(target, key, value) {
       writable: false,
       configurable: false,
     });
-    return;
-  } catch {
-    // Fall back to assignment below.
-  }
-
-  try {
-    target[key] = value;
-  } catch {
-    // Ignore immutable properties.
+  } catch (error) {
+    throw new Error(`Failed to harden property ${String(key)}`, { cause: error });
   }
 }
 

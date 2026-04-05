@@ -4,6 +4,8 @@
 - Python VFS RPCs are intentionally scoped to `/workspace`; normalize and reject anything outside that guest root in `crates/sidecar/src/service.rs` before touching the kernel VFS.
 - Pyodide VFS RPC timeouts are safer to enforce in `crates/execution/src/python.rs` against pending request IDs than inside the embedded runner; touching the bundled Python runner can perturb real Pyodide bootstrap behavior.
 - Non-reaping host child liveness checks in `crates/sidecar/src/service.rs` should use `waitid(..., WNOWAIT | WNOHANG | WEXITED | WSTOPPED | WCONTINUED)`; `waitpid` does not provide a safe non-reaping probe for the PID-reuse hardening path.
+- `crates/execution/src/node_import_cache.rs` hardening helpers should fail closed: if `Object.defineProperty(...)` cannot lock down a guest-visible property, throw immediately instead of falling back to mutable assignment.
+- Kernel zombie cleanup in `crates/kernel/src/process_table.rs` should only reap exited children once they no longer have a living parent in the table; otherwise reschedule them so `waitpid` can still observe their exit code.
 - Native execution engines should own `NodeImportCache` state per `vm_id`, and sidecar VM disposal should call each engine's `dispose_vm`; a single engine-wide cache leaks module state across VMs.
 - WASM runtime hardening is split across three layers together: `ResourceLimits` / sidecar metadata parsing, `crates/sidecar/src/service.rs` injecting reserved `AGENT_OS_WASM_*` env keys, and `crates/execution/src/wasm.rs` validating or enforcing the actual limit before guest code runs.
 - Sidecar `ResourceLimits` parsing should start from `ResourceLimits::default()` and only override metadata keys that are present; rebuilding the struct from sparse metadata silently drops default filesystem byte/inode caps.
@@ -713,4 +715,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Safe native `host_dir` operations are easiest to keep correct if the code either stays on the `openat2`-resolved descriptor directly or uses its `/proc/self/fd/<n>` anchor while that descriptor remains open.
   - Gotchas encountered: Linux reports `RESOLVE_BENEATH` escape attempts as `EXDEV`; the guest-facing sidecar layer should translate that back to `EACCES` so callers keep treating path escapes as access denial.
   - Useful context: `cargo test -p agent-os-sidecar host_dir_plugin -- --test-threads=1`, `cargo test -p agent-os-kernel setpgid_rejects_joining_a_process_group_owned_by_another_driver -- --test-threads=1`, and `cargo check -p agent-os-kernel -p agent-os-sidecar` pass after this change.
+---
+## 2026-04-05 03:55:46 PDT - US-040
+- What was implemented
+- Removed the mutable-assignment fallback from both generated `hardenProperty` helpers in `crates/execution/src/node_import_cache.rs`, so guest hardening now fails closed if `Object.defineProperty(...)` cannot lock down a property.
+- Updated the kernel zombie reaper in `crates/kernel/src/process_table.rs` to keep exited children with living parents in the table and reschedule their cleanup, preserving exit codes until `waitpid` can reap them.
+- Added focused regressions for the preserved child-exit-code path, eventual reaping after the parent exits, and a JavaScript startup regression that confirms the stricter hardening path still boots successfully.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/kernel/src/process_table.rs`
+- `crates/kernel/tests/process_table.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Guest hardening in `node_import_cache.rs` should fail closed; if a property cannot be made non-writable/non-configurable, treat that as a startup error instead of silently keeping a mutable escape hatch.
+  - Gotchas encountered: The process-table zombie TTL is still useful for parentless/orphaned exits, but child zombies with a live parent must be requeued or their exit code disappears before `waitpid`.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test process_table`, `cargo test -p agent-os-execution --test javascript -- --test-threads=1`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, and `cargo check -p agent-os-kernel -p agent-os-execution` all pass after this change.
 ---
