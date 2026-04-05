@@ -4,14 +4,14 @@ use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
     encode_json_string_array, env_builtin_enabled, harden_node_command, node_binary,
     node_resolution_read_paths, resolve_path_like_specifier, spawn_node_control_reader,
-    spawn_stream_reader, spawn_waiter, LinePrefixFilter, NodeControlMessage,
+    spawn_stream_reader, spawn_waiter, ExportedChildFds, LinePrefixFilter, NodeControlMessage,
 };
 use crate::runtime_support::{
     configure_compile_cache, env_flag_enabled, import_cache_root, sandbox_root, warmup_marker_path,
     NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
     NODE_SANDBOX_ROOT_ENV,
 };
-use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
+use nix::fcntl::OFlag;
 use nix::unistd::pipe2;
 use serde::Deserialize;
 use serde_json::{from_str, json, Value};
@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{
@@ -722,16 +722,9 @@ fn create_node_child(
     }
 
     let channels = sync_rpc_channels.expect("JavaScript sync RPC channels should be configured");
+    let mut exported_fds = ExportedChildFds::default();
     command
         .env(NODE_SYNC_RPC_ENABLE_ENV, "1")
-        .env(
-            NODE_SYNC_RPC_REQUEST_FD_ENV,
-            channels.child_request_writer.as_raw_fd().to_string(),
-        )
-        .env(
-            NODE_SYNC_RPC_RESPONSE_FD_ENV,
-            channels.child_response_reader.as_raw_fd().to_string(),
-        )
         .env(
             NODE_SYNC_RPC_DATA_BYTES_ENV,
             NODE_SYNC_RPC_DEFAULT_DATA_BYTES.to_string(),
@@ -740,24 +733,30 @@ fn create_node_child(
             NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV,
             NODE_SYNC_RPC_DEFAULT_WAIT_TIMEOUT_MS.to_string(),
         );
-    let (
-        sync_rpc_request_reader,
-        sync_rpc_response_writer,
-        sync_rpc_child_request_writer,
-        sync_rpc_child_response_reader,
-    ) = (
+    exported_fds
+        .export(
+            &mut command,
+            NODE_SYNC_RPC_REQUEST_FD_ENV,
+            &channels.child_request_writer,
+        )
+        .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
+    exported_fds
+        .export(
+            &mut command,
+            NODE_SYNC_RPC_RESPONSE_FD_ENV,
+            &channels.child_response_reader,
+        )
+        .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
+    let (sync_rpc_request_reader, sync_rpc_response_writer) = (
         Some(channels.parent_request_reader),
         Some(channels.parent_response_writer),
-        Some(channels.child_request_writer),
-        Some(channels.child_response_reader),
     );
 
-    configure_node_control_channel(&mut command, control_fd);
+    configure_node_control_channel(&mut command, control_fd, &mut exported_fds)
+        .map_err(JavascriptExecutionError::Spawn)?;
     configure_node_command(&mut command, import_cache, context, frozen_time_ms)?;
 
     let child = command.spawn().map_err(JavascriptExecutionError::Spawn)?;
-    drop(sync_rpc_child_request_writer);
-    drop(sync_rpc_child_response_reader);
     Ok((child, sync_rpc_request_reader, sync_rpc_response_writer))
 }
 
@@ -942,9 +941,6 @@ fn create_javascript_sync_rpc_channels(
         .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
     drop(fd_reservations);
 
-    clear_cloexec(&child_request_writer)?;
-    clear_cloexec(&child_response_reader)?;
-
     Ok(JavascriptSyncRpcChannels {
         parent_request_reader: File::from(parent_request_reader),
         parent_response_writer: Arc::new(Mutex::new(BufWriter::new(File::from(
@@ -953,16 +949,6 @@ fn create_javascript_sync_rpc_channels(
         child_request_writer,
         child_response_reader,
     })
-}
-
-fn clear_cloexec(fd: &OwnedFd) -> Result<(), JavascriptExecutionError> {
-    let current = fcntl(fd.as_raw_fd(), FcntlArg::F_GETFD)
-        .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
-    let mut flags = FdFlag::from_bits_retain(current);
-    flags.remove(FdFlag::FD_CLOEXEC);
-    fcntl(fd.as_raw_fd(), FcntlArg::F_SETFD(flags))
-        .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
-    Ok(())
 }
 
 fn spawn_javascript_sync_rpc_reader(

@@ -3,7 +3,7 @@ use crate::node_import_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV
 use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
     harden_node_command, node_binary, spawn_node_control_reader, spawn_stream_reader,
-    LinePrefixFilter, NodeControlMessage,
+    ExportedChildFds, LinePrefixFilter, NodeControlMessage,
 };
 use crate::runtime_support::{
     compile_cache_ready, configure_compile_cache, env_flag_enabled, file_fingerprint,
@@ -11,7 +11,7 @@ use crate::runtime_support::{
     NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
     NODE_SANDBOX_ROOT_ENV,
 };
-use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
+use nix::fcntl::OFlag;
 use nix::unistd::pipe2;
 use serde::Deserialize;
 use serde_json::json;
@@ -20,7 +20,7 @@ use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -915,6 +915,7 @@ fn create_node_child(
     frozen_time_ms: u128,
 ) -> Result<(std::process::Child, File, Arc<Mutex<BufWriter<File>>>), PythonExecutionError> {
     let mut command = Command::new(node_binary());
+    let mut exported_fds = ExportedChildFds::default();
     configure_python_node_sandbox(&mut command, import_cache, context, request);
     command
         .arg("--no-warnings")
@@ -933,14 +934,6 @@ fn create_node_child(
         .env(NODE_IMPORT_CACHE_PATH_ENV, import_cache.cache_path())
         .env(PYTHON_CODE_ENV, &request.code)
         .env(
-            PYTHON_VFS_RPC_REQUEST_FD_ENV,
-            rpc_channels.child_request_writer.as_raw_fd().to_string(),
-        )
-        .env(
-            PYTHON_VFS_RPC_RESPONSE_FD_ENV,
-            rpc_channels.child_response_reader.as_raw_fd().to_string(),
-        )
-        .env(
             PYTHON_VFS_RPC_TIMEOUT_MS_ENV,
             request
                 .env
@@ -954,8 +947,23 @@ fn create_node_child(
         command.env(PYTHON_FILE_ENV, file_path);
     }
 
+    exported_fds
+        .export(
+            &mut command,
+            PYTHON_VFS_RPC_REQUEST_FD_ENV,
+            &rpc_channels.child_request_writer,
+        )
+        .map_err(|error| PythonExecutionError::RpcChannel(error.to_string()))?;
+    exported_fds
+        .export(
+            &mut command,
+            PYTHON_VFS_RPC_RESPONSE_FD_ENV,
+            &rpc_channels.child_response_reader,
+        )
+        .map_err(|error| PythonExecutionError::RpcChannel(error.to_string()))?;
     apply_guest_env(&mut command, &request.env, RESERVED_PYTHON_ENV_KEYS);
-    configure_node_control_channel(&mut command, control_fd);
+    configure_node_control_channel(&mut command, control_fd, &mut exported_fds)
+        .map_err(PythonExecutionError::Spawn)?;
     configure_node_command(&mut command, import_cache)?;
     let child = command.spawn().map_err(PythonExecutionError::Spawn)?;
     Ok((
@@ -1141,9 +1149,6 @@ fn create_python_vfs_rpc_channels() -> Result<PythonVfsRpcChannels, PythonExecut
     let (child_response_reader, parent_response_writer) = pipe2(OFlag::O_CLOEXEC)
         .map_err(|error| PythonExecutionError::RpcChannel(error.to_string()))?;
 
-    clear_cloexec(&child_request_writer)?;
-    clear_cloexec(&child_response_reader)?;
-
     Ok(PythonVfsRpcChannels {
         parent_request_reader: File::from(parent_request_reader),
         parent_response_writer: Arc::new(Mutex::new(BufWriter::new(File::from(
@@ -1152,12 +1157,6 @@ fn create_python_vfs_rpc_channels() -> Result<PythonVfsRpcChannels, PythonExecut
         child_request_writer,
         child_response_reader,
     })
-}
-
-fn clear_cloexec(fd: &OwnedFd) -> Result<(), PythonExecutionError> {
-    fcntl(fd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::empty()))
-        .map_err(|error| PythonExecutionError::RpcChannel(error.to_string()))?;
-    Ok(())
 }
 
 fn try_reserve_python_vfs_rpc_slot(

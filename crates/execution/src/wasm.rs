@@ -4,8 +4,8 @@ use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
     encode_json_string_array, encode_json_string_map, env_builtin_enabled, harden_node_command,
     node_binary, node_resolution_read_paths, resolve_path_like_specifier,
-    spawn_node_control_reader, spawn_stream_reader, LinePrefixFilter, NodeControlMessage,
-    NodeSignalDispositionAction, NodeSignalHandlerRegistration,
+    spawn_node_control_reader, spawn_stream_reader, ExportedChildFds, LinePrefixFilter,
+    NodeControlMessage, NodeSignalDispositionAction, NodeSignalHandlerRegistration,
 };
 use crate::runtime_support::{
     configure_compile_cache, env_flag_enabled, file_fingerprint, import_cache_root, sandbox_root,
@@ -469,6 +469,7 @@ fn create_node_child(
     control_fd: &std::os::fd::OwnedFd,
 ) -> Result<std::process::Child, WasmExecutionError> {
     let mut command = Command::new(node_binary());
+    let mut exported_fds = ExportedChildFds::default();
     configure_wasm_node_sandbox(&mut command, import_cache, context, request)?;
     command
         .arg("--no-warnings")
@@ -490,7 +491,8 @@ fn create_node_child(
             request.permission_tier.as_env_value(),
         );
 
-    configure_node_control_channel(&mut command, control_fd);
+    configure_node_control_channel(&mut command, control_fd, &mut exported_fds)
+        .map_err(WasmExecutionError::Spawn)?;
     configure_node_command(&mut command, import_cache, frozen_time_ms, request)?;
 
     command.spawn().map_err(WasmExecutionError::Spawn)

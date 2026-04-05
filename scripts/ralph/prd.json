@@ -907,7 +907,7 @@
         "Typecheck passes"
       ],
       "priority": 57,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: RPC FD numbers passed via env vars with FD_CLOEXEC cleared. Guest can close(), dup2(), read/write to forge RPC requests/responses, or break sidecar communication."
     },
     {

@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Child-facing control/RPC pipes in `crates/execution` should keep their original `pipe2(O_CLOEXEC)` FDs private and use `ExportedChildFds` in `crates/execution/src/node_process.rs` to duplicate only the child ends into reserved `1000+` FD numbers right before `Command::spawn()`.
 - `KernelVmConfig::new()` is deny-all by default; any kernel or browser-sidecar fixture that expects unrestricted filesystem/process access must opt in with `config.permissions = Permissions::allow_all()`.
 - Per-operation memory guards belong in `ResourceLimits`; when adding one, enforce it in the kernel entrypoint that materializes data and keep the matching `resource.max_*` metadata parsing in `crates/sidecar/src/service.rs` in sync.
 - Sidecar JavaScript network policy should read internal bootstrap env like `AGENT_OS_LOOPBACK_EXEMPT_PORTS` from `CreateVmRequest.metadata` `env.*` entries, not `vm.guest_env`, because `guest_env` is permission-filtered and may be empty.
@@ -1055,4 +1056,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Per-operation memory caps should be enforced at the kernel entrypoint that materializes guest-visible buffers, not only in downstream VFS helpers, so oversized calls fail before extra copies or file reads happen.
   - Gotchas encountered: `AGENTS.md` at the repo root is a symlink to `CLAUDE.md`, so instruction updates appear as a tracked `CLAUDE.md` diff.
   - Useful context: `cargo test -p agent-os-kernel --test resource_accounting`, `cargo test -p agent-os-kernel --test api_surface`, `cargo test -p agent-os-kernel --test vfs`, and `cargo test -p agent-os-sidecar parse_resource_limits_reads_filesystem_limits --lib` all pass for this change.
+---
+## 2026-04-05 08:01:50 PDT - US-057
+- What was implemented
+- Added `ExportedChildFds` in `crates/execution/src/node_process.rs` so control and RPC pipes stay `O_CLOEXEC` on their original low-numbered descriptors and only get duplicated into reserved `1000+` FDs immediately before `Command::spawn()`.
+- Switched JavaScript sync RPC, Python VFS RPC, and the shared Node control channel wiring to export those reserved high FDs instead of inheriting the original pipe ends, which also keeps the parent-side duplicates closed automatically after spawn.
+- Added a unit regression for the shared FD exporter and verified the affected execution paths with focused JavaScript, Python, and WASM runtime tests.
+- Files changed
+- `crates/execution/src/javascript.rs`
+- `crates/execution/src/node_process.rs`
+- `crates/execution/src/python.rs`
+- `crates/execution/src/wasm.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: FD remapping for guest-visible control channels belongs in the shared `node_process` spawn helpers so JavaScript, Python, and WASM launches all inherit the same protected `1000+` descriptor policy.
+  - Gotchas encountered: This repo’s pinned `nix` API still takes raw `RawFd` values for `fcntl`, so shared FD helpers need to duplicate with `source_fd.as_raw_fd()` instead of newer `AsFd`-style calls.
+  - Useful context: `cargo check -p agent-os-execution`, `cargo test -p agent-os-execution node_process::tests -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript javascript_execution_surfaces_shared_array_buffer_sync_rpc_requests -- --test-threads=1`, `cargo test -p agent-os-execution --test python python_execution_surfaces_vfs_rpc_requests_and_resumes_after_responses -- --test-threads=1`, and `cargo test -p agent-os-execution --test wasm wasm_execution_emits_signal_state_from_control_channel -- --test-threads=1` all pass after this change.
 ---
