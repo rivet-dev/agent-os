@@ -472,11 +472,7 @@ impl JavascriptExecutionEngine {
         let execution_id = format!("exec-{}", self.next_execution_id);
         let control_channel =
             create_node_control_channel().map_err(JavascriptExecutionError::Spawn)?;
-        let sync_rpc_channels = if node_sync_rpc_enabled(&request.env) {
-            Some(create_javascript_sync_rpc_channels()?)
-        } else {
-            None
-        };
+        let sync_rpc_channels = Some(create_javascript_sync_rpc_channels()?);
         let (mut child, sync_rpc_request_reader, sync_rpc_response_writer) = create_node_child(
             &self.import_cache,
             &context,
@@ -665,39 +661,36 @@ fn create_node_child(
         command.env(NODE_BOOTSTRAP_ENV, bootstrap_module);
     }
 
+    let channels = sync_rpc_channels.expect("JavaScript sync RPC channels should be configured");
+    command
+        .env(NODE_SYNC_RPC_ENABLE_ENV, "1")
+        .env(
+            NODE_SYNC_RPC_REQUEST_FD_ENV,
+            channels.child_request_writer.as_raw_fd().to_string(),
+        )
+        .env(
+            NODE_SYNC_RPC_RESPONSE_FD_ENV,
+            channels.child_response_reader.as_raw_fd().to_string(),
+        )
+        .env(
+            NODE_SYNC_RPC_DATA_BYTES_ENV,
+            NODE_SYNC_RPC_DEFAULT_DATA_BYTES.to_string(),
+        )
+        .env(
+            NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV,
+            NODE_SYNC_RPC_DEFAULT_WAIT_TIMEOUT_MS.to_string(),
+        );
     let (
         sync_rpc_request_reader,
         sync_rpc_response_writer,
         sync_rpc_child_request_writer,
         sync_rpc_child_response_reader,
-    ) = if let Some(channels) = sync_rpc_channels {
-        command
-            .env(NODE_SYNC_RPC_ENABLE_ENV, "1")
-            .env(
-                NODE_SYNC_RPC_REQUEST_FD_ENV,
-                channels.child_request_writer.as_raw_fd().to_string(),
-            )
-            .env(
-                NODE_SYNC_RPC_RESPONSE_FD_ENV,
-                channels.child_response_reader.as_raw_fd().to_string(),
-            )
-            .env(
-                NODE_SYNC_RPC_DATA_BYTES_ENV,
-                NODE_SYNC_RPC_DEFAULT_DATA_BYTES.to_string(),
-            )
-            .env(
-                NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV,
-                NODE_SYNC_RPC_DEFAULT_WAIT_TIMEOUT_MS.to_string(),
-            );
-        (
-            Some(channels.parent_request_reader),
-            Some(channels.parent_response_writer),
-            Some(channels.child_request_writer),
-            Some(channels.child_response_reader),
-        )
-    } else {
-        (None, None, None, None)
-    };
+    ) = (
+        Some(channels.parent_request_reader),
+        Some(channels.parent_response_writer),
+        Some(channels.child_request_writer),
+        Some(channels.child_response_reader),
+    );
 
     configure_node_control_channel(&mut command, control_fd);
     configure_node_command(&mut command, import_cache, context, frozen_time_ms)?;
@@ -784,11 +777,6 @@ fn parse_env_path_list(env: &BTreeMap<String, String>, key: &str) -> Vec<PathBuf
         .flatten()
         .map(PathBuf::from)
         .collect()
-}
-
-fn node_sync_rpc_enabled(env: &BTreeMap<String, String>) -> bool {
-    env.get(NODE_SYNC_RPC_ENABLE_ENV)
-        .is_some_and(|value| value == "1")
 }
 
 fn configure_node_command(

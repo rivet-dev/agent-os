@@ -13,6 +13,7 @@
 - Guest-visible module path scrubbing in `crates/execution/src/node_import_cache.rs` has to cover both the ESM loader and the generated Node runner: translate `error.message`, `error.stack`, and `requireStack`, and import guest entrypoints through guest-mapped file URLs so top-level stack traces never start on host paths.
 - Execution control data that affects host state should move over the shared `AGENT_OS_CONTROL_PIPE_FD` side channel in `crates/execution/src/node_process.rs`; if a runtime still surfaces compatible debug/control prefixes, strip matching guest `stderr` lines before exposing them so forged prefixes never drive host behavior.
 - The JavaScript sync syscall bridge in `crates/execution/src/node_import_cache.rs` should keep request writes on the guest main thread and use a worker only for blocking response reads plus `SharedArrayBuffer` wakeups; under the current Node permission model, worker-thread writes to the inherited request FD fail with `EBADF`.
+- Guest Node `fs` and `fs/promises` polyfills now share the same JavaScript sync-RPC transport; async methods should dispatch as `fs.promises.*` RPC calls, and guest-visible `readdir` results must filter the kernel VFS `.` / `..` entries back out to match Node semantics.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -238,4 +239,22 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Guest builtin ports like `os` need both import-cache asset coverage and runtime hook coverage; only doing one leaves either ESM imports or CJS/builtin lookups leaking back to the host module.
 - Gotchas encountered: The Rust `JavascriptExecutionEngine` does not supply the core bridge’s default builtin allowlist on its own, so direct execution tests must pass `AGENT_OS_ALLOWED_NODE_BUILTINS` explicitly when they exercise opt-in builtins like `os`.
 - Useful context: `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript javascript_execution_virtualizes_os_module -- --exact`, `pnpm --dir packages/core exec tsc --noEmit`, and `pnpm --dir packages/core exec vitest run tests/allowed-node-builtins.test.ts` all pass after this change.
+---
+## 2026-04-04 21:42:38 PDT - US-014
+- What was implemented
+- Routed the `fs.promises` story surface through the Node RPC bridge by adding guest-path normalization, stat proxies, encoding/time normalization, and `fs.promises.*` dispatch in both the generated Node runner and the materialized `node:fs` builtin asset.
+- Extended the sidecar JavaScript RPC handler to service `fs.promises.readFile`, `writeFile`, `stat`, `lstat`, `readdir`, `mkdir`, `rmdir`, `unlink`, `rename`, `copyFile`, `chmod`, `chown`, `utimes`, and `access` against the kernel VFS, including Node-facing `readdir` filtering for `.` and `..`.
+- Enabled the JavaScript sync-RPC bridge for guest Node executions by default so `fs.promises` no longer depends on opt-in env wiring, and added focused execution and sidecar regressions for the async path alongside the existing sync bridge checks.
+- Files changed
+- `AGENTS.md`
+- `crates/execution/src/javascript.rs`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: Guest Node `fs.promises` rides the same JavaScript sync-RPC transport as sync `fs` today; new async VFS methods should use `fs.promises.*` method names and only resolve guest paths, leaving host-path translation to the sidecar/kernel boundary.
+- Gotchas encountered: The direct `JavascriptExecutionEngine` test harness maps the guest cwd to `/`, not `/workspace`, so relative-path RPC assertions need to match `/note.txt`/`/subdir` rather than the sidecar VM’s mounted workspace paths.
+- Useful context: `cargo test -p agent-os-execution --test javascript javascript_execution_routes_fs_promises_through_sync_rpc -- --exact`, `cargo test -p agent-os-execution --test javascript javascript_execution_surfaces_shared_array_buffer_sync_rpc_requests -- --exact`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-sidecar service::tests::javascript_fs_promises_rpc_requests_proxy_into_the_vm_kernel_filesystem -- --exact`, and `cargo test -p agent-os-sidecar service::tests::javascript_sync_rpc_requests_proxy_into_the_vm_kernel_filesystem -- --exact` all pass after this change.
 ---

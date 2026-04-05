@@ -512,6 +512,199 @@ console.log(JSON.stringify({ stat, contents, raw, entries }));
 }
 
 #[test]
+fn javascript_execution_routes_fs_promises_through_sync_rpc() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import fs from "node:fs/promises";
+
+await fs.access("./note.txt");
+const contents = await fs.readFile("./note.txt", "utf8");
+const stat = await fs.stat("./note.txt");
+const lstat = await fs.lstat("./note.txt");
+const entries = await fs.readdir(".");
+await fs.mkdir("./subdir", { recursive: true });
+await fs.writeFile("./out.bin", Buffer.from([1, 2, 3, 4]));
+await fs.copyFile("./note.txt", "./copied.txt");
+await fs.rename("./copied.txt", "./renamed.txt");
+await fs.chmod("./renamed.txt", 0o600);
+await fs.chown("./renamed.txt", 1000, 1001);
+await fs.utimes("./renamed.txt", new Date(1000), new Date(2000));
+await fs.unlink("./out.bin");
+await fs.rmdir("./subdir");
+
+console.log(
+  JSON.stringify({
+    contents,
+    entries,
+    isDir: stat.isDirectory(),
+    isSymlink: lstat.isSymbolicLink(),
+    size: stat.size,
+  }),
+);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
+
+    let mut stdout = Vec::new();
+    let mut exit_code = None;
+    let mut requests = Vec::new();
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => {
+                panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
+            }
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                requests.push((request.method.clone(), request.args.clone()));
+                match request.method.as_str() {
+                    "fs.promises.access" => execution
+                        .respond_sync_rpc_success(request.id, json!(null))
+                        .expect("respond to access"),
+                    "fs.promises.readFile" => execution
+                        .respond_sync_rpc_success(request.id, json!("hello from promises rpc"))
+                        .expect("respond to readFile"),
+                    "fs.promises.stat" => execution
+                        .respond_sync_rpc_success(
+                            request.id,
+                            json!({
+                                "mode": 0o100644,
+                                "size": 23,
+                                "isDirectory": false,
+                                "isSymbolicLink": false,
+                            }),
+                        )
+                        .expect("respond to stat"),
+                    "fs.promises.lstat" => execution
+                        .respond_sync_rpc_success(
+                            request.id,
+                            json!({
+                                "mode": 0o100644,
+                                "size": 23,
+                                "isDirectory": false,
+                                "isSymbolicLink": true,
+                            }),
+                        )
+                        .expect("respond to lstat"),
+                    "fs.promises.readdir" => execution
+                        .respond_sync_rpc_success(request.id, json!(["note.txt", "raw.bin"]))
+                        .expect("respond to readdir"),
+                    "fs.promises.mkdir"
+                    | "fs.promises.copyFile"
+                    | "fs.promises.rename"
+                    | "fs.promises.chmod"
+                    | "fs.promises.chown"
+                    | "fs.promises.utimes"
+                    | "fs.promises.unlink"
+                    | "fs.promises.rmdir" => execution
+                        .respond_sync_rpc_success(request.id, json!(null))
+                        .expect("respond to async fs mutation"),
+                    "fs.promises.writeFile" => {
+                        assert_eq!(request.args[0], json!("/out.bin"));
+                        assert_eq!(
+                            request.args[1],
+                            json!({
+                                "__agentOsType": "bytes",
+                                "base64": "AQIDBA==",
+                            })
+                        );
+                        execution
+                            .respond_sync_rpc_success(request.id, json!(null))
+                            .expect("respond to writeFile");
+                    }
+                    other => panic!("unexpected async fs RPC method: {other}"),
+                }
+            }
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
+
+    assert_eq!(exit_code, Some(0));
+    assert_eq!(
+        requests
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "fs.promises.access",
+            "fs.promises.readFile",
+            "fs.promises.stat",
+            "fs.promises.lstat",
+            "fs.promises.readdir",
+            "fs.promises.mkdir",
+            "fs.promises.writeFile",
+            "fs.promises.copyFile",
+            "fs.promises.rename",
+            "fs.promises.chmod",
+            "fs.promises.chown",
+            "fs.promises.utimes",
+            "fs.promises.unlink",
+            "fs.promises.rmdir",
+        ]
+    );
+
+    assert_eq!(requests[0].1[0], json!("/note.txt"));
+    assert_eq!(
+        requests[1].1,
+        vec![json!("/note.txt"), json!({ "encoding": "utf8" })]
+    );
+    assert_eq!(
+        requests[5].1,
+        vec![json!("/subdir"), json!({ "recursive": true })]
+    );
+    assert_eq!(
+        requests[7].1,
+        vec![json!("/note.txt"), json!("/copied.txt"), Value::Null]
+    );
+    assert_eq!(
+        requests[11].1,
+        vec![json!("/renamed.txt"), json!(1000), json!(2000)]
+    );
+
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
+    assert!(
+        stdout.contains("\"contents\":\"hello from promises rpc\""),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"isDir\":false"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"isSymlink\":true"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"entries\":[\"note.txt\",\"raw.bin\"]"),
+        "unexpected stdout: {stdout}"
+    );
+}
+
+#[test]
 fn javascript_execution_ignores_guest_overrides_for_internal_node_env() {
     assert_node_available();
 

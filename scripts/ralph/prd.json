@@ -222,7 +222,7 @@
         "Typecheck passes"
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": "~20 async methods with direct kernel VFS counterparts. Uses async IPC messages to sidecar."
     },
     {
