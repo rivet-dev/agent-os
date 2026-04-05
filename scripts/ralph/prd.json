@@ -1204,7 +1204,7 @@
         "Typecheck passes"
       ],
       "priority": 76,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: EISDIR not returned for write-on-directory. ENOTDIR not checked in path components. ENAMETOOLONG not implemented. EROFS not distinguished from EACCES."
     },
     {

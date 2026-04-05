@@ -11,7 +11,7 @@ use agent_os_kernel::permissions::Permissions;
 use agent_os_kernel::pipe_manager::MAX_PIPE_BUFFER_BYTES;
 use agent_os_kernel::process_table::{ProcessWaitEvent, SIGWINCH};
 use agent_os_kernel::vfs::{
-    MemoryFileSystem, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
+    MemoryFileSystem, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat, MAX_PATH_LENGTH,
 };
 use std::cell::{Cell, RefCell};
 
@@ -933,6 +933,36 @@ fn proc_mounts_lists_root_and_active_mounts() {
         .expect("proc mounts should be utf8");
     assert!(mounts.contains("root / root rw 0 0"));
     assert!(mounts.contains("memory /data memory ro 0 0"));
+}
+
+#[test]
+fn filesystem_operations_return_linux_errno_values_for_common_failures() {
+    let mut config = KernelVmConfig::new("vm-api-errno");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MountTable::new(MemoryFileSystem::new()), config);
+
+    kernel.create_dir("/dir").expect("create dir");
+    assert_kernel_error_code(kernel.write_file("/dir", b"blocked".to_vec()), "EISDIR");
+
+    kernel
+        .write_file("/file", b"parent".to_vec())
+        .expect("write file parent");
+    assert_kernel_error_code(kernel.stat("/file/child"), "ENOTDIR");
+
+    let long_path = format!("/{}", "a".repeat(MAX_PATH_LENGTH));
+    assert_kernel_error_code(kernel.stat(&long_path), "ENAMETOOLONG");
+
+    kernel
+        .mount_filesystem(
+            "/readonly",
+            MemoryFileSystem::new(),
+            MountOptions::new("memory").read_only(true),
+        )
+        .expect("mount readonly fs");
+    assert_kernel_error_code(
+        kernel.write_file("/readonly/blocked.txt", b"blocked".to_vec()),
+        "EROFS",
+    );
 }
 
 #[test]

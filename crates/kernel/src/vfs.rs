@@ -11,6 +11,7 @@ pub const S_IFLNK: u32 = 0o120000;
 const DEFAULT_UID: u32 = 1000;
 const DEFAULT_GID: u32 = 1000;
 const DIRECTORY_SIZE: u64 = 4096;
+pub const MAX_PATH_LENGTH: usize = 4096;
 const MAX_SYMLINK_DEPTH: usize = 40;
 
 pub type VfsResult<T> = Result<T, VfsError>;
@@ -65,6 +66,10 @@ impl VfsError {
 
     fn not_directory(op: &'static str, path: &str) -> Self {
         Self::new("ENOTDIR", format!("not a directory, {op} '{path}'"))
+    }
+
+    fn path_too_long(path: &str) -> Self {
+        Self::new("ENAMETOOLONG", format!("file name too long: {path}"))
     }
 
     fn not_empty(path: &str) -> Self {
@@ -354,6 +359,7 @@ impl MemoryFileSystem {
         follow_final_symlink: bool,
         depth: usize,
     ) -> VfsResult<String> {
+        validate_path(path)?;
         if depth > MAX_SYMLINK_DEPTH {
             return Err(VfsError::symlink_loop(path));
         }
@@ -378,13 +384,13 @@ impl MemoryFileSystem {
             let is_final = index + 1 == components.len();
             let should_follow = !is_final || follow_final_symlink;
 
-            if should_follow {
-                if let Some(ino) = self.path_index.get(&candidate) {
-                    let inode = self
-                        .inodes
-                        .get(ino)
-                        .expect("path index should always point at a valid inode");
+            if let Some(ino) = self.path_index.get(&candidate) {
+                let inode = self
+                    .inodes
+                    .get(ino)
+                    .expect("path index should always point at a valid inode");
 
+                if should_follow {
                     if let InodeKind::SymbolicLink { target } = &inode.kind {
                         let target_path = if target.starts_with('/') {
                             target.clone()
@@ -403,6 +409,10 @@ impl MemoryFileSystem {
                             depth + 1,
                         );
                     }
+                }
+
+                if !is_final && !matches!(inode.kind, InodeKind::Directory) {
+                    return Err(VfsError::not_directory("stat", &candidate));
                 }
             }
 
@@ -1094,6 +1104,14 @@ impl Default for MemoryFileSystem {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub fn validate_path(path: &str) -> VfsResult<()> {
+    let normalized = normalize_path(path);
+    if normalized.len() > MAX_PATH_LENGTH {
+        return Err(VfsError::path_too_long(path));
+    }
+    Ok(())
 }
 
 pub fn normalize_path(path: &str) -> String {

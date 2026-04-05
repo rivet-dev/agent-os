@@ -170,8 +170,8 @@ fn overlay_rename_rejects_directory_trees_that_exceed_snapshot_depth_limit() {
     let mut lower = MemoryFileSystem::new();
     let mut path = String::from("/deep");
     lower.create_dir(&path).expect("create root of deep tree");
-    for index in 0..1025 {
-        path = format!("{path}/level-{index}");
+    for _ in 0..1025 {
+        path.push_str("/d");
         lower.create_dir(&path).expect("create nested directory");
     }
 

@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Filesystem errno hardening usually needs both layers updated together: enforce fast-fail guest-path validation in `crates/kernel/src/permissions.rs` so overlong paths do not degrade into permission errors, and keep `crates/kernel/src/vfs.rs` path traversal authoritative for semantic errors like `ENOTDIR`.
 - Job-control signal state transitions should be split by layer: `crates/kernel/src/process_table.rs` owns `SIGSTOP`/`SIGTSTP`/`SIGCONT` status changes and `waitpid` notifications, while `crates/kernel/src/kernel.rs` should emit PTY-driven `SIGWINCH` after the PTY layer reports the foreground process group.
 - Guest path scrubbing in `crates/execution/src/node_import_cache.rs` should treat `HOST_CWD` as an implicit runtime-only mapping to the virtual guest cwd for entrypoint loading and stack traces, and only fall back to `/unknown` for absolute host paths outside visible mappings or internal cache roots.
 - Sidecar-managed loopback `net.listen` / `dgram.bind` now separate guest-visible ports from hidden host-bound ports; use guest ports in RPC responses and snapshots, but use the actual host listener port when a host-side test client needs to connect directly.
@@ -96,6 +97,23 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: JavaScript sync RPC should mirror Python VFS RPC timeout handling at the execution-host layer, but its response path also needs a bounded async queue because the sidecar thread can otherwise block on a slow-reading guest pipe.
   - Gotchas encountered: Once the host-side timeout has emitted an error response, later sidecar attempts to reply will race and surface `sync RPC request ... is no longer pending`; that stale response needs to be ignored in `crates/sidecar/src/service.rs`.
   - Useful context: `cargo fmt --all`, `cargo check -p agent-os-execution`, `cargo check -p agent-os-sidecar`, `cargo test -p agent-os-execution javascript::tests -- --nocapture`, and `cargo test -p agent-os-sidecar javascript_sync_rpc_requests_proxy_into_the_vm_kernel_filesystem -- --nocapture` pass after this change.
+---
+## 2026-04-05 11:31:04 PDT - US-076
+- What was implemented
+- Added a shared `MAX_PATH_LENGTH` / `validate_path(...)` guard in `crates/kernel/src/vfs.rs` and threaded it through the permission wrapper so overlong guest paths now fail closed with `ENAMETOOLONG` before permission fallback or generic lookup errors.
+- Tightened `MemoryFileSystem::resolve_path_with_options(...)` in `crates/kernel/src/vfs.rs` so intermediate non-directory components now raise `ENOTDIR` during traversal instead of falling through to `ENOENT`.
+- Added an API-surface regression in `crates/kernel/tests/api_surface.rs` that covers `EISDIR`, `ENOTDIR`, `ENAMETOOLONG`, and `EROFS`, and shortened the deep-tree fixture in `crates/kernel/tests/root_fs.rs` so the existing overlay depth-limit test still exercises snapshot depth rather than the new path-length guard.
+- Files changed
+- `crates/kernel/src/permissions.rs`
+- `crates/kernel/src/vfs.rs`
+- `crates/kernel/tests/api_surface.rs`
+- `crates/kernel/tests/root_fs.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Filesystem errno hardening spans both `PermissionedFileSystem` and the underlying VFS; path-length checks belong in the permission layer for fast-fail behavior, while semantic traversal errors like `ENOTDIR` belong in `MemoryFileSystem`.
+  - Gotchas encountered: Existing deep-tree regressions can accidentally start testing `ENAMETOOLONG` once path-length guards land, so depth-focused fixtures should keep segment names intentionally short.
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-kernel`, `cargo test -p agent-os-kernel --test api_surface filesystem_operations_return_linux_errno_values_for_common_failures -- --exact`, `cargo test -p agent-os-kernel --test root_fs overlay_rename_rejects_directory_trees_that_exceed_snapshot_depth_limit -- --exact`, and `cargo test -p agent-os-kernel` all pass after this change.
 ---
 ## 2026-04-05 02:40:37 PDT - US-033
 - What was implemented

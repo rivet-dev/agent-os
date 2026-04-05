@@ -1,4 +1,6 @@
-use crate::vfs::{VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat};
+use crate::vfs::{
+    validate_path, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
+};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -289,6 +291,7 @@ impl<F> PermissionedFileSystem<F> {
     }
 
     fn check(&self, op: FsOperation, path: &str) -> VfsResult<()> {
+        validate_path(path)?;
         let Some(check) = self.permissions.filesystem.as_ref() else {
             return Err(VfsError::access_denied(op.as_str(), path, None));
         };
@@ -373,6 +376,7 @@ impl<F: VirtualFileSystem> PermissionedFileSystem<F> {
     }
 
     fn permission_subject(&self, op: FsOperation, path: &str) -> VfsResult<String> {
+        validate_path(path)?;
         match op {
             FsOperation::Read
             | FsOperation::ReadDir
