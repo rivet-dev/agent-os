@@ -32,6 +32,7 @@ registry/native/target/
 registry/native/vendor/
 registry/native/c/build/
 registry/native/c/vendor/
+registry/native/go/vendor/
 registry/native/c/libs/
 registry/native/c/.cache/
 registry/native/c/sysroot/

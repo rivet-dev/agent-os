@@ -1,0 +1,16 @@
+--- /dev/null
++++ b/vendor/github.com/atotto/clipboard/clipboard_wasip1.go
+@@ -0,0 +1,13 @@
++//go:build wasip1
++
++package clipboard
++
++import "errors"
++
++func readAll() (string, error) {
++	return "", errors.New("clipboard not supported in WASM")
++}
++
++func writeAll(text string) error {
++	return errors.New("clipboard not supported in WASM")
++}

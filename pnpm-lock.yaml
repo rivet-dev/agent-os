@@ -242,6 +242,9 @@ importers:
       '@rivet-dev/agent-os-sed':
         specifier: link:../../registry/software/sed
         version: link:../../registry/software/sed
+      '@rivet-dev/agent-os-slack-cli':
+        specifier: link:../../registry/software/slack-cli
+        version: link:../../registry/software/slack-cli
       '@rivet-dev/agent-os-tar':
         specifier: link:../../registry/software/tar
         version: link:../../registry/software/tar
@@ -895,6 +898,18 @@ importers:
         version: 5.9.3
 
   registry/software/sed:
+    devDependencies:
+      '@rivet-dev/agent-os-registry-types':
+        specifier: link:../../../packages/registry-types
+        version: link:../../../packages/registry-types
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.15
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+
+  registry/software/slack-cli:
     devDependencies:
       '@rivet-dev/agent-os-registry-types':
         specifier: link:../../../packages/registry-types
