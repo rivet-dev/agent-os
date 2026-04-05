@@ -407,7 +407,7 @@
         "Typecheck passes"
       ],
       "priority": 38,
-      "passes": false,
+      "passes": true,
       "notes": "Exit detection currently relies on fragile stderr magic prefix parsing. All output accumulated in memory with no cap."
     },
     {

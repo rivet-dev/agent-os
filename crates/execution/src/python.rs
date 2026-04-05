@@ -34,10 +34,12 @@ const PYTHON_FILE_ENV: &str = "AGENT_OS_PYTHON_FILE";
 const PYTHON_PREWARM_ONLY_ENV: &str = "AGENT_OS_PYTHON_PREWARM_ONLY";
 const PYTHON_WARMUP_DEBUG_ENV: &str = "AGENT_OS_PYTHON_WARMUP_DEBUG";
 const PYTHON_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_PYTHON_WARMUP_METRICS__:";
+const PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV: &str = "AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES";
 const PYTHON_VFS_RPC_REQUEST_FD_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_REQUEST_FD";
 const PYTHON_VFS_RPC_RESPONSE_FD_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_RESPONSE_FD";
 const PYTHON_EXIT_CONTROL_PREFIX: &str = "__AGENT_OS_PYTHON_EXIT__:";
 const PYTHON_WARMUP_MARKER_VERSION: &str = "1";
+const DEFAULT_PYTHON_OUTPUT_BUFFER_MAX_BYTES: usize = 1024 * 1024;
 const CONTROLLED_STDERR_PREFIXES: &[&str] = &[PYTHON_EXIT_CONTROL_PREFIX];
 const RESERVED_PYTHON_ENV_KEYS: &[&str] = &[
     NODE_COMPILE_CACHE_ENV,
@@ -50,6 +52,7 @@ const RESERVED_PYTHON_ENV_KEYS: &[&str] = &[
     PYODIDE_INDEX_URL_ENV,
     PYTHON_CODE_ENV,
     PYTHON_FILE_ENV,
+    PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV,
     PYTHON_PREWARM_ONLY_ENV,
     PYTHON_VFS_RPC_REQUEST_FD_ENV,
     PYTHON_VFS_RPC_RESPONSE_FD_ENV,
@@ -158,6 +161,7 @@ enum PythonProcessEvent {
     RawStderr(Vec<u8>),
     VfsRpcRequest(PythonVfsRpcRequest),
     Control(NodeControlMessage),
+    Exited(i32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +273,7 @@ pub struct PythonExecution {
     pending_exit_code: Arc<Mutex<Option<i32>>>,
     vfs_rpc_responses: Arc<Mutex<BufWriter<File>>>,
     stderr_filter: Arc<Mutex<LinePrefixFilter>>,
+    output_buffer_max_bytes: usize,
 }
 
 impl PythonExecution {
@@ -366,44 +371,57 @@ impl PythonExecution {
         &self,
         timeout: Duration,
     ) -> Result<Option<PythonExecutionEvent>, PythonExecutionError> {
-        match self.events.recv_timeout(timeout) {
-            Ok(PythonProcessEvent::Stdout(chunk)) => Ok(Some(PythonExecutionEvent::Stdout(chunk))),
-            Ok(PythonProcessEvent::RawStderr(chunk)) => {
-                let mut filter = self
-                    .stderr_filter
-                    .lock()
-                    .map_err(|_| PythonExecutionError::EventChannelClosed)?;
-                let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
-                if filtered.is_empty() {
+        let started = Instant::now();
+
+        loop {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            match self.events.recv_timeout(remaining) {
+                Ok(PythonProcessEvent::Stdout(chunk)) => {
+                    return Ok(Some(PythonExecutionEvent::Stdout(chunk)));
+                }
+                Ok(PythonProcessEvent::RawStderr(chunk)) => {
+                    let mut filter = self
+                        .stderr_filter
+                        .lock()
+                        .map_err(|_| PythonExecutionError::EventChannelClosed)?;
+                    let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
+                    if filtered.is_empty() {
+                        if started.elapsed() >= timeout {
+                            if let Some(exit_code) = self.take_pending_exit_code()? {
+                                return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
+                            }
+                            return Ok(None);
+                        }
+                        continue;
+                    }
+                    return Ok(Some(PythonExecutionEvent::Stderr(filtered)));
+                }
+                Ok(PythonProcessEvent::VfsRpcRequest(request)) => {
+                    return Ok(Some(PythonExecutionEvent::VfsRpcRequest(request)));
+                }
+                Ok(PythonProcessEvent::Exited(exit_code)) => {
+                    return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
+                }
+                Ok(PythonProcessEvent::Control(_)) => {
+                    if started.elapsed() >= timeout {
+                        if let Some(exit_code) = self.take_pending_exit_code()? {
+                            return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
+                        }
+                        return Ok(None);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Some(exit_code) = self.take_pending_exit_code()? {
+                        return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
+                    }
                     return Ok(None);
                 }
-                Ok(Some(PythonExecutionEvent::Stderr(filtered)))
-            }
-            Ok(PythonProcessEvent::VfsRpcRequest(request)) => {
-                Ok(Some(PythonExecutionEvent::VfsRpcRequest(request)))
-            }
-            Ok(PythonProcessEvent::Control(NodeControlMessage::PythonExit { exit_code })) => {
-                self.store_pending_exit_code(exit_code)?;
-                self.finalize_child_exit(exit_code)?;
-                Ok(Some(PythonExecutionEvent::Exited(exit_code)))
-            }
-            Ok(PythonProcessEvent::Control(_)) => Ok(None),
-            Err(RecvTimeoutError::Timeout) => {
-                if let Some(exit_code) = self.take_pending_exit_code()? {
-                    self.finalize_child_exit(exit_code)?;
-                    return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
+                Err(RecvTimeoutError::Disconnected) => {
+                    if let Some(exit_code) = self.take_pending_exit_code()? {
+                        return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
+                    }
+                    return Err(PythonExecutionError::EventChannelClosed);
                 }
-                self.poll_child_exit()
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                if let Some(exit_code) = self.take_pending_exit_code()? {
-                    self.finalize_child_exit(exit_code)?;
-                    return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
-                }
-                if let Some(event) = self.poll_child_exit()? {
-                    return Ok(Some(event));
-                }
-                Err(PythonExecutionError::EventChannelClosed)
             }
         }
     }
@@ -414,8 +432,8 @@ impl PythonExecution {
     ) -> Result<PythonExecutionResult, PythonExecutionError> {
         self.close_stdin()?;
 
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
+        let mut stdout = PythonOutputBuffer::new(self.output_buffer_max_bytes);
+        let mut stderr = PythonOutputBuffer::new(self.output_buffer_max_bytes);
         let started = Instant::now();
 
         loop {
@@ -431,8 +449,8 @@ impl PythonExecution {
                 .unwrap_or_else(|| Duration::from_millis(50));
 
             match self.poll_event(poll_timeout)? {
-                Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
-                Some(PythonExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+                Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(&chunk),
+                Some(PythonExecutionEvent::Stderr(chunk)) => stderr.extend(&chunk),
                 Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
                     return Err(PythonExecutionError::PendingVfsRpcRequest(request.id));
                 }
@@ -440,8 +458,8 @@ impl PythonExecution {
                     return Ok(PythonExecutionResult {
                         execution_id: self.execution_id.clone(),
                         exit_code,
-                        stdout,
-                        stderr,
+                        stdout: stdout.into_inner(),
+                        stderr: stderr.into_inner(),
                     });
                 }
                 None => {}
@@ -480,26 +498,6 @@ impl PythonExecution {
         Ok(Some(exit_code))
     }
 
-    fn poll_child_exit(&self) -> Result<Option<PythonExecutionEvent>, PythonExecutionError> {
-        let mut child_slot = self
-            .child
-            .lock()
-            .map_err(|_| PythonExecutionError::EventChannelClosed)?;
-        let Some(child) = child_slot.as_mut() else {
-            return Ok(None);
-        };
-
-        match child.try_wait().map_err(PythonExecutionError::Wait)? {
-            Some(status) => {
-                *child_slot = None;
-                Ok(Some(PythonExecutionEvent::Exited(
-                    status.code().unwrap_or(1),
-                )))
-            }
-            None => Ok(None),
-        }
-    }
-
     fn store_pending_exit_code(&self, exit_code: i32) -> Result<(), PythonExecutionError> {
         let mut pending = self
             .pending_exit_code
@@ -515,11 +513,6 @@ impl PythonExecution {
             .lock()
             .map_err(|_| PythonExecutionError::EventChannelClosed)?;
         Ok(pending.take())
-    }
-
-    fn finalize_child_exit(&self, _exit_code: i32) -> Result<(), PythonExecutionError> {
-        let _ = self.terminate_child()?;
-        Ok(())
     }
 }
 
@@ -618,10 +611,15 @@ impl PythonExecutionEngine {
             PythonProcessEvent::Control,
             |message| PythonProcessEvent::RawStderr(message.into_bytes()),
         );
-        let _stdout_reader = stdout_reader;
-        let _stderr_reader = stderr_reader;
-        let _sender = sender;
         let child = Arc::new(Mutex::new(Some(child)));
+        spawn_python_waiter(
+            child.clone(),
+            stdout_reader,
+            stderr_reader,
+            sender,
+            PythonProcessEvent::Exited,
+            |message| PythonProcessEvent::RawStderr(message.into_bytes()),
+        );
 
         Ok(PythonExecution {
             execution_id,
@@ -632,8 +630,105 @@ impl PythonExecutionEngine {
             pending_exit_code: Arc::new(Mutex::new(None)),
             vfs_rpc_responses: rpc_response_writer,
             stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
+            output_buffer_max_bytes: python_output_buffer_max_bytes(&request),
         })
     }
+}
+
+#[derive(Debug)]
+struct PythonOutputBuffer {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+}
+
+impl PythonOutputBuffer {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_bytes,
+        }
+    }
+
+    fn extend(&mut self, chunk: &[u8]) {
+        if self.bytes.len() >= self.max_bytes {
+            return;
+        }
+
+        let remaining = self.max_bytes - self.bytes.len();
+        let take = remaining.min(chunk.len());
+        self.bytes.extend_from_slice(&chunk[..take]);
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+fn python_output_buffer_max_bytes(request: &StartPythonExecutionRequest) -> usize {
+    request
+        .env
+        .get(PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV)
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_PYTHON_OUTPUT_BUFFER_MAX_BYTES)
+}
+
+fn spawn_python_waiter<E, FE, FW>(
+    child: Arc<Mutex<Option<Child>>>,
+    stdout_reader: JoinHandle<()>,
+    stderr_reader: JoinHandle<()>,
+    sender: Sender<E>,
+    exit_event: FE,
+    wait_error_event: FW,
+) where
+    E: Send + 'static,
+    FE: Fn(i32) -> E + Send + 'static,
+    FW: Fn(String) -> E + Send + 'static,
+{
+    thread::spawn(move || loop {
+        let outcome = {
+            let mut child_slot = match child.lock() {
+                Ok(child_slot) => child_slot,
+                Err(_) => {
+                    let _ = sender.send(wait_error_event(String::from(
+                        "agent-os execution wait error: child lock poisoned\n",
+                    )));
+                    return;
+                }
+            };
+            let Some(child) = child_slot.as_mut() else {
+                return;
+            };
+
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let exit_code = status.code().unwrap_or(1);
+                    *child_slot = None;
+                    Some(Ok(exit_code))
+                }
+                Ok(None) => None,
+                Err(err) => {
+                    *child_slot = None;
+                    Some(Err(err))
+                }
+            }
+        };
+
+        match outcome {
+            Some(Ok(exit_code)) => {
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                let _ = sender.send(exit_event(exit_code));
+                return;
+            }
+            Some(Err(err)) => {
+                let _ = sender.send(wait_error_event(format!(
+                    "agent-os execution wait error: {err}\n"
+                )));
+                return;
+            }
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+    });
 }
 
 fn create_node_child(

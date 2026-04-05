@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Python execution in `crates/execution/src/python.rs` should keep `poll_event()` blocked until a real guest-visible event arrives or the caller timeout expires; filtered stderr/control traffic is internal noise, and `wait()` should cap buffered stdio via the hidden `AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES` env knob instead of growing unbounded buffers.
 - Native sidecar permission policy must be serialized into `CreateVmRequest`, not just `configure_vm`, because guest env filtering and bootstrap driver registration both happen during VM construction.
 - Sidecar execute flows should validate host `cwd` against `vm.cwd` before spawn, then pass the sandbox root to the Node permission layer separately from the runtime `current_dir`; the host process can start in a subdirectory without widening `--allow-fs-read/--allow-fs-write`.
 - Node builtin hardening is split between `packages/core/src/sidecar/native-kernel-proxy.ts` and four generated surfaces in `crates/execution/src/node_import_cache.rs` (loader, Node runner, Python runner, denied asset materialization); update all of them together when changing builtin policy.
@@ -487,4 +488,20 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Native-sidecar permission policy has to be present during `create_vm`; sending it only in `configure_vm` is too late because guest env filtering and bootstrap driver registration both run while the VM is being constructed.
   - Gotchas encountered: Denying `fs.write` at VM creation time blocks the sidecar’s own `/bin/*` bootstrap stub registration, so enforcement tests should deny `fs.read` or otherwise leave bootstrap writes allowed unless the kernel gains a post-bootstrap permission swap.
   - Useful context: `pnpm --dir packages/core exec vitest run tests/sidecar-permission-descriptors.test.ts`, `pnpm --dir packages/core exec tsc --noEmit`, `cargo test -p agent-os-sidecar --test protocol`, `cargo test -p agent-os-sidecar service::tests::bridge_permissions_map_symlink_operations_to_symlink_access -- --exact`, and `cargo test -p agent-os-sidecar service::tests::create_vm_applies_filesystem_permission_descriptors_to_kernel_access -- --exact` all pass after this change. `pnpm --dir packages/core exec biome format --write ...` could not run in this checkout because `biome` is not installed.
+---
+## 2026-04-05 01:29:38 PDT - US-025
+- What was implemented
+- Replaced Python execution’s main-thread exit polling with a dedicated waiter thread that watches the shared child handle, joins the stdout/stderr readers before emitting `Exited`, and leaves `kill()`/`Drop` able to terminate the same child safely.
+- Updated `poll_event()` to keep consuming control-only and filtered-stderr traffic within the caller timeout so interactive callers no longer see spurious `None` results from internal Python control messages.
+- Added bounded stdout/stderr accumulation to `wait()` with a default 1 MiB per-stream cap and a hidden per-execution override via `AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES`, plus a regression that verifies truncation under a small cap.
+- Files changed
+- `AGENTS.md`
+- `crates/execution/src/python.rs`
+- `crates/execution/tests/python.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Python execution has two different consumers: streaming callers use `poll_event()`, while buffered callers use `wait()`. Internal control/filter noise should be transparent to the streaming API, but buffered `wait()` still needs a hard cap to avoid OOM on large guest output.
+  - Gotchas encountered: Python still needs direct access to its own `Child` handle for `kill()`/`Drop`, so the waiter thread cannot consume the child the same way JS/WASM do; the safe compromise here is a dedicated waiter loop over the shared handle, with `kill()` continuing to own the final `wait()`.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test python`, `cargo test -p agent-os-execution --test python_prewarm`, and `cargo check -p agent-os-execution -p agent-os-sidecar` pass after this change. `cargo test -p agent-os-execution --test permission_flags` still has an existing invocation-count assumption (`expected ... 5`, got `4`), and `cargo test -p agent-os-sidecar --test python` currently fails in this checkout during bundled Pyodide warmup with `Error [ERR_ACCESS_DENIED]: process.binding`.
 ---

@@ -11,6 +11,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 const PYTHON_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_PYTHON_WARMUP_METRICS__:";
+const PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV: &str = "AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES";
 
 #[derive(Debug, Clone, PartialEq)]
 struct PythonPrewarmMetrics {
@@ -244,6 +245,58 @@ export async function loadPyodide(options) {
         stderr.starts_with(&expected_index_path),
         "unexpected stderr: {stderr}"
     );
+}
+
+#[test]
+fn python_execution_wait_bounds_output_buffers() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let pyodide_dir = temp.path().join("pyodide");
+    fs::create_dir_all(&pyodide_dir).expect("create pyodide dir");
+    write_fixture(
+        &pyodide_dir.join("pyodide.mjs"),
+        r#"
+export async function loadPyodide(options) {
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync() {
+      options.stdout('x'.repeat(80));
+      options.stderr('y'.repeat(80));
+    },
+  };
+}
+"#,
+    );
+    write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
+
+    let mut engine = PythonExecutionEngine::default();
+    let context = engine.create_context(CreatePythonContextRequest {
+        vm_id: String::from("vm-python"),
+        pyodide_dist_path: pyodide_dir,
+    });
+
+    let result = engine
+        .start_execution(StartPythonExecutionRequest {
+            vm_id: String::from("vm-python"),
+            context_id: context.context_id,
+            code: String::from("print('ignored')"),
+            file_path: None,
+            env: BTreeMap::from([(
+                String::from(PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV),
+                String::from("32"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start Python execution")
+        .wait(None)
+        .expect("wait for Python execution");
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout.len(), 32, "stdout should be capped");
+    assert_eq!(result.stderr.len(), 32, "stderr should be capped");
+    assert!(result.stdout.iter().all(|byte| *byte == b'x'));
+    assert!(result.stderr.iter().all(|byte| *byte == b'y'));
 }
 
 #[test]
