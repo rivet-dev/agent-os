@@ -843,7 +843,7 @@
         "Typecheck passes"
       ],
       "priority": 53,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: unmount_filesystem() calls .inner_mut().inner_mut().unmount() directly, bypassing all permission checks. Guest can unmount any filesystem including /, /etc, /proc."
     },
     {

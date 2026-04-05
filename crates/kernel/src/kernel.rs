@@ -1424,6 +1424,7 @@ impl KernelVm<MountTable> {
 
     pub fn unmount_filesystem(&mut self, path: &str) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        self.check_mount_permissions(path)?;
         self.filesystem
             .inner_mut()
             .inner_mut()

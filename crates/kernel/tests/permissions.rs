@@ -429,3 +429,105 @@ fn kernel_sensitive_mounts_require_explicit_sensitive_permission() {
         .as_slice()
     );
 }
+
+#[test]
+fn kernel_unmounts_require_write_permission_on_the_mount_path() {
+    let checked = Arc::new(Mutex::new(Vec::new()));
+    let checked_for_permission = Arc::clone(&checked);
+    let mut config = KernelVmConfig::new("vm-unmount-permissions");
+    config.permissions = Permissions {
+        filesystem: Some(Arc::new(move |request: &FsAccessRequest| {
+            checked_for_permission
+                .lock()
+                .expect("checked unmount paths lock poisoned")
+                .push((request.op, request.path.clone()));
+            PermissionDecision::deny("unmounts disabled")
+        })),
+        ..Permissions::default()
+    };
+
+    let mut kernel = KernelVm::new(MountTable::new(MemoryFileSystem::new()), config);
+    kernel
+        .filesystem_mut()
+        .inner_mut()
+        .inner_mut()
+        .mount(
+            "/workspace",
+            MemoryFileSystem::new(),
+            MountOptions::new("memory"),
+        )
+        .expect("seed mount");
+
+    let error = kernel
+        .unmount_filesystem("/workspace")
+        .expect_err("unmount should be denied");
+    assert_eq!(error.code(), "EACCES");
+    assert!(error.to_string().contains("unmounts disabled"));
+    assert_eq!(
+        checked
+            .lock()
+            .expect("checked unmount paths lock poisoned")
+            .as_slice(),
+        [(
+            agent_os_kernel::permissions::FsOperation::Write,
+            String::from("/workspace")
+        )]
+        .as_slice()
+    );
+}
+
+#[test]
+fn kernel_sensitive_unmounts_require_explicit_sensitive_permission() {
+    let checked = Arc::new(Mutex::new(Vec::new()));
+    let checked_for_permission = Arc::clone(&checked);
+    let mut config = KernelVmConfig::new("vm-sensitive-unmounts");
+    config.permissions = Permissions {
+        filesystem: Some(Arc::new(move |request: &FsAccessRequest| {
+            checked_for_permission
+                .lock()
+                .expect("checked sensitive unmount paths lock poisoned")
+                .push((request.op, request.path.clone()));
+            match request.op {
+                agent_os_kernel::permissions::FsOperation::Write => PermissionDecision::allow(),
+                agent_os_kernel::permissions::FsOperation::MountSensitive => {
+                    PermissionDecision::deny("sensitive mounts require elevation")
+                }
+                other => panic!("unexpected filesystem permission probe: {other:?}"),
+            }
+        })),
+        ..Permissions::default()
+    };
+
+    let mut kernel = KernelVm::new(MountTable::new(MemoryFileSystem::new()), config);
+    kernel
+        .filesystem_mut()
+        .inner_mut()
+        .inner_mut()
+        .mount("/etc", MemoryFileSystem::new(), MountOptions::new("memory"))
+        .expect("seed sensitive mount");
+
+    let error = kernel
+        .unmount_filesystem("/etc")
+        .expect_err("sensitive unmount should be denied");
+    assert_eq!(error.code(), "EACCES");
+    assert!(error
+        .to_string()
+        .contains("sensitive mounts require elevation"));
+    assert_eq!(
+        checked
+            .lock()
+            .expect("checked sensitive unmount paths lock poisoned")
+            .as_slice(),
+        [
+            (
+                agent_os_kernel::permissions::FsOperation::Write,
+                String::from("/etc"),
+            ),
+            (
+                agent_os_kernel::permissions::FsOperation::MountSensitive,
+                String::from("/etc"),
+            ),
+        ]
+        .as_slice()
+    );
+}

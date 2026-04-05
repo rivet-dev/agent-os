@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Kernel mount and unmount entrypoints in `crates/kernel/src/kernel.rs` should both route through `check_mount_permissions(...)` so `fs.write` and `fs.mount_sensitive` stay consistent for `/`, `/etc`, and `/proc`.
 - Guest `child_process` internals should never ride in `options.env`: strip `AGENT_OS_*` keys in `crates/execution/src/node_import_cache.rs`, carry only the Node bootstrap allowlist in `options.internalBootstrapEnv`, and let `crates/sidecar/src/service.rs` re-inject that allowlisted map only for nested JavaScript runtimes.
 - The guest `os` polyfill in `crates/execution/src/node_import_cache.rs` should only honor explicit `AGENT_OS_VIRTUAL_OS_*` overrides; safe defaults like `agent-os`, `/root`, `/tmp`, and `/bin/sh` must not fall back to host env vars.
 - JavaScript sync-RPC networking in `crates/sidecar/src/service.rs` bypasses the kernel permission wrappers, so `dns.lookup`/`net.connect`/`net.listen` must enforce `network.dns`/`network.http`/`network.listen` there directly, and errno-style failures should be preserved into `respond_javascript_sync_rpc_error(...)` so guest code sees `EACCES` instead of a generic sync-RPC code.
@@ -209,6 +210,20 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Guest-facing process virtualization should translate host paths back through `AGENT_OS_GUEST_PATH_MAPPINGS`, while internal Node bootstrap code continues using a captured host cwd to avoid breaking resolution.
 - Gotchas encountered: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` still shows pre-existing flaky cache-metric assertions (`javascript_execution_invalidates_bare_package_resolution_when_package_metadata_changes`, `javascript_execution_preserves_source_changes_with_cached_resolution`) even though those cases pass when rerun individually; the new cwd regression and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` pass.
 - Useful context: The cwd hardening lives in the embedded runner source inside `crates/execution/src/node_import_cache.rs`, not in `crates/execution/src/javascript.rs`, because the visible `process` object is constructed inside the generated `runner.mjs`.
+---
+## 2026-04-05 07:10:45 PDT - US-053
+- What was implemented
+- Routed `KernelVm::unmount_filesystem` through the same `check_mount_permissions(...)` helper already used by mount operations, so unmounts now require `fs.write` and sensitive unmounts additionally require `fs.mount_sensitive`.
+- Added kernel permission regressions covering denied unmounts at `/workspace` and denied sensitive unmounts at `/etc`, asserting the exact permission probes and `EACCES` behavior.
+- Files changed
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/tests/permissions.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: Mount lifecycle policy in the kernel belongs at the `KernelVm` entrypoints; tests can seed mounts through `filesystem_mut().inner_mut().inner_mut().mount(...)` when they need to bypass permission wrappers and assert policy behavior in isolation.
+- Gotchas encountered: `MountTable::unmount` still returns `EINVAL` for non-mount targets and `/`; the permission gate must run before that raw mount-table call so denied paths fail closed with `EACCES`.
+- Useful context: `cargo test -p agent-os-kernel --test permissions` and `cargo test -p agent-os-kernel mount_table` cover the touched behavior and both pass on this branch.
 ---
 ## 2026-04-04 19:57:51 PDT - US-006
 - What was implemented
