@@ -322,6 +322,32 @@ where
         }
     }
 
+    fn require_network_access(
+        &self,
+        vm_id: &str,
+        op: NetworkOperation,
+        resource: impl Into<String>,
+    ) -> Result<(), SidecarError> {
+        let resource = resource.into();
+        let decision = self.network_decision(
+            vm_id,
+            &NetworkAccessRequest {
+                vm_id: vm_id.to_owned(),
+                op,
+                resource: resource.clone(),
+            },
+        );
+        if decision.allow {
+            return Ok(());
+        }
+
+        let message = match decision.reason.as_deref() {
+            Some(reason) => format!("EACCES: permission denied, {resource}: {reason}"),
+            None => format!("EACCES: permission denied, {resource}"),
+        };
+        Err(SidecarError::Execution(message))
+    }
+
     fn set_vm_permissions(
         &self,
         vm_id: &str,
@@ -4430,7 +4456,7 @@ where
                 .respond_javascript_sync_rpc_success(request.id, result),
             Err(error) => process.execution.respond_javascript_sync_rpc_error(
                 request.id,
-                "ERR_AGENT_OS_NODE_SYNC_RPC",
+                javascript_sync_rpc_error_code(&error),
                 error.to_string(),
             ),
         }
@@ -6261,6 +6287,14 @@ fn resolve_tcp_bind_addr(host: &str, port: u16) -> Result<SocketAddr, SidecarErr
         })
 }
 
+fn format_dns_resource(hostname: &str) -> String {
+    format!("dns://{hostname}")
+}
+
+fn format_tcp_resource(host: &str, port: u16) -> String {
+    format!("tcp://{host}:{port}")
+}
+
 fn resolve_tcp_connect_addr<B>(
     bridge: &SharedBridge<B>,
     vm_id: &str,
@@ -6807,6 +6841,11 @@ where
                         SidecarError::InvalidState(format!("invalid dns.lookup payload: {error}"))
                     })
                 })?;
+            bridge.require_network_access(
+                vm_id,
+                NetworkOperation::Dns,
+                format_dns_resource(&payload.hostname),
+            )?;
             let addresses = filter_dns_ip_addrs(
                 resolve_dns_ip_addrs(bridge, vm_id, dns, &payload.hostname)?,
                 payload.family,
@@ -6857,6 +6896,11 @@ where
                     }
                 },
             };
+            bridge.require_network_access(
+                vm_id,
+                NetworkOperation::Dns,
+                format_dns_resource(&payload.hostname),
+            )?;
             let addresses = filter_dns_ip_addrs(
                 resolve_dns_ip_addrs(bridge, vm_id, dns, &payload.hostname)?,
                 family,
@@ -7085,13 +7129,13 @@ where
                         "net.connect requires either a path or port",
                     ))
                 })?;
-                let socket = ActiveTcpSocket::connect(
-                    bridge,
+                let host = payload.host.as_deref().unwrap_or("localhost");
+                bridge.require_network_access(
                     vm_id,
-                    dns,
-                    payload.host.as_deref().unwrap_or("localhost"),
-                    port,
+                    NetworkOperation::Http,
+                    format_tcp_resource(host, port),
                 )?;
+                let socket = ActiveTcpSocket::connect(bridge, vm_id, dns, host, port)?;
                 let socket_id = process.allocate_tcp_socket_id();
                 let local_addr = socket.local_addr;
                 let remote_addr = socket.remote_addr;
@@ -7153,11 +7197,14 @@ where
                     "path": guest_path,
                 }))
             } else {
-                let listener = ActiveTcpListener::bind(
-                    payload.host.as_deref().unwrap_or("0.0.0.0"),
-                    payload.port.unwrap_or(0),
-                    payload.backlog,
+                let host = payload.host.as_deref().unwrap_or("0.0.0.0");
+                let port = payload.port.unwrap_or(0);
+                bridge.require_network_access(
+                    vm_id,
+                    NetworkOperation::Listen,
+                    format_tcp_resource(host, port),
                 )?;
+                let listener = ActiveTcpListener::bind(host, port, payload.backlog)?;
                 let listener_id = process.allocate_tcp_listener_id();
                 let local_addr = listener.local_addr();
                 process.tcp_listeners.insert(listener_id.clone(), listener);
@@ -7768,6 +7815,26 @@ fn error_code(error: &SidecarError) -> &'static str {
     }
 }
 
+fn guest_errno_code(message: &str) -> Option<&str> {
+    let (code, _) = message.split_once(':')?;
+    if code.len() < 2 || !code.starts_with('E') {
+        return None;
+    }
+    code[1..]
+        .bytes()
+        .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        .then_some(code)
+}
+
+fn javascript_sync_rpc_error_code(error: &SidecarError) -> String {
+    match error {
+        SidecarError::Execution(message) => guest_errno_code(message)
+            .unwrap_or("ERR_AGENT_OS_NODE_SYNC_RPC")
+            .to_owned(),
+        _ => String::from("ERR_AGENT_OS_NODE_SYNC_RPC"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[path = "/home/nathan/a5/crates/bridge/tests/support.rs"]
@@ -7988,6 +8055,106 @@ ykAheWCsAteSEWVc0w==\n\
             output.status.success(),
             "node must be available for python dispatch tests"
         );
+    }
+
+    fn run_javascript_entry(
+        sidecar: &mut NativeSidecar<RecordingBridge>,
+        vm_id: &str,
+        cwd: &Path,
+        process_id: &str,
+        allowed_node_builtins: &str,
+    ) -> (String, String, Option<i32>) {
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.to_owned(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.to_owned(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    allowed_node_builtins.to_owned(),
+                )]),
+                cwd: cwd.to_path_buf(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                process_id.to_owned(),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
+            );
+        }
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = None;
+        for _ in 0..64 {
+            let next_event = {
+                let vm = sidecar.vms.get(vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get(process_id)
+                    .map(|process| {
+                        process
+                            .execution
+                            .poll_event(Duration::from_secs(5))
+                            .expect("poll javascript event")
+                    })
+                    .flatten()
+            };
+            let Some(event) = next_event else {
+                if exit_code.is_some() {
+                    break;
+                }
+                panic!("javascript process {process_id} disappeared before exit");
+            };
+
+            match &event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    stdout.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    stderr.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Exited(code) => {
+                    exit_code = Some(*code);
+                }
+                _ => {}
+            }
+
+            sidecar
+                .handle_execution_event(vm_id, process_id, event)
+                .expect("handle javascript event");
+        }
+
+        (stdout, stderr, exit_code)
     }
 
     #[test]
@@ -10533,6 +10700,228 @@ console.log(JSON.stringify({{ lookup, resolved, socketSummary }}));
             assert_eq!(event.fields["addresses"], "127.0.0.1");
             assert_eq!(event.fields["resolver_count"], "1");
             assert_eq!(event.fields["resolvers"], "203.0.113.53:5353");
+        }
+    }
+
+    #[test]
+    fn javascript_network_permission_callbacks_fire_for_dns_lookup_connect_and_listen() {
+        assert_node_available();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind tcp listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept tcp client");
+            let mut received = Vec::new();
+            stream
+                .read_to_end(&mut received)
+                .expect("read client payload");
+            assert_eq!(String::from_utf8(received).expect("client utf8"), "ping");
+        });
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm_with_metadata(
+            &mut sidecar,
+            &connection_id,
+            &session_id,
+            Vec::new(),
+            BTreeMap::from([(
+                String::from("network.dns.override.example.test"),
+                String::from("127.0.0.1"),
+            )]),
+        )
+        .expect("create vm");
+        sidecar
+            .bridge
+            .clear_vm_permissions(&vm_id)
+            .expect("clear static vm permissions");
+        let cwd = temp_dir("agent-os-sidecar-js-network-permission-callbacks");
+        write_fixture(
+            &cwd.join("entry.mjs"),
+            &format!(
+                r#"
+import dns from "node:dns";
+import net from "node:net";
+
+const lookup = await dns.promises.lookup("example.test", {{ family: 4 }});
+const listenAddress = await new Promise((resolve, reject) => {{
+  const server = net.createServer();
+  server.on("error", reject);
+  server.listen(0, "127.0.0.1", () => {{
+    const address = server.address();
+    server.close((error) => {{
+      if (error) {{
+        reject(error);
+        return;
+      }}
+      resolve(address);
+    }});
+  }});
+}});
+const connectResult = await new Promise((resolve, reject) => {{
+  const socket = net.createConnection({{ host: "127.0.0.1", port: {port} }});
+  socket.on("error", reject);
+  socket.on("connect", () => {{
+    socket.end("ping");
+  }});
+  socket.on("close", (hadError) => {{
+    resolve({{ hadError }});
+  }});
+}});
+
+console.log(JSON.stringify({{ lookup, listenAddress, connectResult }}));
+process.exit(0);
+"#,
+            ),
+        );
+
+        let (stdout, stderr, exit_code) = run_javascript_entry(
+            &mut sidecar,
+            &vm_id,
+            &cwd,
+            "proc-js-network-permission-callbacks",
+            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+        );
+
+        server.join().expect("join tcp server");
+        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse callback JSON");
+        assert_eq!(
+            parsed["lookup"]["address"],
+            Value::String(String::from("127.0.0.1"))
+        );
+        assert_eq!(parsed["connectResult"]["hadError"], Value::Bool(false));
+        assert!(
+            parsed["listenAddress"]["port"]
+                .as_u64()
+                .is_some_and(|value| value > 0),
+            "stdout: {stdout}"
+        );
+
+        let expected = [
+            format!("net:{vm_id}:{}", format_dns_resource("example.test")),
+            format!("net:{vm_id}:{}", format_tcp_resource("127.0.0.1", 0)),
+            format!("net:{vm_id}:{}", format_tcp_resource("127.0.0.1", port)),
+        ];
+        let checks = sidecar
+            .with_bridge_mut(|bridge| {
+                bridge
+                    .permission_checks
+                    .iter()
+                    .filter(|entry| entry.starts_with("net:"))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .expect("read permission checks");
+        for check in expected {
+            assert!(
+                checks.iter().any(|entry| entry == &check),
+                "missing permission check {check:?} in {checks:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn javascript_network_permission_denials_surface_eacces_to_guest_code() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm_with_metadata(
+            &mut sidecar,
+            &connection_id,
+            &session_id,
+            vec![
+                PermissionDescriptor {
+                    capability: String::from("fs"),
+                    mode: PermissionMode::Allow,
+                },
+                PermissionDescriptor {
+                    capability: String::from("env"),
+                    mode: PermissionMode::Allow,
+                },
+                PermissionDescriptor {
+                    capability: String::from("child_process"),
+                    mode: PermissionMode::Allow,
+                },
+                PermissionDescriptor {
+                    capability: String::from("network"),
+                    mode: PermissionMode::Allow,
+                },
+                PermissionDescriptor {
+                    capability: String::from("network.dns"),
+                    mode: PermissionMode::Deny,
+                },
+                PermissionDescriptor {
+                    capability: String::from("network.http"),
+                    mode: PermissionMode::Deny,
+                },
+                PermissionDescriptor {
+                    capability: String::from("network.listen"),
+                    mode: PermissionMode::Deny,
+                },
+            ],
+            BTreeMap::from([(
+                String::from("network.dns.override.example.test"),
+                String::from("127.0.0.1"),
+            )]),
+        )
+        .expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-network-permission-denials");
+        write_fixture(
+            &cwd.join("entry.mjs"),
+            r#"
+import dns from "node:dns";
+import net from "node:net";
+
+let dnsResult = null;
+try {
+  dnsResult = { unexpected: await dns.promises.lookup("example.test", { family: 4 }) };
+} catch (error) {
+  dnsResult = { code: error.code ?? null, message: error.message };
+}
+const listenResult = (() => {
+  const server = net.createServer();
+  try {
+    server.listen(0, "127.0.0.1");
+    return { unexpected: true };
+  } catch (error) {
+    return { code: error.code ?? null, message: error.message };
+  }
+})();
+const connectResult = await new Promise((resolve) => {
+  const socket = net.createConnection({ host: "127.0.0.1", port: 43111 });
+  socket.on("connect", () => resolve({ unexpected: true }));
+  socket.on("error", (error) => {
+    resolve({ code: error.code ?? null, message: error.message });
+  });
+});
+
+console.log(JSON.stringify({ dnsResult, listenResult, connectResult }));
+process.exit(0);
+"#,
+        );
+
+        let (stdout, stderr, exit_code) = run_javascript_entry(
+            &mut sidecar,
+            &vm_id,
+            &cwd,
+            "proc-js-network-permission-denials",
+            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+        );
+
+        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse denial JSON");
+        for field in ["dnsResult", "listenResult", "connectResult"] {
+            assert_eq!(parsed[field]["code"], Value::String(String::from("EACCES")));
+            assert!(
+                parsed[field]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("blocked by network.")),
+                "missing policy detail for {field}: {stdout}"
+            );
         }
     }
 

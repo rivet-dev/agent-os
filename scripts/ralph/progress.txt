@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- JavaScript sync-RPC networking in `crates/sidecar/src/service.rs` bypasses the kernel permission wrappers, so `dns.lookup`/`net.connect`/`net.listen` must enforce `network.dns`/`network.http`/`network.listen` there directly, and errno-style failures should be preserved into `respond_javascript_sync_rpc_error(...)` so guest code sees `EACCES` instead of a generic sync-RPC code.
 - Sidecar TCP/Unix socket readers should treat peer EOF as a half-close, not a full close: emit `End` immediately, but only emit `Close` after the local write half has also been shut down, or guest `socket.end(...)` flows can turn into resets.
 - Native sidecar security telemetry should use `bridge.emit_structured_event(...)` with a `timestamp` field and stable keys like `policy`, `path`, `reason`, `source_pid`, and `target_pid`; this makes sidecar tests assertable without scraping free-form logs.
 - Sidecar VM-scoped DNS policy is driven from `CreateVmRequest.metadata`: use `network.dns.servers` for comma-separated upstream resolvers and `network.dns.override.<hostname>` for fixed answers, and emit `network.dns.resolved` / `network.dns.resolve_failed` structured events so resolution is observable in tests.
@@ -258,6 +259,7 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Added JavaScript regressions covering guest-visible `require.resolve()` results, translated CJS module-not-found errors, and translated top-level loader stack traces.
 - Files changed
 - `crates/execution/src/node_import_cache.rs`
+
 - `crates/execution/tests/javascript.rs`
 - `scripts/ralph/prd.json`
 - `scripts/ralph/progress.txt`
@@ -897,4 +899,18 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Registry external-network coverage is safest when CI opt-in (`AGENTOS_E2E_NETWORK=1`) is paired with a host-side preflight probe and command-level retries inside the VM.
   - Gotchas encountered: The root workspace install is currently broken by unrelated package metadata (`examples/quickstart` expects `@rivet-dev/agent-os`, while `packages/core` is named `@rivet-dev/agent-os-core`), so focused registry verification has to use `pnpm install --dir registry --ignore-workspace --no-lockfile`.
   - Useful context: `cargo fmt --all --check` passes. `AGENTOS_E2E_NETWORK=1 registry/node_modules/.bin/vitest run registry/tests/wasmvm/curl.test.ts` passes syntactically but skips locally because the required WASM artifacts are not built in this checkout. Root `pnpm install --frozen-lockfile` fails pre-existingly with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`, and root `pnpm install --no-frozen-lockfile` also fails pre-existingly because the workspace contains a missing `@rivet-dev/agent-os` package reference in `examples/quickstart`.
+---
+## 2026-04-05 06:31:02 PDT - US-048
+- What was implemented
+- Enforced per-VM network permissions in the sidecar JavaScript sync-RPC paths for `dns.lookup`/`dns.resolve*`, TCP `net.connect`, and TCP `net.listen`, using operation-time checks instead of only relying on policy setup.
+- Preserved errno-style sync-RPC failures back to guest JavaScript so denied network operations now surface `EACCES` instead of the generic `ERR_AGENT_OS_NODE_SYNC_RPC`.
+- Added sidecar regressions that verify the bridge callback path is exercised for `dns.lookup`, `net.connect`, and `net.listen`, and that a VM with denied network permissions cannot resolve DNS, open outbound TCP connections, or bind TCP listeners.
+- Files changed
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: JavaScript networking sync RPCs are one of the places where sidecar code can bypass kernel permission wrappers, so that layer needs its own explicit permission enforcement and guest-visible errno preservation.
+  - Gotchas encountered: `dns.promises.lookup(...)` in the guest can still throw synchronously when the underlying sync RPC fails, so denial regressions should use `try`/`catch` instead of assuming a rejected promise path.
+  - Useful context: `cargo fmt --check`, `cargo test -p agent-os-sidecar javascript_network_permission_callbacks_fire_for_dns_lookup_connect_and_listen -- --nocapture`, `cargo test -p agent-os-sidecar javascript_network_permission_denials_surface_eacces_to_guest_code -- --nocapture`, and `cargo test -p agent-os-sidecar javascript_dns_rpc_resolves_localhost -- --nocapture` pass after this change. `cargo test -p agent-os-sidecar -- --test-threads=1` is still red on pre-existing failures outside this story, including the bundled Pyodide warmup `process.binding` denial path and unstable older sidecar net/child-process tests.
 ---

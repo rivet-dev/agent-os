@@ -762,7 +762,7 @@
         "Typecheck passes"
       ],
       "priority": 48,
-      "passes": false,
+      "passes": true,
       "notes": "Permission framework exists (NetworkAccessRequest, NetworkOperation enums) but needs audit to confirm callbacks fire at socket operation time, not just policy setup."
     },
     {
