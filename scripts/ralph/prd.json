@@ -986,7 +986,7 @@
         "Typecheck passes"
       ],
       "priority": 62,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: Neither flock() nor fcntl(F_SETLK) implemented anywhere. Git, npm, and many tools depend on file locking. This is the #1 compatibility blocker for agent tools."
     },
     {

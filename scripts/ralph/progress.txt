@@ -2,6 +2,7 @@
 ## Codebase Patterns
 - PID-aware POSIX signal side effects belong at `KernelVm` syscall entrypoints, not low-level resource managers: `PipeManager` should stay signal-agnostic and let `crates/kernel/src/kernel.rs` `fd_write` translate broken-pipe `EPIPE` into `SIGPIPE`.
 - Parent-aware `waitpid` state tracking belongs in `crates/kernel/src/process_table.rs`: queue stop/continue notifications there, and let `crates/kernel/src/kernel.rs` clean up resources only after an exited child is actually reaped.
+- Advisory `flock` state should be kernel-global but owned by the shared open-file-description (`FileDescription.id()`), keyed by the opened file identity, and released only when the last refcounted FD closes so dup/fork inheritance shares locks while separate opens still conflict.
 - WebAssembly parser hardening in `crates/execution/src/wasm.rs` should stat module files before `fs::read()`, cap section entry counts before iteration, and bound varuint byte length so malformed modules fail closed without parser DoS.
 - Child-facing control/RPC pipes in `crates/execution` should keep their original `pipe2(O_CLOEXEC)` FDs private and use `ExportedChildFds` in `crates/execution/src/node_process.rs` to duplicate only the child ends into reserved `1000+` FD numbers right before `Command::spawn()`.
 - `KernelVmConfig::new()` is deny-all by default; any kernel or browser-sidecar fixture that expects unrestricted filesystem/process access must opt in with `config.permissions = Permissions::allow_all()`.
@@ -1151,4 +1152,22 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Parent-aware `waitpid` bookkeeping belongs in `ProcessTable`; queue stop/continue notifications there and keep `KernelVm` focused on post-reap cleanup.
   - Gotchas encountered: `WUNTRACED` and `WCONTINUED` need one-shot queued events, not just current `ProcessStatus`, or a child that stops and resumes before the parent waits loses observable state transitions.
   - Useful context: `cargo fmt --all` and `cargo test -p agent-os-kernel` both pass for this change.
+---
+## 2026-04-05 08:48:38 PDT - US-062
+- What was implemented
+- Added kernel advisory locking support in `crates/kernel/src/fd_table.rs` and `crates/kernel/src/kernel.rs`, including `LOCK_SH`, `LOCK_EX`, `LOCK_UN`, `LOCK_NB`, a kernel-global lock manager, and a public `KernelVm::fd_flock(...)` surface keyed by opened-file identity.
+- Wired advisory locks into FD lifecycle cleanup so dup/fork-inherited descriptors share the same lock ownership and the lock is released only when the last refcounted FD closes or the owning process is reaped.
+- Added focused regressions for lock parsing, shared/exclusive conflicts, nonblocking `EWOULDBLOCK`, dup inheritance, fork inheritance, and last-close release behavior.
+- Files changed
+- `CLAUDE.md`
+- `crates/kernel/src/fd_table.rs`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/tests/api_surface.rs`
+- `crates/kernel/tests/fd_table.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Advisory `flock` ownership belongs to the shared open-file-description, not the PID, so the kernel should key conflicts by file identity while using `FileDescription.id()` as the owner token and releasing on the last refcounted close.
+  - Gotchas encountered: Lock release has to run through the same last-close path used by dup2 replacement and process-reap cleanup; closing an individual FD is not enough when other dup/fork references still point at the same `FileDescription`.
+  - Useful context: `cargo fmt --package agent-os-kernel`, `cargo test -p agent-os-kernel --test fd_table --test api_surface`, `cargo check -p agent-os-kernel`, and `cargo test -p agent-os-kernel` all pass for this change.
 ---

@@ -2,9 +2,9 @@ use crate::bridge::LifecycleState;
 use crate::command_registry::{CommandDriver, CommandRegistry};
 use crate::device_layer::{create_device_layer, DeviceLayer};
 use crate::fd_table::{
-    FdStat, FdTableError, FdTableManager, FileDescription, ProcessFdTable,
-    FILETYPE_CHARACTER_DEVICE, FILETYPE_DIRECTORY, FILETYPE_PIPE, FILETYPE_REGULAR_FILE,
-    FILETYPE_SYMBOLIC_LINK, O_APPEND, O_CREAT, O_EXCL, O_TRUNC,
+    FdStat, FdTableError, FdTableManager, FileDescription, FileLockManager, FileLockTarget,
+    FlockOperation, ProcessFdTable, FILETYPE_CHARACTER_DEVICE, FILETYPE_DIRECTORY, FILETYPE_PIPE,
+    FILETYPE_REGULAR_FILE, FILETYPE_SYMBOLIC_LINK, O_APPEND, O_CREAT, O_EXCL, O_TRUNC,
 };
 use crate::mount_table::{MountEntry, MountOptions, MountTable, MountedFileSystem};
 use crate::permissions::{
@@ -229,12 +229,14 @@ pub struct KernelVm<F> {
     ptys: PtyManager,
     users: UserManager,
     resources: ResourceAccountant,
+    file_locks: FileLockManager,
     driver_pids: Arc<Mutex<BTreeMap<String, BTreeSet<u32>>>>,
     terminated: bool,
 }
 
 fn cleanup_process_resources(
     fd_tables: &Mutex<FdTableManager>,
+    file_locks: &FileLockManager,
     pipes: &PipeManager,
     ptys: &PtyManager,
     driver_pids: &Mutex<BTreeMap<String, BTreeSet<u32>>>,
@@ -266,7 +268,7 @@ fn cleanup_process_resources(
     }
 
     for (description, filetype) in cleanup {
-        close_special_resource_if_needed(pipes, ptys, &description, filetype);
+        close_special_resource_if_needed(file_locks, pipes, ptys, &description, filetype);
     }
 
     let mut owners = lock_or_recover(driver_pids);
@@ -276,6 +278,7 @@ fn cleanup_process_resources(
 }
 
 fn close_special_resource_if_needed(
+    file_locks: &FileLockManager,
     pipes: &PipeManager,
     ptys: &PtyManager,
     description: &Arc<FileDescription>,
@@ -284,6 +287,8 @@ fn close_special_resource_if_needed(
     if description.ref_count() != 0 {
         return;
     }
+
+    file_locks.release_owner(description.id());
 
     if filetype == FILETYPE_PIPE && pipes.is_pipe(description.id()) {
         pipes.close(description.id());
@@ -301,6 +306,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         let process_table = ProcessTable::with_zombie_ttl(config.zombie_ttl);
         let process_table_for_pty = process_table.clone();
         let fd_tables = Arc::new(Mutex::new(FdTableManager::new()));
+        let file_locks = FileLockManager::new();
         let driver_pids = Arc::new(Mutex::new(BTreeMap::new()));
         let pipes = PipeManager::new();
         let ptys = PtyManager::with_signal_handler(Arc::new(move |pgid, signal| {
@@ -308,12 +314,14 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         }));
 
         let fd_tables_for_exit = Arc::clone(&fd_tables);
+        let file_locks_for_exit = file_locks.clone();
         let driver_pids_for_exit = Arc::clone(&driver_pids);
         let pipes_for_exit = pipes.clone();
         let ptys_for_exit = ptys.clone();
         process_table.set_on_process_exit(Some(Arc::new(move |pid| {
             cleanup_process_resources(
                 fd_tables_for_exit.as_ref(),
+                &file_locks_for_exit,
                 &pipes_for_exit,
                 &ptys_for_exit,
                 driver_pids_for_exit.as_ref(),
@@ -338,6 +346,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             ptys,
             users: UserManager::new(),
             resources: ResourceAccountant::new(config.resources),
+            file_locks,
             driver_pids,
             terminated: false,
         }
@@ -704,12 +713,12 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             return Ok(table.dup(existing_fd)?);
         }
 
-        let filetype = self.prepare_fd_open(path, flags)?;
+        let (filetype, lock_target) = self.prepare_fd_open(path, flags)?;
         let mut tables = lock_or_recover(&self.fd_tables);
         let table = tables
             .get_mut(pid)
             .ok_or_else(|| KernelError::no_such_process(pid))?;
-        Ok(table.open_with_filetype(path, flags, filetype)?)
+        Ok(table.open_with_details(path, flags, filetype, lock_target)?)
     }
 
     pub fn fd_read(
@@ -986,6 +995,42 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         Ok(())
     }
 
+    pub fn fd_flock(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        operation: u32,
+    ) -> KernelResult<()> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        let entry = {
+            let tables = lock_or_recover(&self.fd_tables);
+            tables
+                .get(pid)
+                .and_then(|table| table.get(fd))
+                .cloned()
+                .ok_or_else(|| KernelError::bad_file_descriptor(fd))?
+        };
+
+        if entry.filetype != FILETYPE_REGULAR_FILE {
+            return Err(KernelError::new(
+                "EBADF",
+                format!("file descriptor {fd} does not support advisory locking"),
+            ));
+        }
+
+        let target = entry.description.lock_target().ok_or_else(|| {
+            KernelError::new(
+                "EBADF",
+                format!("file descriptor {fd} is missing advisory lock metadata"),
+            )
+        })?;
+        let operation = FlockOperation::from_bits(operation)?;
+        self.file_locks
+            .apply(entry.description.id(), target, operation)?;
+        Ok(())
+    }
+
     pub fn fd_stat(&self, requester_driver: &str, pid: u32, fd: u32) -> KernelResult<FdStat> {
         self.assert_driver_owns(requester_driver, pid)?;
         let tables = lock_or_recover(&self.fd_tables);
@@ -1170,7 +1215,11 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         Ok(())
     }
 
-    fn prepare_fd_open(&mut self, path: &str, flags: u32) -> KernelResult<u8> {
+    fn prepare_fd_open(
+        &mut self,
+        path: &str,
+        flags: u32,
+    ) -> KernelResult<(u8, Option<FileLockTarget>)> {
         let exists = self.filesystem.exists(path)?;
         if exists {
             if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
@@ -1192,7 +1241,10 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         }
 
         let stat = VirtualFileSystem::stat(&mut self.filesystem, path)?;
-        Ok(filetype_for_path(path, &stat))
+        Ok((
+            filetype_for_path(path, &stat),
+            Some(FileLockTarget::new(stat.ino)),
+        ))
     }
 
     fn description_for_fd(
@@ -1239,6 +1291,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
     fn cleanup_process_resources(&self, pid: u32) {
         cleanup_process_resources(
             self.fd_tables.as_ref(),
+            &self.file_locks,
             &self.pipes,
             &self.ptys,
             self.driver_pids.as_ref(),
@@ -1429,7 +1482,13 @@ impl<F: VirtualFileSystem> KernelVm<F> {
     }
 
     fn close_special_resource_if_needed(&self, description: &Arc<FileDescription>, filetype: u8) {
-        close_special_resource_if_needed(&self.pipes, &self.ptys, description, filetype);
+        close_special_resource_if_needed(
+            &self.file_locks,
+            &self.pipes,
+            &self.ptys,
+            description,
+            filetype,
+        );
     }
 }
 

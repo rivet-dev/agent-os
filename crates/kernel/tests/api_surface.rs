@@ -1,5 +1,5 @@
 use agent_os_kernel::command_registry::CommandDriver;
-use agent_os_kernel::fd_table::{O_CREAT, O_RDWR};
+use agent_os_kernel::fd_table::{LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN, O_CREAT, O_RDWR};
 use agent_os_kernel::kernel::{
     ExecOptions, KernelVm, KernelVmConfig, OpenShellOptions, SpawnOptions, WaitPidFlags,
     WaitPidResult, SEEK_SET,
@@ -7,6 +7,14 @@ use agent_os_kernel::kernel::{
 use agent_os_kernel::permissions::Permissions;
 use agent_os_kernel::process_table::ProcessWaitEvent;
 use agent_os_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
+
+fn assert_kernel_error_code<T: std::fmt::Debug>(
+    result: agent_os_kernel::kernel::KernelResult<T>,
+    expected: &str,
+) {
+    let error = result.expect_err("operation should fail");
+    assert_eq!(error.code(), expected);
+}
 
 fn spawn_shell(
     kernel: &mut KernelVm<MemoryFileSystem>,
@@ -142,6 +150,165 @@ fn kernel_fd_surface_supports_open_seek_positional_io_dup_and_dev_fd_views() {
 
     process.finish(0);
     kernel.waitpid(process.pid()).expect("wait for shell");
+}
+
+#[test]
+fn kernel_fd_surface_supports_advisory_locks_and_releases_on_last_close() {
+    let mut config = KernelVmConfig::new("vm-api-flock-close");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    kernel
+        .filesystem_mut()
+        .write_file("/tmp/lock.txt", b"lock".to_vec())
+        .expect("seed file");
+
+    let owner = spawn_shell(&mut kernel);
+    let contender = spawn_shell(&mut kernel);
+    let owner_fd = kernel
+        .fd_open("shell", owner.pid(), "/tmp/lock.txt", O_RDWR, None)
+        .expect("owner opens lock file");
+    let owner_dup = kernel
+        .fd_dup("shell", owner.pid(), owner_fd)
+        .expect("duplicate owner fd");
+    let contender_fd = kernel
+        .fd_open("shell", contender.pid(), "/tmp/lock.txt", O_RDWR, None)
+        .expect("contender opens lock file");
+
+    kernel
+        .fd_flock("shell", owner.pid(), owner_fd, LOCK_EX)
+        .expect("owner acquires exclusive lock");
+    kernel
+        .fd_flock("shell", owner.pid(), owner_dup, LOCK_EX | LOCK_NB)
+        .expect("duplicate shares exclusive lock");
+    assert_kernel_error_code(
+        kernel.fd_flock("shell", contender.pid(), contender_fd, LOCK_SH | LOCK_NB),
+        "EWOULDBLOCK",
+    );
+
+    kernel
+        .fd_close("shell", owner.pid(), owner_fd)
+        .expect("close original owner fd");
+    assert_kernel_error_code(
+        kernel.fd_flock("shell", contender.pid(), contender_fd, LOCK_SH | LOCK_NB),
+        "EWOULDBLOCK",
+    );
+
+    kernel
+        .fd_close("shell", owner.pid(), owner_dup)
+        .expect("close duplicate owner fd");
+    kernel
+        .fd_flock("shell", contender.pid(), contender_fd, LOCK_SH | LOCK_NB)
+        .expect("lock released on last close");
+    kernel
+        .fd_flock("shell", contender.pid(), contender_fd, LOCK_UN)
+        .expect("unlock contender");
+
+    owner.finish(0);
+    contender.finish(0);
+    kernel.waitpid(owner.pid()).expect("wait owner");
+    kernel.waitpid(contender.pid()).expect("wait contender");
+}
+
+#[test]
+fn kernel_fd_surface_supports_shared_locks_and_nonblocking_upgrade_conflicts() {
+    let mut config = KernelVmConfig::new("vm-api-flock-shared");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    kernel
+        .filesystem_mut()
+        .write_file("/tmp/shared-lock.txt", b"shared".to_vec())
+        .expect("seed file");
+
+    let first = spawn_shell(&mut kernel);
+    let second = spawn_shell(&mut kernel);
+    let first_fd = kernel
+        .fd_open("shell", first.pid(), "/tmp/shared-lock.txt", O_RDWR, None)
+        .expect("first opens file");
+    let second_fd = kernel
+        .fd_open("shell", second.pid(), "/tmp/shared-lock.txt", O_RDWR, None)
+        .expect("second opens file");
+
+    kernel
+        .fd_flock("shell", first.pid(), first_fd, LOCK_SH)
+        .expect("first shared lock");
+    kernel
+        .fd_flock("shell", second.pid(), second_fd, LOCK_SH)
+        .expect("second shared lock");
+    assert_kernel_error_code(
+        kernel.fd_flock("shell", first.pid(), first_fd, LOCK_EX | LOCK_NB),
+        "EWOULDBLOCK",
+    );
+
+    kernel
+        .fd_flock("shell", second.pid(), second_fd, LOCK_UN)
+        .expect("unlock second shared lock");
+    kernel
+        .fd_flock("shell", first.pid(), first_fd, LOCK_EX | LOCK_NB)
+        .expect("first upgrades to exclusive once peer unlocks");
+
+    first.finish(0);
+    second.finish(0);
+    kernel.waitpid(first.pid()).expect("wait first");
+    kernel.waitpid(second.pid()).expect("wait second");
+}
+
+#[test]
+fn kernel_fd_surface_shares_advisory_locks_across_fork_inherited_fds() {
+    let mut config = KernelVmConfig::new("vm-api-flock-fork");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    kernel
+        .filesystem_mut()
+        .write_file("/tmp/fork-lock.txt", b"fork".to_vec())
+        .expect("seed file");
+
+    let parent = spawn_shell(&mut kernel);
+    let inherited_fd = kernel
+        .fd_open("shell", parent.pid(), "/tmp/fork-lock.txt", O_RDWR, None)
+        .expect("parent opens file");
+    kernel
+        .fd_flock("shell", parent.pid(), inherited_fd, LOCK_EX)
+        .expect("parent acquires exclusive lock");
+
+    let child = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                parent_pid: Some(parent.pid()),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn child with inherited fds");
+    let contender = spawn_shell(&mut kernel);
+    let contender_fd = kernel
+        .fd_open("shell", contender.pid(), "/tmp/fork-lock.txt", O_RDWR, None)
+        .expect("contender opens file");
+
+    kernel
+        .fd_flock("shell", child.pid(), inherited_fd, LOCK_EX | LOCK_NB)
+        .expect("child sees the inherited open-file-description lock");
+    assert_kernel_error_code(
+        kernel.fd_flock("shell", contender.pid(), contender_fd, LOCK_SH | LOCK_NB),
+        "EWOULDBLOCK",
+    );
+
+    parent.finish(0);
+    child.finish(0);
+    contender.finish(0);
+    kernel.waitpid(parent.pid()).expect("wait parent");
+    kernel.waitpid(child.pid()).expect("wait child");
+    kernel.waitpid(contender.pid()).expect("wait contender");
 }
 
 #[test]

@@ -1,8 +1,8 @@
-use std::collections::{btree_map::Values, BTreeMap};
+use std::collections::{btree_map::Values, BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 pub const MAX_FDS_PER_PROCESS: usize = 256;
 
@@ -13,6 +13,10 @@ pub const O_CREAT: u32 = 0o100;
 pub const O_EXCL: u32 = 0o200;
 pub const O_TRUNC: u32 = 0o1000;
 pub const O_APPEND: u32 = 0o2000;
+pub const LOCK_SH: u32 = 1;
+pub const LOCK_EX: u32 = 2;
+pub const LOCK_NB: u32 = 4;
+pub const LOCK_UN: u32 = 8;
 
 pub const FILETYPE_UNKNOWN: u8 = 0;
 pub const FILETYPE_CHARACTER_DEVICE: u8 = 2;
@@ -48,6 +52,20 @@ impl FdTableError {
             message: String::from("too many open files"),
         }
     }
+
+    fn invalid_argument(message: impl Into<String>) -> Self {
+        Self {
+            code: "EINVAL",
+            message: message.into(),
+        }
+    }
+
+    fn would_block(message: impl Into<String>) -> Self {
+        Self {
+            code: "EWOULDBLOCK",
+            message: message.into(),
+        }
+    }
 }
 
 impl fmt::Display for FdTableError {
@@ -62,6 +80,7 @@ impl Error for FdTableError {}
 pub struct FileDescription {
     id: u64,
     path: String,
+    lock_target: Option<FileLockTarget>,
     cursor: AtomicU64,
     flags: u32,
     ref_count: AtomicUsize,
@@ -69,13 +88,33 @@ pub struct FileDescription {
 
 impl FileDescription {
     pub fn new(id: u64, path: impl Into<String>, flags: u32) -> Self {
-        Self::with_ref_count(id, path, flags, 1)
+        Self::with_ref_count_and_lock(id, path, flags, 1, None)
+    }
+
+    pub fn new_with_lock(
+        id: u64,
+        path: impl Into<String>,
+        flags: u32,
+        lock_target: Option<FileLockTarget>,
+    ) -> Self {
+        Self::with_ref_count_and_lock(id, path, flags, 1, lock_target)
     }
 
     pub fn with_ref_count(id: u64, path: impl Into<String>, flags: u32, ref_count: usize) -> Self {
+        Self::with_ref_count_and_lock(id, path, flags, ref_count, None)
+    }
+
+    pub fn with_ref_count_and_lock(
+        id: u64,
+        path: impl Into<String>,
+        flags: u32,
+        ref_count: usize,
+        lock_target: Option<FileLockTarget>,
+    ) -> Self {
         Self {
             id,
             path: path.into(),
+            lock_target,
             cursor: AtomicU64::new(0),
             flags,
             ref_count: AtomicUsize::new(ref_count),
@@ -88,6 +127,10 @@ impl FileDescription {
 
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    pub fn lock_target(&self) -> Option<FileLockTarget> {
+        self.lock_target
     }
 
     pub fn cursor(&self) -> u64 {
@@ -159,8 +202,64 @@ impl DescriptionFactory {
     }
 
     fn allocate(&self, path: &str, flags: u32) -> SharedFileDescription {
+        self.allocate_with_lock(path, flags, None)
+    }
+
+    fn allocate_with_lock(
+        &self,
+        path: &str,
+        flags: u32,
+        lock_target: Option<FileLockTarget>,
+    ) -> SharedFileDescription {
         let next_id = self.next_description_id.fetch_add(1, Ordering::SeqCst);
-        Arc::new(FileDescription::new(next_id, path, flags))
+        Arc::new(FileDescription::new_with_lock(
+            next_id,
+            path,
+            flags,
+            lock_target,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FileLockTarget {
+    ino: u64,
+}
+
+impl FileLockTarget {
+    pub const fn new(ino: u64) -> Self {
+        Self { ino }
+    }
+
+    pub const fn ino(self) -> u64 {
+        self.ino
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileLockMode {
+    Shared,
+    Exclusive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlockOperation {
+    Shared { nonblocking: bool },
+    Exclusive { nonblocking: bool },
+    Unlock,
+}
+
+impl FlockOperation {
+    pub fn from_bits(operation: u32) -> FdResult<Self> {
+        let nonblocking = operation & LOCK_NB != 0;
+        match operation & !LOCK_NB {
+            LOCK_SH => Ok(Self::Shared { nonblocking }),
+            LOCK_EX => Ok(Self::Exclusive { nonblocking }),
+            LOCK_UN => Ok(Self::Unlock),
+            _ => Err(FdTableError::invalid_argument(format!(
+                "invalid flock operation {operation:#x}"
+            ))),
+        }
     }
 }
 
@@ -257,12 +356,22 @@ impl ProcessFdTable {
     }
 
     pub fn open(&mut self, path: &str, flags: u32) -> FdResult<u32> {
-        self.open_with_filetype(path, flags, FILETYPE_REGULAR_FILE)
+        self.open_with_details(path, flags, FILETYPE_REGULAR_FILE, None)
     }
 
     pub fn open_with_filetype(&mut self, path: &str, flags: u32, filetype: u8) -> FdResult<u32> {
+        self.open_with_details(path, flags, filetype, None)
+    }
+
+    pub fn open_with_details(
+        &mut self,
+        path: &str,
+        flags: u32,
+        filetype: u8,
+        lock_target: Option<FileLockTarget>,
+    ) -> FdResult<u32> {
         let fd = self.allocate_fd()?;
-        let description = self.alloc_desc.allocate(path, flags);
+        let description = self.alloc_desc.allocate_with_lock(path, flags, lock_target);
         self.entries.insert(
             fd,
             FdEntry {
@@ -575,4 +684,136 @@ impl FdTableManager {
             table.close_all();
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FileLockManager {
+    inner: Arc<FileLockManagerInner>,
+}
+
+#[derive(Debug, Default)]
+struct FileLockManagerInner {
+    state: Mutex<FileLockState>,
+    wake: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct FileLockState {
+    entries: BTreeMap<FileLockTarget, FileLockEntry>,
+}
+
+#[derive(Debug, Default)]
+struct FileLockEntry {
+    shared: BTreeSet<u64>,
+    exclusive: Option<u64>,
+}
+
+impl FileLockManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn apply(
+        &self,
+        owner_id: u64,
+        target: FileLockTarget,
+        operation: FlockOperation,
+    ) -> FdResult<()> {
+        match operation {
+            FlockOperation::Shared { nonblocking } => {
+                self.acquire(owner_id, target, FileLockMode::Shared, nonblocking)
+            }
+            FlockOperation::Exclusive { nonblocking } => {
+                self.acquire(owner_id, target, FileLockMode::Exclusive, nonblocking)
+            }
+            FlockOperation::Unlock => {
+                self.release_owner(owner_id);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn release_owner(&self, owner_id: u64) -> bool {
+        let mut state = lock_or_recover(&self.inner.state);
+        let mut released = false;
+        state.entries.retain(|_, entry| {
+            let entry_changed = entry.shared.remove(&owner_id) || entry.exclusive == Some(owner_id);
+            if entry.exclusive == Some(owner_id) {
+                entry.exclusive = None;
+            }
+            released |= entry_changed;
+            !entry.is_empty()
+        });
+        drop(state);
+        if released {
+            self.inner.wake.notify_all();
+        }
+        released
+    }
+
+    fn acquire(
+        &self,
+        owner_id: u64,
+        target: FileLockTarget,
+        mode: FileLockMode,
+        nonblocking: bool,
+    ) -> FdResult<()> {
+        let mut state = lock_or_recover(&self.inner.state);
+        loop {
+            let entry = state.entries.entry(target).or_default();
+            if entry.can_grant(owner_id, mode) {
+                entry.grant(owner_id, mode);
+                return Ok(());
+            }
+
+            if nonblocking {
+                return Err(FdTableError::would_block(
+                    "advisory file lock is unavailable",
+                ));
+            }
+
+            state = wait_or_recover(&self.inner.wake, state);
+        }
+    }
+}
+
+impl FileLockEntry {
+    fn can_grant(&self, owner_id: u64, mode: FileLockMode) -> bool {
+        match mode {
+            FileLockMode::Shared => self.exclusive.is_none_or(|owner| owner == owner_id),
+            FileLockMode::Exclusive => {
+                self.exclusive.is_none_or(|owner| owner == owner_id)
+                    && self.shared.iter().all(|owner| *owner == owner_id)
+            }
+        }
+    }
+
+    fn grant(&mut self, owner_id: u64, mode: FileLockMode) {
+        match mode {
+            FileLockMode::Shared => {
+                self.exclusive = None;
+                self.shared.insert(owner_id);
+            }
+            FileLockMode::Exclusive => {
+                self.shared.retain(|owner| *owner != owner_id);
+                self.exclusive = Some(owner_id);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.exclusive.is_none() && self.shared.is_empty()
+    }
+}
+
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn wait_or_recover<'a, T>(condvar: &Condvar, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+    condvar
+        .wait(guard)
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

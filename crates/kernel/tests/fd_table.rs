@@ -1,5 +1,6 @@
 use agent_os_kernel::fd_table::{
-    FdResult, FdTableManager, FileDescription, FILETYPE_CHARACTER_DEVICE, FILETYPE_REGULAR_FILE,
+    FdResult, FdTableManager, FileDescription, FileLockManager, FileLockTarget, FlockOperation,
+    FILETYPE_CHARACTER_DEVICE, FILETYPE_REGULAR_FILE, LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN,
     MAX_FDS_PER_PROCESS, O_RDONLY, O_WRONLY,
 };
 use std::fmt::Debug;
@@ -211,4 +212,65 @@ fn open_reuses_a_freed_fd_after_next_fd_moves_past_the_limit() {
         .open("/tmp/reused.txt", O_RDONLY)
         .expect("open should wrap and reuse a freed fd");
     assert_eq!(reused, 5);
+}
+
+#[test]
+fn flock_operation_parser_accepts_supported_modes() {
+    assert_eq!(
+        FlockOperation::from_bits(LOCK_SH).expect("shared operation"),
+        FlockOperation::Shared { nonblocking: false }
+    );
+    assert_eq!(
+        FlockOperation::from_bits(LOCK_EX | LOCK_NB).expect("exclusive nonblocking operation"),
+        FlockOperation::Exclusive { nonblocking: true }
+    );
+    assert_eq!(
+        FlockOperation::from_bits(LOCK_UN).expect("unlock operation"),
+        FlockOperation::Unlock
+    );
+}
+
+#[test]
+fn flock_manager_enforces_shared_and_exclusive_conflicts() {
+    let locks = FileLockManager::new();
+    let target = FileLockTarget::new(42);
+
+    locks
+        .apply(1, target, FlockOperation::Shared { nonblocking: false })
+        .expect("first shared lock");
+    locks
+        .apply(2, target, FlockOperation::Shared { nonblocking: false })
+        .expect("second shared lock");
+
+    let blocked = locks.apply(3, target, FlockOperation::Exclusive { nonblocking: true });
+    assert_error_code(blocked, "EWOULDBLOCK");
+
+    locks
+        .apply(1, target, FlockOperation::Unlock)
+        .expect("unlock first shared lock");
+    locks
+        .apply(2, target, FlockOperation::Unlock)
+        .expect("unlock second shared lock");
+    locks
+        .apply(3, target, FlockOperation::Exclusive { nonblocking: true })
+        .expect("exclusive lock becomes available");
+}
+
+#[test]
+fn flock_manager_treats_reacquire_on_same_description_as_non_conflicting() {
+    let locks = FileLockManager::new();
+    let target = FileLockTarget::new(7);
+
+    locks
+        .apply(99, target, FlockOperation::Exclusive { nonblocking: false })
+        .expect("initial exclusive lock");
+    locks
+        .apply(99, target, FlockOperation::Exclusive { nonblocking: true })
+        .expect("same description can reacquire exclusive lock");
+    locks
+        .apply(99, target, FlockOperation::Shared { nonblocking: true })
+        .expect("same description can downgrade to shared lock");
+
+    let shared = locks.apply(100, target, FlockOperation::Shared { nonblocking: true });
+    shared.expect("downgrade should allow other shared holders");
 }
