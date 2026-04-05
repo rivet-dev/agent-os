@@ -581,7 +581,7 @@ fn python_runtime_reports_syntax_errors_over_stderr() {
 }
 
 #[test]
-fn python_runtime_enforces_frozen_time_and_blocks_node_escape_hatches() {
+fn python_runtime_blocks_pyodide_js_escape_hatches() {
     assert_node_available();
 
     let mut sidecar = new_sidecar("python-security");
@@ -606,8 +606,8 @@ fn python_runtime_enforces_frozen_time_and_blocks_node_escape_hatches() {
         "proc-python-security",
         r#"
 import json
-import time
 import js
+import pyodide_js
 
 def capture(action):
     try:
@@ -622,11 +622,11 @@ def capture(action):
         }
 
 result = {
-    "time_ms": int(time.time() * 1000),
-    "date_now_ms": int(js.Date.now()),
-    "child_process": capture(lambda: js.process.getBuiltinModule("node:child_process")),
-    "vm": capture(lambda: js.process.getBuiltinModule("node:vm")),
-    "fetch": capture(lambda: js.fetch("http://127.0.0.1:1/")),
+    "js_process_env": capture(lambda: js.process.env),
+    "js_require": capture(lambda: js.require),
+    "js_process_exit": capture(lambda: js.process.exit),
+    "js_process_kill": capture(lambda: js.process.kill),
+    "pyodide_js_eval_code": capture(lambda: pyodide_js.eval_code),
 }
 
 print(json.dumps(result))
@@ -648,30 +648,33 @@ print(json.dumps(result))
     );
 
     let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse python security JSON");
-    let time_ms = parsed["time_ms"].as_i64().expect("time_ms as i64");
-    let date_now_ms = parsed["date_now_ms"].as_i64().expect("date_now_ms as i64");
-    assert!(
-        (time_ms - date_now_ms).abs() <= 1,
-        "expected frozen Python and JS clocks to stay aligned within 1ms, got {time_ms} vs {date_now_ms}"
+    for key in [
+        "js_process_env",
+        "js_require",
+        "js_process_exit",
+        "js_process_kill",
+    ] {
+        assert_eq!(parsed[key]["ok"], Value::Bool(false));
+        assert_eq!(
+            parsed[key]["type"],
+            Value::String(String::from("RuntimeError"))
+        );
+        assert_eq!(parsed[key]["code"], Value::Null);
+        assert!(parsed[key]["message"]
+            .as_str()
+            .expect("js hardening message")
+            .contains("js is not available"));
+    }
+    assert_eq!(parsed["pyodide_js_eval_code"]["ok"], Value::Bool(false));
+    assert_eq!(
+        parsed["pyodide_js_eval_code"]["type"],
+        Value::String(String::from("RuntimeError"))
     );
-    assert_eq!(parsed["child_process"]["ok"], Value::Bool(false));
-    assert_eq!(parsed["child_process"]["code"], "ERR_ACCESS_DENIED");
-    assert!(parsed["child_process"]["message"]
+    assert_eq!(parsed["pyodide_js_eval_code"]["code"], Value::Null);
+    assert!(parsed["pyodide_js_eval_code"]["message"]
         .as_str()
-        .expect("child_process message")
-        .contains("node:child_process"));
-    assert_eq!(parsed["vm"]["ok"], Value::Bool(false));
-    assert_eq!(parsed["vm"]["code"], "ERR_ACCESS_DENIED");
-    assert!(parsed["vm"]["message"]
-        .as_str()
-        .expect("vm message")
-        .contains("node:vm"));
-    assert_eq!(parsed["fetch"]["ok"], Value::Bool(false));
-    assert_eq!(parsed["fetch"]["code"], "ERR_ACCESS_DENIED");
-    assert!(parsed["fetch"]["message"]
-        .as_str()
-        .expect("fetch message")
-        .contains("network access"));
+        .expect("pyodide_js hardening message")
+        .contains("pyodide_js is not available"));
 }
 
 #[test]

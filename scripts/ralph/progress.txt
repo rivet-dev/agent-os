@@ -1,6 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
 - Node builtin hardening is split between `packages/core/src/sidecar/native-kernel-proxy.ts` and four generated surfaces in `crates/execution/src/node_import_cache.rs` (loader, Node runner, Python runner, denied asset materialization); update all of them together when changing builtin policy.
+- Pyodide guest hardening that must not rewrite user code belongs in `crates/execution/src/node_import_cache.rs` as a `pyodide.runPython(...)` bootstrap in the embedded Python runner, installed after package preloads and before `runPythonAsync()`.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -18,4 +19,19 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: The sidecar’s default builtin policy is injected through `AGENT_OS_ALLOWED_NODE_BUILTINS`, so JS-side allowlist changes must stay aligned with Rust-side deny shims.
 - Gotchas encountered: Repo-wide `pnpm exec tsc -p packages/core/tsconfig.json --noEmit` already fails in unrelated files (`packages/core/src/agent-os.ts`, `packages/core/src/host-tools-server.ts`, `packages/core/src/sidecar/client.ts`), and `pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts` currently fails because `agent-os-sidecar` does not compile due to missing `DiagnosticsRequest` protocol imports.
 - Useful context: `cargo test -p agent-os-execution node_import_cache::tests` is the focused verification target for `crates/execution/src/node_import_cache.rs` hardening changes.
+---
+## 2026-04-04 19:19:59 PDT - US-002
+- What was implemented
+- Added a Python bootstrap blocklist in the embedded Pyodide runner so `import js` and `import pyodide_js` resolve to denied proxy modules before guest code executes.
+- Added a real-bundled-Pyodide regression test in `agent-os-execution` that verifies `js.process.env`, `js.require`, `js.process.exit`, `js.process.kill`, and `pyodide_js.eval_code` are inaccessible from Python.
+- Updated the sidecar Python security test to assert the blocked Pyodide FFI escape hatches instead of relying on `import js`.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/sidecar/tests/python.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: Pyodide import interception needs both a `sys.modules` override and a builtin `__import__` wrapper to make blocked module behavior deterministic across Pyodide’s import path.
+- Gotchas encountered: Double-underscore helper names inside Python bootstrap classes get name-mangled and can accidentally turn intended `RuntimeError` denials into `NameError`s.
+- Useful context: `cargo test -p agent-os-execution node_import_cache::tests` and `cargo test -p agent-os-execution --test python` pass for this change, while `cargo test -p agent-os-sidecar ...` is still blocked by unrelated pre-existing compile errors in `crates/sidecar/src/service.rs` (`DiagnosticsRequest`/`DiagnosticsSnapshotResponse` imports and nearby test code).
 ---

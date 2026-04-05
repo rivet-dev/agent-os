@@ -2797,6 +2797,41 @@ function accessDenied(subject) {
   return error;
 }
 
+const PYTHON_GUEST_IMPORT_BLOCKLIST_SOURCE = String.raw`
+import builtins as _agent_os_builtins
+import sys as _agent_os_sys
+import types as _agent_os_types
+
+def _agent_os_raise_access_denied(module_name):
+    raise RuntimeError(f"{module_name} is not available in the Agent OS guest Python runtime")
+
+class _AgentOsBlockedModule(_agent_os_types.ModuleType):
+    def __init__(self, name):
+        super().__init__(name)
+        self.__dict__['__all__'] = ()
+
+    def __getattr__(self, _name):
+        _agent_os_raise_access_denied(self.__name__)
+
+    def __dir__(self):
+        return []
+
+_agent_os_blocked_modules = {
+    _agent_os_module_name: _AgentOsBlockedModule(_agent_os_module_name)
+    for _agent_os_module_name in ('js', 'pyodide_js')
+}
+
+_agent_os_original_import = _agent_os_builtins.__import__
+
+def _agent_os_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name in _agent_os_blocked_modules:
+        return _agent_os_blocked_modules[name]
+    return _agent_os_original_import(name, globals, locals, fromlist, level)
+
+_agent_os_builtins.__import__ = _agent_os_import
+_agent_os_sys.modules.update(_agent_os_blocked_modules)
+`;
+
 function hardenProperty(target, key, value) {
   try {
     Object.defineProperty(target, key, {
@@ -2822,6 +2857,14 @@ function normalizeBuiltin(specifier) {
   }
 
   return specifier.startsWith('node:') ? specifier.slice('node:'.length) : specifier;
+}
+
+function installPythonGuestImportBlocklist(pyodide) {
+  if (typeof pyodide?.runPython !== 'function') {
+    return;
+  }
+
+  pyodide.runPython(PYTHON_GUEST_IMPORT_BLOCKLIST_SOURCE);
 }
 
 function installPythonGuestHardening() {
@@ -3283,6 +3326,7 @@ try {
     await pyodide.loadPackage(preloadPackages);
     packageLoadMs = realPerformance.now() - packageLoadStarted;
   }
+  installPythonGuestImportBlocklist(pyodide);
   const source = process.env[PYTHON_FILE_ENV] != null ? 'file' : 'inline';
   emitPythonStartupMetrics({
     prewarmOnly: false,
@@ -4412,6 +4456,7 @@ fn write_file_if_changed(path: &Path, contents: &str) -> Result<(), io::Error> {
 mod tests {
     use super::NodeImportCache;
     use crate::node_process::node_binary;
+    use serde_json::Value;
     use std::collections::BTreeSet;
     use std::fs;
     use std::io::Write;
@@ -4700,6 +4745,89 @@ export async function loadPyodide() {
         assert!(
             stderr.contains("SyntaxError: invalid syntax near print("),
             "unexpected stderr: {stderr}"
+        );
+    }
+
+    #[test]
+    fn materialized_python_runner_blocks_pyodide_js_escape_modules() {
+        assert_node_available();
+
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let output = run_python_runner(
+            &import_cache,
+            import_cache.pyodide_dist_path(),
+            r#"
+import json
+import js
+import pyodide_js
+
+def capture(action):
+    try:
+        action()
+        return {"ok": True}
+    except Exception as error:
+        return {
+            "ok": False,
+            "type": type(error).__name__,
+            "message": str(error),
+        }
+
+print(json.dumps({
+    "js_process_env": capture(lambda: js.process.env),
+    "js_require": capture(lambda: js.require),
+    "js_process_exit": capture(lambda: js.process.exit),
+    "js_process_kill": capture(lambda: js.process.kill),
+    "pyodide_js_eval_code": capture(lambda: pyodide_js.eval_code),
+}))
+"#,
+        );
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let parsed: Value =
+            serde_json::from_str(stdout.trim()).expect("parse Python hardening JSON");
+
+        assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+
+        for key in [
+            "js_process_env",
+            "js_require",
+            "js_process_exit",
+            "js_process_kill",
+        ] {
+            assert_eq!(parsed[key]["ok"], Value::Bool(false), "stdout: {stdout}");
+            assert_eq!(
+                parsed[key]["type"],
+                Value::String(String::from("RuntimeError"))
+            );
+            assert!(
+                parsed[key]["message"]
+                    .as_str()
+                    .expect("js hardening message")
+                    .contains("js is not available"),
+                "stdout: {stdout}"
+            );
+        }
+
+        assert_eq!(
+            parsed["pyodide_js_eval_code"]["ok"],
+            Value::Bool(false),
+            "stdout: {stdout}"
+        );
+        assert_eq!(
+            parsed["pyodide_js_eval_code"]["type"],
+            Value::String(String::from("RuntimeError"))
+        );
+        assert!(
+            parsed["pyodide_js_eval_code"]["message"]
+                .as_str()
+                .expect("pyodide_js hardening message")
+                .contains("pyodide_js is not available"),
+            "stdout: {stdout}"
         );
     }
 
