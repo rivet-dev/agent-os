@@ -6157,6 +6157,53 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const TEST_AUTH_TOKEN: &str = "sidecar-test-token";
+    const TLS_TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQClvETzHfSyd1Y+\n\
+sjCfGkuyGxFMzwQlYjUrE0iwdMF774LYHFdpvtEo3sLOW6/b1xfXS/55jq+aggxS\n\
+v+vgtjrhGf/y33XzdrjxcVBRWIsgAtxMHsNKO4EQ/uA1g6zlbaSIu+ZWX3bkDuTi\n\
+K45VW69M0XSVyv8XFGYOcf8LTI87gTtXHuT92iej77IM2lHqLXCzQVr+NQ9yvXld\n\
+9yHlA2ZfYqhkSTLdDablqfgirrQIzZzLypSGQwZUU06nCtZ+dg6SNV4TGL4NqekD\n\
+jXR3BvmZu5l4sGAsNfFVjLx6hxsLt8uqn65sCAwBDdfucR+39+pHA+esj6NAWAFO\n\
+J9CB94sfAgMBAAECggEABQTA772x+a98aJSbvU2eCiwgp3tDTGB/bKj+U/2NGFQl\n\
+2aZuDTEugzbPnlEPb7BBNA9EiujDr4GNnvnZyimqecOASRn0J+Wp7wG35Waxe8wq\n\
+YJGz5y0LGPkmz+gHVcEusMdDz8y/PGOpEaIxAquukLxs89Y8SDYhawGPsAdm9O3F\n\
+4a+aosyQwS26mkZ/1WZOTsOVd4A1/1pxBvsANURj+pq7ed/1WqgrZBN/BG1TX5Xm\n\
+DZeYy01kTCMWtcAb4f8PxGpbkSGMvBb+Mj5XtZByvfQeC+Cs5ECXhmJtVaYVUHhT\n\
+vI0oTMGvit9ffoYNds0qTeZpEeineaDH3sD16D037QKBgQDX5b65KfIVH0/WvcbJ\n\
+Gx2Wh7knXdDBky40wdq4buKK+ImzPPRxOsQ+xEMgEaZs8gb7LBapbB0cZ+YsKBOt\n\
+4FY86XQU5V5ju2ntldIIIaugIGgvGS0jdRMH3ux6iEjPZE6Fm7/s8bjIgqB7keWh\n\
+1rcZwDrwMzqwAUoBTJX58OY/fQKBgQDEhT5U7TqgEFVSspYh8c8yVRV9udiphPH3\n\
+3XIbo9iV3xzNFdwtNHC+2eLM+4J3WKjhB0UvzrlIegSqKPIsy+0nD1uzaU+O72gg\n\
+7+NKSh0RT61UDolk+P4s/2+5tnZqSNYO7Sd/svE/rkwIEtDEI5tb1nqq75h/HDEW\n\
+k56GHAxvywKBgGmGmTdmIjZizKJYti4b+9VU15I/T8ceCmqtChw1zrNAkgWy2IPz\n\
+xnIreefV2LPNhM4GGbmL55q3yhBxMlU9nsk9DokcJ4u10ivXnAZvdrTYwjOrKZ34\n\
+HmotcwbdUEFWdO7nVuMYr0oKVyivAj+ddHe4ttYrJBddOe/yoCe/sLr9AoGBAKHL\n\
+IVpCRXXqfJStOzWPI4rIyfzMuTg3oA71XjCrYHFjUw715GPDPN+j+znQB8XCVKeP\n\
+mMKXa6vj6Vs+gsOm0QTLfC/lj/6Z1Bzp4zMSeYP7GTSPE0bySDE7y/wV4L/4X2PC\n\
+lDZqWHyZPzeWZhJVTl754dxBjkd4KmHv/x9ikEqpAoGBAJNA0u0fKhdWDz32+a2F\n\
++plJ18kQvGuwKFWIIVHBDc0wCxLKWKr5wgkhdcAEpy4mgosiZ09DzV/OpQBBHVWZ\n\
+v/Cn/DwZyoiXIi5onf7AqWIhw+aem+oMbugbSIYqDwYkwnN79tsza0KC1ScphIuf\n\
+vKoOAdY4xOcG9BEZZoKVOa8R\n\
+-----END PRIVATE KEY-----\n";
+    const TLS_TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIDCTCCAfGgAwIBAgIUJqRgTEIlpbfqbQnyo9hxLyIn3qYwDQYJKoZIhvcNAQEL\n\
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDQwNTA3MTAwOVoXDTI2MDQw\n\
+NjA3MTAwOVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF\n\
+AAOCAQ8AMIIBCgKCAQEApbxE8x30sndWPrIwnxpLshsRTM8EJWI1KxNIsHTBe++C\n\
+2BxXab7RKN7Czluv29cX10v+eY6vmoIMUr/r4LY64Rn/8t9183a48XFQUViLIALc\n\
+TB7DSjuBEP7gNYOs5W2kiLvmVl925A7k4iuOVVuvTNF0lcr/FxRmDnH/C0yPO4E7\n\
+Vx7k/dono++yDNpR6i1ws0Fa/jUPcr15Xfch5QNmX2KoZEky3Q2m5an4Iq60CM2c\n\
+y8qUhkMGVFNOpwrWfnYOkjVeExi+DanpA410dwb5mbuZeLBgLDXxVYy8eocbC7fL\n\
+qp+ubAgMAQ3X7nEft/fqRwPnrI+jQFgBTifQgfeLHwIDAQABo1MwUTAdBgNVHQ4E\n\
+FgQUwViZyKE6S2vgTAkexnZFccSwoPMwHwYDVR0jBBgwFoAUwViZyKE6S2vgTAke\n\
+xnZFccSwoPMwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAadmK\n\
+3Ugrvep6glHAfgPP54um9cjJZQZDPn5I7yvgDr/Zp/u/UMW/OUKSfL1VNHlbAVLc\n\
+Yzq2RVTrJKObiTSoy99OzYkEdgfuEBBP7XBEQlqoOGYNRR+IZXBBiQ+m9CtajNwQ\n\
+G6mr9//zZtV1y2UUBgtxVpry5iOekpkr8iXyDLnGpS2gKL5dwXCzWCKVCO3qVotn\n\
+r6FBg4DCBMkwO6xOVN2yInPd6CPy/JAUPW50zWPnn4DKfeAAU0C+E75HN65jozdi\n\
+12yT4K772P8oSecGPInZhqJgOv1q0BDG8gccOxX1PA4sE00Enqlbvxz7sku9y4zp\n\
+ykAheWCsAteSEWVc0w==\n\
+-----END CERTIFICATE-----\n";
 
     fn request(
         request_id: u64,
@@ -8295,6 +8342,193 @@ console.log(JSON.stringify({ lookup, resolve4 }));
             parsed["resolve4"]
                 .as_array()
                 .is_some_and(|entries| entries.iter().any(|entry| entry == "127.0.0.1")),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn javascript_tls_rpc_connects_and_serves_over_guest_net() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-tls-rpc-cwd");
+        let entry = format!(
+            r#"
+import tls from "node:tls";
+
+const key = {key:?};
+const cert = {cert:?};
+
+const summary = await new Promise((resolve, reject) => {{
+  const server = tls.createServer({{ key, cert }}, (socket) => {{
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {{
+      received += chunk;
+      socket.end(`pong:${{chunk}}`);
+    }});
+    socket.on("error", reject);
+    socket.on("close", () => {{
+      server.close(() => {{
+        resolve({{
+          authorized: client.authorized,
+          encrypted: client.encrypted,
+          hadError: closeState.hadError,
+          localPort: client.localPort,
+          received,
+          remoteAddress: client.remoteAddress,
+          response,
+          serverPort: port,
+          serverSecure: secureConnectionSeen,
+        }});
+      }});
+    }});
+  }});
+  let response = "";
+  let port = null;
+  let secureConnectionSeen = false;
+  let closeState = {{ hadError: false }};
+  let client = null;
+
+  server.on("secureConnection", () => {{
+    secureConnectionSeen = true;
+  }});
+  server.on("error", reject);
+  server.listen(0, "127.0.0.1", () => {{
+    port = server.address().port;
+    client = tls.connect({{
+      host: "127.0.0.1",
+      port,
+      rejectUnauthorized: false,
+    }}, () => {{
+      client.write("ping");
+    }});
+    client.setEncoding("utf8");
+    client.on("data", (chunk) => {{
+      response += chunk;
+    }});
+    client.on("error", reject);
+    client.on("close", (hadError) => {{
+      closeState = {{ hadError }};
+    }});
+  }});
+}});
+
+console.log(JSON.stringify(summary));
+"#,
+            key = TLS_TEST_KEY_PEM,
+            cert = TLS_TEST_CERT_PEM,
+        );
+        write_fixture(&cwd.join("entry.mjs"), &entry);
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"tls\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-tls"),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
+            );
+        }
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = None;
+        for _ in 0..192 {
+            let next_event = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-tls")
+                    .map(|process| {
+                        process
+                            .execution
+                            .poll_event(Duration::from_secs(5))
+                            .expect("poll javascript tls rpc event")
+                    })
+                    .flatten()
+            };
+            let Some(event) = next_event else {
+                if exit_code.is_some() {
+                    break;
+                }
+                continue;
+            };
+
+            match &event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    stdout.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    stderr.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Exited(code) => {
+                    exit_code = Some(*code);
+                }
+                _ => {}
+            }
+
+            sidecar
+                .handle_execution_event(&vm_id, "proc-js-tls", event)
+                .expect("handle javascript tls rpc event");
+        }
+
+        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse tls JSON");
+        assert_eq!(parsed["response"], Value::String(String::from("pong:ping")));
+        assert_eq!(parsed["received"], Value::String(String::from("ping")));
+        assert_eq!(parsed["serverSecure"], Value::Bool(true));
+        assert_eq!(parsed["encrypted"], Value::Bool(true));
+        assert_eq!(parsed["hadError"], Value::Bool(false));
+        assert_eq!(
+            parsed["remoteAddress"],
+            Value::String(String::from("127.0.0.1"))
+        );
+        assert!(
+            parsed["serverPort"].as_u64().is_some_and(|port| port > 0),
             "stdout: {stdout}"
         );
     }

@@ -6,6 +6,7 @@
 - When a Node builtin port is landing in phases, inherit untouched exports from a snapped host module and override only the RPC-backed surface for the current story; this keeps helper APIs working while the follow-on stories replace the remaining host-backed entrypoints.
 - When a guest Node networking port stops using real host listeners, mirror that state in `crates/sidecar/src/service.rs` `ActiveProcess` tracking and consult it from `find_listener`/socket snapshot queries before falling back to `/proc/[pid]/net/*`; procfs only sees host-owned sockets, not sidecar-managed polyfill listeners.
 - UDP guest ports follow the same rule as TCP listeners: keep sidecar-managed datagram sockets on `ActiveProcess`, create the real `UdpSocket` lazily on `bind()`/first `send()`, and answer `find_bound_udp` from that tracked state because `/proc/[pid]/net/udp*` never sees sidecar-owned sockets.
+- Guest Node `tls` should stay layered on the guest `net` polyfill: client connections pass a preconnected guest socket into `tls.connect({ socket })`, and TLS servers should wrap accepted guest sockets with `new TLSSocket(..., { isServer: true })` and treat the wrapped socket's `secure` event as `secureConnection`.
 - Pyodide guest hardening that must not rewrite user code belongs in `crates/execution/src/node_import_cache.rs` as a `pyodide.runPython(...)` bootstrap in the embedded Python runner, installed after package preloads and before `runPythonAsync()`.
 - The Pyodide host Node process is hardened with Node `--permission` in `crates/execution/src/python.rs`; keep its read allowlist scoped to the import-cache root, compile-cache dir, Pyodide bundle, and sandbox cwd, and keep writes limited to the cache paths plus sandbox cwd.
 - Node guest env hardening in `crates/execution/src/node_import_cache.rs` should snapshot `AGENT_OS_*` control vars first, then replace `process.env` with a filtered proxy so runtime internals keep working while guest enumeration/access stays scrubbed; when `node:module` is denied, bootstrap the runner via `process.getBuiltinModule('node:module')` instead of importing it through the guest loader.
@@ -234,7 +235,7 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Routed `node:os` through the generated loader asset pipeline plus the runner’s `require(...)`/`process.getBuiltinModule(...)` hooks, removed `os` from the denied builtin asset set, and enabled it in the core bridge’s default Node builtin allowlist.
 - Added regression coverage for the new builtin asset materialization, direct JavaScript execution of the virtualized `os` surface, the default allowlist propagation, and updated the repo instruction tables so the `os` status is no longer stale.
 - Files changed
-- `AGENTS.md`
+- `CLAUDE.md`
 - `CLAUDE.md`
 - `crates/execution/src/node_import_cache.rs`
 - `crates/execution/tests/javascript.rs`
@@ -381,4 +382,23 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Newly allowed Node builtins must not inherit host-owned constructors or helpers that can bypass the kernel-backed surface; replace them with guest shims or explicit unsupported stubs before exposing the builtin by default.
   - Gotchas encountered: `packages/core` verification is blocked in this checkout because the workspace is missing installable dependencies and `pnpm install` fails with `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND` for `@rivet-dev/agent-os`, so the TypeScript and Vitest checks for the updated core files could not be executed here.
   - Useful context: `cargo test -p agent-os-execution --test javascript javascript_execution_routes_dns_through_sync_rpc -- --exact`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-sidecar --lib service::tests::javascript_dns_rpc_resolves_localhost -- --exact`, and `cargo check -p agent-os-execution -p agent-os-sidecar` all pass after this change.
+---
+## 2026-04-05 00:22:29 PDT - US-022
+- What was implemented
+- Added a guest-owned `node:tls` builtin in `crates/execution/src/node_import_cache.rs` that rewrites ESM imports to a materialized TLS asset, exposes the module through `process.getBuiltinModule(...)`/`Module._load`, and wraps the existing guest `net` sockets for both `tls.connect` and `tls.createServer`.
+- Enabled `tls` in the core bridge default builtin allowlist, added builtin asset/import coverage in `agent-os-execution`, and added a sidecar end-to-end regression that performs a full guest-to-guest TLS handshake over the kernel-backed `net` transport using a self-signed cert.
+- Updated the repo instructions so the TLS row and Node builtin porting guidance no longer describe `node:tls` as a host fallthrough.
+- Files changed
+- `AGENTS.md`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/sidecar/src/service.rs`
+- `packages/core/src/sidecar/native-kernel-proxy.ts`
+- `packages/core/tests/allowed-node-builtins.test.ts`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: TLS can stay guest-owned without new sidecar RPC methods by layering host TLS state over preconnected guest `net` sockets; `tls.connect({ socket })` and server-side `new TLSSocket(socket, { isServer: true, ... })` are the safe entrypoints.
+  - Gotchas encountered: Server-side wrapped `TLSSocket`s signal handshake readiness on the `secure` event, not `secureConnect`, and the local `packages/core` toolchain is still unavailable in this checkout (`pnpm --dir packages/core exec tsc --noEmit` / `vitest` both fail because the commands are not installed).
+  - Useful context: `cargo check -p agent-os-execution -p agent-os-sidecar`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript javascript_execution_imports_tls_builtin_when_allowed -- --exact`, and `cargo test -p agent-os-sidecar javascript_tls_rpc_connects_and_serves_over_guest_net -- --exact` all pass after this change.
 ---

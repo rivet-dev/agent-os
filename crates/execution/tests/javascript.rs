@@ -3454,6 +3454,90 @@ console.log(JSON.stringify({
 }
 
 #[test]
+fn javascript_execution_imports_tls_builtin_when_allowed() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import tls from "node:tls";
+
+const server = tls.createServer();
+
+console.log(JSON.stringify({
+  hasConnect: typeof tls.connect,
+  hasCreateServer: typeof tls.createServer,
+  serverHasListen: typeof server.listen,
+  tlsSocketName: tls.TLSSocket?.name ?? null,
+}));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let env = BTreeMap::from([(
+        String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+        String::from(
+            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"tls\",\"url\",\"util\",\"zlib\"]",
+        ),
+    )]);
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env,
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code = None;
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                panic!("unexpected tls sync RPC method: {}", request.method)
+            }
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
+
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(stderr).expect("stderr utf8");
+    assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse tls JSON");
+    assert_eq!(
+        parsed["hasConnect"],
+        Value::String(String::from("function"))
+    );
+    assert_eq!(
+        parsed["hasCreateServer"],
+        Value::String(String::from("function"))
+    );
+    assert_eq!(
+        parsed["serverHasListen"],
+        Value::String(String::from("function"))
+    );
+    assert_eq!(
+        parsed["tlsSocketName"],
+        Value::String(String::from("TLSSocket"))
+    );
+}
+
+#[test]
 fn javascript_execution_translates_require_resolve_and_cjs_errors_to_guest_paths() {
     assert_node_available();
 

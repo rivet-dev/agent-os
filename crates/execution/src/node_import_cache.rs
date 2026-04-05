@@ -87,6 +87,7 @@ const CHILD_PROCESS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}child-process`;
 const NET_ASSET_SPECIFIER = `${BUILTIN_PREFIX}net`;
 const DGRAM_ASSET_SPECIFIER = `${BUILTIN_PREFIX}dgram`;
 const DNS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}dns`;
+const TLS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}tls`;
 const OS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}os`;
 const DENIED_BUILTINS = new Set([
   'child_process',
@@ -585,6 +586,21 @@ function rewriteBuiltinImports(source, filePath) {
     }
   }
 
+  if (ALLOWED_BUILTINS.has('tls')) {
+    for (const specifier of ['node:tls', 'tls']) {
+      rewritten = replaceBuiltinImportSpecifier(
+        rewritten,
+        specifier,
+        TLS_ASSET_SPECIFIER,
+      );
+      rewritten = replaceBuiltinDynamicImportSpecifier(
+        rewritten,
+        specifier,
+        TLS_ASSET_SPECIFIER,
+      );
+    }
+  }
+
   if (ALLOWED_BUILTINS.has('os')) {
     for (const specifier of ['node:os', 'os']) {
       rewritten = replaceBuiltinImportSpecifier(
@@ -688,6 +704,10 @@ function resolveBuiltinAsset(specifier, context) {
     case 'dns':
       return ALLOWED_BUILTINS.has('dns')
         ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'dns.mjs'))
+        : null;
+    case 'tls':
+      return ALLOWED_BUILTINS.has('tls')
+        ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'tls.mjs'))
         : null;
     case 'os':
       return ALLOWED_BUILTINS.has('os')
@@ -1668,6 +1688,7 @@ const hostOs = hostRequire('node:os');
 const hostNet = hostRequire('node:net');
 const hostDgram = hostRequire('node:dgram');
 const hostDns = hostRequire('node:dns');
+const hostTls = hostRequire('node:tls');
 const { EventEmitter } = hostRequire('node:events');
 const { Duplex, Readable, Writable } = hostRequire('node:stream');
 const NODE_SYNC_RPC_ENABLE = HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_ENABLE === '1';
@@ -4310,6 +4331,259 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
   return module;
 }
 
+function createRpcBackedTlsModule(tlsModule, netModule) {
+  const createUnsupportedTlsError = (subject) => {
+    const error = new Error(`${subject} is not supported by the Agent OS tls polyfill yet`);
+    error.code = 'ERR_AGENT_OS_TLS_UNSUPPORTED';
+    return error;
+  };
+  const defineSocketMetadataPassthrough = (tlsSocket, rawSocket) => {
+    for (const key of ['localAddress', 'localPort', 'remoteAddress', 'remotePort', 'remoteFamily']) {
+      try {
+        Object.defineProperty(tlsSocket, key, {
+          configurable: true,
+          enumerable: true,
+          get() {
+            return rawSocket[key];
+          },
+          set(value) {
+            rawSocket[key] = value;
+          },
+        });
+      } catch {
+        // Ignore non-configurable host properties.
+      }
+    }
+  };
+  const normalizeTlsPort = (value) => {
+    const numeric =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.length > 0
+          ? Number(value)
+          : Number.NaN;
+    if (!Number.isInteger(numeric) || numeric < 0 || numeric > 65535) {
+      throw new RangeError('Agent OS tls port must be between 0 and 65535');
+    }
+    return numeric;
+  };
+  const normalizeTlsConnectInvocation = (args) => {
+    const values = [...args];
+    const callback =
+      typeof values[values.length - 1] === 'function' ? values.pop() : undefined;
+
+    let options;
+    if (values[0] != null && typeof values[0] === 'object') {
+      options = { ...values[0] };
+    } else {
+      const positional = {};
+      if (values.length > 0) {
+        positional.port = values.shift();
+      }
+      if (typeof values[0] === 'string') {
+        positional.host = values.shift();
+      }
+      const providedOptions =
+        values[0] != null && typeof values[0] === 'object' ? { ...values[0] } : {};
+      options = { ...providedOptions, ...positional };
+    }
+
+    if (typeof options?.path === 'string') {
+      throw createUnsupportedTlsError('tls.connect({ path })');
+    }
+    if (options?.lookup != null) {
+      throw createUnsupportedTlsError('tls.connect({ lookup })');
+    }
+
+    const transportSocket = options?.socket ?? null;
+    const host =
+      typeof options?.host === 'string' && options.host.length > 0
+        ? options.host
+        : 'localhost';
+    const tlsOptions = { ...options };
+    delete tlsOptions.allowHalfOpen;
+    delete tlsOptions.host;
+    delete tlsOptions.lookup;
+    delete tlsOptions.path;
+    delete tlsOptions.port;
+    delete tlsOptions.socket;
+    if (
+      typeof tlsOptions.servername !== 'string' &&
+      typeof host === 'string' &&
+      host.length > 0 &&
+      hostNet.isIP(host) === 0
+    ) {
+      tlsOptions.servername = host;
+    }
+
+    return {
+      callback,
+      transportOptions:
+        transportSocket == null
+          ? {
+              allowHalfOpen: options?.allowHalfOpen === true,
+              host,
+              port: normalizeTlsPort(options?.port),
+            }
+          : null,
+      transportSocket,
+      tlsOptions,
+    };
+  };
+  const normalizeTlsServerCreation = (args) => {
+    let options = {};
+    let secureConnectionListener;
+
+    if (typeof args[0] === 'function') {
+      secureConnectionListener = args[0];
+    } else {
+      if (args[0] != null) {
+        if (typeof args[0] !== 'object') {
+          throw new TypeError('tls.createServer options must be an object');
+        }
+        options = { ...args[0] };
+      }
+      if (typeof args[1] === 'function') {
+        secureConnectionListener = args[1];
+      }
+    }
+
+    return {
+      secureConnectionListener,
+      options,
+    };
+  };
+  const createServerSecureContext = (options) =>
+    options?.secureContext ?? tlsModule.createSecureContext(options ?? {});
+  const createClientTlsSocket = (rawSocket, tlsOptions) => {
+    const tlsSocket = tlsModule.connect({
+      ...tlsOptions,
+      socket: rawSocket,
+    });
+    defineSocketMetadataPassthrough(tlsSocket, rawSocket);
+    return tlsSocket;
+  };
+  const createServerTlsSocket = (rawSocket, options, secureContext) => {
+    const tlsSocket = new tlsModule.TLSSocket(rawSocket, {
+      ...options,
+      isServer: true,
+      secureContext,
+    });
+    defineSocketMetadataPassthrough(tlsSocket, rawSocket);
+    return tlsSocket;
+  };
+
+  class AgentOsTlsServer extends EventEmitter {
+    constructor(options = {}, secureConnectionListener = undefined) {
+      super();
+      this._tlsOptions = { ...options };
+      this._secureContext = createServerSecureContext(this._tlsOptions);
+      this._netServer = netModule.createServer(
+        {
+          allowHalfOpen: options.allowHalfOpen === true,
+          pauseOnConnect: options.pauseOnConnect === true,
+        },
+        (socket) => {
+          const tlsSocket = createServerTlsSocket(socket, this._tlsOptions, this._secureContext);
+          tlsSocket.on('secure', () => {
+            this.emit('secureConnection', tlsSocket);
+          });
+          tlsSocket.on('error', (error) => {
+            this.emit('tlsClientError', error, tlsSocket);
+          });
+        },
+      );
+      if (typeof secureConnectionListener === 'function') {
+        this.on('secureConnection', secureConnectionListener);
+      }
+      this._netServer.on('close', () => this.emit('close'));
+      this._netServer.on('error', (error) => this.emit('error', error));
+      this._netServer.on('listening', () => this.emit('listening'));
+
+      Object.defineProperties(this, {
+        listening: {
+          enumerable: true,
+          get: () => this._netServer.listening,
+        },
+        maxConnections: {
+          enumerable: true,
+          get: () => this._netServer.maxConnections,
+          set: (value) => {
+            this._netServer.maxConnections = value;
+          },
+        },
+      });
+    }
+
+    address() {
+      return this._netServer.address();
+    }
+
+    close(callback) {
+      this._netServer.close(callback);
+      return this;
+    }
+
+    getConnections(callback) {
+      return this._netServer.getConnections(callback);
+    }
+
+    listen(...args) {
+      this._netServer.listen(...args);
+      return this;
+    }
+
+    ref() {
+      this._netServer.ref();
+      return this;
+    }
+
+    setSecureContext(options) {
+      if (options == null || typeof options !== 'object') {
+        throw new TypeError('tls.Server.setSecureContext options must be an object');
+      }
+      this._tlsOptions = { ...options };
+      this._secureContext = createServerSecureContext(this._tlsOptions);
+      return this;
+    }
+
+    unref() {
+      this._netServer.unref();
+      return this;
+    }
+  }
+
+  const connect = (...args) => {
+    const { callback, transportOptions, transportSocket, tlsOptions } =
+      normalizeTlsConnectInvocation(args);
+    const rawSocket =
+      transportSocket ??
+      netModule.connect({
+        allowHalfOpen: transportOptions.allowHalfOpen,
+        host: transportOptions.host,
+        port: transportOptions.port,
+      });
+    const tlsSocket = createClientTlsSocket(rawSocket, tlsOptions);
+    if (typeof callback === 'function') {
+      tlsSocket.once('secureConnect', callback);
+    }
+    return tlsSocket;
+  };
+  const createServer = (...args) => {
+    const { options, secureConnectionListener } = normalizeTlsServerCreation(args);
+    return new AgentOsTlsServer(options, secureConnectionListener);
+  };
+  const module = Object.assign(Object.create(tlsModule ?? null), {
+    Server: AgentOsTlsServer,
+    TLSSocket: tlsModule.TLSSocket,
+    connect,
+    createConnection: connect,
+    createServer,
+  });
+
+  return module;
+}
+
 function createRpcBackedDgramModule(dgramModule, fromGuestDir = '/') {
   const RPC_POLL_WAIT_MS = 50;
   const RPC_IDLE_POLL_DELAY_MS = 10;
@@ -5019,6 +5293,7 @@ const guestChildProcess = createRpcBackedChildProcessModule(INITIAL_GUEST_CWD);
 const guestNet = createRpcBackedNetModule(hostNet, INITIAL_GUEST_CWD);
 const guestDgram = createRpcBackedDgramModule(hostDgram, INITIAL_GUEST_CWD);
 const guestDns = createRpcBackedDnsModule(hostDns);
+const guestTls = createRpcBackedTlsModule(hostTls, guestNet);
 const guestGetUid = () => VIRTUAL_UID;
 const guestGetGid = () => VIRTUAL_GID;
 const VIRTUAL_OS_HOSTNAME = parseVirtualProcessString(
@@ -5760,6 +6035,9 @@ function installGuestHardening() {
       if (normalized === 'dns' && ALLOWED_BUILTINS.has('dns')) {
         return guestDns;
       }
+      if (normalized === 'tls' && ALLOWED_BUILTINS.has('tls')) {
+        return guestTls;
+      }
       if (normalized === 'child_process' && ALLOWED_BUILTINS.has('child_process')) {
         return guestChildProcess;
       }
@@ -5791,6 +6069,9 @@ function installGuestHardening() {
       }
       if (normalized === 'dns' && ALLOWED_BUILTINS.has('dns')) {
         return guestDns;
+      }
+      if (normalized === 'tls' && ALLOWED_BUILTINS.has('tls')) {
+        return guestTls;
       }
       if (normalized === 'child_process' && ALLOWED_BUILTINS.has('child_process')) {
         return guestChildProcess;
@@ -5864,6 +6145,9 @@ if (ALLOWED_BUILTINS.has('dgram')) {
 }
 if (ALLOWED_BUILTINS.has('dns')) {
   hardenProperty(globalThis, '__agentOsBuiltinDns', guestDns);
+}
+if (ALLOWED_BUILTINS.has('tls')) {
+  hardenProperty(globalThis, '__agentOsBuiltinTls', guestTls);
 }
 if (ALLOWED_BUILTINS.has('os')) {
   hardenProperty(globalThis, '__agentOsBuiltinOs', guestOs);
@@ -7217,6 +7501,11 @@ const BUILTIN_ASSETS: &[BuiltinAsset] = &[
         init_counter_key: "__agentOsBuiltinDnsInitCount",
     },
     BuiltinAsset {
+        name: "tls",
+        module_specifier: "node:tls",
+        init_counter_key: "__agentOsBuiltinTlsInitCount",
+    },
+    BuiltinAsset {
         name: "os",
         module_specifier: "node:os",
         init_counter_key: "__agentOsBuiltinOsInitCount",
@@ -7263,10 +7552,6 @@ const DENIED_BUILTIN_ASSETS: &[DeniedBuiltinAsset] = &[
     DeniedBuiltinAsset {
         name: "net",
         module_specifier: "node:net",
-    },
-    DeniedBuiltinAsset {
-        name: "tls",
-        module_specifier: "node:tls",
     },
     DeniedBuiltinAsset {
         name: "trace_events",
@@ -7502,6 +7787,7 @@ fn render_builtin_asset_source(asset: &BuiltinAsset) -> String {
         "net" => render_net_builtin_asset_source(asset.init_counter_key),
         "dgram" => render_dgram_builtin_asset_source(asset.init_counter_key),
         "dns" => render_dns_builtin_asset_source(asset.init_counter_key),
+        "tls" => render_tls_builtin_asset_source(asset.init_counter_key),
         "os" => render_os_builtin_asset_source(asset.init_counter_key),
         _ => {
             render_passthrough_builtin_asset_source(asset.module_specifier, asset.init_counter_key)
@@ -7778,6 +8064,41 @@ export const resolve6 = mod.resolve6;\n\
 export const reverse = mod.reverse;\n\
 export const setDefaultResultOrder = mod.setDefaultResultOrder;\n\
 export const setServers = mod.setServers;\n"
+    )
+}
+
+fn render_tls_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const ACCESS_DENIED_CODE = \"ERR_ACCESS_DENIED\";\n\
+const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+if (!globalThis.__agentOsBuiltinTls) {{\n\
+  const error = new Error(\"node:tls is not available in the Agent OS guest runtime\");\n\
+  error.code = ACCESS_DENIED_CODE;\n\
+  throw error;\n\
+}}\n\n\
+const mod = globalThis.__agentOsBuiltinTls;\n\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export const CLIENT_RENEG_LIMIT = mod.CLIENT_RENEG_LIMIT;\n\
+export const CLIENT_RENEG_WINDOW = mod.CLIENT_RENEG_WINDOW;\n\
+export const DEFAULT_CIPHERS = mod.DEFAULT_CIPHERS;\n\
+export const DEFAULT_ECDH_CURVE = mod.DEFAULT_ECDH_CURVE;\n\
+export const DEFAULT_MAX_VERSION = mod.DEFAULT_MAX_VERSION;\n\
+export const DEFAULT_MIN_VERSION = mod.DEFAULT_MIN_VERSION;\n\
+export const SecureContext = mod.SecureContext;\n\
+export const Server = mod.Server;\n\
+export const TLSSocket = mod.TLSSocket;\n\
+export const checkServerIdentity = mod.checkServerIdentity;\n\
+export const connect = mod.connect;\n\
+export const createConnection = mod.createConnection;\n\
+export const createSecureContext = mod.createSecureContext;\n\
+export const createSecurePair = mod.createSecurePair;\n\
+export const createServer = mod.createServer;\n\
+export const getCiphers = mod.getCiphers;\n\
+export const rootCertificates = mod.rootCertificates;\n"
     )
 }
 
@@ -8490,7 +8811,6 @@ export async function loadPyodide(options) {
             String::from("inspector"),
             String::from("module"),
             String::from("net"),
-            String::from("tls"),
             String::from("trace_events"),
             String::from("v8"),
             String::from("vm"),
@@ -8570,5 +8890,21 @@ export async function loadPyodide(options) {
         assert!(dns_asset.contains("__agentOsBuiltinDns"));
         assert!(dns_asset.contains("export const lookup = mod.lookup"));
         assert!(dns_asset.contains("export const resolve4 = mod.resolve4"));
+    }
+
+    #[test]
+    fn ensure_materialized_writes_tls_builtin_asset() {
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let tls_asset =
+            fs::read_to_string(import_cache.asset_root().join("builtins").join("tls.mjs"))
+                .expect("read tls builtin asset");
+
+        assert!(tls_asset.contains("__agentOsBuiltinTls"));
+        assert!(tls_asset.contains("export const connect = mod.connect"));
+        assert!(tls_asset.contains("export const createServer = mod.createServer"));
     }
 }

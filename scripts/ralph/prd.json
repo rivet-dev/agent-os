@@ -360,7 +360,7 @@
         "Typecheck passes"
       ],
       "priority": 22,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-018 (net.Socket polyfill). TLS wraps the underlying TCP socket."
     },
     {

@@ -59,6 +59,7 @@ const DEFAULT_ALLOWED_NODE_BUILTINS = [
 	"stream",
 	"string_decoder",
 	"timers",
+	"tls",
 	"url",
 	"util",
 	"zlib",

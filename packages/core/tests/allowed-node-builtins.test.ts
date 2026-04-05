@@ -105,5 +105,6 @@ describe("AgentOsOptions.allowedNodeBuiltins", () => {
 		const builtins = JSON.parse(await captureAllowedNodeBuiltins());
 		expect(builtins).toContain("os");
 		expect(builtins).toContain("dns");
+		expect(builtins).toContain("tls");
 	});
 });
