@@ -9123,6 +9123,8 @@ mod tests {
     ) -> Output {
         let mut command = Command::new(node_binary());
         command
+            .arg("--import")
+            .arg(import_cache.timing_bootstrap_path())
             .arg(import_cache.python_runner_path())
             .env("AGENT_OS_PYODIDE_INDEX_URL", pyodide_index_url)
             .env("AGENT_OS_PYTHON_CODE", code);
@@ -9141,6 +9143,8 @@ mod tests {
     ) -> Output {
         let mut command = Command::new(node_binary());
         command
+            .arg("--import")
+            .arg(import_cache.timing_bootstrap_path())
             .arg(import_cache.python_runner_path())
             .env("AGENT_OS_PYODIDE_INDEX_URL", pyodide_index_url)
             .env("AGENT_OS_PYTHON_PREWARM_ONLY", "1");
@@ -9161,6 +9165,8 @@ mod tests {
     ) -> Output {
         let mut command = Command::new(node_binary());
         command
+            .arg("--import")
+            .arg(import_cache.timing_bootstrap_path())
             .arg(import_cache.python_runner_path())
             .env("AGENT_OS_PYODIDE_INDEX_URL", pyodide_index_url)
             .env("AGENT_OS_PYTHON_CODE", code)
@@ -9468,6 +9474,12 @@ print(json.dumps({
     "js_require": capture(lambda: js.require),
     "js_process_exit": capture(lambda: js.process.exit),
     "js_process_kill": capture(lambda: js.process.kill),
+    "js_child_process_builtin": capture(
+        lambda: js.process.getBuiltinModule("node:child_process")
+    ),
+    "js_vm_builtin": capture(
+        lambda: js.process.getBuiltinModule("node:vm")
+    ),
     "pyodide_js_eval_code": capture(lambda: pyodide_js.eval_code),
 }))
 "#,
@@ -9485,6 +9497,8 @@ print(json.dumps({
             "js_require",
             "js_process_exit",
             "js_process_kill",
+            "js_child_process_builtin",
+            "js_vm_builtin",
         ] {
             assert_eq!(parsed[key]["ok"], Value::Bool(false), "stdout: {stdout}");
             assert_eq!(
@@ -9514,6 +9528,54 @@ print(json.dumps({
                 .as_str()
                 .expect("pyodide_js hardening message")
                 .contains("pyodide_js is not available"),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn materialized_python_runner_exposes_frozen_time_to_python() {
+        assert_node_available();
+
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let frozen_time_ms = 1_704_067_200_123_u64;
+        let output = run_python_runner_with_env(
+            &import_cache,
+            import_cache.pyodide_dist_path(),
+            r#"
+import datetime
+import json
+import time
+
+first_ns = time.time_ns()
+second_ns = time.time_ns()
+utc_now = datetime.datetime.now(datetime.timezone.utc)
+
+print(json.dumps({
+    "first_ns": first_ns,
+    "second_ns": second_ns,
+    "iso": utc_now.isoformat(timespec="milliseconds"),
+}))
+"#,
+            &[("AGENT_OS_FROZEN_TIME_MS", "1704067200123")],
+        );
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse frozen-time JSON");
+
+        assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+        assert_eq!(parsed["first_ns"], parsed["second_ns"], "stdout: {stdout}");
+        let first_ns = parsed["first_ns"]
+            .as_u64()
+            .expect("frozen time.time_ns() value");
+        assert_eq!(first_ns / 1_000_000, frozen_time_ms, "stdout: {stdout}");
+        assert_eq!(
+            parsed["iso"],
+            Value::String(String::from("2024-01-01T00:00:00.123+00:00")),
             "stdout: {stdout}"
         );
     }

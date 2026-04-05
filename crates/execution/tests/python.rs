@@ -1118,3 +1118,70 @@ export async function loadPyodide(options) {
     assert_eq!(exit_code, Some(1));
     assert_process_exits(child_pid);
 }
+
+#[test]
+fn python_execution_blocks_network_requests_during_pyodide_init() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let pyodide_dir = temp.path().join("pyodide");
+    fs::create_dir_all(&pyodide_dir).expect("create pyodide dir");
+    write_fixture(
+        &pyodide_dir.join("pyodide.mjs"),
+        r#"
+export async function loadPyodide() {
+  let initResult;
+  try {
+    await fetch('https://example.com/pyodide-init-check');
+    initResult = { ok: true };
+  } catch (error) {
+    initResult = {
+      ok: false,
+      code: error.code ?? null,
+      message: error.message,
+    };
+  }
+
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync() {
+      console.log(JSON.stringify(initResult));
+    },
+  };
+}
+"#,
+    );
+    write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
+
+    let mut engine = PythonExecutionEngine::default();
+    let context = engine.create_context(CreatePythonContextRequest {
+        vm_id: String::from("vm-python"),
+        pyodide_dist_path: pyodide_dir,
+    });
+
+    let (stdout, stderr, exit_code) = run_python_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        "print('ignored')",
+        BTreeMap::new(),
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("parse init network JSON");
+    assert_eq!(parsed["ok"], serde_json::Value::Bool(false));
+    assert_eq!(
+        parsed["code"],
+        serde_json::Value::String(String::from("ERR_ACCESS_DENIED"))
+    );
+    assert!(
+        parsed["message"]
+            .as_str()
+            .expect("network denial message")
+            .contains("network access"),
+        "unexpected stdout: {stdout}"
+    );
+}

@@ -583,7 +583,7 @@
         "Typecheck passes"
       ],
       "priority": 41,
-      "passes": false,
+      "passes": true,
       "notes": "Multiple Pyodide Phase 1/3 acceptance criteria have no test coverage."
     },
     {

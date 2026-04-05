@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Real bundled-Pyodide coverage belongs in `crates/execution/src/node_import_cache.rs` materialized-runner tests, and those helpers should load `timing-bootstrap.mjs` so frozen `Date`/`performance` behavior matches real execution launches; use `crates/execution/tests/python.rs` for fake-`pyodide.mjs` bootstrap regressions.
 - Sidecar `host_dir` mounts should anchor guest path resolution with `openat2(..., RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` and translate kernel `EXDEV` escape rejections back to guest-facing `EACCES`.
 - Python VFS RPCs are intentionally scoped to `/workspace`; normalize and reject anything outside that guest root in `crates/sidecar/src/service.rs` before touching the kernel VFS.
 - Pyodide VFS RPC timeouts are safer to enforce in `crates/execution/src/python.rs` against pending request IDs than inside the embedded runner; touching the bundled Python runner can perturb real Pyodide bootstrap behavior.
@@ -774,4 +775,19 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Pyodide bootstrap hardening has to be staged; `globalThis` guards can go in before `loadPyodide()`, but mutating `process` before bootstrap breaks the real bundled Pyodide runtime under Node `--permission`.
   - Gotchas encountered: `cargo test -p agent-os-sidecar --test python -- --test-threads=1` is still red on the pre-existing Pyodide warmup `process.binding` denial path and an unrelated cross-runtime workspace test, so the focused execution suites remain the reliable story-level verification targets for this area.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test python -- --test-threads=1`, `cargo test -p agent-os-execution node_import_cache::tests::materialized_python_runner_hardens_builtin_access_before_load_pyodide -- --exact --test-threads=1`, and `cargo check -p agent-os-execution -p agent-os-sidecar` pass after this change.
+---
+## 2026-04-05 04:31:32 PDT - US-036
+- What was implemented
+- Added a real bundled-Pyodide regression in `crates/execution/src/node_import_cache.rs` that verifies Python sees the frozen millisecond timestamp and that Python-side access to `node:child_process` and `node:vm` stays blocked through the `js` escape hatch.
+- Aligned the materialized Python-runner test helpers with production by loading `timing-bootstrap.mjs`, so runner-level tests now exercise the same frozen `Date`/`performance` behavior as actual executions.
+- Added an execution-engine regression in `crates/execution/tests/python.rs` that proves `loadPyodide()` cannot make outbound network requests during bootstrap.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/python.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: Real Pyodide behavior is easiest to validate in `node_import_cache` materialized-runner tests, while bootstrap hardening scenarios are cheaper and clearer with fake `pyodide.mjs` fixtures in `crates/execution/tests/python.rs`.
+- Gotchas encountered: The materialized Python-runner test helpers must import `timing-bootstrap.mjs`; without that, frozen-time assertions measure the bare runner rather than the real execution path.
+- Useful context: Focused checks that passed for this story were `cargo test -p agent-os-execution --test python python_execution_blocks_network_requests_during_pyodide_init -- --exact`, `cargo test -p agent-os-execution node_import_cache::tests::materialized_python_runner_blocks_pyodide_js_escape_modules -- --exact`, `cargo test -p agent-os-execution node_import_cache::tests::materialized_python_runner_exposes_frozen_time_to_python -- --exact`, and `cargo check -p agent-os-execution`.
 ---
