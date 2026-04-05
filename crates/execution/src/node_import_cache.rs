@@ -1773,6 +1773,7 @@ const SIGNAL_EVENTS = new Set(
     name.startsWith('SIG'),
   ),
 );
+const TRACKED_PROCESS_SIGNAL_EVENTS = new Set(['SIGCHLD']);
 const guestEntryPoint =
   HOST_PROCESS_ENV.AGENT_OS_GUEST_ENTRYPOINT ?? HOST_PROCESS_ENV.AGENT_OS_ENTRYPOINT;
 const DEFAULT_VIRTUAL_EXEC_PATH = '/usr/bin/node';
@@ -1810,6 +1811,7 @@ const NODE_IMPORT_CACHE_ROOT =
   typeof NODE_IMPORT_CACHE_PATH === 'string' && NODE_IMPORT_CACHE_PATH.length > 0
     ? path.dirname(NODE_IMPORT_CACHE_PATH)
     : null;
+const CONTROL_PIPE_FD = parseOptionalFd(HOST_PROCESS_ENV.AGENT_OS_CONTROL_PIPE_FD);
 const GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT = '/.agent-os/node-import-cache';
 const VIRTUAL_EXEC_PATH = parseVirtualProcessString(
   HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH,
@@ -6334,6 +6336,53 @@ function isProcessSignalEventName(eventName) {
   return typeof eventName === 'string' && SIGNAL_EVENTS.has(eventName);
 }
 
+function emitControlMessage(message) {
+  if (CONTROL_PIPE_FD == null) {
+    return;
+  }
+
+  try {
+    hostFsWriteSync(CONTROL_PIPE_FD, `${JSON.stringify(message)}\n`);
+  } catch {
+    // Ignore control-channel write failures during teardown.
+  }
+}
+
+function isTrackedProcessSignalEventName(eventName) {
+  return typeof eventName === 'string' && TRACKED_PROCESS_SIGNAL_EVENTS.has(eventName);
+}
+
+function signalEventsAffectedByProcessMethod(methodName, eventName) {
+  if (methodName === 'removeAllListeners' && eventName == null) {
+    return [...TRACKED_PROCESS_SIGNAL_EVENTS];
+  }
+
+  return isTrackedProcessSignalEventName(eventName) ? [eventName] : [];
+}
+
+function emitGuestProcessSignalState(eventName) {
+  if (!isTrackedProcessSignalEventName(eventName)) {
+    return;
+  }
+
+  const signal = hostOs.constants?.signals?.[eventName];
+  if (typeof signal !== 'number') {
+    return;
+  }
+
+  const listenerCount =
+    typeof process.listenerCount === 'function' ? process.listenerCount(eventName) : 0;
+  emitControlMessage({
+    type: 'signal_state',
+    signal: Number(signal) >>> 0,
+    registration: {
+      action: listenerCount > 0 ? 'user' : 'default',
+      mask: [],
+      flags: 0,
+    },
+  });
+}
+
 function createBlockedProcessSignalMethod(methodName) {
   const target = process;
   const method =
@@ -6344,11 +6393,15 @@ function createBlockedProcessSignalMethod(methodName) {
 
   return (...args) => {
     const [eventName] = args;
-    if (isProcessSignalEventName(eventName)) {
+    const affectedSignals = signalEventsAffectedByProcessMethod(methodName, eventName);
+    if (isProcessSignalEventName(eventName) && affectedSignals.length === 0) {
       throw accessDenied(`process.${methodName}(${eventName})`);
     }
 
     const result = method(...args);
+    for (const signalName of affectedSignals) {
+      emitGuestProcessSignalState(signalName);
+    }
     return result === target ? guestProcess : result;
   };
 }
@@ -6994,6 +7047,9 @@ function installGuestHardening() {
     'addListener',
     'on',
     'once',
+    'removeAllListeners',
+    'removeListener',
+    'off',
     'prependListener',
     'prependOnceListener',
   ]) {

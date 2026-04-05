@@ -1507,6 +1507,9 @@ impl DriverProcess for StubDriverProcess {
             let mut state = lock_or_recover(&self.state);
             state.kill_signals.push(signal);
         }
+        if signal == crate::process_table::SIGCHLD {
+            return;
+        }
         self.finish(128 + signal);
     }
 

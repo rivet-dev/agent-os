@@ -270,6 +270,7 @@ console.error(`stderr:${process.argv.slice(2).join(",")}`);
             Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
                 panic!("unexpected sync RPC request: {}", request.method);
             }
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             None => panic!("timed out waiting for JavaScript execution event"),
         }
@@ -346,6 +347,7 @@ process.stdin.on("end", () => {
             Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
                 panic!("unexpected sync RPC request: {}", request.method);
             }
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             None => panic!("timed out waiting for JavaScript execution event"),
         }
@@ -514,6 +516,7 @@ console.log(JSON.stringify({ stat, lstat, contents, raw, entries, missing, linkT
                     other => panic!("unexpected sync RPC method: {other}"),
                 }
             }
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             None => panic!("timed out waiting for JavaScript execution event"),
         }
@@ -689,6 +692,7 @@ console.log(
                     other => panic!("unexpected async fs RPC method: {other}"),
                 }
             }
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             None => panic!("timed out waiting for JavaScript execution event"),
         }
@@ -998,6 +1002,7 @@ console.log(
                     other => panic!("unexpected fd RPC method: {other}"),
                 }
             }
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             None => panic!("timed out waiting for JavaScript execution event"),
         }
@@ -2084,6 +2089,7 @@ console.log(`missing:${missing}`);
                     other => panic!("unexpected sync RPC method: {other}"),
                 }
             }
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             None => panic!("timed out waiting for JavaScript execution event"),
         }
@@ -2735,6 +2741,14 @@ try {
 }
 
 try {
+  const returned = process.on('SIGCHLD', () => {});
+  result.sigchldReturnedSelf = returned === process;
+  process.removeAllListeners('SIGCHLD');
+} catch (error) {
+  result.sigchld = { code: error.code ?? null, message: error.message };
+}
+
+try {
   process.dlopen({}, addonPath);
   result.dlopen = 'unexpected';
 } catch (error) {
@@ -2786,6 +2800,7 @@ console.log(JSON.stringify(result));
         .as_str()
         .expect("signal once message")
         .contains("process.once(SIGINT)"));
+    assert_eq!(parsed.get("sigchld"), None);
     assert_eq!(
         parsed["dlopen"]["code"],
         Value::String(String::from("ERR_ACCESS_DENIED"))
@@ -2918,6 +2933,7 @@ console.log(JSON.stringify({
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
             Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
                 methods.push(request.method.clone());
@@ -3076,6 +3092,7 @@ spawnSync('node', ['./child.mjs'], {
         {
             Some(JavascriptExecutionEvent::Stdout(_chunk)) => {}
             Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
                 match request.method.as_str() {
@@ -3205,6 +3222,7 @@ console.log(JSON.stringify(summary));
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
             Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
                 methods.push(request.method.clone());
@@ -3385,6 +3403,7 @@ console.log(JSON.stringify(summary));
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
             Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
                 methods.push(request.method.clone());
@@ -3587,6 +3606,7 @@ console.log(JSON.stringify(summary));
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
             Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
                 methods.push(request.method.clone());
@@ -3728,6 +3748,7 @@ console.log(JSON.stringify(summary));
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
             Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
                 methods.push(request.method.clone());
@@ -3909,6 +3930,7 @@ console.log(JSON.stringify(summary));
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
             Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
                 methods.push(request.method.clone());
@@ -4101,6 +4123,7 @@ console.log(JSON.stringify({
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
             Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
                 methods.push(request.method.clone());
@@ -4224,6 +4247,7 @@ console.log(JSON.stringify({
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
             Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
                 panic!("unexpected tls sync RPC method: {}", request.method)
@@ -4326,6 +4350,7 @@ console.log(JSON.stringify({
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
             Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
             Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
                 panic!(

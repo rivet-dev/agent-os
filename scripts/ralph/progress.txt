@@ -53,6 +53,7 @@
 - `wrapChildProcessModule` in `crates/execution/src/node_import_cache.rs` can only sandbox `exec`/`execSync` safely for simple Node-runtime commands; parse shell-free argv and delegate to `execFile`, but deny arbitrary shell strings because host shells bypass Node `--permission`.
 - Guest-visible module path scrubbing in `crates/execution/src/node_import_cache.rs` has to cover both the ESM loader and the generated Node runner: translate `error.message`, `error.stack`, and `requireStack`, and import guest entrypoints through guest-mapped file URLs so top-level stack traces never start on host paths.
 - Execution control data that affects host state should move over the shared `AGENT_OS_CONTROL_PIPE_FD` side channel in `crates/execution/src/node_process.rs`; if a runtime still surfaces compatible debug/control prefixes, strip matching guest `stderr` lines before exposing them so forged prefixes never drive host behavior.
+- Guest-visible signal registration that the sidecar needs to observe should ride the shared control pipe from `crates/execution/src/node_import_cache.rs` into `JavascriptExecutionEvent::SignalState` and `crates/sidecar/src/service.rs` `vm.signal_states`; keeping the last snapshot after exit avoids fast-process query races.
 - The JavaScript sync syscall bridge in `crates/execution/src/node_import_cache.rs` should keep request writes on the guest main thread and use a worker only for blocking response reads plus `SharedArrayBuffer` wakeups; under the current Node permission model, worker-thread writes to the inherited request FD fail with `EBADF`.
 - Guest Node `fs` and `fs/promises` polyfills now share the same JavaScript sync-RPC transport; async methods should dispatch as `fs.promises.*` RPC calls, and guest-visible `readdir` results must filter the kernel VFS `.` / `..` entries back out to match Node semantics.
 - Non-fd guest `fs` sync methods should be overridden onto the wrapped module via a dedicated sync-RPC helper in `crates/execution/src/node_import_cache.rs`; keep fd/stream APIs on the translated host module until their kernel-backed port is implemented, and add matching `fs.*Sync` dispatch arms in `crates/sidecar/src/service.rs`.
@@ -1089,4 +1090,28 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: WASM parser hardening belongs in the lightweight preflight path before Node/V8 spawn, and sparse files are an efficient way to regression-test file-size caps without allocating the capped bytes.
   - Gotchas encountered: The old `shift >= 64` guard still fired before the new varuint byte cap until the continued-10th-byte case was rejected explicitly; test the exact overlong encoding path, not just malformed-section overflow in general.
   - Useful context: `cargo test -p agent-os-execution --test wasm -- --test-threads=1` and `cargo check -p agent-os-execution` both pass for this change.
+---
+## 2026-04-05 08:24:58 PDT - US-059
+- What was implemented
+- Added kernel-level `SIGCHLD` delivery in `crates/kernel/src/process_table.rs` so living parents are signaled when child processes exit or are killed, with updated stub/mock driver behavior and kernel regressions covering both paths.
+- Allowed guest Node `process.on('SIGCHLD')` registration in `crates/execution/src/node_import_cache.rs`, emitted signal-state updates over the shared control pipe, and surfaced those updates through `JavascriptExecutionEvent::SignalState` so the sidecar can observe JavaScript signal handlers.
+- Updated `crates/sidecar/src/service.rs` to track JavaScript signal registrations, send a real host `SIGCHLD` to parent runtime processes when nested `child_process` children exit, and retain the last signal-state snapshot after process exit so `get_signal_state` queries stay deterministic.
+- Files changed
+- `crates/execution/src/benchmark.rs`
+- `crates/execution/src/javascript.rs`
+- `crates/execution/src/lib.rs`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/src/process_table.rs`
+- `crates/kernel/tests/process_table.rs`
+- `crates/sidecar/src/service.rs`
+- `crates/sidecar/tests/socket_state_queries.rs`
+- `crates/sidecar/tests/support/mod.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: JavaScript signal support needs all three layers updated together: guest runner registration/hardening, execution-event plumbing, and sidecar state/delivery logic.
+  - Gotchas encountered: Fast-exiting processes can clear `vm.signal_states` before tests or clients query them; retaining the last snapshot after exit makes signal-state inspection deterministic without affecting live delivery.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test process_table -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript -- --test-threads=1`, `cargo test -p agent-os-sidecar --test socket_state_queries -- --test-threads=1`, and `cargo check -p agent-os-kernel -p agent-os-execution -p agent-os-sidecar` all pass. The focused `javascript_execution_denies_process_signal_handlers_and_native_addons` test hit the known temp import-cache race once (`register.mjs` missing) and passed on immediate rerun; the full `agent-os-execution` javascript suite passed in this session.
 ---

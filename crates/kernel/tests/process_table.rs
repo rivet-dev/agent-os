@@ -1,5 +1,6 @@
 use agent_os_kernel::process_table::{
     DriverProcess, ProcessContext, ProcessExitCallback, ProcessResult, ProcessStatus, ProcessTable,
+    SIGCHLD,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -79,7 +80,7 @@ impl DriverProcess for MockDriverProcess {
         let should_exit = {
             let mut state = self.state.lock().expect("mock process lock poisoned");
             state.kills.push(signal);
-            signal == 9 || !state.ignore_sigterm
+            signal != SIGCHLD && (signal == 9 || !state.ignore_sigterm)
         };
 
         if should_exit {
@@ -304,6 +305,82 @@ fn kill_routes_signals_and_validates_process_existence() {
     assert_error_code(table.kill(999, 15), "ESRCH");
     assert_error_code(table.kill(pid as i32, -1), "EINVAL");
     assert_error_code(table.kill(pid as i32, 100), "EINVAL");
+}
+
+#[test]
+fn exiting_child_delivers_sigchld_to_living_parent() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let parent = MockDriverProcess::new();
+    let child = MockDriverProcess::new();
+    let parent_pid = table.allocate_pid();
+    let child_pid = table.allocate_pid();
+
+    table.register(
+        parent_pid,
+        "wasmvm",
+        "parent",
+        Vec::new(),
+        create_context(0),
+        parent.clone(),
+    );
+    table.register(
+        child_pid,
+        "wasmvm",
+        "child",
+        Vec::new(),
+        create_context(parent_pid),
+        child.clone(),
+    );
+
+    child.exit(0);
+
+    wait_for(
+        || parent.kills() == vec![SIGCHLD],
+        Duration::from_millis(100),
+    );
+    assert_eq!(
+        table.waitpid(child_pid).expect("reap child"),
+        (child_pid, 0)
+    );
+}
+
+#[test]
+fn killed_child_delivers_sigchld_to_living_parent() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let parent = MockDriverProcess::new();
+    let child = MockDriverProcess::new();
+    let parent_pid = table.allocate_pid();
+    let child_pid = table.allocate_pid();
+
+    table.register(
+        parent_pid,
+        "wasmvm",
+        "parent",
+        Vec::new(),
+        create_context(0),
+        parent.clone(),
+    );
+    table.register(
+        child_pid,
+        "wasmvm",
+        "child",
+        Vec::new(),
+        create_context(parent_pid),
+        child.clone(),
+    );
+
+    table
+        .kill(child_pid as i32, 15)
+        .expect("deliver SIGTERM to child");
+
+    wait_for(
+        || parent.kills() == vec![SIGCHLD],
+        Duration::from_millis(100),
+    );
+    assert_eq!(
+        table.waitpid(child_pid).expect("reap killed child"),
+        (child_pid, 143)
+    );
 }
 
 #[test]

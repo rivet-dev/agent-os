@@ -939,7 +939,7 @@
         "Typecheck passes"
       ],
       "priority": 59,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: No SIGCHLD implementation. Only SIGTERM(15) and SIGKILL(9) are defined. Parent processes cannot receive async notification of child termination."
     },
     {

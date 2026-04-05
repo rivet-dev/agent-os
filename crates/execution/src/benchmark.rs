@@ -2755,6 +2755,7 @@ fn measure_transport_roundtrip(
                     JavascriptExecutionError::PendingSyncRpcRequest(request.id),
                 ));
             }
+            Some(crate::JavascriptExecutionEvent::SignalState { .. }) => {}
             Some(crate::JavascriptExecutionEvent::Exited(exit_code)) => {
                 return Err(JavascriptBenchmarkError::TransportProbeExited {
                     exit_code,

@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ZOMBIE_TTL: Duration = Duration::from_secs(60);
+pub const SIGCHLD: i32 = 17;
 pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
 
@@ -522,26 +523,39 @@ fn to_process_info(entry: &ProcessEntry) -> ProcessInfo {
 }
 
 fn mark_exited_inner(inner: &Arc<ProcessTableInner>, pid: u32, exit_code: i32) {
-    let (callback, zombie_ttl, should_schedule) = {
+    let (callback, zombie_ttl, should_schedule, parent_driver) = {
         let mut state = inner.lock_state();
-        let Some(record) = state.entries.get_mut(&pid) else {
-            return;
+        let ppid = {
+            let Some(record) = state.entries.get_mut(&pid) else {
+                return;
+            };
+
+            if record.entry.status == ProcessStatus::Exited {
+                return;
+            }
+
+            record.entry.status = ProcessStatus::Exited;
+            record.entry.exit_code = Some(exit_code);
+            record.entry.exit_time_ms = Some(now_ms());
+            record.entry.ppid
         };
 
-        if record.entry.status == ProcessStatus::Exited {
-            return;
-        }
-
-        record.entry.status = ProcessStatus::Exited;
-        record.entry.exit_code = Some(exit_code);
-        record.entry.exit_time_ms = Some(now_ms());
-
         let should_schedule = !state.terminating_all;
+        let parent_driver = if should_schedule {
+            state
+                .entries
+                .get(&ppid)
+                .filter(|parent| parent.entry.status == ProcessStatus::Running)
+                .map(|parent| Arc::clone(&parent.driver_process))
+        } else {
+            None
+        };
 
         (
             state.on_process_exit.clone(),
             state.zombie_ttl,
             should_schedule,
+            parent_driver,
         )
     };
 
@@ -549,6 +563,10 @@ fn mark_exited_inner(inner: &Arc<ProcessTableInner>, pid: u32, exit_code: i32) {
         inner.reaper.schedule(pid, zombie_ttl);
     } else {
         inner.reaper.cancel(pid);
+    }
+
+    if let Some(parent_driver) = parent_driver {
+        parent_driver.kill(SIGCHLD);
     }
 
     if let Some(on_process_exit) = callback {

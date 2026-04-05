@@ -316,6 +316,7 @@ pub fn wasm_signal_state_module() -> Vec<u8> {
   (memory (export "memory") 1)
   (data (i32.const 32) "signal-registered\n")
   (func $_start (export "_start")
+    (local $spin i32)
     (drop
       (call $proc_sigaction
         (i32.const 2)
@@ -334,6 +335,11 @@ pub fn wasm_signal_state_module() -> Vec<u8> {
         (i32.const 1)
         (i32.const 24)
       )
+    )
+    (local.set $spin (i32.const 5000000))
+    (loop $wait
+      (local.set $spin (i32.sub (local.get $spin) (i32.const 1)))
+      (br_if $wait (i32.gt_s (local.get $spin) (i32.const 0)))
     )
   )
 )

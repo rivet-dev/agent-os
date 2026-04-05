@@ -18,6 +18,7 @@ pub use javascript::{
     JavascriptExecutionEngine, JavascriptExecutionError, JavascriptExecutionEvent,
     JavascriptExecutionResult, JavascriptSyncRpcRequest, StartJavascriptExecutionRequest,
 };
+pub use node_process::{NodeSignalDispositionAction, NodeSignalHandlerRegistration};
 pub use python::{
     CreatePythonContextRequest, PythonContext, PythonExecution, PythonExecutionEngine,
     PythonExecutionError, PythonExecutionEvent, PythonExecutionResult, PythonVfsRpcMethod,

@@ -5,6 +5,7 @@ use crate::node_process::{
     encode_json_string_array, env_builtin_enabled, harden_node_command, node_binary,
     node_resolution_read_paths, resolve_path_like_specifier, spawn_node_control_reader,
     spawn_stream_reader, spawn_waiter, ExportedChildFds, LinePrefixFilter, NodeControlMessage,
+    NodeSignalHandlerRegistration,
 };
 use crate::runtime_support::{
     configure_compile_cache, env_flag_enabled, import_cache_root, sandbox_root, warmup_marker_path,
@@ -150,6 +151,10 @@ pub enum JavascriptExecutionEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
     SyncRpcRequest(JavascriptSyncRpcRequest),
+    SignalState {
+        signal: u32,
+        registration: NodeSignalHandlerRegistration,
+    },
     Exited(i32),
 }
 
@@ -367,6 +372,13 @@ impl JavascriptExecution {
                 )
                 .into_bytes(),
             ))),
+            Ok(JavascriptProcessEvent::Control(NodeControlMessage::SignalState {
+                signal,
+                registration,
+            })) => Ok(Some(JavascriptExecutionEvent::SignalState {
+                signal,
+                registration,
+            })),
             Ok(JavascriptProcessEvent::Control(_)) => Ok(None),
             Ok(JavascriptProcessEvent::Exited(code)) => {
                 Ok(Some(JavascriptExecutionEvent::Exited(code)))
@@ -407,6 +419,7 @@ impl JavascriptExecution {
                     )
                     .into_bytes(),
                 ),
+                Ok(JavascriptProcessEvent::Control(NodeControlMessage::SignalState { .. })) => {}
                 Ok(JavascriptProcessEvent::Control(_)) => {}
                 Ok(JavascriptProcessEvent::Exited(exit_code)) => {
                     return Ok(JavascriptExecutionResult {

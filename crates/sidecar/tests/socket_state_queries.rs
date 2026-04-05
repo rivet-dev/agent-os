@@ -5,6 +5,7 @@ use agent_os_sidecar::protocol::{
     GetSignalStateRequest, GuestRuntimeKind, KillProcessRequest, OwnershipScope, RequestPayload,
     ResponsePayload, SignalDispositionAction,
 };
+use nix::libc;
 use std::collections::BTreeMap;
 use std::fs;
 use std::time::{Duration, Instant};
@@ -233,11 +234,15 @@ fn sidecar_queries_listener_udp_and_signal_state() {
     }
 
     let signal_deadline = Instant::now() + Duration::from_secs(5);
+    let wasm_ownership = OwnershipScope::vm(&connection_id, &session_id, &wasm_vm_id);
     loop {
+        let _ = sidecar
+            .poll_event(&wasm_ownership, Duration::from_millis(25))
+            .expect("pump wasm signal-state events");
         let signal_state = sidecar
             .dispatch(request(
                 9,
-                OwnershipScope::vm(&connection_id, &session_id, &wasm_vm_id),
+                wasm_ownership.clone(),
                 RequestPayload::GetSignalState(GetSignalStateRequest {
                     process_id: String::from("signal-state"),
                 }),
@@ -280,4 +285,165 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         }
         other => panic!("unexpected dispose response: {other:?}"),
     }
+}
+
+#[test]
+fn sidecar_tracks_javascript_sigchld_and_delivers_it_on_child_exit() {
+    assert_node_available();
+
+    let mut sidecar = new_sidecar("socket-state-sigchld");
+    let cwd = temp_dir("socket-state-sigchld-cwd");
+    let parent_entry = cwd.join("parent.mjs");
+    let child_entry = cwd.join("child.mjs");
+
+    write_fixture(
+        &child_entry,
+        [
+            "await new Promise((resolve) => setTimeout(resolve, 200));",
+            "console.log('child-exit');",
+        ]
+        .join("\n"),
+    );
+    write_fixture(
+        &parent_entry,
+        [
+            "import { spawn } from 'node:child_process';",
+            "let sigchldCount = 0;",
+            "process.on('SIGCHLD', () => {",
+            "  sigchldCount += 1;",
+            "  console.log(`sigchld:${sigchldCount}`);",
+            "});",
+            "console.log('sigchld-registered');",
+            "const child = spawn('node', ['./child.mjs'], { stdio: ['ignore', 'ignore', 'ignore'] });",
+            "await new Promise((resolve, reject) => {",
+            "  child.on('error', reject);",
+            "  child.on('close', (code) => {",
+            "    if (code !== 0) {",
+            "      reject(new Error(`child exit ${code}`));",
+            "      return;",
+            "    }",
+            "    resolve();",
+            "  });",
+            "});",
+            "const deadline = Date.now() + 2000;",
+            "while (sigchldCount === 0 && Date.now() < deadline) {",
+            "  await new Promise((resolve) => setTimeout(resolve, 10));",
+            "}",
+            "if (sigchldCount === 0) {",
+            "  throw new Error('SIGCHLD was not delivered');",
+            "}",
+            "console.log(`sigchld-final:${sigchldCount}`);",
+        ]
+        .join("\n"),
+    );
+
+    let connection_id = authenticate(&mut sidecar, "conn-sigchld");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let allowed_builtins = serde_json::to_string(&[
+        "assert",
+        "buffer",
+        "child_process",
+        "console",
+        "crypto",
+        "events",
+        "fs",
+        "path",
+        "querystring",
+        "stream",
+        "string_decoder",
+        "timers",
+        "url",
+        "util",
+        "zlib",
+    ])
+    .expect("serialize builtins");
+    let (vm_id, _) = create_vm_with_metadata(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::JavaScript,
+        &cwd,
+        BTreeMap::from([(
+            String::from("env.AGENT_OS_ALLOWED_NODE_BUILTINS"),
+            allowed_builtins,
+        )]),
+    );
+
+    execute(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "sigchld-parent",
+        GuestRuntimeKind::JavaScript,
+        &parent_entry,
+        Vec::new(),
+    );
+
+    let ownership = OwnershipScope::vm(&connection_id, &session_id, &vm_id);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut signal_registered = false;
+    let mut saw_registered_output = false;
+    let mut saw_sigchld_output = false;
+    let mut saw_final_output = false;
+    let mut exit_code = None;
+
+    while exit_code.is_none() || !signal_registered {
+        let signal_state = sidecar
+            .dispatch(request(
+                5,
+                ownership.clone(),
+                RequestPayload::GetSignalState(GetSignalStateRequest {
+                    process_id: String::from("sigchld-parent"),
+                }),
+            ))
+            .expect("query sigchld signal state");
+        match signal_state.response.payload {
+            ResponsePayload::SignalState(snapshot) => {
+                if snapshot.handlers.get(&(libc::SIGCHLD as u32))
+                    == Some(&agent_os_sidecar::protocol::SignalHandlerRegistration {
+                        action: SignalDispositionAction::User,
+                        mask: vec![],
+                        flags: 0,
+                    })
+                {
+                    signal_registered = true;
+                }
+            }
+            other => panic!("unexpected signal state response: {other:?}"),
+        }
+
+        let event = sidecar
+            .poll_event(&ownership, Duration::from_millis(100))
+            .expect("poll SIGCHLD process");
+        if let Some(event) = event {
+            match event.payload {
+                EventPayload::ProcessOutput(output) if output.process_id == "sigchld-parent" => {
+                    saw_registered_output |= output.chunk.contains("sigchld-registered");
+                    saw_sigchld_output |= output.chunk.contains("sigchld:1");
+                    saw_final_output |= output.chunk.contains("sigchld-final:1");
+                }
+                EventPayload::ProcessExited(exited) if exited.process_id == "sigchld-parent" => {
+                    exit_code = Some(exited.exit_code);
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for SIGCHLD registration/output"
+        );
+    }
+
+    assert!(signal_registered, "SIGCHLD should be registered");
+    assert!(
+        saw_registered_output,
+        "parent should report SIGCHLD registration"
+    );
+    assert!(saw_sigchld_output, "parent should receive SIGCHLD output");
+    assert!(saw_final_output, "parent should report final SIGCHLD count");
+    assert_eq!(exit_code, Some(0));
 }

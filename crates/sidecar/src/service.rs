@@ -12,9 +12,9 @@ use crate::protocol::{
     RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryEncoding,
     RootFilesystemEntryKind, RootFilesystemLowerDescriptor, RootFilesystemMode,
     RootFilesystemSnapshotResponse, SessionOpenedResponse, SidecarPlacement,
-    SignalHandlerRegistration, SignalStateResponse, SnapshotRootFilesystemRequest,
-    SocketStateEntry, StdinClosedResponse, StdinWrittenResponse, StreamChannel,
-    VmConfiguredResponse, VmCreatedResponse, VmDisposedResponse, VmLifecycleEvent,
+    SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse,
+    SnapshotRootFilesystemRequest, SocketStateEntry, StdinClosedResponse, StdinWrittenResponse,
+    StreamChannel, VmConfiguredResponse, VmCreatedResponse, VmDisposedResponse, VmLifecycleEvent,
     VmLifecycleState, WasmPermissionTier, WriteStdinRequest, ZombieTimerCountResponse,
     DEFAULT_MAX_FRAME_BYTES,
 };
@@ -35,11 +35,12 @@ use agent_os_execution::wasm::{
 use agent_os_execution::{
     CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
     JavascriptExecution, JavascriptExecutionEngine, JavascriptExecutionError,
-    JavascriptExecutionEvent, JavascriptSyncRpcRequest, PythonExecution, PythonExecutionEngine,
-    PythonExecutionError, PythonExecutionEvent, PythonVfsRpcMethod, PythonVfsRpcRequest,
-    PythonVfsRpcResponsePayload, PythonVfsRpcStat, StartJavascriptExecutionRequest,
-    StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecution, WasmExecutionEngine,
-    WasmExecutionError, WasmExecutionEvent, WasmPermissionTier as ExecutionWasmPermissionTier,
+    JavascriptExecutionEvent, JavascriptSyncRpcRequest, NodeSignalDispositionAction,
+    NodeSignalHandlerRegistration, PythonExecution, PythonExecutionEngine, PythonExecutionError,
+    PythonExecutionEvent, PythonVfsRpcMethod, PythonVfsRpcRequest, PythonVfsRpcResponsePayload,
+    PythonVfsRpcStat, StartJavascriptExecutionRequest, StartPythonExecutionRequest,
+    StartWasmExecutionRequest, WasmExecution, WasmExecutionEngine, WasmExecutionError,
+    WasmExecutionEvent, WasmPermissionTier as ExecutionWasmPermissionTier,
 };
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{
@@ -2320,6 +2321,13 @@ impl ActiveExecution {
                         JavascriptExecutionEvent::SyncRpcRequest(request) => {
                             ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
                         }
+                        JavascriptExecutionEvent::SignalState {
+                            signal,
+                            registration,
+                        } => ActiveExecutionEvent::SignalState {
+                            signal,
+                            registration: map_node_signal_registration(registration),
+                        },
                         JavascriptExecutionEvent::Exited(code) => {
                             ActiveExecutionEvent::Exited(code)
                         }
@@ -3801,7 +3809,6 @@ where
                         .active_processes
                         .remove(process_id)
                         .expect("process should still exist");
-                    vm.signal_states.remove(process_id);
                     terminate_child_process_tree(&mut vm.kernel, &mut process);
                     process.kernel_handle.finish(exit_code);
                     let _ = vm.kernel.wait_and_reap(process.kernel_pid);
@@ -4186,6 +4193,19 @@ where
                 }
                 ActiveExecutionEvent::Exited(exit_code) => {
                     let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                    let parent_runtime_pid = vm
+                        .active_processes
+                        .get(process_id)
+                        .expect("process should still exist")
+                        .execution
+                        .child_pid();
+                    let should_signal_parent = vm
+                        .signal_states
+                        .get(process_id)
+                        .and_then(|handlers| handlers.get(&(libc::SIGCHLD as u32)))
+                        .is_some_and(|registration| {
+                            registration.action != SignalDispositionAction::Default
+                        });
                     let child = vm
                         .active_processes
                         .get_mut(process_id)
@@ -4195,6 +4215,9 @@ where
                         .expect("child process should still exist");
                     child.kernel_handle.finish(exit_code);
                     let _ = vm.kernel.wait_and_reap(child.kernel_pid);
+                    if should_signal_parent {
+                        signal_runtime_process(parent_runtime_pid, libc::SIGCHLD)?;
+                    }
                     return Ok(json!({
                         "type": "exit",
                         "exitCode": exit_code,
@@ -4784,6 +4807,20 @@ fn map_wasm_signal_registration(
             agent_os_execution::wasm::WasmSignalDispositionAction::User => {
                 crate::protocol::SignalDispositionAction::User
             }
+        },
+        mask: registration.mask,
+        flags: registration.flags,
+    }
+}
+
+fn map_node_signal_registration(
+    registration: NodeSignalHandlerRegistration,
+) -> SignalHandlerRegistration {
+    SignalHandlerRegistration {
+        action: match registration.action {
+            NodeSignalDispositionAction::Default => SignalDispositionAction::Default,
+            NodeSignalDispositionAction::Ignore => SignalDispositionAction::Ignore,
+            NodeSignalDispositionAction::User => SignalDispositionAction::User,
         },
         mask: registration.mask,
         flags: registration.flags,
