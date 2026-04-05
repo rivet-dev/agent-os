@@ -13,7 +13,7 @@ use crate::permissions::{
 use crate::pipe_manager::{PipeError, PipeManager};
 use crate::process_table::{
     DriverProcess, ProcessContext, ProcessExitCallback, ProcessInfo, ProcessStatus, ProcessTable,
-    ProcessTableError, SIGPIPE,
+    ProcessTableError, ProcessWaitResult, SIGPIPE,
 };
 use crate::pty::{LineDisciplineConfig, PartialTermios, PtyError, PtyManager, Termios};
 use crate::resource_accounting::{
@@ -30,6 +30,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, WaitTimeoutResult};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub type KernelResult<T> = Result<T, KernelError>;
+pub use crate::process_table::{ProcessWaitEvent as WaitPidEvent, WaitPidFlags};
 
 pub const SEEK_SET: u8 = 0;
 pub const SEEK_CUR: u8 = 1;
@@ -134,6 +135,13 @@ pub struct OpenShellOptions {
 pub struct WaitPidResult {
     pub pid: u32,
     pub status: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitPidEventResult {
+    pub pid: u32,
+    pub status: i32,
+    pub event: WaitPidEvent,
 }
 
 #[derive(Clone)]
@@ -631,6 +639,18 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         let (pid, status) = self.processes.waitpid(pid)?;
         self.cleanup_process_resources(pid);
         Ok(WaitPidResult { pid, status })
+    }
+
+    pub fn waitpid_with_options(
+        &mut self,
+        requester_driver: &str,
+        waiter_pid: u32,
+        pid: i32,
+        flags: WaitPidFlags,
+    ) -> KernelResult<Option<WaitPidEventResult>> {
+        self.assert_driver_owns(requester_driver, waiter_pid)?;
+        let result = self.processes.waitpid_for(waiter_pid, pid, flags)?;
+        Ok(result.map(|result| self.finish_waitpid_event(result)))
     }
 
     pub fn wait_and_reap(&mut self, pid: u32) -> KernelResult<(u32, i32)> {
@@ -1224,6 +1244,17 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             self.driver_pids.as_ref(),
             pid,
         );
+    }
+
+    fn finish_waitpid_event(&mut self, result: ProcessWaitResult) -> WaitPidEventResult {
+        if result.event == WaitPidEvent::Exited {
+            self.cleanup_process_resources(result.pid);
+        }
+        WaitPidEventResult {
+            pid: result.pid,
+            status: result.status,
+            event: result.event,
+        }
     }
 
     fn raw_filesystem_mut(&mut self) -> &mut F {

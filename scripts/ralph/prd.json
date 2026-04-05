@@ -970,7 +970,7 @@
         "Typecheck passes"
       ],
       "priority": 61,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: waitpid(pid: u32) only blocks indefinitely on single process. No WNOHANG, WUNTRACED, WCONTINUED, negative PID, or pid=-1 support."
     },
     {

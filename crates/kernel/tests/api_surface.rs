@@ -1,9 +1,11 @@
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::fd_table::{O_CREAT, O_RDWR};
 use agent_os_kernel::kernel::{
-    ExecOptions, KernelVm, KernelVmConfig, OpenShellOptions, SpawnOptions, WaitPidResult, SEEK_SET,
+    ExecOptions, KernelVm, KernelVmConfig, OpenShellOptions, SpawnOptions, WaitPidFlags,
+    WaitPidResult, SEEK_SET,
 };
 use agent_os_kernel::permissions::Permissions;
+use agent_os_kernel::process_table::ProcessWaitEvent;
 use agent_os_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
 
 fn spawn_shell(
@@ -202,6 +204,53 @@ fn waitpid_returns_structured_result_and_process_introspection_works() {
             pid: child.pid(),
             status: 23,
         }
+    );
+
+    parent.finish(0);
+    kernel.waitpid(parent.pid()).expect("wait parent");
+}
+
+#[test]
+fn waitpid_with_options_supports_wnohang_and_any_child_waits() {
+    let mut config = KernelVmConfig::new("vm-api-waitpid-flags");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let parent = spawn_shell(&mut kernel);
+    let child = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                parent_pid: Some(parent.pid()),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn child");
+
+    assert_eq!(
+        kernel
+            .waitpid_with_options("shell", parent.pid(), -1, WaitPidFlags::WNOHANG)
+            .expect("wnohang wait should succeed"),
+        None
+    );
+
+    child.finish(9);
+    let waited = kernel
+        .waitpid_with_options("shell", parent.pid(), -1, WaitPidFlags::empty())
+        .expect("wait for any child should succeed")
+        .expect("child exit should be reported");
+    assert_eq!(waited.pid, child.pid());
+    assert_eq!(waited.status, 9);
+    assert_eq!(waited.event, ProcessWaitEvent::Exited);
+    assert_eq!(
+        kernel.list_processes().get(&child.pid()),
+        None,
+        "exited child should be reaped after wait"
     );
 
     parent.finish(0);

@@ -1,6 +1,6 @@
 use agent_os_kernel::process_table::{
     DriverProcess, ProcessContext, ProcessExitCallback, ProcessResult, ProcessStatus, ProcessTable,
-    SIGCHLD,
+    ProcessWaitEvent, WaitPidFlags, SIGCHLD, SIGCONT, SIGSTOP,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -216,6 +216,70 @@ fn waitpid_resolves_for_exiting_and_already_exited_processes() {
 }
 
 #[test]
+fn waitpid_for_supports_wnohang_and_waiting_for_any_child() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let parent = MockDriverProcess::new();
+    let child_a = MockDriverProcess::new();
+    let child_b = MockDriverProcess::new();
+
+    let parent_pid = table.allocate_pid();
+    let child_a_pid = table.allocate_pid();
+    let child_b_pid = table.allocate_pid();
+
+    table.register(
+        parent_pid,
+        "wasmvm",
+        "parent",
+        Vec::new(),
+        create_context(0),
+        parent,
+    );
+    table.register(
+        child_a_pid,
+        "wasmvm",
+        "child-a",
+        Vec::new(),
+        create_context(parent_pid),
+        child_a,
+    );
+    table.register(
+        child_b_pid,
+        "wasmvm",
+        "child-b",
+        Vec::new(),
+        create_context(parent_pid),
+        child_b.clone(),
+    );
+
+    assert_eq!(
+        table
+            .waitpid_for(parent_pid, -1, WaitPidFlags::WNOHANG)
+            .expect("wnohang wait should succeed"),
+        None
+    );
+
+    child_b.exit(27);
+    assert_eq!(
+        table
+            .waitpid_for(parent_pid, -1, WaitPidFlags::empty())
+            .expect("wait for any child should succeed"),
+        Some(agent_os_kernel::process_table::ProcessWaitResult {
+            pid: child_b_pid,
+            status: 27,
+            event: ProcessWaitEvent::Exited,
+        })
+    );
+    assert!(
+        table.get(child_b_pid).is_none(),
+        "waited child should be reaped"
+    );
+    assert!(
+        table.get(child_a_pid).is_some(),
+        "other matching children should remain"
+    );
+}
+
+#[test]
 fn on_process_exit_runs_before_waitpid_waiters_are_notified() {
     let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
     let process = MockDriverProcess::new();
@@ -276,6 +340,85 @@ fn on_process_exit_runs_before_waitpid_waiters_are_notified() {
     );
     exit_handle.join().expect("exit thread should finish");
     waiter.join().expect("waiter thread should finish");
+}
+
+#[test]
+fn waitpid_for_reports_stopped_and_continued_children_once() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let parent = MockDriverProcess::new();
+    let child = MockDriverProcess::new();
+
+    let parent_pid = table.allocate_pid();
+    let child_pid = table.allocate_pid();
+    table.register(
+        parent_pid,
+        "wasmvm",
+        "parent",
+        Vec::new(),
+        create_context(0),
+        parent.clone(),
+    );
+    table.register(
+        child_pid,
+        "wasmvm",
+        "child",
+        Vec::new(),
+        create_context(parent_pid),
+        child,
+    );
+
+    table.mark_stopped(child_pid, SIGSTOP);
+    assert_eq!(
+        table
+            .waitpid_for(parent_pid, child_pid as i32, WaitPidFlags::WNOHANG)
+            .expect("stopped child lookup should succeed"),
+        None
+    );
+    assert_eq!(
+        table
+            .waitpid_for(
+                parent_pid,
+                child_pid as i32,
+                WaitPidFlags::WNOHANG | WaitPidFlags::WUNTRACED,
+            )
+            .expect("wuntraced wait should succeed"),
+        Some(agent_os_kernel::process_table::ProcessWaitResult {
+            pid: child_pid,
+            status: SIGSTOP,
+            event: ProcessWaitEvent::Stopped,
+        })
+    );
+    assert_eq!(
+        table
+            .get(child_pid)
+            .expect("child remains registered")
+            .status,
+        ProcessStatus::Stopped
+    );
+
+    table.mark_continued(child_pid);
+    assert_eq!(
+        table
+            .waitpid_for(
+                parent_pid,
+                child_pid as i32,
+                WaitPidFlags::WNOHANG | WaitPidFlags::WCONTINUED,
+            )
+            .expect("wcontinued wait should succeed"),
+        Some(agent_os_kernel::process_table::ProcessWaitResult {
+            pid: child_pid,
+            status: SIGCONT,
+            event: ProcessWaitEvent::Continued,
+        })
+    );
+    assert_eq!(
+        table
+            .get(child_pid)
+            .expect("child remains registered")
+            .status,
+        ProcessStatus::Running
+    );
+    assert_eq!(parent.kills(), vec![SIGCHLD, SIGCHLD]);
 }
 
 #[test]
@@ -553,6 +696,80 @@ fn list_processes_returns_a_snapshot_of_registered_processes() {
 fn waitpid_rejects_unknown_processes() {
     let table = ProcessTable::new();
     assert_error_code(table.waitpid(9999), "ESRCH");
+}
+
+#[test]
+fn waitpid_for_supports_pid_zero_and_negative_process_group_selectors() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let parent = MockDriverProcess::new();
+    let same_group_child = MockDriverProcess::new();
+    let other_group_child = MockDriverProcess::new();
+
+    let parent_pid = table.allocate_pid();
+    let same_group_child_pid = table.allocate_pid();
+    let other_group_child_pid = table.allocate_pid();
+
+    table.register(
+        parent_pid,
+        "wasmvm",
+        "parent",
+        Vec::new(),
+        create_context(0),
+        parent,
+    );
+    table.register(
+        same_group_child_pid,
+        "wasmvm",
+        "same-group",
+        Vec::new(),
+        create_context(parent_pid),
+        same_group_child.clone(),
+    );
+    table.register(
+        other_group_child_pid,
+        "wasmvm",
+        "other-group",
+        Vec::new(),
+        create_context(parent_pid),
+        other_group_child.clone(),
+    );
+    table
+        .setpgid(other_group_child_pid, 0)
+        .expect("child should become group leader");
+
+    other_group_child.exit(13);
+    assert_eq!(
+        table
+            .waitpid_for(parent_pid, 0, WaitPidFlags::WNOHANG)
+            .expect("pid=0 wait should succeed"),
+        None
+    );
+
+    same_group_child.exit(11);
+    assert_eq!(
+        table
+            .waitpid_for(parent_pid, 0, WaitPidFlags::empty())
+            .expect("pid=0 wait should reap same-group child"),
+        Some(agent_os_kernel::process_table::ProcessWaitResult {
+            pid: same_group_child_pid,
+            status: 11,
+            event: ProcessWaitEvent::Exited,
+        })
+    );
+    assert_eq!(
+        table
+            .waitpid_for(
+                parent_pid,
+                -(other_group_child_pid as i32),
+                WaitPidFlags::empty(),
+            )
+            .expect("negative pgid wait should reap matching child"),
+        Some(agent_os_kernel::process_table::ProcessWaitResult {
+            pid: other_group_child_pid,
+            status: 13,
+            event: ProcessWaitEvent::Exited,
+        })
+    );
 }
 
 #[test]

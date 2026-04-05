@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
+use std::ops::{BitOr, BitOrAssign};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, WaitTimeoutResult, Weak};
 use std::thread;
@@ -8,6 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ZOMBIE_TTL: Duration = Duration::from_secs(60);
 pub const SIGCHLD: i32 = 17;
+pub const SIGCONT: i32 = 18;
+pub const SIGSTOP: i32 = 19;
 pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
 pub const SIGPIPE: i32 = 13;
@@ -53,6 +56,13 @@ impl ProcessTableError {
         }
     }
 
+    fn no_matching_child(waiter_pid: u32, pid: i32) -> Self {
+        Self {
+            code: "ECHILD",
+            message: format!("process {waiter_pid} has no matching child for waitpid({pid})"),
+        }
+    }
+
     fn permission_denied(message: impl Into<String>) -> Self {
         Self {
             code: "EPERM",
@@ -74,6 +84,61 @@ pub enum ProcessStatus {
     Running,
     Stopped,
     Exited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitPidFlags {
+    bits: u32,
+}
+
+impl WaitPidFlags {
+    pub const WNOHANG: Self = Self { bits: 1 << 0 };
+    pub const WUNTRACED: Self = Self { bits: 1 << 1 };
+    pub const WCONTINUED: Self = Self { bits: 1 << 2 };
+
+    pub const fn empty() -> Self {
+        Self { bits: 0 }
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        (self.bits & other.bits) == other.bits
+    }
+}
+
+impl Default for WaitPidFlags {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl BitOr for WaitPidFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            bits: self.bits | rhs.bits,
+        }
+    }
+}
+
+impl BitOrAssign for WaitPidFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.bits |= rhs.bits;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessWaitEvent {
+    Exited,
+    Stopped,
+    Continued,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessWaitResult {
+    pub pid: u32,
+    pub status: i32,
+    pub event: ProcessWaitEvent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +221,20 @@ struct ProcessTableInner {
 struct ProcessRecord {
     entry: ProcessEntry,
     driver_process: Arc<dyn DriverProcess>,
+    pending_wait_events: VecDeque<PendingWaitEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingWaitEvent {
+    status: i32,
+    event: ProcessWaitEvent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitSelector {
+    AnyChild,
+    ChildPid(u32),
+    ProcessGroup(u32),
 }
 
 struct ZombieReaper {
@@ -273,6 +352,7 @@ impl ProcessTable {
             ProcessRecord {
                 entry: entry.clone(),
                 driver_process,
+                pending_wait_events: VecDeque::new(),
             },
         );
 
@@ -308,6 +388,30 @@ impl ProcessTable {
         mark_exited_inner(&self.inner, pid, exit_code);
     }
 
+    pub fn mark_stopped(&self, pid: u32, signal: i32) {
+        mark_wait_event_inner(
+            &self.inner,
+            pid,
+            ProcessStatus::Stopped,
+            PendingWaitEvent {
+                status: signal,
+                event: ProcessWaitEvent::Stopped,
+            },
+        );
+    }
+
+    pub fn mark_continued(&self, pid: u32) {
+        mark_wait_event_inner(
+            &self.inner,
+            pid,
+            ProcessStatus::Running,
+            PendingWaitEvent {
+                status: SIGCONT,
+                event: ProcessWaitEvent::Continued,
+            },
+        );
+    }
+
     pub fn waitpid(&self, pid: u32) -> ProcessResult<(u32, i32)> {
         let mut state = self.inner.lock_state();
         loop {
@@ -322,6 +426,38 @@ impl ProcessTable {
                 self.inner.reaper.cancel(pid);
                 self.inner.waiters.notify_all();
                 return Ok((pid, status));
+            }
+
+            state = self.inner.wait_for_state(state);
+        }
+    }
+
+    pub fn waitpid_for(
+        &self,
+        waiter_pid: u32,
+        pid: i32,
+        flags: WaitPidFlags,
+    ) -> ProcessResult<Option<ProcessWaitResult>> {
+        let mut state = self.inner.lock_state();
+        loop {
+            let selector = resolve_wait_selector(&state, waiter_pid, pid)?;
+            let matching_children = matching_child_pids(&state, waiter_pid, selector);
+            if matching_children.is_empty() {
+                return Err(ProcessTableError::no_matching_child(waiter_pid, pid));
+            }
+
+            if let Some(result) = take_waitable_event(&mut state, &matching_children, flags) {
+                let should_reap = result.event == ProcessWaitEvent::Exited;
+                drop(state);
+                if should_reap {
+                    self.inner.reaper.cancel(result.pid);
+                    self.inner.waiters.notify_all();
+                }
+                return Ok(Some(result));
+            }
+
+            if flags.contains(WaitPidFlags::WNOHANG) {
+                return Ok(None);
             }
 
             state = self.inner.wait_for_state(state);
@@ -575,6 +711,135 @@ fn mark_exited_inner(inner: &Arc<ProcessTableInner>, pid: u32, exit_code: i32) {
     }
 
     inner.waiters.notify_all();
+}
+
+fn mark_wait_event_inner(
+    inner: &Arc<ProcessTableInner>,
+    pid: u32,
+    next_status: ProcessStatus,
+    event: PendingWaitEvent,
+) {
+    let parent_driver = {
+        let mut state = inner.lock_state();
+        let ppid = {
+            let Some(record) = state.entries.get_mut(&pid) else {
+                return;
+            };
+
+            if record.entry.status == ProcessStatus::Exited || record.entry.status == next_status {
+                return;
+            }
+
+            record.entry.status = next_status;
+            record.pending_wait_events.push_back(event);
+            record.entry.ppid
+        };
+
+        state
+            .entries
+            .get(&ppid)
+            .filter(|parent| parent.entry.status == ProcessStatus::Running)
+            .map(|parent| Arc::clone(&parent.driver_process))
+    };
+
+    if let Some(parent_driver) = parent_driver {
+        parent_driver.kill(SIGCHLD);
+    }
+
+    inner.waiters.notify_all();
+}
+
+fn resolve_wait_selector(
+    state: &ProcessTableState,
+    waiter_pid: u32,
+    pid: i32,
+) -> ProcessResult<WaitSelector> {
+    let waiter = state
+        .entries
+        .get(&waiter_pid)
+        .ok_or_else(|| ProcessTableError::no_such_process(waiter_pid))?;
+
+    Ok(match pid {
+        -1 => WaitSelector::AnyChild,
+        0 => WaitSelector::ProcessGroup(waiter.entry.pgid),
+        p if p < -1 => WaitSelector::ProcessGroup(p.unsigned_abs()),
+        p => WaitSelector::ChildPid(p as u32),
+    })
+}
+
+fn matching_child_pids(
+    state: &ProcessTableState,
+    waiter_pid: u32,
+    selector: WaitSelector,
+) -> Vec<u32> {
+    state
+        .entries
+        .values()
+        .filter(|record| record.entry.ppid == waiter_pid)
+        .filter(|record| match selector {
+            WaitSelector::AnyChild => true,
+            WaitSelector::ChildPid(pid) => record.entry.pid == pid,
+            WaitSelector::ProcessGroup(pgid) => record.entry.pgid == pgid,
+        })
+        .map(|record| record.entry.pid)
+        .collect()
+}
+
+fn take_waitable_event(
+    state: &mut ProcessTableState,
+    matching_children: &[u32],
+    flags: WaitPidFlags,
+) -> Option<ProcessWaitResult> {
+    for child_pid in matching_children {
+        let mut non_exit_result = None;
+        let mut should_reap = false;
+        {
+            let record = state.entries.get_mut(child_pid)?;
+            if let Some(index) = record
+                .pending_wait_events
+                .iter()
+                .position(|event| is_waitable_event(event.event, flags))
+            {
+                let event = record
+                    .pending_wait_events
+                    .remove(index)
+                    .expect("pending wait event should exist");
+                non_exit_result = Some(ProcessWaitResult {
+                    pid: *child_pid,
+                    status: event.status,
+                    event: event.event,
+                });
+            } else if record.entry.status == ProcessStatus::Exited {
+                should_reap = true;
+            }
+        }
+
+        if let Some(result) = non_exit_result {
+            return Some(result);
+        }
+
+        if should_reap {
+            let record = state
+                .entries
+                .remove(child_pid)
+                .expect("exited child should still exist");
+            return Some(ProcessWaitResult {
+                pid: *child_pid,
+                status: record.entry.exit_code.unwrap_or_default(),
+                event: ProcessWaitEvent::Exited,
+            });
+        }
+    }
+
+    None
+}
+
+fn is_waitable_event(event: ProcessWaitEvent, flags: WaitPidFlags) -> bool {
+    match event {
+        ProcessWaitEvent::Exited => true,
+        ProcessWaitEvent::Stopped => flags.contains(WaitPidFlags::WUNTRACED),
+        ProcessWaitEvent::Continued => flags.contains(WaitPidFlags::WCONTINUED),
+    }
 }
 
 fn start_zombie_reaper(inner: Weak<ProcessTableInner>, reaper: Arc<ZombieReaper>) {
