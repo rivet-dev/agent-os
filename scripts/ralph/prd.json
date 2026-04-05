@@ -515,7 +515,7 @@
         "Typecheck passes"
       ],
       "priority": 33,
-      "passes": false,
+      "passes": true,
       "notes": "Sidecar sends real kill(2) to host PIDs. PID reuse could kill wrong host process. dup2 skips fd bounds check."
     },
     {

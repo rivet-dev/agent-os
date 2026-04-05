@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Non-reaping host child liveness checks in `crates/sidecar/src/service.rs` should use `waitid(..., WNOWAIT | WNOHANG | WEXITED | WSTOPPED | WCONTINUED)`; `waitpid` does not provide a safe non-reaping probe for the PID-reuse hardening path.
 - Native execution engines should own `NodeImportCache` state per `vm_id`, and sidecar VM disposal should call each engine's `dispose_vm`; a single engine-wide cache leaks module state across VMs.
 - WASM runtime hardening is split across three layers together: `ResourceLimits` / sidecar metadata parsing, `crates/sidecar/src/service.rs` injecting reserved `AGENT_OS_WASM_*` env keys, and `crates/execution/src/wasm.rs` validating or enforcing the actual limit before guest code runs.
 - Sidecar `ResourceLimits` parsing should start from `ResourceLimits::default()` and only override metadata keys that are present; rebuilding the struct from sparse metadata silently drops default filesystem byte/inode caps.
@@ -658,4 +659,23 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Python's bundled Pyodide path should be resolved from the VM-scoped import cache before context creation; otherwise Python silently reintroduces shared cache state even if the JavaScript engine is isolated.
   - Gotchas encountered: Sidecar unit tests cannot call crate-private execution-engine helpers from another crate, so cross-crate regressions either need public hidden debug accessors or need to live inside the execution crate itself.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --no-run`, `cargo test -p agent-os-sidecar --no-run`, `cargo test -p agent-os-sidecar dispose_vm_removes_per_vm_javascript_import_cache_directory -- --test-threads=1`, `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1`, `cargo test -p agent-os-execution --test python_prewarm -- --test-threads=1`, `cargo test -p agent-os-execution --test wasm wasm_execution_reuses_shared_warmup_path_across_contexts -- --test-threads=1`, and `cargo test -p agent-os-execution --test wasm wasm_execution_times_out_when_fuel_budget_is_exhausted -- --test-threads=1` pass. A full `cargo test -p agent-os-execution --test wasm -- --test-threads=1` run hit a transient timeout in `wasm_execution_times_out_when_fuel_budget_is_exhausted`, but that case passed immediately when rerun in isolation.
+---
+## 2026-04-05 03:16:19 PDT - US-032
+- What was implemented
+- Hardened sidecar runtime signaling in `crates/sidecar/src/service.rs` by whitelisting guest-exposed signals to `SIGTERM`, `SIGKILL`, `SIGINT`, `SIGCONT`, and signal `0`, and by probing child liveness with a non-reaping `waitid(...)` check before sending a real host signal.
+- Added kernel-side fd bound validation so `dup2` and `open_with` reject target descriptors at or above `MAX_FDS_PER_PROCESS`, and tightened `pty_set_foreground_pgid` so foreground process groups must belong to the caller's session.
+- Added focused regressions for fd-bound enforcement, same-session PTY foreground enforcement, and the sidecar signal/liveness hardening path.
+- Files changed
+- `CLAUDE.md`
+- `crates/kernel/src/fd_table.rs`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/tests/api_surface.rs`
+- `crates/kernel/tests/fd_table.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Host child liveness checks that must not steal exit state from the real waiter should use `waitid(..., WNOWAIT | WNOHANG | WEXITED | WSTOPPED | WCONTINUED)` instead of `waitpid`.
+  - Gotchas encountered: `waitpid` rejects the `WNOWAIT` combination here, so using it for PID-reuse hardening returns `EINVAL` and silently leaves the sidecar without a safe non-reaping probe.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test fd_table --test api_surface`, `cargo test -p agent-os-sidecar service::tests::parse_signal_only_accepts_whitelisted_guest_signals -- --exact`, `cargo test -p agent-os-sidecar service::tests::runtime_child_liveness_only_tracks_owned_children -- --exact`, and `cargo check -p agent-os-kernel -p agent-os-sidecar` all pass after this change.
 ---

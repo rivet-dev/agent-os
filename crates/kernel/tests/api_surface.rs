@@ -255,6 +255,52 @@ fn open_shell_configures_pty_and_exec_uses_shell_driver() {
 }
 
 #[test]
+fn shell_foreground_process_group_must_stay_in_the_same_session() {
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), KernelVmConfig::new("vm-api-shell"));
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let shell = kernel
+        .open_shell(OpenShellOptions {
+            requester_driver: Some(String::from("shell")),
+            ..OpenShellOptions::default()
+        })
+        .expect("open shell");
+    let peer = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                parent_pid: Some(shell.pid()),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn peer");
+
+    assert_eq!(
+        kernel.getsid("shell", peer.pid()).expect("peer sid"),
+        shell.pid()
+    );
+    assert_eq!(
+        kernel.setsid("shell", peer.pid()).expect("setsid"),
+        peer.pid()
+    );
+
+    let error = kernel
+        .pty_set_foreground_pgid("shell", shell.pid(), shell.master_fd(), peer.pid())
+        .expect_err("different-session process group should be rejected");
+    assert_eq!(error.code(), "EPERM");
+    assert!(error.to_string().contains("different session"));
+
+    peer.finish(0);
+    kernel.waitpid(peer.pid()).expect("wait peer");
+    shell.process().finish(0);
+    kernel.waitpid(shell.pid()).expect("wait shell");
+}
+
+#[test]
 fn virtual_filesystem_default_pwrite_zero_fills_missing_bytes() {
     let mut filesystem = MemoryFileSystem::new();
     filesystem

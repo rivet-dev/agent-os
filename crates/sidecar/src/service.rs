@@ -68,6 +68,7 @@ use agent_os_kernel::vfs::{
 use base64::Engine;
 use nix::libc;
 use nix::sys::signal::{kill as send_signal, Signal};
+use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use serde::Deserialize;
 use serde_json::json;
@@ -6475,7 +6476,12 @@ fn parse_signal(signal: &str) -> Result<i32, SidecarError> {
     }
 
     if let Ok(value) = trimmed.parse::<i32>() {
-        return Ok(value);
+        return match value {
+            0 | libc::SIGINT | SIGKILL | SIGTERM | libc::SIGCONT => Ok(value),
+            _ => Err(SidecarError::InvalidState(format!(
+                "unsupported kill_process signal {signal}"
+            ))),
+        };
     }
 
     let upper = trimmed.to_ascii_uppercase();
@@ -6488,72 +6494,47 @@ fn parse_signal(signal: &str) -> Result<i32, SidecarError> {
 
 fn signal_number_from_name(signal: &str) -> Option<i32> {
     match signal {
-        "HUP" => Some(libc::SIGHUP),
         "INT" => Some(libc::SIGINT),
-        "QUIT" => Some(libc::SIGQUIT),
-        "ILL" => Some(libc::SIGILL),
-        "TRAP" => Some(libc::SIGTRAP),
-        "ABRT" | "IOT" => Some(libc::SIGABRT),
-        "BUS" => Some(libc::SIGBUS),
-        "FPE" => Some(libc::SIGFPE),
         "KILL" => Some(SIGKILL),
-        "USR1" => Some(libc::SIGUSR1),
-        "SEGV" => Some(libc::SIGSEGV),
-        "USR2" => Some(libc::SIGUSR2),
-        "PIPE" => Some(libc::SIGPIPE),
-        "ALRM" => Some(libc::SIGALRM),
         "TERM" => Some(SIGTERM),
-        "CHLD" | "CLD" => Some(libc::SIGCHLD),
         "CONT" => Some(libc::SIGCONT),
-        "STOP" => Some(libc::SIGSTOP),
-        "TSTP" => Some(libc::SIGTSTP),
-        "TTIN" => Some(libc::SIGTTIN),
-        "TTOU" => Some(libc::SIGTTOU),
-        "URG" => Some(libc::SIGURG),
-        "XCPU" => Some(libc::SIGXCPU),
-        "XFSZ" => Some(libc::SIGXFSZ),
-        "VTALRM" => Some(libc::SIGVTALRM),
-        "PROF" => Some(libc::SIGPROF),
-        "WINCH" => Some(libc::SIGWINCH),
-        "IO" | "POLL" => Some(libc::SIGIO),
-        "SYS" => Some(libc::SIGSYS),
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        "STKFLT" => Some(libc::SIGSTKFLT),
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        "PWR" => Some(libc::SIGPWR),
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        "UNUSED" => Some(libc::SIGSYS),
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "freebsd",
-            target_os = "dragonfly",
-            target_os = "netbsd",
-            target_os = "openbsd",
-        ))]
-        "EMT" => Some(libc::SIGEMT),
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "freebsd",
-            target_os = "dragonfly",
-            target_os = "netbsd",
-            target_os = "openbsd",
-        ))]
-        "INFO" => Some(libc::SIGINFO),
         _ => None,
     }
 }
 
+fn runtime_child_is_alive(child_pid: u32) -> Result<bool, SidecarError> {
+    let wait_flags = WaitPidFlag::WNOHANG
+        | WaitPidFlag::WNOWAIT
+        | WaitPidFlag::WEXITED
+        | WaitPidFlag::WUNTRACED
+        | WaitPidFlag::WCONTINUED;
+    match wait_on_child(WaitId::Pid(Pid::from_raw(child_pid as i32)), wait_flags) {
+        Ok(WaitStatus::StillAlive)
+        | Ok(WaitStatus::Stopped(_, _))
+        | Ok(WaitStatus::Continued(_)) => Ok(true),
+        Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => Ok(false),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        Ok(WaitStatus::PtraceEvent(_, _, _) | WaitStatus::PtraceSyscall(_)) => Ok(true),
+        Err(nix::errno::Errno::ECHILD) => Ok(false),
+        Err(error) => Err(SidecarError::Execution(format!(
+            "failed to inspect guest runtime process {child_pid}: {error}"
+        ))),
+    }
+}
+
 fn signal_runtime_process(child_pid: u32, signal: i32) -> Result<(), SidecarError> {
-    let result = if signal == 0 {
-        send_signal(Pid::from_raw(child_pid as i32), None)
-    } else {
-        let parsed = Signal::try_from(signal).map_err(|_| {
-            SidecarError::InvalidState(format!("unsupported kill_process signal {signal}"))
-        })?;
-        send_signal(Pid::from_raw(child_pid as i32), Some(parsed))
-    };
+    if !runtime_child_is_alive(child_pid)? {
+        return Ok(());
+    }
+
+    if signal == 0 {
+        return Ok(());
+    }
+
+    let parsed = Signal::try_from(signal).map_err(|_| {
+        SidecarError::InvalidState(format!("unsupported kill_process signal {signal}"))
+    })?;
+    let result = send_signal(Pid::from_raw(child_pid as i32), Some(parsed));
 
     match result {
         Ok(()) => Ok(()),
@@ -6913,23 +6894,46 @@ ykAheWCsAteSEWVc0w==\n\
     }
 
     #[test]
-    fn parse_signal_accepts_posix_names_and_aliases() {
-        assert_eq!(
-            parse_signal("SIGUSR1").expect("parse SIGUSR1"),
-            libc::SIGUSR1
-        );
-        assert_eq!(parse_signal("usr2").expect("parse SIGUSR2"), libc::SIGUSR2);
-        assert_eq!(
-            parse_signal("SIGSTOP").expect("parse SIGSTOP"),
-            libc::SIGSTOP
-        );
+    fn parse_signal_only_accepts_whitelisted_guest_signals() {
+        assert_eq!(parse_signal("SIGINT").expect("parse SIGINT"), libc::SIGINT);
+        assert_eq!(parse_signal("kill").expect("parse SIGKILL"), SIGKILL);
+        assert_eq!(parse_signal("15").expect("parse numeric SIGTERM"), SIGTERM);
         assert_eq!(
             parse_signal("SIGCONT").expect("parse SIGCONT"),
             libc::SIGCONT
         );
-        assert_eq!(parse_signal("SIGCLD").expect("parse SIGCLD"), libc::SIGCHLD);
-        assert_eq!(parse_signal("SIGIOT").expect("parse SIGIOT"), libc::SIGABRT);
-        assert_eq!(parse_signal("15").expect("parse numeric signal"), 15);
+        assert_eq!(parse_signal("0").expect("parse signal 0"), 0);
+        assert!(parse_signal("SIGUSR1").is_err());
+        assert!(parse_signal("SIGSTOP").is_err());
+    }
+
+    #[test]
+    fn runtime_child_liveness_only_tracks_owned_children() {
+        assert!(
+            !runtime_child_is_alive(std::process::id()).expect("current pid is not a child"),
+            "current process should not be treated as a guest runtime child"
+        );
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 10")
+            .spawn()
+            .expect("spawn child process");
+        let child_pid = child.id();
+
+        assert!(
+            runtime_child_is_alive(child_pid).expect("inspect running child"),
+            "running child should be considered alive"
+        );
+
+        signal_runtime_process(child_pid, SIGTERM).expect("signal running child");
+        child.wait().expect("wait for signaled child");
+
+        assert!(
+            !runtime_child_is_alive(child_pid).expect("inspect reaped child"),
+            "reaped child should no longer be considered alive"
+        );
+        signal_runtime_process(child_pid, SIGTERM).expect("ignore reaped child");
     }
 
     #[test]

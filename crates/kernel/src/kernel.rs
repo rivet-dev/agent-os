@@ -12,7 +12,7 @@ use crate::permissions::{
 };
 use crate::pipe_manager::{PipeError, PipeManager};
 use crate::process_table::{
-    DriverProcess, ProcessContext, ProcessExitCallback, ProcessInfo, ProcessTable,
+    DriverProcess, ProcessContext, ProcessExitCallback, ProcessInfo, ProcessStatus, ProcessTable,
     ProcessTableError,
 };
 use crate::pty::{LineDisciplineConfig, PartialTermios, PtyError, PtyManager, Termios};
@@ -989,6 +989,18 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         pgid: u32,
     ) -> KernelResult<()> {
         let description = self.description_for_fd(requester_driver, pid, fd)?;
+        let requester_sid = self.processes.getsid(pid)?;
+        let group = self
+            .processes
+            .list_processes()
+            .into_values()
+            .find(|process| process.pgid == pgid && process.status != ProcessStatus::Exited)
+            .ok_or_else(|| KernelError::new("ESRCH", format!("no such process group {pgid}")))?;
+        if group.sid != requester_sid {
+            return Err(KernelError::permission_denied(
+                "cannot set foreground process group in different session",
+            ));
+        }
         self.ptys.set_foreground_pgid(description.id(), pgid)?;
         Ok(())
     }

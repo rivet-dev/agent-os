@@ -1,5 +1,6 @@
 use agent_os_kernel::fd_table::{
-    FdResult, FdTableManager, FILETYPE_CHARACTER_DEVICE, FILETYPE_REGULAR_FILE, O_RDONLY, O_WRONLY,
+    FdResult, FdTableManager, FileDescription, FILETYPE_CHARACTER_DEVICE, FILETYPE_REGULAR_FILE,
+    MAX_FDS_PER_PROCESS, O_RDONLY, O_WRONLY,
 };
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -75,6 +76,36 @@ fn dup2_replaces_the_target_fd() {
     let target = Arc::clone(&table.get(10).expect("target entry").description);
 
     assert!(Arc::ptr_eq(&source, &target));
+}
+
+#[test]
+fn dup2_rejects_target_fds_past_the_process_limit() {
+    let mut manager = FdTableManager::new();
+    manager.create(1);
+
+    let table = manager.get_mut(1).expect("FD table should exist");
+    let fd = table
+        .open("/tmp/test.txt", O_RDONLY)
+        .expect("open source FD");
+    let result = table.dup2(fd, MAX_FDS_PER_PROCESS as u32);
+
+    assert_error_code(result, "EBADF");
+}
+
+#[test]
+fn open_with_rejects_target_fds_past_the_process_limit() {
+    let mut manager = FdTableManager::new();
+    manager.create(1);
+
+    let table = manager.get_mut(1).expect("FD table should exist");
+    let description = Arc::new(FileDescription::new(999, "/tmp/test.txt", O_RDONLY));
+    let result = table.open_with(
+        description,
+        FILETYPE_REGULAR_FILE,
+        Some(MAX_FDS_PER_PROCESS as u32),
+    );
+
+    assert_error_code(result, "EBADF");
 }
 
 #[test]

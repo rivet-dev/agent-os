@@ -282,7 +282,10 @@ impl ProcessFdTable {
         target_fd: Option<u32>,
     ) -> FdResult<u32> {
         let fd = match target_fd {
-            Some(fd) => fd,
+            Some(fd) => {
+                validate_fd_bounds(fd)?;
+                fd
+            }
             None => self.allocate_fd()?,
         };
         description.increment_ref_count();
@@ -336,6 +339,7 @@ impl ProcessFdTable {
             .get(&old_fd)
             .cloned()
             .ok_or_else(|| FdTableError::bad_file_descriptor(old_fd))?;
+        validate_fd_bounds(new_fd)?;
         if old_fd == new_fd {
             return Ok(());
         }
@@ -421,6 +425,13 @@ impl ProcessFdTable {
         self.next_fd += 1;
         Ok(fd)
     }
+}
+
+fn validate_fd_bounds(fd: u32) -> FdResult<()> {
+    if fd as usize >= MAX_FDS_PER_PROCESS {
+        return Err(FdTableError::bad_file_descriptor(fd));
+    }
+    Ok(())
 }
 
 impl<'a> IntoIterator for &'a ProcessFdTable {
