@@ -7,11 +7,15 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tempfile::tempdir;
 
 const NODE_IMPORT_CACHE_METRICS_PREFIX: &str = "__AGENT_OS_NODE_IMPORT_CACHE_METRICS__:";
 const NODE_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_NODE_WARMUP_METRICS__:";
+const JAVASCRIPT_TEST_VM_ID: &str = "vm-js";
+
+static NEXT_TEST_IMPORT_CACHE_ID: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NodeImportCacheMetrics {
@@ -183,9 +187,20 @@ fn run_javascript_execution(
     (stdout, stderr, result.exit_code)
 }
 
+fn new_test_engine() -> JavascriptExecutionEngine {
+    let mut engine = JavascriptExecutionEngine::default();
+    let cache_id = NEXT_TEST_IMPORT_CACHE_ID.fetch_add(1, Ordering::Relaxed);
+    let base_dir = std::env::temp_dir().join(format!(
+        "agent-os-node-import-cache-test-{}-{cache_id}",
+        std::process::id()
+    ));
+    engine.set_import_cache_base_dir(JAVASCRIPT_TEST_VM_ID, base_dir);
+    engine
+}
+
 #[test]
 fn javascript_contexts_preserve_vm_and_bootstrap_configuration() {
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: Some(String::from("./bootstrap.mjs")),
@@ -228,7 +243,7 @@ console.error(`stderr:${process.argv.slice(2).join(",")}`);
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: Some(String::from("./bootstrap.mjs")),
@@ -305,7 +320,7 @@ process.stdin.on("end", () => {
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -389,7 +404,7 @@ console.log(JSON.stringify({ stat, lstat, contents, raw, entries, missing, linkT
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -602,7 +617,7 @@ console.log(
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -886,7 +901,7 @@ console.log(
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1114,7 +1129,7 @@ console.log("evil override executed");
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1190,7 +1205,7 @@ console.log(
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1244,7 +1259,7 @@ console.log(
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1286,7 +1301,7 @@ console.log(`entry:${answer + 1}:${globalThis.__agentOsDepInitCount}`);
 "#,
     );
 
-    let mut first_engine = JavascriptExecutionEngine::default();
+    let mut first_engine = new_test_engine();
     let first_context = first_engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1319,7 +1334,7 @@ console.log(`entry:${answer + 1}:${globalThis.__agentOsDepInitCount}`);
         "expected cache files in {first_cache_dir:?}, got {cache_files:?}"
     );
 
-    let mut second_engine = JavascriptExecutionEngine::default();
+    let mut second_engine = new_test_engine();
     let second_context = second_engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1361,7 +1376,7 @@ console.log(`entry:${answer}`);
 "#,
     );
 
-    let mut first_engine = JavascriptExecutionEngine::default();
+    let mut first_engine = new_test_engine();
     let first_context = first_engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1385,7 +1400,7 @@ console.log(`entry:${answer}`);
 
     write_fixture(&temp.path().join("dep.mjs"), "export const answer = 42;\n");
 
-    let mut second_engine = JavascriptExecutionEngine::default();
+    let mut second_engine = new_test_engine();
     let second_context = second_engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1438,7 +1453,7 @@ console.log(`sep:${pathDefault.sep}`);
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let first_context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1475,7 +1490,7 @@ console.log(`sep:${pathDefault.sep}`);
     assert!(first_stdout.contains("sep:/"));
     assert!(first_warmup.executed);
     assert_eq!(first_warmup.reason, "executed");
-    assert_eq!(first_warmup.import_count, 4);
+    assert_eq!(first_warmup.import_count, 3);
 
     let cache_files = collect_files(&compile_cache_dir);
     assert!(
@@ -1522,7 +1537,7 @@ console.log(
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let first_context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1591,7 +1606,7 @@ console.log(`answer:${dep.answer}`);
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let first_context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1666,7 +1681,7 @@ console.log(`pkg:${pkg.answer}`);
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let first_context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1733,7 +1748,7 @@ console.log(`answer:${answer}`);
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let first_context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1822,7 +1837,7 @@ console.log(JSON.stringify(result));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1860,7 +1875,7 @@ console.log(`answer:${dep.answer}`);
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let first_context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -1928,7 +1943,7 @@ console.log(`fsReady:${mod.fsReady}`);
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let first_context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -2042,7 +2057,7 @@ console.log(`missing:${missing}`);
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -2141,7 +2156,7 @@ console.log(JSON.stringify(result));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -2206,7 +2221,7 @@ console.log(JSON.stringify(result));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -2275,7 +2290,7 @@ console.log(JSON.stringify(result));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -2368,7 +2383,7 @@ console.log(JSON.stringify(result));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -2520,7 +2535,7 @@ console.log(JSON.stringify(result));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -2711,7 +2726,7 @@ console.log(JSON.stringify({
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -2845,7 +2860,7 @@ console.log(JSON.stringify(result));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -2914,7 +2929,7 @@ console.log(JSON.stringify({
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -2969,7 +2984,7 @@ console.log(JSON.stringify({
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -3125,7 +3140,7 @@ spawnSync('node', ['./child.mjs'], {
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -3266,7 +3281,7 @@ console.log(JSON.stringify(summary));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -3446,7 +3461,7 @@ console.log(JSON.stringify(summary));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -3650,7 +3665,7 @@ console.log(JSON.stringify(summary));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -3791,7 +3806,7 @@ console.log(JSON.stringify(summary));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -3974,7 +3989,7 @@ console.log(JSON.stringify(summary));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -4168,7 +4183,7 @@ console.log(JSON.stringify({
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -4293,7 +4308,7 @@ console.log(JSON.stringify({
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -4396,7 +4411,7 @@ console.log(JSON.stringify({
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -4519,7 +4534,7 @@ console.log(JSON.stringify(result));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -4653,7 +4668,7 @@ console.log(JSON.stringify(result));
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -4723,7 +4738,7 @@ export const broken = ;
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -4784,7 +4799,7 @@ throw error;
         ),
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,
@@ -4826,7 +4841,7 @@ console.log("ready");
 "#,
     );
 
-    let mut engine = JavascriptExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-js"),
         bootstrap_module: None,

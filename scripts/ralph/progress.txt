@@ -3,6 +3,7 @@
 - Security tests must use real Node.js execution and attempt actual forbidden operations, not just verify argument construction with fake binaries.
 - Sidecar test assertions must check response payload contents, not just match on variant shapes with wildcard discards.
 - Import-cache tests should use `NodeImportCache::new_in()` with unique temp directories to avoid parallel test interference.
+- Guest Node sync-RPC bootstrap FDs should be left for process teardown; closing inherited raw FDs with `fs.closeSync()` emits host warnings on newer Node builds.
 - Full crate test suites (`cargo test -p <crate>`) must pass, not just focused individual test cases.
 - After package renames or workspace dependency changes, validate from the repo root with `pnpm install --frozen-lockfile`; package-local checks can miss broken `workspace:*` resolution.
 - SSRF filters must cover all RFC special-purpose ranges: 0.0.0.0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16, 224/4, 255.255.255.255, plus IPv6 equivalents.
@@ -53,4 +54,14 @@ Started: Sat Apr  5 2026
 - **Learnings for future iterations:**
   - Root-level `pnpm install --frozen-lockfile` is the fastest way to confirm a package rename or `workspace:*` dependency edit did not break the monorepo graph.
   - Quickstart typechecking is a useful companion check for package-surface renames because it consumes `@rivet-dev/agent-os` like an external workspace client rather than an internal source file.
+---
+## 2026-04-05 16:38:20 PDT - US-014
+- Implemented isolated Node import-cache roots for every `crates/execution/tests/javascript.rs` engine instance so the stale-cache sweep no longer deletes another test's `register.mjs` under parallel execution.
+- Removed redundant guest sync-RPC raw-FD closes that were emitting intermittent unmanaged-FD warnings on newer Node builds, and updated the warmup assertion to match the current three `node:` prewarm imports.
+- Quality checks: `cargo test -p agent-os-execution --test javascript` passes, and `cargo test -p agent-os-execution --test javascript` completed cleanly 5 times in a row with the default test thread count.
+- Files changed: `crates/execution/src/javascript.rs`, `crates/execution/src/node_import_cache.rs`, `crates/execution/tests/javascript.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `JavascriptExecutionEngine::default()` still shares `env::temp_dir()` unless a caller overrides the VM import-cache root, so parallel tests should preconfigure a unique base directory per engine.
+  - The Node sync-RPC bridge uses inherited bootstrap FDs; closing them from guest JS is unnecessary and can surface host warnings that break stderr-strict tests.
+  - Warmup metrics should track the current `NODE_WARMUP_SPECIFIERS` list in `crates/execution/src/javascript.rs`; stale hard-coded counts become false failures after warmup changes.
 ---

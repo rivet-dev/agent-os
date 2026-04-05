@@ -76,7 +76,7 @@
         "cargo test -p agent-os-execution --test javascript passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Progress log mentions intermittent register.mjs missing failures due to parallel temp-cache races"
     },
     {

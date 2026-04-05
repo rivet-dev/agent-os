@@ -7070,7 +7070,7 @@ function createNodeSyncRpcBridge() {
 
   const workerSource = `
     const { parentPort, workerData } = require('node:worker_threads');
-    const { readSync, writeSync, closeSync } = require('node:fs');
+    const { readSync, writeSync } = require('node:fs');
     const STATE_INDEX = 0;
     const STATUS_INDEX = 1;
     const KIND_INDEX = 2;
@@ -7139,30 +7139,24 @@ function createNodeSyncRpcBridge() {
       }
     }
 
-    try {
-      while (true) {
-        const state = waitForRequest();
-        if (state === STATE_SHUTDOWN) {
-          break;
-        }
-
-        try {
-          const responseLine = readResponseLineSync();
-          setResponse(STATUS_OK, encoder.encode(responseLine));
-        } catch (error) {
-          setResponse(
-            STATUS_ERROR,
-            encoder.encode(JSON.stringify({
-              message: error instanceof Error ? error.message : String(error),
-              code: typeof error?.code === 'string' ? error.code : 'ERR_AGENT_OS_NODE_SYNC_RPC',
-            })),
-          );
-        }
+    while (true) {
+      const state = waitForRequest();
+      if (state === STATE_SHUTDOWN) {
+        break;
       }
-    } finally {
+
       try {
-        closeSync(responseFd);
-      } catch {}
+        const responseLine = readResponseLineSync();
+        setResponse(STATUS_OK, encoder.encode(responseLine));
+      } catch (error) {
+        setResponse(
+          STATUS_ERROR,
+          encoder.encode(JSON.stringify({
+            message: error instanceof Error ? error.message : String(error),
+            code: typeof error?.code === 'string' ? error.code : 'ERR_AGENT_OS_NODE_SYNC_RPC',
+          })),
+        );
+      }
     }
   `;
 
@@ -7283,9 +7277,6 @@ function createNodeSyncRpcBridge() {
       disposed = true;
       Atomics.store(signal, STATE_INDEX, STATE_SHUTDOWN);
       Atomics.notify(signal, STATE_INDEX, 1);
-      try {
-        hostFsCloseSync(NODE_SYNC_RPC_REQUEST_FD);
-      } catch {}
       worker.terminate().catch(() => {});
     },
   };
@@ -9856,7 +9847,7 @@ fn cleanup_stale_node_import_caches(base_dir: &Path) {
 }
 
 impl NodeImportCache {
-    fn new_in(base_dir: PathBuf) -> Self {
+    pub(crate) fn new_in(base_dir: PathBuf) -> Self {
         cleanup_stale_node_import_caches_once(&base_dir);
         let cache_id = NEXT_NODE_IMPORT_CACHE_ID.fetch_add(1, Ordering::Relaxed);
         let root_dir = base_dir.join(format!(
