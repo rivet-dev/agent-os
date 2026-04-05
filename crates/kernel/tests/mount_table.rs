@@ -60,3 +60,25 @@ fn mount_table_enforces_read_only_and_cross_mount_boundaries() {
         .expect_err("rename across mounts should fail");
     assert_eq!(cross_mount_error.code(), "EXDEV");
 }
+
+#[test]
+fn mount_table_rejects_symlinks_that_cross_mount_boundaries() {
+    let mut root = MemoryFileSystem::new();
+    root.write_file("/root.txt", b"root".to_vec())
+        .expect("seed root file");
+
+    let mut mounted = MemoryFileSystem::new();
+    mounted
+        .write_file("/inside.txt", b"inside".to_vec())
+        .expect("seed mounted file");
+
+    let mut table = MountTable::new(root);
+    table
+        .mount("/mounted", mounted, MountOptions::new("memory"))
+        .expect("mount memory filesystem");
+
+    let error = table
+        .symlink("../root.txt", "/mounted/root-link")
+        .expect_err("cross-mount symlink should fail");
+    assert_eq!(error.code(), "EXDEV");
+}

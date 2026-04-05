@@ -63,7 +63,10 @@ fn permission_wrapped_filesystem_denies_access_by_default() {
     assert_fs_access_denied(filesystem.read_file("/existing.txt"));
     assert_fs_access_denied(filesystem.write_file("/new.txt", b"hello".to_vec()));
     assert_fs_access_denied(filesystem.stat("/existing.txt"));
-    assert_fs_access_denied(filesystem.exists("/existing.txt"));
+    assert!(
+        !PermissionedFileSystem::exists(&filesystem, "/existing.txt")
+            .expect("permissioned exists should fail closed")
+    );
     assert_fs_access_denied(filesystem.mkdir("/created-dir", false));
     assert_fs_access_denied(filesystem.read_dir("/"));
     assert_fs_access_denied(filesystem.remove_file("/existing.txt"));
@@ -102,6 +105,107 @@ fn permission_wrapped_filesystem_allows_access_with_explicit_allow_all_callback(
         .remove_file("/existing.txt")
         .expect("remove existing file");
     assert!(!filesystem.inner().exists("/existing.txt"));
+}
+
+#[test]
+fn permission_wrapped_filesystem_resolves_symlinks_before_permission_checks() {
+    let mut inner = MemoryFileSystem::new();
+    inner.mkdir("/allowed", true).expect("seed allowed dir");
+    inner.mkdir("/private", true).expect("seed private dir");
+    inner
+        .write_file("/private/secret.txt", b"secret".to_vec())
+        .expect("seed secret file");
+    inner
+        .symlink("/private/secret.txt", "/allowed/alias.txt")
+        .expect("seed symlink");
+
+    let checked_paths = Arc::new(Mutex::new(Vec::new()));
+    let checked_paths_for_permission = Arc::clone(&checked_paths);
+    let permissions = Permissions {
+        filesystem: Some(Arc::new(move |request: &FsAccessRequest| {
+            checked_paths_for_permission
+                .lock()
+                .expect("permission path lock poisoned")
+                .push(request.path.clone());
+            if request.path.starts_with("/allowed") {
+                PermissionDecision::allow()
+            } else {
+                PermissionDecision::deny("allowed-only")
+            }
+        })),
+        ..Permissions::default()
+    };
+
+    let mut filesystem = PermissionedFileSystem::new(inner, "vm-permissions", permissions);
+
+    let error = filesystem
+        .read_file("/allowed/alias.txt")
+        .expect_err("symlink read should use resolved target path");
+    assert_eq!(error.code(), "EACCES");
+    assert_eq!(
+        checked_paths
+            .lock()
+            .expect("permission path lock poisoned")
+            .as_slice(),
+        [String::from("/private/secret.txt")].as_slice()
+    );
+}
+
+#[test]
+fn permission_wrapped_filesystem_link_checks_source_and_destination_permissions() {
+    let mut inner = MemoryFileSystem::new();
+    inner.mkdir("/allowed", true).expect("seed allowed dir");
+    inner.mkdir("/private", true).expect("seed private dir");
+    inner
+        .write_file("/private/source.txt", b"source".to_vec())
+        .expect("seed source file");
+
+    let checked_paths = Arc::new(Mutex::new(Vec::new()));
+    let checked_paths_for_permission = Arc::clone(&checked_paths);
+    let permissions = Permissions {
+        filesystem: Some(Arc::new(move |request: &FsAccessRequest| {
+            checked_paths_for_permission
+                .lock()
+                .expect("permission path lock poisoned")
+                .push(request.path.clone());
+            PermissionDecision::allow()
+        })),
+        ..Permissions::default()
+    };
+
+    let mut filesystem = PermissionedFileSystem::new(inner, "vm-permissions", permissions);
+    filesystem
+        .link("/private/source.txt", "/allowed/linked.txt")
+        .expect("hardlink should succeed");
+
+    assert_eq!(
+        checked_paths
+            .lock()
+            .expect("permission path lock poisoned")
+            .as_slice(),
+        [
+            String::from("/private/source.txt"),
+            String::from("/allowed/linked.txt"),
+        ]
+        .as_slice()
+    );
+}
+
+#[test]
+fn permission_wrapped_filesystem_exists_fails_closed_on_permission_denied() {
+    let permissions = Permissions {
+        filesystem: Some(Arc::new(|_: &FsAccessRequest| {
+            PermissionDecision::deny("hidden")
+        })),
+        ..Permissions::default()
+    };
+    let filesystem = wrap_filesystem(permissions);
+
+    assert!(
+        !PermissionedFileSystem::exists(&filesystem, "/existing.txt")
+            .expect("permissioned exists should fail closed")
+    );
+    assert!(!VirtualFileSystem::exists(&filesystem, "/existing.txt"));
 }
 
 #[test]

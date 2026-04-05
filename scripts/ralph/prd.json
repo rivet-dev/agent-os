@@ -499,7 +499,7 @@
         "Typecheck passes"
       ],
       "priority": 27,
-      "passes": false,
+      "passes": true,
       "notes": "permissions.rs checks caller-supplied path, then inner fs resolves symlinks independently. TOCTOU bypass if mounts expose host paths."
     },
     {

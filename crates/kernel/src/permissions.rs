@@ -2,6 +2,7 @@ use crate::vfs::{VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, Virtua
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
 
 pub type FsPermissionCheck = Arc<dyn Fn(&FsAccessRequest) -> PermissionDecision + Send + Sync>;
@@ -309,119 +310,208 @@ impl<F> PermissionedFileSystem<F> {
 }
 
 impl<F: VirtualFileSystem> PermissionedFileSystem<F> {
+    fn resolved_existing_path(&self, path: &str) -> VfsResult<String> {
+        self.inner.realpath(path)
+    }
+
+    fn resolved_destination_path(&self, path: &str) -> VfsResult<String> {
+        let normalized = crate::vfs::normalize_path(path);
+        if normalized == "/" {
+            return Ok(normalized);
+        }
+
+        let parent = Path::new(&normalized)
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_string_lossy()
+            .into_owned();
+        let basename = Path::new(&normalized)
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let mut candidate = parent;
+        let mut unresolved_segments = Vec::new();
+
+        let resolved_parent = loop {
+            match self.inner.realpath(&candidate) {
+                Ok(resolved) => break resolved,
+                Err(error) if matches!(error.code(), "ENOENT" | "ENOTDIR") => {
+                    if candidate == "/" {
+                        break String::from("/");
+                    }
+                    let candidate_path = Path::new(&candidate);
+                    if let Some(segment) = candidate_path.file_name() {
+                        unresolved_segments.push(segment.to_string_lossy().into_owned());
+                    }
+                    candidate = candidate_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("/"))
+                        .to_string_lossy()
+                        .into_owned();
+                }
+                Err(error) => return Err(error),
+            }
+        };
+
+        let mut resolved = resolved_parent;
+        for segment in unresolved_segments.iter().rev() {
+            if resolved == "/" {
+                resolved = format!("/{segment}");
+            } else {
+                resolved = format!("{resolved}/{segment}");
+            }
+        }
+
+        if resolved == "/" {
+            Ok(format!("/{basename}"))
+        } else {
+            Ok(format!("{resolved}/{basename}"))
+        }
+    }
+
+    fn permission_subject(&self, op: FsOperation, path: &str) -> VfsResult<String> {
+        match op {
+            FsOperation::Read
+            | FsOperation::ReadDir
+            | FsOperation::Stat
+            | FsOperation::ReadLink
+            | FsOperation::Chmod
+            | FsOperation::Chown
+            | FsOperation::Utimes
+            | FsOperation::Truncate => self.resolved_existing_path(path),
+            FsOperation::Exists | FsOperation::Write => self
+                .resolved_existing_path(path)
+                .or_else(|_| self.resolved_destination_path(path)),
+            FsOperation::Mkdir
+            | FsOperation::CreateDir
+            | FsOperation::Rename
+            | FsOperation::Symlink
+            | FsOperation::Link => self.resolved_destination_path(path),
+            FsOperation::Remove => Ok(crate::vfs::normalize_path(path)),
+        }
+    }
+
+    fn check_subject(&self, op: FsOperation, path: &str) -> VfsResult<()> {
+        let subject = self.permission_subject(op, path)?;
+        self.check(op, &subject)
+    }
+
     pub fn exists(&self, path: &str) -> VfsResult<bool> {
-        self.check(FsOperation::Exists, path)?;
+        if let Err(error) = self.check_subject(FsOperation::Exists, path) {
+            if matches!(error.code(), "EACCES" | "ENOENT" | "ENOTDIR" | "ELOOP") {
+                return Ok(false);
+            }
+            return Err(error);
+        }
         Ok(self.inner.exists(path))
     }
 }
 
 impl<F: VirtualFileSystem> VirtualFileSystem for PermissionedFileSystem<F> {
     fn read_file(&mut self, path: &str) -> VfsResult<Vec<u8>> {
-        self.check(FsOperation::Read, path)?;
+        self.check_subject(FsOperation::Read, path)?;
         self.inner.read_file(path)
     }
 
     fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>> {
-        self.check(FsOperation::ReadDir, path)?;
+        self.check_subject(FsOperation::ReadDir, path)?;
         self.inner.read_dir(path)
     }
 
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
-        self.check(FsOperation::ReadDir, path)?;
+        self.check_subject(FsOperation::ReadDir, path)?;
         self.inner.read_dir_with_types(path)
     }
 
     fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
-        self.check(FsOperation::Write, path)?;
+        self.check_subject(FsOperation::Write, path)?;
         self.inner.write_file(path, content)
     }
 
     fn create_dir(&mut self, path: &str) -> VfsResult<()> {
-        self.check(FsOperation::CreateDir, path)?;
+        self.check_subject(FsOperation::CreateDir, path)?;
         self.inner.create_dir(path)
     }
 
     fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()> {
-        self.check(FsOperation::Mkdir, path)?;
+        self.check_subject(FsOperation::Mkdir, path)?;
         self.inner.mkdir(path, recursive)
     }
 
     fn exists(&self, path: &str) -> bool {
-        match PermissionedFileSystem::exists(self, path) {
-            Ok(exists) => exists,
-            Err(error) if error.code() == "EACCES" => self.inner.exists(path),
-            Err(_) => false,
-        }
+        PermissionedFileSystem::exists(self, path).unwrap_or(false)
     }
 
     fn stat(&mut self, path: &str) -> VfsResult<VirtualStat> {
-        self.check(FsOperation::Stat, path)?;
+        self.check_subject(FsOperation::Stat, path)?;
         self.inner.stat(path)
     }
 
     fn remove_file(&mut self, path: &str) -> VfsResult<()> {
-        self.check(FsOperation::Remove, path)?;
+        self.check_subject(FsOperation::Remove, path)?;
         self.inner.remove_file(path)
     }
 
     fn remove_dir(&mut self, path: &str) -> VfsResult<()> {
-        self.check(FsOperation::Remove, path)?;
+        self.check_subject(FsOperation::Remove, path)?;
         self.inner.remove_dir(path)
     }
 
     fn rename(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
-        self.check(FsOperation::Rename, old_path)?;
-        self.check(FsOperation::Rename, new_path)?;
+        self.check_subject(FsOperation::Rename, old_path)?;
+        self.check_subject(FsOperation::Rename, new_path)?;
         self.inner.rename(old_path, new_path)
     }
 
     fn realpath(&self, path: &str) -> VfsResult<String> {
-        self.check(FsOperation::Read, path)?;
+        self.check_subject(FsOperation::Read, path)?;
         self.inner.realpath(path)
     }
 
     fn symlink(&mut self, target: &str, link_path: &str) -> VfsResult<()> {
-        self.check(FsOperation::Symlink, link_path)?;
+        self.check_subject(FsOperation::Symlink, link_path)?;
         self.inner.symlink(target, link_path)
     }
 
     fn read_link(&self, path: &str) -> VfsResult<String> {
-        self.check(FsOperation::ReadLink, path)?;
+        self.check(FsOperation::ReadLink, &crate::vfs::normalize_path(path))?;
         self.inner.read_link(path)
     }
 
     fn lstat(&self, path: &str) -> VfsResult<VirtualStat> {
-        self.check(FsOperation::Stat, path)?;
+        self.check(FsOperation::Stat, &crate::vfs::normalize_path(path))?;
         self.inner.lstat(path)
     }
 
     fn link(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
-        self.check(FsOperation::Link, new_path)?;
+        self.check_subject(FsOperation::Link, old_path)?;
+        self.check_subject(FsOperation::Link, new_path)?;
         self.inner.link(old_path, new_path)
     }
 
     fn chmod(&mut self, path: &str, mode: u32) -> VfsResult<()> {
-        self.check(FsOperation::Chmod, path)?;
+        self.check_subject(FsOperation::Chmod, path)?;
         self.inner.chmod(path, mode)
     }
 
     fn chown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()> {
-        self.check(FsOperation::Chown, path)?;
+        self.check_subject(FsOperation::Chown, path)?;
         self.inner.chown(path, uid, gid)
     }
 
     fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
-        self.check(FsOperation::Utimes, path)?;
+        self.check_subject(FsOperation::Utimes, path)?;
         self.inner.utimes(path, atime_ms, mtime_ms)
     }
 
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {
-        self.check(FsOperation::Truncate, path)?;
+        self.check_subject(FsOperation::Truncate, path)?;
         self.inner.truncate(path, length)
     }
 
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {
-        self.check(FsOperation::Read, path)?;
+        self.check_subject(FsOperation::Read, path)?;
         self.inner.pread(path, offset, length)
     }
 }

@@ -710,7 +710,23 @@ impl VirtualFileSystem for MountTable {
     }
 
     fn symlink(&mut self, target: &str, link_path: &str) -> VfsResult<()> {
-        let (index, relative_path) = self.resolve_index(link_path)?;
+        let normalized_link_path = normalize_path(link_path);
+        let link_parent = parent_path(&normalized_link_path);
+        let absolute_target = if target.starts_with('/') {
+            normalize_path(target)
+        } else {
+            normalize_path(&format!("{link_parent}/{target}"))
+        };
+
+        let (index, relative_path) = self.resolve_index(&normalized_link_path)?;
+        let (target_index, _) = self.resolve_index(&absolute_target)?;
+        if index != target_index {
+            return Err(VfsError::new(
+                "EXDEV",
+                format!("symlink across mounts: {link_path} -> {target}"),
+            ));
+        }
+
         self.mounts[index]
             .filesystem
             .symlink(target, &relative_path)
