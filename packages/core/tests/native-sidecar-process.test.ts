@@ -335,7 +335,7 @@ describe("native sidecar process client", () => {
 	);
 
 	test(
-		"queries listener, UDP, and signal state through the real sidecar protocol",
+		"queries listener and UDP through the real sidecar protocol and ignores forged signal-state stderr",
 		async () => {
 			const fixtureRoot = mkdtempSync(join(tmpdir(), "agent-os-native-sidecar-"));
 			cleanupPaths.push(fixtureRoot);
@@ -447,17 +447,12 @@ describe("native sidecar process client", () => {
 					runtime: "java_script",
 					entrypoint: "./signal-state.mjs",
 				});
-				const signalState = await waitFor(
-					() => client.getSignalState(session, vm, "signal-state"),
-					{
-						isReady: (value) => value.handlers.get(2)?.flags === 0x1234,
-					},
+				const signalState = await client.getSignalState(
+					session,
+					vm,
+					"signal-state",
 				);
-				expect(signalState.handlers.get(2)).toEqual({
-					action: "user",
-					mask: [15],
-					flags: 0x1234,
-				});
+				expect(signalState.handlers.size).toBe(0);
 
 				await client.killProcess(session, vm, "tcp-listener");
 				await client.waitForEvent(
@@ -563,13 +558,9 @@ describe("native sidecar process client", () => {
 					() => signalStdout,
 					{ isReady: (value) => value.includes("registered") },
 				);
-				const registration = await waitFor(
-					() => kernel.processTable.getSignalState(signalProc.pid).handlers.get(2),
-					{ isReady: (value) => value?.flags === 0x4321 },
+				expect(kernel.processTable.getSignalState(signalProc.pid).handlers.get(2)).toBe(
+					undefined,
 				);
-				expect(registration?.action).toBe("user");
-				expect(registration?.mask).toEqual(new Set([15]));
-				expect(registration?.flags).toBe(0x4321);
 
 				tcpServer.kill(15);
 				udpServer.kill(15);

@@ -75,7 +75,7 @@ const PROJECTED_SOURCE_CACHE_ROOT = CACHE_PATH
   : null;
 const ASSET_ROOT = process.env.__NODE_IMPORT_CACHE_ASSET_ROOT_ENV__;
 const DEBUG_ENABLED = process.env.__NODE_IMPORT_CACHE_DEBUG_ENV__ === '1';
-const METRICS_PREFIX = '__NODE_IMPORT_CACHE_METRICS_PREFIX__';
+const CONTROL_PIPE_FD = parseControlPipeFd(process.env.AGENT_OS_CONTROL_PIPE_FD);
 const SCHEMA_VERSION = '__NODE_IMPORT_CACHE_SCHEMA_VERSION__';
 const LOADER_VERSION = '__NODE_IMPORT_CACHE_LOADER_VERSION__';
 const ASSET_VERSION = '__NODE_IMPORT_CACHE_ASSET_VERSION__';
@@ -330,10 +330,27 @@ function emitMetrics() {
     ? { ...metrics, cacheWriteError }
     : metrics;
 
+  emitControlMessage({ type: 'node_import_cache_metrics', metrics: payload });
+}
+
+function parseControlPipeFd(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function emitControlMessage(message) {
+  if (CONTROL_PIPE_FD == null) {
+    return;
+  }
+
   try {
-    process.stderr.write(`${METRICS_PREFIX}${JSON.stringify(payload)}\n`);
+    fs.writeSync(CONTROL_PIPE_FD, `${JSON.stringify(message)}\n`);
   } catch {
-    // Ignore stderr write failures during teardown.
+    // Ignore control-channel write failures during teardown.
   }
 }
 
@@ -3064,6 +3081,7 @@ for (const specifier of imports) {
 
 const NODE_WASM_RUNNER_SOURCE: &str = r#"
 import fs from 'node:fs/promises';
+import { writeSync } from 'node:fs';
 import path from 'node:path';
 import { WASI } from 'node:wasi';
 
@@ -3095,7 +3113,7 @@ const prewarmOnly = process.env.AGENT_OS_WASM_PREWARM_ONLY === '1';
 const frozenTimeValue = Number(process.env.AGENT_OS_FROZEN_TIME_MS);
 const frozenTimeMs = Number.isFinite(frozenTimeValue) ? Math.trunc(frozenTimeValue) : Date.now();
 const frozenTimeNs = BigInt(frozenTimeMs) * 1000000n;
-const SIGNAL_STATE_CONTROL_PREFIX = '__AGENT_OS_SIGNAL_STATE__:';
+const CONTROL_PIPE_FD = parseControlPipeFd(process.env.AGENT_OS_CONTROL_PIPE_FD);
 
 const moduleBytes = await fs.readFile(resolveModulePath(modulePath));
 const module = await WebAssembly.compile(moduleBytes);
@@ -3142,6 +3160,27 @@ function decodeSignalMask(maskLo, maskHi) {
   return values;
 }
 
+function parseControlPipeFd(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function emitControlMessage(message) {
+  if (CONTROL_PIPE_FD == null) {
+    return;
+  }
+
+  try {
+    writeSync(CONTROL_PIPE_FD, `${JSON.stringify(message)}\n`);
+  } catch {
+    // Ignore control-channel write failures during teardown.
+  }
+}
+
 const hostProcessImport = {
   proc_sigaction(signal, action, maskLo, maskHi, flags) {
     try {
@@ -3150,12 +3189,11 @@ const hostProcessImport = {
         mask: decodeSignalMask(maskLo, maskHi),
         flags: Number(flags) >>> 0,
       };
-      process.stderr.write(
-        `${SIGNAL_STATE_CONTROL_PREFIX}${JSON.stringify({
-          signal: Number(signal) >>> 0,
-          registration,
-        })}\n`,
-      );
+      emitControlMessage({
+        type: 'signal_state',
+        signal: Number(signal) >>> 0,
+        registration,
+      });
       return WASI_ERRNO_SUCCESS;
     } catch {
       return WASI_ERRNO_FAULT;
@@ -3237,7 +3275,6 @@ const PYTHON_FILE_ENV = 'AGENT_OS_PYTHON_FILE';
 const PYTHON_PREWARM_ONLY_ENV = 'AGENT_OS_PYTHON_PREWARM_ONLY';
 const PYTHON_WARMUP_DEBUG_ENV = 'AGENT_OS_PYTHON_WARMUP_DEBUG';
 const PYTHON_WARMUP_METRICS_PREFIX = '__AGENT_OS_PYTHON_WARMUP_METRICS__:';
-const PYTHON_EXIT_CONTROL_PREFIX = '__AGENT_OS_PYTHON_EXIT__:';
 const PYTHON_PRELOAD_PACKAGES_ENV = 'AGENT_OS_PYTHON_PRELOAD_PACKAGES';
 const PYTHON_VFS_RPC_REQUEST_FD_ENV = 'AGENT_OS_PYTHON_VFS_RPC_REQUEST_FD';
 const PYTHON_VFS_RPC_RESPONSE_FD_ENV = 'AGENT_OS_PYTHON_VFS_RPC_RESPONSE_FD';
@@ -3275,6 +3312,7 @@ const originalGetBuiltinModule =
   typeof process.getBuiltinModule === 'function'
     ? process.getBuiltinModule.bind(process)
     : null;
+const CONTROL_PIPE_FD = parseControlPipeFd(process.env.AGENT_OS_CONTROL_PIPE_FD);
 
 function requiredEnv(name) {
   const value = process.env[name];
@@ -3282,6 +3320,27 @@ function requiredEnv(name) {
     throw new Error(`${name} is required`);
   }
   return value;
+}
+
+function parseControlPipeFd(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function emitControlMessage(message) {
+  if (CONTROL_PIPE_FD == null) {
+    return;
+  }
+
+  try {
+    writeSync(CONTROL_PIPE_FD, `${JSON.stringify(message)}\n`);
+  } catch {
+    // Ignore control-channel write failures during teardown.
+  }
 }
 
 function normalizeDirectoryPath(value) {
@@ -4133,7 +4192,7 @@ try {
   process.exitCode = 1;
 } finally {
   pythonVfsRpcBridge?.dispose();
-  writeStream(process.stderr, `${PYTHON_EXIT_CONTROL_PREFIX}${process.exitCode ?? 0}`);
+  emitControlMessage({ type: 'python_exit', exitCode: process.exitCode ?? 0 });
 }
 process.exit(process.exitCode ?? 0);
 "#;

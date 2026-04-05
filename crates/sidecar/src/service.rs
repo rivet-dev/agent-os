@@ -83,7 +83,6 @@ const WASM_COMMAND: &str = "wasm";
 const HOST_REALPATH_MAX_SYMLINK_DEPTH: usize = 40;
 const DISPOSE_VM_SIGTERM_GRACE: Duration = Duration::from_millis(100);
 const DISPOSE_VM_SIGKILL_GRACE: Duration = Duration::from_millis(100);
-const SIGNAL_STATE_CONTROL_PREFIX: &str = "__AGENT_OS_SIGNAL_STATE__:";
 
 type BridgeError<B> = <B as BridgeTypes>::Error;
 type SidecarKernel = KernelVm<MountTable>;
@@ -1314,13 +1313,11 @@ enum ActiveExecutionEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
     PythonVfsRpcRequest(PythonVfsRpcRequest),
+    SignalState {
+        signal: u32,
+        registration: SignalHandlerRegistration,
+    },
     Exited(i32),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-struct SignalControlMessage {
-    signal: u32,
-    registration: SignalHandlerRegistration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1434,6 +1431,13 @@ impl ActiveExecution {
                     event.map(|event| match event {
                         WasmExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
                         WasmExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
+                        WasmExecutionEvent::SignalState {
+                            signal,
+                            registration,
+                        } => ActiveExecutionEvent::SignalState {
+                            signal,
+                            registration: map_wasm_signal_registration(registration),
+                        },
                         WasmExecutionEvent::Exited(code) => ActiveExecutionEvent::Exited(code),
                     })
                 })
@@ -2784,22 +2788,27 @@ where
                     chunk: String::from_utf8_lossy(&chunk).into_owned(),
                 }),
             ))),
-            ActiveExecutionEvent::Stderr(chunk) => {
-                if self.record_signal_state_from_control(vm_id, process_id, &chunk)? {
-                    return Ok(None);
-                }
-
-                Ok(Some(EventFrame::new(
-                    ownership,
-                    EventPayload::ProcessOutput(ProcessOutputEvent {
-                        process_id: process_id.to_owned(),
-                        channel: StreamChannel::Stderr,
-                        chunk: String::from_utf8_lossy(&chunk).into_owned(),
-                    }),
-                )))
-            }
+            ActiveExecutionEvent::Stderr(chunk) => Ok(Some(EventFrame::new(
+                ownership,
+                EventPayload::ProcessOutput(ProcessOutputEvent {
+                    process_id: process_id.to_owned(),
+                    channel: StreamChannel::Stderr,
+                    chunk: String::from_utf8_lossy(&chunk).into_owned(),
+                }),
+            ))),
             ActiveExecutionEvent::PythonVfsRpcRequest(request) => {
                 self.handle_python_vfs_rpc_request(vm_id, process_id, request)?;
+                Ok(None)
+            }
+            ActiveExecutionEvent::SignalState {
+                signal,
+                registration,
+            } => {
+                let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                vm.signal_states
+                    .entry(process_id.to_owned())
+                    .or_default()
+                    .insert(signal, registration);
                 Ok(None)
             }
             ActiveExecutionEvent::Exited(exit_code) => {
@@ -2907,33 +2916,6 @@ where
                 error.to_string(),
             ),
         }
-    }
-
-    fn record_signal_state_from_control(
-        &mut self,
-        vm_id: &str,
-        process_id: &str,
-        chunk: &[u8],
-    ) -> Result<bool, SidecarError> {
-        let text = String::from_utf8_lossy(chunk);
-        let trimmed = text.trim();
-        let Some(payload) = trimmed.strip_prefix(SIGNAL_STATE_CONTROL_PREFIX) else {
-            return Ok(false);
-        };
-
-        let registration: SignalControlMessage =
-            serde_json::from_str(payload).map_err(|error| {
-                SidecarError::InvalidState(format!(
-                    "invalid signal-state control payload for process {process_id}: {error}"
-                ))
-            })?;
-
-        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-        vm.signal_states
-            .entry(process_id.to_owned())
-            .or_default()
-            .insert(registration.signal, registration.registration);
-        Ok(true)
     }
 
     fn vm_ids_for_scope(&self, ownership: &OwnershipScope) -> Result<Vec<String>, SidecarError> {
@@ -3166,6 +3148,26 @@ fn map_bridge_permission(decision: agent_os_bridge::PermissionDecision) -> Permi
                 .reason
                 .unwrap_or_else(|| String::from("permission prompt required")),
         ),
+    }
+}
+
+fn map_wasm_signal_registration(
+    registration: agent_os_execution::wasm::WasmSignalHandlerRegistration,
+) -> SignalHandlerRegistration {
+    SignalHandlerRegistration {
+        action: match registration.action {
+            agent_os_execution::wasm::WasmSignalDispositionAction::Default => {
+                crate::protocol::SignalDispositionAction::Default
+            }
+            agent_os_execution::wasm::WasmSignalDispositionAction::Ignore => {
+                crate::protocol::SignalDispositionAction::Ignore
+            }
+            agent_os_execution::wasm::WasmSignalDispositionAction::User => {
+                crate::protocol::SignalDispositionAction::User
+            }
+        },
+        mask: registration.mask,
+        flags: registration.flags,
     }
 }
 

@@ -9,6 +9,7 @@
 - In the generated Node runner, host-only builtin lookups needed for bootstrap/hardening should go through snapped `hostRequire(...)` rather than guest-visible ESM imports, and wrapped `process` methods that return `this` must translate the captured host target back to `guestProcess` after the proxy swap.
 - `wrapChildProcessModule` in `crates/execution/src/node_import_cache.rs` can only sandbox `exec`/`execSync` safely for simple Node-runtime commands; parse shell-free argv and delegate to `execFile`, but deny arbitrary shell strings because host shells bypass Node `--permission`.
 - Guest-visible module path scrubbing in `crates/execution/src/node_import_cache.rs` has to cover both the ESM loader and the generated Node runner: translate `error.message`, `error.stack`, and `requireStack`, and import guest entrypoints through guest-mapped file URLs so top-level stack traces never start on host paths.
+- Execution control data that affects host state should move over the shared `AGENT_OS_CONTROL_PIPE_FD` side channel in `crates/execution/src/node_process.rs`; if a runtime still surfaces compatible debug/control prefixes, strip matching guest `stderr` lines before exposing them so forged prefixes never drive host behavior.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -147,4 +148,29 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Host-path scrubbing for Node guests is incomplete unless both the generated loader and the generated runner rewrite errors; CJS `require(...)` and top-level ESM imports leak through different surfaces.
   - Gotchas encountered: The repo root hit `ENOSPC` during the broader JavaScript suite because thousands of stale `/tmp/agent-os-node-import-cache-*` directories had accumulated; clearing those temp caches restored the real test signal.
   - Useful context: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` both pass after this change.
+---
+## 2026-04-04 20:38:57 PDT - US-010
+- What was implemented
+- Added a shared `AGENT_OS_CONTROL_PIPE_FD` execution side channel in `agent-os-execution` and routed Node import-cache metrics, Pyodide exit reporting, and WASM signal registrations through structured control messages instead of parsing guest `stderr`.
+- Updated the JavaScript, Python, and WASM execution wrappers to ignore guest-forged control prefixes on `stderr`, while still surfacing trusted debug metrics from the control pipe where tests expect them.
+- Replaced sidecar signal-state updates with structured WASM execution events and updated regression coverage so forged `stderr` no longer mutates signal state while real WASM `proc_sigaction` registrations still do.
+- Files changed
+- `crates/execution/src/javascript.rs`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/src/node_process.rs`
+- `crates/execution/src/python.rs`
+- `crates/execution/src/wasm.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/execution/tests/python.rs`
+- `crates/execution/tests/wasm.rs`
+- `crates/sidecar/src/service.rs`
+- `crates/sidecar/tests/socket_state_queries.rs`
+- `crates/sidecar/tests/support/mod.rs`
+- `packages/core/tests/native-sidecar-process.test.ts`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: Cross-runtime control flow between spawned Node hosts and Rust should use structured JSON lines over `AGENT_OS_CONTROL_PIPE_FD`, then be translated back into runtime-specific events at the Rust boundary instead of teaching the sidecar to parse text streams.
+- Gotchas encountered: `agent-os-sidecar` remains blocked by pre-existing compile failures unrelated to this story (`DiagnosticsRequest`/`DiagnosticsSnapshotResponse` imports in `crates/sidecar/src/service.rs` plus existing lib-test mismatches around `authenticate_and_open_session(...)`), so Rust sidecar tests and the `packages/core` real-sidecar spec still cannot build on this branch.
+- Useful context: `cargo test -p agent-os-execution --test javascript javascript_execution_ignores_forged_import_cache_metrics_written_to_stderr -- --exact`, `cargo test -p agent-os-execution --test python python_execution_ignores_forged_exit_control_written_to_stderr -- --exact`, and `cargo test -p agent-os-execution --test wasm wasm_execution_emits_signal_state_from_control_channel -- --exact` all pass after this change.
 ---

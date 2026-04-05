@@ -1,6 +1,11 @@
 pub(crate) use crate::common::{encode_json_string_array, encode_json_string_map};
+use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
+use nix::unistd::pipe2;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::mpsc::Sender;
@@ -21,11 +26,71 @@ const DANGEROUS_GUEST_ENV_KEYS: &[&str] = &[
     "LD_PRELOAD",
     "NODE_OPTIONS",
 ];
+pub const NODE_CONTROL_PIPE_FD_ENV: &str = "AGENT_OS_CONTROL_PIPE_FD";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeSignalDispositionAction {
+    Default,
+    Ignore,
+    User,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeSignalHandlerRegistration {
+    pub action: NodeSignalDispositionAction,
+    pub mask: Vec<u32>,
+    pub flags: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NodeControlMessage {
+    NodeImportCacheMetrics {
+        metrics: serde_json::Value,
+    },
+    PythonExit {
+        #[serde(rename = "exitCode")]
+        exit_code: i32,
+    },
+    SignalState {
+        signal: u32,
+        registration: NodeSignalHandlerRegistration,
+    },
+}
+
+pub struct NodeControlChannel {
+    pub parent_reader: File,
+    pub child_writer: OwnedFd,
+}
+
+#[derive(Debug, Default)]
+pub struct LinePrefixFilter {
+    pending: Vec<u8>,
+}
 
 pub fn node_binary() -> String {
     let configured =
         std::env::var(NODE_BINARY_ENV).unwrap_or_else(|_| String::from(DEFAULT_NODE_BINARY));
     resolve_executable_path(&configured).unwrap_or(configured)
+}
+
+pub fn create_node_control_channel() -> std::io::Result<NodeControlChannel> {
+    let (parent_reader, child_writer) = pipe2(OFlag::O_CLOEXEC).map_err(std::io::Error::other)?;
+    clear_cloexec(&child_writer)?;
+
+    Ok(NodeControlChannel {
+        parent_reader: File::from(parent_reader),
+        child_writer,
+    })
+}
+
+pub fn configure_node_control_channel(command: &mut Command, child_writer: &OwnedFd) {
+    command.env(
+        NODE_CONTROL_PIPE_FD_ENV,
+        child_writer.as_raw_fd().to_string(),
+    );
 }
 
 pub fn harden_node_command(
@@ -150,6 +215,77 @@ where
         }
     })
 }
+
+pub fn spawn_node_control_reader<E, FM, FE>(
+    reader: File,
+    sender: Sender<E>,
+    map_message: FM,
+    map_error: FE,
+) -> JoinHandle<()>
+where
+    E: Send + 'static,
+    FM: Fn(NodeControlMessage) -> E + Send + 'static,
+    FE: Fn(String) -> E + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => return,
+                Ok(_) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    match serde_json::from_str::<NodeControlMessage>(trimmed) {
+                        Ok(message) => {
+                            if sender.send(map_message(message)).is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            if sender
+                                .send(map_error(format!(
+                                    "invalid agent-os node control message: {error}\n"
+                                )))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(map_error(format!(
+                        "agent-os node control read error: {error}\n"
+                    )));
+                    return;
+                }
+            }
+        }
+    })
+}
+
+impl LinePrefixFilter {
+    pub fn filter_chunk(&mut self, chunk: &[u8], prefixes: &[&str]) -> Vec<u8> {
+        self.pending.extend_from_slice(chunk);
+        let mut filtered = Vec::new();
+
+        while let Some(newline_index) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line = self.pending.drain(..=newline_index).collect::<Vec<_>>();
+            if !has_control_prefix(&line, prefixes) {
+                filtered.extend_from_slice(&line);
+            }
+        }
+
+        filtered
+    }
+}
+
 fn allowed_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut unique = Vec::new();
     let mut seen = BTreeSet::new();
@@ -175,6 +311,17 @@ fn normalize_path(path: PathBuf) -> PathBuf {
     };
 
     absolute.canonicalize().unwrap_or(absolute)
+}
+
+fn clear_cloexec(fd: &OwnedFd) -> std::io::Result<()> {
+    fcntl(fd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::empty())).map_err(std::io::Error::other)?;
+    Ok(())
+}
+
+fn has_control_prefix(line: &[u8], prefixes: &[&str]) -> bool {
+    let text = String::from_utf8_lossy(line);
+    let trimmed = text.trim_end_matches(['\r', '\n']);
+    prefixes.iter().any(|prefix| trimmed.starts_with(prefix))
 }
 
 fn resolve_executable_path(binary: &str) -> Option<String> {

@@ -1,8 +1,10 @@
 use crate::common::{encode_json_string, frozen_time_ms, stable_hash64};
 use crate::node_import_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV};
 use crate::node_process::{
-    apply_guest_env, encode_json_string_array, harden_node_command, node_binary,
-    node_resolution_read_paths, resolve_path_like_specifier, spawn_stream_reader, spawn_waiter,
+    apply_guest_env, configure_node_control_channel, create_node_control_channel,
+    encode_json_string_array, harden_node_command, node_binary, node_resolution_read_paths,
+    resolve_path_like_specifier, spawn_node_control_reader, spawn_stream_reader, spawn_waiter,
+    LinePrefixFilter, NodeControlMessage,
 };
 use serde_json::from_str;
 use std::collections::BTreeMap;
@@ -11,7 +13,10 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{
+    mpsc::{self, Receiver, RecvTimeoutError},
+    Arc, Mutex,
+};
 use std::time::Duration;
 
 const NODE_ENTRYPOINT_ENV: &str = "AGENT_OS_ENTRYPOINT";
@@ -45,6 +50,8 @@ const NODE_WARMUP_SPECIFIERS: &[&str] = &[
     "agent-os:builtin/fs-promises",
     "agent-os:polyfill/path",
 ];
+const CONTROLLED_STDERR_PREFIXES: &[&str] =
+    &[crate::node_import_cache::NODE_IMPORT_CACHE_METRICS_PREFIX];
 const RESERVED_NODE_ENV_KEYS: &[&str] = &[
     NODE_BOOTSTRAP_ENV,
     NODE_COMPILE_CACHE_ENV,
@@ -97,6 +104,14 @@ pub struct StartJavascriptExecutionRequest {
 pub enum JavascriptExecutionEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
+    Exited(i32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JavascriptProcessEvent {
+    Stdout(Vec<u8>),
+    RawStderr(Vec<u8>),
+    Control(NodeControlMessage),
     Exited(i32),
 }
 
@@ -174,7 +189,8 @@ pub struct JavascriptExecution {
     execution_id: String,
     child_pid: u32,
     stdin: Option<ChildStdin>,
-    events: Receiver<JavascriptExecutionEvent>,
+    events: Receiver<JavascriptProcessEvent>,
+    stderr_filter: Arc<Mutex<LinePrefixFilter>>,
 }
 
 impl JavascriptExecution {
@@ -209,7 +225,34 @@ impl JavascriptExecution {
         timeout: Duration,
     ) -> Result<Option<JavascriptExecutionEvent>, JavascriptExecutionError> {
         match self.events.recv_timeout(timeout) {
-            Ok(event) => Ok(Some(event)),
+            Ok(JavascriptProcessEvent::Stdout(chunk)) => {
+                Ok(Some(JavascriptExecutionEvent::Stdout(chunk)))
+            }
+            Ok(JavascriptProcessEvent::RawStderr(chunk)) => {
+                let mut filter = self
+                    .stderr_filter
+                    .lock()
+                    .map_err(|_| JavascriptExecutionError::EventChannelClosed)?;
+                let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
+                if filtered.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(JavascriptExecutionEvent::Stderr(filtered)))
+            }
+            Ok(JavascriptProcessEvent::Control(NodeControlMessage::NodeImportCacheMetrics {
+                metrics,
+            })) => Ok(Some(JavascriptExecutionEvent::Stderr(
+                format!(
+                    "{}{}\n",
+                    crate::node_import_cache::NODE_IMPORT_CACHE_METRICS_PREFIX,
+                    serde_json::to_string(&metrics).unwrap_or_else(|_| String::from("{}"))
+                )
+                .into_bytes(),
+            ))),
+            Ok(JavascriptProcessEvent::Control(_)) => Ok(None),
+            Ok(JavascriptProcessEvent::Exited(code)) => {
+                Ok(Some(JavascriptExecutionEvent::Exited(code)))
+            }
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => {
                 Err(JavascriptExecutionError::EventChannelClosed)
@@ -225,9 +268,26 @@ impl JavascriptExecution {
 
         loop {
             match self.events.recv() {
-                Ok(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
-                Ok(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
-                Ok(JavascriptExecutionEvent::Exited(exit_code)) => {
+                Ok(JavascriptProcessEvent::Stdout(chunk)) => stdout.extend(chunk),
+                Ok(JavascriptProcessEvent::RawStderr(chunk)) => {
+                    let mut filter = self
+                        .stderr_filter
+                        .lock()
+                        .map_err(|_| JavascriptExecutionError::EventChannelClosed)?;
+                    stderr.extend(filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES));
+                }
+                Ok(JavascriptProcessEvent::Control(
+                    NodeControlMessage::NodeImportCacheMetrics { metrics },
+                )) => stderr.extend(
+                    format!(
+                        "{}{}\n",
+                        crate::node_import_cache::NODE_IMPORT_CACHE_METRICS_PREFIX,
+                        serde_json::to_string(&metrics).unwrap_or_else(|_| String::from("{}"))
+                    )
+                    .into_bytes(),
+                ),
+                Ok(JavascriptProcessEvent::Control(_)) => {}
+                Ok(JavascriptProcessEvent::Exited(exit_code)) => {
                     return Ok(JavascriptExecutionResult {
                         execution_id: self.execution_id,
                         exit_code,
@@ -296,7 +356,15 @@ impl JavascriptExecutionEngine {
 
         self.next_execution_id += 1;
         let execution_id = format!("exec-{}", self.next_execution_id);
-        let mut child = create_node_child(&self.import_cache, &context, &request, frozen_time_ms)?;
+        let control_channel =
+            create_node_control_channel().map_err(JavascriptExecutionError::Spawn)?;
+        let mut child = create_node_child(
+            &self.import_cache,
+            &context,
+            &request,
+            frozen_time_ms,
+            &control_channel.child_writer,
+        )?;
         let child_pid = child.id();
 
         let stdin = child.stdin.take();
@@ -311,21 +379,27 @@ impl JavascriptExecutionEngine {
 
         let (sender, receiver) = mpsc::channel();
         if let Some(metrics) = warmup_metrics {
-            let _ = sender.send(JavascriptExecutionEvent::Stderr(metrics));
+            let _ = sender.send(JavascriptProcessEvent::RawStderr(metrics));
         }
 
         let stdout_reader =
-            spawn_stream_reader(stdout, sender.clone(), JavascriptExecutionEvent::Stdout);
+            spawn_stream_reader(stdout, sender.clone(), JavascriptProcessEvent::Stdout);
         let stderr_reader =
-            spawn_stream_reader(stderr, sender.clone(), JavascriptExecutionEvent::Stderr);
+            spawn_stream_reader(stderr, sender.clone(), JavascriptProcessEvent::RawStderr);
+        let _control_reader = spawn_node_control_reader(
+            control_channel.parent_reader,
+            sender.clone(),
+            JavascriptProcessEvent::Control,
+            |message| JavascriptProcessEvent::RawStderr(message.into_bytes()),
+        );
         spawn_waiter(
             child,
             stdout_reader,
             stderr_reader,
             true,
             sender,
-            JavascriptExecutionEvent::Exited,
-            |message| JavascriptExecutionEvent::Stderr(message.into_bytes()),
+            JavascriptProcessEvent::Exited,
+            |message| JavascriptProcessEvent::RawStderr(message.into_bytes()),
         );
 
         Ok(JavascriptExecution {
@@ -333,6 +407,7 @@ impl JavascriptExecutionEngine {
             child_pid,
             stdin,
             events: receiver,
+            stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
         })
     }
 }
@@ -416,6 +491,7 @@ fn create_node_child(
     context: &JavascriptContext,
     request: &StartJavascriptExecutionRequest,
     frozen_time_ms: u128,
+    control_fd: &std::os::fd::OwnedFd,
 ) -> Result<std::process::Child, JavascriptExecutionError> {
     let guest_argv = encode_json_string_array(&request.argv[1..]);
     let mut command = Command::new(node_binary());
@@ -457,6 +533,7 @@ fn create_node_child(
         command.env(NODE_BOOTSTRAP_ENV, bootstrap_module);
     }
 
+    configure_node_control_channel(&mut command, control_fd);
     configure_node_command(&mut command, import_cache, context, frozen_time_ms)?;
 
     command.spawn().map_err(JavascriptExecutionError::Spawn)

@@ -228,6 +228,43 @@ fn wasm_timing_module() -> Vec<u8> {
     .expect("compile timing wasm fixture")
 }
 
+fn wasm_signal_state_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+(module
+  (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
+  (type $proc_sigaction_t (func (param i32 i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (type $fd_write_t)))
+  (import "host_process" "proc_sigaction" (func $proc_sigaction (type $proc_sigaction_t)))
+  (memory (export "memory") 1)
+  (data (i32.const 32) "signal:ready\n")
+  (func $_start (export "_start")
+    (drop
+      (call $proc_sigaction
+        (i32.const 2)
+        (i32.const 2)
+        (i32.const 16384)
+        (i32.const 0)
+        (i32.const 4660)
+      )
+    )
+    (i32.store (i32.const 0) (i32.const 32))
+    (i32.store (i32.const 4) (i32.const 13))
+    (drop
+      (call $fd_write
+        (i32.const 1)
+        (i32.const 0)
+        (i32.const 1)
+        (i32.const 24)
+      )
+    )
+  )
+)
+"#,
+    )
+    .expect("compile signal wasm fixture")
+}
+
 #[test]
 fn wasm_contexts_preserve_vm_and_module_configuration() {
     let mut engine = WasmExecutionEngine::default();
@@ -407,11 +444,77 @@ fn wasm_execution_streams_exit_event() {
             Some(WasmExecutionEvent::Stderr(chunk)) => {
                 panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
             }
+            Some(WasmExecutionEvent::SignalState { .. }) => {}
             None => panic!("timed out waiting for wasm execution event"),
         }
     }
 
     assert!(saw_stdout, "expected stdout event before exit");
+}
+
+#[test]
+fn wasm_execution_emits_signal_state_from_control_channel() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(&temp.path().join("guest.wasm"), &wasm_signal_state_module());
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let execution = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start wasm execution");
+
+    let mut saw_stdout = false;
+    let mut saw_signal = false;
+    let mut saw_exit = false;
+
+    while !saw_exit {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll wasm event")
+        {
+            Some(WasmExecutionEvent::Stdout(chunk)) => {
+                saw_stdout = String::from_utf8(chunk)
+                    .expect("stdout utf8")
+                    .contains("signal:ready");
+            }
+            Some(WasmExecutionEvent::SignalState {
+                signal,
+                registration,
+            }) => {
+                assert_eq!(signal, 2);
+                assert_eq!(
+                    registration.action,
+                    agent_os_execution::wasm::WasmSignalDispositionAction::User
+                );
+                assert_eq!(registration.mask, vec![15]);
+                assert_eq!(registration.flags, 0x1234);
+                saw_signal = true;
+            }
+            Some(WasmExecutionEvent::Exited(code)) => {
+                assert_eq!(code, 0);
+                saw_exit = true;
+            }
+            Some(WasmExecutionEvent::Stderr(chunk)) => {
+                panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
+            }
+            None => panic!("timed out waiting for wasm execution event"),
+        }
+    }
+
+    assert!(saw_stdout, "expected stdout event before exit");
+    assert!(saw_signal, "expected signal-state event before exit");
 }
 
 #[test]

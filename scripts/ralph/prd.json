@@ -154,7 +154,7 @@
         "Typecheck passes"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Guest code can write magic prefixes to stderr to inject fake control messages. Affects Python exit detection, signal state, and import cache metrics."
     },
     {

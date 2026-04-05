@@ -1,9 +1,11 @@
 use crate::common::{encode_json_string, frozen_time_ms, stable_hash64};
 use crate::node_import_cache::NodeImportCache;
 use crate::node_process::{
-    apply_guest_env, encode_json_string_array, encode_json_string_map, harden_node_command,
-    node_binary, node_resolution_read_paths, resolve_path_like_specifier, spawn_stream_reader,
-    spawn_waiter,
+    apply_guest_env, configure_node_control_channel, create_node_control_channel,
+    encode_json_string_array, encode_json_string_map, harden_node_command, node_binary,
+    node_resolution_read_paths, resolve_path_like_specifier, spawn_node_control_reader,
+    spawn_stream_reader, spawn_waiter, LinePrefixFilter, NodeControlMessage,
+    NodeSignalDispositionAction, NodeSignalHandlerRegistration,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -11,7 +13,10 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{
+    mpsc::{self, Receiver, RecvTimeoutError},
+    Arc, Mutex,
+};
 use std::time::{Duration, UNIX_EPOCH};
 
 const WASM_MODULE_PATH_ENV: &str = "AGENT_OS_WASM_MODULE_PATH";
@@ -24,6 +29,8 @@ const NODE_COMPILE_CACHE_ENV: &str = "NODE_COMPILE_CACHE";
 const NODE_DISABLE_COMPILE_CACHE_ENV: &str = "NODE_DISABLE_COMPILE_CACHE";
 const NODE_FROZEN_TIME_ENV: &str = "AGENT_OS_FROZEN_TIME_MS";
 const WASM_WARMUP_MARKER_VERSION: &str = "1";
+const SIGNAL_STATE_CONTROL_PREFIX: &str = "__AGENT_OS_SIGNAL_STATE__:";
+const CONTROLLED_STDERR_PREFIXES: &[&str] = &[SIGNAL_STATE_CONTROL_PREFIX];
 const RESERVED_WASM_ENV_KEYS: &[&str] = &[
     NODE_COMPILE_CACHE_ENV,
     NODE_DISABLE_COMPILE_CACHE_ENV,
@@ -33,6 +40,20 @@ const RESERVED_WASM_ENV_KEYS: &[&str] = &[
     WASM_MODULE_PATH_ENV,
     WASM_PREWARM_ONLY_ENV,
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WasmSignalDispositionAction {
+    Default,
+    Ignore,
+    User,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmSignalHandlerRegistration {
+    pub action: WasmSignalDispositionAction,
+    pub mask: Vec<u32>,
+    pub flags: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateWasmContextRequest {
@@ -60,6 +81,18 @@ pub struct StartWasmExecutionRequest {
 pub enum WasmExecutionEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
+    SignalState {
+        signal: u32,
+        registration: WasmSignalHandlerRegistration,
+    },
+    Exited(i32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WasmProcessEvent {
+    Stdout(Vec<u8>),
+    RawStderr(Vec<u8>),
+    Control(NodeControlMessage),
     Exited(i32),
 }
 
@@ -136,7 +169,8 @@ pub struct WasmExecution {
     execution_id: String,
     child_pid: u32,
     stdin: Option<ChildStdin>,
-    events: Receiver<WasmExecutionEvent>,
+    events: Receiver<WasmProcessEvent>,
+    stderr_filter: Arc<Mutex<LinePrefixFilter>>,
 }
 
 impl WasmExecution {
@@ -168,7 +202,27 @@ impl WasmExecution {
         timeout: Duration,
     ) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
         match self.events.recv_timeout(timeout) {
-            Ok(event) => Ok(Some(event)),
+            Ok(WasmProcessEvent::Stdout(chunk)) => Ok(Some(WasmExecutionEvent::Stdout(chunk))),
+            Ok(WasmProcessEvent::RawStderr(chunk)) => {
+                let mut filter = self
+                    .stderr_filter
+                    .lock()
+                    .map_err(|_| WasmExecutionError::EventChannelClosed)?;
+                let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
+                if filtered.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(WasmExecutionEvent::Stderr(filtered)))
+            }
+            Ok(WasmProcessEvent::Control(NodeControlMessage::SignalState {
+                signal,
+                registration,
+            })) => Ok(Some(WasmExecutionEvent::SignalState {
+                signal,
+                registration: registration.into(),
+            })),
+            Ok(WasmProcessEvent::Control(_)) => Ok(None),
+            Ok(WasmProcessEvent::Exited(code)) => Ok(Some(WasmExecutionEvent::Exited(code))),
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => Err(WasmExecutionError::EventChannelClosed),
         }
@@ -182,9 +236,16 @@ impl WasmExecution {
 
         loop {
             match self.events.recv() {
-                Ok(WasmExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
-                Ok(WasmExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
-                Ok(WasmExecutionEvent::Exited(exit_code)) => {
+                Ok(WasmProcessEvent::Stdout(chunk)) => stdout.extend(chunk),
+                Ok(WasmProcessEvent::RawStderr(chunk)) => {
+                    let mut filter = self
+                        .stderr_filter
+                        .lock()
+                        .map_err(|_| WasmExecutionError::EventChannelClosed)?;
+                    stderr.extend(filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES));
+                }
+                Ok(WasmProcessEvent::Control(_)) => {}
+                Ok(WasmProcessEvent::Exited(exit_code)) => {
                     return Ok(WasmExecutionResult {
                         execution_id: self.execution_id,
                         exit_code,
@@ -247,12 +308,14 @@ impl WasmExecutionEngine {
         self.next_execution_id += 1;
         let execution_id = format!("exec-{}", self.next_execution_id);
         let guest_argv = guest_argv(&context, &request)?;
+        let control_channel = create_node_control_channel().map_err(WasmExecutionError::Spawn)?;
         let mut child = create_node_child(
             &self.import_cache,
             &context,
             &request,
             &guest_argv,
             frozen_time_ms,
+            &control_channel.child_writer,
         )?;
         let child_pid = child.id();
 
@@ -268,19 +331,26 @@ impl WasmExecutionEngine {
 
         let (sender, receiver) = mpsc::channel();
         if let Some(metrics) = warmup_metrics {
-            let _ = sender.send(WasmExecutionEvent::Stderr(metrics));
+            let _ = sender.send(WasmProcessEvent::RawStderr(metrics));
         }
 
-        let stdout_reader = spawn_stream_reader(stdout, sender.clone(), WasmExecutionEvent::Stdout);
-        let stderr_reader = spawn_stream_reader(stderr, sender.clone(), WasmExecutionEvent::Stderr);
+        let stdout_reader = spawn_stream_reader(stdout, sender.clone(), WasmProcessEvent::Stdout);
+        let stderr_reader =
+            spawn_stream_reader(stderr, sender.clone(), WasmProcessEvent::RawStderr);
+        let _control_reader = spawn_node_control_reader(
+            control_channel.parent_reader,
+            sender.clone(),
+            WasmProcessEvent::Control,
+            |message| WasmProcessEvent::RawStderr(message.into_bytes()),
+        );
         spawn_waiter(
             child,
             stdout_reader,
             stderr_reader,
             true,
             sender,
-            WasmExecutionEvent::Exited,
-            |message| WasmExecutionEvent::Stderr(message.into_bytes()),
+            WasmProcessEvent::Exited,
+            |message| WasmProcessEvent::RawStderr(message.into_bytes()),
         );
 
         Ok(WasmExecution {
@@ -288,6 +358,7 @@ impl WasmExecutionEngine {
             child_pid,
             stdin,
             events: receiver,
+            stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
         })
     }
 }
@@ -326,6 +397,7 @@ fn create_node_child(
     request: &StartWasmExecutionRequest,
     guest_argv: &[String],
     frozen_time_ms: u128,
+    control_fd: &std::os::fd::OwnedFd,
 ) -> Result<std::process::Child, WasmExecutionError> {
     let mut command = Command::new(node_binary());
     configure_wasm_node_sandbox(&mut command, import_cache, context, request)?;
@@ -345,6 +417,7 @@ fn create_node_child(
         .env(WASM_GUEST_ARGV_ENV, encode_json_string_array(guest_argv))
         .env(WASM_GUEST_ENV_ENV, encode_json_string_map(&request.env));
 
+    configure_node_control_channel(&mut command, control_fd);
     configure_node_command(&mut command, import_cache, frozen_time_ms)?;
 
     command.spawn().map_err(WasmExecutionError::Spawn)
@@ -550,5 +623,25 @@ fn file_fingerprint(path: &Path) -> String {
                 .unwrap_or_else(|| String::from("unknown"))
         ),
         Err(_) => String::from("missing"),
+    }
+}
+
+impl From<NodeSignalDispositionAction> for WasmSignalDispositionAction {
+    fn from(value: NodeSignalDispositionAction) -> Self {
+        match value {
+            NodeSignalDispositionAction::Default => Self::Default,
+            NodeSignalDispositionAction::Ignore => Self::Ignore,
+            NodeSignalDispositionAction::User => Self::User,
+        }
+    }
+}
+
+impl From<NodeSignalHandlerRegistration> for WasmSignalHandlerRegistration {
+    fn from(value: NodeSignalHandlerRegistration) -> Self {
+        Self {
+            action: value.action.into(),
+            mask: value.mask,
+            flags: value.flags,
+        }
     }
 }

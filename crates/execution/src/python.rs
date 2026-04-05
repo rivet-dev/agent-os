@@ -1,6 +1,10 @@
 use crate::common::{encode_json_string, frozen_time_ms, stable_hash64};
 use crate::node_import_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV};
-use crate::node_process::{apply_guest_env, harden_node_command, node_binary, spawn_stream_reader};
+use crate::node_process::{
+    apply_guest_env, configure_node_control_channel, create_node_control_channel,
+    harden_node_command, node_binary, spawn_node_control_reader, spawn_stream_reader,
+    LinePrefixFilter, NodeControlMessage,
+};
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
 use nix::unistd::pipe2;
 use serde::Deserialize;
@@ -33,6 +37,7 @@ const PYTHON_VFS_RPC_REQUEST_FD_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_REQUEST_FD"
 const PYTHON_VFS_RPC_RESPONSE_FD_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_RESPONSE_FD";
 const PYTHON_EXIT_CONTROL_PREFIX: &str = "__AGENT_OS_PYTHON_EXIT__:";
 const PYTHON_WARMUP_MARKER_VERSION: &str = "1";
+const CONTROLLED_STDERR_PREFIXES: &[&str] = &[PYTHON_EXIT_CONTROL_PREFIX];
 const RESERVED_PYTHON_ENV_KEYS: &[&str] = &[
     NODE_COMPILE_CACHE_ENV,
     NODE_DISABLE_COMPILE_CACHE_ENV,
@@ -146,6 +151,14 @@ pub enum PythonExecutionEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum PythonProcessEvent {
+    Stdout(Vec<u8>),
+    RawStderr(Vec<u8>),
+    VfsRpcRequest(PythonVfsRpcRequest),
+    Control(NodeControlMessage),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PythonExecutionResult {
     pub execution_id: String,
     pub exit_code: i32,
@@ -242,9 +255,10 @@ pub struct PythonExecution {
     child_pid: u32,
     child: Arc<Mutex<Option<Child>>>,
     stdin: Option<ChildStdin>,
-    events: Receiver<PythonExecutionEvent>,
+    events: Receiver<PythonProcessEvent>,
     pending_exit_code: Arc<Mutex<Option<i32>>>,
     vfs_rpc_responses: Arc<Mutex<BufWriter<File>>>,
+    stderr_filter: Arc<Mutex<LinePrefixFilter>>,
 }
 
 impl PythonExecution {
@@ -331,18 +345,26 @@ impl PythonExecution {
         timeout: Duration,
     ) -> Result<Option<PythonExecutionEvent>, PythonExecutionError> {
         match self.events.recv_timeout(timeout) {
-            Ok(PythonExecutionEvent::Stderr(chunk)) => {
-                let (exit_code, filtered_chunk) = extract_python_exit_control(&chunk);
-                if let Some(exit_code) = exit_code {
-                    self.store_pending_exit_code(exit_code)?;
-                    if filtered_chunk.is_empty() {
-                        return self.poll_event(Duration::from_millis(10));
-                    }
-                    return Ok(Some(PythonExecutionEvent::Stderr(filtered_chunk)));
+            Ok(PythonProcessEvent::Stdout(chunk)) => Ok(Some(PythonExecutionEvent::Stdout(chunk))),
+            Ok(PythonProcessEvent::RawStderr(chunk)) => {
+                let mut filter = self
+                    .stderr_filter
+                    .lock()
+                    .map_err(|_| PythonExecutionError::EventChannelClosed)?;
+                let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
+                if filtered.is_empty() {
+                    return Ok(None);
                 }
-                Ok(Some(PythonExecutionEvent::Stderr(chunk)))
+                Ok(Some(PythonExecutionEvent::Stderr(filtered)))
             }
-            Ok(event) => Ok(Some(event)),
+            Ok(PythonProcessEvent::VfsRpcRequest(request)) => {
+                Ok(Some(PythonExecutionEvent::VfsRpcRequest(request)))
+            }
+            Ok(PythonProcessEvent::Control(NodeControlMessage::PythonExit { exit_code })) => {
+                self.store_pending_exit_code(exit_code)?;
+                Ok(None)
+            }
+            Ok(PythonProcessEvent::Control(_)) => Ok(None),
             Err(RecvTimeoutError::Timeout) => {
                 if let Some(exit_code) = self.take_pending_exit_code()? {
                     self.finalize_child_exit(exit_code)?;
@@ -500,11 +522,13 @@ impl PythonExecutionEngine {
         self.next_execution_id += 1;
         let execution_id = format!("exec-{}", self.next_execution_id);
         let rpc_channels = create_python_vfs_rpc_channels()?;
+        let control_channel = create_node_control_channel().map_err(PythonExecutionError::Spawn)?;
         let (mut child, rpc_request_reader, rpc_response_writer) = create_node_child(
             &self.import_cache,
             &context,
             &request,
             rpc_channels,
+            &control_channel.child_writer,
             frozen_time_ms,
         )?;
         let child_pid = child.id();
@@ -521,13 +545,18 @@ impl PythonExecutionEngine {
 
         let (sender, receiver) = mpsc::channel();
         if let Some(metrics) = warmup_metrics {
-            let _ = sender.send(PythonExecutionEvent::Stderr(metrics));
+            let _ = sender.send(PythonProcessEvent::RawStderr(metrics));
         }
-        let stdout_reader =
-            spawn_stream_reader(stdout, sender.clone(), PythonExecutionEvent::Stdout);
+        let stdout_reader = spawn_stream_reader(stdout, sender.clone(), PythonProcessEvent::Stdout);
         let stderr_reader =
-            spawn_stream_reader(stderr, sender.clone(), PythonExecutionEvent::Stderr);
+            spawn_stream_reader(stderr, sender.clone(), PythonProcessEvent::RawStderr);
         let _rpc_reader = spawn_python_vfs_rpc_reader(rpc_request_reader, sender.clone());
+        let _control_reader = spawn_node_control_reader(
+            control_channel.parent_reader,
+            sender.clone(),
+            PythonProcessEvent::Control,
+            |message| PythonProcessEvent::RawStderr(message.into_bytes()),
+        );
         let _stdout_reader = stdout_reader;
         let _stderr_reader = stderr_reader;
         let _sender = sender;
@@ -541,6 +570,7 @@ impl PythonExecutionEngine {
             events: receiver,
             pending_exit_code: Arc::new(Mutex::new(None)),
             vfs_rpc_responses: rpc_response_writer,
+            stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
         })
     }
 }
@@ -550,6 +580,7 @@ fn create_node_child(
     context: &PythonContext,
     request: &StartPythonExecutionRequest,
     rpc_channels: PythonVfsRpcChannels,
+    control_fd: &OwnedFd,
     frozen_time_ms: u128,
 ) -> Result<(std::process::Child, File, Arc<Mutex<BufWriter<File>>>), PythonExecutionError> {
     let mut command = Command::new(node_binary());
@@ -585,6 +616,7 @@ fn create_node_child(
     }
 
     apply_guest_env(&mut command, &request.env, RESERVED_PYTHON_ENV_KEYS);
+    configure_node_control_channel(&mut command, control_fd);
     configure_node_command(&mut command, import_cache)?;
     let child = command.spawn().map_err(PythonExecutionError::Spawn)?;
     Ok((
@@ -834,10 +866,7 @@ fn clear_cloexec(fd: &OwnedFd) -> Result<(), PythonExecutionError> {
     Ok(())
 }
 
-fn spawn_python_vfs_rpc_reader(
-    reader: File,
-    sender: Sender<PythonExecutionEvent>,
-) -> JoinHandle<()> {
+fn spawn_python_vfs_rpc_reader(reader: File, sender: Sender<PythonProcessEvent>) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
@@ -855,7 +884,7 @@ fn spawn_python_vfs_rpc_reader(
                     match parse_python_vfs_rpc_request(trimmed) {
                         Ok(request) => {
                             if sender
-                                .send(PythonExecutionEvent::VfsRpcRequest(request))
+                                .send(PythonProcessEvent::VfsRpcRequest(request))
                                 .is_err()
                             {
                                 return;
@@ -863,7 +892,7 @@ fn spawn_python_vfs_rpc_reader(
                         }
                         Err(message) => {
                             if sender
-                                .send(PythonExecutionEvent::Stderr(message.into_bytes()))
+                                .send(PythonProcessEvent::RawStderr(message.into_bytes()))
                                 .is_err()
                             {
                                 return;
@@ -872,7 +901,7 @@ fn spawn_python_vfs_rpc_reader(
                     }
                 }
                 Err(error) => {
-                    let _ = sender.send(PythonExecutionEvent::Stderr(
+                    let _ = sender.send(PythonProcessEvent::RawStderr(
                         format!("agent-os python vfs rpc read error: {error}\n").into_bytes(),
                     ));
                     return;
@@ -914,26 +943,4 @@ fn write_python_vfs_rpc_response(
         .write_all(b"\n")
         .and_then(|()| writer.flush())
         .map_err(|error| PythonExecutionError::RpcResponse(error.to_string()))
-}
-
-fn extract_python_exit_control(chunk: &[u8]) -> (Option<i32>, Vec<u8>) {
-    let text = String::from_utf8_lossy(chunk);
-    let mut filtered_lines = Vec::new();
-    let mut exit_code = None;
-
-    for line in text.lines() {
-        if let Some(value) = line.strip_prefix(PYTHON_EXIT_CONTROL_PREFIX) {
-            exit_code = value.trim().parse::<i32>().ok();
-            continue;
-        }
-        filtered_lines.push(line);
-    }
-
-    if filtered_lines.is_empty() {
-        return (exit_code, Vec::new());
-    }
-
-    let mut filtered = filtered_lines.join("\n").into_bytes();
-    filtered.push(b'\n');
-    (exit_code, filtered)
 }

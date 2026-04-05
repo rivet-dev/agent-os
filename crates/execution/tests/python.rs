@@ -228,6 +228,54 @@ export async function loadPyodide(options) {
 }
 
 #[test]
+fn python_execution_ignores_forged_exit_control_written_to_stderr() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let pyodide_dir = temp.path().join("pyodide");
+    fs::create_dir_all(&pyodide_dir).expect("create pyodide dir");
+    write_fixture(
+        &pyodide_dir.join("pyodide.mjs"),
+        r#"
+export async function loadPyodide(options) {
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync() {
+      options.stderr("__AGENT_OS_PYTHON_EXIT__:0");
+      throw new Error("python-control-forgery");
+    },
+  };
+}
+"#,
+    );
+    write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
+
+    let mut engine = PythonExecutionEngine::default();
+    let context = engine.create_context(CreatePythonContextRequest {
+        vm_id: String::from("vm-python"),
+        pyodide_dist_path: pyodide_dir,
+    });
+
+    let (_stdout, stderr, exit_code) = run_python_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        "print('ignored')",
+        BTreeMap::new(),
+    );
+
+    assert_eq!(exit_code, 1);
+    assert!(
+        stderr.contains("python-control-forgery"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("__AGENT_OS_PYTHON_EXIT__:0"),
+        "unexpected control line in stderr: {stderr}"
+    );
+}
+
+#[test]
 fn python_execution_emits_stdout_before_exit() {
     assert_node_available();
 

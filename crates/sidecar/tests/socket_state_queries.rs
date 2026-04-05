@@ -6,10 +6,11 @@ use agent_os_sidecar::protocol::{
     SignalDispositionAction,
 };
 use std::collections::BTreeMap;
+use std::fs;
 use std::time::{Duration, Instant};
 use support::{
     assert_node_available, authenticate, create_vm_with_metadata, execute, new_sidecar,
-    open_session, request, temp_dir, write_fixture,
+    open_session, request, temp_dir, wasm_signal_state_module, write_fixture,
 };
 
 fn wait_for_process_output(
@@ -54,7 +55,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
     let cwd = temp_dir("socket-state-queries-cwd");
     let tcp_entry = cwd.join("tcp-listener.mjs");
     let udp_entry = cwd.join("udp-listener.mjs");
-    let signal_entry = cwd.join("signal-state.mjs");
+    let signal_entry = cwd.join("signal-state.wasm");
 
     write_fixture(
         &tcp_entry,
@@ -78,21 +79,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         ]
         .join("\n"),
     );
-    write_fixture(
-        &signal_entry,
-        [
-            "const prefix = '__AGENT_OS_SIGNAL_STATE__:';",
-            "process.stderr.write(",
-            "  `${prefix}${JSON.stringify({",
-            "    signal: 2,",
-            "    registration: { action: 'user', mask: [15], flags: 0x1234 },",
-            "  })}\\n`,",
-            ");",
-            "console.log('signal-registered');",
-            "setInterval(() => {}, 1000);",
-        ]
-        .join("\n"),
-    );
+    fs::write(&signal_entry, wasm_signal_state_module()).expect("write signal-state wasm fixture");
 
     let connection_id = authenticate(&mut sidecar, "conn-1");
     let session_id = open_session(&mut sidecar, 2, &connection_id);
@@ -108,6 +95,15 @@ fn sidecar_queries_listener_udp_and_signal_state() {
             String::from("env.AGENT_OS_ALLOWED_NODE_BUILTINS"),
             allowed_builtins,
         )]),
+    );
+    let (wasm_vm_id, _) = create_vm_with_metadata(
+        &mut sidecar,
+        30,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::Wasm,
+        &cwd,
+        BTreeMap::new(),
     );
 
     execute(
@@ -155,9 +151,9 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         6,
         &connection_id,
         &session_id,
-        &vm_id,
+        &wasm_vm_id,
         "signal-state",
-        GuestRuntimeKind::JavaScript,
+        GuestRuntimeKind::Wasm,
         &signal_entry,
         Vec::new(),
     );
@@ -165,7 +161,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         &mut sidecar,
         &connection_id,
         &session_id,
-        &vm_id,
+        &wasm_vm_id,
         "signal-state",
         "signal-registered",
     );
@@ -214,7 +210,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
     let signal_state = sidecar
         .dispatch(request(
             9,
-            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            OwnershipScope::vm(&connection_id, &session_id, &wasm_vm_id),
             RequestPayload::GetSignalState(GetSignalStateRequest {
                 process_id: String::from("signal-state"),
             }),
@@ -238,15 +234,15 @@ fn sidecar_queries_listener_udp_and_signal_state() {
     let dispose = sidecar
         .dispatch(request(
             10,
-            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            OwnershipScope::vm(&connection_id, &session_id, &wasm_vm_id),
             RequestPayload::DisposeVm(DisposeVmRequest {
                 reason: DisposeReason::Requested,
             }),
         ))
-        .expect("dispose vm");
+        .expect("dispose wasm vm");
     match dispose.response.payload {
         ResponsePayload::VmDisposed(response) => {
-            assert_eq!(response.vm_id, vm_id);
+            assert_eq!(response.vm_id, wasm_vm_id);
         }
         other => panic!("unexpected dispose response: {other:?}"),
     }

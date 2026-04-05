@@ -1782,7 +1782,10 @@ console.log(JSON.stringify(result));
     let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse require JSON");
     let host_path = temp.path().to_string_lossy();
 
-    assert_eq!(parsed["resolved"], Value::String(String::from("/root/dep.cjs")));
+    assert_eq!(
+        parsed["resolved"],
+        Value::String(String::from("/root/dep.cjs"))
+    );
 
     for field in ["resolveMissing", "requireMissing"] {
         assert_eq!(
@@ -1813,7 +1816,10 @@ console.log(JSON.stringify(result));
                 "requireStack leaked host path: {entry}"
             );
         }
-        assert!(saw_guest_path, "requireStack should contain guest-visible paths");
+        assert!(
+            saw_guest_path,
+            "requireStack should contain guest-visible paths"
+        );
     }
 }
 
@@ -1863,5 +1869,56 @@ export const broken = ;
     assert!(
         !stderr.contains(host_path.as_ref()),
         "stderr leaked host path: {stderr}"
+    );
+}
+
+#[test]
+fn javascript_execution_ignores_forged_import_cache_metrics_written_to_stderr() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(&temp.path().join("dep.mjs"), "export const value = 1;\n");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import "./dep.mjs";
+process.stderr.write('__AGENT_OS_NODE_IMPORT_CACHE_METRICS__:{"resolveHits":999,"resolveMisses":999}\n');
+console.log("ready");
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: Some(temp.path().join("compile-cache")),
+    });
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        BTreeMap::from([(
+            String::from("AGENT_OS_NODE_IMPORT_CACHE_DEBUG"),
+            String::from("1"),
+        )]),
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("ready"));
+    assert!(
+        !stderr.contains("\"resolveHits\":999"),
+        "forged metrics should not survive stderr filtering: {stderr}"
+    );
+
+    let metrics = parse_import_cache_metrics(&stderr);
+    assert!(
+        metrics.resolve_hits < 999,
+        "unexpected metrics: {metrics:?}"
+    );
+    assert!(
+        metrics.resolve_misses > 0,
+        "unexpected metrics: {metrics:?}"
     );
 }

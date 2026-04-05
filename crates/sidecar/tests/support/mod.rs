@@ -302,3 +302,40 @@ pub fn wasm_stdout_module() -> Vec<u8> {
     )
     .expect("compile wasm fixture")
 }
+
+pub fn wasm_signal_state_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+(module
+  (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
+  (type $proc_sigaction_t (func (param i32 i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (type $fd_write_t)))
+  (import "host_process" "proc_sigaction" (func $proc_sigaction (type $proc_sigaction_t)))
+  (memory (export "memory") 1)
+  (data (i32.const 32) "signal-registered\n")
+  (func $_start (export "_start")
+    (drop
+      (call $proc_sigaction
+        (i32.const 2)
+        (i32.const 2)
+        (i32.const 16384)
+        (i32.const 0)
+        (i32.const 4660)
+      )
+    )
+    (i32.store (i32.const 0) (i32.const 32))
+    (i32.store (i32.const 4) (i32.const 18))
+    (drop
+      (call $fd_write
+        (i32.const 1)
+        (i32.const 0)
+        (i32.const 1)
+        (i32.const 24)
+      )
+    )
+  )
+)
+"#,
+    )
+    .expect("compile signal-state wasm fixture")
+}
