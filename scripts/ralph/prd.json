@@ -1254,7 +1254,7 @@
         "Typecheck passes"
       ],
       "priority": 79,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: No memory limit on Pyodide process. No execution timeout at Python level. Recursion depth only limited by Python default. Pyodide is otherwise well-secured but resource limits are missing."
     },
     {

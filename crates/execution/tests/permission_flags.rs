@@ -19,7 +19,9 @@ const NODE_ALLOW_CHILD_PROCESS_FLAG: &str = "--allow-child-process";
 const NODE_ALLOW_WORKER_FLAG: &str = "--allow-worker";
 const NODE_ALLOW_FS_READ_FLAG: &str = "--allow-fs-read=";
 const NODE_ALLOW_FS_WRITE_FLAG: &str = "--allow-fs-write=";
+const NODE_MAX_OLD_SPACE_SIZE_FLAG_PREFIX: &str = "--max-old-space-size=";
 const NODE_STACK_SIZE_FLAG_PREFIX: &str = "--stack-size=";
+const PYTHON_MAX_OLD_SPACE_MB_ENV: &str = "AGENT_OS_PYTHON_MAX_OLD_SPACE_MB";
 
 struct EnvVarGuard {
     key: &'static str,
@@ -477,4 +479,61 @@ fn node_permission_flags_only_propagate_nested_child_capabilities_when_parent_ex
         "nested child should preserve --allow-worker when the parent explicitly had it: {:?}",
         invocations[1]
     );
+}
+
+#[test]
+fn python_execution_applies_configured_heap_limit_to_prewarm_and_exec_processes() {
+    let temp = tempdir().expect("create temp dir");
+    let fake_node_path = temp.path().join("fake-node.sh");
+    let log_path = temp.path().join("node-args.log");
+    write_fake_node_binary(&fake_node_path, &log_path);
+    let _node_binary = EnvVarGuard::set("AGENT_OS_NODE_BINARY", &fake_node_path);
+
+    let pyodide_dir = temp.path().join("pyodide-dist");
+    fs::create_dir_all(&pyodide_dir).expect("create pyodide dist dir");
+    fs::write(
+        pyodide_dir.join("pyodide.mjs"),
+        "export async function loadPyodide() { return { async runPythonAsync() {} }; }\n",
+    )
+    .expect("write pyodide fixture");
+    fs::write(pyodide_dir.join("pyodide-lock.json"), "{\"packages\":[]}\n")
+        .expect("write pyodide lock fixture");
+
+    let mut python_engine = PythonExecutionEngine::default();
+    let context = python_engine.create_context(CreatePythonContextRequest {
+        vm_id: String::from("vm-python"),
+        pyodide_dist_path: pyodide_dir,
+    });
+
+    let result = python_engine
+        .start_execution(StartPythonExecutionRequest {
+            vm_id: String::from("vm-python"),
+            context_id: context.context_id,
+            code: String::from("print('ignored')"),
+            file_path: None,
+            env: BTreeMap::from([(
+                String::from(PYTHON_MAX_OLD_SPACE_MB_ENV),
+                String::from("256"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start python execution")
+        .wait(None)
+        .expect("wait for python execution");
+    assert_eq!(result.exit_code, 0);
+
+    let invocations = parse_invocations(&log_path);
+    assert_eq!(
+        invocations.len(),
+        2,
+        "expected one prewarm invocation and one execution invocation"
+    );
+
+    for args in &invocations {
+        assert!(
+            args.iter()
+                .any(|arg| arg == &format!("{NODE_MAX_OLD_SPACE_SIZE_FLAG_PREFIX}256")),
+            "python invocations should apply the configured Node heap limit: {args:?}"
+        );
+    }
 }

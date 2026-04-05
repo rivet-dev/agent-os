@@ -39,6 +39,8 @@ const PYTHON_PREWARM_ONLY_ENV: &str = "AGENT_OS_PYTHON_PREWARM_ONLY";
 const PYTHON_WARMUP_DEBUG_ENV: &str = "AGENT_OS_PYTHON_WARMUP_DEBUG";
 const PYTHON_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_PYTHON_WARMUP_METRICS__:";
 const PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV: &str = "AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES";
+const PYTHON_EXECUTION_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_EXECUTION_TIMEOUT_MS";
+const PYTHON_MAX_OLD_SPACE_MB_ENV: &str = "AGENT_OS_PYTHON_MAX_OLD_SPACE_MB";
 const PYTHON_VFS_RPC_REQUEST_FD_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_REQUEST_FD";
 const PYTHON_VFS_RPC_RESPONSE_FD_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_RESPONSE_FD";
 const PYTHON_VFS_RPC_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_TIMEOUT_MS";
@@ -47,6 +49,8 @@ const PYTHON_VFS_RPC_MAX_PENDING_REQUESTS_ENV: &str =
 const PYTHON_EXIT_CONTROL_PREFIX: &str = "__AGENT_OS_PYTHON_EXIT__:";
 const PYTHON_WARMUP_MARKER_VERSION: &str = "1";
 const DEFAULT_PYTHON_OUTPUT_BUFFER_MAX_BYTES: usize = 1024 * 1024;
+const DEFAULT_PYTHON_EXECUTION_TIMEOUT_MS: u64 = 5 * 60 * 1000;
+const DEFAULT_PYTHON_MAX_OLD_SPACE_MB: usize = 1024;
 const DEFAULT_PYTHON_VFS_RPC_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_PYTHON_VFS_RPC_MAX_PENDING_REQUESTS: usize = 1000;
 const CONTROLLED_STDERR_PREFIXES: &[&str] = &[PYTHON_EXIT_CONTROL_PREFIX];
@@ -60,7 +64,9 @@ const RESERVED_PYTHON_ENV_KEYS: &[&str] = &[
     NODE_IMPORT_CACHE_PATH_ENV,
     PYODIDE_INDEX_URL_ENV,
     PYTHON_CODE_ENV,
+    PYTHON_EXECUTION_TIMEOUT_MS_ENV,
     PYTHON_FILE_ENV,
+    PYTHON_MAX_OLD_SPACE_MB_ENV,
     PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV,
     PYTHON_PREWARM_ONLY_ENV,
     PYTHON_VFS_RPC_REQUEST_FD_ENV,
@@ -287,6 +293,7 @@ pub struct PythonExecution {
     vfs_rpc_responses: Arc<Mutex<BufWriter<File>>>,
     stderr_filter: Arc<Mutex<LinePrefixFilter>>,
     output_buffer_max_bytes: usize,
+    execution_timeout: Option<Duration>,
     vfs_rpc_timeout: Duration,
     _import_cache_guard: Arc<NodeImportCacheCleanup>,
 }
@@ -495,6 +502,12 @@ impl PythonExecution {
         let mut stdout = PythonOutputBuffer::new(self.output_buffer_max_bytes);
         let mut stderr = PythonOutputBuffer::new(self.output_buffer_max_bytes);
         let started = Instant::now();
+        let timeout = match (timeout, self.execution_timeout) {
+            (Some(requested), Some(configured)) => Some(requested.min(configured)),
+            (Some(requested), None) => Some(requested),
+            (None, Some(configured)) => Some(configured),
+            (None, None) => None,
+        };
 
         loop {
             let poll_timeout = timeout
@@ -527,6 +540,7 @@ impl PythonExecution {
 
             if let Some(limit) = timeout {
                 if started.elapsed() >= limit {
+                    self.kill()?;
                     return Err(PythonExecutionError::TimedOut(limit));
                 }
             }
@@ -744,6 +758,7 @@ impl PythonExecutionEngine {
             vfs_rpc_responses: rpc_response_writer,
             stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
             output_buffer_max_bytes: python_output_buffer_max_bytes(&request),
+            execution_timeout: python_execution_timeout(&request),
             vfs_rpc_timeout: python_vfs_rpc_timeout(&request),
             _import_cache_guard: import_cache_guard,
         })
@@ -790,6 +805,35 @@ fn python_output_buffer_max_bytes(request: &StartPythonExecutionRequest) -> usiz
         .get(PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV)
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(DEFAULT_PYTHON_OUTPUT_BUFFER_MAX_BYTES)
+}
+
+fn python_execution_timeout(request: &StartPythonExecutionRequest) -> Option<Duration> {
+    match request.env.get(PYTHON_EXECUTION_TIMEOUT_MS_ENV) {
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed == "0" {
+                None
+            } else {
+                Some(Duration::from_millis(
+                    trimmed
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|value| *value > 0)
+                        .unwrap_or(DEFAULT_PYTHON_EXECUTION_TIMEOUT_MS),
+                ))
+            }
+        }
+        None => Some(Duration::from_millis(DEFAULT_PYTHON_EXECUTION_TIMEOUT_MS)),
+    }
+}
+
+fn python_max_old_space_mb(request: &StartPythonExecutionRequest) -> usize {
+    request
+        .env
+        .get(PYTHON_MAX_OLD_SPACE_MB_ENV)
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_PYTHON_MAX_OLD_SPACE_MB)
 }
 
 fn python_vfs_rpc_timeout(request: &StartPythonExecutionRequest) -> Duration {
@@ -923,6 +967,10 @@ fn create_node_child(
     let mut exported_fds = ExportedChildFds::default();
     configure_python_node_sandbox(&mut command, import_cache, context, request);
     command
+        .arg(format!(
+            "--max-old-space-size={}",
+            python_max_old_space_mb(request)
+        ))
         .arg("--no-warnings")
         .arg("--import")
         .arg(import_cache.timing_bootstrap_path())
@@ -1051,6 +1099,10 @@ fn prewarm_python_path(
     let mut command = Command::new(node_binary());
     configure_python_node_sandbox(&mut command, import_cache, context, request);
     command
+        .arg(format!(
+            "--max-old-space-size={}",
+            python_max_old_space_mb(request)
+        ))
         .arg("--no-warnings")
         .arg("--import")
         .arg(import_cache.timing_bootstrap_path())

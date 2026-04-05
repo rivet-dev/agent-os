@@ -4,6 +4,7 @@ use agent_os_execution::{
 };
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -11,10 +12,47 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 const PYTHON_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_PYTHON_WARMUP_METRICS__:";
+const PYTHON_EXECUTION_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_EXECUTION_TIMEOUT_MS";
+const PYTHON_MAX_OLD_SPACE_MB_ENV: &str = "AGENT_OS_PYTHON_MAX_OLD_SPACE_MB";
 const PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV: &str = "AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES";
 const PYTHON_VFS_RPC_MAX_PENDING_REQUESTS_ENV: &str =
     "AGENT_OS_PYTHON_VFS_RPC_MAX_PENDING_REQUESTS";
 const PYTHON_VFS_RPC_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_TIMEOUT_MS";
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set_path(key: &'static str, value: &Path) -> Self {
+        let previous = std::env::var(key).ok();
+        // SAFETY: These tests scope process-env mutation to a single-threaded test body.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => {
+                // SAFETY: See EnvVarGuard::set_path.
+                unsafe {
+                    std::env::set_var(self.key, value);
+                }
+            }
+            None => {
+                // SAFETY: See EnvVarGuard::set_path.
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 struct PythonPrewarmMetrics {
@@ -50,6 +88,15 @@ fn write_fixture(path: &Path, contents: &str) {
 
 fn write_pyodide_lock_fixture(path: &Path) {
     write_fixture(path, "{\"packages\":[]}\n");
+}
+
+fn write_fake_node_binary(path: &Path, contents: &str) {
+    fs::write(path, contents).expect("write fake node binary");
+    let mut permissions = fs::metadata(path)
+        .expect("fake node metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("chmod fake node binary");
 }
 
 fn parse_metrics_line<'a>(stderr: &'a str, phase: &str) -> &'a str {
@@ -947,6 +994,62 @@ export async function loadPyodide() {
 }
 
 #[test]
+fn python_execution_uses_configured_default_timeout_when_wait_timeout_not_provided() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let pyodide_dir = temp.path().join("pyodide");
+    fs::create_dir_all(&pyodide_dir).expect("create pyodide dir");
+    write_fixture(
+        &pyodide_dir.join("pyodide.mjs"),
+        r#"
+export async function loadPyodide() {
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync() {
+      await new Promise(() => setInterval(() => {}, 1000));
+    },
+  };
+}
+"#,
+    );
+    write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
+
+    let mut engine = PythonExecutionEngine::default();
+    let context = engine.create_context(CreatePythonContextRequest {
+        vm_id: String::from("vm-python"),
+        pyodide_dist_path: pyodide_dir,
+    });
+
+    let execution = engine
+        .start_execution(StartPythonExecutionRequest {
+            vm_id: String::from("vm-python"),
+            context_id: context.context_id,
+            code: String::from("print('hang')"),
+            file_path: None,
+            env: BTreeMap::from([(
+                String::from(PYTHON_EXECUTION_TIMEOUT_MS_ENV),
+                String::from("75"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start Python execution");
+    let child_pid = execution.child_pid();
+
+    let error = execution
+        .wait(None)
+        .expect_err("configured timeout should fire");
+    match error {
+        agent_os_execution::PythonExecutionError::TimedOut(timeout) => {
+            assert_eq!(timeout, Duration::from_millis(75));
+        }
+        other => panic!("expected timeout error, got {other:?}"),
+    }
+
+    assert_process_exits(child_pid);
+}
+
+#[test]
 fn python_vfs_rpc_bridge_times_out_when_sidecar_never_responds() {
     assert_node_available();
 
@@ -1031,6 +1134,68 @@ export async function loadPyodide() {
         "unexpected stderr: {stderr}"
     );
     assert_process_exits(child_pid);
+}
+
+#[test]
+fn python_execution_surfaces_node_heap_oom_stderr() {
+    let temp = tempdir().expect("create temp dir");
+    let fake_node_path = temp.path().join("fake-node.sh");
+    write_fake_node_binary(
+        &fake_node_path,
+        r#"#!/bin/sh
+set -eu
+if [ "${AGENT_OS_PYTHON_PREWARM_ONLY:-0}" = "1" ]; then
+  exit 0
+fi
+printf '%s\n' 'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory' >&2
+exit 134
+"#,
+    );
+    let _node_binary = EnvVarGuard::set_path("AGENT_OS_NODE_BINARY", &fake_node_path);
+
+    let pyodide_dir = temp.path().join("pyodide");
+    fs::create_dir_all(&pyodide_dir).expect("create pyodide dir");
+    write_fixture(
+        &pyodide_dir.join("pyodide.mjs"),
+        r#"
+export async function loadPyodide() {
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync() {},
+  };
+}
+"#,
+    );
+    write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
+
+    let mut engine = PythonExecutionEngine::default();
+    let context = engine.create_context(CreatePythonContextRequest {
+        vm_id: String::from("vm-python"),
+        pyodide_dist_path: pyodide_dir,
+    });
+
+    let result = engine
+        .start_execution(StartPythonExecutionRequest {
+            vm_id: String::from("vm-python"),
+            context_id: context.context_id,
+            code: String::from("print('oom')"),
+            file_path: None,
+            env: BTreeMap::from([(
+                String::from(PYTHON_MAX_OLD_SPACE_MB_ENV),
+                String::from("64"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start Python execution")
+        .wait(None)
+        .expect("wait for Python execution");
+
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 134, "stderr: {stderr}");
+    assert!(
+        stderr.contains("heap out of memory"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]

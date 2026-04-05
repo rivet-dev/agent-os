@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Pyodide runtime hardening knobs should stay in reserved `AGENT_OS_PYTHON_*` execution env keys: apply heap caps to both prewarm and execution host launches, and make `PythonExecution::wait(None)` honor the configured per-run timeout instead of treating `None` as unbounded.
 - Per-process filesystem state such as `umask` belongs in `ProcessContext` / `ProcessTable`; when guest Node code needs it, thread it through `crates/kernel/src/kernel.rs`, `crates/sidecar/src/service.rs`, and `crates/execution/src/node_import_cache.rs` together instead of reading host `process`.
 - `VirtualStat` field additions must be propagated as one bundle across kernel stat producers, sidecar protocol serialization, mount/plugin adapters, and the TypeScript `VirtualStat` / `GuestFilesystemStat` surfaces or some callers will silently keep incomplete metadata.
 - Filesystem errno hardening usually needs both layers updated together: enforce fast-fail guest-path validation in `crates/kernel/src/permissions.rs` so overlong paths do not degrade into permission errors, and keep `crates/kernel/src/vfs.rs` path traversal authoritative for semantic errors like `ENOTDIR`.
@@ -1490,4 +1491,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Per-process filesystem state such as `umask` belongs in `ProcessContext` / `ProcessTable`; if guest Node code needs it, the kernel entrypoint and the JS sync-RPC bridge have to move together.
   - Gotchas encountered: `VirtualStat` changes are easy to land incompletely because synthetic kernel stats, sidecar mount/plugin adapters, protocol structs, and TypeScript runtime types all have their own copy paths.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test vfs --test api_surface`, `cargo check -p agent-os-kernel -p agent-os-sidecar -p agent-os-execution`, `cargo test -p agent-os-sidecar javascript_fd_and_stream_rpc_requests_proxy_into_the_vm_kernel_filesystem -- --nocapture`, and `pnpm -C /home/nathan/a5 --filter @rivet-dev/agent-os-core run check-types` all pass after this change. `pnpm -C /home/nathan/a5 --filter @rivet-dev/agent-os-browser run check-types` is blocked in this checkout because `packages/browser` has no local `node_modules` and fails with `tsc: not found`.
+---
+## 2026-04-05 12:14:22 PDT - US-079
+- What was implemented
+- Added reserved Pyodide runtime knobs in `crates/execution/src/python.rs` for a per-run execution timeout (`AGENT_OS_PYTHON_EXECUTION_TIMEOUT_MS`, default 5 minutes) and a Node heap cap (`AGENT_OS_PYTHON_MAX_OLD_SPACE_MB`), made `PythonExecution::wait(None)` enforce the configured timeout, and kill the child before returning `TimedOut`.
+- Applied `--max-old-space-size` to both Pyodide prewarm and execution launches so the Node host process is bounded even before guest code runs.
+- Added regressions covering the implicit timeout path, heap-cap flag injection for both launches, and OOM stderr surfacing.
+- Files changed
+- `AGENTS.md`
+- `crates/execution/src/python.rs`
+- `crates/execution/tests/permission_flags.rs`
+- `crates/execution/tests/python.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Pyodide execution-level hardening fits the existing reserved-env pattern; runtime-only knobs should be read from `StartPythonExecutionRequest.env`, consumed host-side, and stripped from guest-visible `process.env`.
+  - Gotchas encountered: `wait(None)` is part of the security boundary for Python runs now; treating `None` as “unbounded” would silently bypass the per-run timeout even when the request config set one.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test python -- --test-threads=1`, `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1`, and `cargo check -p agent-os-execution` all pass after this change. The Python suite showed one transient `loader.mjs`-missing import-cache race on the first run, then passed cleanly on rerun.
 ---
