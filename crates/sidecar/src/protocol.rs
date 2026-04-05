@@ -577,6 +577,9 @@ pub struct VmConfiguredResponse {
 pub struct GuestFilesystemStat {
     pub mode: u32,
     pub size: u64,
+    pub blocks: u64,
+    pub dev: u64,
+    pub rdev: u64,
     pub is_directory: bool,
     pub is_symbolic_link: bool,
     pub atime_ms: u64,

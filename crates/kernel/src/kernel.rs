@@ -17,7 +17,8 @@ use crate::poll::{
 };
 use crate::process_table::{
     DriverProcess, ProcessContext, ProcessExitCallback, ProcessInfo, ProcessStatus, ProcessTable,
-    ProcessTableError, ProcessWaitResult, SIGCONT, SIGPIPE, SIGSTOP, SIGTSTP, SIGWINCH,
+    ProcessTableError, ProcessWaitResult, DEFAULT_PROCESS_UMASK, SIGCONT, SIGPIPE, SIGSTOP,
+    SIGTSTP, SIGWINCH,
 };
 use crate::pty::{LineDisciplineConfig, PartialTermios, PtyError, PtyManager, Termios};
 use crate::resource_accounting::{
@@ -513,6 +514,26 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(self.filesystem.write_file(path, content)?)
     }
 
+    pub fn write_file_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+        content: impl Into<Vec<u8>>,
+        mode: Option<u32>,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existed = self.exists_internal(Some(pid), path)?;
+        let content = content.into();
+        self.write_file(path, content)?;
+        if !existed {
+            let umask = self.processes.get_umask(pid)?;
+            self.apply_creation_mode(path, mode.unwrap_or(0o666), umask)?;
+        }
+        Ok(())
+    }
+
     pub fn create_dir(&mut self, path: &str) -> KernelResult<()> {
         self.assert_not_terminated()?;
         if is_proc_path(path) {
@@ -525,6 +546,24 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(self.filesystem.create_dir(path)?)
     }
 
+    pub fn create_dir_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+        mode: Option<u32>,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existed = self.exists_internal(Some(pid), path)?;
+        self.create_dir(path)?;
+        if !existed {
+            let umask = self.processes.get_umask(pid)?;
+            self.apply_creation_mode(path, mode.unwrap_or(0o777), umask)?;
+        }
+        Ok(())
+    }
+
     pub fn mkdir(&mut self, path: &str, recursive: bool) -> KernelResult<()> {
         self.assert_not_terminated()?;
         if is_proc_path(path) {
@@ -535,6 +574,41 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
         self.check_mkdir_limits(path, recursive)?;
         Ok(self.filesystem.mkdir(path, recursive)?)
+    }
+
+    pub fn mkdir_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+        recursive: bool,
+        mode: Option<u32>,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let created_paths = self.missing_directory_paths(path, recursive)?;
+        self.mkdir(path, recursive)?;
+        if !created_paths.is_empty() {
+            let umask = self.processes.get_umask(pid)?;
+            let mode = mode.unwrap_or(0o777);
+            for created_path in created_paths {
+                self.apply_creation_mode(&created_path, mode, umask)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn umask(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        new_mask: Option<u32>,
+    ) -> KernelResult<u32> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        match new_mask {
+            Some(mask) => Ok(self.processes.set_umask(pid, mask)?),
+            None => Ok(self.processes.get_umask(pid)?),
+        }
     }
 
     pub fn exists(&self, path: &str) -> KernelResult<bool> {
@@ -817,6 +891,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 ppid: options.parent_pid.unwrap_or(0),
                 env,
                 cwd,
+                umask: DEFAULT_PROCESS_UMASK,
                 fds: Default::default(),
             },
             process.clone(),
@@ -892,7 +967,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         pid: u32,
         path: &str,
         flags: u32,
-        _mode: Option<u32>,
+        mode: Option<u32>,
     ) -> KernelResult<u32> {
         self.assert_not_terminated()?;
         self.assert_driver_owns(requester_driver, pid)?;
@@ -928,7 +1003,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                     | ProcNode::PidFdLink { .. }
             ) {
                 let target = self.proc_symlink_target(&proc_node)?;
-                return self.fd_open(requester_driver, pid, &target, flags, _mode);
+                return self.fd_open(requester_driver, pid, &target, flags, mode);
             }
 
             self.filesystem
@@ -946,7 +1021,16 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             )?);
         }
 
+        let existed = if flags & O_CREAT != 0 {
+            self.exists_internal(Some(pid), path)?
+        } else {
+            false
+        };
         let (filetype, lock_target) = self.prepare_fd_open(path, flags)?;
+        if flags & O_CREAT != 0 && !existed {
+            let umask = self.processes.get_umask(pid)?;
+            self.apply_creation_mode(path, mode.unwrap_or(0o666), umask)?;
+        }
         let mut tables = lock_or_recover(&self.fd_tables);
         let table = tables
             .get_mut(pid)
@@ -2364,6 +2448,47 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             .unwrap_or(0))
     }
 
+    fn apply_creation_mode(&mut self, path: &str, mode: u32, umask: u32) -> KernelResult<()> {
+        let masked_mode = (mode & !0o777) | ((mode & 0o777) & !(umask & 0o777));
+        Ok(self.filesystem.chmod(path, masked_mode)?)
+    }
+
+    fn missing_directory_paths(
+        &mut self,
+        path: &str,
+        recursive: bool,
+    ) -> KernelResult<Vec<String>> {
+        let normalized = normalize_path(path);
+        if normalized == "/" {
+            return Ok(Vec::new());
+        }
+
+        if !recursive {
+            return Ok(if self.storage_lstat(&normalized)?.is_none() {
+                vec![normalized]
+            } else {
+                Vec::new()
+            });
+        }
+
+        let mut created = Vec::new();
+        let mut current = String::from("/");
+        for component in normalized
+            .split('/')
+            .filter(|component| !component.is_empty())
+        {
+            current = if current == "/" {
+                format!("/{component}")
+            } else {
+                format!("{current}/{component}")
+            };
+            if self.storage_lstat(&current)?.is_none() {
+                created.push(current.clone());
+            }
+        }
+        Ok(created)
+    }
+
     fn check_write_file_limits(&mut self, path: &str, new_size: u64) -> KernelResult<()> {
         if is_virtual_device_storage_path(path) {
             return Ok(());
@@ -2850,6 +2975,9 @@ fn synthetic_character_device_stat(ino: u64) -> VirtualStat {
     VirtualStat {
         mode: 0o666,
         size: 0,
+        blocks: 0,
+        dev: 2,
+        rdev: 0,
         is_directory: false,
         is_symbolic_link: false,
         atime_ms: now,
@@ -2868,6 +2996,9 @@ fn proc_dir_stat(ino: u64) -> VirtualStat {
     VirtualStat {
         mode: 0o555,
         size: 0,
+        blocks: 0,
+        dev: 3,
+        rdev: 0,
         is_directory: true,
         is_symbolic_link: false,
         atime_ms: now,
@@ -2886,6 +3017,9 @@ fn proc_file_stat(ino: u64, size: u64) -> VirtualStat {
     VirtualStat {
         mode: 0o444,
         size,
+        blocks: if size == 0 { 0 } else { size.div_ceil(512) },
+        dev: 3,
+        rdev: 0,
         is_directory: false,
         is_symbolic_link: false,
         atime_ms: now,
@@ -2904,6 +3038,9 @@ fn proc_symlink_stat(ino: u64, size: u64) -> VirtualStat {
     VirtualStat {
         mode: 0o777,
         size,
+        blocks: if size == 0 { 0 } else { size.div_ceil(512) },
+        dev: 3,
+        rdev: 0,
         is_directory: false,
         is_symbolic_link: true,
         atime_ms: now,
@@ -2995,6 +3132,7 @@ mod tests {
                 ppid: 0,
                 env: BTreeMap::new(),
                 cwd: String::from("/"),
+                umask: DEFAULT_PROCESS_UMASK,
                 fds: Default::default(),
             },
             Arc::new(StubDriverProcess::default()),
@@ -3011,6 +3149,7 @@ mod tests {
                 ppid: leader_pid,
                 env: BTreeMap::new(),
                 cwd: String::from("/"),
+                umask: DEFAULT_PROCESS_UMASK,
                 fds: Default::default(),
             },
             Arc::new(StubDriverProcess::default()),

@@ -13,6 +13,9 @@ export interface VirtualDirEntry {
 export interface VirtualStat {
 	mode: number;
 	size: number;
+	blocks: number;
+	dev: number;
+	rdev: number;
 	isDirectory: boolean;
 	isSymbolicLink: boolean;
 	atimeMs: number;

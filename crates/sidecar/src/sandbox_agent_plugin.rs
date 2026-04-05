@@ -119,6 +119,13 @@ impl SandboxAgentFilesystem {
                 S_IFREG | 0o644
             },
             size: stat.size,
+            blocks: if stat.size == 0 {
+                0
+            } else {
+                stat.size.div_ceil(512)
+            },
+            dev: 1,
+            rdev: 0,
             is_directory,
             is_symbolic_link: false,
             atime_ms: modified_ms,

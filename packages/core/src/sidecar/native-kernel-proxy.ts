@@ -1655,6 +1655,9 @@ function toVirtualStat(stat: GuestFilesystemStat): VirtualStat {
 	return {
 		mode: stat.mode,
 		size: stat.size,
+		blocks: stat.blocks,
+		dev: stat.dev,
+		rdev: stat.rdev,
 		isDirectory: stat.is_directory,
 		isSymbolicLink: stat.is_symbolic_link,
 		atimeMs: stat.atime_ms,

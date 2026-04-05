@@ -268,6 +268,9 @@ fn device_stat(path: &str) -> VirtualStat {
     VirtualStat {
         mode: 0o666,
         size: 0,
+        blocks: 0,
+        dev: 2,
+        rdev: device_rdev(path),
         is_directory: false,
         is_symbolic_link: false,
         atime_ms: now,
@@ -286,6 +289,9 @@ fn device_dir_stat(path: &str) -> VirtualStat {
     VirtualStat {
         mode: 0o755,
         size: 0,
+        blocks: 0,
+        dev: 2,
+        rdev: 0,
         is_directory: true,
         is_symbolic_link: false,
         atime_ms: now,
@@ -309,6 +315,22 @@ fn device_ino(path: &str) -> u64 {
         "/dev/urandom" => 0xffff_0006,
         _ => 0xffff_0000,
     }
+}
+
+fn device_rdev(path: &str) -> u64 {
+    match path {
+        "/dev/null" => encode_device_id(1, 3),
+        "/dev/zero" => encode_device_id(1, 5),
+        "/dev/stdin" => encode_device_id(5, 0),
+        "/dev/stdout" => encode_device_id(5, 1),
+        "/dev/stderr" => encode_device_id(5, 2),
+        "/dev/urandom" => encode_device_id(1, 9),
+        _ => 0,
+    }
+}
+
+fn encode_device_id(major: u64, minor: u64) -> u64 {
+    (major << 8) | minor
 }
 
 fn random_bytes(length: usize) -> VfsResult<Vec<u8>> {

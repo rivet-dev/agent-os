@@ -321,6 +321,9 @@ fn kernel_fd_surface_supports_open_seek_positional_io_dup_and_dev_fd_views() {
         .dev_fd_stat("shell", process.pid(), fd)
         .expect("stat regular file fd");
     assert_eq!(file_stat.size, 5);
+    assert_eq!(file_stat.blocks, 1);
+    assert_eq!(file_stat.dev, 1);
+    assert_eq!(file_stat.rdev, 0);
     assert!(!file_stat.is_directory);
 
     let (read_fd, write_fd) = kernel.open_pipe("shell", process.pid()).expect("open pipe");
@@ -346,7 +349,63 @@ fn kernel_fd_surface_supports_open_seek_positional_io_dup_and_dev_fd_views() {
         .expect("stat pipe fd");
     assert_eq!(pipe_stat.mode, 0o666);
     assert_eq!(pipe_stat.size, 0);
+    assert_eq!(pipe_stat.blocks, 0);
+    assert_eq!(pipe_stat.dev, 2);
     assert!(!pipe_stat.is_directory);
+
+    process.finish(0);
+    kernel.waitpid(process.pid()).expect("wait for shell");
+}
+
+#[test]
+fn kernel_process_umask_applies_to_created_files_and_directories() {
+    let mut config = KernelVmConfig::new("vm-api-umask");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let process = spawn_shell(&mut kernel);
+    assert_eq!(
+        kernel
+            .umask("shell", process.pid(), None)
+            .expect("read default umask"),
+        0o022
+    );
+    assert_eq!(
+        kernel
+            .umask("shell", process.pid(), Some(0o027))
+            .expect("set umask"),
+        0o022
+    );
+
+    let created_fd = kernel
+        .fd_open(
+            "shell",
+            process.pid(),
+            "/tmp/umask-file.txt",
+            O_CREAT | O_RDWR,
+            Some(0o666),
+        )
+        .expect("create file with umask");
+    kernel
+        .fd_close("shell", process.pid(), created_fd)
+        .expect("close created fd");
+    let file_stat = kernel.stat("/tmp/umask-file.txt").expect("stat umask file");
+    assert_eq!(file_stat.mode & 0o777, 0o640);
+
+    kernel
+        .mkdir_for_process(
+            "shell",
+            process.pid(),
+            "/tmp/private-dir",
+            false,
+            Some(0o777),
+        )
+        .expect("create directory with umask");
+    let dir_stat = kernel.stat("/tmp/private-dir").expect("stat private dir");
+    assert_eq!(dir_stat.mode & 0o777, 0o750);
 
     process.finish(0);
     kernel.waitpid(process.pid()).expect("wait for shell");

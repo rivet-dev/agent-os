@@ -2645,6 +2645,14 @@ function requireFsSyncRpcBridge() {
   return requireAgentOsSyncRpcBridge();
 }
 
+function guestProcessUmask(mask) {
+  const bridge = requireAgentOsSyncRpcBridge();
+  if (mask == null) {
+    return bridge.callSync('process.umask', []);
+  }
+  return bridge.callSync('process.umask', [normalizeFsMode(mask) ?? 0]);
+}
+
 function createRpcBackedFsPromises(fromGuestDir = '/') {
   const call = (method, args = []) => requireFsSyncRpcBridge().call(method, args);
 
@@ -7294,6 +7302,7 @@ function installGuestHardening() {
   hardenProperty(process, 'uptime', guestProcessUptime);
   hardenProperty(process, 'getuid', guestGetUid);
   hardenProperty(process, 'getgid', guestGetGid);
+  hardenProperty(process, 'umask', guestProcessUmask);
 
   hardenProperty(process, 'binding', () => {
     throw accessDenied('process.binding');

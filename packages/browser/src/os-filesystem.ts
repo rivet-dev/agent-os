@@ -468,9 +468,13 @@ export class InMemoryFileSystem implements VirtualFileSystem {
 	}
 
 	private toStat(entry: Entry): VirtualStat {
+		const size = entry.type === "file" ? entry.data.length : 4096;
 		return {
 			mode: entry.mode,
-			size: entry.type === "file" ? entry.data.length : 4096,
+			size,
+			blocks: size === 0 ? 0 : Math.ceil(size / 512),
+			dev: 1,
+			rdev: 0,
 			isDirectory: entry.type === "dir",
 			isSymbolicLink: entry.type === "symlink",
 			atimeMs: entry.atimeMs,

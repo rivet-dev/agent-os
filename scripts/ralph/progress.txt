@@ -1,5 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Per-process filesystem state such as `umask` belongs in `ProcessContext` / `ProcessTable`; when guest Node code needs it, thread it through `crates/kernel/src/kernel.rs`, `crates/sidecar/src/service.rs`, and `crates/execution/src/node_import_cache.rs` together instead of reading host `process`.
+- `VirtualStat` field additions must be propagated as one bundle across kernel stat producers, sidecar protocol serialization, mount/plugin adapters, and the TypeScript `VirtualStat` / `GuestFilesystemStat` surfaces or some callers will silently keep incomplete metadata.
 - Filesystem errno hardening usually needs both layers updated together: enforce fast-fail guest-path validation in `crates/kernel/src/permissions.rs` so overlong paths do not degrade into permission errors, and keep `crates/kernel/src/vfs.rs` path traversal authoritative for semantic errors like `ENOTDIR`.
 - Job-control signal state transitions should be split by layer: `crates/kernel/src/process_table.rs` owns `SIGSTOP`/`SIGTSTP`/`SIGCONT` status changes and `waitpid` notifications, while `crates/kernel/src/kernel.rs` should emit PTY-driven `SIGWINCH` after the PTY layer reports the foreground process group.
 - Guest path scrubbing in `crates/execution/src/node_import_cache.rs` should treat `HOST_CWD` as an implicit runtime-only mapping to the virtual guest cwd for entrypoint loading and stack traces, and only fall back to `/unknown` for absolute host paths outside visible mappings or internal cache roots.
@@ -1435,4 +1437,36 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Job-control signal state transitions should be split by layer: `ProcessTable::kill(...)` owns `SIGSTOP`/`SIGTSTP`/`SIGCONT` status changes and `waitpid` notifications, while `KernelVm` entrypoints should emit PTY-driven `SIGWINCH` after the PTY layer reports the foreground process group.
   - Gotchas encountered: The kernel’s stub driver treats any signal as fatal unless explicitly exempted, so kernel tests that add non-terminating signals such as `SIGSTOP`, `SIGCONT`, `SIGTSTP`, or `SIGWINCH` must keep `StubDriverProcess::kill(...)` aligned with Linux job-control semantics.
   - Useful context: `cargo fmt --all`, `cargo check -p agent-os-kernel -p agent-os-sidecar`, `cargo test -p agent-os-kernel --test process_table -- --nocapture`, `cargo test -p agent-os-kernel --test api_surface -- --nocapture`, `cargo test -p agent-os-kernel --test pty -- --nocapture`, `cargo test -p agent-os-sidecar parse_signal_only_accepts_whitelisted_guest_signals -- --nocapture`, and `pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts -t "delivers SIGSTOP and SIGCONT through killProcess"` all pass after this change.
+---
+## 2026-04-05 11:49:44 PDT - US-077
+- What was implemented
+- Added per-process `umask` state in `crates/kernel/src/process_table.rs`, exposed it through `KernelVm::umask(...)`, and applied it to file and directory creation paths in `crates/kernel/src/kernel.rs`, including `O_CREAT`, direct write helpers, and recursive `mkdir`.
+- Extended `VirtualStat` with `blocks`, `dev`, and `rdev`, filled those fields across kernel VFS stats, synthetic `/dev` and `/proc` entries, sidecar host-dir and sandbox-agent mounts, sidecar protocol serialization, and the TypeScript runtime adapters in `packages/core` and `packages/browser`.
+- Updated filesystem timestamp behavior so directory reads refresh `atime` and metadata-changing operations such as `link`, `rename`, and unlink-style removals refresh `ctime`, then added regressions covering kernel umask behavior, stat field propagation, timestamp updates, and guest Node `process.umask()` plus `fs` integration.
+- Files changed
+- `AGENTS.md`
+- `CLAUDE.md`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/kernel/src/device_layer.rs`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/src/process_table.rs`
+- `crates/kernel/src/vfs.rs`
+- `crates/kernel/tests/api_surface.rs`
+- `crates/kernel/tests/vfs.rs`
+- `crates/sidecar/src/host_dir_plugin.rs`
+- `crates/sidecar/src/protocol.rs`
+- `crates/sidecar/src/sandbox_agent_plugin.rs`
+- `crates/sidecar/src/service.rs`
+- `packages/browser/src/driver.ts`
+- `packages/browser/src/os-filesystem.ts`
+- `packages/browser/src/runtime.ts`
+- `packages/core/src/runtime.ts`
+- `packages/core/src/sidecar/native-kernel-proxy.ts`
+- `packages/core/src/sidecar/native-process-client.ts`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Per-process filesystem state such as `umask` belongs in `ProcessContext` / `ProcessTable`; if guest Node code needs it, the kernel entrypoint and the JS sync-RPC bridge have to move together.
+  - Gotchas encountered: `VirtualStat` changes are easy to land incompletely because synthetic kernel stats, sidecar mount/plugin adapters, protocol structs, and TypeScript runtime types all have their own copy paths.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test vfs --test api_surface`, `cargo check -p agent-os-kernel -p agent-os-sidecar -p agent-os-execution`, `cargo test -p agent-os-sidecar javascript_fd_and_stream_rpc_requests_proxy_into_the_vm_kernel_filesystem -- --nocapture`, and `pnpm -C /home/nathan/a5 --filter @rivet-dev/agent-os-core run check-types` all pass after this change. `pnpm -C /home/nathan/a5 --filter @rivet-dev/agent-os-browser run check-types` is blocked in this checkout because `packages/browser` has no local `node_modules` and fails with `tsc: not found`.
 ---

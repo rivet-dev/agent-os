@@ -1,5 +1,5 @@
 use agent_os_kernel::vfs::{normalize_path, MemoryFileSystem, VirtualFileSystem, S_IFLNK, S_IFREG};
-use std::fmt::Debug;
+use std::{fmt::Debug, thread::sleep, time::Duration};
 
 fn assert_error_code<T: Debug>(result: agent_os_kernel::vfs::VfsResult<T>, expected: &str) {
     let error = result.expect_err("operation should fail");
@@ -273,6 +273,9 @@ fn chmod_chown_utimes_truncate_and_pread_update_metadata_and_contents() {
     assert_eq!(stat.atime_ms, 1_700_000_000_000);
     assert_eq!(stat.mtime_ms, 1_710_000_000_000);
     assert_eq!(stat.size, 8);
+    assert_eq!(stat.blocks, 1);
+    assert_eq!(stat.dev, 1);
+    assert_eq!(stat.rdev, 0);
 
     let bytes = filesystem
         .read_file("/meta.txt")
@@ -290,6 +293,49 @@ fn chmod_chown_utimes_truncate_and_pread_update_metadata_and_contents() {
         .pread("/meta.txt", 100, 4)
         .expect("pread beyond eof")
         .is_empty());
+}
+
+#[test]
+fn directory_reads_and_metadata_updates_refresh_timestamps() {
+    let mut filesystem = MemoryFileSystem::new();
+    filesystem
+        .write_file("/workspace/file.txt", "hello")
+        .expect("seed file");
+
+    let before_dir_read = filesystem.stat("/workspace").expect("stat workspace");
+    sleep(Duration::from_millis(2));
+    filesystem
+        .read_dir("/workspace")
+        .expect("read workspace directory");
+    let after_dir_read = filesystem.stat("/workspace").expect("restat workspace");
+    assert!(
+        after_dir_read.atime_ms > before_dir_read.atime_ms,
+        "directory atime should advance after read_dir"
+    );
+
+    let before_link = filesystem.stat("/workspace/file.txt").expect("stat file");
+    sleep(Duration::from_millis(2));
+    filesystem
+        .link("/workspace/file.txt", "/workspace/file-link.txt")
+        .expect("create hard link");
+    let after_link = filesystem.stat("/workspace/file.txt").expect("restat file");
+    assert!(
+        after_link.ctime_ms > before_link.ctime_ms,
+        "ctime should advance when link count changes"
+    );
+
+    let before_rename = after_link.ctime_ms;
+    sleep(Duration::from_millis(2));
+    filesystem
+        .rename("/workspace/file-link.txt", "/workspace/file-renamed.txt")
+        .expect("rename linked path");
+    let renamed = filesystem
+        .stat("/workspace/file-renamed.txt")
+        .expect("stat renamed path");
+    assert!(
+        renamed.ctime_ms > before_rename,
+        "ctime should advance on rename"
+    );
 }
 
 #[test]

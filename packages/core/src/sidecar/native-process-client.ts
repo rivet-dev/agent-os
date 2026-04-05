@@ -74,6 +74,9 @@ type WireRootFilesystemEntry = {
 export interface GuestFilesystemStat {
 	mode: number;
 	size: number;
+	blocks: number;
+	dev: number;
+	rdev: number;
 	is_directory: boolean;
 	is_symbolic_link: boolean;
 	atime_ms: number;

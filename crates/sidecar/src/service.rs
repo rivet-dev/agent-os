@@ -569,6 +569,13 @@ impl<B> HostFilesystem<B> {
         let mut stat = VirtualStat {
             mode: metadata.mode,
             size: metadata.size,
+            blocks: if metadata.size == 0 {
+                0
+            } else {
+                metadata.size.div_ceil(512)
+            },
+            dev: 1,
+            rdev: 0,
             is_directory: metadata.kind == FileKind::Directory,
             is_symbolic_link: metadata.kind == FileKind::SymbolicLink,
             atime_ms: 0,
@@ -5695,6 +5702,9 @@ fn guest_filesystem_stat(stat: VirtualStat) -> GuestFilesystemStat {
     GuestFilesystemStat {
         mode: stat.mode,
         size: stat.size,
+        blocks: stat.blocks,
+        dev: stat.dev,
+        rdev: stat.rdev,
         is_directory: stat.is_directory,
         is_symbolic_link: stat.is_symbolic_link,
         atime_ms: stat.atime_ms,
@@ -7256,6 +7266,41 @@ fn javascript_sync_rpc_option_bool(args: &[Value], index: usize, key: &str) -> O
         .and_then(Value::as_bool)
 }
 
+fn javascript_sync_rpc_option_u32(
+    args: &[Value],
+    index: usize,
+    key: &str,
+) -> Result<Option<u32>, SidecarError> {
+    let Some(value) = args.get(index).and_then(|value| {
+        if value.is_object() {
+            value.get(key)
+        } else if key == "mode" {
+            Some(value)
+        } else {
+            None
+        }
+    }) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    let numeric = value
+        .as_u64()
+        .or_else(|| {
+            value
+                .as_f64()
+                .filter(|number| number.is_finite() && *number >= 0.0)
+                .map(|number| number as u64)
+        })
+        .ok_or_else(|| SidecarError::InvalidState(format!("{key} must be numeric")))?;
+
+    u32::try_from(numeric)
+        .map(Some)
+        .map_err(|_| SidecarError::InvalidState(format!("{key} must fit within u32")))
+}
+
 fn javascript_sync_rpc_arg_u32(
     args: &[Value],
     index: usize,
@@ -7317,6 +7362,9 @@ fn javascript_sync_rpc_stat_value(stat: VirtualStat) -> Value {
     json!({
         "mode": stat.mode,
         "size": stat.size,
+        "blocks": stat.blocks,
+        "dev": stat.dev,
+        "rdev": stat.rdev,
         "isDirectory": stat.is_directory,
         "isSymbolicLink": stat.is_symbolic_link,
         "atimeMs": stat.atime_ms,
@@ -7425,6 +7473,13 @@ where
                 resource_limits,
                 network_counts,
             )
+        }
+        "process.umask" => {
+            let new_mask = javascript_sync_rpc_arg_u32_optional(&request.args, 0, "process umask")?;
+            kernel
+                .umask(EXECUTION_DRIVER_NAME, process.kernel_pid, new_mask)
+                .map(|mask| json!(mask))
+                .map_err(kernel_error)
         }
         _ => service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request),
     }
@@ -8200,7 +8255,13 @@ fn service_javascript_fs_sync_rpc(
             let contents =
                 javascript_sync_rpc_bytes_arg(&request.args, 1, "filesystem writeFile contents")?;
             kernel
-                .write_file(path, contents)
+                .write_file_for_process(
+                    EXECUTION_DRIVER_NAME,
+                    kernel_pid,
+                    path,
+                    contents,
+                    javascript_sync_rpc_option_u32(&request.args, 2, "mode")?,
+                )
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
         }
@@ -8230,7 +8291,13 @@ fn service_javascript_fs_sync_rpc(
             let recursive =
                 javascript_sync_rpc_option_bool(&request.args, 1, "recursive").unwrap_or(false);
             kernel
-                .mkdir(path, recursive)
+                .mkdir_for_process(
+                    EXECUTION_DRIVER_NAME,
+                    kernel_pid,
+                    path,
+                    recursive,
+                    javascript_sync_rpc_option_u32(&request.args, 1, "mode")?,
+                )
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
         }
@@ -8250,7 +8317,13 @@ fn service_javascript_fs_sync_rpc(
                 .read_file_for_process(EXECUTION_DRIVER_NAME, kernel_pid, source)
                 .map_err(kernel_error)?;
             kernel
-                .write_file(destination, contents)
+                .write_file_for_process(
+                    EXECUTION_DRIVER_NAME,
+                    kernel_pid,
+                    destination,
+                    contents,
+                    None,
+                )
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
         }
@@ -10550,9 +10623,14 @@ const bytesRead = fs.readSync(inFd, buffer, 0, buffer.length, 1);
 const stat = fs.fstatSync(inFd);
 fs.closeSync(inFd);
 
-const outFd = fs.openSync("/rpc/output.txt", "w");
+const defaultUmask = process.umask();
+const previousUmask = process.umask(0o027);
+const outFd = fs.openSync("/rpc/output.txt", "w", 0o666);
 const written = fs.writeSync(outFd, Buffer.from("kernel"), 0, 6, 0);
 fs.closeSync(outFd);
+fs.mkdirSync("/rpc/private", { mode: 0o777 });
+const outputStat = fs.statSync("/rpc/output.txt");
+const privateDirStat = fs.statSync("/rpc/private");
 
 const asyncSummary = await new Promise((resolve, reject) => {
   fs.open("/rpc/input.txt", "r", (openError, asyncFd) => {
@@ -10624,7 +10702,14 @@ console.log(
     text: buffer.toString("utf8"),
     bytesRead,
     size: stat.size,
+    blocks: stat.blocks,
+    dev: stat.dev,
+    rdev: stat.rdev,
     written,
+    defaultUmask,
+    previousUmask,
+    outputMode: outputStat.mode & 0o777,
+    privateDirMode: privateDirStat.mode & 0o777,
     asyncSummary,
     streamChunks,
     watchCode,
@@ -10730,7 +10815,17 @@ console.log(
         assert!(stdout.contains("\"text\":\"bcdef\""), "stdout: {stdout}");
         assert!(stdout.contains("\"bytesRead\":5"), "stdout: {stdout}");
         assert!(stdout.contains("\"size\":7"), "stdout: {stdout}");
+        assert!(stdout.contains("\"blocks\":1"), "stdout: {stdout}");
+        assert!(stdout.contains("\"dev\":1"), "stdout: {stdout}");
+        assert!(stdout.contains("\"rdev\":0"), "stdout: {stdout}");
         assert!(stdout.contains("\"written\":6"), "stdout: {stdout}");
+        assert!(stdout.contains("\"defaultUmask\":18"), "stdout: {stdout}");
+        assert!(stdout.contains("\"previousUmask\":18"), "stdout: {stdout}");
+        assert!(stdout.contains("\"outputMode\":416"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("\"privateDirMode\":488"),
+            "stdout: {stdout}"
+        );
         assert!(
             stdout.contains("\"asyncText\":\"abcde\""),
             "stdout: {stdout}"

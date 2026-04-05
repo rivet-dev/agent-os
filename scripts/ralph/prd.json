@@ -1222,7 +1222,7 @@
         "Typecheck passes"
       ],
       "priority": 77,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: No umask implementation. stat missing blocks/dev fields. atime only updated on pread, not general reads. ctime inconsistently updated."
     },
     {

@@ -179,6 +179,9 @@ export class OpfsFileSystem implements VirtualFileSystem {
 			return {
 				mode: S_IFREG | 0o644,
 				size: file.size,
+				blocks: file.size === 0 ? 0 : Math.ceil(file.size / 512),
+				dev: 1,
+				rdev: 0,
 				isDirectory: false,
 				isSymbolicLink: false,
 				atimeMs: file.lastModified,
@@ -198,6 +201,9 @@ export class OpfsFileSystem implements VirtualFileSystem {
 				return {
 					mode: S_IFDIR | 0o755,
 					size: 4096,
+					blocks: 8,
+					dev: 1,
+					rdev: 0,
 					isDirectory: true,
 					isSymbolicLink: false,
 					atimeMs: now,

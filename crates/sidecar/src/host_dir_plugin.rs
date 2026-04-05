@@ -282,6 +282,9 @@ impl HostDirFilesystem {
         VirtualStat {
             mode: metadata.mode(),
             size: metadata.size(),
+            blocks: metadata.blocks(),
+            dev: metadata.dev(),
+            rdev: metadata.rdev(),
             is_directory: metadata.is_dir(),
             is_symbolic_link: metadata.file_type().is_symlink(),
             atime_ms,
@@ -307,6 +310,9 @@ impl HostDirFilesystem {
         VirtualStat {
             mode: stat.st_mode,
             size: stat.st_size as u64,
+            blocks: stat.st_blocks as u64,
+            dev: stat.st_dev,
+            rdev: stat.st_rdev,
             is_directory: file_type == SFlag::S_IFDIR,
             is_symbolic_link: file_type == SFlag::S_IFLNK,
             atime_ms,

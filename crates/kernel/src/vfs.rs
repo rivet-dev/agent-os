@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const S_IFREG: u32 = 0o100000;
 pub const S_IFDIR: u32 = 0o040000;
 pub const S_IFLNK: u32 = 0o120000;
+const MEMORY_FILESYSTEM_DEVICE_ID: u64 = 1;
 
 const DEFAULT_UID: u32 = 1000;
 const DEFAULT_GID: u32 = 1000;
@@ -131,6 +132,9 @@ pub struct VirtualDirEntry {
 pub struct VirtualStat {
     pub mode: u32,
     pub size: u64,
+    pub blocks: u64,
+    pub dev: u64,
+    pub rdev: u64,
     pub is_directory: bool,
     pub is_symbolic_link: bool,
     pub atime_ms: u64,
@@ -499,6 +503,11 @@ impl MemoryFileSystem {
             return Err(VfsError::is_directory("unlink", path));
         }
 
+        self.inodes
+            .get_mut(&ino)
+            .expect("inode should exist when unlinking")
+            .metadata
+            .ctime_ms = now_ms();
         self.path_index.remove(&normalized);
         self.decrement_link_count(ino);
         Ok(())
@@ -526,6 +535,11 @@ impl MemoryFileSystem {
             }
         }
 
+        self.inodes
+            .get_mut(&ino)
+            .expect("inode should exist when removing destination")
+            .metadata
+            .ctime_ms = now_ms();
         self.path_index.remove(&normalized);
         self.decrement_link_count(ino);
         Ok(())
@@ -556,6 +570,9 @@ impl MemoryFileSystem {
         VirtualStat {
             mode: inode.metadata.mode,
             size,
+            blocks: block_count_for_size(size),
+            dev: MEMORY_FILESYSTEM_DEVICE_ID,
+            rdev: 0,
             is_directory: matches!(inode.kind, InodeKind::Directory),
             is_symbolic_link: matches!(inode.kind, InodeKind::SymbolicLink { .. }),
             atime_ms: inode.metadata.atime_ms,
@@ -676,6 +693,9 @@ impl VirtualFileSystem for MemoryFileSystem {
     fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
         self.assert_directory_path(path, "scandir")?;
         let resolved = self.resolve_path(path, 0)?;
+        self.inode_mut_for_existing_path(&resolved, "scandir", false)?
+            .metadata
+            .atime_ms = now_ms();
         let prefix = if resolved == "/" {
             String::from("/")
         } else {
@@ -710,6 +730,9 @@ impl VirtualFileSystem for MemoryFileSystem {
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
         self.assert_directory_path(path, "scandir")?;
         let resolved = self.resolve_path(path, 0)?;
+        self.inode_mut_for_existing_path(&resolved, "scandir", false)?
+            .metadata
+            .atime_ms = now_ms();
         let prefix = if resolved == "/" {
             String::from("/")
         } else {
@@ -960,6 +983,11 @@ impl VirtualFileSystem for MemoryFileSystem {
         if !is_directory {
             self.path_index.remove(&old_normalized);
             self.path_index.insert(new_normalized, ino);
+            self.inodes
+                .get_mut(&ino)
+                .expect("renamed inode should exist")
+                .metadata
+                .ctime_ms = now_ms();
             return Ok(());
         }
 
@@ -983,6 +1011,12 @@ impl VirtualFileSystem for MemoryFileSystem {
             };
             self.path_index.insert(relocated_path, inode_id);
         }
+
+        self.inodes
+            .get_mut(&ino)
+            .expect("renamed directory inode should exist")
+            .metadata
+            .ctime_ms = now_ms();
 
         Ok(())
     }
@@ -1031,11 +1065,12 @@ impl VirtualFileSystem for MemoryFileSystem {
 
         self.assert_directory_path(&dirname(&normalized), "link")?;
         self.path_index.insert(normalized, ino);
-        self.inodes
+        let inode = self
+            .inodes
             .get_mut(&ino)
-            .expect("path index should always point at a valid inode")
-            .metadata
-            .nlink += 1;
+            .expect("path index should always point at a valid inode");
+        inode.metadata.nlink += 1;
+        inode.metadata.ctime_ms = now_ms();
         Ok(())
     }
 
@@ -1140,6 +1175,14 @@ pub fn normalize_path(path: &str) -> String {
         String::from("/")
     } else {
         format!("/{}", resolved.join("/"))
+    }
+}
+
+fn block_count_for_size(size: u64) -> u64 {
+    if size == 0 {
+        0
+    } else {
+        size.div_ceil(512)
     }
 }
 

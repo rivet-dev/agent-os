@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ZOMBIE_TTL: Duration = Duration::from_secs(60);
 const INIT_PID: u32 = 1;
+pub const DEFAULT_PROCESS_UMASK: u32 = 0o022;
 pub const SIGHUP: i32 = 1;
 pub const SIGCHLD: i32 = 17;
 pub const SIGCONT: i32 = 18;
@@ -168,6 +169,7 @@ pub struct ProcessContext {
     pub ppid: u32,
     pub env: BTreeMap<String, String>,
     pub cwd: String,
+    pub umask: u32,
     pub fds: ProcessFileDescriptors,
 }
 
@@ -178,6 +180,7 @@ impl Default for ProcessContext {
             ppid: 0,
             env: BTreeMap::new(),
             cwd: String::from("/"),
+            umask: DEFAULT_PROCESS_UMASK,
             fds: ProcessFileDescriptors::default(),
         }
     }
@@ -197,6 +200,7 @@ pub struct ProcessEntry {
     pub exit_time_ms: Option<u64>,
     pub env: BTreeMap<String, String>,
     pub cwd: String,
+    pub umask: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,6 +346,7 @@ impl ProcessTable {
             exit_time_ms: None,
             env: ctx.env,
             cwd: ctx.cwd,
+            umask: ctx.umask & 0o777,
         };
 
         let weak = Arc::downgrade(&self.inner);
@@ -603,6 +608,23 @@ impl ProcessTable {
         self.get(pid)
             .map(|entry| entry.ppid)
             .ok_or_else(|| ProcessTableError::no_such_process(pid))
+    }
+
+    pub fn get_umask(&self, pid: u32) -> ProcessResult<u32> {
+        self.get(pid)
+            .map(|entry| entry.umask)
+            .ok_or_else(|| ProcessTableError::no_such_process(pid))
+    }
+
+    pub fn set_umask(&self, pid: u32, umask: u32) -> ProcessResult<u32> {
+        let mut state = self.inner.lock_state();
+        let record = state
+            .entries
+            .get_mut(&pid)
+            .ok_or_else(|| ProcessTableError::no_such_process(pid))?;
+        let previous = record.entry.umask;
+        record.entry.umask = umask & 0o777;
+        Ok(previous)
     }
 
     pub fn has_process_group(&self, pgid: u32) -> bool {

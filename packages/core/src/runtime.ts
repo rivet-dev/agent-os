@@ -97,6 +97,9 @@ export interface VirtualDirEntry {
 export interface VirtualStat {
 	mode: number;
 	size: number;
+	blocks: number;
+	dev: number;
+	rdev: number;
 	isDirectory: boolean;
 	isSymbolicLink: boolean;
 	atimeMs: number;
@@ -859,9 +862,13 @@ export class InMemoryFileSystem implements VirtualFileSystem {
 	}
 
 	private toStat(entry: MemoryEntry): VirtualStat {
+		const size = entry.type === "file" ? entry.data.length : 4096;
 		return {
 			mode: entry.mode,
-			size: entry.type === "file" ? entry.data.length : 4096,
+			size,
+			blocks: size === 0 ? 0 : Math.ceil(size / 512),
+			dev: 1,
+			rdev: 0,
 			isDirectory: entry.type === "dir",
 			isSymbolicLink: entry.type === "symlink",
 			atimeMs: entry.atimeMs,
@@ -900,9 +907,17 @@ export class NodeFileSystem implements VirtualFileSystem {
 	}
 
 	private toStat(stat: fsSync.Stats): VirtualStat {
+		const posixStat = stat as fsSync.Stats & {
+			blocks?: number;
+			dev?: number;
+			rdev?: number;
+		};
 		return {
 			mode: stat.mode,
 			size: stat.size,
+			blocks: posixStat.blocks ?? (stat.size === 0 ? 0 : Math.ceil(stat.size / 512)),
+			dev: posixStat.dev ?? 1,
+			rdev: posixStat.rdev ?? 0,
 			isDirectory: stat.isDirectory(),
 			isSymbolicLink: stat.isSymbolicLink(),
 			atimeMs: Math.trunc(stat.atimeMs),
