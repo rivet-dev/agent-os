@@ -76,6 +76,13 @@ const ALLOWED_BUILTINS = new Set(parseJsonArray(process.env.AGENT_OS_ALLOWED_NOD
 const CACHE_PATH = process.env.__NODE_IMPORT_CACHE_PATH_ENV__;
 const CACHE_ROOT = CACHE_PATH ? path.dirname(CACHE_PATH) : null;
 const GUEST_INTERNAL_CACHE_ROOT = '/.agent-os/node-import-cache';
+const HOST_CWD = process.cwd();
+const DEFAULT_GUEST_CWD =
+  typeof process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR === 'string' &&
+  process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR.startsWith('/')
+    ? path.posix.normalize(process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR)
+    : '/root';
+const UNMAPPED_GUEST_PATH = '/unknown';
 const PROJECTED_SOURCE_CACHE_ROOT = CACHE_PATH
   ? path.join(path.dirname(CACHE_PATH), 'projected-sources')
   : null;
@@ -1350,8 +1357,7 @@ function translateResolvedUrlToGuest(url) {
     return url;
   }
 
-  const guestPath = guestPathFromHostPath(hostPath);
-  return guestPath ? pathToFileURL(guestPath).href : url;
+  return pathToFileURL(guestVisiblePathFromHostPath(hostPath)).href;
 }
 
 function translateResolvedUrlToHost(url) {
@@ -1399,6 +1405,18 @@ function hostPathFromGuestPath(guestPath) {
   }
 
   const normalized = path.posix.normalize(guestPath);
+  if (
+    CACHE_ROOT &&
+    (normalized === GUEST_INTERNAL_CACHE_ROOT ||
+      normalized.startsWith(`${GUEST_INTERNAL_CACHE_ROOT}/`))
+  ) {
+    const suffix =
+      normalized === GUEST_INTERNAL_CACHE_ROOT
+        ? ''
+        : normalized.slice(GUEST_INTERNAL_CACHE_ROOT.length + 1);
+    return suffix ? path.join(CACHE_ROOT, ...suffix.split('/')) : CACHE_ROOT;
+  }
+
   for (const mapping of GUEST_PATH_MAPPINGS) {
     if (mapping.guestPath === '/') {
       const suffix = normalized.replace(/^\/+/, '');
@@ -1417,6 +1435,17 @@ function hostPathFromGuestPath(guestPath) {
         ? ''
         : normalized.slice(mapping.guestPath.length + 1);
     return suffix ? path.join(mapping.hostPath, suffix) : mapping.hostPath;
+  }
+
+  if (
+    normalized === DEFAULT_GUEST_CWD ||
+    normalized.startsWith(`${DEFAULT_GUEST_CWD}/`)
+  ) {
+    const suffix =
+      normalized === DEFAULT_GUEST_CWD
+        ? ''
+        : normalized.slice(DEFAULT_GUEST_CWD.length + 1);
+    return suffix ? path.join(HOST_CWD, ...suffix.split('/')) : HOST_CWD;
   }
 
   return null;
@@ -1452,6 +1481,29 @@ function guestPathFromHostPath(hostPath) {
   return null;
 }
 
+function guestCwdPathFromHostPath(hostPath) {
+  if (typeof hostPath !== 'string') {
+    return null;
+  }
+
+  const normalized = path.resolve(hostPath);
+  const hostRoot = path.resolve(HOST_CWD);
+  if (
+    normalized !== hostRoot &&
+    !normalized.startsWith(`${hostRoot}${path.sep}`)
+  ) {
+    return null;
+  }
+
+  const suffix =
+    normalized === hostRoot
+      ? ''
+      : normalized.slice(hostRoot.length + path.sep.length);
+  return suffix
+    ? path.posix.join(DEFAULT_GUEST_CWD, suffix.split(path.sep).join('/'))
+    : DEFAULT_GUEST_CWD;
+}
+
 function guestInternalPathFromHostPath(hostPath) {
   if (typeof hostPath !== 'string' || !CACHE_ROOT) {
     return null;
@@ -1476,7 +1528,28 @@ function guestInternalPathFromHostPath(hostPath) {
 }
 
 function guestVisiblePathFromHostPath(hostPath) {
-  return guestPathFromHostPath(hostPath) ?? guestInternalPathFromHostPath(hostPath);
+  return (
+    guestPathFromHostPath(hostPath) ??
+    guestInternalPathFromHostPath(hostPath) ??
+    guestCwdPathFromHostPath(hostPath) ??
+    UNMAPPED_GUEST_PATH
+  );
+}
+
+function isGuestVisiblePath(value) {
+  if (typeof value !== 'string' || !path.posix.isAbsolute(value)) {
+    return false;
+  }
+
+  const normalized = path.posix.normalize(value);
+  return (
+    normalized === UNMAPPED_GUEST_PATH ||
+    normalized === GUEST_INTERNAL_CACHE_ROOT ||
+    normalized.startsWith(`${GUEST_INTERNAL_CACHE_ROOT}/`) ||
+    normalized === DEFAULT_GUEST_CWD ||
+    normalized.startsWith(`${DEFAULT_GUEST_CWD}/`) ||
+    hostPathFromGuestPath(normalized) != null
+  );
 }
 
 function translatePathStringToGuest(value) {
@@ -1486,15 +1559,23 @@ function translatePathStringToGuest(value) {
 
   if (value.startsWith('file:')) {
     const hostPath = guestFilePathFromUrl(value);
-    const guestPath = hostPath ? guestVisiblePathFromHostPath(hostPath) : null;
-    return guestPath ? pathToFileURL(guestPath).href : value;
+    if (!hostPath) {
+      return value;
+    }
+
+    const guestPath = isGuestVisiblePath(hostPath)
+      ? path.posix.normalize(hostPath)
+      : guestVisiblePathFromHostPath(hostPath);
+    return pathToFileURL(guestPath).href;
   }
 
   if (!path.isAbsolute(value)) {
     return value;
   }
 
-  return guestVisiblePathFromHostPath(value) ?? value;
+  return isGuestVisiblePath(value)
+    ? path.posix.normalize(value)
+    : guestVisiblePathFromHostPath(value);
 }
 
 function buildHostToGuestTextReplacements() {
@@ -1535,7 +1616,52 @@ function buildHostToGuestTextReplacements() {
     }
   }
 
+  if (!guestPathFromHostPath(HOST_CWD)) {
+    const hostRoot = path.resolve(HOST_CWD);
+    addReplacement(hostRoot, DEFAULT_GUEST_CWD);
+    addReplacement(pathToFileURL(hostRoot).href, pathToFileURL(DEFAULT_GUEST_CWD).href);
+    const forwardSlashHostRoot = hostRoot.split(path.sep).join('/');
+    if (forwardSlashHostRoot !== hostRoot) {
+      addReplacement(forwardSlashHostRoot, DEFAULT_GUEST_CWD);
+    }
+  }
+
   return [...replacements.entries()].sort((left, right) => right[0].length - left[0].length);
+}
+
+function splitPathLocationSuffix(value) {
+  if (typeof value !== 'string') {
+    return { pathLike: value, suffix: '' };
+  }
+
+  const match = /^(.*?)(:\d+(?::\d+)?)$/.exec(value);
+  return match
+    ? { pathLike: match[1], suffix: match[2] }
+    : { pathLike: value, suffix: '' };
+}
+
+function translateTextTokenToGuest(token) {
+  if (typeof token !== 'string' || token.length === 0) {
+    return token;
+  }
+
+  const leading = token.match(/^[("'`[{<]+/)?.[0] ?? '';
+  const trailing = token.match(/[)"'`\]}>.,;!?]+$/)?.[0] ?? '';
+  const coreEnd = token.length - trailing.length;
+  const core = token.slice(leading.length, coreEnd);
+  if (core.length === 0) {
+    return token;
+  }
+
+  const { pathLike, suffix } = splitPathLocationSuffix(core);
+  if (
+    typeof pathLike !== 'string' ||
+    (!pathLike.startsWith('file:') && !path.isAbsolute(pathLike))
+  ) {
+    return token;
+  }
+
+  return `${leading}${translatePathStringToGuest(pathLike)}${suffix}${trailing}`;
 }
 
 function translateTextToGuest(value) {
@@ -1547,7 +1673,11 @@ function translateTextToGuest(value) {
   for (const [hostValue, guestValue] of buildHostToGuestTextReplacements()) {
     translated = translated.split(hostValue).join(guestValue);
   }
-  return translated;
+
+  return translated
+    .split(/(\s+)/)
+    .map((token) => (/^\s+$/.test(token) ? token : translateTextTokenToGuest(token)))
+    .join('');
 }
 
 function translateErrorToGuest(error) {
@@ -1813,6 +1943,7 @@ const NODE_IMPORT_CACHE_ROOT =
     : null;
 const CONTROL_PIPE_FD = parseOptionalFd(HOST_PROCESS_ENV.AGENT_OS_CONTROL_PIPE_FD);
 const GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT = '/.agent-os/node-import-cache';
+const UNMAPPED_GUEST_PATH = '/unknown';
 const VIRTUAL_EXEC_PATH = parseVirtualProcessString(
   HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH,
   DEFAULT_VIRTUAL_EXEC_PATH,
@@ -1832,6 +1963,10 @@ const VIRTUAL_UID = parseVirtualProcessNumber(
 const VIRTUAL_GID = parseVirtualProcessNumber(
   HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_PROCESS_GID,
   DEFAULT_VIRTUAL_GID,
+);
+const DEFAULT_GUEST_CWD = resolveVirtualPath(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_HOMEDIR,
+  DEFAULT_VIRTUAL_OS_HOMEDIR,
 );
 
 function isPathLike(specifier) {
@@ -2035,6 +2170,20 @@ function hostPathFromGuestPath(guestPath) {
   }
 
   const normalized = path.posix.normalize(guestPath);
+  if (
+    NODE_IMPORT_CACHE_ROOT &&
+    (normalized === GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT ||
+      normalized.startsWith(`${GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT}/`))
+  ) {
+    const suffix =
+      normalized === GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT
+        ? ''
+        : normalized.slice(GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT.length + 1);
+    return suffix
+      ? path.join(NODE_IMPORT_CACHE_ROOT, ...suffix.split('/'))
+      : NODE_IMPORT_CACHE_ROOT;
+  }
+
   for (const mapping of GUEST_PATH_MAPPINGS) {
     if (mapping.guestPath === '/') {
       const suffix = normalized.replace(/^\/+/, '');
@@ -2053,6 +2202,17 @@ function hostPathFromGuestPath(guestPath) {
         ? ''
         : normalized.slice(mapping.guestPath.length + 1);
     return suffix ? path.join(mapping.hostPath, suffix) : mapping.hostPath;
+  }
+
+  if (
+    normalized === DEFAULT_GUEST_CWD ||
+    normalized.startsWith(`${DEFAULT_GUEST_CWD}/`)
+  ) {
+    const suffix =
+      normalized === DEFAULT_GUEST_CWD
+        ? ''
+        : normalized.slice(DEFAULT_GUEST_CWD.length + 1);
+    return suffix ? path.join(HOST_CWD, ...suffix.split('/')) : HOST_CWD;
   }
 
   return null;
@@ -2085,6 +2245,29 @@ function guestPathFromHostPath(hostPath) {
   return null;
 }
 
+function guestCwdPathFromHostPath(hostPath) {
+  if (typeof hostPath !== 'string') {
+    return null;
+  }
+
+  const normalized = path.resolve(hostPath);
+  const hostRoot = path.resolve(HOST_CWD);
+  if (
+    normalized !== hostRoot &&
+    !normalized.startsWith(`${hostRoot}${path.sep}`)
+  ) {
+    return null;
+  }
+
+  const suffix =
+    normalized === hostRoot
+      ? ''
+      : normalized.slice(hostRoot.length + path.sep.length);
+  return suffix
+    ? path.posix.join(INITIAL_GUEST_CWD, suffix.split(path.sep).join('/'))
+    : INITIAL_GUEST_CWD;
+}
+
 function guestInternalPathFromHostPath(hostPath) {
   if (typeof hostPath !== 'string' || !NODE_IMPORT_CACHE_ROOT) {
     return null;
@@ -2112,7 +2295,28 @@ function guestInternalPathFromHostPath(hostPath) {
 }
 
 function guestVisiblePathFromHostPath(hostPath) {
-  return guestPathFromHostPath(hostPath) ?? guestInternalPathFromHostPath(hostPath);
+  return (
+    guestPathFromHostPath(hostPath) ??
+    guestInternalPathFromHostPath(hostPath) ??
+    guestCwdPathFromHostPath(hostPath) ??
+    UNMAPPED_GUEST_PATH
+  );
+}
+
+function isGuestVisiblePath(value) {
+  if (typeof value !== 'string' || !path.posix.isAbsolute(value)) {
+    return false;
+  }
+
+  const normalized = path.posix.normalize(value);
+  return (
+    normalized === UNMAPPED_GUEST_PATH ||
+    normalized === GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT ||
+    normalized.startsWith(`${GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT}/`) ||
+    normalized === INITIAL_GUEST_CWD ||
+    normalized.startsWith(`${INITIAL_GUEST_CWD}/`) ||
+    hostPathFromGuestPath(normalized) != null
+  );
 }
 
 function translatePathStringToGuest(value) {
@@ -2123,8 +2327,10 @@ function translatePathStringToGuest(value) {
   if (value.startsWith('file:')) {
     try {
       const hostPath = new URL(value).pathname;
-      const guestPath = guestVisiblePathFromHostPath(hostPath);
-      return guestPath ? pathToFileURL(guestPath).href : value;
+      const guestPath = isGuestVisiblePath(hostPath)
+        ? path.posix.normalize(hostPath)
+        : guestVisiblePathFromHostPath(hostPath);
+      return pathToFileURL(guestPath).href;
     } catch {
       return value;
     }
@@ -2134,7 +2340,9 @@ function translatePathStringToGuest(value) {
     return value;
   }
 
-  return guestVisiblePathFromHostPath(value) ?? value;
+  return isGuestVisiblePath(value)
+    ? path.posix.normalize(value)
+    : guestVisiblePathFromHostPath(value);
 }
 
 function buildHostToGuestTextReplacements() {
@@ -2175,7 +2383,52 @@ function buildHostToGuestTextReplacements() {
     }
   }
 
+  if (!guestPathFromHostPath(HOST_CWD)) {
+    const hostRoot = path.resolve(HOST_CWD);
+    addReplacement(hostRoot, INITIAL_GUEST_CWD);
+    addReplacement(pathToFileURL(hostRoot).href, pathToFileURL(INITIAL_GUEST_CWD).href);
+    const forwardSlashHostRoot = hostRoot.split(path.sep).join('/');
+    if (forwardSlashHostRoot !== hostRoot) {
+      addReplacement(forwardSlashHostRoot, INITIAL_GUEST_CWD);
+    }
+  }
+
   return [...replacements.entries()].sort((left, right) => right[0].length - left[0].length);
+}
+
+function splitPathLocationSuffix(value) {
+  if (typeof value !== 'string') {
+    return { pathLike: value, suffix: '' };
+  }
+
+  const match = /^(.*?)(:\d+(?::\d+)?)$/.exec(value);
+  return match
+    ? { pathLike: match[1], suffix: match[2] }
+    : { pathLike: value, suffix: '' };
+}
+
+function translateTextTokenToGuest(token) {
+  if (typeof token !== 'string' || token.length === 0) {
+    return token;
+  }
+
+  const leading = token.match(/^[("'`[{<]+/)?.[0] ?? '';
+  const trailing = token.match(/[)"'`\]}>.,;!?]+$/)?.[0] ?? '';
+  const coreEnd = token.length - trailing.length;
+  const core = token.slice(leading.length, coreEnd);
+  if (core.length === 0) {
+    return token;
+  }
+
+  const { pathLike, suffix } = splitPathLocationSuffix(core);
+  if (
+    typeof pathLike !== 'string' ||
+    (!pathLike.startsWith('file:') && !path.isAbsolute(pathLike))
+  ) {
+    return token;
+  }
+
+  return `${leading}${translatePathStringToGuest(pathLike)}${suffix}${trailing}`;
 }
 
 function translateTextToGuest(value) {
@@ -2187,7 +2440,11 @@ function translateTextToGuest(value) {
   for (const [hostValue, guestValue] of buildHostToGuestTextReplacements()) {
     translated = translated.split(hostValue).join(guestValue);
   }
-  return translated;
+
+  return translated
+    .split(/(\s+)/)
+    .map((token) => (/^\s+$/.test(token) ? token : translateTextTokenToGuest(token)))
+    .join('');
 }
 
 function translateErrorToGuest(error) {
@@ -2477,7 +2734,7 @@ function resolveGuestSymlinkTarget(value, fromGuestDir = '/') {
   return value;
 }
 
-const INITIAL_GUEST_CWD = guestPathFromHostPath(HOST_CWD) ?? HOST_CWD;
+const INITIAL_GUEST_CWD = guestPathFromHostPath(HOST_CWD) ?? DEFAULT_GUEST_CWD;
 
 function guestMappedChildNames(guestDir) {
   if (typeof guestDir !== 'string') {
@@ -6166,6 +6423,10 @@ function cloneFsModule(fsModule) {
 function resolveVirtualPath(value, fallback) {
   if (typeof value !== 'string' || value.length === 0) {
     return fallback;
+  }
+
+  if (path.posix.isAbsolute(value)) {
+    return path.posix.normalize(value);
   }
 
   return translatePathStringToGuest(value);

@@ -1173,7 +1173,7 @@
         "Typecheck passes"
       ],
       "priority": 74,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: guestVisiblePathFromHostPath ?? value falls back to host path. INITIAL_GUEST_CWD ?? HOST_CWD falls back to host CWD. Both leak host filesystem layout."
     },
     {

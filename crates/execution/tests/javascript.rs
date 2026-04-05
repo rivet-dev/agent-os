@@ -2176,6 +2176,85 @@ console.log(JSON.stringify(result));
 }
 
 #[test]
+fn javascript_execution_uses_virtual_root_when_no_guest_path_mapping_exists() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("dep.cjs"),
+        "module.exports = { answer: 42 };\n",
+    );
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const result = {
+  cwd: process.cwd(),
+  resolved: require.resolve('./dep.cjs'),
+};
+
+try {
+  require.resolve('./missing.cjs');
+  result.resolveMissing = 'unexpected';
+} catch (error) {
+  result.resolveMissing = {
+    message: error.message,
+    stack: error.stack ?? null,
+  };
+}
+
+console.log(JSON.stringify(result));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        BTreeMap::new(),
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse cwd fallback JSON");
+    let host_path = temp.path().to_string_lossy();
+
+    assert_eq!(parsed["cwd"], Value::String(String::from("/root")));
+    assert_eq!(
+        parsed["resolved"],
+        Value::String(String::from("/root/dep.cjs"))
+    );
+    let message = parsed["resolveMissing"]["message"]
+        .as_str()
+        .expect("missing resolve message");
+    let stack = parsed["resolveMissing"]["stack"]
+        .as_str()
+        .expect("missing resolve stack");
+    assert!(
+        message.contains("/root/missing.cjs"),
+        "message should use virtual cwd fallback: {message}"
+    );
+    assert!(
+        stack.contains("/root/entry.mjs"),
+        "stack should use virtual cwd fallback: {stack}"
+    );
+    assert!(
+        !message.contains(host_path.as_ref()),
+        "message leaked host path: {message}"
+    );
+    assert!(
+        !stack.contains(host_path.as_ref()),
+        "stack leaked host path: {stack}"
+    );
+}
+
+#[test]
 fn javascript_execution_virtualizes_process_identity() {
     assert_node_available();
 
@@ -4678,6 +4757,57 @@ export const broken = ;
     assert!(
         !stderr.contains(host_path.as_ref()),
         "stderr leaked host path: {stderr}"
+    );
+}
+
+#[test]
+fn javascript_execution_scrubs_unmapped_host_paths_to_unknown() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let outside = tempdir().expect("create outside temp dir");
+    let outside_path = outside
+        .path()
+        .join("outside-only.mjs")
+        .to_string_lossy()
+        .replace('\\', "\\\\");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        &format!(
+            r#"
+const hostOnlyPath = "{outside_path}";
+const error = new Error(`boom at ${{hostOnlyPath}}`);
+error.path = hostOnlyPath;
+error.filename = hostOnlyPath;
+throw error;
+"#
+        ),
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        BTreeMap::new(),
+    );
+
+    assert_eq!(stdout.trim(), "");
+    assert_eq!(exit_code, 1, "stderr: {stderr}");
+    assert!(
+        stderr.contains("/unknown"),
+        "stderr should redact unmapped host paths: {stderr}"
+    );
+    assert!(
+        !stderr.contains(outside.path().to_string_lossy().as_ref()),
+        "stderr leaked unmapped host path: {stderr}"
     );
 }
 

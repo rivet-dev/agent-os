@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Guest path scrubbing in `crates/execution/src/node_import_cache.rs` should treat `HOST_CWD` as an implicit runtime-only mapping to the virtual guest cwd for entrypoint loading and stack traces, and only fall back to `/unknown` for absolute host paths outside visible mappings or internal cache roots.
 - Sidecar-managed loopback `net.listen` / `dgram.bind` now separate guest-visible ports from hidden host-bound ports; use guest ports in RPC responses and snapshots, but use the actual host listener port when a host-side test client needs to connect directly.
 - JavaScript sync RPC timeout and backpressure belong in `crates/execution/src/javascript.rs`: track the pending request ID on the host, auto-emit `ERR_AGENT_OS_NODE_SYNC_RPC_TIMEOUT` there, queue replies through a bounded async writer so slow guest reads cannot block the sidecar thread, and let `crates/sidecar/src/service.rs` ignore stale `sync RPC request ... is no longer pending` races after timeout.
 - Direct script execution in `crates/kernel/src/kernel.rs` should first map registered `/bin/*` and `/usr/bin/*` command stubs back to their command drivers, and only parse shebangs for real file paths; otherwise stub executables like `/bin/sh` recurse into their own wrapper.
@@ -1378,4 +1379,20 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Sidecar-managed loopback listeners should keep a guest-visible port mapping separate from the hidden host-bound port so VM-local semantics and host-side test probes can both work.
   - Gotchas encountered: Existing unit tests that connect from the host must use the actual listener socket stored in `ActiveProcess.tcp_listeners`, not the guest-visible port returned to Node.
   - Useful context: `cargo fmt --all`, `cargo check -p agent-os-sidecar -p agent-os-execution`, `cargo test -p agent-os-sidecar javascript_network_ -- --test-threads=1 --nocapture`, `cargo test -p agent-os-sidecar javascript_net_rpc_listens_accepts_connections_and_reports_listener_state -- --test-threads=1 --nocapture`, `cargo test -p agent-os-sidecar javascript_net_rpc_reports_connection_counts_and_enforces_backlog -- --test-threads=1 --nocapture`, `cargo test -p agent-os-sidecar javascript_net_rpc_listens_and_connects_over_unix_domain_sockets -- --test-threads=1 --nocapture`, and `cargo test -p agent-os-sidecar --test socket_state_queries -- --test-threads=1 --nocapture` all pass after this change.
+---
+## 2026-04-05 11:15:18 PDT - US-074
+- What was implemented
+- Hardened both generated Node import-cache templates in `crates/execution/src/node_import_cache.rs` so host-to-guest path translation never falls back to raw host paths, uses the virtual guest cwd as an implicit runtime-only mapping for the real `HOST_CWD`, and redacts other unmapped absolute host paths to `/unknown`.
+- Preserved loader/runtime usability by mapping internal import-cache guest paths back to their host cache roots, and by treating explicit virtual OS paths like `/bin/bash` as already guest-visible instead of scrubbing them.
+- Added JavaScript regressions that verify `process.cwd()` and `require.resolve()` fall back to `/root` with no guest path mappings, and that top-level errors redact an injected unmapped host path to `/unknown`.
+- Files changed
+- `AGENTS.md`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Guest path scrubbing should treat the actual `HOST_CWD` as an implicit runtime-only mapping to the virtual guest cwd so entrypoint loading, `process.cwd()`, and stack traces stay coherent without revealing the host path.
+  - Gotchas encountered: Internal Node import-cache asset paths and explicit virtual OS paths are already guest-visible surfaces; scrubbing them to `/unknown` breaks loader startup (`register.mjs` / `timing-bootstrap.mjs`) and regresses `os.userInfo().shell`.
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-execution`, and `cargo test -p agent-os-execution --test javascript -- --nocapture --test-threads=1` all pass after this change.
 ---
