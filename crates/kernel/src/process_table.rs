@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::ops::{BitOr, BitOrAssign};
@@ -8,6 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ZOMBIE_TTL: Duration = Duration::from_secs(60);
+const INIT_PID: u32 = 1;
+pub const SIGHUP: i32 = 1;
 pub const SIGCHLD: i32 = 17;
 pub const SIGCONT: i32 = 18;
 pub const SIGSTOP: i32 = 19;
@@ -476,9 +478,7 @@ impl ProcessTable {
                 let grouped: Vec<_> = state
                     .entries
                     .values()
-                    .filter(|record| {
-                        record.entry.pgid == pgid && record.entry.status == ProcessStatus::Running
-                    })
+                    .filter(|record| record.entry.pgid == pgid)
                     .map(|record| Arc::clone(&record.driver_process))
                     .collect();
                 if grouped.is_empty() {
@@ -660,9 +660,9 @@ fn to_process_info(entry: &ProcessEntry) -> ProcessInfo {
 }
 
 fn mark_exited_inner(inner: &Arc<ProcessTableInner>, pid: u32, exit_code: i32) {
-    let (callback, zombie_ttl, should_schedule, parent_driver) = {
+    let (callback, zombie_ttl, should_schedule, parent_driver, orphaned_group_targets) = {
         let mut state = inner.lock_state();
-        let ppid = {
+        let (ppid, pgid) = {
             let Some(record) = state.entries.get_mut(&pid) else {
                 return;
             };
@@ -674,8 +674,14 @@ fn mark_exited_inner(inner: &Arc<ProcessTableInner>, pid: u32, exit_code: i32) {
             record.entry.status = ProcessStatus::Exited;
             record.entry.exit_code = Some(exit_code);
             record.entry.exit_time_ms = Some(now_ms());
-            record.entry.ppid
+            let ppid = record.entry.ppid;
+            let pgid = record.entry.pgid;
+            (ppid, pgid)
         };
+        let mut affected_pgids = BTreeSet::from([pgid]);
+        reparent_children_to_init(&mut state, pid, &mut affected_pgids);
+
+        let orphaned_group_targets = collect_orphaned_group_signal_targets(&state, &affected_pgids);
 
         let should_schedule = !state.terminating_all;
         let parent_driver = if should_schedule {
@@ -693,6 +699,7 @@ fn mark_exited_inner(inner: &Arc<ProcessTableInner>, pid: u32, exit_code: i32) {
             state.zombie_ttl,
             should_schedule,
             parent_driver,
+            orphaned_group_targets,
         )
     };
 
@@ -706,11 +713,107 @@ fn mark_exited_inner(inner: &Arc<ProcessTableInner>, pid: u32, exit_code: i32) {
         parent_driver.kill(SIGCHLD);
     }
 
+    for driver in &orphaned_group_targets {
+        driver.kill(SIGHUP);
+    }
+    for driver in &orphaned_group_targets {
+        driver.kill(SIGCONT);
+    }
+
     if let Some(on_process_exit) = callback {
         on_process_exit(pid);
     }
 
     inner.waiters.notify_all();
+}
+
+fn reparent_children_to_init(
+    state: &mut ProcessTableState,
+    exiting_pid: u32,
+    affected_pgids: &mut BTreeSet<u32>,
+) {
+    let new_parent = reparent_target_pid(state, exiting_pid);
+    for record in state.entries.values_mut() {
+        if record.entry.ppid != exiting_pid {
+            continue;
+        }
+        record.entry.ppid = new_parent;
+        affected_pgids.insert(record.entry.pgid);
+    }
+}
+
+fn reparent_target_pid(state: &ProcessTableState, exiting_pid: u32) -> u32 {
+    if exiting_pid != INIT_PID
+        && state
+            .entries
+            .get(&INIT_PID)
+            .map(|record| record.entry.status != ProcessStatus::Exited)
+            .unwrap_or(false)
+    {
+        INIT_PID
+    } else {
+        0
+    }
+}
+
+fn collect_orphaned_group_signal_targets(
+    state: &ProcessTableState,
+    candidate_pgids: &BTreeSet<u32>,
+) -> Vec<Arc<dyn DriverProcess>> {
+    let mut targets = Vec::new();
+    for &pgid in candidate_pgids {
+        if !process_group_is_orphaned(state, pgid) || !process_group_has_stopped_member(state, pgid)
+        {
+            continue;
+        }
+
+        for record in state.entries.values() {
+            if record.entry.pgid == pgid && record.entry.status != ProcessStatus::Exited {
+                targets.push(Arc::clone(&record.driver_process));
+            }
+        }
+    }
+    targets
+}
+
+fn process_group_is_orphaned(state: &ProcessTableState, pgid: u32) -> bool {
+    let mut has_member = false;
+    for record in state.entries.values() {
+        if record.entry.pgid != pgid || record.entry.status == ProcessStatus::Exited {
+            continue;
+        }
+        has_member = true;
+        if has_parent_outside_group_in_same_session(state, &record.entry) {
+            return false;
+        }
+    }
+
+    has_member
+}
+
+fn has_parent_outside_group_in_same_session(
+    state: &ProcessTableState,
+    entry: &ProcessEntry,
+) -> bool {
+    match entry.ppid {
+        0 | INIT_PID => false,
+        ppid => state
+            .entries
+            .get(&ppid)
+            .map(|parent| {
+                parent.entry.status != ProcessStatus::Exited
+                    && parent.entry.sid == entry.sid
+                    && parent.entry.pgid != entry.pgid
+            })
+            .unwrap_or(false),
+    }
+}
+
+fn process_group_has_stopped_member(state: &ProcessTableState, pgid: u32) -> bool {
+    state
+        .entries
+        .values()
+        .any(|record| record.entry.pgid == pgid && record.entry.status == ProcessStatus::Stopped)
 }
 
 fn mark_wait_event_inner(

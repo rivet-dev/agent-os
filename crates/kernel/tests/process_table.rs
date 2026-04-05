@@ -1,6 +1,6 @@
 use agent_os_kernel::process_table::{
     DriverProcess, ProcessContext, ProcessExitCallback, ProcessResult, ProcessStatus, ProcessTable,
-    ProcessWaitEvent, WaitPidFlags, SIGCHLD, SIGCONT, SIGSTOP,
+    ProcessWaitEvent, WaitPidFlags, SIGCHLD, SIGCONT, SIGHUP, SIGSTOP,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -80,7 +80,7 @@ impl DriverProcess for MockDriverProcess {
         let should_exit = {
             let mut state = self.state.lock().expect("mock process lock poisoned");
             state.kills.push(signal);
-            signal != SIGCHLD && (signal == 9 || !state.ignore_sigterm)
+            signal == 9 || (signal == 15 && !state.ignore_sigterm)
         };
 
         if should_exit {
@@ -615,6 +615,184 @@ fn negative_pid_kill_targets_entire_process_groups() {
 
     assert_eq!(leader.kills(), vec![15]);
     assert_eq!(peer.kills(), vec![15]);
+}
+
+#[test]
+fn negative_pid_kill_reaches_stopped_and_exited_group_members() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let init = MockDriverProcess::new();
+    let parent = MockDriverProcess::new();
+    let leader = MockDriverProcess::stubborn();
+    let stopped = MockDriverProcess::stubborn();
+    let zombie = MockDriverProcess::stubborn();
+    let init_pid = table.allocate_pid();
+    let parent_pid = table.allocate_pid();
+    let leader_pid = table.allocate_pid();
+    let stopped_pid = table.allocate_pid();
+    let zombie_pid = table.allocate_pid();
+
+    table.register(
+        init_pid,
+        "wasmvm",
+        "init",
+        Vec::new(),
+        create_context(0),
+        init,
+    );
+    table.register(
+        parent_pid,
+        "wasmvm",
+        "parent",
+        Vec::new(),
+        create_context(init_pid),
+        parent,
+    );
+    table.register(
+        leader_pid,
+        "wasmvm",
+        "leader",
+        Vec::new(),
+        create_context(parent_pid),
+        leader.clone(),
+    );
+    table.register(
+        stopped_pid,
+        "wasmvm",
+        "stopped",
+        Vec::new(),
+        create_context(parent_pid),
+        stopped.clone(),
+    );
+    table.register(
+        zombie_pid,
+        "wasmvm",
+        "zombie",
+        Vec::new(),
+        create_context(parent_pid),
+        zombie.clone(),
+    );
+    table
+        .setpgid(leader_pid, 0)
+        .expect("leader becomes process-group leader");
+    table
+        .setpgid(stopped_pid, leader_pid)
+        .expect("stopped peer joins leader group");
+    table
+        .setpgid(zombie_pid, leader_pid)
+        .expect("zombie peer joins leader group");
+    table.mark_stopped(stopped_pid, SIGSTOP);
+    zombie.exit(23);
+
+    table
+        .kill(-(leader_pid as i32), 15)
+        .expect("group kill should include stopped and zombie members");
+
+    assert_eq!(leader.kills(), vec![15]);
+    assert_eq!(stopped.kills(), vec![15]);
+    assert_eq!(zombie.kills(), vec![15]);
+}
+
+#[test]
+fn exiting_parent_reparents_children_to_pid_one_when_available() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let init = MockDriverProcess::new();
+    let parent = MockDriverProcess::new();
+    let child = MockDriverProcess::new();
+    let init_pid = table.allocate_pid();
+    let parent_pid = table.allocate_pid();
+    let child_pid = table.allocate_pid();
+
+    table.register(
+        init_pid,
+        "wasmvm",
+        "init",
+        Vec::new(),
+        create_context(0),
+        init,
+    );
+    table.register(
+        parent_pid,
+        "wasmvm",
+        "parent",
+        Vec::new(),
+        create_context(init_pid),
+        parent.clone(),
+    );
+    table.register(
+        child_pid,
+        "wasmvm",
+        "child",
+        Vec::new(),
+        create_context(parent_pid),
+        child,
+    );
+
+    parent.exit(0);
+
+    assert_eq!(
+        table
+            .getppid(child_pid)
+            .expect("child should be reparented"),
+        1
+    );
+}
+
+#[test]
+fn orphaned_stopped_process_groups_receive_sighup_and_sigcont() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let init = MockDriverProcess::new();
+    let parent = MockDriverProcess::new();
+    let leader = MockDriverProcess::new();
+    let stopped = MockDriverProcess::new();
+    let init_pid = table.allocate_pid();
+    let parent_pid = table.allocate_pid();
+    let leader_pid = table.allocate_pid();
+    let stopped_pid = table.allocate_pid();
+
+    table.register(
+        init_pid,
+        "wasmvm",
+        "init",
+        Vec::new(),
+        create_context(0),
+        init,
+    );
+    table.register(
+        parent_pid,
+        "wasmvm",
+        "parent",
+        Vec::new(),
+        create_context(init_pid),
+        parent.clone(),
+    );
+    table.register(
+        leader_pid,
+        "wasmvm",
+        "leader",
+        Vec::new(),
+        create_context(parent_pid),
+        leader.clone(),
+    );
+    table.register(
+        stopped_pid,
+        "wasmvm",
+        "stopped",
+        Vec::new(),
+        create_context(parent_pid),
+        stopped.clone(),
+    );
+    table
+        .setpgid(leader_pid, 0)
+        .expect("leader becomes process-group leader");
+    table
+        .setpgid(stopped_pid, leader_pid)
+        .expect("stopped peer joins leader group");
+    table.mark_stopped(stopped_pid, SIGSTOP);
+
+    parent.exit(0);
+
+    assert_eq!(leader.kills(), vec![SIGHUP, SIGCONT]);
+    assert_eq!(stopped.kills(), vec![SIGHUP, SIGCONT]);
 }
 
 #[test]

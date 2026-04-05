@@ -1047,7 +1047,7 @@
         "Typecheck passes"
       ],
       "priority": 66,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: No reparenting — orphaned children become standalone zombies. Process group kill filters for ProcessStatus::Running only, missing stopped/zombie. Zombie processes bypass max_processes since only running_processes is checked."
     },
     {

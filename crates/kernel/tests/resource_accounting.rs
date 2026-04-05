@@ -126,6 +126,57 @@ fn resource_limits_reject_extra_processes_pipes_and_ptys() {
 }
 
 #[test]
+fn zombie_processes_count_against_process_limits_until_reaped() {
+    let mut config = KernelVmConfig::new("vm-zombie-process-limit");
+    config.permissions = Permissions::allow_all();
+    config.resources = ResourceLimits {
+        max_processes: Some(1),
+        ..ResourceLimits::default()
+    };
+
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let process = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn initial process");
+    process.finish(0);
+
+    let error = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect_err("zombie should still count against process limit");
+    assert_eq!(error.code(), "EAGAIN");
+
+    kernel.wait_and_reap(process.pid()).expect("reap zombie");
+    kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn should succeed after zombie is reaped");
+}
+
+#[test]
 fn filesystem_limits_reject_inode_growth_and_file_expansion() {
     let mut config = KernelVmConfig::new("vm-filesystem-limits");
     config.permissions = Permissions::allow_all();

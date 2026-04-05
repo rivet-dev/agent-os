@@ -178,7 +178,7 @@ impl ResourceAccountant {
         additional_fds: usize,
     ) -> Result<(), ResourceError> {
         if let Some(limit) = self.limits.max_processes {
-            if snapshot.running_processes >= limit {
+            if snapshot.running_processes + snapshot.exited_processes >= limit {
                 return Err(ResourceError::exhausted("maximum process limit reached"));
             }
         }
