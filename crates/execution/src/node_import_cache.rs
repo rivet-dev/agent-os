@@ -3956,6 +3956,8 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
   const callPoll = (socketId, waitMs = 0) => bridge().callSync('net.poll', [socketId, waitMs]);
   const callServerPoll = (serverId, waitMs = 0) =>
     bridge().callSync('net.server_poll', [serverId, waitMs]);
+  const callServerConnections = (serverId) =>
+    bridge().callSync('net.server_connections', [serverId]);
   const callWrite = (socketId, chunk) =>
     bridge().call('net.write', [socketId, toGuestBufferView(chunk, 'net.write chunk')]);
   const callShutdown = (socketId) => bridge().call('net.shutdown', [socketId]);
@@ -3967,6 +3969,7 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
       return;
     }
     socket._agentOsClosed = true;
+    socket._agentOsSocketId = null;
     socket.connecting = false;
     socket.pending = false;
     socket._pollTimer && clearTimeout(socket._pollTimer);
@@ -4125,7 +4128,11 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
         finalizeSocketClose(this, Boolean(error));
         callback(error);
       };
-      if (socketId == null) {
+      if (
+        socketId == null ||
+        this._agentOsClosed ||
+        (error == null && this.readableEnded && this.writableEnded)
+      ) {
         finishDestroy();
         return;
       }
@@ -4330,10 +4337,30 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
     }
 
     getConnections(callback) {
-      if (typeof callback === 'function') {
-        queueMicrotask(() => callback(null, 0));
+      if (this._agentOsServerId == null || this._agentOsClosed) {
+        const error = new Error('Agent OS net server is not running');
+        error.code = 'ERR_SERVER_NOT_RUNNING';
+        if (typeof callback === 'function') {
+          queueMicrotask(() => callback(error));
+          return this;
+        }
+        throw error;
       }
-      return Promise.resolve(0);
+
+      try {
+        const count = callServerConnections(this._agentOsServerId);
+        if (typeof callback === 'function') {
+          queueMicrotask(() => callback(null, count));
+        }
+      } catch (error) {
+        if (typeof callback === 'function') {
+          queueMicrotask(() => callback(error));
+          return this;
+        }
+        throw error;
+      }
+
+      return this;
     }
 
     listen(...args) {

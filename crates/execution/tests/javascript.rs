@@ -2970,16 +2970,25 @@ import net from "node:net";
 const summary = await new Promise((resolve, reject) => {
   const server = net.createServer({ allowHalfOpen: false }, (socket) => {
     let data = "";
+    let connections = -1;
     socket.setEncoding("utf8");
     socket.on("data", (chunk) => {
       data += chunk;
-      socket.end("pong");
+      server.getConnections((error, count) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        connections = count;
+        socket.end("pong");
+      });
     });
     socket.on("error", reject);
     socket.on("close", () => {
       server.close(() => {
         resolve({
           address: server.address(),
+          connections,
           data,
           localPort: socket.localPort,
           remoteAddress: socket.remoteAddress,
@@ -2989,7 +2998,7 @@ const summary = await new Promise((resolve, reject) => {
     });
   });
   server.on("error", reject);
-  server.listen(43111, "127.0.0.1");
+  server.listen({ port: 43111, host: "127.0.0.1", backlog: 2 });
 });
 
 console.log(JSON.stringify(summary));
@@ -3037,6 +3046,7 @@ console.log(JSON.stringify(summary));
                 methods.push(request.method.clone());
                 match request.method.as_str() {
                     "net.listen" => {
+                        assert_eq!(request.args[0]["backlog"], Value::from(2));
                         listener_events.insert(
                             String::from("listener-1"),
                             vec![json!({
@@ -3093,6 +3103,11 @@ console.log(JSON.stringify(summary));
                             .respond_sync_rpc_success(request.id, next)
                             .expect("respond to net.server_poll");
                     }
+                    "net.server_connections" => {
+                        execution
+                            .respond_sync_rpc_success(request.id, json!(1))
+                            .expect("respond to net.server_connections");
+                    }
                     "net.poll" => {
                         let socket_id = request.args[0].as_str().expect("poll socket id");
                         let next = socket_events
@@ -3141,6 +3156,7 @@ console.log(JSON.stringify(summary));
     let stderr = String::from_utf8(stderr).expect("stderr utf8");
     assert_eq!(exit_code, Some(0), "stderr: {stderr}");
     let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse net JSON");
+    assert_eq!(parsed["connections"], Value::from(1));
     assert_eq!(parsed["data"], Value::String(String::from("ping")));
     assert_eq!(
         parsed["address"]["address"],
@@ -3154,11 +3170,13 @@ console.log(JSON.stringify(summary));
     assert_eq!(parsed["remotePort"], Value::from(54000));
     assert!(methods.iter().any(|method| method == "net.listen"));
     assert!(methods.iter().any(|method| method == "net.server_poll"));
+    assert!(methods
+        .iter()
+        .any(|method| method == "net.server_connections"));
     assert!(methods.iter().any(|method| method == "net.poll"));
     assert!(methods.iter().any(|method| method == "net.write"));
     assert!(methods.iter().any(|method| method == "net.shutdown"));
     assert!(methods.iter().any(|method| method == "net.server_close"));
-    assert!(methods.iter().any(|method| method == "net.destroy"));
 }
 
 #[test]

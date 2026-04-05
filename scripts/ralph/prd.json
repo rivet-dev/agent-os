@@ -719,7 +719,7 @@
         "Typecheck passes"
       ],
       "priority": 45,
-      "passes": false,
+      "passes": true,
       "notes": "getConnections() currently stubs to 0. Backlog parameter accepted but ignored in service.rs (let _ = payload.backlog)."
     },
     {

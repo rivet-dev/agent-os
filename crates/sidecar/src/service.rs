@@ -86,6 +86,7 @@ use std::net::{
     UdpSocket,
 };
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -102,6 +103,7 @@ const DISPOSE_VM_SIGTERM_GRACE: Duration = Duration::from_millis(100);
 const DISPOSE_VM_SIGKILL_GRACE: Duration = Duration::from_millis(100);
 const VM_DNS_SERVERS_METADATA_KEY: &str = "network.dns.servers";
 const VM_DNS_OVERRIDE_METADATA_PREFIX: &str = "network.dns.override.";
+const DEFAULT_JAVASCRIPT_NET_BACKLOG: u32 = 511;
 
 type BridgeError<B> = <B as BridgeTypes>::Error;
 type SidecarKernel = KernelVm<MountTable>;
@@ -1576,8 +1578,12 @@ enum JavascriptTcpSocketEvent {
 struct ActiveTcpSocket {
     stream: Arc<Mutex<TcpStream>>,
     events: Receiver<JavascriptTcpSocketEvent>,
+    event_sender: Sender<JavascriptTcpSocketEvent>,
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
+    listener_id: Option<String>,
+    saw_remote_end: Arc<AtomicBool>,
+    close_notified: Arc<AtomicBool>,
 }
 
 impl ActiveTcpSocket {
@@ -1595,22 +1601,33 @@ impl ActiveTcpSocket {
         let remote_addr = resolve_tcp_connect_addr(bridge, vm_id, dns, host, port)?;
         let stream = TcpStream::connect_timeout(&remote_addr, Duration::from_secs(30))
             .map_err(sidecar_net_error)?;
-        Self::from_stream(stream)
+        Self::from_stream(stream, None)
     }
 
-    fn from_stream(stream: TcpStream) -> Result<Self, SidecarError> {
+    fn from_stream(stream: TcpStream, listener_id: Option<String>) -> Result<Self, SidecarError> {
         let local_addr = stream.local_addr().map_err(sidecar_net_error)?;
         let remote_addr = stream.peer_addr().map_err(sidecar_net_error)?;
         let read_stream = stream.try_clone().map_err(sidecar_net_error)?;
         let stream = Arc::new(Mutex::new(stream));
         let (sender, events) = mpsc::channel();
-        spawn_tcp_socket_reader(read_stream, sender);
+        let saw_remote_end = Arc::new(AtomicBool::new(false));
+        let close_notified = Arc::new(AtomicBool::new(false));
+        spawn_tcp_socket_reader(
+            read_stream,
+            sender.clone(),
+            Arc::clone(&saw_remote_end),
+            Arc::clone(&close_notified),
+        );
 
         Ok(Self {
             stream,
             events,
+            event_sender: sender,
             local_addr,
             remote_addr,
+            listener_id,
+            saw_remote_end,
+            close_notified,
         })
     }
 
@@ -1638,7 +1655,17 @@ impl ActiveTcpSocket {
             .stream
             .lock()
             .map_err(|_| SidecarError::InvalidState(String::from("TCP socket lock poisoned")))?;
-        stream.shutdown(Shutdown::Write).map_err(sidecar_net_error)
+        stream
+            .shutdown(Shutdown::Write)
+            .map_err(sidecar_net_error)?;
+        if self.saw_remote_end.load(Ordering::SeqCst)
+            && !self.close_notified.swap(true, Ordering::SeqCst)
+        {
+            let _ = self
+                .event_sender
+                .send(JavascriptTcpSocketEvent::Close { had_error: false });
+        }
+        Ok(())
     }
 
     fn close(&self) -> Result<(), SidecarError> {
@@ -1654,10 +1681,12 @@ impl ActiveTcpSocket {
 struct ActiveTcpListener {
     listener: TcpListener,
     local_addr: SocketAddr,
+    backlog: usize,
+    active_connection_ids: BTreeSet<String>,
 }
 
 impl ActiveTcpListener {
-    fn bind(host: &str, port: u16) -> Result<Self, SidecarError> {
+    fn bind(host: &str, port: u16, backlog: Option<u32>) -> Result<Self, SidecarError> {
         let bind_addr = resolve_tcp_bind_addr(host, port)?;
         let listener = TcpListener::bind(bind_addr).map_err(sidecar_net_error)?;
         listener.set_nonblocking(true).map_err(sidecar_net_error)?;
@@ -1665,6 +1694,9 @@ impl ActiveTcpListener {
         Ok(Self {
             listener,
             local_addr,
+            backlog: usize::try_from(backlog.unwrap_or(DEFAULT_JAVASCRIPT_NET_BACKLOG))
+                .expect("default backlog fits within usize"),
+            active_connection_ids: BTreeSet::new(),
         })
     }
 
@@ -1677,6 +1709,13 @@ impl ActiveTcpListener {
         loop {
             match self.listener.accept() {
                 Ok((stream, remote_addr)) => {
+                    if self.active_connection_ids.len() >= self.backlog {
+                        let _ = stream.shutdown(Shutdown::Both);
+                        if wait.is_zero() || Instant::now() >= deadline {
+                            return Ok(None);
+                        }
+                        continue;
+                    }
                     let local_addr = stream.local_addr().map_err(sidecar_net_error)?;
                     return Ok(Some(JavascriptTcpListenerEvent::Connection(
                         PendingTcpSocket {
@@ -1704,6 +1743,18 @@ impl ActiveTcpListener {
 
     fn close(&self) -> Result<(), SidecarError> {
         Ok(())
+    }
+
+    fn active_connection_count(&self) -> usize {
+        self.active_connection_ids.len()
+    }
+
+    fn register_connection(&mut self, socket_id: &str) {
+        self.active_connection_ids.insert(socket_id.to_string());
+    }
+
+    fn release_connection(&mut self, socket_id: &str) {
+        self.active_connection_ids.remove(socket_id);
     }
 }
 
@@ -6047,15 +6098,20 @@ fn sidecar_net_error(error: std::io::Error) -> SidecarError {
     SidecarError::Execution(message)
 }
 
-fn spawn_tcp_socket_reader(stream: TcpStream, sender: Sender<JavascriptTcpSocketEvent>) {
+fn spawn_tcp_socket_reader(
+    stream: TcpStream,
+    sender: Sender<JavascriptTcpSocketEvent>,
+    saw_remote_end: Arc<AtomicBool>,
+    close_notified: Arc<AtomicBool>,
+) {
     thread::spawn(move || {
         let mut stream = stream;
         let mut buffer = vec![0_u8; 64 * 1024];
         loop {
             match stream.read(&mut buffer) {
                 Ok(0) => {
+                    saw_remote_end.store(true, Ordering::SeqCst);
                     let _ = sender.send(JavascriptTcpSocketEvent::End);
-                    let _ = sender.send(JavascriptTcpSocketEvent::Close { had_error: false });
                     break;
                 }
                 Ok(bytes_read) => {
@@ -6074,7 +6130,9 @@ fn spawn_tcp_socket_reader(stream: TcpStream, sender: Sender<JavascriptTcpSocket
                         code,
                         message: error.to_string(),
                     });
-                    let _ = sender.send(JavascriptTcpSocketEvent::Close { had_error: true });
+                    if !close_notified.swap(true, Ordering::SeqCst) {
+                        let _ = sender.send(JavascriptTcpSocketEvent::Close { had_error: true });
+                    }
                     break;
                 }
             }
@@ -6282,8 +6340,15 @@ where
         "dns.lookup" | "dns.resolve" | "dns.resolve4" | "dns.resolve6" => {
             service_javascript_dns_sync_rpc(bridge, vm_id, dns, request)
         }
-        "net.connect" | "net.listen" | "net.poll" | "net.server_poll" | "net.write"
-        | "net.shutdown" | "net.destroy" | "net.server_close" => service_javascript_net_sync_rpc(
+        "net.connect"
+        | "net.listen"
+        | "net.poll"
+        | "net.server_poll"
+        | "net.server_connections"
+        | "net.write"
+        | "net.shutdown"
+        | "net.destroy"
+        | "net.server_close" => service_javascript_net_sync_rpc(
             bridge,
             vm_id,
             dns,
@@ -6634,10 +6699,10 @@ where
                         SidecarError::InvalidState(format!("invalid net.listen payload: {error}"))
                     })
                 })?;
-            let _ = payload.backlog;
             let listener = ActiveTcpListener::bind(
                 payload.host.as_deref().unwrap_or("0.0.0.0"),
                 payload.port,
+                payload.backlog,
             )?;
             let listener_id = process.allocate_tcp_listener_id();
             let local_addr = listener.local_addr();
@@ -6676,7 +6741,11 @@ where
                 })),
                 Some(JavascriptTcpSocketEvent::Close { had_error }) => {
                     if let Some(socket) = process.tcp_sockets.remove(socket_id) {
-                        let _ = socket.close();
+                        if let Some(listener_id) = socket.listener_id.as_deref() {
+                            if let Some(listener) = process.tcp_listeners.get_mut(listener_id) {
+                                listener.release_connection(socket_id);
+                            }
+                        }
                     }
                     Ok(json!({
                         "type": "close",
@@ -6722,8 +6791,14 @@ where
                             "message": error.to_string(),
                         }));
                     }
-                    let socket = ActiveTcpSocket::from_stream(pending.stream)?;
+                    let socket = ActiveTcpSocket::from_stream(
+                        pending.stream,
+                        Some(listener_id.to_string()),
+                    )?;
                     let socket_id = process.allocate_tcp_socket_id();
+                    if let Some(listener) = process.tcp_listeners.get_mut(listener_id) {
+                        listener.register_connection(&socket_id);
+                    }
                     process.tcp_sockets.insert(socket_id.clone(), socket);
                     Ok(json!({
                         "type": "connection",
@@ -6742,6 +6817,17 @@ where
                 })),
                 None => Ok(Value::Null),
             }
+        }
+        "net.server_connections" => {
+            let listener_id = javascript_sync_rpc_arg_str(
+                &request.args,
+                0,
+                "net.server_connections listener id",
+            )?;
+            let listener = process.tcp_listeners.get(listener_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown TCP listener {listener_id}"))
+            })?;
+            Ok(json!(listener.active_connection_count()))
         }
         "net.write" => {
             let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "net.write socket id")?;
@@ -6765,6 +6851,11 @@ where
             let socket = process.tcp_sockets.remove(socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown TCP socket {socket_id}"))
             })?;
+            if let Some(listener_id) = socket.listener_id.as_deref() {
+                if let Some(listener) = process.tcp_listeners.get_mut(listener_id) {
+                    listener.release_connection(socket_id);
+                }
+            }
             let _ = socket.close();
             Ok(Value::Null)
         }
@@ -7152,7 +7243,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::{Read, Write};
-    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::thread;
@@ -10659,6 +10750,343 @@ server.listen(0, "127.0.0.1", () => {
             stdout.contains("\"address\":{\"address\":\"127.0.0.1\""),
             "stdout: {stdout}"
         );
+    }
+
+    #[test]
+    fn javascript_net_rpc_reports_connection_counts_and_enforces_backlog() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-net-backlog-cwd");
+        write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-backlog"),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
+            );
+        }
+
+        let bridge = sidecar.bridge.clone();
+        let dns = sidecar.vms.get(&vm_id).expect("javascript vm").dns.clone();
+        let limits = ResourceLimits::default();
+
+        let listen = {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                .expect("backlog process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-backlog")
+                .expect("backlog process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 0,
+                        "backlog": 1,
+                    })],
+                },
+                &limits,
+                counts,
+            )
+            .expect("listen through sidecar net RPC")
+        };
+        let server_id = listen["serverId"].as_str().expect("server id").to_string();
+        let port = listen["localPort"]
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .expect("listener port");
+
+        let first_client = thread::spawn(move || {
+            let mut stream =
+                TcpStream::connect(("127.0.0.1", port)).expect("connect first backlog client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set first client timeout");
+            let mut received = Vec::new();
+            stream
+                .read_to_end(&mut received)
+                .expect("read first backlog client EOF");
+            assert!(
+                received.is_empty(),
+                "first backlog client should not receive data"
+            );
+        });
+
+        let first_connection = {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                .expect("backlog process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-backlog")
+                .expect("backlog process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("net.server_poll"),
+                    args: vec![json!(server_id), json!(250)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("accept first backlog connection")
+        };
+        let first_socket_id = first_connection["socketId"]
+            .as_str()
+            .expect("first socket id")
+            .to_string();
+
+        let connection_count = {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                .expect("backlog process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-backlog")
+                .expect("backlog process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("net.server_connections"),
+                    args: vec![json!(server_id)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("query server connections")
+        };
+        assert_eq!(connection_count, json!(1));
+
+        let second_client = thread::spawn(move || {
+            let address = SocketAddr::from(([127, 0, 0, 1], port));
+            let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+                .expect("connect second backlog client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set second client timeout");
+            stream
+                .write_all(b"blocked")
+                .expect("write second backlog client payload");
+            let mut buffer = [0_u8; 16];
+            match stream.read(&mut buffer) {
+                Ok(0) => {}
+                Ok(bytes_read) => panic!(
+                    "unexpected second backlog payload: {}",
+                    String::from_utf8_lossy(&buffer[..bytes_read])
+                ),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::NotConnected
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::WouldBlock
+                    ) => {}
+                Err(error) => panic!("unexpected second backlog read error: {error}"),
+            }
+        });
+
+        let second_poll = {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                .expect("backlog process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-backlog")
+                .expect("backlog process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 4,
+                    method: String::from("net.server_poll"),
+                    args: vec![json!(server_id), json!(250)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("poll second backlog connection")
+        };
+        assert_eq!(second_poll, Value::Null);
+        second_client.join().expect("join second backlog client");
+
+        let connection_count = {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                .expect("backlog process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-backlog")
+                .expect("backlog process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 5,
+                    method: String::from("net.server_connections"),
+                    args: vec![json!(server_id)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("query server connections after backlog rejection")
+        };
+        assert_eq!(connection_count, json!(1));
+
+        {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                .expect("backlog process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-backlog")
+                .expect("backlog process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 6,
+                    method: String::from("net.destroy"),
+                    args: vec![json!(first_socket_id)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("destroy first backlog socket");
+        }
+        first_client.join().expect("join first backlog client");
+
+        {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                .expect("backlog process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-backlog")
+                .expect("backlog process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 7,
+                    method: String::from("net.server_close"),
+                    args: vec![json!(server_id)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("close backlog listener");
+        }
+
+        sidecar
+            .dispose_vm_internal(
+                &connection_id,
+                &session_id,
+                &vm_id,
+                DisposeReason::Requested,
+            )
+            .expect("dispose backlog vm");
     }
 
     #[test]

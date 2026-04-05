@@ -27,6 +27,7 @@
 - Permissioned Pyodide host launches need the same `--allow-worker` treatment as JavaScript in `crates/execution/src/python.rs`; Node's internal loader worker is a host runtime requirement there too, not guest `worker_threads` exposure.
 - Guest-owned Node builtin polyfills that need both ESM and CJS coverage should be wired in three places together: loader import rewriting/asset resolution, the generated Node runner’s `process.getBuiltinModule` and `Module._load` hooks, and the core bridge’s default allowlist in `packages/core/src/sidecar/native-kernel-proxy.ts`.
 - When a Node builtin port is landing in phases, inherit untouched exports from a snapped host module and override only the RPC-backed surface for the current story; this keeps helper APIs working while the follow-on stories replace the remaining host-backed entrypoints.
+- Node `net` server behavior is split between the guest runner in `crates/execution/src/node_import_cache.rs` and the sidecar TCP state machine in `crates/sidecar/src/service.rs`; changes to `listen`, `getConnections`, backlog handling, or close semantics need updates and regressions on both sides.
 - When a guest Node networking port stops using real host listeners, mirror that state in `crates/sidecar/src/service.rs` `ActiveProcess` tracking and consult it from `find_listener`/socket snapshot queries before falling back to `/proc/[pid]/net/*`; procfs only sees host-owned sockets, not sidecar-managed polyfill listeners.
 - UDP guest ports follow the same rule as TCP listeners: keep sidecar-managed datagram sockets on `ActiveProcess`, create the real `UdpSocket` lazily on `bind()`/first `send()`, and answer `find_bound_udp` from that tracked state because `/proc/[pid]/net/udp*` never sees sidecar-owned sockets.
 - Guest Node `tls` should stay layered on the guest `net` polyfill: client connections pass a preconnected guest socket into `tls.connect({ socket })`, and TLS servers should wrap accepted guest sockets with `new TLSSocket(..., { isServer: true })` and treat the wrapped socket's `secure` event as `secureConnection`.
@@ -845,5 +846,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - **Learnings for future iterations:**
   - Patterns discovered: VM-specific sidecar behavior can be added without widening the public API by parsing `CreateVmRequest.metadata`, which is useful when the actor/client parity requirements would otherwise force cross-repo API work.
   - Gotchas encountered: Hickory’s `Resolver::builder_tokio()` keeps DNS resolution in-process and off the host libc resolver, but custom upstreams still need per-connection port overrides applied to every `NameServerConfig.connections` entry.
-  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-sidecar`, and `cargo test -p agent-os-sidecar javascript_dns_rpc -- --test-threads=1` all pass after this change. `cargo test -p agent-os-sidecar javascript_ -- --test-threads=1` still shows unrelated/pre-existing instability in older JS net/child-process tests on this branch, but the DNS-focused slice and the new override/connect regression are green.
+- Useful context: `cargo fmt --all`, `cargo check -p agent-os-sidecar`, and `cargo test -p agent-os-sidecar javascript_dns_rpc -- --test-threads=1` all pass after this change. `cargo test -p agent-os-sidecar javascript_ -- --test-threads=1` still shows unrelated/pre-existing instability in older JS net/child-process tests on this branch, but the DNS-focused slice and the new override/connect regression are green.
+---
+## 2026-04-05 05:41:47 PDT - US-045
+- What was implemented
+- Added a real guest `net.Server.getConnections(callback)` path in `crates/execution/src/node_import_cache.rs` that queries the sidecar instead of returning a stubbed `0`.
+- Taught the sidecar TCP listener state in `crates/sidecar/src/service.rs` to track active listener-owned connections, expose them through a new `net.server_connections` sync RPC, and enforce `listen({ backlog })` by rejecting excess accepted connections once the configured listener limit is reached.
+- Added focused regressions for the runner/server RPC path and a direct sidecar backlog test that proves listener counts and backlog enforcement work against real TCP sockets.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Node `net` server behavior spans both the guest runner RPC shims and the sidecar’s TCP socket lifecycle bookkeeping, so listener features need paired changes and paired regressions in both layers.
+  - Gotchas encountered: Guest stream teardown can easily turn a graceful FIN into a reset if the runner keeps a stale socket id after the sidecar reports close, so normal close/finalize paths should avoid issuing an extra `net.destroy`.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test javascript javascript_execution_routes_net_create_server_through_sync_rpc -- --test-threads=1`, and `cargo test -p agent-os-sidecar javascript_net_rpc_reports_connection_counts_and_enforces_backlog -- --test-threads=1` pass after this change.
 ---
