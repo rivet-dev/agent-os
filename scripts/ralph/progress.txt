@@ -1,6 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
 - Kernel filesystem semantic additions must be threaded through every wrapper layer together: `VirtualFileSystem`, `PermissionedFileSystem`, `DeviceLayer`, `MountTable`/`MountedFileSystem`, and the root/overlay delegates, or mounted/device-backed paths silently keep the old behavior.
+- Per-FD status bits such as `O_NONBLOCK` belong on `FdEntry` / `ProcessFdTable`, while shared `FileDescription.flags()` should stay limited to open-file-description semantics such as access mode and `O_APPEND`; use `/dev/fd/N` duplication when you need a differently flagged view of the same description before a real `fcntl(F_SETFL)` surface exists.
 - PID-aware POSIX signal side effects belong at `KernelVm` syscall entrypoints, not low-level resource managers: `PipeManager` should stay signal-agnostic and let `crates/kernel/src/kernel.rs` `fd_write` translate broken-pipe `EPIPE` into `SIGPIPE`.
 - Parent-aware `waitpid` state tracking belongs in `crates/kernel/src/process_table.rs`: queue stop/continue notifications there, and let `crates/kernel/src/kernel.rs` clean up resources only after an exited child is actually reaped.
 - Advisory `flock` state should be kernel-global but owned by the shared open-file-description (`FileDescription.id()`), keyed by the opened file identity, and released only when the last refcounted FD closes so dup/fork inheritance shares locks while separate opens still conflict.
@@ -284,7 +285,6 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Some Node `process` properties are refreshed or non-configurable, so stable guest identity virtualization works more reliably by swapping `globalThis.process` to a proxy after bootstrap setup than by relying on direct property replacement alone.
 - Gotchas encountered: `process.argv0` is non-configurable in Node v24, so this story can safely virtualize `process.argv[0]` but not the separate `process.argv0` property without violating Proxy invariants.
 - Useful context: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` both pass after this change on the current branch.
----
 ## 2026-04-04 20:03:57 PDT - US-007
 - What was implemented
 - Hardened the generated Node guest runner to deny `process.on`/`addListener`/`once`/`prepend*` registrations for real OS signal events while leaving non-signal process events usable.
@@ -1192,4 +1192,25 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Kernel filesystem semantic additions have to be propagated through every wrapper layer, not just `MemoryFileSystem`, or mounted/device-backed paths keep the old behavior.
   - Gotchas encountered: `MountTable` has its own `MountedFileSystem` abstraction separate from `VirtualFileSystem`, so new VFS entrypoints must be added to both traits and to `MountedVirtualFileSystem` forwarding.
   - Useful context: `cargo fmt --all --check`, `cargo test -p agent-os-kernel --test api_surface -- --test-threads=1`, `cargo check -p agent-os-kernel`, and `cargo test -p agent-os-kernel` all pass for this change.
+---
+## 2026-04-05 09:05:53 PDT - US-064
+- What was implemented
+- Added FD-level `O_NONBLOCK` tracking in `crates/kernel/src/fd_table.rs`, keeping shared `FileDescription.flags()` scoped to open-file-description state while `fd_stat` reports the combined view.
+- Taught `crates/kernel/src/kernel.rs` to honor per-FD nonblocking mode for pipe and PTY reads, to route pipe writes through a blocking/nonblocking-aware pipe path, and to let `/dev/fd/N` duplication layer `O_NONBLOCK` onto a duplicate FD.
+- Hardened `crates/kernel/src/pipe_manager.rs` so blocking small writes wait until the full `PIPE_BUF` chunk fits, preserving atomic writes up to 4096 bytes while nonblocking writes still fail fast with `EAGAIN`.
+- Added focused regressions for FD-level nonblocking flags, nonblocking pipe duplicates through `/dev/fd`, and `PIPE_BUF` atomicity.
+- Files changed
+- `AGENTS.md`
+- `crates/kernel/src/fd_table.rs`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/src/pipe_manager.rs`
+- `crates/kernel/tests/api_surface.rs`
+- `crates/kernel/tests/fd_table.rs`
+- `crates/kernel/tests/pipe_manager.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Per-FD status bits such as `O_NONBLOCK` should live on `FdEntry`, while shared `FileDescription.flags()` should keep only open-file-description semantics like access mode and `O_APPEND`.
+  - Gotchas encountered: Without a `fcntl(F_SETFL)` API, the practical way to obtain a nonblocking view of an existing pipe in this codebase is duplicating `/dev/fd/N` and layering `O_NONBLOCK` onto the duplicate entry.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test fd_table -- --test-threads=1`, `cargo test -p agent-os-kernel --test pipe_manager -- --test-threads=1`, `cargo test -p agent-os-kernel --test api_surface -- --test-threads=1`, and `cargo check -p agent-os-kernel` all pass after this change.
 ---

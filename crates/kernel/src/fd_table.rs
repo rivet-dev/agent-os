@@ -13,6 +13,7 @@ pub const O_CREAT: u32 = 0o100;
 pub const O_EXCL: u32 = 0o200;
 pub const O_TRUNC: u32 = 0o1000;
 pub const O_APPEND: u32 = 0o2000;
+pub const O_NONBLOCK: u32 = 0o4000;
 pub const LOCK_SH: u32 = 1;
 pub const LOCK_EX: u32 = 2;
 pub const LOCK_NB: u32 = 4;
@@ -172,6 +173,7 @@ impl FileDescription {
 pub struct FdEntry {
     pub fd: u32,
     pub description: SharedFileDescription,
+    pub status_flags: u32,
     pub rights: u64,
     pub filetype: u8,
 }
@@ -290,6 +292,7 @@ impl ProcessFdTable {
             FdEntry {
                 fd: 0,
                 description: stdin_desc,
+                status_flags: 0,
                 rights: 0,
                 filetype: FILETYPE_CHARACTER_DEVICE,
             },
@@ -299,6 +302,7 @@ impl ProcessFdTable {
             FdEntry {
                 fd: 1,
                 description: stdout_desc,
+                status_flags: 0,
                 rights: 0,
                 filetype: FILETYPE_CHARACTER_DEVICE,
             },
@@ -308,6 +312,7 @@ impl ProcessFdTable {
             FdEntry {
                 fd: 2,
                 description: stderr_desc,
+                status_flags: 0,
                 rights: 0,
                 filetype: FILETYPE_CHARACTER_DEVICE,
             },
@@ -331,6 +336,7 @@ impl ProcessFdTable {
             FdEntry {
                 fd: 0,
                 description: stdin_desc,
+                status_flags: 0,
                 rights: 0,
                 filetype: stdin_type,
             },
@@ -340,6 +346,7 @@ impl ProcessFdTable {
             FdEntry {
                 fd: 1,
                 description: stdout_desc,
+                status_flags: 0,
                 rights: 0,
                 filetype: stdout_type,
             },
@@ -349,6 +356,7 @@ impl ProcessFdTable {
             FdEntry {
                 fd: 2,
                 description: stderr_desc,
+                status_flags: 0,
                 rights: 0,
                 filetype: stderr_type,
             },
@@ -371,12 +379,15 @@ impl ProcessFdTable {
         lock_target: Option<FileLockTarget>,
     ) -> FdResult<u32> {
         let fd = self.allocate_fd()?;
-        let description = self.alloc_desc.allocate_with_lock(path, flags, lock_target);
+        let description =
+            self.alloc_desc
+                .allocate_with_lock(path, description_flags(flags), lock_target);
         self.entries.insert(
             fd,
             FdEntry {
                 fd,
                 description,
+                status_flags: status_flags(flags),
                 rights: 0,
                 filetype,
             },
@@ -403,6 +414,7 @@ impl ProcessFdTable {
             FdEntry {
                 fd,
                 description,
+                status_flags: 0,
                 rights: 0,
                 filetype,
             },
@@ -423,6 +435,14 @@ impl ProcessFdTable {
     }
 
     pub fn dup(&mut self, fd: u32) -> FdResult<u32> {
+        self.dup_with_status_flags(fd, None)
+    }
+
+    pub fn dup_with_status_flags(
+        &mut self,
+        fd: u32,
+        status_flags_override: Option<u32>,
+    ) -> FdResult<u32> {
         let entry = self
             .entries
             .get(&fd)
@@ -435,6 +455,7 @@ impl ProcessFdTable {
             FdEntry {
                 fd: new_fd,
                 description: entry.description,
+                status_flags: status_flags_override.unwrap_or(entry.status_flags),
                 rights: entry.rights,
                 filetype: entry.filetype,
             },
@@ -463,6 +484,7 @@ impl ProcessFdTable {
             FdEntry {
                 fd: new_fd,
                 description: entry.description,
+                status_flags: entry.status_flags,
                 rights: entry.rights,
                 filetype: entry.filetype,
             },
@@ -477,7 +499,7 @@ impl ProcessFdTable {
             .ok_or_else(|| FdTableError::bad_file_descriptor(fd))?;
         Ok(FdStat {
             filetype: entry.filetype,
-            flags: entry.description.flags(),
+            flags: entry.description.flags() | entry.status_flags,
             rights: entry.rights,
         })
     }
@@ -493,6 +515,7 @@ impl ProcessFdTable {
                 FdEntry {
                     fd: *fd,
                     description: Arc::clone(&entry.description),
+                    status_flags: entry.status_flags,
                     rights: entry.rights,
                     filetype: entry.filetype,
                 },
@@ -544,6 +567,14 @@ fn validate_fd_bounds(fd: u32) -> FdResult<()> {
         return Err(FdTableError::bad_file_descriptor(fd));
     }
     Ok(())
+}
+
+fn description_flags(flags: u32) -> u32 {
+    flags & !status_flags(flags)
+}
+
+fn status_flags(flags: u32) -> u32 {
+    flags & O_NONBLOCK
 }
 
 impl<'a> IntoIterator for &'a ProcessFdTable {

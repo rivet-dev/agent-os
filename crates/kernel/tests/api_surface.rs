@@ -1,12 +1,13 @@
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::fd_table::{
-    LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN, O_APPEND, O_CREAT, O_EXCL, O_RDWR,
+    LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN, O_APPEND, O_CREAT, O_EXCL, O_NONBLOCK, O_RDWR,
 };
 use agent_os_kernel::kernel::{
     ExecOptions, KernelVm, KernelVmConfig, OpenShellOptions, SpawnOptions, WaitPidFlags,
     WaitPidResult, SEEK_SET,
 };
 use agent_os_kernel::permissions::Permissions;
+use agent_os_kernel::pipe_manager::MAX_PIPE_BUFFER_BYTES;
 use agent_os_kernel::process_table::ProcessWaitEvent;
 use agent_os_kernel::vfs::{
     MemoryFileSystem, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
@@ -337,6 +338,83 @@ fn kernel_fd_surface_supports_open_seek_positional_io_dup_and_dev_fd_views() {
     assert_eq!(pipe_stat.mode, 0o666);
     assert_eq!(pipe_stat.size, 0);
     assert!(!pipe_stat.is_directory);
+
+    process.finish(0);
+    kernel.waitpid(process.pid()).expect("wait for shell");
+}
+
+#[test]
+fn kernel_fd_surface_supports_nonblocking_pipe_duplicates_via_dev_fd() {
+    let mut config = KernelVmConfig::new("vm-api-fd-nonblock");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let process = spawn_shell(&mut kernel);
+    let (read_fd, write_fd) = kernel.open_pipe("shell", process.pid()).expect("open pipe");
+    let nonblocking_read_fd = kernel
+        .fd_open(
+            "shell",
+            process.pid(),
+            &format!("/dev/fd/{read_fd}"),
+            O_NONBLOCK,
+            None,
+        )
+        .expect("duplicate read end with O_NONBLOCK");
+    let nonblocking_write_fd = kernel
+        .fd_open(
+            "shell",
+            process.pid(),
+            &format!("/dev/fd/{write_fd}"),
+            O_NONBLOCK,
+            None,
+        )
+        .expect("duplicate write end with O_NONBLOCK");
+
+    assert_eq!(
+        kernel
+            .fd_stat("shell", process.pid(), read_fd)
+            .expect("stat blocking read fd")
+            .flags
+            & O_NONBLOCK,
+        0
+    );
+    assert_ne!(
+        kernel
+            .fd_stat("shell", process.pid(), nonblocking_read_fd)
+            .expect("stat nonblocking read fd")
+            .flags
+            & O_NONBLOCK,
+        0
+    );
+    assert_ne!(
+        kernel
+            .fd_stat("shell", process.pid(), nonblocking_write_fd)
+            .expect("stat nonblocking write fd")
+            .flags
+            & O_NONBLOCK,
+        0
+    );
+
+    assert_kernel_error_code(
+        kernel.fd_read("shell", process.pid(), nonblocking_read_fd, 1),
+        "EAGAIN",
+    );
+
+    kernel
+        .fd_write(
+            "shell",
+            process.pid(),
+            write_fd,
+            &vec![7; MAX_PIPE_BUFFER_BYTES],
+        )
+        .expect("fill pipe buffer");
+    assert_kernel_error_code(
+        kernel.fd_write("shell", process.pid(), nonblocking_write_fd, &[8]),
+        "EAGAIN",
+    );
 
     process.finish(0);
     kernel.waitpid(process.pid()).expect("wait for shell");

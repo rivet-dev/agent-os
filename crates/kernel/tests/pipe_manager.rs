@@ -1,5 +1,7 @@
 use agent_os_kernel::fd_table::{FdResult, FdTableManager, FILETYPE_PIPE};
-use agent_os_kernel::pipe_manager::{PipeManager, PipeResult, MAX_PIPE_BUFFER_BYTES};
+use agent_os_kernel::pipe_manager::{
+    PipeManager, PipeResult, MAX_PIPE_BUFFER_BYTES, PIPE_BUF_BYTES,
+};
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -133,6 +135,57 @@ fn buffer_limit_is_enforced_until_the_reader_drains_the_pipe() {
     manager
         .write(pipe.write.description.id(), vec![2; 1024])
         .expect("write after draining");
+}
+
+#[test]
+fn blocking_small_writes_wait_for_full_pipe_buf_capacity() {
+    let manager = PipeManager::new();
+    let pipe = manager.create_pipe();
+    let read_id = pipe.read.description.id();
+    let write_id = pipe.write.description.id();
+    let writer = manager.clone();
+
+    manager
+        .write(
+            write_id,
+            vec![0; MAX_PIPE_BUFFER_BYTES - (PIPE_BUF_BYTES - 1)],
+        )
+        .expect("fill pipe to one byte below PIPE_BUF headroom");
+
+    let handle = thread::spawn(move || {
+        writer
+            .write_blocking(write_id, vec![1; PIPE_BUF_BYTES])
+            .expect("small blocking write should eventually succeed")
+    });
+
+    thread::sleep(Duration::from_millis(25));
+    assert!(
+        !handle.is_finished(),
+        "PIPE_BUF-sized write should wait until the full chunk fits"
+    );
+
+    let first = manager
+        .read(read_id, 1)
+        .expect("drain one byte")
+        .expect("byte should be present");
+    assert_eq!(first, vec![0]);
+
+    assert_eq!(
+        handle.join().expect("writer thread should finish"),
+        PIPE_BUF_BYTES
+    );
+
+    let drained = manager
+        .read(read_id, MAX_PIPE_BUFFER_BYTES)
+        .expect("drain remainder")
+        .expect("remainder should be present");
+    assert_eq!(drained.len(), MAX_PIPE_BUFFER_BYTES);
+    assert!(drained[..drained.len() - PIPE_BUF_BYTES]
+        .iter()
+        .all(|byte| *byte == 0));
+    assert!(drained[drained.len() - PIPE_BUF_BYTES..]
+        .iter()
+        .all(|byte| *byte == 1));
 }
 
 #[test]

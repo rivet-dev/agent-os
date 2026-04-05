@@ -4,7 +4,7 @@ use crate::device_layer::{create_device_layer, DeviceLayer};
 use crate::fd_table::{
     FdStat, FdTableError, FdTableManager, FileDescription, FileLockManager, FileLockTarget,
     FlockOperation, ProcessFdTable, FILETYPE_CHARACTER_DEVICE, FILETYPE_DIRECTORY, FILETYPE_PIPE,
-    FILETYPE_REGULAR_FILE, FILETYPE_SYMBOLIC_LINK, O_APPEND, O_CREAT, O_EXCL, O_TRUNC,
+    FILETYPE_REGULAR_FILE, FILETYPE_SYMBOLIC_LINK, O_APPEND, O_CREAT, O_EXCL, O_NONBLOCK, O_TRUNC,
 };
 use crate::mount_table::{MountEntry, MountOptions, MountTable, MountedFileSystem};
 use crate::permissions::{
@@ -710,7 +710,14 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             let table = tables
                 .get_mut(pid)
                 .ok_or_else(|| KernelError::no_such_process(pid))?;
-            return Ok(table.dup(existing_fd)?);
+            let entry = table
+                .get(existing_fd)
+                .cloned()
+                .ok_or_else(|| KernelError::bad_file_descriptor(existing_fd))?;
+            return Ok(table.dup_with_status_flags(
+                existing_fd,
+                Some(entry.status_flags | (flags & O_NONBLOCK)),
+            )?);
         }
 
         let (filetype, lock_target) = self.prepare_fd_open(path, flags)?;
@@ -741,14 +748,30 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         if self.pipes.is_pipe(entry.description.id()) {
             return Ok(self
                 .pipes
-                .read_with_timeout(entry.description.id(), length, self.blocking_read_timeout())?
+                .read_with_timeout(
+                    entry.description.id(),
+                    length,
+                    if entry.status_flags & O_NONBLOCK != 0 {
+                        Some(Duration::ZERO)
+                    } else {
+                        self.blocking_read_timeout()
+                    },
+                )?
                 .unwrap_or_default());
         }
 
         if self.ptys.is_pty(entry.description.id()) {
             return Ok(self
                 .ptys
-                .read_with_timeout(entry.description.id(), length, self.blocking_read_timeout())?
+                .read_with_timeout(
+                    entry.description.id(),
+                    length,
+                    if entry.status_flags & O_NONBLOCK != 0 {
+                        Some(Duration::ZERO)
+                    } else {
+                        self.blocking_read_timeout()
+                    },
+                )?
                 .unwrap_or_default());
         }
 
@@ -784,7 +807,11 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         };
 
         if self.pipes.is_pipe(entry.description.id()) {
-            return match self.pipes.write(entry.description.id(), data) {
+            return match self.pipes.write_with_mode(
+                entry.description.id(),
+                data,
+                entry.status_flags & O_NONBLOCK != 0,
+            ) {
                 Ok(bytes) => Ok(bytes),
                 Err(error) => {
                     if error.code() == "EPIPE" {

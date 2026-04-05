@@ -1,7 +1,7 @@
 use agent_os_kernel::fd_table::{
     FdResult, FdTableManager, FileDescription, FileLockManager, FileLockTarget, FlockOperation,
     FILETYPE_CHARACTER_DEVICE, FILETYPE_REGULAR_FILE, LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN,
-    MAX_FDS_PER_PROCESS, O_RDONLY, O_WRONLY,
+    MAX_FDS_PER_PROCESS, O_NONBLOCK, O_RDONLY, O_WRONLY,
 };
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -179,6 +179,42 @@ fn stat_returns_fd_metadata() {
 
     assert_eq!(stat.filetype, FILETYPE_REGULAR_FILE);
     assert_eq!(stat.flags, O_WRONLY);
+}
+
+#[test]
+fn nonblocking_status_flags_are_tracked_per_fd_entry() {
+    let mut manager = FdTableManager::new();
+    manager.create(1);
+
+    let table = manager.get_mut(1).expect("FD table should exist");
+    let fd = table
+        .open_with_filetype(
+            "/tmp/test.txt",
+            O_WRONLY | O_NONBLOCK,
+            FILETYPE_REGULAR_FILE,
+        )
+        .expect("open regular file");
+    let dup_fd = table
+        .dup_with_status_flags(fd, Some(0))
+        .expect("duplicate regular file without nonblocking");
+
+    let original = table.stat(fd).expect("stat original FD");
+    let duplicated = table.stat(dup_fd).expect("stat duplicate FD");
+
+    assert_eq!(original.flags, O_WRONLY | O_NONBLOCK);
+    assert_eq!(duplicated.flags, O_WRONLY);
+    assert_eq!(
+        table.get(fd).expect("original entry").description.flags(),
+        O_WRONLY
+    );
+    assert_eq!(
+        table
+            .get(dup_fd)
+            .expect("duplicate entry")
+            .description
+            .flags(),
+        O_WRONLY
+    );
 }
 
 #[test]

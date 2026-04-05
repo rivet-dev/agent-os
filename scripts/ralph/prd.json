@@ -1017,7 +1017,7 @@
         "Typecheck passes"
       ],
       "priority": 64,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: O_NONBLOCK not implemented. Pipe writes not atomic at any size. Non-blocking I/O is required for event loops, Node.js internals, and many CLI tools."
     },
     {

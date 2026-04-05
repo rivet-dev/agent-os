@@ -9,6 +9,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 pub const MAX_PIPE_BUFFER_BYTES: usize = 65_536;
+pub const PIPE_BUF_BYTES: usize = 4_096;
 
 pub type PipeResult<T> = Result<T, PipeError>;
 
@@ -190,6 +191,19 @@ impl PipeManager {
     }
 
     pub fn write(&self, description_id: u64, data: impl AsRef<[u8]>) -> PipeResult<usize> {
+        self.write_with_mode(description_id, data, true)
+    }
+
+    pub fn write_blocking(&self, description_id: u64, data: impl AsRef<[u8]>) -> PipeResult<usize> {
+        self.write_with_mode(description_id, data, false)
+    }
+
+    pub fn write_with_mode(
+        &self,
+        description_id: u64,
+        data: impl AsRef<[u8]>,
+        nonblocking: bool,
+    ) -> PipeResult<usize> {
         let payload = data.as_ref();
         let mut state = lock_or_recover(&self.inner.state);
         let pipe_ref = state
@@ -201,47 +215,66 @@ impl PipeManager {
             return Err(PipeError::bad_file_descriptor("not a pipe write end"));
         }
 
-        let waiter_id = {
-            let pipe = state
-                .pipes
-                .get_mut(&pipe_ref.pipe_id)
-                .ok_or_else(|| PipeError::bad_file_descriptor("pipe not found"))?;
-            if pipe.closed_write {
-                return Err(PipeError::broken_pipe("write end closed"));
-            }
-            if pipe.closed_read {
-                return Err(PipeError::broken_pipe("read end closed"));
-            }
-            pipe.waiting_reads.pop_front()
-        };
+        loop {
+            let waiter_id = {
+                let pipe = state
+                    .pipes
+                    .get_mut(&pipe_ref.pipe_id)
+                    .ok_or_else(|| PipeError::bad_file_descriptor("pipe not found"))?;
+                if pipe.closed_write {
+                    return Err(PipeError::broken_pipe("write end closed"));
+                }
+                if pipe.closed_read {
+                    return Err(PipeError::broken_pipe("read end closed"));
+                }
+                pipe.waiting_reads.pop_front()
+            };
 
-        if let Some(waiter_id) = waiter_id {
-            if let Some(waiter) = state.waiters.get_mut(&waiter_id) {
-                waiter.result = Some(Some(payload.to_vec()));
+            if let Some(waiter_id) = waiter_id {
+                if let Some(waiter) = state.waiters.get_mut(&waiter_id) {
+                    waiter.result = Some(Some(payload.to_vec()));
+                    self.inner.waiters.notify_all();
+                    return Ok(payload.len());
+                }
+                continue;
+            }
+
+            let current_buffer_size = {
+                let pipe = state
+                    .pipes
+                    .get(&pipe_ref.pipe_id)
+                    .ok_or_else(|| PipeError::bad_file_descriptor("pipe not found"))?;
+                buffer_size(&pipe.buffer)
+            };
+            let available = MAX_PIPE_BUFFER_BYTES.saturating_sub(current_buffer_size);
+
+            if payload.len() <= PIPE_BUF_BYTES {
+                if available >= payload.len() {
+                    let pipe = state
+                        .pipes
+                        .get_mut(&pipe_ref.pipe_id)
+                        .ok_or_else(|| PipeError::bad_file_descriptor("pipe not found"))?;
+                    pipe.buffer.push_back(payload.to_vec());
+                    self.inner.waiters.notify_all();
+                    return Ok(payload.len());
+                }
+            } else if available > 0 {
+                let chunk_len = available.min(payload.len());
+                let pipe = state
+                    .pipes
+                    .get_mut(&pipe_ref.pipe_id)
+                    .ok_or_else(|| PipeError::bad_file_descriptor("pipe not found"))?;
+                pipe.buffer.push_back(payload[..chunk_len].to_vec());
                 self.inner.waiters.notify_all();
-                return Ok(payload.len());
+                return Ok(chunk_len);
             }
+
+            if nonblocking {
+                return Err(PipeError::would_block("pipe buffer full"));
+            }
+
+            state = wait_or_recover(&self.inner.waiters, state);
         }
-
-        let current_buffer_size = {
-            let pipe = state
-                .pipes
-                .get(&pipe_ref.pipe_id)
-                .ok_or_else(|| PipeError::bad_file_descriptor("pipe not found"))?;
-            buffer_size(&pipe.buffer)
-        };
-
-        if current_buffer_size.saturating_add(payload.len()) > MAX_PIPE_BUFFER_BYTES {
-            return Err(PipeError::would_block("pipe buffer full"));
-        }
-
-        let pipe = state
-            .pipes
-            .get_mut(&pipe_ref.pipe_id)
-            .ok_or_else(|| PipeError::bad_file_descriptor("pipe not found"))?;
-        pipe.buffer.push_back(payload.to_vec());
-        self.inner.waiters.notify_all();
-        Ok(payload.len())
     }
 
     pub fn read(&self, description_id: u64, length: usize) -> PipeResult<Option<Vec<u8>>> {
@@ -284,7 +317,9 @@ impl PipeManager {
                     .ok_or_else(|| PipeError::bad_file_descriptor("pipe not found"))?;
 
                 if !pipe.buffer.is_empty() {
-                    return Ok(Some(drain_buffer(&mut pipe.buffer, length)));
+                    let result = drain_buffer(&mut pipe.buffer, length);
+                    self.inner.waiters.notify_all();
+                    return Ok(Some(result));
                 }
 
                 if pipe.closed_write {
@@ -359,7 +394,7 @@ impl PipeManager {
                 match pipe_ref.end {
                     PipeSide::Read => {
                         pipe.closed_read = true;
-                        (Vec::new(), pipe.closed_read && pipe.closed_write, false)
+                        (Vec::new(), pipe.closed_read && pipe.closed_write, true)
                     }
                     PipeSide::Write => {
                         pipe.closed_write = true;
