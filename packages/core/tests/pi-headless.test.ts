@@ -126,7 +126,7 @@ console.log("messages:" + JSON.stringify(parsed.messages));
 		expect(stdout).toContain('messages:["hello"]');
 	}, 30_000);
 
-	// TODO: Full PI headless execution is blocked by two secure-exec VM limitations:
+	// TODO: Full PI headless execution is blocked by two current VM limitations:
 	// 1. ESM module linking: V8 Rust runtime doesn't forward named exports from
 	//    host-loaded modules (ModuleAccessFileSystem overlay). VFS modules work fine.
 	//    PI's CLI must run as ESM (has async top-level main()), but ESM mode can't

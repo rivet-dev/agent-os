@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-uuid-pass",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"uuid": "11.1.0"
+	}
+}

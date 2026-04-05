@@ -3,6 +3,6 @@ name = "secureexec-column"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "column implementation for secure-exec standalone binaries"
+description = "column implementation for Agent OS standalone binaries"
 
 [dependencies]

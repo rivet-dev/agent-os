@@ -5,6 +5,7 @@ import { AgentOs } from "../src/agent-os.js";
 import type { JsonRpcNotification } from "../src/protocol.js";
 import { Session } from "../src/session.js";
 import { createStdoutLineIterable } from "../src/stdout-lines.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 import {
 	createAnthropicFixture,
 	startLlmock,
@@ -201,7 +202,7 @@ describe("end-to-end mock agent session with llmock", () => {
 		await vm.writeFile("/tmp/llm-adapter.mjs", MOCK_LLM_AGENT_ADAPTER);
 
 		const { iterable, onStdout } = createStdoutLineIterable();
-		const proc = vm.kernel.spawn(
+		const proc = getAgentOsKernel(vm).spawn(
 			"node",
 			["/tmp/llm-adapter.mjs"],
 			{

@@ -1,0 +1,6 @@
+[package]
+name = "agent-os-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared bridge contracts between the Agent OS kernel and execution planes"

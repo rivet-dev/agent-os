@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-bcryptjs-pass",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"bcryptjs": "2.4.3"
+	}
+}

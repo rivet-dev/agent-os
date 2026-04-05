@@ -3,7 +3,7 @@ name = "cmd-rg"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "rg (ripgrep) standalone binary for secure-exec WasmVM"
+description = "rg (ripgrep) standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "rg"

@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-jsonwebtoken-pass",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"jsonwebtoken": "9.0.2"
+	}
+}

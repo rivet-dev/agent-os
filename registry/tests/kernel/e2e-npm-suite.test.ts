@@ -23,9 +23,9 @@ import {
   createWasmVmRuntime,
   createNodeRuntime,
   createIntegrationKernel,
+  NodeFileSystem,
   skipUnlessWasmBuilt,
 } from './helpers.ts';
-import { NodeFileSystem } from '@secure-exec/nodejs';
 
 const wasmSkip = skipUnlessWasmBuilt();
 

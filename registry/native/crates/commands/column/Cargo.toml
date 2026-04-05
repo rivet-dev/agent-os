@@ -3,7 +3,7 @@ name = "cmd-column"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "column standalone binary for secure-exec WasmVM"
+description = "column standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "column"

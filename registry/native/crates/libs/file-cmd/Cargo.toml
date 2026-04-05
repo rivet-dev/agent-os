@@ -3,7 +3,7 @@ name = "secureexec-file-cmd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "file command implementation for secure-exec standalone binaries"
+description = "file command implementation for Agent OS standalone binaries"
 
 [dependencies]
 infer = "0.16"

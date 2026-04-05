@@ -3,7 +3,7 @@ name = "secureexec-find"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "find implementation for secure-exec standalone binaries"
+description = "find implementation for Agent OS standalone binaries"
 
 [dependencies]
 regex = "1"

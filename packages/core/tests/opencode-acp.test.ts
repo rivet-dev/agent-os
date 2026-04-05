@@ -1,11 +1,12 @@
 import { resolve } from "node:path";
 import type { LLMock } from "@copilotkit/llmock";
-import type { ManagedProcess } from "@secure-exec/core";
+import type { ManagedProcess } from "../src/runtime-compat.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import opencode from "@rivet-dev/agent-os-opencode";
 import { AcpClient } from "../src/acp-client.js";
 import { AgentOs } from "../src/agent-os.js";
 import { createStdoutLineIterable } from "../src/stdout-lines.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 import {
 	DEFAULT_TEXT_FIXTURE,
 	startLlmock,
@@ -66,7 +67,7 @@ describe.skipIf(registrySkipReason)("OpenCode ACP manual spawn inside the VM", (
 		const { iterable, onStdout } = createStdoutLineIterable();
 
 		let stderrOutput = "";
-		const proc = vm.kernel.spawn("node", [binPath], {
+		const proc = getAgentOsKernel(vm).spawn("node", [binPath], {
 			streamStdin: true,
 			onStdout,
 			onStderr: (data: Uint8Array) => {

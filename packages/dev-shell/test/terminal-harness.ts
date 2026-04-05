@@ -1,5 +1,5 @@
 import { Terminal } from "@xterm/headless";
-import type { Kernel } from "@secure-exec/core";
+import type { Kernel } from "@rivet-dev/agent-os/test/runtime";
 
 type ShellHandle = ReturnType<Kernel["openShell"]>;
 

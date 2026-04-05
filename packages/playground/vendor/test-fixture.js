@@ -1,1 +1,0 @@
-/tmp/playground-vendor-JavmEJ/fixture.js

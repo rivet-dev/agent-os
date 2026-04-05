@@ -1,6 +1,6 @@
 // Clone a local repository and check out a feature branch in the clone.
 
-import { AgentOs } from "@rivet-dev/agent-os-core";
+import { AgentOs } from "@rivet-dev/agent-os";
 import common from "@rivet-dev/agent-os-common";
 import git from "@rivet-dev/agent-os-git";
 

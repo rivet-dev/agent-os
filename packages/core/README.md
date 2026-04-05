@@ -7,13 +7,14 @@ Agents run inside sandboxed VMs with their own filesystem, process table, and ne
 ## Features
 
 - **VM lifecycle** — create, configure, and dispose isolated virtual machines
+- **Sidecar placement** — reuse the default shared sidecar or inject an explicit sidecar handle
 - **Agent sessions (ACP)** — launch coding agents (PI, OpenCode) via JSON-RPC over stdio
 - **Filesystem operations** — read, write, mkdir, stat, move, delete, recursive listing, batch read/write
 - **Process management** — spawn, exec, stop, kill processes; inspect process trees across all runtimes
 - **Agent registry** — discover available agents and their installation status
 - **Networking** — reach services running inside the VM via `fetch()`
 - **Shell access** — open interactive shells with PTY support
-- **Mount backends** — memory, host directory, S3, overlay (copy-on-write), or custom VirtualFileSystem
+- **Mount backends** — memory, native host directory mounts, S3, overlay (copy-on-write), or custom VirtualFileSystem
 
 ## Quick Start
 
@@ -24,7 +25,7 @@ npm install pi-acp @mariozechner/pi-coding-agent
 ```
 
 ```typescript
-import { AgentOs } from "@rivet-dev/agent-os-core";
+import { AgentOs } from "@rivet-dev/agent-os";
 
 // 1. Create a VM
 const vm = await AgentOs.create();
@@ -47,7 +48,17 @@ await vm.dispose();
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `create` | `static create(options?: AgentOsOptions): Promise<AgentOs>` | Create and boot a new VM |
+| `getSharedSidecar` | `static getSharedSidecar(options?: AgentOsSharedSidecarOptions): Promise<AgentOsSidecar>` | Get or create a shared sidecar handle for a pool |
+| `createSidecar` | `static createSidecar(options?: AgentOsCreateSidecarOptions): Promise<AgentOsSidecar>` | Create an explicit sidecar handle |
 | `dispose` | `dispose(): Promise<void>` | Shut down the VM and all sessions |
+
+### Sidecars
+
+| Surface | Signature | Description |
+|--------|-----------|-------------|
+| `sidecar` | `AgentOsSidecar` | Sidecar handle backing the VM |
+| `describe` | `sidecar.describe(): AgentOsSidecarDescription` | Inspect sidecar placement, state, and active VM count |
+| `dispose` | `sidecar.dispose(): Promise<void>` | Dispose the sidecar handle and any active VMs leased from it |
 
 ### Filesystem
 
@@ -90,6 +101,7 @@ await vm.dispose();
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
+| `connectTerminal` | `connectTerminal(options?: ConnectTerminalOptions): Promise<number>` | Attach a shell directly to the host terminal and wait for exit |
 | `openShell` | `openShell(options?: OpenShellOptions): { shellId: string }` | Open an interactive shell with PTY support |
 | `writeShell` | `writeShell(shellId: string, data: string \| Uint8Array): void` | Write data to a shell's PTY input |
 | `onShellData` | `onShellData(shellId: string, handler: (data: Uint8Array) => void): () => void` | Subscribe to shell output data |
@@ -137,14 +149,21 @@ await vm.dispose();
 
 **VM & Options**
 - `AgentOsOptions` — VM creation options (commandDirs, loopbackExemptPorts, moduleAccessCwd, mounts, additionalInstructions)
+- `AgentOsSidecarConfig` — shared-pool or explicit-handle sidecar selection for VM creation
+- `AgentOsSharedSidecarOptions` — shared sidecar pool selection
+- `AgentOsCreateSidecarOptions` — explicit sidecar handle creation options
 - `CreateSessionOptions` — Session options (cwd, env, mcpServers, skipOsInstructions, additionalInstructions)
+
+**Sidecar**
+- `AgentOsSidecarDescription` — Sidecar identity, placement, lifecycle state, and active VM count
 
 **Mount Configurations**
 - `MountConfig` — Union of all mount types
 - `MountConfigMemory` — In-memory filesystem
 - `MountConfigCustom` — Caller-provided VirtualFileSystem
-- `MountConfigHostDir` — Host directory with symlink escape prevention
-- `MountConfigS3` — S3-compatible object storage
+- `NativeMountConfig` — Declarative sidecar mount plugin configuration
+- `createGoogleDriveBackend()` — Declarative Google Drive native mount helper from `@rivet-dev/agent-os-google-drive`
+- `createS3Backend()` — Declarative S3-compatible native mount helper from `@rivet-dev/agent-os-s3`
 - `MountConfigOverlay` — Copy-on-write overlay (lower + upper layers)
 
 **MCP Servers**
@@ -188,4 +207,4 @@ await vm.dispose();
 - `JsonRpcRequest`, `JsonRpcResponse`, `JsonRpcNotification`, `JsonRpcError`
 
 **Backends**
-- `HostDirBackendOptions`, `OverlayBackendOptions`, `S3BackendOptions`
+- `HostDirBackendOptions` — Options for the `createHostDirBackend()` native host-dir plugin helper

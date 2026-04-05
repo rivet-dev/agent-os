@@ -7,6 +7,9 @@ npm-debug.log*
 pnpm-debug.log*
 .pnpm-store/
 
+# Rust
+target/
+
 # TypeScript
 *.tsbuildinfo
 dist/
@@ -37,3 +40,9 @@ registry/software/*/agent-os-package.meta.json
 registry/.last-publish-hash
 registry/software/*/.last-publish-hash
 registry/.build-markers/
+
+# Ralph agent artifacts
+scripts/ralph/codex-streams/
+scripts/ralph/.last-branch
+scripts/ralph/prd.json
+scripts/ralph/progress.txt

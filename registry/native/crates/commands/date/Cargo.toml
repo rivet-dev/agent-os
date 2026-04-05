@@ -3,7 +3,7 @@ name = "cmd-date"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "date standalone binary for secure-exec WasmVM"
+description = "date standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "date"

@@ -3,7 +3,7 @@ name = "cmd-pathchk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "pathchk standalone binary for secure-exec WasmVM"
+description = "pathchk standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "pathchk"

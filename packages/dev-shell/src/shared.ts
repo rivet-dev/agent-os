@@ -4,7 +4,7 @@ import path from "node:path";
 
 export interface WorkspacePaths {
 	workspaceRoot: string;
-	secureExecRoot: string;
+	hostProjectRoot: string;
 	wasmCommandsDir: string;
 	realProviderEnvFile: string;
 }
@@ -29,9 +29,9 @@ export function resolveWorkspacePaths(startDir: string): WorkspacePaths {
 	const workspaceRoot = findWorkspaceRoot(startDir);
 	return {
 		workspaceRoot,
-		// Dev-shell used to live in a nested secure-exec repo. In this monorepo,
+		// Dev-shell used to live in a nested runtime repo. In this monorepo,
 		// the workspace root itself is the host-visible project root.
-		secureExecRoot: workspaceRoot,
+		hostProjectRoot: workspaceRoot,
 		wasmCommandsDir: path.join(
 			workspaceRoot,
 			"registry",

@@ -1,0 +1,8 @@
+{
+  "name": "project-matrix-pino-pass",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "pino": "^9.0.0"
+  }
+}

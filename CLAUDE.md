@@ -1,16 +1,16 @@
 # agentOS
 
-A high-level wrapper around the Secure-Exec OS that provides a clean API for running coding agents inside isolated VMs via the Agent Communication Protocol (ACP).
+A high-level wrapper around the Agent OS runtime that provides a clean API for running coding agents inside isolated VMs via the Agent Communication Protocol (ACP).
 
-## Secure-Exec (the underlying OS)
+## Agent OS Runtime
 
-Secure-Exec is an in-process operating system kernel written in JavaScript. All runtimes make "syscalls" into this kernel for file I/O, process spawning, networking, etc. The kernel orchestrates three execution environments:
+Agent OS uses a native kernel sidecar written in Rust. All guest code runs inside the sidecar's isolation boundary — nothing executes as an unsandboxed host process. The kernel orchestrates three execution environments:
 
-- **WASM processes** — A custom libc and Rust toolchain compile a full suite of POSIX utilities (coreutils, sh, grep, etc.) to WebAssembly. WASM processes run in Worker threads and make synchronous syscalls to the kernel via SharedArrayBuffer RPC.
+- **WASM processes** — A custom libc and Rust toolchain compile a full suite of POSIX utilities (coreutils, sh, grep, etc.) to WebAssembly. All WASM execution happens within the sidecar's managed runtime.
 - **Node.js (V8 isolates)** — A sandboxed reimplementation of Node.js APIs (`child_process`, `fs`, `net`, etc.) runs JS/TS inside isolated V8 contexts. Module loading is hijacked to route through the kernel VFS. This is how agent code runs.
-- **Python (Pyodide)** — CPython compiled to WASM via Pyodide, running in a Worker thread with kernel-backed file/network I/O.
+- **Python (Pyodide)** — CPython compiled to WASM via Pyodide, running within the sidecar with kernel-backed file/network I/O.
 
-All three runtimes implement the `RuntimeDriver` interface and are mounted into the kernel at boot. Processes can spawn children across runtimes (e.g., a Node process can spawn a WASM shell).
+All runtimes are managed by the sidecar's execution engines and kernel process table. Processes can spawn children across runtimes (e.g., a Node process can spawn a WASM shell). Guest code must never escape the sidecar's isolation boundary to run on the host.
 
 ### Key subsystems
 
@@ -26,8 +26,8 @@ agentOS wraps the kernel and adds: a high-level filesystem/process API, ACP agen
 
 ## Project Structure
 
-- **Monorepo**: pnpm workspaces + Turborepo + TypeScript + Biome (mirrors secure-exec)
-- **Core package**: `@rivet-dev/agent-os-core` in `packages/core/` -- contains everything (VM ops, ACP client, session management)
+- **Monorepo**: pnpm workspaces + Turborepo + TypeScript + Biome
+- **Core package**: `@rivet-dev/agent-os` in `packages/core/` -- contains everything (VM ops, ACP client, session management)
 - **Registry types**: `@rivet-dev/agent-os-registry-types` in `packages/registry-types/` -- shared type definitions for WASM command package descriptors. The registry software packages link to this package. When changing descriptor types, update here and rebuild the registry.
 - **npm scope**: `@rivet-dev/agent-os-*`
 - **Actor integration** lives in the Rivet repo at `rivetkit-typescript/packages/rivetkit/src/agent-os/`, not as a separate package
@@ -40,7 +40,7 @@ agentOS wraps the kernel and adds: a high-level filesystem/process API, ACP agen
 The `registry/` directory contains four categories of extension packages, all published under `@rivet-dev/agent-os-*`:
 
 1. **Agents** (`registry/agent/`) — ACP adapter packages that let specific coding agents run inside the VM. Each agent package wraps an agent SDK or CLI with an ACP adapter binary. Examples: `@rivet-dev/agent-os-pi`, `@rivet-dev/agent-os-pi-cli`, `@rivet-dev/agent-os-opencode`.
-2. **File systems** (`registry/file-system/`) — Pluggable `FsBlockStore` implementations for persistent VFS storage. These are drivers passed via `type: "custom"` mount, not imported by core. Examples: `@rivet-dev/agent-os-s3` (S3-compatible block store), `@rivet-dev/agent-os-google-drive` (Google Drive API v3).
+2. **File systems** (`registry/file-system/`) — First-party filesystem helpers and storage integrations. Migrated drivers like `@rivet-dev/agent-os-s3` now emit declarative native mount descriptors, while remaining storage packages can still expose lower-level block-store helpers until their native cutovers land.
 3. **Tools** (`registry/tool/`) — Extension toolkits that add capabilities to the VM. Example: `@rivet-dev/agent-os-sandbox` (Sandbox Agent SDK integration with `createSandboxFs()` and `createSandboxToolkit()`).
 4. **Software** (`registry/software/`) — Pre-built WASM command binaries (coreutils, grep, sed, etc.) compiled from Rust and C source in `registry/native/`. See `registry/CLAUDE.md` for naming conventions, package types, and how to add new packages.
 
@@ -65,13 +65,15 @@ The registry software packages depend on `@rivet-dev/agent-os-registry-types` (i
 - **The VM base filesystem artifact is derived from Alpine Linux, but runtime source should stay generic.** `packages/core/src/` must not hardcode Alpine-specific defaults or import Alpine-named helpers. The runtime consumes `packages/core/fixtures/base-filesystem.json` as the default root layer.
 - **Base filesystem rebuild flow:** first capture a fresh Alpine snapshot with `pnpm --dir packages/core snapshot:alpine-defaults`, which writes `packages/core/fixtures/alpine-defaults.json`. Then run `pnpm --dir packages/core build:base-filesystem`, which rewrites the required AgentOs-specific values (for example `HOSTNAME=agent-os` and `/etc/hostname`) and emits `packages/core/fixtures/base-filesystem.json`. AgentOs uses that built artifact as the lower layer of an overlay-backed root filesystem.
 - **The default VM filesystem model should be Docker-like.** The root filesystem should be a layered overlay view with one writable upper layer on top of one or more immutable lower snapshot layers. The base filesystem artifact is the initial lower layer; additional frozen lower layers may be stacked beneath the writable upper if needed. Do not design the default VM root as a pile of ad hoc post-boot mutations.
-- **Everything runs inside the VM.** Agent processes, servers, network requests -- all spawned inside the secure-exec kernel, never on the host. This is a hard rule with no exceptions.
-- The `AgentOs` class wraps a secure-exec `Kernel` and proxies its API directly
+- **Everything runs inside the VM.** Agent processes, servers, network requests -- all spawned inside the Agent OS kernel, never on the host. This is a hard rule with no exceptions.
+- **All guest code must execute within the kernel's isolation boundary (WASM or in-kernel isolate).** No runtime may escape to a host-native process. If a language runtime requires a JavaScript host (e.g., Emscripten-compiled WASM like Pyodide), the JS host must itself run inside the kernel — not as a host-side Node.js subprocess. Spawning an unsandboxed host process to run guest code is never acceptable, even as a convenience shortcut. New runtimes must either compile to WASI (so they run in the kernel's WASM engine directly) or run inside an already-sandboxed in-kernel isolate.
+- **`sandbox_agent` mounts on `sandbox-agent@0.4.2` only get basic file endpoints (`entries`, `file`, `mkdir`, `move`, `stat`) from the HTTP fs API.** When the sidecar needs symlink/readlink/realpath/link/chmod/chown/utimes semantics, it must use the remote process API as a fallback and return `ENOSYS` when that helper path is unavailable.
+- The `AgentOs` class wraps the kernel and proxies its API directly
 - **All public methods on AgentOs must accept and return JSON-serializable data.** No object references (Session, ManagedProcess, ShellHandle) in the public API. Reference resources by ID (session ID, PID, shell ID). This keeps the API flat and portable across serialization boundaries (HTTP, RPC, IPC).
 - Filesystem methods mirror the kernel API 1:1 (readFile, writeFile, mkdir, readdir, stat, exists, move, delete)
 - **readdir returns `.` and `..` entries** — always filter them when iterating children to avoid infinite recursion
 - Command execution mirrors the kernel API (exec, spawn)
-- `fetch(port, request)` reaches services running inside the VM using the secure-exec network adapter pattern (`proc.network.fetch`)
+- `fetch(port, request)` reaches services running inside the VM using the kernel network adapter pattern (`proc.network.fetch`)
 
 ## Virtual Filesystem Design Reference
 
@@ -81,8 +83,8 @@ The registry software packages depend on `@rivet-dev/agent-os-registry-types` (i
 
 ### Agent-OS filesystem packages
 
-- The old `fs-sqlite` and `fs-postgres` packages were deleted. They are replaced by the secure-exec `SqliteMetadataStore` and the `ChunkedVFS` composition layer.
-- File system drivers live in `registry/file-system/` (see Registry section above). They implement the `FsBlockStore` interface and are passed via `type: "custom"` mount.
+- The old `fs-sqlite` and `fs-postgres` packages were deleted. They are replaced by the Agent OS `SqliteMetadataStore` and the `ChunkedVFS` composition layer.
+- File system drivers live in `registry/file-system/` (see Registry section above). Prefer their declarative mount helpers when available; the legacy custom-`VirtualFileSystem` path is only for arbitrary caller-supplied filesystems and compatibility fallbacks.
 - The Rivet actor integration (in the Rivet repo at `rivetkit-typescript/packages/rivetkit/src/agent-os/`) currently uses `ChunkedVFS(InMemoryMetadataStore + InMemoryBlockStore)` as legacy temporary infrastructure. This is not an acceptable long-term model for filesystem correctness. Filesystem semantics must move to durable metadata and block storage rather than transient in-memory state.
 
 ## Filesystem Conventions
@@ -97,7 +99,6 @@ The registry software packages depend on `@rivet-dev/agent-os-registry-types` (i
 
 ## Dependencies
 
-- **secure-exec** is published on npm as `secure-exec`, `@secure-exec/core`, `@secure-exec/nodejs`, `@secure-exec/v8`, etc. Pinned at `^0.2.1`.
 - **Rivet repo** — A modifiable copy lives at `~/r-aos`. Use this when you need to make changes to the Rivet codebase.
 - Mount host `node_modules` read-only for agent packages (pi-acp, etc.)
 
@@ -140,6 +141,14 @@ Each agent type needs:
 - **Mock LLM testing**: Use `@copilotkit/llmock` to run a mock LLM server on the HOST (not inside the VM). Use `loopbackExemptPorts` in `AgentOs.create()` to exempt the mock port from SSRF checks. The kernel needs `permissions: allowAll` for network access.
 - **Module access**: Set `moduleAccessCwd` in `AgentOs.create()` to a host dir with `node_modules/`. pnpm puts devDeps in `packages/core/node_modules/` which are accessible via the ModuleAccessFileSystem overlay.
 
+### WASM Binaries and Quickstart Examples
+
+- **WASM command binaries are not checked into git.** The `registry/software/*/wasm/` directories are build artifacts produced by compiling Rust/C source in `registry/native/`. They are published to npm as part of software packages (e.g., `@rivet-dev/agent-os-coreutils` is ~54MB with WASM binaries included).
+- **Quickstart examples that use `exec()` or shell commands require WASM binaries.** Examples like `processes.ts`, `bash.ts`, `git.ts`, `nodejs.ts`, and `tools.ts` import `@rivet-dev/agent-os-common` which resolves to local `registry/software/*/wasm/` directories in a dev checkout. Without built WASM binaries, these fail with "No shell available."
+- **To build WASM binaries locally:** Run `make` in `registry/native/`, then `make copy-wasm` and `make build` in `registry/`. This requires Rust nightly + wasi-sdk.
+- **Examples that work without WASM binaries:** `hello-world.ts`, `filesystem.ts`, `cron.ts` (schedule/cancel only). These only use the Node runtime and don't need shell commands.
+- **When testing quickstart examples**, don't treat WASM-dependent failures as regressions unless the WASM binaries are present. The published npm flow works because npm packages bundle the pre-built WASM binaries.
+
 ### Known VM Limitations
 
 - `globalThis.fetch` is hardened (non-writable) in the VM — can't be mocked in-process
@@ -156,6 +165,9 @@ Each agent type needs:
 ## Documentation
 
 - **Keep docs in `~/r-aos/docs/docs/agent-os/` up to date** when public API methods or types are added, removed, or changed on AgentOs or Session classes.
+- **Keep the standalone `secure-exec` docs repo up to date** when exported API methods, types, or package-level behavior change for public `secure-exec` compatibility packages. The source of truth is the repo that contains `docs/docs.json`.
+- **The active public `secure-exec` package scope is currently `secure-exec` and `@secure-exec/typescript`.** Do not assume other legacy `@secure-exec/*` packages are still part of the maintained public surface unless the user explicitly says so.
+- **If a user asks for a `secure-exec` change without naming the package, prompt them to choose the target public package when it is ambiguous.** Specifically, ask whether the change belongs in `secure-exec` or `@secure-exec/typescript` before editing code if the target is not clear from the symbol or file path.
 - **Keep `website/src/data/registry.ts` up to date.** When adding, removing, or renaming a package, update this file so the website reflects the current set of available apps (agents, file-systems, software, and sandbox providers). Every new agent-os package or registry software package must have a corresponding entry.
 - **No implementation details in user-facing docs.** Never mention WebAssembly, WASM, V8 isolates, Pyodide, or SQLite VFS in documentation outside of `architecture.mdx`. These are internal implementation details. Use user-facing language instead: "persistent filesystem" not "SQLite VFS", "JavaScript, TypeScript, Python, and shell commands" not "WASM, V8 isolates, and Pyodide", "sandboxed execution" not "WebAssembly and V8 isolates". The `architecture.mdx` page is the only place where internals are appropriate.
 

@@ -28,7 +28,7 @@ Import signatures match wasmvm/crates/wasi-ext/src/lib.rs exactly.
 -      $TARGET_TRIPLE == *"wasip1" || $TARGET_TRIPLE == *"wasip1-threads" ]]; then
 -    MUSL_OMIT_HEADERS+=("netdb.h")
 -fi
-+# NOTE: commented out by secureexec 0008-sockets patch — we provide getaddrinfo via host_net
++# NOTE: commented out by the Agent OS 0008-sockets patch — we provide getaddrinfo via host_net
 +#if [[ $TARGET_TRIPLE == *"wasi" || $TARGET_TRIPLE == *"wasi-threads" || \
 +#      $TARGET_TRIPLE == *"wasip1" || $TARGET_TRIPLE == *"wasip1-threads" ]]; then
 +#    MUSL_OMIT_HEADERS+=("netdb.h")
@@ -842,7 +842,7 @@ index efa48aa..57d2ac3 100755
 -      $TARGET_TRIPLE == *"wasip1" || $TARGET_TRIPLE == *"wasip1-threads" ]]; then
 -    MUSL_OMIT_HEADERS+=("netdb.h")
 -fi
-+# NOTE: secure-exec provides getaddrinfo via host_net, so keep netdb.h.
++# NOTE: Agent OS provides getaddrinfo via host_net, so keep netdb.h.
 +#if [[ $TARGET_TRIPLE == *"wasi" || $TARGET_TRIPLE == *"wasi-threads" || \
 +#      $TARGET_TRIPLE == *"wasip1" || $TARGET_TRIPLE == *"wasip1-threads" ]]; then
 +#    MUSL_OMIT_HEADERS+=("netdb.h")

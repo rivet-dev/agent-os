@@ -3,7 +3,7 @@ name = "cmd-dd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "dd standalone binary for secure-exec WasmVM"
+description = "dd standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "dd"

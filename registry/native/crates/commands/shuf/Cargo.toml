@@ -3,7 +3,7 @@ name = "cmd-shuf"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "shuf standalone binary for secure-exec WasmVM"
+description = "shuf standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "shuf"

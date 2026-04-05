@@ -3,7 +3,7 @@ name = "cmd-echo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "echo standalone binary for secure-exec WasmVM"
+description = "echo standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "echo"

@@ -3,7 +3,7 @@ name = "cmd-expand"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "expand standalone binary for secure-exec WasmVM"
+description = "expand standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "expand"

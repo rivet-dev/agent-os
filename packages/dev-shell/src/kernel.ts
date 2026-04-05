@@ -1,13 +1,20 @@
 import { existsSync } from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	allowAll,
 	createInMemoryFileSystem,
 	createKernel,
 	createProcessScopedFileSystem,
+	createDefaultNetworkAdapter,
+	createHostFallbackVfs,
+	createKernelCommandExecutor,
+	createKernelVfsAdapter,
+	createNodeDriver,
+	createNodeHostNetworkAdapter,
+	createNodeRuntime,
 	type DriverProcess,
 	type Kernel,
 	type KernelInterface,
@@ -15,19 +22,9 @@ import {
 	type Permissions,
 	type ProcessContext,
 	type VirtualFileSystem,
-} from "@secure-exec/core";
-import {
-	createDefaultNetworkAdapter,
-	createHostFallbackVfs,
-	createKernelCommandExecutor,
-	createKernelVfsAdapter,
-	createNodeDriver,
-	createNodeRuntime,
-	createNodeHostNetworkAdapter,
 	NodeExecutionDriver,
-} from "@secure-exec/nodejs";
-import { createPythonRuntime } from "@rivet-dev/agent-os-python";
-import { createWasmVmRuntime } from "@rivet-dev/agent-os-posix";
+} from "@rivet-dev/agent-os/internal/runtime-compat";
+import { createWasmVmRuntime } from "@rivet-dev/agent-os/test/runtime";
 import type { DebugLogger } from "./debug-logger.js";
 import { createDebugLogger, createNoopLogger } from "./debug-logger.js";
 import type { WorkspacePaths } from "./shared.js";
@@ -38,7 +35,6 @@ const moduleRequire = createRequire(import.meta.url);
 
 export interface DevShellOptions {
 	workDir?: string;
-	mountPython?: boolean;
 	mountWasm?: boolean;
 	envFilePath?: string;
 	/** When set, structured pino debug logs are written to this file path. */
@@ -58,16 +54,16 @@ export interface DevShellKernelResult {
 function normalizeHostRoots(roots: string[]): string[] {
 	return Array.from(
 		new Set(
-			roots
-				.filter((root) => root.length > 0)
-				.map((root) => path.resolve(root)),
+			roots.filter((root) => root.length > 0).map((root) => path.resolve(root)),
 		),
 	).sort((left, right) => right.length - left.length);
 }
 
 function isWithinHostRoots(targetPath: string, roots: string[]): boolean {
 	const resolved = path.resolve(targetPath);
-	return roots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
+	return roots.some(
+		(root) => resolved === root || resolved.startsWith(`${root}${path.sep}`),
+	);
 }
 
 function toIntegerTimestamp(value: number): number {
@@ -78,7 +74,10 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 	const memfs = createInMemoryFileSystem();
 	const normalizedRoots = normalizeHostRoots(hostRoots);
 
-	const withHostFallback = async <T>(targetPath: string, op: () => Promise<T>): Promise<T> => {
+	const withHostFallback = async <T>(
+		targetPath: string,
+		op: () => Promise<T>,
+	): Promise<T> => {
 		try {
 			return await op();
 		} catch {
@@ -92,7 +91,9 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 	return {
 		readFile: async (targetPath) => {
 			try {
-				return await withHostFallback(targetPath, () => memfs.readFile(targetPath));
+				return await withHostFallback(targetPath, () =>
+					memfs.readFile(targetPath),
+				);
 			} catch (error) {
 				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
 				return new Uint8Array(await fsPromises.readFile(targetPath));
@@ -100,7 +101,9 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 		},
 		readTextFile: async (targetPath) => {
 			try {
-				return await withHostFallback(targetPath, () => memfs.readTextFile(targetPath));
+				return await withHostFallback(targetPath, () =>
+					memfs.readTextFile(targetPath),
+				);
 			} catch (error) {
 				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
 				return await fsPromises.readFile(targetPath, "utf8");
@@ -108,7 +111,9 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 		},
 		readDir: async (targetPath) => {
 			try {
-				return await withHostFallback(targetPath, () => memfs.readDir(targetPath));
+				return await withHostFallback(targetPath, () =>
+					memfs.readDir(targetPath),
+				);
 			} catch (error) {
 				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
 				return await fsPromises.readdir(targetPath);
@@ -116,10 +121,14 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 		},
 		readDirWithTypes: async (targetPath) => {
 			try {
-				return await withHostFallback(targetPath, () => memfs.readDirWithTypes(targetPath));
+				return await withHostFallback(targetPath, () =>
+					memfs.readDirWithTypes(targetPath),
+				);
 			} catch (error) {
 				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
-				const entries = await fsPromises.readdir(targetPath, { withFileTypes: true });
+				const entries = await fsPromises.readdir(targetPath, {
+					withFileTypes: true,
+				});
 				return entries.map((entry) => ({
 					name: entry.name,
 					isDirectory: entry.isDirectory(),
@@ -161,7 +170,9 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 		},
 		lstat: async (targetPath) => {
 			try {
-				return await withHostFallback(targetPath, () => memfs.lstat(targetPath));
+				return await withHostFallback(targetPath, () =>
+					memfs.lstat(targetPath),
+				);
 			} catch (error) {
 				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
 				const info = await fsPromises.lstat(targetPath);
@@ -183,7 +194,9 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 		},
 		realpath: async (targetPath) => {
 			try {
-				return await withHostFallback(targetPath, () => memfs.realpath(targetPath));
+				return await withHostFallback(targetPath, () =>
+					memfs.realpath(targetPath),
+				);
 			} catch (error) {
 				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
 				return await fsPromises.realpath(targetPath);
@@ -191,7 +204,9 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 		},
 		readlink: async (targetPath) => {
 			try {
-				return await withHostFallback(targetPath, () => memfs.readlink(targetPath));
+				return await withHostFallback(targetPath, () =>
+					memfs.readlink(targetPath),
+				);
 			} catch (error) {
 				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
 				return await fsPromises.readlink(targetPath);
@@ -199,7 +214,9 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 		},
 		pread: async (targetPath, offset, length) => {
 			try {
-				return await withHostFallback(targetPath, () => memfs.pread(targetPath, offset, length));
+				return await withHostFallback(targetPath, () =>
+					memfs.pread(targetPath, offset, length),
+				);
 			} catch (error) {
 				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
 				const handle = await fsPromises.open(targetPath, "r");
@@ -214,7 +231,9 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 		},
 		pwrite: async (targetPath, offset, data) => {
 			try {
-				return await withHostFallback(targetPath, () => memfs.pwrite(targetPath, offset, data));
+				return await withHostFallback(targetPath, () =>
+					memfs.pwrite(targetPath, offset, data),
+				);
 			} catch (error) {
 				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
 				const handle = await fsPromises.open(targetPath, "r+");
@@ -235,7 +254,9 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 				: memfs.createDir(targetPath),
 		mkdir: (targetPath, options) =>
 			isWithinHostRoots(targetPath, normalizedRoots)
-				? fsPromises.mkdir(targetPath, { recursive: options?.recursive ?? true }).then(() => {})
+				? fsPromises
+						.mkdir(targetPath, { recursive: options?.recursive ?? true })
+						.then(() => {})
 				: memfs.mkdir(targetPath, options),
 		removeFile: (targetPath) =>
 			isWithinHostRoots(targetPath, normalizedRoots)
@@ -246,7 +267,8 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 				? fsPromises.rm(targetPath, { recursive: true, force: false })
 				: memfs.removeDir(targetPath),
 		rename: (oldPath, newPath) =>
-			(isWithinHostRoots(oldPath, normalizedRoots) || isWithinHostRoots(newPath, normalizedRoots))
+			isWithinHostRoots(oldPath, normalizedRoots) ||
+			isWithinHostRoots(newPath, normalizedRoots)
 				? fsPromises.rename(oldPath, newPath)
 				: memfs.rename(oldPath, newPath),
 		symlink: (target, linkPath) =>
@@ -254,7 +276,8 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 				? fsPromises.symlink(target, linkPath)
 				: memfs.symlink(target, linkPath),
 		link: (oldPath, newPath) =>
-			(isWithinHostRoots(oldPath, normalizedRoots) || isWithinHostRoots(newPath, normalizedRoots))
+			isWithinHostRoots(oldPath, normalizedRoots) ||
+			isWithinHostRoots(newPath, normalizedRoots)
 				? fsPromises.link(oldPath, newPath)
 				: memfs.link(oldPath, newPath),
 		chmod: (targetPath, mode) =>
@@ -345,7 +368,10 @@ class SandboxNodeScriptDriver implements RuntimeDriver {
 				if (stdinChunks.length === 0) {
 					stdinResolve(undefined);
 				} else {
-					const totalLength = stdinChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+					const totalLength = stdinChunks.reduce(
+						(sum, chunk) => sum + chunk.length,
+						0,
+					);
 					const merged = new Uint8Array(totalLength);
 					let offset = 0;
 					for (const chunk of stdinChunks) {
@@ -381,7 +407,15 @@ class SandboxNodeScriptDriver implements RuntimeDriver {
 			wait: () => exitPromise,
 		};
 
-		void this.executeAsync(kernel, args, ctx, proc, resolveExit, stdinPromise, () => killedSignal);
+		void this.executeAsync(
+			kernel,
+			args,
+			ctx,
+			proc,
+			resolveExit,
+			stdinPromise,
+			() => killedSignal,
+		);
 
 		return proc;
 	}
@@ -411,14 +445,19 @@ class SandboxNodeScriptDriver implements RuntimeDriver {
 			const code =
 				this.launchMode === "import"
 					? [
-						"(async () => {",
-						`  process.argv = ${JSON.stringify([process.execPath, this.commands[0], ...args])};`,
-						`  await import(${JSON.stringify(this.entryPath)});`,
-						"})().catch((error) => {",
-						'  console.error(error && error.stack ? error.stack : String(error));',
-						"  process.exit(1);",
-						"});",
-					].join("\n")
+							"(async () => {",
+							`  process.argv = ${JSON.stringify([process.execPath, this.commands[0], ...args])};`,
+							`  await import(${JSON.stringify(this.entryPath)});`,
+							"})().catch((error) => {",
+							"  const message = error && error.stack ? error.stack : String(error);",
+							"  const exitMatch = /process\\.exit\\((\\d+)\\)/.exec(message);",
+							"  if (exitMatch) {",
+							"    process.exit(Number.parseInt(exitMatch[1], 10));",
+							"  }",
+							"  console.error(message);",
+							"  process.exit(1);",
+							"});",
+						].join("\n")
 					: await kernel.vfs.readTextFile(this.entryPath);
 			const stdinData = await stdinPromise;
 			if (getKilledSignal() !== null) return;
@@ -453,26 +492,26 @@ class SandboxNodeScriptDriver implements RuntimeDriver {
 
 			const onPtySetRawMode = ctx.stdinIsTTY
 				? (mode: boolean) => {
-					kernel.tcsetattr(ctx.pid, 0, {
-						icanon: !mode,
-						echo: !mode,
-						isig: !mode,
-						icrnl: !mode,
-					});
-				}
+						kernel.tcsetattr(ctx.pid, 0, {
+							icanon: !mode,
+							echo: !mode,
+							isig: !mode,
+							icrnl: !mode,
+						});
+					}
 				: undefined;
 
 			const liveStdinSource = ctx.stdinIsTTY
 				? {
-					async read() {
-						try {
-							const chunk = await kernel.fdRead(ctx.pid, 0, 4096);
-							return chunk.length === 0 ? null : chunk;
-						} catch {
-							return null;
-						}
-					},
-				}
+						async read() {
+							try {
+								const chunk = await kernel.fdRead(ctx.pid, 0, 4096);
+								return chunk.length === 0 ? null : chunk;
+							} catch {
+								return null;
+							}
+						},
+					}
 				: undefined;
 
 			const executionDriver = new NodeExecutionDriver({
@@ -545,7 +584,7 @@ function resolvePiCliPath(paths: WorkspacePaths): string | undefined {
 	} catch {
 		const candidates = [
 			path.join(
-				paths.secureExecRoot,
+				paths.hostProjectRoot,
 				"node_modules",
 				"@mariozechner",
 				"pi-coding-agent",
@@ -575,14 +614,13 @@ export async function createDevShellKernel(
 	const paths = resolveWorkspacePaths(moduleDir);
 	const workDir = path.resolve(options.workDir ?? process.cwd());
 	const mountWasm = options.mountWasm !== false;
-	const mountPython = options.mountPython !== false;
 	const env = collectShellEnv(options.envFilePath ?? paths.realProviderEnvFile);
 
 	// Set up structured debug logger (file-only, never stdout/stderr).
 	const logger = options.debugLogPath
 		? createDebugLogger(options.debugLogPath)
 		: createNoopLogger();
-	logger.info({ workDir, mountWasm, mountPython }, "dev-shell session init");
+	logger.info({ workDir, mountWasm }, "dev-shell session init");
 	env.HOME = workDir;
 	env.XDG_CONFIG_HOME = path.join(workDir, ".config");
 	env.XDG_CACHE_HOME = path.join(workDir, ".cache");
@@ -598,7 +636,7 @@ export async function createDevShellKernel(
 	const filesystem = createHybridVfs([
 		workDir,
 		paths.workspaceRoot,
-		paths.secureExecRoot,
+		paths.hostProjectRoot,
 		"/tmp",
 	]);
 
@@ -615,7 +653,9 @@ export async function createDevShellKernel(
 
 	// Mount shell/runtime drivers in the same order as the integration tests.
 	if (mountWasm) {
-		const wasmRuntime = createWasmVmRuntime({ commandDirs: [paths.wasmCommandsDir] });
+		const wasmRuntime = createWasmVmRuntime({
+			commandDirs: [paths.wasmCommandsDir],
+		});
 		await kernel.mount(wasmRuntime);
 		loadedCommands.push(...wasmRuntime.commands);
 		logger.info({ commands: wasmRuntime.commands }, "mounted wasmvm runtime");
@@ -626,13 +666,6 @@ export async function createDevShellKernel(
 	loadedCommands.push(...nodeRuntime.commands);
 	logger.info({ commands: nodeRuntime.commands }, "mounted node runtime");
 
-	if (mountPython) {
-		const pythonRuntime = createPythonRuntime();
-		await kernel.mount(pythonRuntime);
-		loadedCommands.push(...pythonRuntime.commands);
-		logger.info({ commands: pythonRuntime.commands }, "mounted python runtime");
-	}
-
 	const piCliPath = resolvePiCliPath(paths);
 	if (piCliPath) {
 		await kernel.mount(
@@ -640,7 +673,7 @@ export async function createDevShellKernel(
 				"pi",
 				piCliPath,
 				allowAll,
-				paths.secureExecRoot,
+				paths.hostProjectRoot,
 				"import",
 			),
 		);

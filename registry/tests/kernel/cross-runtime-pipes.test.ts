@@ -8,7 +8,7 @@
  * is not built.
  *
  * NOTE: The kernel-level unit tests (MockRuntimeDriver, no WASM) are kept
- * in the secure-exec repo. Only the WasmVM-dependent integration tests
+ * in the legacy runtime repo. Only the WasmVM-dependent integration tests
  * are included here.
  */
 

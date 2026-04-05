@@ -3,6 +3,7 @@ import { AcpClient } from "../src/acp-client.js";
 import { AgentOs } from "../src/agent-os.js";
 import { Session, type SessionInitData } from "../src/session.js";
 import { createStdoutLineIterable } from "../src/stdout-lines.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 
 /**
  * Mock ACP adapter that handles initialize, session/new, session/prompt,
@@ -88,7 +89,7 @@ describe("session.cancel() tests", () => {
 		// Spawn mock adapter and create session
 		await vm.writeFile("/tmp/cancel-mock.mjs", CANCEL_MOCK);
 		const { iterable, onStdout } = createStdoutLineIterable();
-		const proc = vm.kernel.spawn("node", ["/tmp/cancel-mock.mjs"], {
+		const proc = getAgentOsKernel(vm).spawn("node", ["/tmp/cancel-mock.mjs"], {
 			streamStdin: true,
 			onStdout,
 			env: { HOME: "/home/user" },

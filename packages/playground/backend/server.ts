@@ -1,9 +1,9 @@
 /**
  * Static dev server for the browser playground.
  *
- * SharedArrayBuffer (required by the secure-exec web worker) needs COOP/COEP
+ * SharedArrayBuffer (required by the Agent OS web worker) needs COOP/COEP
  * headers. Once COEP is "require-corp", every subresource must be same-origin
- * or carry Cross-Origin-Resource-Policy. Vendor assets (Monaco, Pyodide,
+ * or carry Cross-Origin-Resource-Policy. Vendor assets (Monaco and
  * TypeScript) are installed as npm packages and symlinked into vendor/ by
  * `scripts/setup-vendor.ts`, so everything is served from the local filesystem.
  */
@@ -20,12 +20,6 @@ import { fileURLToPath } from "node:url";
 
 const DEFAULT_PORT = Number(process.env.PORT ?? "4173");
 const playgroundDir = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const secureExecDir = resolve(playgroundDir, "../secure-exec");
-
-/* Map URL prefixes to filesystem directories outside playgroundDir */
-const PATH_ALIASES: Array<{ prefix: string; dir: string }> = [
-	{ prefix: "/secure-exec/", dir: secureExecDir },
-];
 
 const mimeTypes = new Map<string, string>([
 	[".css", "text/css; charset=utf-8"],
@@ -42,17 +36,6 @@ const mimeTypes = new Map<string, string>([
 function getFilePath(urlPath: string): string | null {
 	const pathname = decodeURIComponent(urlPath.split("?")[0] ?? "/");
 	const relativePath = pathname === "/" ? "/frontend/index.html" : pathname;
-
-	/* Check path aliases for sibling packages (e.g. secure-exec dist) */
-	for (const alias of PATH_ALIASES) {
-		if (relativePath.startsWith(alias.prefix)) {
-			const rest = relativePath.slice(alias.prefix.length);
-			const safePath = normalize(rest).replace(/^(\.\.[/\\])+/, "");
-			const absolutePath = resolve(alias.dir, safePath);
-			if (!absolutePath.startsWith(alias.dir)) return null;
-			return absolutePath;
-		}
-	}
 
 	const safePath = normalize(relativePath).replace(/^(\.\.[/\\])+/, "");
 	const absolutePath = resolve(playgroundDir, `.${safePath}`);
@@ -75,7 +58,11 @@ const COEP_HEADERS = {
 	"Cross-Origin-Opener-Policy": "same-origin",
 } as const;
 
-function writeHeaders(response: ServerResponse, status: number, extras: OutgoingHttpHeaders = {}): void {
+function writeHeaders(
+	response: ServerResponse,
+	status: number,
+	extras: OutgoingHttpHeaders = {},
+): void {
 	response.writeHead(status, {
 		"Cache-Control": "no-store",
 		...COEP_HEADERS,
@@ -130,7 +117,8 @@ export function createBrowserPlaygroundServer(): Server {
 				return;
 			}
 
-			const mimeType = mimeTypes.get(extname(finalPath)) ?? "application/octet-stream";
+			const mimeType =
+				mimeTypes.get(extname(finalPath)) ?? "application/octet-stream";
 			writeHeaders(response, 200, {
 				"Content-Length": String(fileStat.size),
 				"Content-Type": mimeType,
@@ -151,6 +139,9 @@ export function startBrowserPlaygroundServer(port = DEFAULT_PORT): Server {
 	return server;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (
+	process.argv[1] &&
+	resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
 	startBrowserPlaygroundServer();
 }

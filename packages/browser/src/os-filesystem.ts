@@ -1,7 +1,7 @@
 /**
  * In-memory filesystem for browser environments.
  *
- * Expanded from the original secure-exec InMemoryFileSystem with POSIX
+ * Expanded from the original Agent OS in-memory filesystem with POSIX
  * extensions (symlinks, hard links, chmod, chown, utimes, truncate)
  * needed by the kernel VFS interface.
  */
@@ -10,7 +10,7 @@ import type {
 	VirtualDirEntry,
 	VirtualFileSystem,
 	VirtualStat,
-} from "@secure-exec/core";
+} from "./runtime.js";
 
 const S_IFREG = 0o100000;
 const S_IFDIR = 0o040000;

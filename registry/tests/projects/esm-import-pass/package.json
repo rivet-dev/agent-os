@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-esm-import-pass",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"hono": "4.7.5"
+	}
+}

@@ -10,22 +10,20 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { createWasmVmRuntime, WASMVM_COMMANDS } from '@rivet-dev/agent-os-posix';
-import type { WasmVmRuntimeOptions } from '@rivet-dev/agent-os-posix';
-import { createKernel } from '@secure-exec/core';
-import { COMMANDS_DIR, hasWasmBinaries } from '../helpers.js';
+import { createWasmVmRuntime, WASMVM_COMMANDS } from '@rivet-dev/agent-os/test/runtime';
+import type { WasmVmRuntimeOptions } from '@rivet-dev/agent-os/test/runtime';
+import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
 import type {
-  KernelRuntimeDriver as RuntimeDriver,
-  KernelInterface,
-  ProcessContext,
   DriverProcess,
   Kernel,
-} from '@secure-exec/core';
+  KernelInterface,
+  KernelRuntimeDriver as RuntimeDriver,
+  ProcessContext,
+} from '../helpers.js';
 import { writeFile, mkdir, rm, symlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-
 
 // Valid WASM magic: \0asm + version 1
 const VALID_WASM = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);

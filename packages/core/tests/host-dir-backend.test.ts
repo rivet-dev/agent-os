@@ -2,48 +2,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { createHostDirBackend } from "../src/backends/host-dir-backend.js";
-import { defineFsDriverTests } from "../src/test/file-system.js";
-import { AgentOs } from "../src/index.js";
+import { AgentOs, createHostDirBackend } from "../src/index.js";
 
-// ---------------------------------------------------------------------------
-// Shared VFS conformance tests
-// ---------------------------------------------------------------------------
-
-let conformanceTmpDir: string;
-
-defineFsDriverTests({
-	name: "HostDirBackend",
-	createFs: () => {
-		conformanceTmpDir = fs.mkdtempSync(
-			path.join(os.tmpdir(), "host-dir-test-"),
-		);
-		return createHostDirBackend({
-			hostPath: conformanceTmpDir,
-			readOnly: false,
-		});
-	},
-	cleanup: () => {
-		if (conformanceTmpDir)
-			fs.rmSync(conformanceTmpDir, { recursive: true, force: true });
-	},
-	capabilities: {
-		symlinks: true,
-		hardLinks: true,
-		permissions: true,
-		utimes: true,
-		truncate: true,
-		pread: true,
-		mkdir: true,
-		removeDir: true,
-	},
-});
-
-// ---------------------------------------------------------------------------
-// Host-dir-specific tests (security, read-only)
-// ---------------------------------------------------------------------------
-
-describe("HostDirBackend (security)", () => {
+describe("host_dir native mount integration", () => {
 	let vm: AgentOs;
 	let tmpDir: string;
 
@@ -64,11 +25,21 @@ describe("HostDirBackend (security)", () => {
 
 	test("path traversal attempt (../../etc/passwd) is blocked", async () => {
 		vm = await AgentOs.create({
-			mounts: [{ path: "/hostmnt", driver: createHostDirBackend({ hostPath: tmpDir }) }],
+			mounts: [{ path: "/hostmnt", plugin: createHostDirBackend({ hostPath: tmpDir }) }],
 		});
 		await expect(
 			vm.readFile("/hostmnt/../../etc/passwd"),
 		).rejects.toThrow();
+	});
+
+	test("mounted host directory exposes existing host files", async () => {
+		vm = await AgentOs.create({
+			mounts: [{ path: "/hostmnt", plugin: createHostDirBackend({ hostPath: tmpDir }) }],
+		});
+		const content = new TextDecoder().decode(
+			await vm.readFile("/hostmnt/hello.txt"),
+		);
+		expect(content).toBe("hello from host");
 	});
 
 	test("symlink escape attempt is blocked", async () => {
@@ -76,16 +47,16 @@ describe("HostDirBackend (security)", () => {
 		fs.symlinkSync("/etc", escapePath);
 
 		vm = await AgentOs.create({
-			mounts: [{ path: "/hostmnt", driver: createHostDirBackend({ hostPath: tmpDir }) }],
+			mounts: [{ path: "/hostmnt", plugin: createHostDirBackend({ hostPath: tmpDir }) }],
 		});
 		await expect(vm.readFile("/hostmnt/escape/hostname")).rejects.toThrow(
 			"EACCES",
 		);
 	});
 
-	test("write blocked when readOnly", async () => {
+	test("write blocked when helper defaults to readOnly", async () => {
 		vm = await AgentOs.create({
-			mounts: [{ path: "/hostmnt", driver: createHostDirBackend({ hostPath: tmpDir }), readOnly: true }],
+			mounts: [{ path: "/hostmnt", plugin: createHostDirBackend({ hostPath: tmpDir }) }],
 		});
 		await expect(
 			vm.writeFile("/hostmnt/new.txt", "should fail"),
@@ -97,7 +68,7 @@ describe("HostDirBackend (security)", () => {
 			mounts: [
 				{
 					path: "/hostmnt",
-					driver: createHostDirBackend({ hostPath: tmpDir, readOnly: false }),
+					plugin: createHostDirBackend({ hostPath: tmpDir, readOnly: false }),
 				},
 			],
 		});
@@ -109,5 +80,26 @@ describe("HostDirBackend (security)", () => {
 			"utf-8",
 		);
 		expect(content).toBe("written from VM");
+	});
+
+	test("rename and delete update the host directory when writable", async () => {
+		vm = await AgentOs.create({
+			mounts: [
+				{
+					path: "/hostmnt",
+					plugin: createHostDirBackend({ hostPath: tmpDir, readOnly: false }),
+				},
+			],
+		});
+
+		await vm.writeFile("/hostmnt/to-rename.txt", "rename me");
+		await vm.move("/hostmnt/to-rename.txt", "/hostmnt/renamed.txt");
+		expect(fs.existsSync(path.join(tmpDir, "to-rename.txt"))).toBe(false);
+		expect(fs.readFileSync(path.join(tmpDir, "renamed.txt"), "utf-8")).toBe(
+			"rename me",
+		);
+
+		await vm.delete("/hostmnt/renamed.txt");
+		expect(fs.existsSync(path.join(tmpDir, "renamed.txt"))).toBe(false);
 	});
 });

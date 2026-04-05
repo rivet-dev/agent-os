@@ -7,13 +7,17 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { createWasmVmRuntime } from '@rivet-dev/agent-os-posix';
-import { createKernel, SIGTERM } from '@secure-exec/core';
-import { COMMANDS_DIR, C_BUILD_DIR, hasWasmBinaries } from '../helpers.js';
-import type { Kernel } from '@secure-exec/core';
+import { createWasmVmRuntime } from '@rivet-dev/agent-os/test/runtime';
+import {
+  COMMANDS_DIR,
+  C_BUILD_DIR,
+  createKernel,
+  hasWasmBinaries,
+  SIGTERM,
+} from '../helpers.js';
+import type { Kernel } from '../helpers.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-
 
 const hasCWasmBinaries = existsSync(join(C_BUILD_DIR, 'signal_handler'));
 const EXPECTED_SIGACTION_FLAGS = (0x10000000 | 0x80000000) >>> 0;

@@ -3,15 +3,15 @@
 // The VM creates an in-memory filesystem by default. Custom mounts
 // (S3, host directories) can be configured at boot:
 //
-//   import { S3BlockStore } from "@rivet-dev/agent-os-s3";
+//   import { createS3Backend } from "@rivet-dev/agent-os-s3";
 //   const vm = await AgentOs.create({
 //     mounts: [{
 //       path: "/data",
-//       driver: createChunkedVfs(sqliteMetadata, new S3BlockStore({ bucket: "my-bucket" })),
+//       plugin: createS3Backend({ bucket: "my-bucket" }),
 //     }],
 //   });
 
-import { AgentOs } from "@rivet-dev/agent-os-core";
+import { AgentOs } from "@rivet-dev/agent-os";
 
 const vm = await AgentOs.create();
 

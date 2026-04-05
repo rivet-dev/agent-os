@@ -1,6 +1,6 @@
 /**
  * Permission tier for WASM command execution.
- * Mirrors the PermissionTier from @rivet-dev/agent-os-posix.
+ * Shared runtime permission tiers for registry command metadata.
  *
  * - full: spawn processes, network I/O, file read/write
  * - read-write: file read/write, no network or process spawning

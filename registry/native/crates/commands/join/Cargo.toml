@@ -3,7 +3,7 @@ name = "cmd-join"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "join standalone binary for secure-exec WasmVM"
+description = "join standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "join"

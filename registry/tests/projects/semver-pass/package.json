@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-semver-pass",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"semver": "7.7.3"
+	}
+}

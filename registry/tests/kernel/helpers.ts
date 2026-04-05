@@ -6,30 +6,42 @@
  */
 
 import {
+  AF_INET,
+  AF_UNIX,
   COMMANDS_DIR,
   C_BUILD_DIR,
   hasWasmBinaries,
+  NodeFileSystem,
+  SIGTERM,
+  SOCK_DGRAM,
+  SOCK_STREAM,
+  TerminalHarness,
   skipReason,
+  createInMemoryFileSystem,
   createKernel,
   createWasmVmRuntime,
   createNodeRuntime,
 } from "../helpers.js";
-import type { Kernel } from "../helpers.js";
-import { createInMemoryFileSystem } from "@secure-exec/core";
-import type { VirtualFileSystem } from "@secure-exec/core";
+import type { Kernel, VirtualFileSystem } from "../helpers.js";
 
 export {
+  AF_INET,
+  AF_UNIX,
   COMMANDS_DIR,
   C_BUILD_DIR,
   hasWasmBinaries,
+  NodeFileSystem,
+  SIGTERM,
+  SOCK_DGRAM,
+  SOCK_STREAM,
+  TerminalHarness,
   skipReason,
+  createInMemoryFileSystem,
   createKernel,
   createWasmVmRuntime,
   createNodeRuntime,
 } from "../helpers.js";
-export type { Kernel } from "../helpers.js";
-export { createInMemoryFileSystem } from "@secure-exec/core";
-export type { VirtualFileSystem } from "@secure-exec/core";
+export type { Kernel, VirtualFileSystem } from "../helpers.js";
 
 export interface IntegrationKernelResult {
   kernel: Kernel;
@@ -38,16 +50,15 @@ export interface IntegrationKernelResult {
 }
 
 export interface IntegrationKernelOptions {
-  runtimes?: ("wasmvm" | "node" | "python")[];
+  runtimes?: ("wasmvm" | "node")[];
 }
 
 /**
- * Create a kernel with real runtime drivers for integration testing.
+ * Create a kernel with the in-scope runtime drivers for integration testing.
  *
  * Mount order matters. Last-mounted driver wins for overlapping commands:
  *   1. WasmVM first: provides sh/bash/coreutils (90+ commands)
  *   2. Node second: overrides WasmVM's 'node' stub with real V8
- *   3. Python third: overrides WasmVM's 'python' stub with real Pyodide
  */
 export async function createIntegrationKernel(
   options?: IntegrationKernelOptions,
@@ -62,7 +73,6 @@ export async function createIntegrationKernel(
   if (runtimes.includes("node")) {
     await kernel.mount(createNodeRuntime());
   }
-  // Python runtime not re-exported from parent helpers yet; add when needed.
 
   return {
     kernel,

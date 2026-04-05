@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import type { LLMock } from "@copilotkit/llmock";
-import type { ManagedProcess } from "@secure-exec/core";
+import type { ManagedProcess } from "../src/runtime-compat.js";
 import {
 	afterAll,
 	afterEach,
@@ -15,6 +15,7 @@ import { AgentOs } from "../src/agent-os.js";
 import type { JsonRpcNotification } from "../src/protocol.js";
 import { Session } from "../src/session.js";
 import { createStdoutLineIterable } from "../src/stdout-lines.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 import {
 	DEFAULT_TEXT_FIXTURE,
 	startLlmock,
@@ -97,7 +98,7 @@ async function spawnMockAdapter(vm: AgentOs): Promise<{
 
 	const { iterable, onStdout } = createStdoutLineIterable();
 
-	const proc = vm.kernel.spawn("node", ["/tmp/mock-adapter.mjs"], {
+	const proc = getAgentOsKernel(vm).spawn("node", ["/tmp/mock-adapter.mjs"], {
 		streamStdin: true,
 		onStdout,
 		env: { HOME: "/home/user" },

@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@rivet-dev/agent-os-common": "workspace:*",
+    "@rivet-dev/agent-os-curl": "workspace:*",
     "@rivet-dev/agent-os-make": "workspace:*",
     "@rivet-dev/agent-os-git": "workspace:*"
   },

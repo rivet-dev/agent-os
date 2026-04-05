@@ -11,10 +11,10 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
-import { AgentOs } from "@rivet-dev/agent-os-core";
+import { AgentOs } from "@rivet-dev/agent-os";
 import common, { coreutils } from "@rivet-dev/agent-os-common";
-import type { SandboxAgentContainerHandle } from "@rivet-dev/agent-os-core/test/docker";
-import { startSandboxAgentContainer } from "@rivet-dev/agent-os-core/test/docker";
+import type { SandboxAgentContainerHandle } from "@rivet-dev/agent-os/test/docker";
+import { startSandboxAgentContainer } from "@rivet-dev/agent-os/test/docker";
 import { createSandboxFs, createSandboxToolkit } from "../src/index.js";
 
 let sandbox: SandboxAgentContainerHandle;
@@ -44,7 +44,7 @@ describe.skipIf(skipReason)("VM integration", () => {
 			mounts: [
 				{
 					path: "/sandbox",
-					driver: createSandboxFs({ client: sandbox.client }),
+					plugin: createSandboxFs({ client: sandbox.client }),
 				},
 			],
 			toolKits: [createSandboxToolkit({ client: sandbox.client })],

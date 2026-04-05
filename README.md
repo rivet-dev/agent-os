@@ -28,11 +28,11 @@ You don't have to choose: agentOS works with sandboxes through the [sandbox exte
 ## Quick start
 
 ```bash
-npm install @rivet-dev/agent-os-core @rivet-dev/agent-os-common @rivet-dev/agent-os-pi
+npm install @rivet-dev/agent-os @rivet-dev/agent-os-common @rivet-dev/agent-os-pi
 ```
 
 ```ts
-import { AgentOs } from "@rivet-dev/agent-os-core";
+import { AgentOs } from "@rivet-dev/agent-os";
 import common from "@rivet-dev/agent-os-common";
 import pi from "@rivet-dev/agent-os-pi";
 
@@ -57,16 +57,12 @@ vm.closeSession(sessionId);
 await vm.dispose();
 ```
 
-agentOS can run Node.js, Python, and shell scripts inside the VM:
+agentOS can run Node.js and shell scripts inside the VM:
 
 ```ts
 // Node.js
 await vm.writeFile("/hello.mjs", 'import fs from "fs"; fs.writeFileSync("/out.txt", "hi"); console.log(fs.readFileSync("/out.txt", "utf8"));');
 await vm.exec("node /hello.mjs");
-
-// Python
-await vm.writeFile("/hello.py", 'open("/out.txt", "w").write("hi"); print(open("/out.txt").read())');
-await vm.exec("python /hello.py");
 
 // Bash
 await vm.exec("echo 'hi' > /out.txt && cat /out.txt");

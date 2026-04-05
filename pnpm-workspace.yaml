@@ -20,7 +20,3 @@ onlyBuiltDependencies:
   - esbuild
   - lefthook
   - sharp
-
-patchedDependencies:
-  '@secure-exec/nodejs@0.2.1': patches/@secure-exec__nodejs@0.2.1.patch
-  '@secure-exec/v8@0.2.1': patches/@secure-exec__v8@0.2.1.patch

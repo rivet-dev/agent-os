@@ -3,7 +3,7 @@ name = "cmd-nohup"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "nohup standalone binary for secure-exec WasmVM"
+description = "nohup standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "nohup"

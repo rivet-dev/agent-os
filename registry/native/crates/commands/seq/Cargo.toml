@@ -3,7 +3,7 @@ name = "cmd-seq"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "seq standalone binary for secure-exec WasmVM"
+description = "seq standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "seq"

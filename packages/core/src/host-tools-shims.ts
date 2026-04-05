@@ -1,4 +1,4 @@
-import { createInMemoryFileSystem } from "@secure-exec/core";
+import { createInMemoryFileSystem } from "./runtime-compat.js";
 import type { ToolKit } from "./host-tools.js";
 
 const NETWORK_ERROR_JSON =

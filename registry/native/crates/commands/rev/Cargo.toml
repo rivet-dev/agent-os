@@ -3,7 +3,7 @@ name = "cmd-rev"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "rev standalone binary for secure-exec WasmVM"
+description = "rev standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "rev"

@@ -1,4 +1,4 @@
-import { AgentOs } from "@rivet-dev/agent-os-core";
+import { AgentOs } from "@rivet-dev/agent-os";
 
 const os = await AgentOs.create();
 const { sessionId } = await os.createSession("pi");

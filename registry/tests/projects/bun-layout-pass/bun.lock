@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "project-matrix-bun-layout-pass",
+      "dependencies": {
+        "left-pad": "0.0.3",
+      },
+    },
+  },
+  "packages": {
+    "left-pad": ["left-pad@0.0.3", "", {}, "sha512-Qli5dSpAXQOSw1y/M+uBKT37rj6iZAQMz6Uy5/ZYGIhBLS/ODRHqL4XIDvSAtYpjfia0XKNztlPFa806TWw5Gw=="],
+  }
+}

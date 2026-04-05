@@ -1,0 +1,34 @@
+{
+	"name": "@secure-exec/typescript",
+	"version": "0.2.1",
+	"description": "Secure-Exec TypeScript companion tools backed by Agent OS runtime primitives.",
+	"type": "module",
+	"license": "Apache-2.0",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"default": "./dist/index.js"
+		}
+	},
+	"scripts": {
+		"check-types": "tsc --noEmit",
+		"build": "tsc",
+		"test": "vitest run",
+		"test:smoke": "tsc --noEmit -p tests/tsconfig.quickstart.json"
+	},
+	"dependencies": {
+		"secure-exec": "workspace:*",
+		"typescript": "^5.7.2"
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.2",
+		"vitest": "^2.1.8"
+	}
+}

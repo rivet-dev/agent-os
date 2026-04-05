@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import * as posixPath from "node:path/posix";
-import { KernelError, type VirtualFileSystem } from "@secure-exec/core";
-import { createOverlayBackend } from "./backends/overlay-backend.js";
+import { KernelError, type VirtualFileSystem } from "./runtime-compat.js";
+import { createOverlayBackend } from "./overlay-filesystem.js";
 import {
 	createFilesystemFromEntries,
 	type FilesystemEntry,

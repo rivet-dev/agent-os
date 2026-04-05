@@ -22,8 +22,7 @@
 		"test": "vitest run"
 	},
 	"dependencies": {
-		"googleapis": "^144.0.0",
-		"@secure-exec/core": "^0.2.1"
+		"@rivet-dev/agent-os": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/node": "^22.10.2",

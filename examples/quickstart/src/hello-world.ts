@@ -1,6 +1,6 @@
 // Minimal agentOS example: create a VM, write a file, read it back.
 
-import { AgentOs } from "@rivet-dev/agent-os-core";
+import { AgentOs } from "@rivet-dev/agent-os";
 
 const vm = await AgentOs.create();
 

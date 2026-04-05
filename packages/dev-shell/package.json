@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "bin": {
-    "secure-exec-dev-shell": "./dist/shell.js"
+    "agent-os-dev-shell": "./dist/shell.js"
   },
   "scripts": {
     "build": "tsc",
@@ -12,12 +12,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@secure-exec/core": "^0.2.1",
-    "@secure-exec/nodejs": "^0.2.1",
-    "@rivet-dev/agent-os-python": "workspace:*",
-    "@rivet-dev/agent-os-posix": "workspace:*",
-    "pino": "^10.3.1",
-    "pyodide": "^0.28.3"
+    "@rivet-dev/agent-os": "workspace:*",
+    "pino": "^10.3.1"
   },
   "devDependencies": {
     "@types/node": "^22.19.3",

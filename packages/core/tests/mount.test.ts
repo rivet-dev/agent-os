@@ -29,6 +29,23 @@ describe("mount integration", () => {
 		expect(new TextDecoder().decode(data)).toBe("hello mount");
 	});
 
+	test("create with declarative native memory mount config", async () => {
+		vm = await AgentOs.create({
+			mounts: [
+				{
+					path: "/native",
+					plugin: {
+						id: "memory",
+						config: {},
+					},
+				},
+			],
+		});
+		await vm.writeFile("/native/plugin.txt", "native mount");
+		const data = await vm.readFile("/native/plugin.txt");
+		expect(new TextDecoder().decode(data)).toBe("native mount");
+	});
+
 	test("root FS and mount are separate", async () => {
 		vm = await AgentOs.create({
 			mounts: [{ path: "/data", driver: createInMemoryFileSystem() }],

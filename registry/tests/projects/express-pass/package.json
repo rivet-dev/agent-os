@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-express-pass",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"express": "4.21.2"
+	}
+}

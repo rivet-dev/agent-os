@@ -1,4 +1,4 @@
-import type { ManagedProcess } from "@secure-exec/core";
+import type { ManagedProcess } from "./runtime-compat.js";
 import {
 	deserializeMessage,
 	isRequest,
@@ -142,7 +142,10 @@ export class AcpClient {
 		this._closed = true;
 		this._closeReader();
 		this._rejectAll(new Error("AcpClient closed"));
-		this._process.kill();
+		// Hard-close the agent process. Sending a graceful stdin-close first can
+		// leave a hanging sidecar close_stdin RPC behind when the process is being
+		// torn down anyway, which makes session disposal flaky under test load.
+		this._process.kill(9);
 	}
 
 	private _startReading(stdoutLines: AsyncIterable<string>): void {

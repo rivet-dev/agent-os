@@ -3,7 +3,7 @@ name = "cmd-timeout"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "timeout standalone binary for secure-exec WasmVM"
+description = "timeout standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "timeout"

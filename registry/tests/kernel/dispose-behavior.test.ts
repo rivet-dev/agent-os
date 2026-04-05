@@ -6,7 +6,7 @@
  * and supports idempotent double-dispose.
  *
  * The pure kernel unit tests (MockRuntimeDriver, no WASM) remain in
- * the secure-exec repo. Only WasmVM-dependent integration tests are here.
+ * the legacy runtime repo. Only WasmVM-dependent integration tests are here.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';

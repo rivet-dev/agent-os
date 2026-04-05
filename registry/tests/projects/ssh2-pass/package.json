@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-ssh2-pass",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"ssh2": "1.17.0"
+	}
+}

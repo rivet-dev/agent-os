@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { LLMock } from "@copilotkit/llmock";
-import type { ManagedProcess } from "@secure-exec/core";
+import type { ManagedProcess } from "../src/runtime-compat.js";
 import {
 	afterAll,
 	afterEach,
@@ -15,6 +15,7 @@ import pi from "@rivet-dev/agent-os-pi";
 import { AcpClient } from "../src/acp-client.js";
 import { AgentOs } from "../src/agent-os.js";
 import { createStdoutLineIterable } from "../src/stdout-lines.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 import {
 	DEFAULT_TEXT_FIXTURE,
 	startLlmock,
@@ -97,7 +98,7 @@ describe("pi-sdk-acp adapter manual spawn", () => {
 		const { iterable, onStdout } = createStdoutLineIterable();
 
 		let stderrOutput = "";
-		const spawned = vm.kernel.spawn("node", [binPath], {
+		const spawned = getAgentOsKernel(vm).spawn("node", [binPath], {
 			streamStdin: true,
 			onStdout,
 			onStderr: (data: Uint8Array) => {
@@ -176,7 +177,11 @@ describe("pi-sdk-acp adapter manual spawn", () => {
 			);
 		}
 
-		expect(sessionResponse.error).toBeUndefined();
+		if (sessionResponse.error) {
+			throw new Error(
+				`session/new ACP error: ${JSON.stringify(sessionResponse.error)}\nstderr: ${spawned.stderr()}`,
+			);
+		}
 		expect(sessionResponse.id).toBeDefined();
 		expect(sessionResponse.jsonrpc).toBe("2.0");
 		expect(sessionResponse.result).toBeDefined();
@@ -201,7 +206,11 @@ describe("pi-sdk-acp adapter manual spawn", () => {
 			cwd: "/home/user",
 			mcpServers: [],
 		});
-		expect(sessionResponse.error).toBeUndefined();
+		if (sessionResponse.error) {
+			throw new Error(
+				`session/new ACP error: ${JSON.stringify(sessionResponse.error)}\nstderr: ${spawned.stderr()}`,
+			);
+		}
 		const sessionId = (
 			sessionResponse.result as { sessionId: string }
 		).sessionId;

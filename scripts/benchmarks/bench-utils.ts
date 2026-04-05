@@ -1,4 +1,4 @@
-import { AgentOs, type SoftwareInput } from "@rivet-dev/agent-os-core";
+import { AgentOs, type SoftwareInput } from "@rivet-dev/agent-os";
 import { coreutils } from "@rivet-dev/agent-os-common";
 import claude from "@rivet-dev/agent-os-claude";
 import codex from "@rivet-dev/agent-os-codex-agent";

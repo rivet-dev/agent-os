@@ -3,7 +3,7 @@ name = "cmd-tr"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "tr standalone binary for secure-exec WasmVM"
+description = "tr standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "tr"

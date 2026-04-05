@@ -3,7 +3,7 @@ name = "cmd-basenc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "basenc standalone binary for secure-exec WasmVM"
+description = "basenc standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "basenc"

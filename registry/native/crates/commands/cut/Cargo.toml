@@ -3,7 +3,7 @@ name = "cmd-cut"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "cut standalone binary for secure-exec WasmVM"
+description = "cut standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "cut"

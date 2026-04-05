@@ -3,7 +3,7 @@ name = "secureexec-expr"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "expr implementation for secure-exec standalone binaries"
+description = "expr implementation for Agent OS standalone binaries"
 
 [dependencies]
 regex = "1"

@@ -37,7 +37,7 @@ pnpm install
 # Build all packages
 make build
 
-# Build WASM from secure-exec source (requires ~/secure-exec-1)
+# Build WASM from the local legacy source checkout configured in the Makefile
 make build-wasm
 
 # Copy WASM binaries to packages

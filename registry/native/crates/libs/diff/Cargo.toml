@@ -3,7 +3,7 @@ name = "secureexec-diff"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "diff implementation for secure-exec standalone binaries"
+description = "diff implementation for Agent OS standalone binaries"
 
 [dependencies]
 similar = "2"

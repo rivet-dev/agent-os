@@ -7,7 +7,7 @@
  * `capabilities` object.
  */
 
-import type { VirtualFileSystem } from "@secure-exec/core";
+import type { VirtualFileSystem } from "../runtime-compat.js";
 import { describe, beforeEach, afterEach, expect, test } from "vitest";
 
 // ---------------------------------------------------------------------------

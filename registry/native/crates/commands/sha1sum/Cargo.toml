@@ -3,7 +3,7 @@ name = "cmd-sha1sum"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "sha1sum standalone binary for secure-exec WasmVM"
+description = "sha1sum standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "sha1sum"

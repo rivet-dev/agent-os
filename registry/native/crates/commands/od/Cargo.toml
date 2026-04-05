@@ -3,7 +3,7 @@ name = "cmd-od"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "od standalone binary for secure-exec WasmVM"
+description = "od standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "od"

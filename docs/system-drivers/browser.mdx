@@ -7,25 +7,18 @@ icon: "globe"
 
 The browser system driver provides sandboxed runtimes with filesystem and network capabilities that work in browser environments. It uses OPFS or an in-memory filesystem and fetch-based networking.
 
-<Note>
-The same `NodeRuntime` class works in both Node.js and browser environments. The system driver and runtime driver factory determine where code actually runs — `NodeRuntime` is just the execution API.
-</Note>
-
 ## Basic setup
 
 `createBrowserDriver` is async because it needs to initialize the [Origin Private File System (OPFS)](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system) before returning.
 
 ```ts
-import { NodeRuntime } from "secure-exec";
 import {
   createBrowserDriver,
   createBrowserRuntimeDriverFactory,
-} from "@secure-exec/browser";
+} from "@rivet-dev/agent-os-browser";
 
-const runtime = new NodeRuntime({
-  systemDriver: await createBrowserDriver(),
-  runtimeDriverFactory: createBrowserRuntimeDriverFactory(),
-});
+const systemDriver = await createBrowserDriver();
+const runtimeDriverFactory = createBrowserRuntimeDriverFactory();
 ```
 
 ## Filesystem options
@@ -60,7 +53,7 @@ Customize the worker script URL if you need to serve it from a specific path.
 
 ```ts
 const runtimeDriver = createBrowserRuntimeDriverFactory({
-  workerUrl: new URL("/workers/secure-exec.js", import.meta.url),
+  workerUrl: new URL("/workers/agent-os-worker.js", import.meta.url),
 });
 ```
 

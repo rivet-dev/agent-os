@@ -3,7 +3,7 @@ name = "secureexec-builtins"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Built-in command implementations (sleep, test/[, whoami) for secure-exec WasmVM"
+description = "Built-in command implementations (sleep, test/[, whoami) for Agent OS WasmVM"
 
 [dependencies]
 wasi-ext = { path = "../../wasi-ext" }

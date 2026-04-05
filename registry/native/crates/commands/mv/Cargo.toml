@@ -3,7 +3,7 @@ name = "cmd-mv"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "mv standalone binary for secure-exec WasmVM"
+description = "mv standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "mv"

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { type VirtualFileSystem } from "@secure-exec/core";
+import { type VirtualFileSystem } from "./runtime-compat.js";
 import { getBaseFilesystemSnapshot, type BaseFilesystemSnapshot } from "./base-filesystem.js";
-import { createOverlayBackend } from "./backends/overlay-backend.js";
+import { createOverlayBackend } from "./overlay-filesystem.js";
 import {
 	createFilesystemFromEntries,
 	snapshotVirtualFilesystem,

@@ -1,10 +1,11 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import type { KernelSpawnOptions, ManagedProcess } from "@secure-exec/core";
+import type { KernelSpawnOptions, ManagedProcess } from "../src/runtime-compat.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { z } from "zod";
 import { AgentOs, generateToolReference, hostTool, toolKit } from "../src/index.js";
 import { AGENT_CONFIGS } from "../src/agents.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 
@@ -172,7 +173,7 @@ describe("PI prepareInstructions with toolReference", () => {
 			typeof config.prepareInstructions
 		>;
 		const toolRef = generateToolReference([mathToolKit]);
-		const result = await prepare(vm.kernel, "/home/user", undefined, {
+		const result = await prepare(getAgentOsKernel(vm), "/home/user", undefined, {
 			toolReference: toolRef,
 		});
 
@@ -193,7 +194,7 @@ describe("PI prepareInstructions with toolReference", () => {
 		>;
 		const additional = "CUSTOM_MARKER_123";
 		const toolRef = generateToolReference([mathToolKit]);
-		const result = await prepare(vm.kernel, "/home/user", additional, {
+		const result = await prepare(getAgentOsKernel(vm), "/home/user", additional, {
 			toolReference: toolRef,
 		});
 
@@ -215,7 +216,7 @@ describe("PI prepareInstructions with toolReference", () => {
 			typeof config.prepareInstructions
 		>;
 		const toolRef = generateToolReference([mathToolKit]);
-		const result = await prepare(vm.kernel, "/home/user", undefined, {
+		const result = await prepare(getAgentOsKernel(vm), "/home/user", undefined, {
 			toolReference: toolRef,
 			skipBase: true,
 		});
@@ -235,7 +236,7 @@ describe("PI prepareInstructions with toolReference", () => {
 		const prepare = config.prepareInstructions as NonNullable<
 			typeof config.prepareInstructions
 		>;
-		const result = await prepare(vm.kernel, "/home/user", undefined, {
+		const result = await prepare(getAgentOsKernel(vm), "/home/user", undefined, {
 			skipBase: true,
 		});
 
@@ -262,7 +263,7 @@ describe("OpenCode prepareInstructions with toolReference", () => {
 			typeof config.prepareInstructions
 		>;
 		const toolRef = generateToolReference([mathToolKit]);
-		const result = await prepare(vm.kernel, "/home/user", undefined, {
+		const result = await prepare(getAgentOsKernel(vm), "/home/user", undefined, {
 			toolReference: toolRef,
 		});
 
@@ -286,7 +287,7 @@ describe("OpenCode prepareInstructions with toolReference", () => {
 			typeof config.prepareInstructions
 		>;
 		const toolRef = generateToolReference([mathToolKit]);
-		const result = await prepare(vm.kernel, "/home/user", undefined, {
+		const result = await prepare(getAgentOsKernel(vm), "/home/user", undefined, {
 			toolReference: toolRef,
 			skipBase: true,
 		});
@@ -385,8 +386,9 @@ describe("createSession with toolkits injects tool reference", () => {
 
 	function spyOnSpawn(vm: AgentOs): SpawnCapture[] {
 		const captures: SpawnCapture[] = [];
-		const origSpawn = vm.kernel.spawn.bind(vm.kernel);
-		vm.kernel.spawn = (
+		const kernel = getAgentOsKernel(vm);
+		const origSpawn = kernel.spawn.bind(kernel);
+		kernel.spawn = (
 			command: string,
 			args: string[],
 			options?: KernelSpawnOptions,

@@ -1,9 +1,10 @@
-import type { ManagedProcess } from "@secure-exec/core";
+import type { ManagedProcess } from "../src/runtime-compat.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AcpClient } from "../src/acp-client.js";
 import { AgentOs } from "../src/agent-os.js";
 import type { JsonRpcNotification } from "../src/protocol.js";
 import { createStdoutLineIterable } from "../src/stdout-lines.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 
 /**
  * Comprehensive mock ACP adapter that supports all protocol methods.
@@ -721,7 +722,7 @@ async function spawnAdapter(
 }> {
 	await vm.writeFile(scriptPath, script);
 	const { iterable, onStdout } = createStdoutLineIterable();
-	const proc = vm.kernel.spawn("node", [scriptPath], {
+	const proc = getAgentOsKernel(vm).spawn("node", [scriptPath], {
 		streamStdin: true,
 		onStdout,
 		env: { HOME: "/home/user" },
@@ -741,7 +742,7 @@ async function spawnAdapterWithTimeout(
 }> {
 	await vm.writeFile(scriptPath, script);
 	const { iterable, onStdout } = createStdoutLineIterable();
-	const proc = vm.kernel.spawn("node", [scriptPath], {
+	const proc = getAgentOsKernel(vm).spawn("node", [scriptPath], {
 		streamStdin: true,
 		onStdout,
 		env: { HOME: "/home/user" },

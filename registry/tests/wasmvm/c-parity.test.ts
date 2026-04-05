@@ -8,10 +8,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { createWasmVmRuntime } from '@rivet-dev/agent-os-posix';
-import { createKernel } from '@secure-exec/core';
-import { COMMANDS_DIR, C_BUILD_DIR, hasWasmBinaries } from '../helpers.js';
-import type { Kernel } from '@secure-exec/core';
+import { createWasmVmRuntime } from '@rivet-dev/agent-os/test/runtime';
+import { COMMANDS_DIR, C_BUILD_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import type { Kernel } from '../helpers.js';
 import { existsSync } from 'node:fs';
 import { writeFile as fsWriteFile, readFile as fsReadFile, mkdtemp, rm, mkdir as fsMkdir } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
@@ -19,7 +18,6 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer as createTcpServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
-
 
 const NATIVE_DIR = join(C_BUILD_DIR, 'native');
 
@@ -830,7 +828,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
 
   it.skipIf(tier5Skip)('json_parse: cJSON parse and format parity', async () => {
     const sampleJson = JSON.stringify({
-      name: 'secure-exec',
+      name: 'agent-os',
       version: 2,
       enabled: true,
       tags: ['alpha', 'beta'],
@@ -847,7 +845,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(wasm.stdout).toBe(native.stdout);
     expect(normalizeStderr(wasm.stderr)).toBe(normalizeStderr(native.stderr));
     // Verify key structural elements are present
-    expect(wasm.stdout).toContain('"name": "secure-exec"');
+    expect(wasm.stdout).toContain('"name": "agent-os"');
     expect(wasm.stdout).toContain('"enabled": true');
     expect(wasm.stdout).toContain('"timeout": null');
     expect(wasm.stdout).toContain('"ratio": 3.14');

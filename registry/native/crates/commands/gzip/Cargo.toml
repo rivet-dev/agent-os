@@ -3,7 +3,7 @@ name = "cmd-gzip"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "gzip standalone binary for secure-exec WasmVM"
+description = "gzip standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "gzip"

@@ -3,7 +3,7 @@ name = "cmd-stubs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "_stubs mini-multicall binary for unsupported commands in secure-exec WasmVM"
+description = "_stubs mini-multicall binary for unsupported commands in Agent OS WasmVM"
 
 [[bin]]
 name = "_stubs"

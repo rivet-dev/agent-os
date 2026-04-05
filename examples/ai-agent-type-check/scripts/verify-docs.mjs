@@ -4,10 +4,9 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../../..");
-const docsPath = path.join(repoRoot, "docs/use-cases/ai-agent-code-exec.mdx");
+const docsPath = path.join(repoRoot, "docs/features/typescript.mdx");
 
 const expectedFiles = new Map([
-  ["JavaScript Execution", path.join(repoRoot, "examples/ai-sdk/src/index.ts")],
   ["Type-Checked Execution", path.join(repoRoot, "examples/ai-agent-type-check/src/index.ts")],
 ]);
 

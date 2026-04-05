@@ -9,10 +9,15 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { createWasmVmRuntime } from '@rivet-dev/agent-os-posix';
-import { createKernel, createInMemoryFileSystem } from '@secure-exec/core';
-import { COMMANDS_DIR, C_BUILD_DIR, hasWasmBinaries } from '../helpers.js';
-import type { Kernel } from '@secure-exec/core';
+import { createWasmVmRuntime } from '@rivet-dev/agent-os/test/runtime';
+import {
+  COMMANDS_DIR,
+  C_BUILD_DIR,
+  createInMemoryFileSystem,
+  createKernel,
+  hasWasmBinaries,
+} from '../helpers.js';
+import type { Kernel } from '../helpers.js';
 import {
   existsSync,
   readdirSync,
@@ -25,6 +30,7 @@ import {
 import { spawn } from 'node:child_process';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
+
 interface ExclusionEntry {
   expected: 'fail' | 'skip';
   reason: string;

@@ -1,0 +1,11 @@
+{
+	"name": "project-matrix-optional-deps-pass",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"semver": "7.7.3"
+	},
+	"optionalDependencies": {
+		"@anthropic-internal/nonexistent-optional-pkg": "99.0.0"
+	}
+}

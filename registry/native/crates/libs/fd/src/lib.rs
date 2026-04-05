@@ -184,7 +184,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 std::process::exit(0);
             }
             "-V" | "--version" => {
-                println!("fd 0.1.0 (secure-exec)");
+                println!("fd 0.1.0 (Agent OS)");
                 std::process::exit(0);
             }
             "-H" | "--hidden" => {

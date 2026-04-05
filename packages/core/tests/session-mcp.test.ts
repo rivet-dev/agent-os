@@ -3,6 +3,7 @@ import { AcpClient } from "../src/acp-client.js";
 import type { McpServerConfig } from "../src/agent-os.js";
 import { AgentOs } from "../src/agent-os.js";
 import { createStdoutLineIterable } from "../src/stdout-lines.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 
 /**
  * Mock ACP adapter that echoes back the full mcpServers array
@@ -82,7 +83,7 @@ describe("MCP server config passthrough", () => {
 		vm = await AgentOs.create();
 		const { iterable, onStdout } = createStdoutLineIterable();
 		await vm.writeFile("/tmp/mcp-echo.mjs", MCP_ECHO_MOCK);
-		const proc = vm.kernel.spawn("node", ["/tmp/mcp-echo.mjs"], {
+		const proc = getAgentOsKernel(vm).spawn("node", ["/tmp/mcp-echo.mjs"], {
 			streamStdin: true,
 			onStdout,
 			env: { HOME: "/home/user" },

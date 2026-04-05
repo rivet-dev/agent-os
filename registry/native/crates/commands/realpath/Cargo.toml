@@ -3,7 +3,7 @@ name = "cmd-realpath"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "realpath standalone binary for secure-exec WasmVM"
+description = "realpath standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "realpath"

@@ -1,7 +1,6 @@
-# Secure Exec
+# Agent OS Browser
 
-Secure Node.js execution without a sandbox. V8 isolate-based code execution with full Node.js and npm compatibility.
+Browser driver primitives for Agent OS.
 
-- [Website](https://secureexec.dev)
-- [Documentation](https://secureexec.dev/docs)
-- [GitHub](https://github.com/rivet-dev/secure-exec)
+- Package: `@rivet-dev/agent-os-browser`
+- Exports: `createBrowserDriver`, `createBrowserRuntimeDriverFactory`, `createOpfsFileSystem`, `BrowserWorkerAdapter`

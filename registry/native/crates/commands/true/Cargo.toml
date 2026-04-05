@@ -3,7 +3,7 @@ name = "cmd-true"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "true standalone binary for secure-exec WasmVM"
+description = "true standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "true"

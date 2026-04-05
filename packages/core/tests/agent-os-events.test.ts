@@ -1,4 +1,4 @@
-import type { ManagedProcess } from "@secure-exec/core";
+import type { ManagedProcess } from "../src/runtime-compat.js";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { AcpClient } from "../src/acp-client.js";
 import { AgentOs } from "../src/agent-os.js";
@@ -11,6 +11,7 @@ import type {
 } from "../src/session.js";
 import { Session, type SessionInitData } from "../src/session.js";
 import { createStdoutLineIterable } from "../src/stdout-lines.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 
 /**
  * Build a mock ACP adapter script that uses the given prefix for session IDs.
@@ -113,7 +114,7 @@ async function registerMockSession(
 	const prefix = `sub-${mockCounter}`;
 	await vm.writeFile(scriptPath, buildMockAdapter(prefix));
 	const { iterable, onStdout } = createStdoutLineIterable();
-	const proc = vm.kernel.spawn("node", [scriptPath], {
+	const proc = getAgentOsKernel(vm).spawn("node", [scriptPath], {
 		streamStdin: true,
 		onStdout,
 		env: { HOME: "/home/user" },

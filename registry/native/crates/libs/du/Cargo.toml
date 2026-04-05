@@ -3,6 +3,6 @@ name = "secureexec-du"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "du implementation for secure-exec standalone binaries"
+description = "du implementation for Agent OS standalone binaries"
 
 [dependencies]

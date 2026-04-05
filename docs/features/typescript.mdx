@@ -1,102 +1,132 @@
 ---
 title: TypeScript
-description: Sandboxed type checking and compilation.
+description: Sandboxed type checking and compilation via @secure-exec/typescript.
 icon: "code"
 ---
 
-<Card title="Example on GitHub" icon="github" href="https://github.com/rivet-dev/secure-exec/blob/main/examples/features/src/typescript.ts">
-  Runnable example for sandboxed TypeScript compilation.
-</Card>
-
-The `@secure-exec/typescript` companion package runs the TypeScript compiler inside a sandbox for safe type checking and compilation of untrusted code.
+The maintained Secure-Exec compatibility surface includes a companion package
+for sandboxed TypeScript tooling. `@secure-exec/typescript` runs the TypeScript
+compiler inside the sandbox runtime instead of the host process, so untrusted
+compile and typecheck work stays inside the same execution boundary.
 
 ## Runnable example
 
-```ts
+```ts Type-Checked Execution
+import { anthropic } from "@ai-sdk/anthropic";
+import { createTypeScriptTools } from "@secure-exec/typescript";
+import { generateText, stepCountIs, tool } from "ai";
 import {
-  NodeRuntime,
-  allowAllFs,
-  createNodeDriver,
-  createNodeRuntimeDriverFactory,
-} from "../../../packages/secure-exec/src/index.ts";
-import { createTypeScriptTools } from "../../../packages/typescript/src/index.ts";
+	allowAll,
+	createNodeDriver,
+	createNodeRuntimeDriverFactory,
+	NodeRuntime,
+} from "secure-exec";
+import { z } from "zod";
 
-const sourceText = `
-  export const message: string = "hello from typescript";
-`;
-
-const systemDriver = createNodeDriver();
-const runtimeDriverFactory = createNodeRuntimeDriverFactory();
-const compilerSystemDriver = createNodeDriver({
-  moduleAccess: {
-    cwd: process.cwd(),
-  },
-  permissions: { ...allowAllFs },
+const systemDriver = createNodeDriver({
+	moduleAccess: {
+		cwd: process.cwd(),
+	},
+	permissions: allowAll,
 });
+const runtimeDriverFactory = createNodeRuntimeDriverFactory();
 
 const runtime = new NodeRuntime({
-  systemDriver,
-  runtimeDriverFactory,
+	systemDriver,
+	runtimeDriverFactory,
+	memoryLimit: 64,
+	cpuTimeLimitMs: 5000,
 });
-
 const ts = createTypeScriptTools({
-  systemDriver: compilerSystemDriver,
-  runtimeDriverFactory,
-  compilerSpecifier: "/root/node_modules/typescript/lib/typescript.js",
+	systemDriver,
+	runtimeDriverFactory,
+	memoryLimit: 256,
+	cpuTimeLimitMs: 5000,
 });
 
 try {
-  const typecheck = await ts.typecheckSource({
-    sourceText,
-    filePath: "/root/example.ts",
-    compilerOptions: {
-      module: "commonjs",
-      target: "es2022",
-    },
-  });
+	const { text } = await generateText({
+		model: anthropic("claude-sonnet-4-6"),
+		prompt:
+			"Write TypeScript that calculates the first 20 fibonacci numbers. Assign the result to module.exports.",
+		stopWhen: stepCountIs(5),
+		tools: {
+			execute_typescript: tool({
+				description:
+					"Type-check TypeScript in a sandbox, compile it, then run the emitted JavaScript in a sandbox. Return diagnostics when validation fails.",
+				inputSchema: z.object({ code: z.string() }),
+				execute: async ({ code }) => {
+					const typecheck = await ts.typecheckSource({
+						sourceText: code,
+						filePath: "/root/generated.ts",
+						compilerOptions: {
+							module: "commonjs",
+							target: "es2022",
+						},
+					});
 
-  if (!typecheck.success) {
-    throw new Error(typecheck.diagnostics.map((diagnostic) => diagnostic.message).join("\n"));
-  }
+					if (!typecheck.success) {
+						return {
+							ok: false,
+							stage: "typecheck",
+							diagnostics: typecheck.diagnostics,
+						};
+					}
 
-  const compiled = await ts.compileSource({
-    sourceText,
-    filePath: "/root/example.ts",
-    compilerOptions: {
-      module: "commonjs",
-      target: "es2022",
-    },
-  });
+					const compiled = await ts.compileSource({
+						sourceText: code,
+						filePath: "/root/generated.ts",
+						compilerOptions: {
+							module: "commonjs",
+							target: "es2022",
+						},
+					});
 
-  if (!compiled.success || !compiled.outputText) {
-    throw new Error(compiled.diagnostics.map((diagnostic) => diagnostic.message).join("\n"));
-  }
+					if (!compiled.success || !compiled.outputText) {
+						return {
+							ok: false,
+							stage: "compile",
+							diagnostics: compiled.diagnostics,
+						};
+					}
 
-  const result = await runtime.run<{ message: string }>(compiled.outputText, "/root/example.js");
-  const message = result.exports?.message;
+					const execution = await runtime.run<Record<string, unknown>>(
+						compiled.outputText,
+						"/root/generated.js",
+					);
 
-  if (result.code !== 0 || message !== "hello from typescript") {
-    throw new Error(`Unexpected runtime result: ${JSON.stringify(result)}`);
-  }
+					if (execution.code !== 0) {
+						return {
+							ok: false,
+							stage: "run",
+							errorMessage:
+								execution.errorMessage ??
+								`Sandbox exited with code ${execution.code}`,
+						};
+					}
 
-  console.log(
-    JSON.stringify({
-      ok: true,
-      message,
-      summary: "sandbox typechecked, compiled, and ran a TypeScript snippet",
-    }),
-  );
+					return {
+						ok: true,
+						stage: "run",
+						exports: execution.exports,
+					};
+				},
+			}),
+		},
+	});
+
+	console.log(text);
 } finally {
-  runtime.dispose();
+	runtime.dispose();
 }
 ```
 
-Source: [examples/features/src/typescript.ts](https://github.com/rivet-dev/secure-exec/blob/main/examples/features/src/typescript.ts)
+Source: [`examples/ai-agent-type-check/src/index.ts`](../../examples/ai-agent-type-check/src/index.ts)
 
 ## Install
 
 ```bash
-pnpm add @secure-exec/typescript
+pnpm add secure-exec @secure-exec/typescript typescript
 ```
 
 ## Setup
@@ -106,66 +136,51 @@ import { createNodeDriver, createNodeRuntimeDriverFactory } from "secure-exec";
 import { createTypeScriptTools } from "@secure-exec/typescript";
 
 const ts = createTypeScriptTools({
-  systemDriver: createNodeDriver(),
+  systemDriver: createNodeDriver({
+    moduleAccess: {
+      cwd: process.cwd(),
+    },
+  }),
   runtimeDriverFactory: createNodeRuntimeDriverFactory(),
 });
 ```
 
-**Options:**
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `systemDriver` | `SystemDriver` | required | Compiler runtime capabilities and filesystem view |
-| `runtimeDriverFactory` | `NodeRuntimeDriverFactory` | required | Creates the compiler sandbox |
-| `memoryLimit` | `number` | `512` | Compiler isolate memory cap in MB |
-| `cpuTimeLimitMs` | `number` | | Compiler CPU time budget in ms |
-| `compilerSpecifier` | `string` | `"/root/node_modules/typescript/lib/typescript.js"` | Module specifier for the TypeScript compiler |
+`moduleAccess.cwd` exposes the host package's `node_modules/` to the sandbox as
+a read-only module tree, which lets the compiler runtime import packages like
+`typescript` without copying them into the sandbox filesystem first.
 
 ## Type-check a source string
 
 ```ts
 const result = await ts.typecheckSource({
-  sourceText: "const x: number = 'hello';",
+  sourceText: "const value: string = 1;",
+  filePath: "/root/input.ts",
 });
 
 console.log(result.success); // false
-console.log(result.diagnostics[0].message);
-// "Type 'string' is not assignable to type 'number'."
-```
-
-## Type-check a project
-
-```ts
-const result = await ts.typecheckProject({
-  cwd: "/app",
-  configFilePath: "/app/tsconfig.json",
-});
-
-for (const d of result.diagnostics) {
-  console.log(`${d.filePath}:${d.line} ${d.message}`);
-}
+console.log(result.diagnostics[0]?.message);
 ```
 
 ## Compile a source string
 
 ```ts
 const result = await ts.compileSource({
-  sourceText: "const x: number = 42; export default x;",
+  sourceText: "export const value: number = 3;",
+  filePath: "/root/input.ts",
+  compilerOptions: {
+    module: "commonjs",
+    target: "es2022",
+  },
 });
 
 console.log(result.outputText);
-// "const x = 42; export default x;"
 ```
 
-## Compile a project
+## Type-check or compile a project
 
 ```ts
-const result = await ts.compileProject({
-  cwd: "/app",
-});
-
-console.log(result.emittedFiles); // ["/app/dist/index.js", ...]
-console.log(result.success); // true
+await ts.typecheckProject({ cwd: "/root/project" });
+await ts.compileProject({ cwd: "/root/project" });
 ```
 
 ## Diagnostic shape

@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-ioredis-pass",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"ioredis": "5.4.2"
+	}
+}

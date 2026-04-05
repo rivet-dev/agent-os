@@ -38,9 +38,35 @@ export function skipReason(): string | false {
   return false;
 }
 
-// Re-exports from secure-exec packages
-export { createKernel } from "@secure-exec/core";
-export type { Kernel } from "@secure-exec/core";
-export { createWasmVmRuntime } from "@rivet-dev/agent-os-posix";
-export { createNodeRuntime, createNodeHostNetworkAdapter } from "@secure-exec/nodejs";
-export { allowAll } from "@secure-exec/core";
+// Re-exports from the repo-owned Agent OS test runtime surface.
+export {
+  AF_INET,
+  AF_UNIX,
+  allowAll,
+  createInMemoryFileSystem,
+  createKernel,
+  SIGTERM,
+  SOCK_DGRAM,
+  SOCK_STREAM,
+} from "@rivet-dev/agent-os/test/runtime";
+export type {
+  DriverProcess,
+  Kernel,
+  KernelInterface,
+  KernelRuntimeDriver,
+  ProcessContext,
+  VirtualFileSystem,
+} from "@rivet-dev/agent-os/test/runtime";
+export {
+	createWasmVmRuntime,
+	DEFAULT_FIRST_PARTY_TIERS,
+	WASMVM_COMMANDS,
+	type PermissionTier,
+	type WasmVmRuntimeOptions,
+} from "@rivet-dev/agent-os/test/runtime";
+export {
+  createNodeHostNetworkAdapter,
+  createNodeRuntime,
+  NodeFileSystem,
+  TerminalHarness,
+} from "@rivet-dev/agent-os/test/runtime";

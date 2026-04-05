@@ -3,7 +3,7 @@ name = "cmd-ls"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ls standalone binary for secure-exec WasmVM"
+description = "ls standalone binary for Agent OS WasmVM"
 
 [[bin]]
 name = "ls"

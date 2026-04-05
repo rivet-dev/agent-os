@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validatePermissionSource } from "@secure-exec/browser/internal/permission-validation";
+import { validatePermissionSource } from "../../src/permission-validation.js";
 
 describe("browser permission callback validation", () => {
 	// Normal permission callbacks — must be accepted

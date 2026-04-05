@@ -3,7 +3,7 @@ name = "secureexec-tar"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "tar implementation for secure-exec standalone binaries"
+description = "tar implementation for Agent OS standalone binaries"
 
 [dependencies]
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }

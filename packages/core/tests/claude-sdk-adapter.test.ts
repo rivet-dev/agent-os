@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { LLMock, Fixture, ToolCall } from "@copilotkit/llmock";
-import type { ManagedProcess } from "@secure-exec/core";
+import type { ManagedProcess } from "../src/runtime-compat.js";
 import {
 	afterAll,
 	afterEach,
@@ -14,6 +14,7 @@ import {
 import { AcpClient } from "../src/acp-client.js";
 import { AgentOs } from "../src/agent-os.js";
 import { createStdoutLineIterable } from "../src/stdout-lines.js";
+import { getAgentOsKernel } from "../src/test/runtime.js";
 import {
 	REGISTRY_SOFTWARE,
 	registrySkipReason,
@@ -179,7 +180,7 @@ describe.skipIf(registrySkipReason)("claude-sdk-acp adapter manual spawn", () =>
 		const { iterable, onStdout } = createStdoutLineIterable();
 
 		let stderrOutput = "";
-		const spawned = targetVm.kernel.spawn("node", [binPath], {
+		const spawned = getAgentOsKernel(targetVm).spawn("node", [binPath], {
 			streamStdin: true,
 			onStdout,
 			onStderr: (data: Uint8Array) => {

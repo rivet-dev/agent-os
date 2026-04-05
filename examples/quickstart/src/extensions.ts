@@ -6,7 +6,7 @@
 //     mounts: [{ path: "/project", driver: myHostDriver, readOnly: true }],
 //   });
 
-import { AgentOs } from "@rivet-dev/agent-os-core";
+import { AgentOs } from "@rivet-dev/agent-os";
 
 const os = await AgentOs.create();
 

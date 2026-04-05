@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bridge",
+    "crates/kernel",
+    "crates/execution",
+    "crates/sidecar",
+    "crates/sidecar-browser",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"

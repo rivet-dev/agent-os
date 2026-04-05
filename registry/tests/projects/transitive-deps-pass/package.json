@@ -1,0 +1,8 @@
+{
+	"name": "project-matrix-transitive-deps-pass",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"@chain-test/level-a": "file:packages/level-a"
+	}
+}

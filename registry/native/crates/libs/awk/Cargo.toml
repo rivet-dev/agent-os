@@ -3,7 +3,7 @@ name = "secureexec-awk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "awk implementation for secure-exec standalone binaries"
+description = "awk implementation for Agent OS standalone binaries"
 
 [dependencies]
 awk-rs = "0.1.0"

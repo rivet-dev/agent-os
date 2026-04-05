@@ -7,19 +7,19 @@
       "expected": "fail",
       "category": "wasm-limitation",
       "reason": "os-test uses long (32-bit on WASM32) to hold a 64-bit value — ffsll itself works but the test constant truncates to 0",
-      "issue": "https://github.com/rivet-dev/secure-exec/issues/40"
+      "issue": "https://github.com/rivet-dev/agent-os/pull/40"
     },
     "basic/sys_statvfs/fstatvfs": {
       "expected": "fail",
       "category": "wasi-gap",
       "reason": "fstatvfs() not part of WASI — no filesystem statistics interface",
-      "issue": "https://github.com/rivet-dev/secure-exec/issues/48"
+      "issue": "https://github.com/rivet-dev/agent-os/pull/48"
     },
     "basic/sys_statvfs/statvfs": {
       "expected": "fail",
       "category": "wasi-gap",
       "reason": "statvfs() not part of WASI — no filesystem statistics interface",
-      "issue": "https://github.com/rivet-dev/secure-exec/issues/48"
+      "issue": "https://github.com/rivet-dev/agent-os/pull/48"
     }
   }
 }

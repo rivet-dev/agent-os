@@ -13,16 +13,16 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { createInMemoryFileSystem } from '@secure-exec/core';
-import type { Kernel } from '@secure-exec/core';
 import {
   COMMANDS_DIR,
   C_BUILD_DIR,
   allowAll,
+  createInMemoryFileSystem,
   createKernel,
   createNodeHostNetworkAdapter,
   createWasmVmRuntime,
 } from '../helpers.js';
+import type { Kernel } from '../helpers.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
