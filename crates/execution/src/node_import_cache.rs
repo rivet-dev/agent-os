@@ -1396,6 +1396,11 @@ if (!Module || typeof Module.createRequire !== 'function') {
   throw new Error('node:module builtin access is required for the Agent OS guest runtime');
 }
 const hostRequire = Module.createRequire(import.meta.url);
+const SIGNAL_EVENTS = new Set(
+  Object.keys(hostRequire('node:os').constants?.signals ?? {}).filter((name) =>
+    name.startsWith('SIG'),
+  ),
+);
 const guestEntryPoint =
   HOST_PROCESS_ENV.AGENT_OS_GUEST_ENTRYPOINT ?? HOST_PROCESS_ENV.AGENT_OS_ENTRYPOINT;
 const DEFAULT_VIRTUAL_EXEC_PATH = '/usr/bin/node';
@@ -2106,6 +2111,29 @@ function cloneFsModule(fsModule) {
   return cloned;
 }
 
+function isProcessSignalEventName(eventName) {
+  return typeof eventName === 'string' && SIGNAL_EVENTS.has(eventName);
+}
+
+function createBlockedProcessSignalMethod(methodName) {
+  const target = process;
+  const method =
+    typeof target[methodName] === 'function' ? target[methodName].bind(target) : null;
+  if (!method) {
+    return null;
+  }
+
+  return (...args) => {
+    const [eventName] = args;
+    if (isProcessSignalEventName(eventName)) {
+      throw accessDenied(`process.${methodName}(${eventName})`);
+    }
+
+    const result = method(...args);
+    return result === target ? guestProcess : result;
+  };
+}
+
 function createGuestProcessProxy(target) {
   return new Proxy(target, {
     get(source, key) {
@@ -2251,6 +2279,23 @@ function installGuestHardening() {
   hardenProperty(process, 'dlopen', () => {
     throw accessDenied('process.dlopen');
   });
+  for (const methodName of [
+    'addListener',
+    'on',
+    'once',
+    'prependListener',
+    'prependOnceListener',
+  ]) {
+    const blockedMethod = createBlockedProcessSignalMethod(methodName);
+    if (blockedMethod) {
+      hardenProperty(process, methodName, blockedMethod);
+    }
+  }
+  if (Module?._extensions && typeof Module._extensions === 'object') {
+    hardenProperty(Module._extensions, '.node', () => {
+      throw accessDenied('native addon loading');
+    });
+  }
   if (originalGetBuiltinModule) {
     hardenProperty(process, 'getBuiltinModule', (specifier) => {
       const normalized =

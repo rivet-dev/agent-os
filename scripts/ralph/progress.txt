@@ -6,6 +6,7 @@
 - Node guest env hardening in `crates/execution/src/node_import_cache.rs` should snapshot `AGENT_OS_*` control vars first, then replace `process.env` with a filtered proxy so runtime internals keep working while guest enumeration/access stays scrubbed; when `node:module` is denied, bootstrap the runner via `process.getBuiltinModule('node:module')` instead of importing it through the guest loader.
 - Node guest process virtualization in `crates/execution/src/node_import_cache.rs` should snapshot the host `process.cwd()` before hardening, use that snapshot for internal module resolution/`createRequire(...)`, and derive guest-visible paths from `AGENT_OS_GUEST_PATH_MAPPINGS` for user-facing `process.*` APIs.
 - Guest-visible `process` identity in `crates/execution/src/node_import_cache.rs` should be virtualized through a `globalThis.process` proxy after bootstrap setup, while `require('node:process')` and `process.getBuiltinModule('node:process')` are routed back to that same proxy; keep internal host-only values in snapped constants like `HOST_EXEC_PATH`.
+- In the generated Node runner, host-only builtin lookups needed for bootstrap/hardening should go through snapped `hostRequire(...)` rather than guest-visible ESM imports, and wrapped `process` methods that return `this` must translate the captured host target back to `guestProcess` after the proxy swap.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -99,4 +100,19 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Some Node `process` properties are refreshed or non-configurable, so stable guest identity virtualization works more reliably by swapping `globalThis.process` to a proxy after bootstrap setup than by relying on direct property replacement alone.
 - Gotchas encountered: `process.argv0` is non-configurable in Node v24, so this story can safely virtualize `process.argv[0]` but not the separate `process.argv0` property without violating Proxy invariants.
 - Useful context: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` both pass after this change on the current branch.
+---
+## 2026-04-04 20:03:57 PDT - US-007
+- What was implemented
+- Hardened the generated Node guest runner to deny `process.on`/`addListener`/`once`/`prepend*` registrations for real OS signal events while leaving non-signal process events usable.
+- Denied native addon loading by overriding `Module._extensions['.node']` to throw `ERR_ACCESS_DENIED`, complementing the existing `process.dlopen` denial.
+- Added an execution regression test that verifies signal-handler registration is blocked, non-signal listeners still work, and both `process.dlopen(...)` and `require('./addon.node')` fail with `ERR_ACCESS_DENIED`.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: Runner bootstrap code that needs host-only builtin state should use snapped `hostRequire(...)`, because guest-loader ESM imports can be redirected into denied builtin assets once hardening is active.
+- Gotchas encountered: Wrapped `process` EventEmitter methods return the host `process` object by default; after the guest proxy swap they need to remap that return value back to `guestProcess` or user code will observe the wrong identity.
+- Useful context: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` both pass for this story on the current branch.
 ---

@@ -1468,3 +1468,109 @@ console.log(JSON.stringify(result));
     assert_eq!(parsed["uid"], Value::from(0));
     assert_eq!(parsed["gid"], Value::from(0));
 }
+
+#[test]
+fn javascript_execution_denies_process_signal_handlers_and_native_addons() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(&temp.path().join("addon.node"), "not-a-real-native-addon\n");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import { fileURLToPath } from 'node:url';
+
+const addonPath = fileURLToPath(new URL('./addon.node', import.meta.url));
+const result = {};
+
+try {
+  const returned = process.on('beforeExit', () => {});
+  result.nonSignalReturnedSelf = returned === process;
+  process.removeAllListeners('beforeExit');
+} catch (error) {
+  result.nonSignal = { code: error.code ?? null, message: error.message };
+}
+
+try {
+  process.on('SIGTERM', () => {});
+  result.signalOn = 'unexpected';
+} catch (error) {
+  result.signalOn = { code: error.code ?? null, message: error.message };
+}
+
+try {
+  process.once('SIGINT', () => {});
+  result.signalOnce = 'unexpected';
+} catch (error) {
+  result.signalOnce = { code: error.code ?? null, message: error.message };
+}
+
+try {
+  process.dlopen({}, addonPath);
+  result.dlopen = 'unexpected';
+} catch (error) {
+  result.dlopen = { code: error.code ?? null, message: error.message };
+}
+
+try {
+  require(addonPath);
+  result.nativeAddon = 'unexpected';
+} catch (error) {
+  result.nativeAddon = { code: error.code ?? null, message: error.message };
+}
+
+console.log(JSON.stringify(result));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        BTreeMap::new(),
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse hardening JSON");
+    assert_eq!(parsed["nonSignalReturnedSelf"], Value::Bool(true));
+    assert_eq!(
+        parsed["signalOn"]["code"],
+        Value::String(String::from("ERR_ACCESS_DENIED"))
+    );
+    assert!(parsed["signalOn"]["message"]
+        .as_str()
+        .expect("signal on message")
+        .contains("process.on(SIGTERM)"));
+    assert_eq!(
+        parsed["signalOnce"]["code"],
+        Value::String(String::from("ERR_ACCESS_DENIED"))
+    );
+    assert!(parsed["signalOnce"]["message"]
+        .as_str()
+        .expect("signal once message")
+        .contains("process.once(SIGINT)"));
+    assert_eq!(
+        parsed["dlopen"]["code"],
+        Value::String(String::from("ERR_ACCESS_DENIED"))
+    );
+    assert!(parsed["dlopen"]["message"]
+        .as_str()
+        .expect("dlopen message")
+        .contains("process.dlopen"));
+    assert_eq!(
+        parsed["nativeAddon"]["code"],
+        Value::String(String::from("ERR_ACCESS_DENIED"))
+    );
+    assert!(parsed["nativeAddon"]["message"]
+        .as_str()
+        .expect("native addon message")
+        .contains("native addon loading"));
+}

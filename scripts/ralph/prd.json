@@ -107,7 +107,7 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Guest can register signal handlers that prevent clean termination. Native addons (.node files) are arbitrary native code on the host."
     },
     {
