@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- JavaScript sync RPC timeout and backpressure belong in `crates/execution/src/javascript.rs`: track the pending request ID on the host, auto-emit `ERR_AGENT_OS_NODE_SYNC_RPC_TIMEOUT` there, queue replies through a bounded async writer so slow guest reads cannot block the sidecar thread, and let `crates/sidecar/src/service.rs` ignore stale `sync RPC request ... is no longer pending` races after timeout.
 - Direct script execution in `crates/kernel/src/kernel.rs` should first map registered `/bin/*` and `/usr/bin/*` command stubs back to their command drivers, and only parse shebangs for real file paths; otherwise stub executables like `/bin/sh` recurse into their own wrapper.
 - Stream devices in `crates/kernel/src/device_layer.rs` should share one length-aware helper, and exact Linux-style byte-count behavior for `/dev/zero` / `/dev/urandom` should be asserted through `pread` / `fd_read` rather than `read_file()`.
 - Synthetic procfs entries in `crates/kernel/src/kernel.rs` should authorize the guest-visible `/proc/...` path directly; if procfs checks go through `PermissionedFileSystem::check_path(...)`, missing backing `/proc` directories in the mounted root can accidentally break the virtual proc layer.
@@ -75,6 +76,23 @@
 - Registry external-network tests should stay behind `AGENTOS_E2E_NETWORK=1`, preflight host connectivity before enabling CI coverage, and retry the in-VM outbound command so transient internet issues skip or self-heal instead of creating flaky regressions.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
+---
+## 2026-04-05 10:33:43 PDT - US-072
+- What was implemented
+- Added host-side JavaScript sync RPC timeout tracking in `crates/execution/src/javascript.rs`, so pending requests now auto-expire with `ERR_AGENT_OS_NODE_SYNC_RPC_TIMEOUT` instead of waiting forever for a sidecar response.
+- Replaced direct sync-RPC response pipe writes with a bounded async writer queue and timeout-based enqueueing so slow guest reads cannot block sidecar request handling indefinitely.
+- Updated `crates/sidecar/src/service.rs` to ignore stale post-timeout sync-RPC replies instead of surfacing a second failure after the timeout response has already been sent.
+- Added focused execution regressions for timeout-response emission and bounded response-queue backpressure.
+- Files changed
+- `AGENTS.md`
+- `crates/execution/src/javascript.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: JavaScript sync RPC should mirror Python VFS RPC timeout handling at the execution-host layer, but its response path also needs a bounded async queue because the sidecar thread can otherwise block on a slow-reading guest pipe.
+  - Gotchas encountered: Once the host-side timeout has emitted an error response, later sidecar attempts to reply will race and surface `sync RPC request ... is no longer pending`; that stale response needs to be ignored in `crates/sidecar/src/service.rs`.
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-execution`, `cargo check -p agent-os-sidecar`, `cargo test -p agent-os-execution javascript::tests -- --nocapture`, and `cargo test -p agent-os-sidecar javascript_sync_rpc_requests_proxy_into_the_vm_kernel_filesystem -- --nocapture` pass after this change.
 ---
 ## 2026-04-05 02:40:37 PDT - US-033
 - What was implemented

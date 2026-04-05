@@ -24,10 +24,11 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{
-    mpsc::{self, Receiver, RecvTimeoutError},
+    mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
     Arc, Mutex,
 };
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 const NODE_ENTRYPOINT_ENV: &str = "AGENT_OS_ENTRYPOINT";
 const NODE_BOOTSTRAP_ENV: &str = "AGENT_OS_BOOTSTRAP_MODULE";
@@ -59,6 +60,7 @@ const NODE_SYNC_RPC_DATA_BYTES_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_DATA_BYTES";
 const NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_WAIT_TIMEOUT_MS";
 const NODE_SYNC_RPC_DEFAULT_DATA_BYTES: usize = 4 * 1024 * 1024;
 const NODE_SYNC_RPC_DEFAULT_WAIT_TIMEOUT_MS: u64 = 30_000;
+const NODE_SYNC_RPC_RESPONSE_QUEUE_CAPACITY: usize = 1;
 const NODE_WARMUP_MARKER_VERSION: &str = "1";
 const NODE_WARMUP_SPECIFIERS: &[&str] = &[
     "agent-os:builtin/path",
@@ -117,9 +119,74 @@ struct JavascriptSyncRpcRequestWire {
 
 struct JavascriptSyncRpcChannels {
     parent_request_reader: File,
-    parent_response_writer: Arc<Mutex<BufWriter<File>>>,
+    parent_response_writer: File,
     child_request_writer: OwnedFd,
     child_response_reader: OwnedFd,
+}
+
+#[derive(Debug)]
+struct JavascriptSyncRpcResponseWriter {
+    sender: SyncSender<Vec<u8>>,
+    timeout: Duration,
+}
+
+impl JavascriptSyncRpcResponseWriter {
+    fn new(writer: File, timeout: Duration) -> Self {
+        let (sender, receiver) = mpsc::sync_channel(NODE_SYNC_RPC_RESPONSE_QUEUE_CAPACITY);
+        spawn_javascript_sync_rpc_response_writer(writer, receiver);
+        Self { sender, timeout }
+    }
+
+    fn send(&self, payload: Vec<u8>) -> Result<(), JavascriptExecutionError> {
+        let started = Instant::now();
+        let mut payload = Some(payload);
+
+        loop {
+            match self
+                .sender
+                .try_send(payload.take().expect("payload should be present"))
+            {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err(JavascriptExecutionError::RpcResponse(String::from(
+                        "JavaScript sync RPC response channel closed unexpectedly",
+                    )));
+                }
+                Err(TrySendError::Full(returned_payload)) => {
+                    if started.elapsed() >= self.timeout {
+                        return Err(JavascriptExecutionError::RpcResponse(format!(
+                            "timed out after {}ms while queueing JavaScript sync RPC response",
+                            self.timeout.as_millis()
+                        )));
+                    }
+                    payload = Some(returned_payload);
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+}
+
+impl Clone for JavascriptSyncRpcResponseWriter {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            timeout: self.timeout,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingSyncRpcState {
+    Pending(u64),
+    TimedOut(u64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingSyncRpcResolution {
+    Pending,
+    TimedOut,
+    Missing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +253,7 @@ pub enum JavascriptExecutionError {
     WarmupFailed { exit_code: i32, stderr: String },
     Spawn(std::io::Error),
     PendingSyncRpcRequest(u64),
+    ExpiredSyncRpcRequest(u64),
     RpcChannel(String),
     RpcResponse(String),
     StdinClosed,
@@ -234,6 +302,9 @@ impl fmt::Display for JavascriptExecutionError {
                     "guest JavaScript execution requires servicing pending sync RPC request {id}"
                 )
             }
+            Self::ExpiredSyncRpcRequest(id) => {
+                write!(f, "sync RPC request {id} is no longer pending")
+            }
             Self::RpcChannel(message) => {
                 write!(
                     f,
@@ -264,7 +335,9 @@ pub struct JavascriptExecution {
     stdin: Option<ChildStdin>,
     events: Receiver<JavascriptProcessEvent>,
     stderr_filter: Arc<Mutex<LinePrefixFilter>>,
-    sync_rpc_responses: Option<Arc<Mutex<BufWriter<File>>>>,
+    pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
+    sync_rpc_responses: Option<JavascriptSyncRpcResponseWriter>,
+    sync_rpc_timeout: Duration,
 }
 
 impl JavascriptExecution {
@@ -305,6 +378,14 @@ impl JavascriptExecution {
             )));
         };
 
+        match self.clear_pending_sync_rpc(id)? {
+            PendingSyncRpcResolution::Pending => {}
+            PendingSyncRpcResolution::TimedOut => {
+                return Err(JavascriptExecutionError::ExpiredSyncRpcRequest(id));
+            }
+            PendingSyncRpcResolution::Missing => {}
+        }
+
         write_javascript_sync_rpc_response(
             writer,
             json!({
@@ -326,6 +407,14 @@ impl JavascriptExecution {
                 "no sync RPC channel is active for this JavaScript execution",
             )));
         };
+
+        match self.clear_pending_sync_rpc(id)? {
+            PendingSyncRpcResolution::Pending => {}
+            PendingSyncRpcResolution::TimedOut => {
+                return Err(JavascriptExecutionError::ExpiredSyncRpcRequest(id));
+            }
+            PendingSyncRpcResolution::Missing => {}
+        }
 
         write_javascript_sync_rpc_response(
             writer,
@@ -360,6 +449,13 @@ impl JavascriptExecution {
                 Ok(Some(JavascriptExecutionEvent::Stderr(filtered)))
             }
             Ok(JavascriptProcessEvent::SyncRpcRequest(request)) => {
+                self.set_pending_sync_rpc(request.id)?;
+                spawn_javascript_sync_rpc_timeout(
+                    request.id,
+                    self.sync_rpc_timeout,
+                    self.pending_sync_rpc.clone(),
+                    self.sync_rpc_responses.clone(),
+                );
                 Ok(Some(JavascriptExecutionEvent::SyncRpcRequest(request)))
             }
             Ok(JavascriptProcessEvent::Control(NodeControlMessage::NodeImportCacheMetrics {
@@ -433,6 +529,37 @@ impl JavascriptExecution {
             }
         }
     }
+
+    fn set_pending_sync_rpc(&self, id: u64) -> Result<(), JavascriptExecutionError> {
+        let mut pending = self.pending_sync_rpc.lock().map_err(|_| {
+            JavascriptExecutionError::RpcResponse(String::from(
+                "sync RPC pending-request state lock poisoned",
+            ))
+        })?;
+        *pending = Some(PendingSyncRpcState::Pending(id));
+        Ok(())
+    }
+
+    fn clear_pending_sync_rpc(
+        &self,
+        id: u64,
+    ) -> Result<PendingSyncRpcResolution, JavascriptExecutionError> {
+        let mut pending = self.pending_sync_rpc.lock().map_err(|_| {
+            JavascriptExecutionError::RpcResponse(String::from(
+                "sync RPC pending-request state lock poisoned",
+            ))
+        })?;
+        match *pending {
+            Some(PendingSyncRpcState::Pending(current)) if current == id => {
+                *pending = None;
+                Ok(PendingSyncRpcResolution::Pending)
+            }
+            Some(PendingSyncRpcState::TimedOut(current)) if current == id => {
+                Ok(PendingSyncRpcResolution::TimedOut)
+            }
+            _ => Ok(PendingSyncRpcResolution::Missing),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -500,6 +627,7 @@ impl JavascriptExecutionEngine {
             .import_caches
             .get(&context.vm_id)
             .expect("vm import cache should exist after materialization");
+        let sync_rpc_timeout = javascript_sync_rpc_timeout(&request);
         let (mut child, sync_rpc_request_reader, sync_rpc_response_writer) = create_node_child(
             import_cache,
             &context,
@@ -554,7 +682,9 @@ impl JavascriptExecutionEngine {
             stdin,
             events: receiver,
             stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
+            pending_sync_rpc: Arc::new(Mutex::new(None)),
             sync_rpc_responses: sync_rpc_response_writer,
+            sync_rpc_timeout,
         })
     }
 
@@ -670,7 +800,7 @@ fn create_node_child(
     (
         std::process::Child,
         Option<File>,
-        Option<Arc<Mutex<BufWriter<File>>>>,
+        Option<JavascriptSyncRpcResponseWriter>,
     ),
     JavascriptExecutionError,
 > {
@@ -744,7 +874,7 @@ fn create_node_child(
         )
         .env(
             NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV,
-            NODE_SYNC_RPC_DEFAULT_WAIT_TIMEOUT_MS.to_string(),
+            javascript_sync_rpc_timeout(request).as_millis().to_string(),
         );
     exported_fds
         .export(
@@ -762,7 +892,10 @@ fn create_node_child(
         .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
     let (sync_rpc_request_reader, sync_rpc_response_writer) = (
         Some(channels.parent_request_reader),
-        Some(channels.parent_response_writer),
+        Some(JavascriptSyncRpcResponseWriter::new(
+            channels.parent_response_writer,
+            javascript_sync_rpc_timeout(request),
+        )),
     );
 
     configure_node_control_channel(&mut command, control_fd, &mut exported_fds)
@@ -956,12 +1089,62 @@ fn create_javascript_sync_rpc_channels(
 
     Ok(JavascriptSyncRpcChannels {
         parent_request_reader: File::from(parent_request_reader),
-        parent_response_writer: Arc::new(Mutex::new(BufWriter::new(File::from(
-            parent_response_writer,
-        )))),
+        parent_response_writer: File::from(parent_response_writer),
         child_request_writer,
         child_response_reader,
     })
+}
+
+fn javascript_sync_rpc_timeout(request: &StartJavascriptExecutionRequest) -> Duration {
+    let timeout_ms = request
+        .env
+        .get(NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(NODE_SYNC_RPC_DEFAULT_WAIT_TIMEOUT_MS);
+    Duration::from_millis(timeout_ms)
+}
+
+fn spawn_javascript_sync_rpc_timeout(
+    id: u64,
+    timeout: Duration,
+    pending_state: Arc<Mutex<Option<PendingSyncRpcState>>>,
+    responses: Option<JavascriptSyncRpcResponseWriter>,
+) {
+    let Some(responses) = responses else {
+        return;
+    };
+
+    thread::spawn(move || {
+        thread::sleep(timeout);
+
+        let should_timeout = match pending_state.lock() {
+            Ok(mut guard) if *guard == Some(PendingSyncRpcState::Pending(id)) => {
+                *guard = Some(PendingSyncRpcState::TimedOut(id));
+                true
+            }
+            Ok(_) => false,
+            Err(_) => false,
+        };
+
+        if !should_timeout {
+            return;
+        }
+
+        let _ = write_javascript_sync_rpc_response(
+            &responses,
+            json!({
+                "id": id,
+                "ok": false,
+                "error": {
+                    "code": "ERR_AGENT_OS_NODE_SYNC_RPC_TIMEOUT",
+                    "message": format!(
+                        "guest JavaScript sync RPC request {id} timed out after {}ms",
+                        timeout.as_millis()
+                    ),
+                },
+            }),
+        );
+    });
 }
 
 fn spawn_javascript_sync_rpc_reader(
@@ -1026,18 +1209,100 @@ fn parse_javascript_sync_rpc_request(line: &str) -> Result<JavascriptSyncRpcRequ
 }
 
 fn write_javascript_sync_rpc_response(
-    writer: &Arc<Mutex<BufWriter<File>>>,
+    writer: &JavascriptSyncRpcResponseWriter,
     response: Value,
 ) -> Result<(), JavascriptExecutionError> {
-    let mut writer = writer.lock().map_err(|_| {
-        JavascriptExecutionError::RpcResponse(String::from(
-            "sync RPC response writer lock poisoned",
-        ))
-    })?;
-    serde_json::to_writer(&mut *writer, &response)
+    let mut payload = serde_json::to_vec(&response)
         .map_err(|error| JavascriptExecutionError::RpcResponse(error.to_string()))?;
-    writer
-        .write_all(b"\n")
-        .and_then(|()| writer.flush())
-        .map_err(|error| JavascriptExecutionError::RpcResponse(error.to_string()))
+    payload.push(b'\n');
+    writer.send(payload)
+}
+
+fn spawn_javascript_sync_rpc_response_writer(
+    writer: File,
+    receiver: Receiver<Vec<u8>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut writer = BufWriter::new(writer);
+        while let Ok(payload) = receiver.recv() {
+            if writer
+                .write_all(&payload)
+                .and_then(|()| writer.flush())
+                .is_err()
+            {
+                return;
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::fcntl::OFlag;
+    use nix::unistd::pipe2;
+    use serde_json::Value;
+    use std::io::BufRead;
+
+    #[test]
+    fn javascript_sync_rpc_timeout_writes_clear_error_response() {
+        let (reader_fd, writer_fd) = pipe2(OFlag::O_CLOEXEC).expect("create pipe");
+        let reader = File::from(reader_fd);
+        let writer = File::from(writer_fd);
+        let response_writer =
+            JavascriptSyncRpcResponseWriter::new(writer, Duration::from_millis(50));
+        let pending = Arc::new(Mutex::new(Some(PendingSyncRpcState::Pending(7))));
+
+        spawn_javascript_sync_rpc_timeout(
+            7,
+            Duration::from_millis(20),
+            pending.clone(),
+            Some(response_writer),
+        );
+
+        let mut line = String::new();
+        let mut reader = BufReader::new(reader);
+        reader.read_line(&mut line).expect("read timeout response");
+
+        let response: Value = serde_json::from_str(line.trim()).expect("parse timeout response");
+        assert_eq!(response["id"], Value::from(7));
+        assert_eq!(response["ok"], Value::from(false));
+        assert_eq!(
+            response["error"]["code"],
+            Value::String(String::from("ERR_AGENT_OS_NODE_SYNC_RPC_TIMEOUT"))
+        );
+        assert!(response["error"]["message"]
+            .as_str()
+            .expect("timeout message")
+            .contains("timed out after 20ms"));
+        assert_eq!(
+            *pending.lock().expect("pending state lock"),
+            Some(PendingSyncRpcState::TimedOut(7))
+        );
+    }
+
+    #[test]
+    fn javascript_sync_rpc_response_writer_times_out_when_queue_is_full() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let writer = JavascriptSyncRpcResponseWriter {
+            sender,
+            timeout: Duration::from_millis(30),
+        };
+
+        writer
+            .send(b"first\n".to_vec())
+            .expect("queue first response");
+
+        let started = Instant::now();
+        let error = writer
+            .send(b"second\n".to_vec())
+            .expect_err("full queue should time out");
+        assert!(
+            started.elapsed() >= Duration::from_millis(30),
+            "send should wait for the configured timeout"
+        );
+        assert!(error
+            .to_string()
+            .contains("timed out after 30ms while queueing JavaScript sync RPC response"));
+    }
 }

@@ -4267,7 +4267,7 @@ where
                         Ok(result) => child
                             .execution
                             .respond_javascript_sync_rpc_success(request.id, result)
-                            .map_err(|error| SidecarError::Execution(error.to_string()))?,
+                            .or_else(ignore_stale_javascript_sync_rpc_response)?,
                         Err(error) => child
                             .execution
                             .respond_javascript_sync_rpc_error(
@@ -4275,7 +4275,7 @@ where
                                 "ERR_AGENT_OS_NODE_SYNC_RPC",
                                 error.to_string(),
                             )
-                            .map_err(|error| SidecarError::Execution(error.to_string()))?,
+                            .or_else(ignore_stale_javascript_sync_rpc_response)?,
                     }
                 }
                 ActiveExecutionEvent::PythonVfsRpcRequest(_) => {
@@ -4477,12 +4477,16 @@ where
         match response {
             Ok(result) => process
                 .execution
-                .respond_javascript_sync_rpc_success(request.id, result),
-            Err(error) => process.execution.respond_javascript_sync_rpc_error(
-                request.id,
-                javascript_sync_rpc_error_code(&error),
-                error.to_string(),
-            ),
+                .respond_javascript_sync_rpc_success(request.id, result)
+                .or_else(ignore_stale_javascript_sync_rpc_response),
+            Err(error) => process
+                .execution
+                .respond_javascript_sync_rpc_error(
+                    request.id,
+                    javascript_sync_rpc_error_code(&error),
+                    error.to_string(),
+                )
+                .or_else(ignore_stale_javascript_sync_rpc_response),
         }
     }
 
@@ -8125,6 +8129,18 @@ fn javascript_sync_rpc_error_code(error: &SidecarError) -> String {
             .unwrap_or("ERR_AGENT_OS_NODE_SYNC_RPC")
             .to_owned(),
         _ => String::from("ERR_AGENT_OS_NODE_SYNC_RPC"),
+    }
+}
+
+fn ignore_stale_javascript_sync_rpc_response(error: SidecarError) -> Result<(), SidecarError> {
+    match error {
+        SidecarError::Execution(message)
+            if message.ends_with("is no longer pending")
+                && message.starts_with("sync RPC request ") =>
+        {
+            Ok(())
+        }
+        other => Err(other),
     }
 }
 

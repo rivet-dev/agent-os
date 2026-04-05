@@ -1142,7 +1142,7 @@
         "Typecheck passes"
       ],
       "priority": 72,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: JavaScript sync RPC in service.rs dispatches to kernel without timeout. Response writer can deadlock if guest slow-reads. Python VFS bridge has 30s timeout but JS bridge does not."
     },
     {
