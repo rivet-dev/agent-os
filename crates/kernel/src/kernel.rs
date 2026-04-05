@@ -40,6 +40,8 @@ pub use crate::process_table::{ProcessWaitEvent as WaitPidEvent, WaitPidFlags};
 pub const SEEK_SET: u8 = 0;
 pub const SEEK_CUR: u8 = 1;
 pub const SEEK_END: u8 = 2;
+const EXECUTABLE_PERMISSION_BITS: u32 = 0o111;
+const SHEBANG_LINE_MAX_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelError {
@@ -147,6 +149,19 @@ pub struct WaitPidEventResult {
     pub pid: u32,
     pub status: i32,
     pub event: WaitPidEvent,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSpawnCommand {
+    command: String,
+    args: Vec<String>,
+    driver: CommandDriver,
+}
+
+#[derive(Debug, Clone)]
+struct ShebangCommand {
+    interpreter: String,
+    args: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -745,30 +760,27 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         options: SpawnOptions,
     ) -> KernelResult<KernelProcessHandle> {
         self.assert_not_terminated()?;
-        let driver = self
-            .commands
-            .resolve(command)
-            .cloned()
-            .ok_or_else(|| KernelError::command_not_found(command))?;
-
         if let (Some(requester), Some(parent_pid)) =
             (options.requester_driver.as_deref(), options.parent_pid)
         {
             self.assert_driver_owns(requester, parent_pid)?;
         }
 
-        self.resources.check_process_argv_bytes(command, &args)?;
+        let cwd = options.cwd.clone().unwrap_or_else(|| self.cwd.clone());
+        let resolved = self.resolve_spawn_command(command, &args, &cwd)?;
+
+        self.resources
+            .check_process_argv_bytes(&resolved.command, &resolved.args)?;
         self.resources
             .check_process_env_bytes(&self.env, &options.env)?;
 
         let mut env = self.env.clone();
         env.extend(options.env.clone());
-        let cwd = options.cwd.clone().unwrap_or_else(|| self.cwd.clone());
         check_command_execution(
             &self.vm_id,
             &self.permissions,
-            command,
-            &args,
+            &resolved.command,
+            &resolved.args,
             Some(&cwd),
             &env,
         )?;
@@ -794,12 +806,12 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         let process = Arc::new(StubDriverProcess::default());
-        let driver_name = driver.name().to_owned();
+        let driver_name = resolved.driver.name().to_owned();
         self.processes.register(
             pid,
             driver_name.clone(),
-            command.to_owned(),
-            args,
+            resolved.command,
+            resolved.args,
             ProcessContext {
                 pid,
                 ppid: options.parent_pid.unwrap_or(0),
@@ -1693,6 +1705,156 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             self.driver_pids.as_ref(),
             pid,
         );
+    }
+
+    fn resolve_spawn_command(
+        &mut self,
+        command: &str,
+        args: &[String],
+        cwd: &str,
+    ) -> KernelResult<ResolvedSpawnCommand> {
+        if let Some(driver) = self.commands.resolve(command).cloned() {
+            return Ok(ResolvedSpawnCommand {
+                command: command.to_owned(),
+                args: args.to_vec(),
+                driver,
+            });
+        }
+
+        let Some(path) = self.resolve_executable_path(command, cwd)? else {
+            return Err(KernelError::command_not_found(command));
+        };
+
+        if let Some(registered_command) = self.resolve_registered_command_path(&path) {
+            let driver = self
+                .commands
+                .resolve(&registered_command)
+                .cloned()
+                .ok_or_else(|| KernelError::command_not_found(&registered_command))?;
+            return Ok(ResolvedSpawnCommand {
+                command: registered_command,
+                args: args.to_vec(),
+                driver,
+            });
+        }
+
+        let shebang = self
+            .parse_shebang_command(&path)?
+            .ok_or_else(|| KernelError::new("ENOEXEC", format!("exec format error: {path}")))?;
+        self.resolve_shebang_command(&path, args, shebang)
+    }
+
+    fn resolve_executable_path(
+        &mut self,
+        command: &str,
+        cwd: &str,
+    ) -> KernelResult<Option<String>> {
+        if !command.contains('/') {
+            return Ok(None);
+        }
+
+        let path = if command.starts_with('/') {
+            normalize_path(command)
+        } else {
+            normalize_path(&format!("{cwd}/{command}"))
+        };
+        let stat = self.filesystem.stat(&path)?;
+        if stat.is_directory {
+            return Err(KernelError::new(
+                "EACCES",
+                format!("permission denied, execute '{path}'"),
+            ));
+        }
+        if stat.mode & EXECUTABLE_PERMISSION_BITS == 0 {
+            return Err(KernelError::new(
+                "EACCES",
+                format!("permission denied, execute '{path}'"),
+            ));
+        }
+        Ok(Some(path))
+    }
+
+    fn resolve_registered_command_path(&self, path: &str) -> Option<String> {
+        let normalized = normalize_path(path);
+        for prefix in ["/bin/", "/usr/bin/"] {
+            let Some(name) = normalized.strip_prefix(prefix) else {
+                continue;
+            };
+            if !name.is_empty() && !name.contains('/') && self.commands.resolve(name).is_some() {
+                return Some(name.to_owned());
+            }
+        }
+        None
+    }
+
+    fn parse_shebang_command(&mut self, path: &str) -> KernelResult<Option<ShebangCommand>> {
+        let header = self.filesystem.pread(path, 0, SHEBANG_LINE_MAX_BYTES + 1)?;
+        if !header.starts_with(b"#!") {
+            return Ok(None);
+        }
+
+        let line_end = match header.iter().position(|byte| *byte == b'\n') {
+            Some(index) => index,
+            None if header.len() <= SHEBANG_LINE_MAX_BYTES => header.len(),
+            None => {
+                return Err(KernelError::new(
+                    "ENOEXEC",
+                    format!("shebang line exceeds {SHEBANG_LINE_MAX_BYTES} bytes: {path}"),
+                ))
+            }
+        };
+        let line = header[2..line_end]
+            .strip_suffix(b"\r")
+            .unwrap_or(&header[2..line_end]);
+        let text = std::str::from_utf8(line)
+            .map_err(|_| KernelError::new("ENOEXEC", format!("invalid shebang line: {path}")))?;
+        let mut parts = text.split_ascii_whitespace();
+        let interpreter = parts
+            .next()
+            .ok_or_else(|| KernelError::new("ENOEXEC", format!("invalid shebang line: {path}")))?;
+        Ok(Some(ShebangCommand {
+            interpreter: interpreter.to_owned(),
+            args: parts.map(ToOwned::to_owned).collect(),
+        }))
+    }
+
+    fn resolve_shebang_command(
+        &self,
+        path: &str,
+        args: &[String],
+        shebang: ShebangCommand,
+    ) -> KernelResult<ResolvedSpawnCommand> {
+        let mut interpreter_args = shebang.args;
+        let interpreter = normalize_path(&shebang.interpreter);
+        let command = if interpreter == "/usr/bin/env" || interpreter == "/bin/env" {
+            if interpreter_args.is_empty() {
+                return Err(KernelError::new(
+                    "ENOENT",
+                    format!("missing interpreter after /usr/bin/env in shebang: {path}"),
+                ));
+            }
+            interpreter_args.remove(0)
+        } else if let Some(command) = self.resolve_registered_command_path(&interpreter) {
+            command
+        } else if self.commands.resolve(&shebang.interpreter).is_some() {
+            shebang.interpreter
+        } else {
+            return Err(KernelError::command_not_found(&shebang.interpreter));
+        };
+
+        let driver = self
+            .commands
+            .resolve(&command)
+            .cloned()
+            .ok_or_else(|| KernelError::command_not_found(&command))?;
+        let mut resolved_args = interpreter_args;
+        resolved_args.push(path.to_owned());
+        resolved_args.extend(args.iter().cloned());
+        Ok(ResolvedSpawnCommand {
+            command,
+            args: resolved_args,
+            driver,
+        })
     }
 
     fn finish_waitpid_event(&mut self, result: ProcessWaitResult) -> WaitPidEventResult {

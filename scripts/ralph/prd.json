@@ -1127,7 +1127,7 @@
         "Typecheck passes"
       ],
       "priority": 71,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: Kernel doesn't parse shebang lines. Scripts starting with #!/bin/sh won't execute. Common pattern in agent workflows."
     },
     {

@@ -239,3 +239,88 @@ fn process_exit_cleanup_removes_fd_tables_before_and_after_reap() {
         "ESRCH"
     );
 }
+
+#[test]
+fn spawn_process_executes_shebang_scripts_with_registered_interpreters() {
+    let mut config = KernelVmConfig::new("vm-shebang");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    kernel
+        .register_driver(CommandDriver::new("node", ["node"]))
+        .expect("register node");
+
+    kernel
+        .write_file("/tmp/script.sh", b"#!/bin/sh -eu\necho shell\n".to_vec())
+        .expect("write shell script");
+    kernel
+        .chmod("/tmp/script.sh", 0o755)
+        .expect("chmod shell script");
+    let shell_process = kernel
+        .spawn_process(
+            "/tmp/script.sh",
+            vec![String::from("arg")],
+            SpawnOptions::default(),
+        )
+        .expect("spawn shell script");
+    assert_eq!(
+        kernel
+            .read_file(&format!("/proc/{}/cmdline", shell_process.pid()))
+            .expect("read shell cmdline"),
+        b"sh\0-eu\0/tmp/script.sh\0arg\0".to_vec()
+    );
+
+    kernel
+        .write_file(
+            "/tmp/script.mjs",
+            b"#!/usr/bin/env node --trace-warnings\nconsole.log('node');\n".to_vec(),
+        )
+        .expect("write node script");
+    kernel
+        .chmod("/tmp/script.mjs", 0o755)
+        .expect("chmod node script");
+    let node_process = kernel
+        .spawn_process("/tmp/script.mjs", Vec::new(), SpawnOptions::default())
+        .expect("spawn node script");
+    assert_eq!(
+        kernel
+            .read_file(&format!("/proc/{}/cmdline", node_process.pid()))
+            .expect("read node cmdline"),
+        b"node\0--trace-warnings\0/tmp/script.mjs\0".to_vec()
+    );
+}
+
+#[test]
+fn spawn_process_rejects_invalid_shebang_scripts() {
+    let mut config = KernelVmConfig::new("vm-shebang-errors");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    kernel
+        .write_file("/tmp/missing.sh", b"#!/missing/interpreter\n".to_vec())
+        .expect("write missing-interpreter script");
+    kernel
+        .chmod("/tmp/missing.sh", 0o755)
+        .expect("chmod missing-interpreter script");
+    let missing = kernel
+        .spawn_process("/tmp/missing.sh", Vec::new(), SpawnOptions::default())
+        .expect_err("missing interpreter should fail");
+    assert_eq!(missing.code(), "ENOENT");
+
+    let long_shebang = format!("#!/{0}\n", "a".repeat(256));
+    kernel
+        .write_file("/tmp/long.sh", long_shebang.into_bytes())
+        .expect("write long-shebang script");
+    kernel
+        .chmod("/tmp/long.sh", 0o755)
+        .expect("chmod long-shebang script");
+    let long_error = kernel
+        .spawn_process("/tmp/long.sh", Vec::new(), SpawnOptions::default())
+        .expect_err("overlong shebang should fail");
+    assert_eq!(long_error.code(), "ENOEXEC");
+}

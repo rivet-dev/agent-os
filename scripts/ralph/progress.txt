@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Direct script execution in `crates/kernel/src/kernel.rs` should first map registered `/bin/*` and `/usr/bin/*` command stubs back to their command drivers, and only parse shebangs for real file paths; otherwise stub executables like `/bin/sh` recurse into their own wrapper.
 - Stream devices in `crates/kernel/src/device_layer.rs` should share one length-aware helper, and exact Linux-style byte-count behavior for `/dev/zero` / `/dev/urandom` should be asserted through `pread` / `fd_read` rather than `read_file()`.
 - Synthetic procfs entries in `crates/kernel/src/kernel.rs` should authorize the guest-visible `/proc/...` path directly; if procfs checks go through `PermissionedFileSystem::check_path(...)`, missing backing `/proc` directories in the mounted root can accidentally break the virtual proc layer.
 - OverlayFS mutating ops should not trust merged `read_dir()` for emptiness once copy-up marks directories opaque; raw upper/lower listings are required for `rmdir`, and rename-like moves should stage source entries into the upper and then use the upper filesystem's native `rename` to preserve hardlinks/inode identity.
@@ -1326,4 +1327,19 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Stream devices should keep their byte-generation logic in one helper so `pread()` / FD reads stay aligned with any bounded `read_file()` fallback.
   - Gotchas encountered: Exact-byte Linux semantics for `/dev/zero` and `/dev/urandom` need to be asserted on length-aware read surfaces (`pread`, `fd_read`), because `read_file()` has no request-size parameter.
   - Useful context: `cargo fmt --all`, `cargo check -p agent-os-kernel`, `cargo test -p agent-os-kernel --test device_layer -- --nocapture`, `cargo test -p agent-os-kernel --test api_surface kernel_fd_surface_reads_exact_byte_counts_from_device_nodes -- --exact --nocapture`, and `cargo test -p agent-os-kernel` all pass after this change.
+---
+## 2026-04-05 10:21:58 PDT - US-071
+- What was implemented
+- Added shebang-aware command resolution in `crates/kernel/src/kernel.rs` so direct path execution now dispatches `#!/bin/sh ...` and `#!/usr/bin/env node ...` scripts through registered interpreters, enforces a 256-byte shebang cap, and returns `ENOEXEC`/`ENOENT` for malformed or missing interpreters.
+- Added kernel integration coverage for direct shell and Node shebang execution plus missing-interpreter and overlong-shebang failures.
+- Files changed
+- `CLAUDE.md`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/tests/kernel_integration.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Direct script execution should resolve registered `/bin/*` and `/usr/bin/*` command stubs before parsing file contents; otherwise stub executables like `/bin/sh` loop back through their own shebang wrapper.
+  - Gotchas encountered: `#!/usr/bin/env ...` shebangs need interpreter extraction at parse time rather than generic basename dispatch if the proc cmdline should reflect the real target interpreter (`node`, not `env`).
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-kernel`, `cargo test -p agent-os-kernel --test kernel_integration -- --nocapture`, and `cargo test -p agent-os-kernel` all pass after this change.
 ---
