@@ -4,6 +4,7 @@ use agent_os_execution::{
     CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
     JavascriptExecutionEngine, PythonExecutionEngine, StartJavascriptExecutionRequest,
     StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecutionEngine,
+    WasmPermissionTier,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -189,6 +190,7 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
             argv: vec![String::from("./modules/guest.wasm")],
             env: BTreeMap::new(),
             cwd: wasm_cwd.clone(),
+            permission_tier: WasmPermissionTier::Full,
         })
         .expect("start wasm execution")
         .wait()

@@ -15,7 +15,8 @@ use crate::protocol::{
     SignalHandlerRegistration, SignalStateResponse, SnapshotRootFilesystemRequest,
     SocketStateEntry, StdinClosedResponse, StdinWrittenResponse, StreamChannel,
     VmConfiguredResponse, VmCreatedResponse, VmDisposedResponse, VmLifecycleEvent,
-    VmLifecycleState, WriteStdinRequest, ZombieTimerCountResponse, DEFAULT_MAX_FRAME_BYTES,
+    VmLifecycleState, WasmPermissionTier, WriteStdinRequest, ZombieTimerCountResponse,
+    DEFAULT_MAX_FRAME_BYTES,
 };
 use crate::s3_plugin::S3MountPlugin;
 use crate::sandbox_agent_plugin::SandboxAgentMountPlugin;
@@ -35,7 +36,7 @@ use agent_os_execution::{
     PythonExecutionError, PythonExecutionEvent, PythonVfsRpcMethod, PythonVfsRpcRequest,
     PythonVfsRpcResponsePayload, PythonVfsRpcStat, StartJavascriptExecutionRequest,
     StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecution, WasmExecutionEngine,
-    WasmExecutionError, WasmExecutionEvent,
+    WasmExecutionError, WasmExecutionEvent, WasmPermissionTier as ExecutionWasmPermissionTier,
 };
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{
@@ -1430,6 +1431,7 @@ struct VmConfiguration {
     permissions: Vec<crate::protocol::PermissionDescriptor>,
     instructions: Vec<String>,
     projected_modules: Vec<crate::protocol::ProjectedModuleDescriptor>,
+    command_permissions: BTreeMap<String, WasmPermissionTier>,
 }
 
 #[allow(dead_code)]
@@ -1444,6 +1446,7 @@ struct VmState {
     loaded_snapshot: Option<FilesystemSnapshot>,
     configuration: VmConfiguration,
     command_guest_paths: BTreeMap<String, String>,
+    command_permissions: BTreeMap<String, WasmPermissionTier>,
     active_processes: BTreeMap<String, ActiveProcess>,
     signal_states: BTreeMap<String, BTreeMap<u32, SignalHandlerRegistration>>,
 }
@@ -2337,6 +2340,7 @@ where
                 loaded_snapshot,
                 configuration: VmConfiguration::default(),
                 command_guest_paths: BTreeMap::new(),
+                command_permissions: BTreeMap::new(),
                 active_processes: BTreeMap::new(),
                 signal_states: BTreeMap::new(),
             },
@@ -2438,12 +2442,14 @@ where
                 execution_commands,
             ))
             .map_err(kernel_error)?;
+        vm.command_permissions = payload.command_permissions.clone();
         vm.configuration = VmConfiguration {
             mounts: payload.mounts.clone(),
             software: payload.software.clone(),
             permissions: payload.permissions.clone(),
             instructions: payload.instructions.clone(),
             projected_modules: payload.projected_modules.clone(),
+            command_permissions: payload.command_permissions.clone(),
         };
         if !payload.permissions.is_empty() {
             self.bridge
@@ -2894,6 +2900,12 @@ where
                 ActiveExecution::Python(execution)
             }
             GuestRuntimeKind::WebAssembly => {
+                let wasm_permission_tier = resolve_wasm_permission_tier(
+                    vm,
+                    None,
+                    payload.wasm_permission_tier,
+                    &payload.entrypoint,
+                );
                 let context = self.wasm_engine.create_context(CreateWasmContextRequest {
                     vm_id: vm_id.clone(),
                     module_path: Some(payload.entrypoint.clone()),
@@ -2906,6 +2918,7 @@ where
                         argv: payload.args.clone(),
                         env,
                         cwd,
+                        permission_tier: execution_wasm_permission_tier(wasm_permission_tier),
                     })
                     .map_err(wasm_error)?;
                 ActiveExecution::Wasm(execution)
@@ -3567,6 +3580,7 @@ where
                 env,
                 guest_cwd,
                 host_cwd,
+                wasm_permission_tier: None,
             });
         }
 
@@ -3589,6 +3603,7 @@ where
                     host_cwd.join(guest_entrypoint)
                 }
             });
+        let wasm_permission_tier = vm.command_permissions.get(&command).copied();
 
         Ok(ResolvedChildProcessExecution {
             command,
@@ -3599,6 +3614,7 @@ where
             env,
             guest_cwd,
             host_cwd,
+            wasm_permission_tier,
         })
     }
 
@@ -3684,6 +3700,11 @@ where
                         argv: resolved.execution_args.clone(),
                         env: execution_env,
                         cwd: resolved.host_cwd.clone(),
+                        permission_tier: execution_wasm_permission_tier(
+                            resolved
+                                .wasm_permission_tier
+                                .unwrap_or(WasmPermissionTier::Full),
+                        ),
                     })
                     .map_err(wasm_error)?;
                 ActiveExecution::Wasm(execution)
@@ -5094,6 +5115,32 @@ fn is_path_like_specifier(specifier: &str) -> bool {
         || specifier.starts_with("file:")
 }
 
+fn execution_wasm_permission_tier(tier: WasmPermissionTier) -> ExecutionWasmPermissionTier {
+    match tier {
+        WasmPermissionTier::Full => ExecutionWasmPermissionTier::Full,
+        WasmPermissionTier::ReadWrite => ExecutionWasmPermissionTier::ReadWrite,
+        WasmPermissionTier::ReadOnly => ExecutionWasmPermissionTier::ReadOnly,
+        WasmPermissionTier::Isolated => ExecutionWasmPermissionTier::Isolated,
+    }
+}
+
+fn resolve_wasm_permission_tier(
+    vm: &VmState,
+    command_name: Option<&str>,
+    explicit_tier: Option<WasmPermissionTier>,
+    entrypoint: &str,
+) -> WasmPermissionTier {
+    explicit_tier
+        .or_else(|| command_name.and_then(|command| vm.command_permissions.get(command).copied()))
+        .or_else(|| {
+            Path::new(entrypoint)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|command| vm.command_permissions.get(command).copied())
+        })
+        .unwrap_or(WasmPermissionTier::Full)
+}
+
 fn tokenize_shell_free_command(command: &str) -> Vec<String> {
     command
         .split_whitespace()
@@ -5172,6 +5219,7 @@ struct ResolvedChildProcessExecution {
     env: BTreeMap<String, String>,
     guest_cwd: String,
     host_cwd: PathBuf,
+    wasm_permission_tier: Option<WasmPermissionTier>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6750,6 +6798,7 @@ ykAheWCsAteSEWVc0w==\n\
                     permissions: Vec::new(),
                     instructions: Vec::new(),
                     projected_modules: Vec::new(),
+                    command_permissions: BTreeMap::new(),
                 }),
             ))
             .expect("configure mounts");
@@ -6815,6 +6864,7 @@ ykAheWCsAteSEWVc0w==\n\
                     permissions: Vec::new(),
                     instructions: Vec::new(),
                     projected_modules: Vec::new(),
+                    command_permissions: BTreeMap::new(),
                 }),
             ))
             .expect("configure readonly mount");
@@ -6881,6 +6931,7 @@ ykAheWCsAteSEWVc0w==\n\
                     permissions: Vec::new(),
                     instructions: Vec::new(),
                     projected_modules: Vec::new(),
+                    command_permissions: BTreeMap::new(),
                 }),
             ))
             .expect("configure host_dir mount");
@@ -6951,6 +7002,7 @@ ykAheWCsAteSEWVc0w==\n\
                     permissions: Vec::new(),
                     instructions: Vec::new(),
                     projected_modules: Vec::new(),
+                    command_permissions: BTreeMap::new(),
                 }),
             ))
             .expect("configure js_bridge mount");
@@ -7052,6 +7104,7 @@ ykAheWCsAteSEWVc0w==\n\
                     permissions: Vec::new(),
                     instructions: Vec::new(),
                     projected_modules: Vec::new(),
+                    command_permissions: BTreeMap::new(),
                 }),
             ))
             .expect("configure js_bridge mount");
@@ -7149,6 +7202,7 @@ ykAheWCsAteSEWVc0w==\n\
                     permissions: Vec::new(),
                     instructions: Vec::new(),
                     projected_modules: Vec::new(),
+                    command_permissions: BTreeMap::new(),
                 }),
             ))
             .expect("configure sandbox_agent mount");
@@ -7238,6 +7292,7 @@ ykAheWCsAteSEWVc0w==\n\
                     permissions: Vec::new(),
                     instructions: Vec::new(),
                     projected_modules: Vec::new(),
+                    command_permissions: BTreeMap::new(),
                 }),
             ))
             .expect("configure s3 mount");
@@ -7376,6 +7431,7 @@ ykAheWCsAteSEWVc0w==\n\
                     permissions: Vec::new(),
                     instructions: Vec::new(),
                     projected_modules: Vec::new(),
+                    command_permissions: BTreeMap::new(),
                 }),
             ))
             .expect("dispatch configure vm");
@@ -7434,6 +7490,7 @@ ykAheWCsAteSEWVc0w==\n\
                     permissions: Vec::new(),
                     instructions: Vec::new(),
                     projected_modules: Vec::new(),
+                    command_permissions: BTreeMap::new(),
                 }),
             ))
             .expect("dispatch configure vm");
@@ -7563,6 +7620,7 @@ ykAheWCsAteSEWVc0w==\n\
                     permissions: Vec::new(),
                     instructions: Vec::new(),
                     projected_modules: Vec::new(),
+                    command_permissions: BTreeMap::new(),
                 }),
             ))
             .expect("configure host_dir mount");
@@ -7610,6 +7668,7 @@ ykAheWCsAteSEWVc0w==\n\
                     args: Vec::new(),
                     env: BTreeMap::new(),
                     cwd: None,
+                    wasm_permission_tier: None,
                 }),
             ))
             .expect("dispatch python execute");

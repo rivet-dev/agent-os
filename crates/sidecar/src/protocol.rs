@@ -382,6 +382,8 @@ pub struct ConfigureVmRequest {
     pub permissions: Vec<PermissionDescriptor>,
     pub instructions: Vec<String>,
     pub projected_modules: Vec<ProjectedModuleDescriptor>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub command_permissions: BTreeMap<String, WasmPermissionTier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -447,6 +449,15 @@ pub struct ProjectedModuleDescriptor {
     pub entrypoint: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WasmPermissionTier {
+    Full,
+    ReadWrite,
+    ReadOnly,
+    Isolated,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecuteRequest {
     pub process_id: String,
@@ -457,6 +468,8 @@ pub struct ExecuteRequest {
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm_permission_tier: Option<WasmPermissionTier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

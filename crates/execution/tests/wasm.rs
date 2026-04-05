@@ -1,5 +1,6 @@
 use agent_os_execution::{
     CreateWasmContextRequest, StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionEvent,
+    WasmPermissionTier,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -114,6 +115,7 @@ fn run_wasm_execution(
     cwd: &Path,
     argv: Vec<String>,
     env: BTreeMap<String, String>,
+    permission_tier: WasmPermissionTier,
 ) -> (String, String, i32) {
     let execution = engine
         .start_execution(StartWasmExecutionRequest {
@@ -122,6 +124,7 @@ fn run_wasm_execution(
             argv,
             env,
             cwd: cwd.to_path_buf(),
+            permission_tier,
         })
         .expect("start wasm execution");
 
@@ -265,6 +268,59 @@ fn wasm_signal_state_module() -> Vec<u8> {
     .expect("compile signal wasm fixture")
 }
 
+fn wasm_write_file_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+(module
+  (type $path_open_t (func (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+  (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
+  (type $fd_close_t (func (param i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_open" (func $path_open (type $path_open_t)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (type $fd_write_t)))
+  (import "wasi_snapshot_preview1" "fd_close" (func $fd_close (type $fd_close_t)))
+  (memory (export "memory") 1)
+  (data (i32.const 64) "output.txt")
+  (data (i32.const 80) "tiered-write\n")
+  (func $_start (export "_start")
+    (if
+      (i32.ne
+        (call $path_open
+          (i32.const 3)
+          (i32.const 0)
+          (i32.const 64)
+          (i32.const 10)
+          (i32.const 9)
+          (i64.const 64)
+          (i64.const 64)
+          (i32.const 0)
+          (i32.const 8)
+        )
+        (i32.const 0)
+      )
+      (then unreachable)
+    )
+    (i32.store (i32.const 0) (i32.const 80))
+    (i32.store (i32.const 4) (i32.const 13))
+    (if
+      (i32.ne
+        (call $fd_write
+          (i32.load (i32.const 8))
+          (i32.const 0)
+          (i32.const 1)
+          (i32.const 12)
+        )
+        (i32.const 0)
+      )
+      (then unreachable)
+    )
+    (drop (call $fd_close (i32.load (i32.const 8))))
+  )
+)
+"#,
+    )
+    .expect("compile write-file wasm fixture")
+}
+
 #[test]
 fn wasm_contexts_preserve_vm_and_module_configuration() {
     let mut engine = WasmExecutionEngine::default();
@@ -298,6 +354,7 @@ fn wasm_execution_runs_guest_module_through_v8() {
             argv: vec![String::from("guest.wasm")],
             env: BTreeMap::from([(String::from("IGNORED_FOR_NOW"), String::from("ok"))]),
             cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
         })
         .expect("start wasm execution");
 
@@ -345,6 +402,7 @@ fn wasm_execution_ignores_guest_overrides_for_internal_node_env() {
             ),
             (String::from("NODE_OPTIONS"), String::from("--no-warnings")),
         ]),
+        WasmPermissionTier::Full,
     );
 
     assert_eq!(exit_code, 0, "stderr: {stderr}");
@@ -371,6 +429,7 @@ fn wasm_execution_freezes_wasi_clock_time() {
         temp.path(),
         Vec::new(),
         BTreeMap::new(),
+        WasmPermissionTier::Full,
     );
 
     assert_eq!(exit_code, 0);
@@ -393,6 +452,7 @@ fn wasm_execution_rejects_vm_mismatch() {
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: Path::new("/tmp").to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
         })
         .expect_err("vm mismatch should fail");
 
@@ -421,6 +481,7 @@ fn wasm_execution_streams_exit_event() {
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
         })
         .expect("start wasm execution");
 
@@ -472,6 +533,7 @@ fn wasm_execution_emits_signal_state_from_control_channel() {
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
         })
         .expect("start wasm execution");
 
@@ -518,6 +580,108 @@ fn wasm_execution_emits_signal_state_from_control_channel() {
 }
 
 #[test]
+fn wasm_read_only_tier_blocks_workspace_writes_but_read_write_allows_them() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(&temp.path().join("guest.wasm"), &wasm_write_file_module());
+
+    let mut engine = WasmExecutionEngine::default();
+    let read_only_context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+    let read_write_context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let (read_only_stdout, read_only_stderr, read_only_exit) = run_wasm_execution(
+        &mut engine,
+        read_only_context.context_id,
+        temp.path(),
+        Vec::new(),
+        BTreeMap::new(),
+        WasmPermissionTier::ReadOnly,
+    );
+
+    assert_ne!(
+        read_only_exit, 0,
+        "read-only tier unexpectedly wrote to workspace: stdout={read_only_stdout} stderr={read_only_stderr}"
+    );
+    assert!(
+        !temp.path().join("output.txt").exists(),
+        "read-only tier should not create workspace files"
+    );
+
+    let (read_write_stdout, read_write_stderr, read_write_exit) = run_wasm_execution(
+        &mut engine,
+        read_write_context.context_id,
+        temp.path(),
+        Vec::new(),
+        BTreeMap::new(),
+        WasmPermissionTier::ReadWrite,
+    );
+
+    assert_eq!(
+        read_write_exit, 0,
+        "read-write tier should allow workspace writes: stdout={read_write_stdout} stderr={read_write_stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(temp.path().join("output.txt")).expect("read output"),
+        "tiered-write\n"
+    );
+}
+
+#[test]
+fn wasm_full_tier_exposes_host_process_imports_but_read_write_does_not() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(&temp.path().join("guest.wasm"), &wasm_signal_state_module());
+
+    let mut engine = WasmExecutionEngine::default();
+    let full_context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+    let read_write_context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let (full_stdout, full_stderr, full_exit) = run_wasm_execution(
+        &mut engine,
+        full_context.context_id,
+        temp.path(),
+        Vec::new(),
+        BTreeMap::new(),
+        WasmPermissionTier::Full,
+    );
+
+    assert_eq!(full_exit, 0, "stderr: {full_stderr}");
+    assert!(full_stdout.contains("signal:ready"));
+
+    let (_stdout, stderr, exit_code) = run_wasm_execution(
+        &mut engine,
+        read_write_context.context_id,
+        temp.path(),
+        Vec::new(),
+        BTreeMap::new(),
+        WasmPermissionTier::ReadWrite,
+    );
+
+    assert_ne!(
+        exit_code, 0,
+        "read-write tier should deny host_process imports"
+    );
+    assert!(
+        stderr.contains("host_process") || stderr.contains("proc_sigaction"),
+        "unexpected stderr for denied host_process import: {stderr}"
+    );
+}
+
+#[test]
 fn wasm_execution_reuses_shared_warmup_path_across_contexts() {
     assert_node_available();
 
@@ -544,6 +708,7 @@ fn wasm_execution_reuses_shared_warmup_path_across_contexts() {
         temp.path(),
         Vec::new(),
         debug_env.clone(),
+        WasmPermissionTier::Full,
     );
     let first_warmup = parse_warmup_metrics(&first_stderr);
 
@@ -563,6 +728,7 @@ fn wasm_execution_reuses_shared_warmup_path_across_contexts() {
         temp.path(),
         Vec::new(),
         debug_env,
+        WasmPermissionTier::Full,
     );
     let second_warmup = parse_warmup_metrics(&second_stderr);
 
@@ -599,6 +765,7 @@ fn wasm_warmup_metrics_encode_emoji_module_paths_as_json() {
             String::from("AGENT_OS_WASM_WARMUP_DEBUG"),
             String::from("1"),
         )]),
+        WasmPermissionTier::Full,
     );
     let warmup = parse_warmup_metrics(&stderr);
 

@@ -306,6 +306,7 @@ fn schema_supports_configuration_and_structured_events() {
                 package_name: "workspace".to_string(),
                 entrypoint: "/workspace/index.ts".to_string(),
             }],
+            command_permissions: BTreeMap::new(),
         }),
     ));
 

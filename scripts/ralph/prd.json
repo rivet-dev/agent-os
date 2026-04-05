@@ -656,7 +656,7 @@
         "Typecheck passes"
       ],
       "priority": 29,
-      "passes": false,
+      "passes": true,
       "notes": "Permission tiers are declared in descriptors but not enforced at runtime."
     },
     {

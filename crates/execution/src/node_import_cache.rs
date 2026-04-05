@@ -7011,7 +7011,9 @@ import path from 'node:path';
 import { WASI } from 'node:wasi';
 
 const WASI_ERRNO_SUCCESS = 0;
+const WASI_ERRNO_ROFS = 69;
 const WASI_ERRNO_FAULT = 21;
+const WASI_RIGHT_FD_WRITE = 64n;
 
 function isPathLike(specifier) {
   return specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('file:');
@@ -7034,11 +7036,26 @@ if (!modulePath) {
 
 const guestArgv = JSON.parse(process.env.AGENT_OS_GUEST_ARGV ?? '[]');
 const guestEnv = JSON.parse(process.env.AGENT_OS_GUEST_ENV ?? '{}');
+const permissionTier = process.env.AGENT_OS_WASM_PERMISSION_TIER ?? 'full';
 const prewarmOnly = process.env.AGENT_OS_WASM_PREWARM_ONLY === '1';
 const frozenTimeValue = Number(process.env.AGENT_OS_FROZEN_TIME_MS);
 const frozenTimeMs = Number.isFinite(frozenTimeValue) ? Math.trunc(frozenTimeValue) : Date.now();
 const frozenTimeNs = BigInt(frozenTimeMs) * 1000000n;
 const CONTROL_PIPE_FD = parseControlPipeFd(process.env.AGENT_OS_CONTROL_PIPE_FD);
+
+function buildPreopens() {
+  switch (permissionTier) {
+    case 'isolated':
+      return {};
+    case 'read-only':
+    case 'read-write':
+    case 'full':
+    default:
+      return {
+        '/workspace': process.cwd(),
+      };
+  }
+}
 
 const moduleBytes = await fs.readFile(resolveModulePath(modulePath));
 const module = await WebAssembly.compile(moduleBytes);
@@ -7051,9 +7068,7 @@ const wasi = new WASI({
   version: 'preview1',
   args: guestArgv,
   env: guestEnv,
-  preopens: {
-    '/workspace': process.cwd(),
-  },
+  preopens: buildPreopens(),
   returnOnExit: true,
 });
 
@@ -7066,6 +7081,18 @@ const delegateClockTimeGet =
 const delegateClockResGet =
   typeof wasi.wasiImport.clock_res_get === 'function'
     ? wasi.wasiImport.clock_res_get.bind(wasi.wasiImport)
+    : null;
+const delegatePathOpen =
+  typeof wasi.wasiImport.path_open === 'function'
+    ? wasi.wasiImport.path_open.bind(wasi.wasiImport)
+    : null;
+const delegateFdWrite =
+  typeof wasi.wasiImport.fd_write === 'function'
+    ? wasi.wasiImport.fd_write.bind(wasi.wasiImport)
+    : null;
+const delegateFdPwrite =
+  typeof wasi.wasiImport.fd_pwrite === 'function'
+    ? wasi.wasiImport.fd_pwrite.bind(wasi.wasiImport)
     : null;
 
 function decodeSignalMask(maskLo, maskHi) {
@@ -7106,25 +7133,44 @@ function emitControlMessage(message) {
   }
 }
 
-const hostProcessImport = {
-  proc_sigaction(signal, action, maskLo, maskHi, flags) {
-    try {
-      const registration = {
-        action: action === 0 ? 'default' : action === 1 ? 'ignore' : 'user',
-        mask: decodeSignalMask(maskLo, maskHi),
-        flags: Number(flags) >>> 0,
-      };
-      emitControlMessage({
-        type: 'signal_state',
-        signal: Number(signal) >>> 0,
-        registration,
-      });
-      return WASI_ERRNO_SUCCESS;
-    } catch {
-      return WASI_ERRNO_FAULT;
-    }
-  },
-};
+function isWorkspaceReadOnly() {
+  return permissionTier === 'read-only' || permissionTier === 'isolated';
+}
+
+function hasWriteRights(rights) {
+  try {
+    return (BigInt(rights) & WASI_RIGHT_FD_WRITE) !== 0n;
+  } catch {
+    return true;
+  }
+}
+
+function denyReadOnlyMutation() {
+  return WASI_ERRNO_ROFS;
+}
+
+const hostProcessImport =
+  permissionTier === 'full'
+    ? {
+        proc_sigaction(signal, action, maskLo, maskHi, flags) {
+          try {
+            const registration = {
+              action: action === 0 ? 'default' : action === 1 ? 'ignore' : 'user',
+              mask: decodeSignalMask(maskLo, maskHi),
+              flags: Number(flags) >>> 0,
+            };
+            emitControlMessage({
+              type: 'signal_state',
+              signal: Number(signal) >>> 0,
+              registration,
+            });
+            return WASI_ERRNO_SUCCESS;
+          } catch {
+            return WASI_ERRNO_FAULT;
+          }
+        },
+      }
+    : {};
 
 wasiImport.clock_time_get = (clockId, precision, resultPtr) => {
   if (!(instanceMemory instanceof WebAssembly.Memory)) {
@@ -7157,6 +7203,73 @@ wasiImport.clock_res_get = (clockId, resultPtr) => {
     return WASI_ERRNO_FAULT;
   }
 };
+
+if (isWorkspaceReadOnly()) {
+  wasiImport.path_open = (
+    fd,
+    dirflags,
+    pathPtr,
+    pathLen,
+    oflags,
+    rightsBase,
+    rightsInheriting,
+    fdflags,
+    openedFdPtr,
+  ) => {
+    if (Number(oflags) !== 0 || hasWriteRights(rightsBase) || hasWriteRights(rightsInheriting)) {
+      return denyReadOnlyMutation();
+    }
+
+    return delegatePathOpen
+      ? delegatePathOpen(
+          fd,
+          dirflags,
+          pathPtr,
+          pathLen,
+          oflags,
+          rightsBase,
+          rightsInheriting,
+          fdflags,
+          openedFdPtr,
+        )
+      : WASI_ERRNO_FAULT;
+  };
+
+  wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
+    if (Number(fd) > 2) {
+      return denyReadOnlyMutation();
+    }
+
+    return delegateFdWrite ? delegateFdWrite(fd, iovs, iovsLen, nwrittenPtr) : WASI_ERRNO_FAULT;
+  };
+
+  wasiImport.fd_pwrite = (fd, iovs, iovsLen, offset, nwrittenPtr) => {
+    if (Number(fd) > 2) {
+      return denyReadOnlyMutation();
+    }
+
+    return delegateFdPwrite
+      ? delegateFdPwrite(fd, iovs, iovsLen, offset, nwrittenPtr)
+      : WASI_ERRNO_FAULT;
+  };
+
+  for (const name of [
+    'fd_allocate',
+    'fd_filestat_set_size',
+    'fd_filestat_set_times',
+    'path_create_directory',
+    'path_filestat_set_times',
+    'path_link',
+    'path_remove_directory',
+    'path_rename',
+    'path_symlink',
+    'path_unlink_file',
+  ]) {
+    if (typeof wasiImport[name] === 'function') {
+      wasiImport[name] = () => denyReadOnlyMutation();
+    }
+  }
+}
 
 const instance = await WebAssembly.instantiate(module, {
   wasi_snapshot_preview1: wasiImport,

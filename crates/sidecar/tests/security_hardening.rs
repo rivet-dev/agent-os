@@ -338,6 +338,7 @@ console.log("slow");
                 args: Vec::new(),
                 env: BTreeMap::new(),
                 cwd: None,
+                wasm_permission_tier: None,
             }),
         ))
         .expect("dispatch second execute");
@@ -412,6 +413,7 @@ fn execute_rejects_cwd_outside_vm_sandbox_root() {
                 args: Vec::new(),
                 env: BTreeMap::new(),
                 cwd: Some(String::from("/")),
+                wasm_permission_tier: None,
             }),
         ))
         .expect("dispatch execute request");
@@ -463,6 +465,7 @@ fn execute_scopes_node_permission_flags_to_vm_sandbox_root() {
                 args: Vec::new(),
                 env: BTreeMap::new(),
                 cwd: Some(nested_cwd.to_string_lossy().into_owned()),
+                wasm_permission_tier: None,
             }),
         ))
         .expect("dispatch execute request");
@@ -480,7 +483,11 @@ fn execute_scopes_node_permission_flags_to_vm_sandbox_root() {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 
     let invocations = parse_invocations(&log_path);
-    assert_eq!(invocations.len(), 2, "expected warmup and execution invocations");
+    assert_eq!(
+        invocations.len(),
+        2,
+        "expected warmup and execution invocations"
+    );
 
     let sandbox_root = canonical(&cwd).display().to_string();
     let nested_root = canonical(&nested_cwd).display().to_string();
@@ -492,7 +499,9 @@ fn execute_scopes_node_permission_flags_to_vm_sandbox_root() {
             "sandbox root should stay in read allowlist: {args:?}"
         );
         assert!(
-            write_paths.iter().any(|path| *path == sandbox_root.as_str()),
+            write_paths
+                .iter()
+                .any(|path| *path == sandbox_root.as_str()),
             "sandbox root should stay in write allowlist: {args:?}"
         );
         assert!(

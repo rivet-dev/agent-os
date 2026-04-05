@@ -195,6 +195,7 @@ pub fn execute(
                 args,
                 env: BTreeMap::new(),
                 cwd: None,
+                wasm_permission_tier: None,
             }),
         ))
         .expect("start sidecar execution");

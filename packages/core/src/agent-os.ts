@@ -1312,6 +1312,7 @@ export class AgentOs {
 				await client.configureVm(session, nativeVm, {
 					mounts: sidecarMounts,
 					permissions: sidecarPermissions,
+					commandPermissions: processed.commandPermissions,
 				});
 
 				rootBridge = new NativeSidecarKernelProxy({
@@ -1322,6 +1323,7 @@ export class AgentOs {
 					cwd: "/home/user",
 					localMounts,
 					commandGuestPaths,
+					wasmCommandPermissions: processed.commandPermissions,
 					hostPathMappings: hostPathMappings.map((mapping) => ({
 						guestPath: mapping.vmPath,
 						hostPath: mapping.hostPath,

@@ -528,6 +528,7 @@ fn native_sidecar_binary_runs_the_framed_protocol_over_stdio() {
                 args: Vec::new(),
                 env: BTreeMap::new(),
                 cwd: None,
+                wasm_permission_tier: None,
             }),
         ),
     );
@@ -662,6 +663,7 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
                 permissions: Vec::new(),
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
+                command_permissions: BTreeMap::new(),
             }),
         ),
     );

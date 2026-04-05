@@ -110,6 +110,7 @@ fn execute_python_entrypoint_with_env(
                 args: Vec::new(),
                 env,
                 cwd: None,
+                wasm_permission_tier: None,
             }),
         ))
         .expect("start python execution");
@@ -144,6 +145,7 @@ fn execute_javascript_with_env(
                 args,
                 env,
                 cwd: None,
+                wasm_permission_tier: None,
             }),
         ))
         .expect("start JavaScript execution");
@@ -951,6 +953,7 @@ if (mode === 'write') {
                 permissions: Vec::new(),
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
+                command_permissions: BTreeMap::new(),
             }),
         ))
         .expect("configure host_dir workspace mount");

@@ -23,6 +23,7 @@ import type {
 	KernelSpawnOptions,
 	ManagedProcess,
 	OpenShellOptions,
+	PermissionTier,
 	ProcessInfo,
 	ShellHandle,
 	VirtualFileSystem,
@@ -228,6 +229,7 @@ interface NativeSidecarKernelProxyOptions {
 	cwd: string;
 	localMounts: LocalCompatMount[];
 	commandGuestPaths: ReadonlyMap<string, string>;
+	wasmCommandPermissions?: Readonly<Record<string, PermissionTier>>;
 	hostPathMappings: HostPathMapping[];
 	allowedNodeBuiltins?: readonly string[];
 	loopbackExemptPorts?: number[];
@@ -247,6 +249,7 @@ export class NativeSidecarKernelProxy {
 	private readonly vm: CreatedVm;
 	private readonly localMounts: LocalCompatMount[];
 	private readonly commandGuestPaths: Map<string, string>;
+	private readonly wasmCommandPermissions: Readonly<Record<string, PermissionTier>>;
 	private readonly hostPathMappings: HostPathMapping[];
 	private readonly allowedNodeBuiltins: readonly string[];
 	private readonly loopbackExemptPorts: readonly number[];
@@ -280,6 +283,9 @@ export class NativeSidecarKernelProxy {
 			(left, right) => right.path.length - left.path.length,
 		);
 		this.commandGuestPaths = new Map(options.commandGuestPaths);
+		this.wasmCommandPermissions = Object.freeze({
+			...(options.wasmCommandPermissions ?? {}),
+		});
 		this.hostPathMappings = [...options.hostPathMappings].sort(
 			(left, right) => right.guestPath.length - left.guestPath.length,
 		);
@@ -826,6 +832,7 @@ export class NativeSidecarKernelProxy {
 			args: execution.args,
 			env: execution.env,
 			cwd: execution.cwd,
+			wasmPermissionTier: execution.wasmPermissionTier,
 		});
 		entry.hostPid = started.pid;
 		entry.started = true;
@@ -1020,6 +1027,7 @@ export class NativeSidecarKernelProxy {
 		args: string[];
 		cwd?: string;
 		env?: Record<string, string>;
+		wasmPermissionTier?: PermissionTier;
 		bootstrap?: () => Promise<void>;
 	}> {
 		if (entry.command === "node") {
@@ -1057,14 +1065,15 @@ export class NativeSidecarKernelProxy {
 
 		const wasmEntrypoint = this.commandGuestPaths.get(entry.command);
 		if (wasmEntrypoint) {
-			return {
-				runtime: "web_assembly",
-				entrypoint: wasmEntrypoint,
-				args: entry.args,
-				cwd: entry.cwd,
-				env: entry.env,
-			};
-		}
+				return {
+					runtime: "web_assembly",
+					entrypoint: wasmEntrypoint,
+					args: entry.args,
+					cwd: entry.cwd,
+					env: entry.env,
+					wasmPermissionTier: this.wasmCommandPermissions[entry.command],
+				};
+			}
 
 		throw new Error(
 			`command not found on native sidecar path: ${entry.command}`,
