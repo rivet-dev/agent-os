@@ -68,6 +68,28 @@ impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
         self.inner.read_dir(path)
     }
 
+    fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
+        if path == "/dev" {
+            let entries = DEV_DIR_ENTRIES
+                .iter()
+                .map(|(name, _)| String::from(*name))
+                .collect::<Vec<_>>();
+            if entries.len() > max_entries {
+                return Err(VfsError::new(
+                    "ENOMEM",
+                    format!(
+                        "directory listing for '{path}' exceeds configured limit of {max_entries} entries"
+                    ),
+                ));
+            }
+            return Ok(entries);
+        }
+        if DEVICE_DIRS.contains(&path) {
+            return Ok(Vec::new());
+        }
+        self.inner.read_dir_limited(path, max_entries)
+    }
+
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
         if path == "/dev" {
             return Ok(DEV_DIR_ENTRIES

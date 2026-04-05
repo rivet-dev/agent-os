@@ -1,6 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
 - `KernelVmConfig::new()` is deny-all by default; any kernel or browser-sidecar fixture that expects unrestricted filesystem/process access must opt in with `config.permissions = Permissions::allow_all()`.
+- Per-operation memory guards belong in `ResourceLimits`; when adding one, enforce it in the kernel entrypoint that materializes data and keep the matching `resource.max_*` metadata parsing in `crates/sidecar/src/service.rs` in sync.
 - Sidecar JavaScript network policy should read internal bootstrap env like `AGENT_OS_LOOPBACK_EXEMPT_PORTS` from `CreateVmRequest.metadata` `env.*` entries, not `vm.guest_env`, because `guest_env` is permission-filtered and may be empty.
 - Kernel mount and unmount entrypoints in `crates/kernel/src/kernel.rs` should both route through `check_mount_permissions(...)` so `fs.write` and `fs.mount_sensitive` stay consistent for `/`, `/etc`, and `/proc`.
 - Guest `child_process` internals should never ride in `options.env`: strip `AGENT_OS_*` keys in `crates/execution/src/node_import_cache.rs`, carry only the Node bootstrap allowlist in `options.internalBootstrapEnv`, and let `crates/sidecar/src/service.rs` re-inject that allowlisted map only for nested JavaScript runtimes.
@@ -1030,4 +1031,28 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Nested Node child processes should receive Agent OS bootstrap state through sidecar-only RPC metadata, not through the child environment that shell/WASM children inherit.
   - Gotchas encountered: The sidecar child-process regression is more stable when it stays at the RPC/bootstrap layer; trying to assert non-Node env contents through extra command fixtures introduces unrelated import-cache and command-availability noise.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test javascript child_process -- --test-threads=1`, and `cargo test -p agent-os-sidecar javascript_child_process -- --test-threads=1` all pass after this change.
+---
+## 2026-04-05 07:46:10 PDT - US-056
+- What was implemented
+- Extended `ResourceLimits` with configurable caps for `pread`, `fd_write`/`fd_pwrite`, merged spawn `argv`/`env`, and `readdir` batches, with safe defaults in the kernel.
+- Enforced those limits in `KernelVm` entrypoints and added `read_dir_limited(...)` support through the core VFS delegation stack so common in-memory and overlay listings fail closed before returning oversized batches.
+- Threaded the new `resource.max_*` keys through sidecar metadata parsing and documented the pattern in the repo instructions.
+- Files changed
+- `CLAUDE.md`
+- `crates/kernel/src/device_layer.rs`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/src/mount_table.rs`
+- `crates/kernel/src/overlay_fs.rs`
+- `crates/kernel/src/permissions.rs`
+- `crates/kernel/src/resource_accounting.rs`
+- `crates/kernel/src/root_fs.rs`
+- `crates/kernel/src/vfs.rs`
+- `crates/kernel/tests/resource_accounting.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Per-operation memory caps should be enforced at the kernel entrypoint that materializes guest-visible buffers, not only in downstream VFS helpers, so oversized calls fail before extra copies or file reads happen.
+  - Gotchas encountered: `AGENTS.md` at the repo root is a symlink to `CLAUDE.md`, so instruction updates appear as a tracked `CLAUDE.md` diff.
+  - Useful context: `cargo test -p agent-os-kernel --test resource_accounting`, `cargo test -p agent-os-kernel --test api_surface`, `cargo test -p agent-os-kernel --test vfs`, and `cargo test -p agent-os-sidecar parse_resource_limits_reads_filesystem_limits --lib` all pass for this change.
 ---

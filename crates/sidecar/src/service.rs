@@ -5063,6 +5063,24 @@ fn parse_resource_limits(
         limits.max_blocking_read_ms =
             parse_resource_limit_u64(metadata, "resource.max_blocking_read_ms")?;
     }
+    if metadata.contains_key("resource.max_pread_bytes") {
+        limits.max_pread_bytes = parse_resource_limit(metadata, "resource.max_pread_bytes")?;
+    }
+    if metadata.contains_key("resource.max_fd_write_bytes") {
+        limits.max_fd_write_bytes = parse_resource_limit(metadata, "resource.max_fd_write_bytes")?;
+    }
+    if metadata.contains_key("resource.max_process_argv_bytes") {
+        limits.max_process_argv_bytes =
+            parse_resource_limit(metadata, "resource.max_process_argv_bytes")?;
+    }
+    if metadata.contains_key("resource.max_process_env_bytes") {
+        limits.max_process_env_bytes =
+            parse_resource_limit(metadata, "resource.max_process_env_bytes")?;
+    }
+    if metadata.contains_key("resource.max_readdir_entries") {
+        limits.max_readdir_entries =
+            parse_resource_limit(metadata, "resource.max_readdir_entries")?;
+    }
     if metadata.contains_key("resource.max_wasm_fuel") {
         limits.max_wasm_fuel = parse_resource_limit_u64(metadata, "resource.max_wasm_fuel")?;
     }
@@ -9255,6 +9273,26 @@ ykAheWCsAteSEWVc0w==\n\
                 String::from("resource.max_blocking_read_ms"),
                 String::from("250"),
             ),
+            (
+                String::from("resource.max_pread_bytes"),
+                String::from("8192"),
+            ),
+            (
+                String::from("resource.max_fd_write_bytes"),
+                String::from("4096"),
+            ),
+            (
+                String::from("resource.max_process_argv_bytes"),
+                String::from("2048"),
+            ),
+            (
+                String::from("resource.max_process_env_bytes"),
+                String::from("1024"),
+            ),
+            (
+                String::from("resource.max_readdir_entries"),
+                String::from("32"),
+            ),
             (String::from("resource.max_wasm_fuel"), String::from("5000")),
             (
                 String::from("resource.max_wasm_memory_bytes"),
@@ -9272,6 +9310,11 @@ ykAheWCsAteSEWVc0w==\n\
         assert_eq!(limits.max_filesystem_bytes, Some(4096));
         assert_eq!(limits.max_inode_count, Some(128));
         assert_eq!(limits.max_blocking_read_ms, Some(250));
+        assert_eq!(limits.max_pread_bytes, Some(8192));
+        assert_eq!(limits.max_fd_write_bytes, Some(4096));
+        assert_eq!(limits.max_process_argv_bytes, Some(2048));
+        assert_eq!(limits.max_process_env_bytes, Some(1024));
+        assert_eq!(limits.max_readdir_entries, Some(32));
         assert_eq!(limits.max_wasm_fuel, Some(5000));
         assert_eq!(limits.max_wasm_memory_bytes, Some(131072));
         assert_eq!(limits.max_wasm_stack_bytes, Some(262144));

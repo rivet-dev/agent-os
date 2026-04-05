@@ -3,13 +3,18 @@ use crate::pipe_manager::PipeManager;
 use crate::process_table::{ProcessStatus, ProcessTable};
 use crate::pty::PtyManager;
 use crate::vfs::{VfsResult, VirtualFileSystem};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
 pub const DEFAULT_MAX_FILESYSTEM_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_INODE_COUNT: usize = 16_384;
 pub const DEFAULT_BLOCKING_READ_TIMEOUT_MS: u64 = 5_000;
+pub const DEFAULT_MAX_PREAD_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_FD_WRITE_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_PROCESS_ARGV_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_MAX_PROCESS_ENV_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_MAX_READDIR_ENTRIES: usize = 4_096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResourceSnapshot {
@@ -35,6 +40,11 @@ pub struct ResourceLimits {
     pub max_filesystem_bytes: Option<u64>,
     pub max_inode_count: Option<usize>,
     pub max_blocking_read_ms: Option<u64>,
+    pub max_pread_bytes: Option<usize>,
+    pub max_fd_write_bytes: Option<usize>,
+    pub max_process_argv_bytes: Option<usize>,
+    pub max_process_env_bytes: Option<usize>,
+    pub max_readdir_entries: Option<usize>,
     pub max_wasm_fuel: Option<u64>,
     pub max_wasm_memory_bytes: Option<u64>,
     pub max_wasm_stack_bytes: Option<usize>,
@@ -52,6 +62,11 @@ impl Default for ResourceLimits {
             max_filesystem_bytes: Some(DEFAULT_MAX_FILESYSTEM_BYTES),
             max_inode_count: Some(DEFAULT_MAX_INODE_COUNT),
             max_blocking_read_ms: Some(DEFAULT_BLOCKING_READ_TIMEOUT_MS),
+            max_pread_bytes: Some(DEFAULT_MAX_PREAD_BYTES),
+            max_fd_write_bytes: Some(DEFAULT_MAX_FD_WRITE_BYTES),
+            max_process_argv_bytes: Some(DEFAULT_MAX_PROCESS_ARGV_BYTES),
+            max_process_env_bytes: Some(DEFAULT_MAX_PROCESS_ENV_BYTES),
+            max_readdir_entries: Some(DEFAULT_MAX_READDIR_ENTRIES),
             max_wasm_fuel: None,
             max_wasm_memory_bytes: None,
             max_wasm_stack_bytes: None,
@@ -86,6 +101,20 @@ impl ResourceError {
     fn filesystem_full(message: impl Into<String>) -> Self {
         Self {
             code: "ENOSPC",
+            message: message.into(),
+        }
+    }
+
+    fn invalid_input(message: impl Into<String>) -> Self {
+        Self {
+            code: "EINVAL",
+            message: message.into(),
+        }
+    }
+
+    fn out_of_memory(message: impl Into<String>) -> Self {
+        Self {
+            code: "ENOMEM",
             message: message.into(),
         }
     }
@@ -157,6 +186,40 @@ impl ResourceAccountant {
         self.check_open_fds(snapshot, additional_fds)
     }
 
+    pub fn check_process_argv_bytes(
+        &self,
+        command: &str,
+        args: &[String],
+    ) -> Result<(), ResourceError> {
+        if let Some(limit) = self.limits.max_process_argv_bytes {
+            let total = argv_payload_bytes(command, args);
+            if total > limit {
+                return Err(ResourceError::invalid_input(format!(
+                    "process argv payload {total} bytes exceeds configured limit {limit}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn check_process_env_bytes(
+        &self,
+        inherited_env: &BTreeMap<String, String>,
+        overrides: &BTreeMap<String, String>,
+    ) -> Result<(), ResourceError> {
+        if let Some(limit) = self.limits.max_process_env_bytes {
+            let total = merged_env_payload_bytes(inherited_env, overrides);
+            if total > limit {
+                return Err(ResourceError::invalid_input(format!(
+                    "process environment payload {total} bytes exceeds configured limit {limit}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn check_pipe_allocation(&self, snapshot: &ResourceSnapshot) -> Result<(), ResourceError> {
         if let Some(limit) = self.limits.max_pipes {
             if snapshot.pipes >= limit {
@@ -175,6 +238,46 @@ impl ResourceAccountant {
         }
 
         self.check_open_fds(snapshot, 2)
+    }
+
+    pub fn check_pread_length(&self, length: usize) -> Result<(), ResourceError> {
+        if let Some(limit) = self.limits.max_pread_bytes {
+            if length > limit {
+                return Err(ResourceError::invalid_input(format!(
+                    "pread length {length} exceeds configured limit {limit}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn check_fd_write_size(&self, size: usize) -> Result<(), ResourceError> {
+        if let Some(limit) = self.limits.max_fd_write_bytes {
+            if size > limit {
+                return Err(ResourceError::invalid_input(format!(
+                    "write size {size} exceeds configured limit {limit}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn max_readdir_entries(&self) -> Option<usize> {
+        self.limits.max_readdir_entries
+    }
+
+    pub fn check_readdir_entries(&self, entries: usize) -> Result<(), ResourceError> {
+        if let Some(limit) = self.limits.max_readdir_entries {
+            if entries > limit {
+                return Err(ResourceError::out_of_memory(format!(
+                    "directory listing with {entries} entries exceeds configured limit {limit}"
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     fn check_open_fds(
@@ -216,6 +319,41 @@ impl ResourceAccountant {
         }
         Ok(())
     }
+}
+
+fn argv_payload_bytes(command: &str, args: &[String]) -> usize {
+    let command_bytes = command.len().saturating_add(1);
+    command_bytes.saturating_add(
+        args.iter()
+            .map(|arg| arg.len().saturating_add(1))
+            .sum::<usize>(),
+    )
+}
+
+fn env_entry_payload_bytes(key: &str, value: &str) -> usize {
+    key.len()
+        .saturating_add(1)
+        .saturating_add(value.len())
+        .saturating_add(1)
+}
+
+fn merged_env_payload_bytes(
+    inherited_env: &BTreeMap<String, String>,
+    overrides: &BTreeMap<String, String>,
+) -> usize {
+    let mut total = inherited_env
+        .iter()
+        .map(|(key, value)| env_entry_payload_bytes(key, value))
+        .sum::<usize>();
+
+    for (key, value) in overrides {
+        if let Some(previous) = inherited_env.get(key) {
+            total = total.saturating_sub(env_entry_payload_bytes(key, previous));
+        }
+        total = total.saturating_add(env_entry_payload_bytes(key, value));
+    }
+
+    total
 }
 
 pub fn measure_filesystem_usage<F: VirtualFileSystem>(

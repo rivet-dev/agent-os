@@ -235,6 +235,10 @@ impl VirtualFileSystem for RootFileSystem {
         self.overlay.read_dir(path)
     }
 
+    fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
+        self.overlay.read_dir_limited(path, max_entries)
+    }
+
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<crate::vfs::VirtualDirEntry>> {
         self.overlay.read_dir_with_types(path)
     }

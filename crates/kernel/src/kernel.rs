@@ -473,7 +473,13 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
     pub fn read_dir(&mut self, path: &str) -> KernelResult<Vec<String>> {
         self.assert_not_terminated()?;
-        Ok(self.filesystem.read_dir(path)?)
+        let entries = if let Some(limit) = self.resources.max_readdir_entries() {
+            self.filesystem.read_dir_limited(path, limit)?
+        } else {
+            self.filesystem.read_dir(path)?
+        };
+        self.resources.check_readdir_entries(entries.len())?;
+        Ok(entries)
     }
 
     pub fn remove_file(&mut self, path: &str) -> KernelResult<()> {
@@ -554,6 +560,10 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         {
             self.assert_driver_owns(requester, parent_pid)?;
         }
+
+        self.resources.check_process_argv_bytes(command, &args)?;
+        self.resources
+            .check_process_env_bytes(&self.env, &options.env)?;
 
         let mut env = self.env.clone();
         env.extend(options.env.clone());
@@ -734,6 +744,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         data: &[u8],
     ) -> KernelResult<usize> {
         self.assert_driver_owns(requester_driver, pid)?;
+        self.resources.check_fd_write_size(data.len())?;
         let entry = {
             let tables = lock_or_recover(&self.fd_tables);
             tables
@@ -834,6 +845,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         offset: u64,
     ) -> KernelResult<Vec<u8>> {
         self.assert_driver_owns(requester_driver, pid)?;
+        self.resources.check_pread_length(length)?;
         let entry = {
             let tables = lock_or_recover(&self.fd_tables);
             tables
@@ -864,6 +876,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         offset: u64,
     ) -> KernelResult<usize> {
         self.assert_driver_owns(requester_driver, pid)?;
+        self.resources.check_fd_write_size(data.len())?;
         let entry = {
             let tables = lock_or_recover(&self.fd_tables);
             tables
@@ -1086,6 +1099,8 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         let table = tables
             .get(pid)
             .ok_or_else(|| KernelError::no_such_process(pid))?;
+        let entry_count = table.len();
+        self.resources.check_readdir_entries(entry_count)?;
         Ok(table.iter().map(|entry| entry.fd.to_string()).collect())
     }
 

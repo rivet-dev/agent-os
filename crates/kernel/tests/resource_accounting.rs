@@ -4,6 +4,7 @@ use agent_os_kernel::permissions::Permissions;
 use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use agent_os_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -270,4 +271,130 @@ fn blocking_pipe_and_pty_reads_time_out_instead_of_hanging_forever() {
 
     process.finish(0);
     kernel.wait_and_reap(process.pid()).expect("reap shell");
+}
+
+#[test]
+fn resource_limits_reject_oversized_spawn_payloads() {
+    let mut config = KernelVmConfig::new("vm-spawn-payload-limits");
+    config.permissions = Permissions::allow_all();
+    config.resources = ResourceLimits {
+        max_process_argv_bytes: Some(13),
+        max_process_env_bytes: Some(15),
+        ..ResourceLimits::default()
+    };
+
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let argv_error = kernel
+        .spawn_process(
+            "sh",
+            vec![String::from("1234567890")],
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect_err("oversized argv should be rejected");
+    assert_eq!(argv_error.code(), "EINVAL");
+
+    let env_error = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                env: BTreeMap::from([(String::from("LONG"), String::from("1234567890"))]),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect_err("oversized environment should be rejected");
+    assert_eq!(env_error.code(), "EINVAL");
+}
+
+#[test]
+fn resource_limits_reject_oversized_pread_and_write_operations() {
+    let mut config = KernelVmConfig::new("vm-io-op-limits");
+    config.permissions = Permissions::allow_all();
+    config.resources = ResourceLimits {
+        max_pread_bytes: Some(4),
+        max_fd_write_bytes: Some(3),
+        ..ResourceLimits::default()
+    };
+
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    kernel
+        .write_file("/tmp/data.txt", b"hello".to_vec())
+        .expect("seed file");
+
+    let process = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn shell");
+    let fd = kernel
+        .fd_open("shell", process.pid(), "/tmp/data.txt", 0, None)
+        .expect("open file");
+
+    let pread_error = kernel
+        .fd_pread("shell", process.pid(), fd, 5, 0)
+        .expect_err("oversized pread should be rejected");
+    assert_eq!(pread_error.code(), "EINVAL");
+
+    let write_error = kernel
+        .fd_write("shell", process.pid(), fd, b"four")
+        .expect_err("oversized fd_write should be rejected");
+    assert_eq!(write_error.code(), "EINVAL");
+
+    let pwrite_error = kernel
+        .fd_pwrite("shell", process.pid(), fd, b"four", 0)
+        .expect_err("oversized fd_pwrite should be rejected");
+    assert_eq!(pwrite_error.code(), "EINVAL");
+
+    assert_eq!(
+        kernel
+            .read_file("/tmp/data.txt")
+            .expect("file should remain unchanged"),
+        b"hello".to_vec()
+    );
+
+    process.finish(0);
+    kernel.wait_and_reap(process.pid()).expect("reap shell");
+}
+
+#[test]
+fn resource_limits_reject_oversized_readdir_batches() {
+    let mut config = KernelVmConfig::new("vm-readdir-limit");
+    config.permissions = Permissions::allow_all();
+    config.resources = ResourceLimits {
+        max_readdir_entries: Some(2),
+        ..ResourceLimits::default()
+    };
+
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel.create_dir("/tmp").expect("create tmp");
+    kernel
+        .write_file("/tmp/a.txt", b"a".to_vec())
+        .expect("write first entry");
+    kernel
+        .write_file("/tmp/b.txt", b"b".to_vec())
+        .expect("write second entry");
+    kernel
+        .write_file("/tmp/c.txt", b"c".to_vec())
+        .expect("write third entry");
+
+    let error = kernel
+        .read_dir("/tmp")
+        .expect_err("oversized readdir batch should be rejected");
+    assert_eq!(error.code(), "ENOMEM");
 }

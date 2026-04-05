@@ -891,7 +891,7 @@
         "Typecheck passes"
       ],
       "priority": 56,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: pread(fd, 0, usize::MAX) allocates unbounded memory. fd_write accepts arbitrary data size. spawn_process env/args have no size limit. readdir returns all entries at once. truncate allocates before checking FS limits."
     },
     {

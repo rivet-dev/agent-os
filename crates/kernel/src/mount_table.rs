@@ -8,6 +8,18 @@ pub trait MountedFileSystem: Any {
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn read_file(&mut self, path: &str) -> VfsResult<Vec<u8>>;
     fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>>;
+    fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
+        let entries = self.read_dir(path)?;
+        if entries.len() > max_entries {
+            return Err(VfsError::new(
+                "ENOMEM",
+                format!(
+                    "directory listing for '{path}' exceeds configured limit of {max_entries} entries"
+                ),
+            ));
+        }
+        Ok(entries)
+    }
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>>;
     fn write_file(&mut self, path: &str, content: Vec<u8>) -> VfsResult<()>;
     fn create_dir(&mut self, path: &str) -> VfsResult<()>;
@@ -68,6 +80,10 @@ where
 
     fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>> {
         VirtualFileSystem::read_dir(&mut self.inner, path)
+    }
+
+    fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
+        VirtualFileSystem::read_dir_limited(&mut self.inner, path, max_entries)
     }
 
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
@@ -165,6 +181,10 @@ where
 
     fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>> {
         (**self).read_dir(path)
+    }
+
+    fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
+        (**self).read_dir_limited(path, max_entries)
     }
 
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
@@ -276,6 +296,10 @@ where
 
     fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>> {
         self.inner.read_dir(path)
+    }
+
+    fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
+        self.inner.read_dir_limited(path, max_entries)
     }
 
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
@@ -606,6 +630,31 @@ impl VirtualFileSystem for MountTable {
         let mut merged = BTreeSet::new();
         merged.extend(entries.drain(..));
         merged.extend(child_mounts);
+        Ok(merged.into_iter().collect())
+    }
+
+    fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
+        let normalized = normalize_path(path);
+        let (index, relative_path) = self.resolve_index(&normalized)?;
+        let mut entries = self.mounts[index]
+            .filesystem
+            .read_dir_limited(&relative_path, max_entries)?;
+        let child_mounts = self.child_mount_basenames(&normalized);
+        if child_mounts.is_empty() {
+            return Ok(entries);
+        }
+
+        let mut merged = BTreeSet::new();
+        merged.extend(entries.drain(..));
+        merged.extend(child_mounts);
+        if merged.len() > max_entries {
+            return Err(VfsError::new(
+                "ENOMEM",
+                format!(
+                    "directory listing for '{path}' exceeds configured limit of {max_entries} entries"
+                ),
+            ));
+        }
         Ok(merged.into_iter().collect())
     }
 

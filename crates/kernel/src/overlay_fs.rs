@@ -469,6 +469,70 @@ impl VirtualFileSystem for OverlayFileSystem {
         Ok(entries.into_iter().collect())
     }
 
+    fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
+        if self.is_whited_out(path) {
+            return Err(Self::directory_not_found(path));
+        }
+
+        let normalized = Self::normalized(path);
+        let mut directory_exists = false;
+        let mut entries = BTreeSet::new();
+        let whiteouts = self.whiteouts.clone();
+
+        for lower in self.lowers.iter_mut().rev() {
+            if let Ok(lower_entries) = lower.read_dir(path) {
+                directory_exists = true;
+                for entry in lower_entries {
+                    if entry == "." || entry == ".." {
+                        continue;
+                    }
+                    let child_path = if normalized == "/" {
+                        format!("/{entry}")
+                    } else {
+                        format!("{normalized}/{entry}")
+                    };
+                    if !whiteouts.contains(&Self::normalized(&child_path)) {
+                        entries.insert(entry);
+                        if entries.len() > max_entries {
+                            return Err(VfsError::new(
+                                "ENOMEM",
+                                format!(
+                                    "directory listing for '{path}' exceeds configured limit of {max_entries} entries"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(upper) = self.upper.as_mut() {
+            if let Ok(upper_entries) = upper.read_dir(path) {
+                directory_exists = true;
+                for entry in upper_entries {
+                    if entry == "." || entry == ".." {
+                        continue;
+                    }
+                    entries.insert(entry);
+                    if entries.len() > max_entries {
+                        return Err(VfsError::new(
+                            "ENOMEM",
+                            format!(
+                                "directory listing for '{path}' exceeds configured limit of {max_entries} entries"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if !directory_exists {
+            return Err(Self::directory_not_found(path));
+        }
+
+        Ok(entries.into_iter().collect())
+    }
+
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
         if self.is_whited_out(path) {
             return Err(Self::directory_not_found(path));

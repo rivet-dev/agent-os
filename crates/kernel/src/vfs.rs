@@ -144,6 +144,18 @@ pub trait VirtualFileSystem {
         String::from_utf8(self.read_file(path)?).map_err(|_| VfsError::invalid_utf8(path))
     }
     fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>>;
+    fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
+        let entries = self.read_dir(path)?;
+        if entries.len() > max_entries {
+            return Err(VfsError::new(
+                "ENOMEM",
+                format!(
+                    "directory listing for '{path}' exceeds configured limit of {max_entries} entries"
+                ),
+            ));
+        }
+        Ok(entries)
+    }
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>>;
     fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()>;
     fn create_dir(&mut self, path: &str) -> VfsResult<()>;
@@ -634,6 +646,40 @@ impl VirtualFileSystem for MemoryFileSystem {
             .into_iter()
             .map(|entry| entry.name)
             .collect())
+    }
+
+    fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
+        self.assert_directory_path(path, "scandir")?;
+        let resolved = self.resolve_path(path, 0)?;
+        let prefix = if resolved == "/" {
+            String::from("/")
+        } else {
+            format!("{resolved}/")
+        };
+
+        let mut entries = BTreeMap::<String, String>::new();
+        for (candidate_path, _) in self.path_index.range(prefix.clone()..) {
+            if !candidate_path.starts_with(&prefix) {
+                break;
+            }
+
+            let rest = &candidate_path[prefix.len()..];
+            if rest.is_empty() || rest.contains('/') {
+                continue;
+            }
+
+            entries.insert(String::from(rest), String::from(rest));
+            if entries.len() > max_entries {
+                return Err(VfsError::new(
+                    "ENOMEM",
+                    format!(
+                        "directory listing for '{path}' exceeds configured limit of {max_entries} entries"
+                    ),
+                ));
+            }
+        }
+
+        Ok(entries.into_values().collect())
     }
 
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
