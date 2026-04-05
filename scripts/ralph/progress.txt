@@ -48,6 +48,7 @@
 - Guest Node `fs` fd/stream support should stay on the shared sync-RPC bridge end-to-end: `open/read/write/close/fstat` and `createReadStream`/`createWriteStream` all use the same RPC surface, while runner-internal sync-RPC pipe writes must use snapped host `node:fs` bindings because `syncBuiltinModuleExports(...)` mutates builtin modules for guest code.
 - Synthetic guest `ChildProcess` handles in `crates/execution/src/node_import_cache.rs` must stay ref'd by default and only `unref()` their poll timer when guest code explicitly asks; otherwise `exec()`/top-level `await` can terminate early with Node's unsettled-top-level-await exit.
 - When a newly allowed Node builtin still exposes bypass-capable host-owned helpers or constructors, replace those exports with guest shims or explicit unsupported stubs before adding the builtin to `DEFAULT_ALLOWED_NODE_BUILTINS`; `dns.Resolver` and `dns.promises.Resolver` are the model for this rule.
+- Registry external-network tests should stay behind `AGENTOS_E2E_NETWORK=1`, preflight host connectivity before enabling CI coverage, and retry the in-VM outbound command so transient internet issues skip or self-heal instead of creating flaky regressions.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -881,4 +882,19 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Guest Node `net` Unix sockets need the same two-layer treatment as TCP: update both the generated runner RPC shims and the sidecar’s active socket bookkeeping, then cover both layers with regressions.
   - Gotchas encountered: Unix socket paths only exist on the host when they resolve onto a host-backed path or the sidecar mirrors them under the VM sandbox root, so non-mounted IPC listeners also need a kernel VFS placeholder for guest `fs` visibility.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test javascript javascript_execution_routes_net_ -- --test-threads=1`, `cargo test -p agent-os-sidecar service::tests::javascript_net_rpc_listens_and_connects_over_unix_domain_sockets -- --exact --test-threads=1`, and `cargo check -p agent-os-execution -p agent-os-sidecar` all pass after this change.
+---
+## 2026-04-05 06:16:15 PDT - US-047
+- What was implemented
+- Enabled external-network coverage in `registry/tests/wasmvm/curl.test.ts` with a host-side availability probe, retry helpers, a new raw external TCP regression through `http_get_test`, and more stable external HTTP/HTTPS curl assertions against `example.com`.
+- Updated `.github/workflows/ci.yml` to run the test suite with `AGENTOS_E2E_NETWORK=1`, and recorded the reusable external-network test pattern in `registry/CLAUDE.md`.
+- Files changed
+- `.github/workflows/ci.yml`
+- `registry/CLAUDE.md`
+- `registry/tests/wasmvm/curl.test.ts`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Registry external-network coverage is safest when CI opt-in (`AGENTOS_E2E_NETWORK=1`) is paired with a host-side preflight probe and command-level retries inside the VM.
+  - Gotchas encountered: The root workspace install is currently broken by unrelated package metadata (`examples/quickstart` expects `@rivet-dev/agent-os`, while `packages/core` is named `@rivet-dev/agent-os-core`), so focused registry verification has to use `pnpm install --dir registry --ignore-workspace --no-lockfile`.
+  - Useful context: `cargo fmt --all --check` passes. `AGENTOS_E2E_NETWORK=1 registry/node_modules/.bin/vitest run registry/tests/wasmvm/curl.test.ts` passes syntactically but skips locally because the required WASM artifacts are not built in this checkout. Root `pnpm install --frozen-lockfile` fails pre-existingly with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`, and root `pnpm install --no-frozen-lockfile` also fails pre-existingly because the workspace contains a missing `@rivet-dev/agent-os` package reference in `examples/quickstart`.
 ---

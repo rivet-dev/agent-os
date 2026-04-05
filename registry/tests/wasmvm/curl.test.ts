@@ -29,7 +29,11 @@ import {
   type ServerResponse,
 } from 'node:http';
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
-import { createServer as createTcpServer, type Server as TcpServer } from 'node:net';
+import {
+  createConnection,
+  createServer as createTcpServer,
+  type Server as TcpServer,
+} from 'node:net';
 import { execSync } from 'node:child_process';
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -43,6 +47,14 @@ const hasHttpGetTest = hasWasmBinaries && existsSync(resolve(COMMANDS_DIR, 'http
 const hasPackagedCurl = existsSync(resolve(CURL_PACKAGE_DIR, 'curl'));
 const hasCurl = hasPackagedCurl || (hasWasmBinaries && existsSync(resolve(COMMANDS_DIR, 'curl')));
 const runExternalNetwork = process.env.AGENTOS_E2E_NETWORK === '1';
+const EXTERNAL_HOST = 'example.com';
+const EXTERNAL_TCP_PORT = 80;
+const EXTERNAL_HTTP_URL = `http://${EXTERNAL_HOST}/`;
+const EXTERNAL_HTTPS_URL = `https://${EXTERNAL_HOST}/`;
+const EXTERNAL_EXPECTED_BODY = 'Example Domain';
+const EXTERNAL_RETRY_ATTEMPTS = 3;
+const EXTERNAL_RETRY_DELAY_MS = 1_000;
+const EXTERNAL_PROBE_TIMEOUT_MS = 8_000;
 let hasOpenssl = false;
 
 try {
@@ -51,6 +63,91 @@ try {
 } catch {
   hasOpenssl = false;
 }
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+async function retryExternal<T>(run: () => Promise<T>, attempts = EXTERNAL_RETRY_ATTEMPTS): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        await sleep(EXTERNAL_RETRY_DELAY_MS);
+      }
+    }
+  }
+
+  throw lastError ?? new Error('external network probe failed');
+}
+
+async function probeExternalTcp(): Promise<void> {
+  await new Promise<void>((resolveConnect, rejectConnect) => {
+    const socket = createConnection({
+      host: EXTERNAL_HOST,
+      port: EXTERNAL_TCP_PORT,
+    });
+    let settled = false;
+
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      callback();
+    };
+
+    socket.setTimeout(EXTERNAL_PROBE_TIMEOUT_MS);
+    socket.once('connect', () => {
+      finish(() => {
+        socket.end();
+        resolveConnect();
+      });
+    });
+    socket.once('timeout', () => {
+      finish(() => {
+        socket.destroy();
+        rejectConnect(new Error(`timed out connecting to ${EXTERNAL_HOST}:${EXTERNAL_TCP_PORT}`));
+      });
+    });
+    socket.once('error', (error) => {
+      finish(() => {
+        socket.destroy();
+        rejectConnect(error);
+      });
+    });
+  });
+}
+
+async function probeExternalHttps(): Promise<void> {
+  const response = await fetch(EXTERNAL_HTTPS_URL, {
+    signal: AbortSignal.timeout(EXTERNAL_PROBE_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`host probe failed with HTTP ${response.status}`);
+  }
+  await response.arrayBuffer();
+}
+
+const externalNetworkSkipReason = runExternalNetwork
+  ? await (async () => {
+      try {
+        await retryExternal(async () => {
+          await probeExternalTcp();
+          await probeExternalHttps();
+        });
+        return false as const;
+      } catch (error) {
+        return `external network unavailable: ${formatError(error)}`;
+      }
+    })()
+  : 'set AGENTOS_E2E_NETWORK=1 to enable external-network coverage';
 
 function generateSelfSignedCert(): { key: string; cert: string } {
   const keyPath = join(tmpdir(), `curl-test-key-${process.pid}-${Date.now()}.pem`);
@@ -327,6 +424,19 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     return kernel;
   }
 
+  async function execWithRetry(command: string) {
+    let lastResult: Awaited<ReturnType<typeof kernel.exec>> | undefined;
+    for (let attempt = 1; attempt <= EXTERNAL_RETRY_ATTEMPTS; attempt += 1) {
+      lastResult = await kernel.exec(command);
+      if (lastResult.exitCode === 0) return lastResult;
+      if (attempt < EXTERNAL_RETRY_ATTEMPTS) {
+        await sleep(EXTERNAL_RETRY_DELAY_MS);
+      }
+    }
+
+    return lastResult!;
+  }
+
   afterEach(async () => {
     await kernel?.dispose();
   });
@@ -582,17 +692,28 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(Date.now() - startedAt).toBeLessThan(8000);
   }, 15000);
 
-  it.skipIf(!hasCurl || !runExternalNetwork)('curl reaches httpbin over real external HTTP', async () => {
+  it.skipIf(!hasHttpGetTest || externalNetworkSkipReason)('http_get_test reaches an external host over real TCP', async () => {
     await createKernelWithNet();
-    const result = await kernel.exec('curl -sS --max-time 20 http://httpbin.org/get');
+    const result = await execWithRetry(`http_get_test ${EXTERNAL_HOST} ${EXTERNAL_TCP_PORT} /`);
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain('"url": "http://httpbin.org/get"');
+    expect(result.stdout).toMatch(/HTTP\/1\.[01] (200|301|302)/);
   }, 30000);
 
-  it.skipIf(!hasCurl || !runExternalNetwork)('curl reaches httpbin over real external HTTPS', async () => {
+  it.skipIf(!hasCurl || externalNetworkSkipReason)('curl reaches a real external HTTP endpoint', async () => {
     await createKernelWithNet();
-    const result = await kernel.exec('curl -sS --max-time 20 https://httpbin.org/get');
+    const result = await execWithRetry(
+      `curl -fsSL --retry 2 --retry-delay 1 --retry-all-errors --connect-timeout 10 --max-time 30 ${EXTERNAL_HTTP_URL}`,
+    );
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain('"url": "https://httpbin.org/get"');
+    expect(result.stdout).toContain(EXTERNAL_EXPECTED_BODY);
+  }, 30000);
+
+  it.skipIf(!hasCurl || externalNetworkSkipReason)('curl reaches a real external HTTPS endpoint', async () => {
+    await createKernelWithNet();
+    const result = await execWithRetry(
+      `curl -fsSL --retry 2 --retry-delay 1 --retry-all-errors --connect-timeout 10 --max-time 30 ${EXTERNAL_HTTPS_URL}`,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(EXTERNAL_EXPECTED_BODY);
   }, 30000);
 });

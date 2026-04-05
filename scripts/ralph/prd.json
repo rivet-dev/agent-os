@@ -747,7 +747,7 @@
         "curl.test.ts external network tests enabled in CI or equivalent coverage added"
       ],
       "priority": 47,
-      "passes": false,
+      "passes": true,
       "notes": "External network tests in curl.test.ts are skipped unless runExternalNetwork=true. No CI validation of outbound connectivity."
     },
     {

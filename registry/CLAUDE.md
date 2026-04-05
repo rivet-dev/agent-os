@@ -132,6 +132,10 @@ make publish-clean # Clear publish cache
 make clean         # Remove dist/ and wasm/ from all packages
 ```
 
+## Testing
+
+- External-network registry tests should stay behind `AGENTOS_E2E_NETWORK=1`, probe host connectivity up front so CI can skip cleanly when the internet is unavailable, and retry the in-VM command itself for transient outbound failures instead of hard-failing on the first flaky request.
+
 ## Native Source
 
 All WASM command source code lives in `native/`:

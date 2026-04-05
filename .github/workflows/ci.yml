@@ -21,3 +21,5 @@ jobs:
       - run: pnpm check-types
       - run: pnpm build
       - run: pnpm test
+        env:
+          AGENTOS_E2E_NETWORK: '1'
