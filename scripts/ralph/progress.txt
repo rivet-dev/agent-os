@@ -1,6 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
 - `KernelVmConfig::new()` is deny-all by default; any kernel or browser-sidecar fixture that expects unrestricted filesystem/process access must opt in with `config.permissions = Permissions::allow_all()`.
+- Sidecar JavaScript network policy should read internal bootstrap env like `AGENT_OS_LOOPBACK_EXEMPT_PORTS` from `CreateVmRequest.metadata` `env.*` entries, not `vm.guest_env`, because `guest_env` is permission-filtered and may be empty.
 - Kernel mount and unmount entrypoints in `crates/kernel/src/kernel.rs` should both route through `check_mount_permissions(...)` so `fs.write` and `fs.mount_sensitive` stay consistent for `/`, `/etc`, and `/proc`.
 - Guest `child_process` internals should never ride in `options.env`: strip `AGENT_OS_*` keys in `crates/execution/src/node_import_cache.rs`, carry only the Node bootstrap allowlist in `options.internalBootstrapEnv`, and let `crates/sidecar/src/service.rs` re-inject that allowlisted map only for nested JavaScript runtimes.
 - The guest `os` polyfill in `crates/execution/src/node_import_cache.rs` should only honor explicit `AGENT_OS_VIRTUAL_OS_*` overrides; safe defaults like `agent-os`, `/root`, `/tmp`, and `/bin/sh` must not fall back to host env vars.
@@ -118,6 +119,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: The execution engines already separate `current_dir(...)` from permission flag construction, so sidecar hardening can flow sandbox metadata through a reserved env key without changing the public execution request types.
 - Gotchas encountered: The Rust permission-flag tests mutate `AGENT_OS_NODE_BINARY`, so they need single-threaded execution (`-- --test-threads=1`) to avoid test-process env races.
 - Useful context: `cargo test -p agent-os-sidecar --test security_hardening execute_rejects_cwd_outside_vm_sandbox_root -- --exact`, `cargo test -p agent-os-sidecar --test security_hardening execute_scopes_node_permission_flags_to_vm_sandbox_root -- --exact`, `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1`, and `cargo check -p agent-os-sidecar -p agent-os-execution` all pass after this change.
+---
+## 2026-04-05 07:36:14 PDT - US-055
+- What was implemented
+- Added SSRF validation to sidecar JavaScript DNS/TCP handling in `crates/sidecar/src/service.rs`, blocking private/link-local IPv4 and IPv6 ranges from `dns.lookup` / `dns.resolve*` results before they reach guest code.
+- Hardened `net.connect` target selection so literal or DNS-resolved loopback/private addresses fail closed with `EACCES`, while VM-owned loopback listeners and explicitly exempt host loopback ports from `AGENT_OS_LOOPBACK_EXEMPT_PORTS` still connect successfully.
+- Added focused sidecar regressions for blocked metadata/loopback targets and updated existing DNS/permission callback tests to prove the exempt-port path still works.
+- Files changed
+- `AGENTS.md`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Sidecar-only bootstrap settings such as `AGENT_OS_LOOPBACK_EXEMPT_PORTS` must be read from `CreateVmRequest.metadata` `env.*` entries rather than `vm.guest_env`, because env permissions can legally filter `guest_env` down to nothing.
+  - Gotchas encountered: The sidecar lib tests that materialize Node import-cache runners are reliable when run sequentially, but parallel spot-checks can trip temp-cache races and report `register.mjs` missing.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-sidecar javascript_network_ssrf_protection_blocks_private_dns_and_unowned_loopback_targets -- --nocapture`, `cargo test -p agent-os-sidecar javascript_dns_rpc_honors_vm_dns_overrides_and_net_connect_uses_sidecar_dns -- --nocapture`, `cargo test -p agent-os-sidecar javascript_network_permission_callbacks_fire_for_dns_lookup_connect_and_listen -- --nocapture`, `cargo test -p agent-os-sidecar javascript_dns_rpc_resolves_localhost -- --nocapture`, and `cargo fmt --check --all` all pass after this change.
 ---
 ## 2026-04-05 01:17:31 PDT - US-024
 - What was implemented

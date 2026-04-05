@@ -873,7 +873,7 @@
         "Typecheck passes"
       ],
       "priority": 55,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: DNS resolution and TCP/UDP connections have zero address validation. Guest can SSRF to cloud metadata (169.254.169.254), internal databases, host services, etc."
     },
     {

@@ -105,6 +105,7 @@ const DISPOSE_VM_SIGKILL_GRACE: Duration = Duration::from_millis(100);
 const VM_DNS_SERVERS_METADATA_KEY: &str = "network.dns.servers";
 const VM_DNS_OVERRIDE_METADATA_PREFIX: &str = "network.dns.override.";
 const DEFAULT_JAVASCRIPT_NET_BACKLOG: u32 = 511;
+const LOOPBACK_EXEMPT_PORTS_ENV: &str = "AGENT_OS_LOOPBACK_EXEMPT_PORTS";
 
 type BridgeError<B> = <B as BridgeTypes>::Error;
 type SidecarKernel = KernelVm<MountTable>;
@@ -1495,6 +1496,8 @@ struct VmState {
 struct JavascriptSocketPathContext {
     sandbox_root: PathBuf,
     mounts: Vec<crate::protocol::MountDescriptor>,
+    loopback_exempt_ports: BTreeSet<u16>,
+    active_loopback_tcp_ports: BTreeSet<u16>,
 }
 
 #[allow(dead_code)]
@@ -1649,12 +1652,13 @@ impl ActiveTcpSocket {
         dns: &VmDnsConfig,
         host: &str,
         port: u16,
+        context: &JavascriptSocketPathContext,
     ) -> Result<Self, SidecarError>
     where
         B: NativeSidecarBridge + Send + 'static,
         BridgeError<B>: fmt::Debug + Send + Sync + 'static,
     {
-        let remote_addr = resolve_tcp_connect_addr(bridge, vm_id, dns, host, port)?;
+        let remote_addr = resolve_tcp_connect_addr(bridge, vm_id, dns, host, port, context)?;
         let stream = TcpStream::connect_timeout(&remote_addr, Duration::from_secs(30))
             .map_err(sidecar_net_error)?;
         Self::from_stream(stream, None)
@@ -4206,10 +4210,7 @@ where
                         } else {
                             let resource_limits = vm.kernel.resource_limits().clone();
                             let network_counts = vm_network_resource_counts(vm);
-                            let socket_paths = JavascriptSocketPathContext {
-                                sandbox_root: vm.cwd.clone(),
-                                mounts: vm.configuration.mounts.clone(),
-                            };
+                            let socket_paths = build_javascript_socket_path_context(vm)?;
                             let child = vm
                                 .active_processes
                                 .get_mut(process_id)
@@ -4425,10 +4426,7 @@ where
                 let vm = self.vms.get_mut(vm_id).expect("VM should exist");
                 let resource_limits = vm.kernel.resource_limits().clone();
                 let network_counts = vm_network_resource_counts(vm);
-                let socket_paths = JavascriptSocketPathContext {
-                    sandbox_root: vm.cwd.clone(),
-                    mounts: vm.configuration.mounts.clone(),
-                };
+                let socket_paths = build_javascript_socket_path_context(vm)?;
                 let process = vm
                     .active_processes
                     .get_mut(process_id)
@@ -5147,6 +5145,47 @@ fn parse_vm_dns_config(metadata: &BTreeMap<String, String>) -> Result<VmDnsConfi
     Ok(config)
 }
 
+fn parse_loopback_exempt_ports(
+    env: &BTreeMap<String, String>,
+) -> Result<BTreeSet<u16>, SidecarError> {
+    let Some(value) = env.get(LOOPBACK_EXEMPT_PORTS_ENV) else {
+        return Ok(BTreeSet::new());
+    };
+
+    let parsed = serde_json::from_str::<Vec<Value>>(value).map_err(|error| {
+        SidecarError::InvalidState(format!(
+            "invalid {LOOPBACK_EXEMPT_PORTS_ENV}={value}: {error}"
+        ))
+    })?;
+
+    let mut ports = BTreeSet::new();
+    for entry in parsed {
+        let port = match entry {
+            Value::String(raw) => raw.parse::<u16>().map_err(|error| {
+                SidecarError::InvalidState(format!(
+                    "invalid {LOOPBACK_EXEMPT_PORTS_ENV} entry {raw:?}: {error}"
+                ))
+            })?,
+            Value::Number(raw) => raw
+                .as_u64()
+                .and_then(|port| u16::try_from(port).ok())
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(format!(
+                        "invalid {LOOPBACK_EXEMPT_PORTS_ENV} entry {raw}"
+                    ))
+                })?,
+            other => {
+                return Err(SidecarError::InvalidState(format!(
+                    "invalid {LOOPBACK_EXEMPT_PORTS_ENV} entry {other:?}"
+                )))
+            }
+        };
+        ports.insert(port);
+    }
+
+    Ok(ports)
+}
+
 fn parse_vm_dns_nameserver(value: &str) -> Result<SocketAddr, SidecarError> {
     if let Ok(address) = value.parse::<SocketAddr>() {
         return Ok(address);
@@ -5792,6 +5831,30 @@ fn vm_network_resource_counts(vm: &VmState) -> NetworkResourceCounts {
     counts
 }
 
+fn active_loopback_tcp_ports(vm: &VmState) -> BTreeSet<u16> {
+    vm.active_processes
+        .values()
+        .flat_map(|process| process.tcp_listeners.values())
+        .filter_map(|listener| {
+            let local_addr = listener.local_addr();
+            (local_addr.ip().is_loopback() || local_addr.ip().is_unspecified())
+                .then_some(local_addr.port())
+        })
+        .collect()
+}
+
+fn build_javascript_socket_path_context(
+    vm: &VmState,
+) -> Result<JavascriptSocketPathContext, SidecarError> {
+    let internal_env = extract_guest_env(&vm.metadata);
+    Ok(JavascriptSocketPathContext {
+        sandbox_root: vm.cwd.clone(),
+        mounts: vm.configuration.mounts.clone(),
+        loopback_exempt_ports: parse_loopback_exempt_ports(&internal_env)?,
+        active_loopback_tcp_ports: active_loopback_tcp_ports(vm),
+    })
+}
+
 fn check_network_resource_limit(
     limit: Option<usize>,
     current: usize,
@@ -6321,23 +6384,161 @@ fn format_tcp_resource(host: &str, port: u16) -> String {
     format!("tcp://{host}:{port}")
 }
 
+fn is_loopback_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_loopback(),
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| mapped.is_loopback())
+        }
+    }
+}
+
+fn loopback_cidr(ip: IpAddr) -> &'static str {
+    match ip {
+        IpAddr::V4(ip) if ip.is_loopback() => "127.0.0.0/8",
+        IpAddr::V6(ip)
+            if ip
+                .to_ipv4_mapped()
+                .is_some_and(|mapped| mapped.is_loopback()) =>
+        {
+            "127.0.0.0/8"
+        }
+        IpAddr::V6(_) => "::1/128",
+        IpAddr::V4(_) => "127.0.0.0/8",
+    }
+}
+
+fn restricted_non_loopback_ip_range(ip: IpAddr) -> Option<(&'static str, &'static str)> {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [first, second, ..] = ip.octets();
+            match (first, second) {
+                (10, _) => Some(("10.0.0.0/8", "private")),
+                (172, 16..=31) => Some(("172.16.0.0/12", "private")),
+                (192, 168) => Some(("192.168.0.0/16", "private")),
+                (169, 254) => Some(("169.254.0.0/16", "link-local")),
+                _ => None,
+            }
+        }
+        IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return restricted_non_loopback_ip_range(IpAddr::V4(mapped));
+            }
+
+            let segments = ip.segments();
+            if (segments[0] & 0xfe00) == 0xfc00 {
+                return Some(("fc00::/7", "unique-local"));
+            }
+            if (segments[0] & 0xffc0) == 0xfe80 {
+                return Some(("fe80::/10", "link-local"));
+            }
+            None
+        }
+    }
+}
+
+fn blocked_dns_resolution_error(
+    resource: &str,
+    ip: IpAddr,
+    cidr: &str,
+    label: &str,
+) -> SidecarError {
+    SidecarError::Execution(format!(
+        "EACCES: blocked outbound network access to {resource}: {ip} is within restricted {label} range {cidr}"
+    ))
+}
+
+fn blocked_loopback_connect_error(resource: &str, ip: IpAddr, port: u16) -> SidecarError {
+    SidecarError::Execution(format!(
+        "EACCES: blocked outbound network access to {resource}: {ip} is loopback ({}) and port {port} is not owned by this VM and is not listed in {LOOPBACK_EXEMPT_PORTS_ENV}",
+        loopback_cidr(ip)
+    ))
+}
+
+fn filter_dns_safe_ip_addrs(
+    addresses: Vec<IpAddr>,
+    hostname: &str,
+) -> Result<Vec<IpAddr>, SidecarError> {
+    let resource = format_dns_resource(hostname);
+    let mut allowed = Vec::new();
+    let mut blocked = None;
+
+    for ip in addresses {
+        if let Some((cidr, label)) = restricted_non_loopback_ip_range(ip) {
+            blocked.get_or_insert((ip, cidr, label));
+            continue;
+        }
+        allowed.push(ip);
+    }
+
+    if allowed.is_empty() {
+        let (ip, cidr, label) = blocked.expect("blocked DNS results should capture a reason");
+        return Err(blocked_dns_resolution_error(&resource, ip, cidr, label));
+    }
+
+    Ok(allowed)
+}
+
+fn loopback_connect_allowed(context: &JavascriptSocketPathContext, port: u16) -> bool {
+    context.loopback_exempt_ports.contains(&port)
+        || context.active_loopback_tcp_ports.contains(&port)
+}
+
+fn filter_tcp_connect_ip_addrs(
+    addresses: Vec<IpAddr>,
+    host: &str,
+    port: u16,
+    context: &JavascriptSocketPathContext,
+) -> Result<Vec<IpAddr>, SidecarError> {
+    let resource = format_tcp_resource(host, port);
+    let mut allowed = Vec::new();
+    let mut blocked = None;
+
+    for ip in addresses {
+        if let Some((cidr, label)) = restricted_non_loopback_ip_range(ip) {
+            blocked.get_or_insert_with(|| blocked_dns_resolution_error(&resource, ip, cidr, label));
+            continue;
+        }
+        if is_loopback_ip(ip) && !loopback_connect_allowed(context, port) {
+            blocked.get_or_insert_with(|| blocked_loopback_connect_error(&resource, ip, port));
+            continue;
+        }
+        allowed.push(ip);
+    }
+
+    if allowed.is_empty() {
+        return Err(blocked.expect("blocked TCP connect results should capture a reason"));
+    }
+
+    Ok(allowed)
+}
+
 fn resolve_tcp_connect_addr<B>(
     bridge: &SharedBridge<B>,
     vm_id: &str,
     dns: &VmDnsConfig,
     host: &str,
     port: u16,
+    context: &JavascriptSocketPathContext,
 ) -> Result<SocketAddr, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    let ip = resolve_dns_ip_addrs(bridge, vm_id, dns, host)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            SidecarError::Execution(format!("failed to resolve TCP address {host}:{port}"))
-        })?;
+    let ip = filter_tcp_connect_ip_addrs(
+        resolve_dns_ip_addrs(bridge, vm_id, dns, host)?,
+        host,
+        port,
+        context,
+    )?
+    .into_iter()
+    .next()
+    .ok_or_else(|| {
+        SidecarError::Execution(format!("failed to resolve TCP address {host}:{port}"))
+    })?;
     Ok(SocketAddr::new(ip, port))
 }
 
@@ -6876,6 +7077,7 @@ where
                 resolve_dns_ip_addrs(bridge, vm_id, dns, &payload.hostname)?,
                 payload.family,
             )?;
+            let addresses = filter_dns_safe_ip_addrs(addresses, &payload.hostname)?;
             Ok(Value::Array(
                 addresses
                     .into_iter()
@@ -6931,6 +7133,7 @@ where
                 resolve_dns_ip_addrs(bridge, vm_id, dns, &payload.hostname)?,
                 family,
             )?;
+            let addresses = filter_dns_safe_ip_addrs(addresses, &payload.hostname)?;
             Ok(Value::Array(
                 addresses
                     .into_iter()
@@ -7161,7 +7364,8 @@ where
                     NetworkOperation::Http,
                     format_tcp_resource(host, port),
                 )?;
-                let socket = ActiveTcpSocket::connect(bridge, vm_id, dns, host, port)?;
+                let socket =
+                    ActiveTcpSocket::connect(bridge, vm_id, dns, host, port, socket_paths)?;
                 let socket_id = process.allocate_tcp_socket_id();
                 let local_addr = socket.local_addr;
                 let remote_addr = socket.remote_addr;
@@ -9911,7 +10115,7 @@ console.log(
                 .expect("handle javascript fd rpc event");
         }
 
-        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        assert_eq!(exit_code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
         assert!(stdout.contains("\"text\":\"bcdef\""), "stdout: {stdout}");
         assert!(stdout.contains("\"bytesRead\":5"), "stdout: {stdout}");
         assert!(stdout.contains("\"size\":7"), "stdout: {stdout}");
@@ -10133,97 +10337,13 @@ socket.on("close", (hadError) => {{
             ),
         );
 
-        let context = sidecar
-            .javascript_engine
-            .create_context(CreateJavascriptContextRequest {
-                vm_id: vm_id.clone(),
-                bootstrap_module: None,
-                compile_cache_root: None,
-            });
-        let execution = sidecar
-            .javascript_engine
-            .start_execution(StartJavascriptExecutionRequest {
-                vm_id: vm_id.clone(),
-                context_id: context.context_id,
-                argv: vec![String::from("./entry.mjs")],
-                env: BTreeMap::from([(
-                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
-                    String::from(
-                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
-                    ),
-                )]),
-                cwd: cwd.clone(),
-            })
-            .expect("start fake javascript execution");
-
-        let kernel_handle = {
-            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
-            vm.kernel
-                .spawn_process(
-                    JAVASCRIPT_COMMAND,
-                    vec![String::from("./entry.mjs")],
-                    SpawnOptions {
-                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
-                        cwd: Some(String::from("/")),
-                        ..SpawnOptions::default()
-                    },
-                )
-                .expect("spawn kernel javascript process")
-        };
-
-        {
-            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
-            vm.active_processes.insert(
-                String::from("proc-js-net"),
-                ActiveProcess::new(
-                    kernel_handle.pid(),
-                    kernel_handle,
-                    GuestRuntimeKind::JavaScript,
-                    ActiveExecution::Javascript(execution),
-                ),
-            );
-        }
-
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        let mut exit_code = None;
-        for _ in 0..64 {
-            let next_event = {
-                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
-                vm.active_processes
-                    .get("proc-js-net")
-                    .map(|process| {
-                        process
-                            .execution
-                            .poll_event(Duration::from_secs(5))
-                            .expect("poll javascript net rpc event")
-                    })
-                    .flatten()
-            };
-            let Some(event) = next_event else {
-                if exit_code.is_some() {
-                    break;
-                }
-                panic!("javascript net process disappeared before exit");
-            };
-
-            match &event {
-                ActiveExecutionEvent::Stdout(chunk) => {
-                    stdout.push_str(&String::from_utf8_lossy(chunk));
-                }
-                ActiveExecutionEvent::Stderr(chunk) => {
-                    stderr.push_str(&String::from_utf8_lossy(chunk));
-                }
-                ActiveExecutionEvent::Exited(code) => {
-                    exit_code = Some(*code);
-                }
-                _ => {}
-            }
-
-            sidecar
-                .handle_execution_event(&vm_id, "proc-js-net", event)
-                .expect("handle javascript net rpc event");
-        }
+        let (stdout, stderr, exit_code) = run_javascript_entry(
+            &mut sidecar,
+            &vm_id,
+            &cwd,
+            "proc-js-net",
+            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+        );
 
         server.join().expect("join tcp server");
         assert_eq!(exit_code, Some(0), "stderr: {stderr}");
@@ -10527,6 +10647,203 @@ console.log(JSON.stringify({ lookup, resolve4 }));
     }
 
     #[test]
+    fn javascript_network_ssrf_protection_blocks_private_dns_and_unowned_loopback_targets() {
+        assert_node_available();
+
+        let loopback_listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        let loopback_port = loopback_listener
+            .local_addr()
+            .expect("loopback listener address")
+            .port();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm_with_metadata(
+            &mut sidecar,
+            &connection_id,
+            &session_id,
+            Vec::new(),
+            BTreeMap::from([(
+                String::from("network.dns.override.metadata.test"),
+                String::from("169.254.169.254"),
+            )]),
+        )
+        .expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-ssrf-protection-cwd");
+        write_fixture(
+            &cwd.join("entry.mjs"),
+            &format!(
+                r#"
+import dns from "node:dns";
+import net from "node:net";
+
+const dnsLookup = await (async () => {{
+  try {{
+    await dns.promises.lookup("metadata.test", {{ family: 4 }});
+    return {{ unexpected: true }};
+  }} catch (error) {{
+    return {{ code: error.code ?? null, message: error.message }};
+  }}
+}})();
+
+const privateConnect = await new Promise((resolve) => {{
+  const socket = net.createConnection({{ host: "metadata.test", port: 80 }});
+  socket.on("connect", () => {{
+    socket.destroy();
+    resolve({{ unexpected: true }});
+  }});
+  socket.on("error", (error) => {{
+    resolve({{ code: error.code ?? null, message: error.message }});
+  }});
+}});
+
+const loopbackConnect = await new Promise((resolve) => {{
+  const socket = net.createConnection({{ host: "127.0.0.1", port: {loopback_port} }});
+  socket.on("connect", () => {{
+    socket.destroy();
+    resolve({{ unexpected: true }});
+  }});
+  socket.on("error", (error) => {{
+    resolve({{ code: error.code ?? null, message: error.message }});
+  }});
+}});
+
+console.log(JSON.stringify({{ dnsLookup, privateConnect, loopbackConnect }}));
+process.exit(0);
+"#,
+            ),
+        );
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-ssrf-protection"),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
+            );
+        }
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = None;
+        for _ in 0..64 {
+            let next_event = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-ssrf-protection")
+                    .map(|process| {
+                        process
+                            .execution
+                            .poll_event(Duration::from_secs(5))
+                            .expect("poll javascript ssrf event")
+                    })
+                    .flatten()
+            };
+            let Some(event) = next_event else {
+                if exit_code.is_some() {
+                    break;
+                }
+                panic!("javascript ssrf process disappeared before exit");
+            };
+
+            match &event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    stdout.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    stderr.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Exited(code) => {
+                    exit_code = Some(*code);
+                }
+                _ => {}
+            }
+
+            sidecar
+                .handle_execution_event(&vm_id, "proc-js-ssrf-protection", event)
+                .expect("handle javascript ssrf event");
+        }
+
+        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse ssrf JSON");
+        assert_eq!(
+            parsed["dnsLookup"]["code"],
+            Value::String(String::from("EACCES"))
+        );
+        assert!(
+            parsed["dnsLookup"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("169.254.0.0/16")),
+            "stdout: {stdout}"
+        );
+        assert_eq!(
+            parsed["privateConnect"]["code"],
+            Value::String(String::from("EACCES"))
+        );
+        assert!(
+            parsed["privateConnect"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("169.254.0.0/16")),
+            "stdout: {stdout}"
+        );
+        assert_eq!(
+            parsed["loopbackConnect"]["code"],
+            Value::String(String::from("EACCES"))
+        );
+        assert!(
+            parsed["loopbackConnect"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(LOOPBACK_EXEMPT_PORTS_ENV)),
+            "stdout: {stdout}"
+        );
+
+        drop(loopback_listener);
+    }
+
+    #[test]
     fn javascript_dns_rpc_honors_vm_dns_overrides_and_net_connect_uses_sidecar_dns() {
         assert_node_available();
 
@@ -10551,6 +10868,10 @@ console.log(JSON.stringify({ lookup, resolve4 }));
             &session_id,
             Vec::new(),
             BTreeMap::from([
+                (
+                    format!("env.{LOOPBACK_EXEMPT_PORTS_ENV}"),
+                    serde_json::to_string(&vec![port.to_string()]).expect("serialize exempt ports"),
+                ),
                 (
                     String::from("network.dns.override.example.test"),
                     String::from("127.0.0.1"),
@@ -10752,10 +11073,16 @@ console.log(JSON.stringify({{ lookup, resolved, socketSummary }}));
             &connection_id,
             &session_id,
             Vec::new(),
-            BTreeMap::from([(
-                String::from("network.dns.override.example.test"),
-                String::from("127.0.0.1"),
-            )]),
+            BTreeMap::from([
+                (
+                    format!("env.{LOOPBACK_EXEMPT_PORTS_ENV}"),
+                    serde_json::to_string(&vec![port.to_string()]).expect("serialize exempt ports"),
+                ),
+                (
+                    String::from("network.dns.override.example.test"),
+                    String::from("127.0.0.1"),
+                ),
+            ]),
         )
         .expect("create vm");
         sidecar
@@ -11784,6 +12111,8 @@ server.listen(0, "127.0.0.1", () => {
         let socket_paths = JavascriptSocketPathContext {
             sandbox_root: cwd.clone(),
             mounts: Vec::new(),
+            loopback_exempt_ports: BTreeSet::new(),
+            active_loopback_tcp_ports: BTreeSet::new(),
         };
 
         let listen = {
@@ -12139,6 +12468,8 @@ server.listen(0, "127.0.0.1", () => {
         let socket_paths = JavascriptSocketPathContext {
             sandbox_root: cwd.clone(),
             mounts: Vec::new(),
+            loopback_exempt_ports: BTreeSet::new(),
+            active_loopback_tcp_ports: BTreeSet::new(),
         };
         let socket_path = "/tmp/agent-os.sock";
         let host_socket_path = cwd.join("tmp/agent-os.sock");
