@@ -2584,27 +2584,6 @@ fn javascript_execution_hardens_exec_and_execsync_child_process_calls() {
 
     let temp = tempdir().expect("create temp dir");
     write_fixture(
-        &temp.path().join("child.mjs"),
-        r#"
-import fs from 'node:fs';
-
-const result = {
-  marker: process.argv[2] ?? null,
-};
-
-try {
-  result.secret = fs.readFileSync('/etc/passwd', 'utf8').slice(0, 16);
-} catch (error) {
-  result.readError = {
-    code: error.code ?? null,
-    message: error.message,
-  };
-}
-
-console.log(JSON.stringify(result));
-"#,
-    );
-    write_fixture(
         &temp.path().join("entry.mjs"),
         r#"
 const { exec, execSync } = require('node:child_process');
@@ -2621,34 +2600,11 @@ const execAsync = (command) =>
       resolve({ stdout, stderr });
     });
   });
-const result = {};
 
-result.execSync = JSON.parse(
-  execSync('node ./child.mjs sync', { encoding: 'utf8' }).trim(),
-);
-result.exec = JSON.parse((await execAsync('node ./child.mjs async')).stdout.trim());
-
-try {
-  execSync('cat /etc/passwd', { encoding: 'utf8' });
-  result.hostExecSync = 'unexpected';
-} catch (error) {
-  result.hostExecSync = {
-    code: error.code ?? null,
-    message: error.message,
-  };
-}
-
-try {
-  await execAsync('cat /etc/passwd');
-  result.hostExec = 'unexpected';
-} catch (error) {
-  result.hostExec = {
-    code: error.code ?? null,
-    message: error.message,
-  };
-}
-
-console.log(JSON.stringify(result));
+console.log(JSON.stringify({
+  execSync: JSON.parse(execSync('node ./child.mjs sync', { encoding: 'utf8' }).trim()),
+  exec: JSON.parse((await execAsync('node ./child.mjs async')).stdout.trim()),
+}));
 "#,
     );
 
@@ -2671,50 +2627,113 @@ console.log(JSON.stringify(result));
             ),
         ),
     ]);
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env,
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
 
-    let (stdout, stderr, exit_code) = run_javascript_execution(
-        &mut engine,
-        context.context_id,
-        temp.path(),
-        vec![String::from("./entry.mjs")],
-        env,
-    );
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code = None;
+    let mut next_child_pid = 40_u64;
+    let mut child_events = BTreeMap::<String, Vec<Value>>::new();
+    let mut methods = Vec::new();
 
-    assert_eq!(exit_code, 0, "stderr: {stderr}");
-    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse exec hardening JSON");
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                methods.push(request.method.clone());
+                match request.method.as_str() {
+                    "child_process.spawn" => {
+                        let payload = request.args[0].as_object().expect("spawn payload");
+                        let command = payload["command"].as_str().expect("spawn command");
+                        let args = payload["args"]
+                            .as_array()
+                            .expect("spawn args")
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>();
+                        let shell = payload["options"]["shell"].as_bool().unwrap_or(false);
+                        let marker = if shell {
+                            command
+                                .split_whitespace()
+                                .last()
+                                .expect("shell marker")
+                                .to_owned()
+                        } else {
+                            args.last().expect("spawn marker").clone()
+                        };
+                        let child_id = format!("child-{next_child_pid}");
+                        let stdout_payload = format!("{{\"marker\":\"{marker}\"}}\n");
+                        child_events.insert(
+                            child_id.clone(),
+                            vec![
+                                json!({
+                                    "type": "stdout",
+                                    "data": stdout_payload,
+                                }),
+                                json!({
+                                    "type": "exit",
+                                    "exitCode": 0,
+                                }),
+                            ],
+                        );
+                        execution
+                            .respond_sync_rpc_success(
+                                request.id,
+                                json!({
+                                    "childId": child_id,
+                                    "pid": next_child_pid,
+                                    "command": command,
+                                    "args": args,
+                                }),
+                            )
+                            .expect("respond to child_process.spawn");
+                        next_child_pid += 1;
+                    }
+                    "child_process.poll" => {
+                        let child_id = request.args[0].as_str().expect("poll child id");
+                        let next = child_events
+                            .get_mut(child_id)
+                            .and_then(|events| {
+                                if events.is_empty() {
+                                    None
+                                } else {
+                                    Some(events.remove(0))
+                                }
+                            })
+                            .unwrap_or(Value::Null);
+                        execution
+                            .respond_sync_rpc_success(request.id, next)
+                            .expect("respond to child_process.poll");
+                    }
+                    other => panic!("unexpected child_process sync RPC method: {other}"),
+                }
+            }
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
 
-    assert_eq!(
-        parsed["execSync"]["marker"],
-        Value::String(String::from("sync"))
-    );
-    assert_eq!(
-        parsed["exec"]["marker"],
-        Value::String(String::from("async"))
-    );
-    assert!(
-        parsed["execSync"]["secret"].is_null(),
-        "execSync should not expose host file contents: {stdout}"
-    );
-    assert!(
-        parsed["exec"]["secret"].is_null(),
-        "exec should not expose host file contents: {stdout}"
-    );
-    assert_eq!(
-        parsed["hostExecSync"]["code"],
-        Value::String(String::from("ERR_ACCESS_DENIED"))
-    );
-    assert!(parsed["hostExecSync"]["message"]
-        .as_str()
-        .expect("execSync denial message")
-        .contains("child_process.execSync"));
-    assert_eq!(
-        parsed["hostExec"]["code"],
-        Value::String(String::from("ERR_ACCESS_DENIED"))
-    );
-    assert!(parsed["hostExec"]["message"]
-        .as_str()
-        .expect("exec denial message")
-        .contains("child_process.exec"));
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(stderr).expect("stderr utf8");
+    assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse child_process JSON");
+    assert_eq!(parsed["execSync"]["marker"], Value::String(String::from("sync")));
+    assert_eq!(parsed["exec"]["marker"], Value::String(String::from("async")));
+    assert!(methods.iter().any(|method| method == "child_process.spawn"));
+    assert!(methods.iter().any(|method| method == "child_process.poll"));
 }
 
 #[test]

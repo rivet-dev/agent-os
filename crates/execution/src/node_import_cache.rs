@@ -1605,6 +1605,7 @@ if (!Module || typeof Module.createRequire !== 'function') {
 }
 const hostRequire = Module.createRequire(import.meta.url);
 const hostOs = hostRequire('node:os');
+const { EventEmitter } = hostRequire('node:events');
 const { Readable, Writable } = hostRequire('node:stream');
 const NODE_SYNC_RPC_ENABLE = HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_ENABLE === '1';
 const hostWorkerThreads = NODE_SYNC_RPC_ENABLE ? hostRequire('node:worker_threads') : null;
@@ -2206,7 +2207,7 @@ function createGuestFsStats(stat) {
   });
 }
 
-function requireFsSyncRpcBridge() {
+function requireAgentOsSyncRpcBridge() {
   const bridge = globalThis.__agentOsSyncRpc;
   if (
     bridge &&
@@ -2216,9 +2217,13 @@ function requireFsSyncRpcBridge() {
     return bridge;
   }
 
-  const error = new Error('Agent OS fs sync RPC bridge is unavailable');
+  const error = new Error('Agent OS sync RPC bridge is unavailable');
   error.code = 'ERR_AGENT_OS_NODE_SYNC_RPC_UNAVAILABLE';
   throw error;
+}
+
+function requireFsSyncRpcBridge() {
+  return requireAgentOsSyncRpcBridge();
 }
 
 function createRpcBackedFsPromises(fromGuestDir = '/') {
@@ -3101,405 +3106,553 @@ function wrapRenameLikeAsync(fn, fromGuestDir) {
     );
 }
 
-function wrapChildProcessModule(childProcessModule, fromGuestDir = '/') {
-  const isNodeCommand = (command) =>
-    command === 'node' || String(command).endsWith('/node');
-  const isNodeScriptCommand = (command) =>
-    typeof command === 'string' &&
-    (command.startsWith('./') ||
-      command.startsWith('../') ||
-      command.startsWith('/') ||
-      command.startsWith('file:')) &&
-    /\.(?:[cm]?js)$/i.test(command);
-  const usesNodeRuntime = (command) =>
-    isNodeCommand(command) || isNodeScriptCommand(command);
-  const translateCommand = (command) =>
-    usesNodeRuntime(command)
-      ? HOST_EXEC_PATH
-      : translateGuestPath(command, fromGuestDir);
-  const isGuestCommandPath = (command) =>
-    typeof command === 'string' &&
-    (command.startsWith('/') || command.startsWith('file:'));
-  const ensureRuntimeEnv = (env) => {
-    const sourceEnv =
-      env && typeof env === 'object' ? env : process.env;
-    const { NODE_OPTIONS: _nodeOptions, ...safeEnv } = sourceEnv;
-    for (const key of ['HOME', 'PWD', 'TMPDIR', 'TEMP', 'TMP', 'PI_CODING_AGENT_DIR']) {
-      if (typeof safeEnv[key] === 'string') {
-        safeEnv[key] = translateGuestPath(safeEnv[key], fromGuestDir);
-      }
-    }
-    const nodeDir = HOST_EXEC_DIR;
-    const existingPath =
-      typeof safeEnv.PATH === 'string'
-        ? safeEnv.PATH
-        : typeof process.env.PATH === 'string'
-          ? process.env.PATH
-          : '';
-    const segments = existingPath
-      .split(path.delimiter)
-      .filter(Boolean);
+function createRpcBackedChildProcessModule(fromGuestDir = '/') {
+  const RPC_POLL_WAIT_MS = 50;
+  const RPC_IDLE_POLL_DELAY_MS = 10;
+  const INTERNAL_ENV_KEYS = [
+    'AGENT_OS_ALLOWED_NODE_BUILTINS',
+    'AGENT_OS_GUEST_PATH_MAPPINGS',
+    'AGENT_OS_LOOPBACK_EXEMPT_PORTS',
+    'AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH',
+    'AGENT_OS_VIRTUAL_PROCESS_UID',
+    'AGENT_OS_VIRTUAL_PROCESS_GID',
+  ];
 
-    if (!segments.includes(nodeDir)) {
-      segments.unshift(nodeDir);
-    }
-
-    return {
-      ...safeEnv,
-      PATH: segments.join(path.delimiter),
-    };
+  const bridge = () => requireAgentOsSyncRpcBridge();
+  const createUnsupportedChildProcessError = (subject) => {
+    const error = new Error(`${subject} is not supported by the Agent OS child_process polyfill`);
+    error.code = 'ERR_AGENT_OS_CHILD_PROCESS_UNSUPPORTED';
+    return error;
   };
-  const translateProcessOptions = (options) => {
-    if (options == null) {
-      return {
-        env: ensureRuntimeEnv(process.env),
-      };
-    }
-
-    if (typeof options !== 'object') {
-      return options;
-    }
-
-    return {
-      ...options,
-      cwd:
-        typeof options.cwd === 'string'
-          ? translateGuestPath(options.cwd, fromGuestDir)
-          : options.cwd,
-      env: ensureRuntimeEnv(options.env),
-    };
-  };
-  const translateArgs = (command, args) => {
-    if (isNodeScriptCommand(command)) {
-      const translatedScript = translateGuestPath(command, fromGuestDir);
-      const translatedArgs = Array.isArray(args)
-        ? args.map((arg) => translateGuestPath(arg, fromGuestDir))
-        : [];
-      return [translatedScript, ...translatedArgs];
-    }
-
+  const normalizeSpawnInvocation = (args, options) => {
     if (!Array.isArray(args)) {
-      return args;
-    }
-    if (!isNodeCommand(command)) {
-      return args.map((arg) => translateGuestPath(arg, fromGuestDir));
-    }
-    return args.map((arg, index) =>
-      index === 0 ? translateGuestPath(arg, fromGuestDir) : arg,
-    );
-  };
-  const SHELL_CONTROL_TOKENS = new Set(['|', '&', ';', '<', '>', '\n', '\r']);
-  const parseSimpleExecCommand = (command) => {
-    if (typeof command !== 'string') {
-      return null;
-    }
-
-    const tokens = [];
-    let current = '';
-    let quote = null;
-    let escaped = false;
-
-    for (const ch of command) {
-      if (escaped) {
-        current += ch;
-        escaped = false;
-        continue;
-      }
-
-      if (quote === "'") {
-        if (ch === "'") {
-          quote = null;
-        } else {
-          current += ch;
-        }
-        continue;
-      }
-
-      if (quote === '"') {
-        if (ch === '"') {
-          quote = null;
-        } else if (ch === '\\') {
-          escaped = true;
-        } else {
-          current += ch;
-        }
-        continue;
-      }
-
-      if (ch === "'" || ch === '"') {
-        quote = ch;
-        continue;
-      }
-
-      if (ch === '\\') {
-        escaped = true;
-        continue;
-      }
-
-      if (SHELL_CONTROL_TOKENS.has(ch)) {
-        return null;
-      }
-
-      if (/\s/.test(ch)) {
-        if (current.length > 0) {
-          tokens.push(current);
-          current = '';
-        }
-        continue;
-      }
-
-      current += ch;
-    }
-
-    if (escaped || quote) {
-      return null;
-    }
-
-    if (current.length > 0) {
-      tokens.push(current);
-    }
-
-    return tokens.length > 0 ? tokens : null;
-  };
-  const normalizeExecInvocation = (options, callback) => {
-    if (typeof options === 'function') {
       return {
-        options: undefined,
-        callback: options,
+        args: [],
+        options: args && typeof args === 'object' ? args : options,
       };
     }
 
     return {
+      args,
       options,
-      callback,
     };
   };
-  const prependNodePermissionArgs = (command, args, options) => {
-    if (!usesNodeRuntime(command)) {
-      return args;
+  const normalizeExecInvocation = (options, callback) =>
+    typeof options === 'function'
+      ? { options: undefined, callback: options }
+      : { options, callback };
+  const normalizeExecFileInvocation = (args, options, callback) => {
+    if (typeof args === 'function') {
+      return { args: [], options: undefined, callback: args };
     }
-
-    const translatedArgs = Array.isArray(args) ? args : [];
-    const readPaths = new Set();
-    const writePaths = new Set();
-    const addReadPathChain = (value) => {
-      if (typeof value !== 'string' || value.length === 0) {
-        return;
-      }
-      let current = value;
-      while (true) {
-        readPaths.add(current);
-        const parent = path.dirname(current);
-        if (parent === current) {
-          break;
-        }
-        current = parent;
-      }
-    };
-    const addWritePath = (value) => {
-      if (typeof value !== 'string' || value.length === 0) {
-        return;
-      }
-      writePaths.add(value);
-    };
-
-    if (typeof options?.cwd === 'string') {
-      addReadPathChain(options.cwd);
-      addWritePath(options.cwd);
+    if (!Array.isArray(args)) {
+      return {
+        args: [],
+        options: args,
+        callback: typeof options === 'function' ? options : callback,
+      };
     }
-
-    const homePath =
-      typeof options?.env?.HOME === 'string'
-        ? translateGuestPath(options.env.HOME, fromGuestDir)
-        : typeof process.env.HOME === 'string'
-          ? translateGuestPath(process.env.HOME, fromGuestDir)
-          : null;
-    if (homePath) {
-      addReadPathChain(homePath);
-      addWritePath(homePath);
+    if (typeof options === 'function') {
+      return { args, options: undefined, callback: options };
     }
-
-    if (translatedArgs.length > 0 && typeof translatedArgs[0] === 'string') {
-      addReadPathChain(translatedArgs[0]);
-    }
-
-    const permissionArgs = [
-      '--allow-child-process',
-      '--disable-warning=SecurityWarning',
-    ];
-
-    if (ALLOWED_BUILTINS.has('worker_threads')) {
-      permissionArgs.push('--allow-worker');
-    }
-
-    for (const allowedPath of readPaths) {
-      permissionArgs.push(`--allow-fs-read=${allowedPath}`);
-    }
-    for (const allowedPath of writePaths) {
-      permissionArgs.push(`--allow-fs-write=${allowedPath}`);
-    }
-
-    return [...permissionArgs, ...translatedArgs];
+    return { args, options, callback };
   };
-  const translateExecOptions = (options) => {
-    const translated = translateProcessOptions(options);
-    if (translated == null || typeof translated !== 'object') {
-      return translated;
+  const normalizeChildProcessSignal = (value) =>
+    typeof value === 'string' && value.length > 0 ? value : 'SIGTERM';
+  const normalizeChildProcessEncoding = (options) =>
+    typeof options?.encoding === 'string' ? options.encoding : null;
+  const normalizeChildProcessTimeout = (options) =>
+    Number.isInteger(options?.timeout) && options.timeout > 0 ? options.timeout : null;
+  const normalizeChildProcessEnv = (env) => {
+    const source = env && typeof env === 'object' ? env : {};
+    const merged = {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([, value]) => typeof value === 'string'),
+      ),
+      ...Object.fromEntries(
+        Object.entries(source).filter(([, value]) => value != null),
+      ),
+    };
+    delete merged.NODE_OPTIONS;
+
+    for (const key of INTERNAL_ENV_KEYS) {
+      if (typeof HOST_PROCESS_ENV[key] === 'string') {
+        merged[key] = HOST_PROCESS_ENV[key];
+      }
+    }
+    for (const [key, value] of Object.entries(HOST_PROCESS_ENV)) {
+      if (key.startsWith('AGENT_OS_VIRTUAL_OS_') && typeof value === 'string') {
+        merged[key] = value;
+      }
+    }
+
+    return Object.fromEntries(
+      Object.entries(merged).map(([key, value]) => [key, String(value)]),
+    );
+  };
+  const normalizeChildProcessStdioEntry = (value, index) => {
+    if (value == null) {
+      return 'pipe';
+    }
+    if (value === 'pipe' || value === 'ignore' || value === 'inherit') {
+      return value;
+    }
+    if (value === 'ipc') {
+      throw createUnsupportedChildProcessError('child_process IPC stdio');
+    }
+    if (value === null && index === 0) {
+      return 'pipe';
+    }
+    throw createUnsupportedChildProcessError(`child_process stdio=${String(value)}`);
+  };
+  const normalizeChildProcessStdio = (stdio) => {
+    if (stdio == null) {
+      return ['pipe', 'pipe', 'pipe'];
+    }
+    if (typeof stdio === 'string') {
+      return [
+        normalizeChildProcessStdioEntry(stdio, 0),
+        normalizeChildProcessStdioEntry(stdio, 1),
+        normalizeChildProcessStdioEntry(stdio, 2),
+      ];
+    }
+    if (!Array.isArray(stdio)) {
+      throw createUnsupportedChildProcessError('child_process stdio configuration');
+    }
+    return [0, 1, 2].map((index) =>
+      normalizeChildProcessStdioEntry(stdio[index], index),
+    );
+  };
+  const normalizeChildProcessOptions = (options, shell = false) => {
+    if (options != null && typeof options !== 'object') {
+      throw new TypeError('child_process options must be an object');
+    }
+    if (options?.detached) {
+      throw createUnsupportedChildProcessError('child_process detached');
     }
 
     return {
-      ...translated,
-      shell: false,
+      cwd:
+        typeof options?.cwd === 'string'
+          ? resolveGuestFsPath(options.cwd, fromGuestDir)
+          : fromGuestDir,
+      env: normalizeChildProcessEnv(options?.env),
+      shell: shell || options?.shell === true,
+      stdio: normalizeChildProcessStdio(options?.stdio),
+      timeout: normalizeChildProcessTimeout(options),
+      killSignal: normalizeChildProcessSignal(options?.killSignal),
     };
   };
-  const wrapExecDeniedCallback = (subject, callback) => {
-    if (typeof callback !== 'function') {
-      return undefined;
+  const createRpcSpawnRequest = (command, args, options, shell = false) => ({
+    command: String(command),
+    args: Array.isArray(args) ? args.map((arg) => String(arg)) : [],
+    options: normalizeChildProcessOptions(options, shell),
+  });
+  const callSpawn = (command, args, options, shell = false) =>
+    bridge().callSync('child_process.spawn', [
+      createRpcSpawnRequest(command, args, options, shell),
+    ]);
+  const callPoll = (childId, waitMs = 0) =>
+    bridge().callSync('child_process.poll', [childId, waitMs]);
+  const callKill = (childId, signal) =>
+    bridge().callSync('child_process.kill', [childId, normalizeChildProcessSignal(signal)]);
+  const callWriteStdin = (childId, chunk) =>
+    bridge().call('child_process.write_stdin', [childId, toGuestBufferView(chunk, 'stdin chunk')]);
+  const callCloseStdin = (childId) =>
+    bridge().call('child_process.close_stdin', [childId]);
+  const encodeChildProcessOutput = (buffer, encoding) =>
+    encoding ? buffer.toString(encoding) : buffer;
+  const createChildProcessExecError = (subject, exitCode, signal, stdout, stderr) => {
+    const error = new Error(
+      signal == null
+        ? `${subject} exited with code ${exitCode ?? 'unknown'}`
+        : `${subject} terminated by signal ${signal}`,
+    );
+    error.code = signal == null ? 'ERR_AGENT_OS_CHILD_PROCESS_EXIT' : signal;
+    error.killed = signal != null;
+    error.signal = signal;
+    error.stdout = stdout;
+    error.stderr = stderr;
+    if (typeof exitCode === 'number') {
+      error.status = exitCode;
+    }
+    return error;
+  };
+  const createSpawnSyncResult = (pid, stdout, stderr, exitCode, signal, error, encoding) => {
+    const encodedStdout = encodeChildProcessOutput(stdout, encoding);
+    const encodedStderr = encodeChildProcessOutput(stderr, encoding);
+    return {
+      pid,
+      output: [null, encodedStdout, encodedStderr],
+      stdout: encodedStdout,
+      stderr: encodedStderr,
+      status: typeof exitCode === 'number' ? exitCode : null,
+      signal: signal ?? null,
+      error,
+    };
+  };
+  const runChildProcessSync = (command, args, options, shell = false) => {
+    const normalizedOptions = normalizeChildProcessOptions(options, shell);
+    const encoding = normalizeChildProcessEncoding(options);
+    const stdout = [];
+    const stderr = [];
+    let child;
+    try {
+      child = callSpawn(command, args, options, shell);
+    } catch (error) {
+      return createSpawnSyncResult(
+        0,
+        Buffer.alloc(0),
+        Buffer.from(error instanceof Error ? error.message : String(error)),
+        null,
+        null,
+        error,
+        encoding,
+      );
     }
 
-    return (error, stdout, stderr) => {
-      const denied = accessDenied(subject);
-      if (error && typeof error === 'object') {
-        error.code = denied.code;
-        error.message = denied.message;
-        if (stderr != null) {
-          error.stderr = stderr;
-        }
+    const startedAt = Date.now();
+    let exitCode = null;
+    let signal = null;
+    while (exitCode == null && signal == null) {
+      if (
+        normalizedOptions.timeout != null &&
+        Date.now() - startedAt > normalizedOptions.timeout
+      ) {
+        callKill(child.childId, normalizedOptions.killSignal);
       }
-      callback(error ?? denied, stdout, stderr);
-    };
-  };
-  const denyExec = (subject, options, callback) =>
-    childProcessModule.execFile(
-      HOST_EXEC_PATH,
-      [
-        '-e',
-        `process.stderr.write(${JSON.stringify(`${accessDenied(subject).message}\n`)}); process.exit(1);`,
-      ],
-      options,
-      wrapExecDeniedCallback(subject, callback),
+
+      const event = callPoll(child.childId, RPC_POLL_WAIT_MS);
+      if (!event) {
+        continue;
+      }
+
+      if (event.type === 'stdout') {
+        stdout.push(decodeFsBytesPayload(event.data, 'child_process.spawnSync stdout'));
+      } else if (event.type === 'stderr') {
+        stderr.push(decodeFsBytesPayload(event.data, 'child_process.spawnSync stderr'));
+      } else if (event.type === 'exit') {
+        exitCode =
+          typeof event.exitCode === 'number' ? Math.trunc(event.exitCode) : null;
+        signal = typeof event.signal === 'string' ? event.signal : null;
+      }
+    }
+
+    const stdoutBuffer = Buffer.concat(stdout);
+    const stderrBuffer = Buffer.concat(stderr);
+    return createSpawnSyncResult(
+      Number(child.pid) || 0,
+      stdoutBuffer,
+      stderrBuffer,
+      exitCode,
+      signal,
+      null,
+      encoding,
     );
-
-  return {
-    ...childProcessModule,
-    exec: (command, options, callback) => {
-      const {
-        options: execOptions,
-        callback: execCallback,
-      } = normalizeExecInvocation(options, callback);
-      const translatedOptions = translateExecOptions(execOptions);
-      const parsedCommand = parseSimpleExecCommand(command);
-
-      if (!parsedCommand || !usesNodeRuntime(parsedCommand[0])) {
-        return denyExec('child_process.exec', translatedOptions, execCallback);
-      }
-
-      const [file, ...args] = parsedCommand;
-      return childProcessModule.execFile(
-        translateCommand(file),
-        prependNodePermissionArgs(
-          file,
-          translateArgs(file, args),
-          translatedOptions,
-        ),
-        translatedOptions,
-        execCallback,
-      );
-    },
-    execFile: (file, args, options, callback) => {
-      const translatedOptions = translateProcessOptions(options);
-      return childProcessModule.execFile(
-        translateCommand(file),
-        prependNodePermissionArgs(
-          file,
-          translateArgs(file, args),
-          translatedOptions,
-        ),
-        translatedOptions,
-        callback,
-      );
-    },
-    execFileSync: (file, args, options) => {
-      const translatedOptions = translateProcessOptions(options);
-      return childProcessModule.execFileSync(
-        translateCommand(file),
-        prependNodePermissionArgs(
-          file,
-          translateArgs(file, args),
-          translatedOptions,
-        ),
-        translatedOptions,
-      );
-    },
-    execSync: (command, options) => {
-      const translatedOptions = translateExecOptions(options);
-      const parsedCommand = parseSimpleExecCommand(command);
-
-      if (!parsedCommand || !usesNodeRuntime(parsedCommand[0])) {
-        throw accessDenied('child_process.execSync');
-      }
-
-      const [file, ...args] = parsedCommand;
-      return childProcessModule.execFileSync(
-        translateCommand(file),
-        prependNodePermissionArgs(
-          file,
-          translateArgs(file, args),
-          translatedOptions,
-        ),
-        translatedOptions,
-      );
-    },
-    fork: (modulePath, args, options) => {
-      const translatedOptions = translateProcessOptions(options);
-      return childProcessModule.fork(
-        translateGuestPath(modulePath, fromGuestDir),
-        prependNodePermissionArgs(
-          'node',
-          translateArgs('node', args),
-          translatedOptions,
-        ),
-        translatedOptions,
-      );
-    },
-    spawn: (command, args, options) => {
-      const translatedOptions = translateProcessOptions(options);
-      return childProcessModule.spawn(
-        translateCommand(command),
-        prependNodePermissionArgs(
-          command,
-          translateArgs(command, args),
-          translatedOptions,
-        ),
-        translatedOptions,
-      );
-    },
-    spawnSync: (command, args, options) =>
-      {
-        const translatedOptions = translateProcessOptions(options);
-        const result = childProcessModule.spawnSync(
-          translateCommand(command),
-          prependNodePermissionArgs(
-            command,
-            translateArgs(command, args),
-            translatedOptions,
-          ),
-          translatedOptions,
-        );
-        if (
-          isGuestCommandPath(command) &&
-          result?.status == null &&
-          (result.error?.code === 'ENOENT' || result.error?.code === 'EACCES')
-        ) {
-          return {
-            ...result,
-            status: 1,
-            stderr: Buffer.from(result.error.message),
-          };
-        }
-        return result;
-      },
   };
+
+  class AgentOsChildReadable extends Readable {
+    _read() {}
+  }
+
+  class AgentOsChildWritable extends Writable {
+    constructor(childId) {
+      super();
+      this.childId = childId;
+    }
+
+    _write(chunk, encoding, callback) {
+      callWriteStdin(this.childId, chunk).then(
+        () => callback(),
+        (error) => callback(error),
+      );
+    }
+
+    _final(callback) {
+      callCloseStdin(this.childId).then(
+        () => callback(),
+        (error) => callback(error),
+      );
+    }
+  }
+
+  const finalizeChildStream = (stream) => {
+    if (!stream || stream.destroyed) {
+      return;
+    }
+    stream.push(null);
+  };
+  const emitChildLifecycleEvents = (child) => {
+    queueMicrotask(() => {
+      child.emit('exit', child.exitCode, child.signalCode);
+      child.emit('close', child.exitCode, child.signalCode);
+    });
+  };
+  const deliverChildOutput = (child, channel, payload) => {
+    const chunk = decodeFsBytesPayload(payload, `child_process.${channel}`);
+    const mode = channel === 'stdout' ? child._stdio[1] : child._stdio[2];
+    if (mode === 'ignore') {
+      return;
+    }
+    if (mode === 'inherit') {
+      (channel === 'stdout' ? process.stdout : process.stderr).write(chunk);
+      return;
+    }
+
+    const stream = channel === 'stdout' ? child.stdout : child.stderr;
+    stream?.push(chunk);
+  };
+  const closeSyntheticChild = (child, exitCode, signalCode) => {
+    if (child._closed) {
+      return;
+    }
+    child._closed = true;
+    child.exitCode = exitCode;
+    child.signalCode = signalCode;
+    finalizeChildStream(child.stdout);
+    finalizeChildStream(child.stderr);
+    if (child.stdin && !child.stdin.destroyed) {
+      child.stdin.destroy();
+    }
+    emitChildLifecycleEvents(child);
+  };
+  const scheduleSyntheticChildPoll = (child, delayMs) => {
+    if (child._closed || child._pollTimer != null) {
+      return;
+    }
+    child._pollTimer = setTimeout(() => {
+      child._pollTimer = null;
+      if (child._closed) {
+        return;
+      }
+
+      let event;
+      try {
+        event = callPoll(child._childId, RPC_POLL_WAIT_MS);
+      } catch (error) {
+        child._closed = true;
+        finalizeChildStream(child.stdout);
+        finalizeChildStream(child.stderr);
+        queueMicrotask(() => child.emit('error', error));
+        return;
+      }
+
+      if (!event) {
+        scheduleSyntheticChildPoll(child, RPC_IDLE_POLL_DELAY_MS);
+        return;
+      }
+
+      if (event.type === 'stdout' || event.type === 'stderr') {
+        deliverChildOutput(child, event.type, event.data);
+        scheduleSyntheticChildPoll(child, 0);
+        return;
+      }
+
+      if (event.type === 'exit') {
+        closeSyntheticChild(
+          child,
+          typeof event.exitCode === 'number' ? Math.trunc(event.exitCode) : null,
+          typeof event.signal === 'string' ? event.signal : null,
+        );
+        return;
+      }
+
+      scheduleSyntheticChildPoll(child, 0);
+    }, delayMs);
+    if (!child._refed) {
+      child._pollTimer.unref?.();
+    }
+  };
+  const createSyntheticChildProcess = (spawnResult, options) => {
+    const child = Object.create(EventEmitter.prototype);
+    EventEmitter.call(child);
+    child._childId = spawnResult.childId;
+    child._closed = false;
+    child._pollTimer = null;
+    child._refed = true;
+    child._stdio = options.stdio;
+    child.pid = Math.trunc(Number(spawnResult.pid) || 0);
+    child.exitCode = null;
+    child.signalCode = null;
+    child.spawnfile = String(spawnResult.command ?? '');
+    child.spawnargs = [
+      child.spawnfile,
+      ...(Array.isArray(spawnResult.args) ? spawnResult.args.map(String) : []),
+    ];
+    child.stdin = options.stdio[0] === 'pipe' ? new AgentOsChildWritable(child._childId) : null;
+    child.stdout = options.stdio[1] === 'pipe' ? new AgentOsChildReadable() : null;
+    child.stderr = options.stdio[2] === 'pipe' ? new AgentOsChildReadable() : null;
+    child.killed = false;
+    child.connected = false;
+    child.kill = (signal = 'SIGTERM') => {
+      try {
+        callKill(child._childId, signal);
+        child.killed = true;
+        return true;
+      } catch (error) {
+        if (error && typeof error === 'object' && error.code === 'ESRCH') {
+          return false;
+        }
+        throw error;
+      }
+    };
+    child.ref = () => {
+      child._refed = true;
+      child._pollTimer?.ref?.();
+      return child;
+    };
+    child.unref = () => {
+      child._refed = false;
+      child._pollTimer?.unref?.();
+      return child;
+    };
+    child.disconnect = () => {
+      throw createUnsupportedChildProcessError('child_process.disconnect');
+    };
+    child.send = () => {
+      throw createUnsupportedChildProcessError('child_process.send');
+    };
+    queueMicrotask(() => child.emit('spawn'));
+    scheduleSyntheticChildPoll(child, 0);
+    return child;
+  };
+  const collectSyntheticChildOutput = (child, options, callback) => {
+    const encoding = normalizeChildProcessEncoding(options) ?? 'utf8';
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    const timeout = normalizeChildProcessTimeout(options);
+    const killSignal = normalizeChildProcessSignal(options?.killSignal);
+    let timer = null;
+
+    if (child.stdout) {
+      child.stdout.on('data', (chunk) => {
+        stdoutChunks.push(Buffer.from(chunk));
+      });
+    }
+    if (child.stderr) {
+      child.stderr.on('data', (chunk) => {
+        stderrChunks.push(Buffer.from(chunk));
+      });
+    }
+
+    const promise = new Promise((resolve, reject) => {
+      if (timeout != null) {
+        timer = setTimeout(() => {
+          try {
+            child.kill(killSignal);
+          } catch {}
+        }, timeout);
+        timer.unref?.();
+      }
+
+      child.once('error', reject);
+      child.once('close', (exitCode, signalCode) => {
+        if (timer) {
+          clearTimeout(timer);
+        }
+        const stdout = encodeChildProcessOutput(Buffer.concat(stdoutChunks), encoding);
+        const stderr = encodeChildProcessOutput(Buffer.concat(stderrChunks), encoding);
+        if (exitCode === 0 && signalCode == null) {
+          resolve({ stdout, stderr, exitCode, signalCode });
+          return;
+        }
+        reject(createChildProcessExecError('child_process', exitCode, signalCode, stdout, stderr));
+      });
+    });
+
+    if (typeof callback === 'function') {
+      promise.then(
+        ({ stdout, stderr }) => callback(null, stdout, stderr),
+        (error) => callback(error, error.stdout, error.stderr),
+      );
+    }
+
+    return promise;
+  };
+
+  const module = {
+    ChildProcess: EventEmitter,
+    spawn(command, args, options) {
+      const invocation = normalizeSpawnInvocation(args, options);
+      const normalizedOptions = normalizeChildProcessOptions(invocation.options);
+      const child = createSyntheticChildProcess(
+        callSpawn(command, invocation.args, invocation.options),
+        normalizedOptions,
+      );
+      return child;
+    },
+    spawnSync(command, args, options) {
+      const invocation = normalizeSpawnInvocation(args, options);
+      return runChildProcessSync(command, invocation.args, invocation.options);
+    },
+    exec(command, options, callback) {
+      const invocation = normalizeExecInvocation(options, callback);
+      const child = module.spawn(command, [], {
+        ...invocation.options,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        shell: true,
+      });
+      collectSyntheticChildOutput(child, invocation.options, invocation.callback);
+      return child;
+    },
+    execSync(command, options) {
+      const result = runChildProcessSync(command, [], {
+        ...options,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }, true);
+      if (result.error) {
+        throw result.error;
+      }
+      if (result.status !== 0 || result.signal != null) {
+        throw createChildProcessExecError(
+          'child_process.execSync',
+          result.status,
+          result.signal,
+          result.stdout,
+          result.stderr,
+        );
+      }
+      return result.stdout;
+    },
+    execFile(file, args, options, callback) {
+      const invocation = normalizeExecFileInvocation(args, options, callback);
+      const child = module.spawn(file, invocation.args, {
+        ...invocation.options,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      collectSyntheticChildOutput(child, invocation.options, invocation.callback);
+      return child;
+    },
+    execFileSync(file, args, options) {
+      const invocation = normalizeExecFileInvocation(args, options);
+      const result = runChildProcessSync(file, invocation.args, {
+        ...invocation.options,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      if (result.error) {
+        throw result.error;
+      }
+      if (result.status !== 0 || result.signal != null) {
+        throw createChildProcessExecError(
+          'child_process.execFileSync',
+          result.status,
+          result.signal,
+          result.stdout,
+          result.stderr,
+        );
+      }
+      return result.stdout;
+    },
+    fork(modulePath, args, options) {
+      const invocation = normalizeSpawnInvocation(args, options);
+      return module.spawn('node', [modulePath, ...invocation.args], {
+        ...invocation.options,
+        stdio: invocation.options?.stdio ?? ['pipe', 'pipe', 'pipe'],
+      });
+    },
+  };
+
+  return module;
 }
 
 const guestRequireCache = new Map();
@@ -3508,10 +3661,9 @@ const hostFs = fs;
 const hostFsPromises = fs.promises;
 const hostFsWriteSync = fs.writeSync.bind(fs);
 const hostFsCloseSync = fs.closeSync.bind(fs);
-const hostChildProcess = hostRequire('child_process');
 const guestFs = wrapFsModule(hostFs);
 globalThis.__agentOsGuestFs = guestFs;
-const guestChildProcess = wrapChildProcessModule(hostChildProcess);
+const guestChildProcess = createRpcBackedChildProcessModule(INITIAL_GUEST_CWD);
 const guestGetUid = () => VIRTUAL_UID;
 const guestGetGid = () => VIRTUAL_GID;
 const VIRTUAL_OS_HOSTNAME = parseVirtualProcessString(

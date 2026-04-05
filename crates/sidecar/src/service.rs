@@ -65,6 +65,7 @@ use base64::Engine;
 use nix::libc;
 use nix::sys::signal::{kill as send_signal, Signal};
 use nix::unistd::Pid;
+use serde::Deserialize;
 use serde_json::json;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1290,6 +1291,7 @@ struct VmState {
     kernel: SidecarKernel,
     loaded_snapshot: Option<FilesystemSnapshot>,
     configuration: VmConfiguration,
+    command_guest_paths: BTreeMap<String, String>,
     active_processes: BTreeMap<String, ActiveProcess>,
     signal_states: BTreeMap<String, BTreeMap<u32, SignalHandlerRegistration>>,
 }
@@ -1300,6 +1302,31 @@ struct ActiveProcess {
     kernel_handle: KernelProcessHandle,
     runtime: GuestRuntimeKind,
     execution: ActiveExecution,
+    child_processes: BTreeMap<String, ActiveProcess>,
+    next_child_process_id: usize,
+}
+
+impl ActiveProcess {
+    fn new(
+        kernel_pid: u32,
+        kernel_handle: KernelProcessHandle,
+        runtime: GuestRuntimeKind,
+        execution: ActiveExecution,
+    ) -> Self {
+        Self {
+            kernel_pid,
+            kernel_handle,
+            runtime,
+            execution,
+            child_processes: BTreeMap::new(),
+            next_child_process_id: 0,
+        }
+    }
+
+    fn allocate_child_process_id(&mut self) -> String {
+        self.next_child_process_id += 1;
+        format!("child-{}", self.next_child_process_id)
+    }
 }
 
 #[derive(Debug)]
@@ -1821,6 +1848,7 @@ where
                 kernel,
                 loaded_snapshot,
                 configuration: VmConfiguration::default(),
+                command_guest_paths: BTreeMap::new(),
                 active_processes: BTreeMap::new(),
                 signal_states: BTreeMap::new(),
             },
@@ -1909,6 +1937,16 @@ where
                 vm_id: vm_id.clone(),
             },
         )?;
+        vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);
+        let mut execution_commands = vec![
+            String::from(JAVASCRIPT_COMMAND),
+            String::from(PYTHON_COMMAND),
+            String::from(WASM_COMMAND),
+        ];
+        execution_commands.extend(vm.command_guest_paths.keys().cloned());
+        vm.kernel
+            .register_driver(CommandDriver::new(EXECUTION_DRIVER_NAME, execution_commands))
+            .map_err(kernel_error)?;
         vm.configuration = VmConfiguration {
             mounts: payload.mounts.clone(),
             software: payload.software.clone(),
@@ -2388,12 +2426,7 @@ where
 
         vm.active_processes.insert(
             payload.process_id.clone(),
-            ActiveProcess {
-                kernel_pid: kernel_handle.pid(),
-                kernel_handle,
-                runtime: payload.runtime,
-                execution,
-            },
+            ActiveProcess::new(kernel_handle.pid(), kernel_handle, payload.runtime, execution),
         );
         self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
 
@@ -2854,11 +2887,12 @@ where
             ActiveExecutionEvent::Exited(exit_code) => {
                 let became_idle = {
                     let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-                    let process = vm
+                    let mut process = vm
                         .active_processes
                         .remove(process_id)
                         .expect("process should still exist");
                     vm.signal_states.remove(process_id);
+                    terminate_child_process_tree(&mut vm.kernel, &mut process);
                     process.kernel_handle.finish(exit_code);
                     let _ = vm.kernel.wait_and_reap(process.kernel_pid);
                     vm.active_processes.is_empty()
@@ -2958,295 +2992,493 @@ where
         }
     }
 
+    fn resolve_javascript_child_process_execution(
+        &self,
+        vm: &VmState,
+        request: &JavascriptChildProcessSpawnRequest,
+    ) -> Result<ResolvedChildProcessExecution, SidecarError> {
+        let guest_cwd = normalize_path(request.options.cwd.as_deref().unwrap_or("/"));
+        let host_cwd = host_mount_path_for_guest_path(vm, &guest_cwd).unwrap_or_else(|| {
+            let candidate = PathBuf::from(&guest_cwd);
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                vm.cwd.clone()
+            }
+        });
+        let mut env = vm.guest_env.clone();
+        env.extend(request.options.env.clone());
+
+        let (command, process_args) = if request.options.shell {
+            if vm.command_guest_paths.contains_key("sh") {
+                (
+                    String::from("sh"),
+                    vec![String::from("-c"), request.command.clone()],
+                )
+            } else {
+                let tokens = tokenize_shell_free_command(&request.command);
+                let Some((command, args)) = tokens.split_first() else {
+                    return Err(SidecarError::InvalidState(String::from(
+                        "child_process shell command must not be empty",
+                    )));
+                };
+                (command.clone(), args.to_vec())
+            }
+        } else {
+            (request.command.clone(), request.args.clone())
+        };
+
+        if matches!(command.as_str(), "node" | "npm" | "npx") {
+            let Some(entrypoint_specifier) = process_args.first() else {
+                return Err(SidecarError::InvalidState(format!(
+                    "{command} child_process spawn requires an entrypoint"
+                )));
+            };
+
+            let entrypoint = if is_path_like_specifier(entrypoint_specifier) {
+                let guest_entrypoint = if entrypoint_specifier.starts_with('/') {
+                    normalize_path(entrypoint_specifier)
+                } else if entrypoint_specifier.starts_with("file:") {
+                    normalize_path(entrypoint_specifier.trim_start_matches("file:"))
+                } else {
+                    normalize_path(&format!("{guest_cwd}/{entrypoint_specifier}"))
+                };
+                let host_entrypoint = if entrypoint_specifier.starts_with("./")
+                    || entrypoint_specifier.starts_with("../")
+                {
+                    host_cwd.join(entrypoint_specifier)
+                } else {
+                    host_mount_path_for_guest_path(vm, &guest_entrypoint).unwrap_or_else(|| {
+                        let candidate = PathBuf::from(&guest_entrypoint);
+                        if candidate.is_absolute() {
+                            candidate
+                        } else {
+                            host_cwd.join(&guest_entrypoint)
+                        }
+                    })
+                };
+                env.insert(
+                    String::from("AGENT_OS_GUEST_ENTRYPOINT"),
+                    guest_entrypoint,
+                );
+                host_entrypoint.to_string_lossy().into_owned()
+            } else {
+                entrypoint_specifier.clone()
+            };
+
+            return Ok(ResolvedChildProcessExecution {
+                command,
+                process_args: process_args.clone(),
+                runtime: GuestRuntimeKind::JavaScript,
+                entrypoint,
+                execution_args: process_args.iter().skip(1).cloned().collect(),
+                env,
+                guest_cwd,
+                host_cwd,
+            });
+        }
+
+        if command == PYTHON_COMMAND {
+            return Err(SidecarError::InvalidState(String::from(
+                "nested python child_process execution is not supported yet",
+            )));
+        }
+
+        let guest_entrypoint = vm
+            .command_guest_paths
+            .get(&command)
+            .ok_or_else(|| SidecarError::InvalidState(format!("command not found: {command}")))?;
+        let host_entrypoint =
+            host_mount_path_for_guest_path(vm, guest_entrypoint).unwrap_or_else(|| {
+                let candidate = PathBuf::from(guest_entrypoint);
+                if candidate.is_absolute() {
+                    candidate
+                } else {
+                    host_cwd.join(guest_entrypoint)
+                }
+            });
+
+        Ok(ResolvedChildProcessExecution {
+            command,
+            process_args: process_args.clone(),
+            runtime: GuestRuntimeKind::WebAssembly,
+            entrypoint: host_entrypoint.to_string_lossy().into_owned(),
+            execution_args: process_args,
+            env,
+            guest_cwd,
+            host_cwd,
+        })
+    }
+
+    fn spawn_javascript_child_process(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        request: JavascriptChildProcessSpawnRequest,
+    ) -> Result<Value, SidecarError> {
+        let resolved = {
+            let vm = self.vms.get(vm_id).expect("VM should exist");
+            self.resolve_javascript_child_process_execution(vm, &request)?
+        };
+
+        let (parent_kernel_pid, child_process_id) = {
+            let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+            let process = vm
+                .active_processes
+                .get_mut(process_id)
+                .expect("process should still exist");
+            (process.kernel_pid, process.allocate_child_process_id())
+        };
+
+        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let kernel_handle = vm
+            .kernel
+            .spawn_process(
+                &resolved.command,
+                resolved.process_args.clone(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    parent_pid: Some(parent_kernel_pid),
+                    env: resolved.env.clone(),
+                    cwd: Some(resolved.guest_cwd.clone()),
+                },
+            )
+            .map_err(kernel_error)?;
+        let kernel_pid = kernel_handle.pid();
+
+        let mut execution_env = resolved.env.clone();
+        execution_env.insert(
+            String::from("AGENT_OS_VIRTUAL_PROCESS_PID"),
+            kernel_pid.to_string(),
+        );
+        execution_env.insert(
+            String::from("AGENT_OS_VIRTUAL_PROCESS_PPID"),
+            parent_kernel_pid.to_string(),
+        );
+
+        let execution = match resolved.runtime {
+            GuestRuntimeKind::JavaScript => {
+                let context =
+                    self.javascript_engine
+                        .create_context(CreateJavascriptContextRequest {
+                            vm_id: vm_id.to_owned(),
+                            bootstrap_module: None,
+                            compile_cache_root: Some(self.cache_root.join("node-compile-cache")),
+                        });
+                let execution = self
+                    .javascript_engine
+                    .start_execution(StartJavascriptExecutionRequest {
+                        vm_id: vm_id.to_owned(),
+                        context_id: context.context_id,
+                        argv: std::iter::once(resolved.entrypoint.clone())
+                            .chain(resolved.execution_args.clone())
+                            .collect(),
+                        env: execution_env,
+                        cwd: resolved.host_cwd.clone(),
+                    })
+                    .map_err(javascript_error)?;
+                ActiveExecution::Javascript(execution)
+            }
+            GuestRuntimeKind::WebAssembly => {
+                let context = self.wasm_engine.create_context(CreateWasmContextRequest {
+                    vm_id: vm_id.to_owned(),
+                    module_path: Some(resolved.entrypoint.clone()),
+                });
+                let execution = self
+                    .wasm_engine
+                    .start_execution(StartWasmExecutionRequest {
+                        vm_id: vm_id.to_owned(),
+                        context_id: context.context_id,
+                        argv: resolved.execution_args.clone(),
+                        env: execution_env,
+                        cwd: resolved.host_cwd.clone(),
+                    })
+                    .map_err(wasm_error)?;
+                ActiveExecution::Wasm(execution)
+            }
+            GuestRuntimeKind::Python => unreachable!("python child_process execution is rejected"),
+        };
+
+        vm.active_processes
+            .get_mut(process_id)
+            .expect("process should still exist")
+            .child_processes
+            .insert(
+                child_process_id.clone(),
+                ActiveProcess::new(kernel_pid, kernel_handle, resolved.runtime, execution),
+            );
+
+        Ok(json!({
+            "childId": child_process_id,
+            "pid": kernel_pid,
+            "command": resolved.command,
+            "args": resolved.process_args,
+        }))
+    }
+
+    fn poll_javascript_child_process(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        child_process_id: &str,
+        wait_ms: u64,
+    ) -> Result<Value, SidecarError> {
+        loop {
+            let event = {
+                let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                let child = vm
+                    .active_processes
+                    .get_mut(process_id)
+                    .expect("process should still exist")
+                    .child_processes
+                    .get_mut(child_process_id)
+                    .ok_or_else(|| {
+                        SidecarError::InvalidState(format!(
+                            "unknown child process {child_process_id}"
+                        ))
+                    })?;
+                child
+                    .execution
+                    .poll_event(Duration::from_millis(wait_ms))
+                    .map_err(|error| SidecarError::Execution(error.to_string()))?
+            };
+
+            let Some(event) = event else {
+                return Ok(Value::Null);
+            };
+
+            match event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    return Ok(json!({
+                        "type": "stdout",
+                        "data": javascript_sync_rpc_bytes_value(&chunk),
+                    }));
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    return Ok(json!({
+                        "type": "stderr",
+                        "data": javascript_sync_rpc_bytes_value(&chunk),
+                    }));
+                }
+                ActiveExecutionEvent::Exited(exit_code) => {
+                    let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                    let child = vm
+                        .active_processes
+                        .get_mut(process_id)
+                        .expect("process should still exist")
+                        .child_processes
+                        .remove(child_process_id)
+                        .expect("child process should still exist");
+                    child.kernel_handle.finish(exit_code);
+                    let _ = vm.kernel.wait_and_reap(child.kernel_pid);
+                    return Ok(json!({
+                        "type": "exit",
+                        "exitCode": exit_code,
+                    }));
+                }
+                ActiveExecutionEvent::JavascriptSyncRpcRequest(request) => {
+                    let response = {
+                        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                        let child_kernel_pid = vm
+                            .active_processes
+                            .get(process_id)
+                            .expect("process should still exist")
+                            .child_processes
+                            .get(child_process_id)
+                            .expect("child process should still exist")
+                            .kernel_pid;
+                        if request.method.starts_with("child_process.") {
+                            Err(SidecarError::InvalidState(String::from(
+                                "nested child_process calls from a child process are not supported yet",
+                            )))
+                        } else {
+                            service_javascript_fs_sync_rpc(vm, child_kernel_pid, &request)
+                        }
+                    };
+
+                    let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                    let child = vm
+                        .active_processes
+                        .get_mut(process_id)
+                        .expect("process should still exist")
+                        .child_processes
+                        .get_mut(child_process_id)
+                        .expect("child process should still exist");
+                    match response {
+                        Ok(result) => child
+                            .execution
+                            .respond_javascript_sync_rpc_success(request.id, result)
+                            .map_err(|error| SidecarError::Execution(error.to_string()))?,
+                        Err(error) => child
+                            .execution
+                            .respond_javascript_sync_rpc_error(
+                                request.id,
+                                "ERR_AGENT_OS_NODE_SYNC_RPC",
+                                error.to_string(),
+                            )
+                            .map_err(|error| SidecarError::Execution(error.to_string()))?,
+                    }
+                }
+                ActiveExecutionEvent::PythonVfsRpcRequest(_) => {
+                    return Err(SidecarError::InvalidState(String::from(
+                        "nested Python child_process execution is not supported yet",
+                    )));
+                }
+                ActiveExecutionEvent::SignalState { .. } => {}
+            }
+        }
+    }
+
+    fn write_javascript_child_process_stdin(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        child_process_id: &str,
+        chunk: &[u8],
+    ) -> Result<(), SidecarError> {
+        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let child = vm
+            .active_processes
+            .get_mut(process_id)
+            .expect("process should still exist")
+            .child_processes
+            .get_mut(child_process_id)
+            .ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown child process {child_process_id}"))
+            })?;
+        child.execution.write_stdin(chunk)
+    }
+
+    fn close_javascript_child_process_stdin(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        child_process_id: &str,
+    ) -> Result<(), SidecarError> {
+        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let child = vm
+            .active_processes
+            .get_mut(process_id)
+            .expect("process should still exist")
+            .child_processes
+            .get_mut(child_process_id)
+            .ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown child process {child_process_id}"))
+            })?;
+        child.execution.close_stdin()
+    }
+
+    fn kill_javascript_child_process(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        child_process_id: &str,
+        signal: &str,
+    ) -> Result<(), SidecarError> {
+        let signal = parse_signal(signal)?;
+        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let child = vm
+            .active_processes
+            .get_mut(process_id)
+            .expect("process should still exist")
+            .child_processes
+            .get_mut(child_process_id)
+            .ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown child process {child_process_id}"))
+            })?;
+        vm.kernel
+            .kill_process(EXECUTION_DRIVER_NAME, child.kernel_pid, signal)
+            .map_err(kernel_error)
+    }
+
     fn handle_javascript_sync_rpc_request(
         &mut self,
         vm_id: &str,
         process_id: &str,
         request: JavascriptSyncRpcRequest,
     ) -> Result<(), SidecarError> {
-        let response: Result<Value, SidecarError> = {
-            let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-            let kernel_pid = vm
-                .active_processes
-                .get(process_id)
-                .expect("process should still exist")
-                .kernel_pid;
-            match request.method.as_str() {
-                "fs.open" | "fs.openSync" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem open path")?;
-                    let flags =
-                        javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem open flags")?;
-                    let mode = javascript_sync_rpc_arg_u32_optional(&request.args, 2, "filesystem open mode")?;
-                    vm.kernel
-                        .fd_open(EXECUTION_DRIVER_NAME, kernel_pid, path, flags, mode)
-                        .map(|fd| json!(fd))
-                        .map_err(kernel_error)
-                }
-                "fs.read" | "fs.readSync" => {
-                    let fd =
-                        javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem read fd")?;
-                    let length = usize::try_from(javascript_sync_rpc_arg_u64(
-                        &request.args,
-                        1,
-                        "filesystem read length",
-                    )?)
-                    .map_err(|_| {
-                        SidecarError::InvalidState(
-                            "filesystem read length must fit within usize".to_string(),
-                        )
+        let response: Result<Value, SidecarError> = match request.method.as_str() {
+            "child_process.spawn" => {
+                let payload = request
+                    .args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| {
+                        SidecarError::InvalidState(String::from(
+                            "child_process.spawn requires a request payload",
+                        ))
+                    })
+                    .and_then(|value| {
+                        serde_json::from_value::<JavascriptChildProcessSpawnRequest>(value)
+                            .map_err(|error| {
+                                SidecarError::InvalidState(format!(
+                                    "invalid child_process.spawn payload: {error}"
+                                ))
+                            })
                     })?;
-                    let position = javascript_sync_rpc_arg_u64_optional(
-                        &request.args,
-                        2,
-                        "filesystem read position",
-                    )?;
-                    let bytes = match position {
-                        Some(offset) => vm
-                            .kernel
-                            .fd_pread(EXECUTION_DRIVER_NAME, kernel_pid, fd, length, offset),
-                        None => vm
-                            .kernel
-                            .fd_read(EXECUTION_DRIVER_NAME, kernel_pid, fd, length),
-                    };
-                    bytes.map(|payload| javascript_sync_rpc_bytes_value(&payload))
-                        .map_err(kernel_error)
-                }
-                "fs.write" | "fs.writeSync" => {
-                    let fd =
-                        javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem write fd")?;
-                    let contents = javascript_sync_rpc_bytes_arg(
-                        &request.args,
-                        1,
-                        "filesystem write contents",
-                    )?;
-                    let position = javascript_sync_rpc_arg_u64_optional(
-                        &request.args,
-                        2,
-                        "filesystem write position",
-                    )?;
-                    let written = match position {
-                        Some(offset) => vm.kernel.fd_pwrite(
-                            EXECUTION_DRIVER_NAME,
-                            kernel_pid,
-                            fd,
-                            &contents,
-                            offset,
-                        ),
-                        None => vm
-                            .kernel
-                            .fd_write(EXECUTION_DRIVER_NAME, kernel_pid, fd, &contents),
-                    };
-                    written.map(|count| json!(count)).map_err(kernel_error)
-                }
-                "fs.close" | "fs.closeSync" => {
-                    let fd =
-                        javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem close fd")?;
-                    vm.kernel
-                        .fd_close(EXECUTION_DRIVER_NAME, kernel_pid, fd)
-                        .map(|()| Value::Null)
-                        .map_err(kernel_error)
-                }
-                "fs.fstat" | "fs.fstatSync" => {
-                    let fd =
-                        javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem fstat fd")?;
-                    vm.kernel
-                        .fd_stat(EXECUTION_DRIVER_NAME, kernel_pid, fd)
-                        .map_err(kernel_error)?;
-                    vm.kernel
-                        .dev_fd_stat(EXECUTION_DRIVER_NAME, kernel_pid, fd)
-                        .map(javascript_sync_rpc_stat_value)
-                        .map_err(kernel_error)
-                }
-                "fs.readFileSync" | "fs.promises.readFile" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readFile path")?;
-                    let encoding = javascript_sync_rpc_encoding(&request.args);
-                    vm.kernel
-                        .read_file(path)
-                        .map(|content| match encoding.as_deref() {
-                            Some("utf8") | Some("utf-8") => {
-                                Value::String(String::from_utf8_lossy(&content).into_owned())
-                            }
-                            _ => javascript_sync_rpc_bytes_value(&content),
-                        })
-                        .map_err(kernel_error)
-                }
-                "fs.writeFileSync" | "fs.promises.writeFile" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem writeFile path")?;
-                    let contents = javascript_sync_rpc_bytes_arg(
-                        &request.args,
-                        1,
-                        "filesystem writeFile contents",
-                    )?;
-                    vm.kernel
-                        .write_file(path, contents)
-                        .map(|()| Value::Null)
-                        .map_err(kernel_error)
-                }
-                "fs.statSync" | "fs.promises.stat" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem stat path")?;
-                    vm.kernel
-                        .stat(path)
-                        .map(javascript_sync_rpc_stat_value)
-                        .map_err(kernel_error)
-                }
-                "fs.lstatSync" | "fs.promises.lstat" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem lstat path")?;
-                    vm.kernel
-                        .lstat(path)
-                        .map(javascript_sync_rpc_stat_value)
-                        .map_err(kernel_error)
-                }
-                "fs.readdirSync" | "fs.promises.readdir" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readdir path")?;
-                    vm.kernel
-                        .read_dir(path)
-                        .map(javascript_sync_rpc_readdir_value)
-                        .map_err(kernel_error)
-                }
-                "fs.mkdirSync" | "fs.promises.mkdir" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem mkdir path")?;
-                    let recursive = javascript_sync_rpc_option_bool(&request.args, 1, "recursive")
-                        .unwrap_or(false);
-                    vm.kernel
-                        .mkdir(path, recursive)
-                        .map(|()| Value::Null)
-                        .map_err(kernel_error)
-                }
-                "fs.accessSync" | "fs.promises.access" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem access path")?;
-                    vm.kernel
-                        .stat(path)
-                        .map(|_| Value::Null)
-                        .map_err(kernel_error)
-                }
-                "fs.copyFileSync" | "fs.promises.copyFile" => {
-                    let source = javascript_sync_rpc_arg_str(
-                        &request.args,
-                        0,
-                        "filesystem copyFile source",
-                    )?;
-                    let destination = javascript_sync_rpc_arg_str(
-                        &request.args,
-                        1,
-                        "filesystem copyFile destination",
-                    )?;
-                    let contents = vm.kernel.read_file(source).map_err(kernel_error)?;
-                    vm.kernel
-                        .write_file(destination, contents)
-                        .map(|()| Value::Null)
-                        .map_err(kernel_error)
-                }
-                "fs.existsSync" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem exists path")?;
-                    vm.kernel
-                        .exists(path)
-                        .map(Value::Bool)
-                        .map_err(kernel_error)
-                }
-                "fs.readlinkSync" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readlink path")?;
-                    vm.kernel
-                        .read_link(path)
-                        .map(Value::String)
-                        .map_err(kernel_error)
-                }
-                "fs.symlinkSync" => {
-                    let target =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem symlink target")?;
-                    let link_path =
-                        javascript_sync_rpc_arg_str(&request.args, 1, "filesystem symlink path")?;
-                    vm.kernel
-                        .symlink(target, link_path)
-                        .map(|()| Value::Null)
-                        .map_err(kernel_error)
-                }
-                "fs.linkSync" => {
-                    let source =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem link source")?;
-                    let destination =
-                        javascript_sync_rpc_arg_str(&request.args, 1, "filesystem link path")?;
-                    vm.kernel
-                        .link(source, destination)
-                        .map(|()| Value::Null)
-                        .map_err(kernel_error)
-                }
-                "fs.renameSync" | "fs.promises.rename" => {
-                    let source =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem rename source")?;
-                    let destination = javascript_sync_rpc_arg_str(
-                        &request.args,
-                        1,
-                        "filesystem rename destination",
-                    )?;
-                    vm.kernel
-                        .rename(source, destination)
-                        .map(|()| Value::Null)
-                        .map_err(kernel_error)
-                }
-                "fs.rmdirSync" | "fs.promises.rmdir" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem rmdir path")?;
-                    vm.kernel
-                        .remove_dir(path)
-                        .map(|()| Value::Null)
-                        .map_err(kernel_error)
-                }
-                "fs.unlinkSync" | "fs.promises.unlink" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem unlink path")?;
-                    vm.kernel
-                        .remove_file(path)
-                        .map(|()| Value::Null)
-                        .map_err(kernel_error)
-                }
-                "fs.chmodSync" | "fs.promises.chmod" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem chmod path")?;
-                    let mode =
-                        javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem chmod mode")?;
-                    vm.kernel
-                        .chmod(path, mode)
-                        .map(|()| Value::Null)
-                        .map_err(kernel_error)
-                }
-                "fs.chownSync" | "fs.promises.chown" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem chown path")?;
-                    let uid =
-                        javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem chown uid")?;
-                    let gid =
-                        javascript_sync_rpc_arg_u32(&request.args, 2, "filesystem chown gid")?;
-                    vm.kernel
-                        .chown(path, uid, gid)
-                        .map(|()| Value::Null)
-                        .map_err(kernel_error)
-                }
-                "fs.utimesSync" | "fs.promises.utimes" => {
-                    let path =
-                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem utimes path")?;
-                    let atime_ms =
-                        javascript_sync_rpc_arg_u64(&request.args, 1, "filesystem utimes atime")?;
-                    let mtime_ms =
-                        javascript_sync_rpc_arg_u64(&request.args, 2, "filesystem utimes mtime")?;
-                    vm.kernel
-                        .utimes(path, atime_ms, mtime_ms)
-                        .map(|()| Value::Null)
-                        .map_err(kernel_error)
-                }
-                _ => Err(SidecarError::InvalidState(format!(
-                    "unsupported JavaScript sync RPC method {}",
-                    request.method
-                ))),
+                self.spawn_javascript_child_process(vm_id, process_id, payload)
+            }
+            "child_process.poll" => {
+                let child_process_id = javascript_sync_rpc_arg_str(
+                    &request.args,
+                    0,
+                    "child_process.poll child id",
+                )?;
+                let wait_ms = javascript_sync_rpc_arg_u64_optional(
+                    &request.args,
+                    1,
+                    "child_process.poll wait ms",
+                )?
+                .unwrap_or_default();
+                self.poll_javascript_child_process(vm_id, process_id, child_process_id, wait_ms)
+            }
+            "child_process.write_stdin" => {
+                let child_process_id = javascript_sync_rpc_arg_str(
+                    &request.args,
+                    0,
+                    "child_process.write_stdin child id",
+                )?;
+                let chunk = javascript_sync_rpc_bytes_arg(
+                    &request.args,
+                    1,
+                    "child_process.write_stdin chunk",
+                )?;
+                self.write_javascript_child_process_stdin(
+                    vm_id,
+                    process_id,
+                    child_process_id,
+                    &chunk,
+                )?;
+                Ok(Value::Null)
+            }
+            "child_process.close_stdin" => {
+                let child_process_id = javascript_sync_rpc_arg_str(
+                    &request.args,
+                    0,
+                    "child_process.close_stdin child id",
+                )?;
+                self.close_javascript_child_process_stdin(vm_id, process_id, child_process_id)?;
+                Ok(Value::Null)
+            }
+            "child_process.kill" => {
+                let child_process_id = javascript_sync_rpc_arg_str(
+                    &request.args,
+                    0,
+                    "child_process.kill child id",
+                )?;
+                let signal =
+                    javascript_sync_rpc_arg_str(&request.args, 1, "child_process.kill signal")?;
+                self.kill_javascript_child_process(vm_id, process_id, child_process_id, signal)?;
+                Ok(Value::Null)
+            }
+            _ => {
+                let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                let kernel_pid = vm
+                    .active_processes
+                    .get(process_id)
+                    .expect("process should still exist")
+                    .kernel_pid;
+                service_javascript_fs_sync_rpc(vm, kernel_pid, &request)
             }
         };
 
@@ -4194,6 +4426,138 @@ fn python_file_entrypoint(entrypoint: &str) -> Option<PathBuf> {
         .then(|| path.to_path_buf())
 }
 
+fn discover_command_guest_paths(kernel: &mut SidecarKernel) -> BTreeMap<String, String> {
+    let mut command_guest_paths = BTreeMap::new();
+    let Ok(command_roots) = kernel.read_dir("/__agentos/commands") else {
+        return command_guest_paths;
+    };
+
+    let mut ordered_roots = command_roots
+        .into_iter()
+        .filter(|entry| !entry.is_empty() && entry.chars().all(|ch| ch.is_ascii_digit()))
+        .collect::<Vec<_>>();
+    ordered_roots.sort();
+
+    for root in ordered_roots {
+        let guest_root = format!("/__agentos/commands/{root}");
+        let Ok(entries) = kernel.read_dir(&guest_root) else {
+            continue;
+        };
+
+        for entry in entries {
+            if entry.starts_with('.') || command_guest_paths.contains_key(&entry) {
+                continue;
+            }
+            command_guest_paths.insert(entry.clone(), format!("{guest_root}/{entry}"));
+        }
+    }
+
+    command_guest_paths
+}
+
+fn is_path_like_specifier(specifier: &str) -> bool {
+    specifier.starts_with('/')
+        || specifier.starts_with("./")
+        || specifier.starts_with("../")
+        || specifier.starts_with("file:")
+}
+
+fn tokenize_shell_free_command(command: &str) -> Vec<String> {
+    command
+        .split_whitespace()
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn host_mount_path_for_guest_path(vm: &VmState, guest_path: &str) -> Option<PathBuf> {
+    let normalized = normalize_path(guest_path);
+
+    let mut mounts = vm
+        .configuration
+        .mounts
+        .iter()
+        .filter_map(|mount| {
+            (mount.plugin.id == "host_dir")
+                .then(|| {
+                    mount
+                        .plugin
+                        .config
+                        .get("hostPath")
+                        .and_then(Value::as_str)
+                        .map(|host_path| (mount.guest_path.as_str(), host_path))
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    mounts.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+
+    for (guest_root, host_root) in mounts {
+        if normalized != guest_root
+            && !normalized.starts_with(&format!("{guest_root}/"))
+        {
+            continue;
+        }
+
+        let suffix = normalized
+            .strip_prefix(guest_root)
+            .unwrap_or_default()
+            .trim_start_matches('/');
+        let mut path = PathBuf::from(host_root);
+        if !suffix.is_empty() {
+            path.push(suffix);
+        }
+        return Some(path);
+    }
+
+    None
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct JavascriptChildProcessSpawnOptions {
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    shell: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct JavascriptChildProcessSpawnRequest {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    options: JavascriptChildProcessSpawnOptions,
+}
+
+#[derive(Debug)]
+struct ResolvedChildProcessExecution {
+    command: String,
+    process_args: Vec<String>,
+    runtime: GuestRuntimeKind,
+    entrypoint: String,
+    execution_args: Vec<String>,
+    env: BTreeMap<String, String>,
+    guest_cwd: String,
+    host_cwd: PathBuf,
+}
+
+fn terminate_child_process_tree(kernel: &mut SidecarKernel, process: &mut ActiveProcess) {
+    let child_ids = process.child_processes.keys().cloned().collect::<Vec<_>>();
+    for child_id in child_ids {
+        let Some(mut child) = process.child_processes.remove(&child_id) else {
+            continue;
+        };
+        terminate_child_process_tree(kernel, &mut child);
+        let _ = kernel.kill_process(EXECUTION_DRIVER_NAME, child.kernel_pid, SIGTERM);
+        let _ = signal_runtime_process(child.execution.child_pid(), SIGTERM);
+        child.kernel_handle.finish(0);
+        let _ = kernel.wait_and_reap(child.kernel_pid);
+    }
+}
+
 fn javascript_sync_rpc_arg_str<'a>(
     args: &'a [Value],
     index: usize,
@@ -4339,6 +4703,253 @@ fn javascript_sync_rpc_bytes_value(bytes: &[u8]) -> Value {
         "__agentOsType": "bytes",
         "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
     })
+}
+
+fn service_javascript_fs_sync_rpc(
+    vm: &mut VmState,
+    kernel_pid: u32,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    match request.method.as_str() {
+        "fs.open" | "fs.openSync" => {
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem open path")?;
+            let flags = javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem open flags")?;
+            let mode =
+                javascript_sync_rpc_arg_u32_optional(&request.args, 2, "filesystem open mode")?;
+            vm.kernel
+                .fd_open(EXECUTION_DRIVER_NAME, kernel_pid, path, flags, mode)
+                .map(|fd| json!(fd))
+                .map_err(kernel_error)
+        }
+        "fs.read" | "fs.readSync" => {
+            let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem read fd")?;
+            let length = usize::try_from(javascript_sync_rpc_arg_u64(
+                &request.args,
+                1,
+                "filesystem read length",
+            )?)
+            .map_err(|_| {
+                SidecarError::InvalidState(
+                    "filesystem read length must fit within usize".to_string(),
+                )
+            })?;
+            let position =
+                javascript_sync_rpc_arg_u64_optional(&request.args, 2, "filesystem read position")?;
+            let bytes = match position {
+                Some(offset) => vm
+                    .kernel
+                    .fd_pread(EXECUTION_DRIVER_NAME, kernel_pid, fd, length, offset),
+                None => vm
+                    .kernel
+                    .fd_read(EXECUTION_DRIVER_NAME, kernel_pid, fd, length),
+            };
+            bytes.map(|payload| javascript_sync_rpc_bytes_value(&payload))
+                .map_err(kernel_error)
+        }
+        "fs.write" | "fs.writeSync" => {
+            let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem write fd")?;
+            let contents =
+                javascript_sync_rpc_bytes_arg(&request.args, 1, "filesystem write contents")?;
+            let position = javascript_sync_rpc_arg_u64_optional(
+                &request.args,
+                2,
+                "filesystem write position",
+            )?;
+            let written = match position {
+                Some(offset) => vm.kernel.fd_pwrite(
+                    EXECUTION_DRIVER_NAME,
+                    kernel_pid,
+                    fd,
+                    &contents,
+                    offset,
+                ),
+                None => vm
+                    .kernel
+                    .fd_write(EXECUTION_DRIVER_NAME, kernel_pid, fd, &contents),
+            };
+            written.map(|count| json!(count)).map_err(kernel_error)
+        }
+        "fs.close" | "fs.closeSync" => {
+            let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem close fd")?;
+            vm.kernel
+                .fd_close(EXECUTION_DRIVER_NAME, kernel_pid, fd)
+                .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        "fs.fstat" | "fs.fstatSync" => {
+            let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem fstat fd")?;
+            vm.kernel
+                .fd_stat(EXECUTION_DRIVER_NAME, kernel_pid, fd)
+                .map_err(kernel_error)?;
+            vm.kernel
+                .dev_fd_stat(EXECUTION_DRIVER_NAME, kernel_pid, fd)
+                .map(javascript_sync_rpc_stat_value)
+                .map_err(kernel_error)
+        }
+        "fs.readFileSync" | "fs.promises.readFile" => {
+            let path =
+                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readFile path")?;
+            let encoding = javascript_sync_rpc_encoding(&request.args);
+            vm.kernel
+                .read_file(path)
+                .map(|content| match encoding.as_deref() {
+                    Some("utf8") | Some("utf-8") => {
+                        Value::String(String::from_utf8_lossy(&content).into_owned())
+                    }
+                    _ => javascript_sync_rpc_bytes_value(&content),
+                })
+                .map_err(kernel_error)
+        }
+        "fs.writeFileSync" | "fs.promises.writeFile" => {
+            let path =
+                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem writeFile path")?;
+            let contents =
+                javascript_sync_rpc_bytes_arg(&request.args, 1, "filesystem writeFile contents")?;
+            vm.kernel
+                .write_file(path, contents)
+                .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        "fs.statSync" | "fs.promises.stat" => {
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem stat path")?;
+            vm.kernel
+                .stat(path)
+                .map(javascript_sync_rpc_stat_value)
+                .map_err(kernel_error)
+        }
+        "fs.lstatSync" | "fs.promises.lstat" => {
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem lstat path")?;
+            vm.kernel
+                .lstat(path)
+                .map(javascript_sync_rpc_stat_value)
+                .map_err(kernel_error)
+        }
+        "fs.readdirSync" | "fs.promises.readdir" => {
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readdir path")?;
+            vm.kernel
+                .read_dir(path)
+                .map(javascript_sync_rpc_readdir_value)
+                .map_err(kernel_error)
+        }
+        "fs.mkdirSync" | "fs.promises.mkdir" => {
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem mkdir path")?;
+            let recursive =
+                javascript_sync_rpc_option_bool(&request.args, 1, "recursive").unwrap_or(false);
+            vm.kernel
+                .mkdir(path, recursive)
+                .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        "fs.accessSync" | "fs.promises.access" => {
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem access path")?;
+            vm.kernel.stat(path).map(|_| Value::Null).map_err(kernel_error)
+        }
+        "fs.copyFileSync" | "fs.promises.copyFile" => {
+            let source =
+                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem copyFile source")?;
+            let destination = javascript_sync_rpc_arg_str(
+                &request.args,
+                1,
+                "filesystem copyFile destination",
+            )?;
+            let contents = vm.kernel.read_file(source).map_err(kernel_error)?;
+            vm.kernel
+                .write_file(destination, contents)
+                .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        "fs.existsSync" => {
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem exists path")?;
+            vm.kernel.exists(path).map(Value::Bool).map_err(kernel_error)
+        }
+        "fs.readlinkSync" => {
+            let path =
+                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readlink path")?;
+            vm.kernel
+                .read_link(path)
+                .map(Value::String)
+                .map_err(kernel_error)
+        }
+        "fs.symlinkSync" => {
+            let target =
+                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem symlink target")?;
+            let link_path =
+                javascript_sync_rpc_arg_str(&request.args, 1, "filesystem symlink path")?;
+            vm.kernel
+                .symlink(target, link_path)
+                .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        "fs.linkSync" => {
+            let source =
+                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem link source")?;
+            let destination =
+                javascript_sync_rpc_arg_str(&request.args, 1, "filesystem link path")?;
+            vm.kernel
+                .link(source, destination)
+                .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        "fs.renameSync" | "fs.promises.rename" => {
+            let source =
+                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem rename source")?;
+            let destination = javascript_sync_rpc_arg_str(
+                &request.args,
+                1,
+                "filesystem rename destination",
+            )?;
+            vm.kernel
+                .rename(source, destination)
+                .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        "fs.rmdirSync" | "fs.promises.rmdir" => {
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem rmdir path")?;
+            vm.kernel
+                .remove_dir(path)
+                .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        "fs.unlinkSync" | "fs.promises.unlink" => {
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem unlink path")?;
+            vm.kernel
+                .remove_file(path)
+                .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        "fs.chmodSync" | "fs.promises.chmod" => {
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem chmod path")?;
+            let mode = javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem chmod mode")?;
+            vm.kernel
+                .chmod(path, mode)
+                .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        "fs.chownSync" | "fs.promises.chown" => {
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem chown path")?;
+            let uid = javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem chown uid")?;
+            let gid = javascript_sync_rpc_arg_u32(&request.args, 2, "filesystem chown gid")?;
+            vm.kernel
+                .chown(path, uid, gid)
+                .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        "fs.utimesSync" | "fs.promises.utimes" => {
+            let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem utimes path")?;
+            let atime_ms =
+                javascript_sync_rpc_arg_u64(&request.args, 1, "filesystem utimes atime")?;
+            let mtime_ms =
+                javascript_sync_rpc_arg_u64(&request.args, 2, "filesystem utimes mtime")?;
+            vm.kernel
+                .utimes(path, atime_ms, mtime_ms)
+                .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        _ => Err(SidecarError::InvalidState(format!(
+            "unsupported JavaScript sync RPC method {}",
+            request.method
+        ))),
+    }
 }
 
 fn kernel_error(error: KernelError) -> SidecarError {
@@ -5621,12 +6232,12 @@ export async function loadPyodide() {
             let vm = sidecar.vms.get_mut(&vm_id).expect("python vm");
             vm.active_processes.insert(
                 String::from("proc-python-vfs"),
-                ActiveProcess {
-                    kernel_pid: kernel_handle.pid(),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
                     kernel_handle,
-                    runtime: GuestRuntimeKind::Python,
-                    execution: ActiveExecution::Python(execution),
-                },
+                    GuestRuntimeKind::Python,
+                    ActiveExecution::Python(execution),
+                ),
             );
         }
 
@@ -5747,12 +6358,12 @@ await new Promise(() => {});
             let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
             vm.active_processes.insert(
                 String::from("proc-js-sync"),
-                ActiveProcess {
-                    kernel_pid: kernel_handle.pid(),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
                     kernel_handle,
-                    runtime: GuestRuntimeKind::JavaScript,
-                    execution: ActiveExecution::Javascript(execution),
-                },
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
             );
         }
 
@@ -5955,7 +6566,12 @@ console.log(
                 vm_id: vm_id.clone(),
                 context_id: context.context_id,
                 argv: vec![String::from("./entry.mjs")],
-                env: BTreeMap::new(),
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"child_process\",\"console\",\"crypto\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
                 cwd: cwd.clone(),
             })
             .expect("start fake javascript execution");
@@ -5979,12 +6595,12 @@ console.log(
             let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
             vm.active_processes.insert(
                 String::from("proc-js-fd"),
-                ActiveProcess {
-                    kernel_pid: kernel_handle.pid(),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
                     kernel_handle,
-                    runtime: GuestRuntimeKind::JavaScript,
-                    execution: ActiveExecution::Javascript(execution),
-                },
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
             );
         }
 
@@ -6102,7 +6718,12 @@ await new Promise(() => {});
                 vm_id: vm_id.clone(),
                 context_id: context.context_id,
                 argv: vec![String::from("./entry.mjs")],
-                env: BTreeMap::new(),
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"child_process\",\"crypto\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
                 cwd: cwd.clone(),
             })
             .expect("start fake javascript execution");
@@ -6126,12 +6747,12 @@ await new Promise(() => {});
             let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
             vm.active_processes.insert(
                 String::from("proc-js-promises"),
-                ActiveProcess {
-                    kernel_pid: kernel_handle.pid(),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
                     kernel_handle,
-                    runtime: GuestRuntimeKind::JavaScript,
-                    execution: ActiveExecution::Javascript(execution),
-                },
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
             );
         }
 
@@ -6185,5 +6806,183 @@ await new Promise(() => {});
                 .expect("remove fake javascript process")
         };
         let _ = signal_runtime_process(process.execution.child_pid(), SIGTERM);
+    }
+
+    #[test]
+    fn javascript_child_process_rpc_spawns_nested_node_processes_inside_vm_kernel() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-child-process-cwd");
+        write_fixture(
+            &cwd.join("child.mjs"),
+            r#"
+import fs from "node:fs";
+
+const note = fs.readFileSync("/rpc/note.txt", "utf8").trim();
+console.log(`${process.argv[2]}:${process.pid}:${process.ppid}:${note}`);
+"#,
+        );
+        write_fixture(
+            &cwd.join("entry.mjs"),
+            r#"
+const { execSync, spawn } = require("node:child_process");
+
+const child = spawn("node", ["./child.mjs", "spawn"], {
+  stdio: ["ignore", "pipe", "pipe"],
+});
+let spawnOutput = "";
+child.stdout.setEncoding("utf8");
+child.stdout.on("data", (chunk) => {
+  spawnOutput += chunk;
+});
+await new Promise((resolve, reject) => {
+  child.on("error", reject);
+  child.on("close", (code) => {
+    if (code !== 0) {
+      reject(new Error(`spawn exit ${code}`));
+      return;
+    }
+    resolve();
+  });
+});
+
+const execOutput = execSync("node ./child.mjs exec", {
+  encoding: "utf8",
+}).trim();
+
+console.log(JSON.stringify({
+  parentPid: process.pid,
+  childPid: child.pid,
+  spawnOutput: spawnOutput.trim(),
+  execOutput,
+}));
+"#,
+        );
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .write_file("/rpc/note.txt", b"hello from nested child".to_vec())
+                .expect("seed rpc note");
+        }
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"child_process\",\"crypto\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-child"),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
+            );
+        }
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = None;
+        for _ in 0..96 {
+            let next_event = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-child")
+                    .map(|process| {
+                        process
+                            .execution
+                            .poll_event(Duration::from_secs(5))
+                            .expect("poll javascript child_process event")
+                    })
+                    .flatten()
+            };
+            let Some(event) = next_event else {
+                if exit_code.is_some() {
+                    break;
+                }
+                continue;
+            };
+
+            match &event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    stdout.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    stderr.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Exited(code) => exit_code = Some(*code),
+                _ => {}
+            }
+
+            sidecar
+                .handle_execution_event(&vm_id, "proc-js-child", event)
+                .expect("handle javascript child_process event");
+        }
+
+        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse child_process JSON");
+        let parent_pid = parsed["parentPid"].as_u64().expect("parent pid") as u32;
+        let child_pid = parsed["childPid"].as_u64().expect("child pid") as u32;
+        let spawn_parts = parsed["spawnOutput"]
+            .as_str()
+            .expect("spawn output")
+            .split(':')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let exec_parts = parsed["execOutput"]
+            .as_str()
+            .expect("exec output")
+            .split(':')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+
+        assert_eq!(spawn_parts[0], "spawn");
+        assert_eq!(spawn_parts[1].parse::<u32>().expect("spawn pid"), child_pid);
+        assert_eq!(spawn_parts[2].parse::<u32>().expect("spawn ppid"), parent_pid);
+        assert_eq!(spawn_parts[3], "hello from nested child");
+        assert_eq!(exec_parts[0], "exec");
+        assert_eq!(exec_parts[2].parse::<u32>().expect("exec ppid"), parent_pid);
+        assert_eq!(exec_parts[3], "hello from nested child");
     }
 }

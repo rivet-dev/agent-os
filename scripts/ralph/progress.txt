@@ -16,6 +16,7 @@
 - Guest Node `fs` and `fs/promises` polyfills now share the same JavaScript sync-RPC transport; async methods should dispatch as `fs.promises.*` RPC calls, and guest-visible `readdir` results must filter the kernel VFS `.` / `..` entries back out to match Node semantics.
 - Non-fd guest `fs` sync methods should be overridden onto the wrapped module via a dedicated sync-RPC helper in `crates/execution/src/node_import_cache.rs`; keep fd/stream APIs on the translated host module until their kernel-backed port is implemented, and add matching `fs.*Sync` dispatch arms in `crates/sidecar/src/service.rs`.
 - Guest Node `fs` fd/stream support should stay on the shared sync-RPC bridge end-to-end: `open/read/write/close/fstat` and `createReadStream`/`createWriteStream` all use the same RPC surface, while runner-internal sync-RPC pipe writes must use snapped host `node:fs` bindings because `syncBuiltinModuleExports(...)` mutates builtin modules for guest code.
+- Synthetic guest `ChildProcess` handles in `crates/execution/src/node_import_cache.rs` must stay ref'd by default and only `unref()` their poll timer when guest code explicitly asks; otherwise `exec()`/top-level `await` can terminate early with Node's unsettled-top-level-await exit.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -291,4 +292,20 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Sync `fs` methods should share the same JS bridge as `fs.promises`, but they need a separate override layer on the wrapped module so fd/stream APIs can remain on the old host-backed path until US-016 lands.
   - Gotchas encountered: `readdirSync({ withFileTypes: true })` cannot reuse the old synthetic dirent helper for RPC-backed paths; it needs per-entry `lstatSync` round-trips to reconstruct Dirent-like type methods without falling back to host `node:fs`.
   - Useful context: `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript javascript_execution_surfaces_shared_array_buffer_sync_rpc_requests -- --exact`, `cargo test -p agent-os-execution --test javascript javascript_execution_redirects_computed_node_fs_imports_through_builtin_assets -- --exact`, `cargo test -p agent-os-sidecar service::tests::javascript_sync_rpc_requests_proxy_into_the_vm_kernel_filesystem -- --exact`, `cargo check -p agent-os-execution`, and `cargo check -p agent-os-sidecar` all pass after this change.
+---
+## 2026-04-04 22:48:51 PDT - US-017
+- What was implemented
+- Replaced the guest `wrapChildProcessModule(...)` path-translating wrapper with an RPC-backed `child_process` polyfill that routes `spawn`, `exec`, `execFile`, `spawnSync`, `execSync`, `execFileSync`, and `fork` through the shared Agent OS sync bridge.
+- Added sidecar child-process RPC handlers that resolve nested guest commands into kernel-managed runtime launches, stream stdio through synthetic `ChildProcess` objects, route `.kill()` through kernel/runtime signaling, and tear down nested children when the parent process exits.
+- Added focused execution and sidecar regressions covering callback-based `exec`/`execSync` behavior and nested `node` child processes reading the VM filesystem through the kernel.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: The guest `child_process` polyfill now rides the same JS sync-RPC bridge as `fs`, with async lifecycle methods split into `child_process.spawn`, `child_process.poll`, `child_process.write_stdin`, `child_process.close_stdin`, and `child_process.kill` on the sidecar.
+- Gotchas encountered: Synthetic child processes must keep their polling timer ref'd until `child.unref()` is called, and `exec`/`execFile` should default collected output to `utf8` strings to match Node's callback API.
+- Useful context: `cargo check -p agent-os-sidecar`, `cargo test -p agent-os-execution --test javascript javascript_execution_hardens_exec_and_execsync_child_process_calls -- --exact`, and `cargo test -p agent-os-sidecar --lib javascript_child_process_rpc_spawns_nested_node_processes_inside_vm_kernel -- --nocapture` all pass for this story.
 ---

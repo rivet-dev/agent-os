@@ -277,7 +277,7 @@
         "Typecheck passes"
       ],
       "priority": 17,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-012. Replace the current path-translating wrapper with a full kernel-backed polyfill."
     },
     {
