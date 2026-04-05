@@ -1032,7 +1032,7 @@
         "Typecheck passes"
       ],
       "priority": 65,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: No select/poll/epoll mechanism in kernel. Cannot multiplex I/O across FDs. Breaks event loops, shell I/O multiplexing, and server accept loops."
     },
     {

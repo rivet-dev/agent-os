@@ -2,6 +2,7 @@ use crate::fd_table::{
     FdResult, FileDescription, ProcessFdTable, SharedFileDescription, FILETYPE_CHARACTER_DEVICE,
     O_RDWR,
 };
+use crate::poll::{PollEvents, PollNotifier, POLLHUP, POLLIN, POLLOUT};
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
@@ -248,6 +249,7 @@ struct PtyManagerInner {
 pub struct PtyManager {
     inner: Arc<PtyManagerInner>,
     on_signal: Option<SignalHandler>,
+    notifier: Option<PollNotifier>,
 }
 
 impl Default for PtyManager {
@@ -258,6 +260,7 @@ impl Default for PtyManager {
                 waiters: Condvar::new(),
             }),
             on_signal: None,
+            notifier: None,
         }
     }
 }
@@ -271,6 +274,22 @@ impl PtyManager {
         let mut manager = Self::new();
         manager.on_signal = Some(on_signal);
         manager
+    }
+
+    pub(crate) fn with_signal_handler_and_notifier(
+        on_signal: SignalHandler,
+        notifier: PollNotifier,
+    ) -> Self {
+        let mut manager = Self::with_notifier(notifier);
+        manager.on_signal = Some(on_signal);
+        manager
+    }
+
+    pub(crate) fn with_notifier(notifier: PollNotifier) -> Self {
+        Self {
+            notifier: Some(notifier),
+            ..Self::default()
+        }
     }
 
     pub fn create_pty(&self) -> PtyPair {
@@ -353,6 +372,51 @@ impl PtyManager {
         }
     }
 
+    pub fn poll(&self, description_id: u64, requested: PollEvents) -> PtyResult<PollEvents> {
+        let state = lock_or_recover(&self.inner.state);
+        let pty_ref = state
+            .desc_to_pty
+            .get(&description_id)
+            .copied()
+            .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
+        let pty = state
+            .ptys
+            .get(&pty_ref.pty_id)
+            .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))?;
+
+        let mut events = PollEvents::empty();
+        match pty_ref.end {
+            PtyEndKind::Master => {
+                if requested.intersects(POLLIN) && !pty.output_buffer.is_empty() {
+                    events |= POLLIN;
+                }
+                if pty.closed_slave {
+                    events |= POLLHUP;
+                } else if requested.intersects(POLLOUT)
+                    && (available_capacity(&pty.input_buffer) > 0
+                        || !pty.waiting_input_reads.is_empty())
+                {
+                    events |= POLLOUT;
+                }
+            }
+            PtyEndKind::Slave => {
+                if requested.intersects(POLLIN) && !pty.input_buffer.is_empty() {
+                    events |= POLLIN;
+                }
+                if pty.closed_master {
+                    events |= POLLHUP;
+                } else if requested.intersects(POLLOUT)
+                    && (available_capacity(&pty.output_buffer) > 0
+                        || !pty.waiting_output_reads.is_empty())
+                {
+                    events |= POLLOUT;
+                }
+            }
+        }
+
+        Ok(events)
+    }
+
     pub fn write(&self, description_id: u64, data: impl AsRef<[u8]>) -> PtyResult<usize> {
         let payload = data.as_ref();
         let mut signals = Vec::new();
@@ -393,7 +457,7 @@ impl PtyManager {
             }
         }
 
-        self.inner.waiters.notify_all();
+        self.notify_waiters_and_pollers();
         if let Some(on_signal) = &self.on_signal {
             for (pgid, signal) in signals {
                 if pgid > 0 {
@@ -450,7 +514,9 @@ impl PtyManager {
                         }
 
                         if !pty.output_buffer.is_empty() {
-                            return Ok(Some(drain_buffer(&mut pty.output_buffer, length)));
+                            let result = drain_buffer(&mut pty.output_buffer, length);
+                            self.notify_waiters_and_pollers();
+                            return Ok(Some(result));
                         }
 
                         if pty.closed_slave {
@@ -469,7 +535,9 @@ impl PtyManager {
                         }
 
                         if !pty.input_buffer.is_empty() {
-                            return Ok(Some(drain_buffer(&mut pty.input_buffer, length)));
+                            let result = drain_buffer(&mut pty.input_buffer, length);
+                            self.notify_waiters_and_pollers();
+                            return Ok(Some(result));
                         }
 
                         if pty.closed_master {
@@ -496,6 +564,7 @@ impl PtyManager {
                     PtyEndKind::Master => pty.waiting_output_reads.push_back(next),
                     PtyEndKind::Slave => pty.waiting_input_reads.push_back(next),
                 }
+                self.notify_waiters_and_pollers();
                 waiter_id = Some(next);
                 next
             };
@@ -516,6 +585,7 @@ impl PtyManager {
                         pty.waiting_input_reads.retain(|queued| *queued != id);
                         pty.waiting_output_reads.retain(|queued| *queued != id);
                     }
+                    self.notify_waiters_and_pollers();
                 }
                 return Err(PtyError::would_block("PTY read timed out"));
             }
@@ -534,6 +604,7 @@ impl PtyManager {
                         pty.waiting_input_reads.retain(|queued| *queued != id);
                         pty.waiting_output_reads.retain(|queued| *queued != id);
                     }
+                    self.notify_waiters_and_pollers();
                 }
                 return Err(PtyError::would_block("PTY read timed out"));
             }
@@ -574,7 +645,7 @@ impl PtyManager {
         if remove_pty {
             state.ptys.remove(&pty_ref.pty_id);
         }
-        self.inner.waiters.notify_all();
+        self.notify_waiters_and_pollers();
     }
 
     pub fn is_pty(&self, description_id: u64) -> bool {
@@ -701,6 +772,13 @@ impl PtyManager {
         let state = lock_or_recover(&self.inner.state);
         let pty_ref = state.desc_to_pty.get(&description_id)?;
         state.ptys.get(&pty_ref.pty_id).map(|pty| pty.path.clone())
+    }
+
+    fn notify_waiters_and_pollers(&self) {
+        self.inner.waiters.notify_all();
+        if let Some(notifier) = &self.notifier {
+            notifier.notify();
+        }
     }
 }
 
@@ -879,6 +957,10 @@ fn signal_for_byte(termios: &Termios, byte: u8) -> Option<i32> {
 
 fn buffer_size(buffer: &VecDeque<Vec<u8>>) -> usize {
     buffer.iter().map(Vec::len).sum()
+}
+
+fn available_capacity(buffer: &VecDeque<Vec<u8>>) -> usize {
+    MAX_PTY_BUFFER_BYTES.saturating_sub(buffer_size(buffer))
 }
 
 fn drain_buffer(buffer: &mut VecDeque<Vec<u8>>, length: usize) -> Vec<u8> {

@@ -11,6 +11,9 @@ use crate::permissions::{
     check_command_execution, FsOperation, PermissionError, PermissionedFileSystem, Permissions,
 };
 use crate::pipe_manager::{PipeError, PipeManager};
+use crate::poll::{
+    PollEvents, PollFd, PollNotifier, PollResult, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT,
+};
 use crate::process_table::{
     DriverProcess, ProcessContext, ProcessExitCallback, ProcessInfo, ProcessStatus, ProcessTable,
     ProcessTableError, ProcessWaitResult, SIGPIPE,
@@ -27,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, WaitTimeoutResult};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub type KernelResult<T> = Result<T, KernelError>;
 pub use crate::process_table::{ProcessWaitEvent as WaitPidEvent, WaitPidFlags};
@@ -227,6 +230,7 @@ pub struct KernelVm<F> {
     processes: ProcessTable,
     pipes: PipeManager,
     ptys: PtyManager,
+    poll_notifier: PollNotifier,
     users: UserManager,
     resources: ResourceAccountant,
     file_locks: FileLockManager,
@@ -308,10 +312,14 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         let fd_tables = Arc::new(Mutex::new(FdTableManager::new()));
         let file_locks = FileLockManager::new();
         let driver_pids = Arc::new(Mutex::new(BTreeMap::new()));
-        let pipes = PipeManager::new();
-        let ptys = PtyManager::with_signal_handler(Arc::new(move |pgid, signal| {
-            let _ = process_table_for_pty.kill(-(pgid as i32), signal);
-        }));
+        let poll_notifier = PollNotifier::default();
+        let pipes = PipeManager::with_notifier(poll_notifier.clone());
+        let ptys = PtyManager::with_signal_handler_and_notifier(
+            Arc::new(move |pgid, signal| {
+                let _ = process_table_for_pty.kill(-(pgid as i32), signal);
+            }),
+            poll_notifier.clone(),
+        );
 
         let fd_tables_for_exit = Arc::clone(&fd_tables);
         let file_locks_for_exit = file_locks.clone();
@@ -344,6 +352,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             processes: process_table,
             pipes,
             ptys,
+            poll_notifier,
             users: UserManager::new(),
             resources: ResourceAccountant::new(config.resources),
             file_locks,
@@ -859,6 +868,49 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         Ok(data.len())
     }
 
+    pub fn poll_fds(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        mut fds: Vec<PollFd>,
+        timeout_ms: i32,
+    ) -> KernelResult<PollResult> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        if timeout_ms < -1 {
+            return Err(KernelError::new(
+                "EINVAL",
+                format!("invalid poll timeout {timeout_ms}"),
+            ));
+        }
+
+        let timeout = if timeout_ms < 0 {
+            None
+        } else {
+            Some(Duration::from_millis(timeout_ms as u64))
+        };
+        let deadline = timeout.map(|duration| Instant::now() + duration);
+
+        loop {
+            let observed_generation = self.poll_notifier.snapshot();
+            let ready_count = self.populate_poll_revents(pid, &mut fds)?;
+            if ready_count > 0 || matches!(timeout, Some(duration) if duration.is_zero()) {
+                return Ok(PollResult { ready_count, fds });
+            }
+
+            let remaining = deadline.map(|target| target.saturating_duration_since(Instant::now()));
+            if matches!(remaining, Some(duration) if duration.is_zero()) {
+                return Ok(PollResult { ready_count, fds });
+            }
+
+            if !self
+                .poll_notifier
+                .wait_for_change(observed_generation, remaining)
+            {
+                return Ok(PollResult { ready_count, fds });
+            }
+        }
+    }
+
     pub fn fd_seek(
         &mut self,
         requester_driver: &str,
@@ -1278,6 +1330,62 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             filetype_for_path(path, &stat),
             Some(FileLockTarget::new(stat.ino)),
         ))
+    }
+
+    fn populate_poll_revents(&self, pid: u32, fds: &mut [PollFd]) -> KernelResult<usize> {
+        let entries = {
+            let tables = lock_or_recover(&self.fd_tables);
+            let table = tables
+                .get(pid)
+                .ok_or_else(|| KernelError::no_such_process(pid))?;
+            fds.iter()
+                .map(|poll_fd| table.get(poll_fd.fd).cloned())
+                .collect::<Vec<_>>()
+        };
+
+        let mut ready_count = 0;
+        for (poll_fd, entry) in fds.iter_mut().zip(entries.into_iter()) {
+            poll_fd.revents = if let Some(entry) = entry {
+                self.poll_entry(&entry, poll_fd.events)?
+            } else {
+                POLLNVAL
+            };
+            if !poll_fd.revents.is_empty() {
+                ready_count += 1;
+            }
+        }
+
+        Ok(ready_count)
+    }
+
+    fn poll_entry(
+        &self,
+        entry: &crate::fd_table::FdEntry,
+        requested: PollEvents,
+    ) -> KernelResult<PollEvents> {
+        if self.pipes.is_pipe(entry.description.id()) {
+            return Ok(self.pipes.poll(entry.description.id(), requested)?);
+        }
+
+        if self.ptys.is_pty(entry.description.id()) {
+            return Ok(self.ptys.poll(entry.description.id(), requested)?);
+        }
+
+        let access_mode = entry.description.flags() & 0b11;
+        let mut events = PollEvents::empty();
+        if requested.intersects(POLLIN) && access_mode != crate::fd_table::O_WRONLY {
+            events |= POLLIN;
+        }
+        if requested.intersects(POLLOUT) && access_mode != crate::fd_table::O_RDONLY {
+            events |= POLLOUT;
+        }
+        if entry.filetype == FILETYPE_DIRECTORY && requested.intersects(POLLOUT) {
+            events |= POLLERR;
+        }
+        if self.terminated {
+            events |= POLLHUP;
+        }
+        Ok(events)
     }
 
     fn description_for_fd(

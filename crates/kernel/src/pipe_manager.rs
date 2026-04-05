@@ -2,6 +2,7 @@ use crate::fd_table::{
     FdResult, FileDescription, ProcessFdTable, SharedFileDescription, FILETYPE_PIPE, O_RDONLY,
     O_WRONLY,
 };
+use crate::poll::{PollEvents, PollNotifier, POLLERR, POLLHUP, POLLIN, POLLOUT};
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
@@ -123,6 +124,7 @@ struct PipeManagerInner {
 #[derive(Debug, Clone)]
 pub struct PipeManager {
     inner: Arc<PipeManagerInner>,
+    notifier: Option<PollNotifier>,
 }
 
 impl Default for PipeManager {
@@ -132,6 +134,7 @@ impl Default for PipeManager {
                 state: Mutex::new(PipeManagerState::default()),
                 waiters: Condvar::new(),
             }),
+            notifier: None,
         }
     }
 }
@@ -139,6 +142,13 @@ impl Default for PipeManager {
 impl PipeManager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn with_notifier(notifier: PollNotifier) -> Self {
+        Self {
+            notifier: Some(notifier),
+            ..Self::default()
+        }
     }
 
     pub fn create_pipe(&self) -> PipePair {
@@ -190,6 +200,42 @@ impl PipeManager {
         }
     }
 
+    pub fn poll(&self, description_id: u64, requested: PollEvents) -> PipeResult<PollEvents> {
+        let state = lock_or_recover(&self.inner.state);
+        let pipe_ref = state
+            .desc_to_pipe
+            .get(&description_id)
+            .copied()
+            .ok_or_else(|| PipeError::bad_file_descriptor("not a pipe end"))?;
+        let pipe = state
+            .pipes
+            .get(&pipe_ref.pipe_id)
+            .ok_or_else(|| PipeError::bad_file_descriptor("pipe not found"))?;
+
+        let mut events = PollEvents::empty();
+        match pipe_ref.end {
+            PipeSide::Read => {
+                if requested.intersects(POLLIN) && !pipe.buffer.is_empty() {
+                    events |= POLLIN;
+                }
+                if pipe.closed_write {
+                    events |= POLLHUP;
+                }
+            }
+            PipeSide::Write => {
+                if pipe.closed_read {
+                    events |= POLLERR;
+                } else if requested.intersects(POLLOUT)
+                    && (available_capacity(pipe) > 0 || !pipe.waiting_reads.is_empty())
+                {
+                    events |= POLLOUT;
+                }
+            }
+        }
+
+        Ok(events)
+    }
+
     pub fn write(&self, description_id: u64, data: impl AsRef<[u8]>) -> PipeResult<usize> {
         self.write_with_mode(description_id, data, true)
     }
@@ -233,7 +279,7 @@ impl PipeManager {
             if let Some(waiter_id) = waiter_id {
                 if let Some(waiter) = state.waiters.get_mut(&waiter_id) {
                     waiter.result = Some(Some(payload.to_vec()));
-                    self.inner.waiters.notify_all();
+                    self.notify_waiters_and_pollers();
                     return Ok(payload.len());
                 }
                 continue;
@@ -255,7 +301,7 @@ impl PipeManager {
                         .get_mut(&pipe_ref.pipe_id)
                         .ok_or_else(|| PipeError::bad_file_descriptor("pipe not found"))?;
                     pipe.buffer.push_back(payload.to_vec());
-                    self.inner.waiters.notify_all();
+                    self.notify_waiters_and_pollers();
                     return Ok(payload.len());
                 }
             } else if available > 0 {
@@ -265,7 +311,7 @@ impl PipeManager {
                     .get_mut(&pipe_ref.pipe_id)
                     .ok_or_else(|| PipeError::bad_file_descriptor("pipe not found"))?;
                 pipe.buffer.push_back(payload[..chunk_len].to_vec());
-                self.inner.waiters.notify_all();
+                self.notify_waiters_and_pollers();
                 return Ok(chunk_len);
             }
 
@@ -318,7 +364,7 @@ impl PipeManager {
 
                 if !pipe.buffer.is_empty() {
                     let result = drain_buffer(&mut pipe.buffer, length);
-                    self.inner.waiters.notify_all();
+                    self.notify_waiters_and_pollers();
                     return Ok(Some(result));
                 }
 
@@ -341,6 +387,7 @@ impl PipeManager {
                     return Err(PipeError::bad_file_descriptor("pipe not found"));
                 };
                 pipe.waiting_reads.push_back(next);
+                self.notify_waiters_and_pollers();
                 waiter_id = Some(next);
                 next
             };
@@ -360,6 +407,7 @@ impl PipeManager {
                     if let Some(pipe) = state.pipes.get_mut(&pipe_ref.pipe_id) {
                         pipe.waiting_reads.retain(|queued| *queued != id);
                     }
+                    self.notify_waiters_and_pollers();
                 }
                 return Err(PipeError::would_block("pipe read timed out"));
             }
@@ -377,6 +425,7 @@ impl PipeManager {
                     if let Some(pipe) = state.pipes.get_mut(&pipe_ref.pipe_id) {
                         pipe.waiting_reads.retain(|queued| *queued != id);
                     }
+                    self.notify_waiters_and_pollers();
                 }
                 return Err(PipeError::would_block("pipe read timed out"));
             }
@@ -416,7 +465,7 @@ impl PipeManager {
             state.pipes.remove(&pipe_ref.pipe_id);
         }
         if should_notify {
-            self.inner.waiters.notify_all();
+            self.notify_waiters_and_pollers();
         }
     }
 
@@ -459,10 +508,21 @@ impl PipeManager {
             }
         }
     }
+
+    fn notify_waiters_and_pollers(&self) {
+        self.inner.waiters.notify_all();
+        if let Some(notifier) = &self.notifier {
+            notifier.notify();
+        }
+    }
 }
 
 fn buffer_size(buffer: &VecDeque<Vec<u8>>) -> usize {
     buffer.iter().map(Vec::len).sum()
+}
+
+fn available_capacity(pipe: &PipeState) -> usize {
+    MAX_PIPE_BUFFER_BYTES.saturating_sub(buffer_size(&pipe.buffer))
 }
 
 fn drain_buffer(buffer: &mut VecDeque<Vec<u8>>, length: usize) -> Vec<u8> {

@@ -12,6 +12,7 @@ pub mod mount_table;
 pub mod overlay_fs;
 pub mod permissions;
 pub mod pipe_manager;
+pub mod poll;
 pub mod process_table;
 pub mod pty;
 pub mod resource_accounting;

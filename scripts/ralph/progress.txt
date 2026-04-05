@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Cross-resource kernel readiness waits should use the shared `PollNotifier` in `crates/kernel/src/poll.rs`; when pipe or PTY state changes, notify it alongside the manager condvar so mixed-FD `poll_fds` calls do not miss wakeups.
 - Kernel filesystem semantic additions must be threaded through every wrapper layer together: `VirtualFileSystem`, `PermissionedFileSystem`, `DeviceLayer`, `MountTable`/`MountedFileSystem`, and the root/overlay delegates, or mounted/device-backed paths silently keep the old behavior.
 - Per-FD status bits such as `O_NONBLOCK` belong on `FdEntry` / `ProcessFdTable`, while shared `FileDescription.flags()` should stay limited to open-file-description semantics such as access mode and `O_APPEND`; use `/dev/fd/N` duplication when you need a differently flagged view of the same description before a real `fcntl(F_SETFL)` surface exists.
 - PID-aware POSIX signal side effects belong at `KernelVm` syscall entrypoints, not low-level resource managers: `PipeManager` should stay signal-agnostic and let `crates/kernel/src/kernel.rs` `fd_write` translate broken-pipe `EPIPE` into `SIGPIPE`.
@@ -160,7 +161,26 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - **Learnings for future iterations:**
   - Patterns discovered: Pyodide host executions need the same Node internal loader-worker permission as JavaScript hosts, even when guest `worker_threads` remains denied.
   - Gotchas encountered: `PythonExecution::poll_event()` should emit `Exited` immediately when the control pipe reports `PythonExit`; returning `None` there looks like a timeout to polling callers and leaves tests waiting on a later synthetic exit.
-  - Useful context: `cargo test -p agent-os-execution --test python -- --test-threads=1`, `cargo test -p agent-os-execution --test python_prewarm -- --test-threads=1`, `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1`, and `cargo check -p agent-os-execution` all pass after this change.
+- Useful context: `cargo test -p agent-os-execution --test python -- --test-threads=1`, `cargo test -p agent-os-execution --test python_prewarm -- --test-threads=1`, `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1`, and `cargo check -p agent-os-execution` all pass after this change.
+---
+## 2026-04-05 09:17:51 PDT - US-065
+- What was implemented
+- Added a new kernel poll surface in `crates/kernel/src/poll.rs` plus `KernelVm::poll_fds(...)` in `crates/kernel/src/kernel.rs` so callers can multiplex across multiple FDs with `POLLIN`, `POLLOUT`, `POLLERR`, `POLLHUP`, and timeout handling for `0`, finite millisecond waits, and `-1`.
+- Wired `PipeManager` and `PtyManager` readiness reporting into that syscall, including a shared `PollNotifier` so mixed pipe/PTy waits wake correctly when buffers, waiter queues, or peer-close state changes.
+- Added focused kernel regressions covering pipe readability/writability, hangup/error signaling, mixed pipe+PTY polling, and finite timeout behavior.
+- Files changed
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/src/lib.rs`
+- `crates/kernel/src/pipe_manager.rs`
+- `crates/kernel/src/poll.rs`
+- `crates/kernel/src/pty.rs`
+- `crates/kernel/tests/poll.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Kernel-wide `poll` support is easiest to keep race-free when every special-FD manager shares one notifier and emits wakeups for buffer changes, waiter-queue changes, and peer-close transitions.
+  - Gotchas encountered: PTY and pipe waiter queues affect write readiness, not just buffered bytes, so `poll` wakeups have to fire when reads start waiting or time out, not only on reads and writes that move payload bytes.
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-kernel`, `cargo test -p agent-os-kernel --test poll -- --nocapture`, and `cargo test -p agent-os-kernel` all pass after this change.
 ---
 ## 2026-04-04 19:11:19 PDT - US-001
 - What was implemented
