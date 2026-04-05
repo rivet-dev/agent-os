@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- WebAssembly parser hardening in `crates/execution/src/wasm.rs` should stat module files before `fs::read()`, cap section entry counts before iteration, and bound varuint byte length so malformed modules fail closed without parser DoS.
 - Child-facing control/RPC pipes in `crates/execution` should keep their original `pipe2(O_CLOEXEC)` FDs private and use `ExportedChildFds` in `crates/execution/src/node_process.rs` to duplicate only the child ends into reserved `1000+` FD numbers right before `Command::spawn()`.
 - `KernelVmConfig::new()` is deny-all by default; any kernel or browser-sidecar fixture that expects unrestricted filesystem/process access must opt in with `config.permissions = Permissions::allow_all()`.
 - Per-operation memory guards belong in `ResourceLimits`; when adding one, enforce it in the kernel entrypoint that materializes data and keep the matching `resource.max_*` metadata parsing in `crates/sidecar/src/service.rs` in sync.
@@ -1073,4 +1074,19 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: FD remapping for guest-visible control channels belongs in the shared `node_process` spawn helpers so JavaScript, Python, and WASM launches all inherit the same protected `1000+` descriptor policy.
   - Gotchas encountered: This repo’s pinned `nix` API still takes raw `RawFd` values for `fcntl`, so shared FD helpers need to duplicate with `source_fd.as_raw_fd()` instead of newer `AsFd`-style calls.
   - Useful context: `cargo check -p agent-os-execution`, `cargo test -p agent-os-execution node_process::tests -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript javascript_execution_surfaces_shared_array_buffer_sync_rpc_requests -- --test-threads=1`, `cargo test -p agent-os-execution --test python python_execution_surfaces_vfs_rpc_requests_and_resumes_after_responses -- --test-threads=1`, and `cargo test -p agent-os-execution --test wasm wasm_execution_emits_signal_state_from_control_channel -- --test-threads=1` all pass after this change.
+---
+## 2026-04-05 08:06:20 PDT - US-058
+- What was implemented
+- Added explicit WebAssembly parser guardrails in `crates/execution/src/wasm.rs`: module files are size-checked via `metadata()` before `fs::read()`, import and memory section counts are capped before iteration, and varuint decoding now has a hard byte-length bound plus checked `usize` conversions.
+- Added focused regressions in `crates/execution/tests/wasm.rs` for oversized sparse module files, excessive import entries, excessive memory entries, and malformed overlong varuint encodings so parser failures stay explicit and non-panicking.
+- Files changed
+- `CLAUDE.md`
+- `crates/execution/src/wasm.rs`
+- `crates/execution/tests/wasm.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: WASM parser hardening belongs in the lightweight preflight path before Node/V8 spawn, and sparse files are an efficient way to regression-test file-size caps without allocating the capped bytes.
+  - Gotchas encountered: The old `shift >= 64` guard still fired before the new varuint byte cap until the continued-10th-byte case was rejected explicitly; test the exact overlong encoding path, not just malformed-section overflow in general.
+  - Useful context: `cargo test -p agent-os-execution --test wasm -- --test-threads=1` and `cargo check -p agent-os-execution` both pass for this change.
 ---

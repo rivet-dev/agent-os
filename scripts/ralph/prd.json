@@ -923,7 +923,7 @@
         "Typecheck passes"
       ],
       "priority": 58,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: fs::read() on module path has no size limit (can OOM). Import section iteration is unbounded if import_count is huge. varuint parsing has shift overflow check but no iteration cap."
     },
     {

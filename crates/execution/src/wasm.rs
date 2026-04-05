@@ -54,6 +54,10 @@ const RESERVED_WASM_ENV_KEYS: &[&str] = &[
 ];
 const WASM_PAGE_BYTES: u64 = 65_536;
 const WASM_TIMEOUT_EXIT_CODE: i32 = 124;
+const MAX_WASM_MODULE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_WASM_IMPORT_SECTION_ENTRIES: usize = 16_384;
+const MAX_WASM_MEMORY_SECTION_ENTRIES: usize = 1_024;
+const MAX_WASM_VARUINT_BYTES: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WasmSignalDispositionAction {
@@ -846,6 +850,19 @@ fn validate_module_limits(
     };
 
     let resolved_path = resolved_module_path(&module_path(context, request)?, &request.cwd);
+    let metadata = fs::metadata(&resolved_path).map_err(|error| {
+        WasmExecutionError::InvalidModule(format!(
+            "failed to stat {}: {error}",
+            resolved_path.display()
+        ))
+    })?;
+    if metadata.len() > MAX_WASM_MODULE_FILE_BYTES {
+        return Err(WasmExecutionError::InvalidModule(format!(
+            "module file size of {} bytes exceeds the configured parser cap of {} bytes",
+            metadata.len(),
+            MAX_WASM_MODULE_FILE_BYTES
+        )));
+    }
     let bytes = fs::read(&resolved_path).map_err(|error| {
         WasmExecutionError::InvalidModule(format!(
             "failed to read {}: {error}",
@@ -904,7 +921,7 @@ fn extract_wasm_module_limits(bytes: &[u8]) -> Result<WasmModuleLimits, WasmExec
     while offset < bytes.len() {
         let section_id = bytes[offset];
         offset += 1;
-        let section_size = read_varuint(bytes, &mut offset)? as usize;
+        let section_size = read_varuint_usize(bytes, &mut offset, "section size")?;
         let section_end = offset.checked_add(section_size).ok_or_else(|| {
             WasmExecutionError::InvalidModule(String::from("section size overflow"))
         })?;
@@ -917,7 +934,12 @@ fn extract_wasm_module_limits(bytes: &[u8]) -> Result<WasmModuleLimits, WasmExec
         match section_id {
             2 => {
                 let mut cursor = offset;
-                let import_count = read_varuint(bytes, &mut cursor)? as usize;
+                let import_count = read_varuint_usize(bytes, &mut cursor, "import count")?;
+                if import_count > MAX_WASM_IMPORT_SECTION_ENTRIES {
+                    return Err(WasmExecutionError::InvalidModule(format!(
+                        "import section contains {import_count} entries, which exceeds the parser cap of {MAX_WASM_IMPORT_SECTION_ENTRIES}"
+                    )));
+                }
                 for _ in 0..import_count {
                     skip_name(bytes, &mut cursor)?;
                     skip_name(bytes, &mut cursor)?;
@@ -947,7 +969,12 @@ fn extract_wasm_module_limits(bytes: &[u8]) -> Result<WasmModuleLimits, WasmExec
             }
             5 => {
                 let mut cursor = offset;
-                let memory_count = read_varuint(bytes, &mut cursor)? as usize;
+                let memory_count = read_varuint_usize(bytes, &mut cursor, "memory count")?;
+                if memory_count > MAX_WASM_MEMORY_SECTION_ENTRIES {
+                    return Err(WasmExecutionError::InvalidModule(format!(
+                        "memory section contains {memory_count} entries, which exceeds the parser cap of {MAX_WASM_MEMORY_SECTION_ENTRIES}"
+                    )));
+                }
                 if memory_count > 0 {
                     let (initial_pages, maximum_pages) = read_memory_limits(bytes, &mut cursor)?;
                     limits.initial_memory_bytes =
@@ -980,7 +1007,7 @@ fn read_memory_limits(
 }
 
 fn skip_name(bytes: &[u8], offset: &mut usize) -> Result<(), WasmExecutionError> {
-    let length = read_varuint(bytes, offset)? as usize;
+    let length = read_varuint_usize(bytes, offset, "name length")?;
     let end = offset
         .checked_add(length)
         .ok_or_else(|| WasmExecutionError::InvalidModule(String::from("name length overflow")))?;
@@ -1016,12 +1043,24 @@ fn read_byte(bytes: &[u8], offset: &mut usize) -> Result<u8, WasmExecutionError>
 fn read_varuint(bytes: &[u8], offset: &mut usize) -> Result<u64, WasmExecutionError> {
     let mut shift = 0_u32;
     let mut value = 0_u64;
+    let mut encoded_bytes = 0_usize;
 
     loop {
         let byte = read_byte(bytes, offset)?;
+        encoded_bytes += 1;
+        if encoded_bytes > MAX_WASM_VARUINT_BYTES {
+            return Err(WasmExecutionError::InvalidModule(format!(
+                "varuint exceeds the parser cap of {MAX_WASM_VARUINT_BYTES} bytes"
+            )));
+        }
         value |= u64::from(byte & 0x7f) << shift;
         if byte & 0x80 == 0 {
             return Ok(value);
+        }
+        if encoded_bytes == MAX_WASM_VARUINT_BYTES {
+            return Err(WasmExecutionError::InvalidModule(format!(
+                "varuint exceeds the parser cap of {MAX_WASM_VARUINT_BYTES} bytes"
+            )));
         }
         shift = shift.saturating_add(7);
         if shift >= 64 {
@@ -1030,6 +1069,19 @@ fn read_varuint(bytes: &[u8], offset: &mut usize) -> Result<u64, WasmExecutionEr
             )));
         }
     }
+}
+
+fn read_varuint_usize(
+    bytes: &[u8],
+    offset: &mut usize,
+    label: &str,
+) -> Result<usize, WasmExecutionError> {
+    let value = read_varuint(bytes, offset)?;
+    usize::try_from(value).map_err(|_| {
+        WasmExecutionError::InvalidModule(format!(
+            "{label} of {value} exceeds platform usize range"
+        ))
+    })
 }
 
 impl From<NodeSignalDispositionAction> for WasmSignalDispositionAction {

@@ -350,6 +350,30 @@ fn wasm_memory_capped_module() -> Vec<u8> {
     .expect("compile memory-capped wasm fixture")
 }
 
+fn raw_wasm_module(section_id: u8, section_contents: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::from(*b"\0asm");
+    bytes.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
+    bytes.push(section_id);
+    bytes.extend(encode_varuint(section_contents.len() as u64));
+    bytes.extend_from_slice(section_contents);
+    bytes
+}
+
+fn encode_varuint(mut value: u64) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        encoded.push(byte);
+        if value == 0 {
+            return encoded;
+        }
+    }
+}
+
 #[test]
 fn wasm_contexts_preserve_vm_and_module_configuration() {
     let mut engine = WasmExecutionEngine::default();
@@ -870,6 +894,154 @@ fn wasm_execution_rejects_modules_whose_memory_cap_exceeds_limit() {
 
     assert!(
         error.to_string().contains("memory maximum"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn wasm_execution_rejects_modules_that_exceed_parser_file_size_cap() {
+    let temp = tempdir().expect("create temp dir");
+    let module_path = temp.path().join("guest.wasm");
+    let file = fs::File::create(&module_path).expect("create oversize wasm file");
+    file.set_len(256_u64 * 1024 * 1024 + 1)
+        .expect("sparsely size oversize wasm file");
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let error = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: Vec::new(),
+            env: BTreeMap::from([(
+                String::from(WASM_MAX_MEMORY_BYTES_ENV),
+                String::from("65536"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
+        })
+        .expect_err("oversized module should be rejected before read");
+
+    assert!(
+        error
+            .to_string()
+            .contains("module file size of 268435457 bytes exceeds the configured parser cap"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn wasm_execution_rejects_modules_with_too_many_import_entries() {
+    let temp = tempdir().expect("create temp dir");
+    let mut import_section = encode_varuint(16_385);
+    import_section.extend_from_slice(&[0x00, 0x00]);
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &raw_wasm_module(2, &import_section),
+    );
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let error = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: Vec::new(),
+            env: BTreeMap::from([(
+                String::from(WASM_MAX_MEMORY_BYTES_ENV),
+                String::from("65536"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
+        })
+        .expect_err("import cap should reject oversized import section");
+
+    assert!(
+        error
+            .to_string()
+            .contains("import section contains 16385 entries"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn wasm_execution_rejects_modules_with_too_many_memory_entries() {
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &raw_wasm_module(5, &encode_varuint(1_025)),
+    );
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let error = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: Vec::new(),
+            env: BTreeMap::from([(
+                String::from(WASM_MAX_MEMORY_BYTES_ENV),
+                String::from("65536"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
+        })
+        .expect_err("memory cap should reject oversized memory section");
+
+    assert!(
+        error
+            .to_string()
+            .contains("memory section contains 1025 entries"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn wasm_execution_rejects_varuints_that_exceed_parser_iteration_cap() {
+    let temp = tempdir().expect("create temp dir");
+    let mut bytes = Vec::from(*b"\0asm");
+    bytes.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
+    bytes.push(5);
+    bytes.extend_from_slice(&[0x80; 11]);
+    bytes.push(0x00);
+    write_fixture(&temp.path().join("guest.wasm"), &bytes);
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let error = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: Vec::new(),
+            env: BTreeMap::from([(
+                String::from(WASM_MAX_MEMORY_BYTES_ENV),
+                String::from("65536"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
+        })
+        .expect_err("varuint cap should reject oversized encodings");
+
+    assert!(
+        error
+            .to_string()
+            .contains("varuint exceeds the parser cap of 10 bytes"),
         "unexpected error: {error}"
     );
 }
