@@ -329,7 +329,7 @@
         "Typecheck passes"
       ],
       "priority": 20,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-012. Similar pattern to net.Socket polyfill but for UDP."
     },
     {

@@ -73,7 +73,9 @@ use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{
+    Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket,
+};
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -1310,6 +1312,8 @@ struct ActiveProcess {
     next_tcp_listener_id: usize,
     tcp_sockets: BTreeMap<String, ActiveTcpSocket>,
     next_tcp_socket_id: usize,
+    udp_sockets: BTreeMap<String, ActiveUdpSocket>,
+    next_udp_socket_id: usize,
 }
 
 impl ActiveProcess {
@@ -1330,6 +1334,8 @@ impl ActiveProcess {
             next_tcp_listener_id: 0,
             tcp_sockets: BTreeMap::new(),
             next_tcp_socket_id: 0,
+            udp_sockets: BTreeMap::new(),
+            next_udp_socket_id: 0,
         }
     }
 
@@ -1346,6 +1352,11 @@ impl ActiveProcess {
     fn allocate_tcp_socket_id(&mut self) -> String {
         self.next_tcp_socket_id += 1;
         format!("socket-{}", self.next_tcp_socket_id)
+    }
+
+    fn allocate_udp_socket_id(&mut self) -> String {
+        self.next_udp_socket_id += 1;
+        format!("udp-socket-{}", self.next_udp_socket_id)
     }
 }
 
@@ -1500,6 +1511,159 @@ impl ActiveTcpListener {
 
     fn close(&self) -> Result<(), SidecarError> {
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JavascriptUdpFamily {
+    Ipv4,
+    Ipv6,
+}
+
+impl JavascriptUdpFamily {
+    fn from_socket_type(value: &str) -> Result<Self, SidecarError> {
+        match value {
+            "udp4" => Ok(Self::Ipv4),
+            "udp6" => Ok(Self::Ipv6),
+            other => Err(SidecarError::InvalidState(format!(
+                "unsupported dgram socket type {other}"
+            ))),
+        }
+    }
+
+    fn socket_type(self) -> &'static str {
+        match self {
+            Self::Ipv4 => "udp4",
+            Self::Ipv6 => "udp6",
+        }
+    }
+
+    fn default_bind_host(self) -> &'static str {
+        match self {
+            Self::Ipv4 => "0.0.0.0",
+            Self::Ipv6 => "::",
+        }
+    }
+
+    fn matches_addr(self, addr: &SocketAddr) -> bool {
+        match (self, addr) {
+            (Self::Ipv4, SocketAddr::V4(_)) | (Self::Ipv6, SocketAddr::V6(_)) => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum JavascriptUdpSocketEvent {
+    Message {
+        data: Vec<u8>,
+        remote_addr: SocketAddr,
+    },
+    Error {
+        code: Option<String>,
+        message: String,
+    },
+}
+
+#[derive(Debug)]
+struct ActiveUdpSocket {
+    family: JavascriptUdpFamily,
+    socket: Option<UdpSocket>,
+}
+
+impl ActiveUdpSocket {
+    fn new(family: JavascriptUdpFamily) -> Self {
+        Self {
+            family,
+            socket: None,
+        }
+    }
+
+    fn local_addr(&self) -> Option<SocketAddr> {
+        self.socket
+            .as_ref()
+            .and_then(|socket| socket.local_addr().ok())
+    }
+
+    fn bind(&mut self, host: Option<&str>, port: u16) -> Result<SocketAddr, SidecarError> {
+        if self.socket.is_some() {
+            return Err(SidecarError::Execution(String::from(
+                "EINVAL: Agent OS dgram socket is already bound",
+            )));
+        }
+
+        let bind_addr = resolve_udp_addr(
+            host.unwrap_or(self.family.default_bind_host()),
+            port,
+            self.family,
+        )?;
+        let socket = UdpSocket::bind(bind_addr).map_err(sidecar_net_error)?;
+        socket.set_nonblocking(true).map_err(sidecar_net_error)?;
+        let local_addr = socket.local_addr().map_err(sidecar_net_error)?;
+        self.socket = Some(socket);
+        Ok(local_addr)
+    }
+
+    fn ensure_bound_for_send(&mut self) -> Result<SocketAddr, SidecarError> {
+        if let Some(local_addr) = self.local_addr() {
+            return Ok(local_addr);
+        }
+
+        self.bind(None, 0)
+    }
+
+    fn send_to(
+        &mut self,
+        host: &str,
+        port: u16,
+        contents: &[u8],
+    ) -> Result<(usize, SocketAddr), SidecarError> {
+        let remote_addr = resolve_udp_addr(host, port, self.family)?;
+        let _ = self.ensure_bound_for_send()?;
+        let socket = self.socket.as_ref().ok_or_else(|| {
+            SidecarError::InvalidState(String::from("UDP socket is not initialized"))
+        })?;
+        let written = socket
+            .send_to(contents, remote_addr)
+            .map_err(sidecar_net_error)?;
+        let local_addr = socket.local_addr().map_err(sidecar_net_error)?;
+        Ok((written, local_addr))
+    }
+
+    fn poll(&self, wait: Duration) -> Result<Option<JavascriptUdpSocketEvent>, SidecarError> {
+        let socket = self
+            .socket
+            .as_ref()
+            .ok_or_else(|| SidecarError::InvalidState(String::from("UDP socket is not bound")))?;
+        let deadline = Instant::now() + wait;
+        let mut buffer = vec![0_u8; 64 * 1024];
+
+        loop {
+            match socket.recv_from(&mut buffer) {
+                Ok((bytes_read, remote_addr)) => {
+                    return Ok(Some(JavascriptUdpSocketEvent::Message {
+                        data: buffer[..bytes_read].to_vec(),
+                        remote_addr,
+                    }))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if wait.is_zero() || Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    return Ok(Some(JavascriptUdpSocketEvent::Error {
+                        code: io_error_code(&error),
+                        message: error.to_string(),
+                    }))
+                }
+            }
+        }
+    }
+
+    fn close(&mut self) {
+        self.socket.take();
     }
 }
 
@@ -4344,23 +4508,49 @@ fn find_socket_state_entry(
 
     for (process_id, process) in &vm.active_processes {
         if request.path.is_none() {
-            for listener in process.tcp_listeners.values() {
-                let local_addr = listener.local_addr();
-                let local_host = local_addr.ip().to_string();
-                if !socket_host_matches(request.host.as_deref(), &local_host) {
-                    continue;
-                }
-                if let Some(port) = request.port {
-                    if local_addr.port() != port {
-                        continue;
+            match kind {
+                SocketQueryKind::TcpListener => {
+                    for listener in process.tcp_listeners.values() {
+                        let local_addr = listener.local_addr();
+                        let local_host = local_addr.ip().to_string();
+                        if !socket_host_matches(request.host.as_deref(), &local_host) {
+                            continue;
+                        }
+                        if let Some(port) = request.port {
+                            if local_addr.port() != port {
+                                continue;
+                            }
+                        }
+                        return Ok(Some(SocketStateEntry {
+                            process_id: process_id.to_owned(),
+                            host: Some(local_host),
+                            port: Some(local_addr.port()),
+                            path: None,
+                        }));
                     }
                 }
-                return Ok(Some(SocketStateEntry {
-                    process_id: process_id.to_owned(),
-                    host: Some(local_host),
-                    port: Some(local_addr.port()),
-                    path: None,
-                }));
+                SocketQueryKind::UdpBound => {
+                    for socket in process.udp_sockets.values() {
+                        let Some(local_addr) = socket.local_addr() else {
+                            continue;
+                        };
+                        let local_host = local_addr.ip().to_string();
+                        if !socket_host_matches(request.host.as_deref(), &local_host) {
+                            continue;
+                        }
+                        if let Some(port) = request.port {
+                            if local_addr.port() != port {
+                                continue;
+                            }
+                        }
+                        return Ok(Some(SocketStateEntry {
+                            process_id: process_id.to_owned(),
+                            host: Some(local_host),
+                            port: Some(local_addr.port()),
+                            path: None,
+                        }));
+                    }
+                }
             }
         }
 
@@ -4784,6 +4974,27 @@ struct JavascriptNetListenRequest {
     backlog: Option<u32>,
 }
 
+#[derive(Debug, Deserialize)]
+struct JavascriptDgramCreateSocketRequest {
+    #[serde(rename = "type")]
+    socket_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct JavascriptDgramBindRequest {
+    #[serde(default)]
+    address: Option<String>,
+    #[serde(default)]
+    port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+struct JavascriptDgramSendRequest {
+    #[serde(default)]
+    address: Option<String>,
+    port: u16,
+}
+
 fn resolve_tcp_bind_addr(host: &str, port: u16) -> Result<SocketAddr, SidecarError> {
     (host, port)
         .to_socket_addrs()
@@ -4801,6 +5012,23 @@ fn resolve_tcp_connect_addr(host: &str, port: u16) -> Result<SocketAddr, Sidecar
         .next()
         .ok_or_else(|| {
             SidecarError::Execution(format!("failed to resolve TCP address {host}:{port}"))
+        })
+}
+
+fn resolve_udp_addr(
+    host: &str,
+    port: u16,
+    family: JavascriptUdpFamily,
+) -> Result<SocketAddr, SidecarError> {
+    (host, port)
+        .to_socket_addrs()
+        .map_err(sidecar_net_error)?
+        .find(|addr| family.matches_addr(addr))
+        .ok_or_else(|| {
+            SidecarError::Execution(format!(
+                "failed to resolve {} UDP address {host}:{port}",
+                family.socket_type()
+            ))
         })
 }
 
@@ -4881,6 +5109,13 @@ fn terminate_child_process_tree(kernel: &mut SidecarKernel, process: &mut Active
     for socket_id in sockets {
         if let Some(socket) = process.tcp_sockets.remove(&socket_id) {
             let _ = socket.close();
+        }
+    }
+
+    let udp_socket_ids = process.udp_sockets.keys().cloned().collect::<Vec<_>>();
+    for socket_id in udp_socket_ids {
+        if let Some(mut socket) = process.udp_sockets.remove(&socket_id) {
+            socket.close();
         }
     }
 
@@ -5054,7 +5289,144 @@ fn service_javascript_sync_rpc(
         | "net.shutdown" | "net.destroy" | "net.server_close" => {
             service_javascript_net_sync_rpc(process, request)
         }
+        "dgram.createSocket" | "dgram.bind" | "dgram.send" | "dgram.poll" | "dgram.close" => {
+            service_javascript_dgram_sync_rpc(process, request)
+        }
         _ => service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request),
+    }
+}
+
+fn service_javascript_dgram_sync_rpc(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    match request.method.as_str() {
+        "dgram.createSocket" => {
+            let payload = request
+                .args
+                .first()
+                .cloned()
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from(
+                        "dgram.createSocket requires a request payload",
+                    ))
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<JavascriptDgramCreateSocketRequest>(value).map_err(
+                        |error| {
+                            SidecarError::InvalidState(format!(
+                                "invalid dgram.createSocket payload: {error}"
+                            ))
+                        },
+                    )
+                })?;
+            let family = JavascriptUdpFamily::from_socket_type(&payload.socket_type)?;
+            let socket_id = process.allocate_udp_socket_id();
+            process
+                .udp_sockets
+                .insert(socket_id.clone(), ActiveUdpSocket::new(family));
+            Ok(json!({
+                "socketId": socket_id,
+                "type": family.socket_type(),
+            }))
+        }
+        "dgram.bind" => {
+            let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "dgram.bind socket id")?;
+            let payload = request
+                .args
+                .get(1)
+                .cloned()
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from(
+                        "dgram.bind requires a request payload",
+                    ))
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<JavascriptDgramBindRequest>(value).map_err(|error| {
+                        SidecarError::InvalidState(format!("invalid dgram.bind payload: {error}"))
+                    })
+                })?;
+            let socket = process.udp_sockets.get_mut(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
+            })?;
+            let local_addr = socket.bind(payload.address.as_deref(), payload.port)?;
+            Ok(json!({
+                "localAddress": local_addr.ip().to_string(),
+                "localPort": local_addr.port(),
+                "family": socket_addr_family(&local_addr),
+            }))
+        }
+        "dgram.send" => {
+            let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "dgram.send socket id")?;
+            let chunk = javascript_sync_rpc_bytes_arg(&request.args, 1, "dgram.send payload")?;
+            let payload = request
+                .args
+                .get(2)
+                .cloned()
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from(
+                        "dgram.send requires a request payload",
+                    ))
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<JavascriptDgramSendRequest>(value).map_err(|error| {
+                        SidecarError::InvalidState(format!("invalid dgram.send payload: {error}"))
+                    })
+                })?;
+            let socket = process.udp_sockets.get_mut(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
+            })?;
+            let (written, local_addr) = socket.send_to(
+                payload.address.as_deref().unwrap_or("localhost"),
+                payload.port,
+                &chunk,
+            )?;
+            Ok(json!({
+                "bytes": written,
+                "localAddress": local_addr.ip().to_string(),
+                "localPort": local_addr.port(),
+                "family": socket_addr_family(&local_addr),
+            }))
+        }
+        "dgram.poll" => {
+            let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "dgram.poll socket id")?;
+            let wait_ms =
+                javascript_sync_rpc_arg_u64_optional(&request.args, 1, "dgram.poll wait ms")?
+                    .unwrap_or_default();
+            let event = {
+                let socket = process.udp_sockets.get(socket_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
+                })?;
+                socket.poll(Duration::from_millis(wait_ms))?
+            };
+
+            match event {
+                Some(JavascriptUdpSocketEvent::Message { data, remote_addr }) => Ok(json!({
+                    "type": "message",
+                    "data": javascript_sync_rpc_bytes_value(&data),
+                    "remoteAddress": remote_addr.ip().to_string(),
+                    "remotePort": remote_addr.port(),
+                    "remoteFamily": socket_addr_family(&remote_addr),
+                })),
+                Some(JavascriptUdpSocketEvent::Error { code, message }) => Ok(json!({
+                    "type": "error",
+                    "code": code,
+                    "message": message,
+                })),
+                None => Ok(Value::Null),
+            }
+        }
+        "dgram.close" => {
+            let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "dgram.close socket id")?;
+            let mut socket = process.udp_sockets.remove(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
+            })?;
+            socket.close();
+            Ok(Value::Null)
+        }
+        other => Err(SidecarError::InvalidState(format!(
+            "unsupported JavaScript dgram sync RPC method {other}"
+        ))),
     }
 }
 
@@ -7482,6 +7854,166 @@ socket.on("close", (hadError) => {{
         assert!(stdout.contains("\"hadError\":false"), "stdout: {stdout}");
         assert!(
             stdout.contains(&format!("\"remotePort\":{port}")),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn javascript_dgram_rpc_sends_and_receives_host_udp_packets() {
+        assert_node_available();
+
+        let listener = UdpSocket::bind("127.0.0.1:0").expect("bind udp listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = thread::spawn(move || {
+            let mut buffer = [0_u8; 64 * 1024];
+            let (bytes_read, remote_addr) = listener.recv_from(&mut buffer).expect("recv packet");
+            assert_eq!(
+                String::from_utf8(buffer[..bytes_read].to_vec()).expect("udp payload utf8"),
+                "ping"
+            );
+            listener
+                .send_to(b"pong", remote_addr)
+                .expect("send udp response");
+        });
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-dgram-rpc-cwd");
+        write_fixture(
+            &cwd.join("entry.mjs"),
+            &format!(
+                r#"
+import dgram from "node:dgram";
+
+const socket = dgram.createSocket("udp4");
+const summary = await new Promise((resolve) => {{
+socket.on("error", (error) => {{
+  console.error(error.stack ?? error.message);
+  process.exit(1);
+}});
+socket.on("message", (message, rinfo) => {{
+  const address = socket.address();
+  socket.close(() => {{
+    resolve({{
+      address,
+      message: message.toString("utf8"),
+      rinfo,
+    }});
+  }});
+}});
+socket.bind(0, "127.0.0.1", () => {{
+  socket.send("ping", {port}, "127.0.0.1");
+}});
+}});
+
+console.log(JSON.stringify(summary));
+"#,
+            ),
+        );
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dgram\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-dgram"),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
+            );
+        }
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = None;
+        for _ in 0..64 {
+            let next_event = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-dgram")
+                    .map(|process| {
+                        process
+                            .execution
+                            .poll_event(Duration::from_secs(5))
+                            .expect("poll javascript dgram rpc event")
+                    })
+                    .flatten()
+            };
+            let Some(event) = next_event else {
+                if exit_code.is_some() {
+                    break;
+                }
+                panic!("javascript dgram process disappeared before exit");
+            };
+
+            match &event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    stdout.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    stderr.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Exited(code) => {
+                    exit_code = Some(*code);
+                }
+                _ => {}
+            }
+
+            sidecar
+                .handle_execution_event(&vm_id, "proc-js-dgram", event)
+                .expect("handle javascript dgram rpc event");
+        }
+
+        server.join().expect("join udp server");
+        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        assert!(stdout.contains("\"message\":\"pong\""), "stdout: {stdout}");
+        assert!(
+            stdout.contains("\"address\":{\"address\":\"127.0.0.1\""),
+            "stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("\"port\":{port}")),
             "stdout: {stdout}"
         );
     }

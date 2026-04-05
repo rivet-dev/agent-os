@@ -85,6 +85,7 @@ const FS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}fs`;
 const FS_PROMISES_ASSET_SPECIFIER = `${BUILTIN_PREFIX}fs-promises`;
 const CHILD_PROCESS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}child-process`;
 const NET_ASSET_SPECIFIER = `${BUILTIN_PREFIX}net`;
+const DGRAM_ASSET_SPECIFIER = `${BUILTIN_PREFIX}dgram`;
 const OS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}os`;
 const DENIED_BUILTINS = new Set([
   'child_process',
@@ -553,6 +554,21 @@ function rewriteBuiltinImports(source, filePath) {
     }
   }
 
+  if (ALLOWED_BUILTINS.has('dgram')) {
+    for (const specifier of ['node:dgram', 'dgram']) {
+      rewritten = replaceBuiltinImportSpecifier(
+        rewritten,
+        specifier,
+        DGRAM_ASSET_SPECIFIER,
+      );
+      rewritten = replaceBuiltinDynamicImportSpecifier(
+        rewritten,
+        specifier,
+        DGRAM_ASSET_SPECIFIER,
+      );
+    }
+  }
+
   if (ALLOWED_BUILTINS.has('os')) {
     for (const specifier of ['node:os', 'os']) {
       rewritten = replaceBuiltinImportSpecifier(
@@ -648,6 +664,10 @@ function resolveBuiltinAsset(specifier, context) {
     case 'net':
       return ALLOWED_BUILTINS.has('net')
         ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'net.mjs'))
+        : null;
+    case 'dgram':
+      return ALLOWED_BUILTINS.has('dgram')
+        ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'dgram.mjs'))
         : null;
     case 'os':
       return ALLOWED_BUILTINS.has('os')
@@ -1626,6 +1646,7 @@ if (!Module || typeof Module.createRequire !== 'function') {
 const hostRequire = Module.createRequire(import.meta.url);
 const hostOs = hostRequire('node:os');
 const hostNet = hostRequire('node:net');
+const hostDgram = hostRequire('node:dgram');
 const { EventEmitter } = hostRequire('node:events');
 const { Duplex, Readable, Writable } = hostRequire('node:stream');
 const NODE_SYNC_RPC_ENABLE = HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_ENABLE === '1';
@@ -4268,6 +4289,426 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
   return module;
 }
 
+function createRpcBackedDgramModule(dgramModule, fromGuestDir = '/') {
+  const RPC_POLL_WAIT_MS = 50;
+  const RPC_IDLE_POLL_DELAY_MS = 10;
+  const bridge = () => requireAgentOsSyncRpcBridge();
+  const createUnsupportedDgramError = (subject) => {
+    const error = new Error(`${subject} is not supported by the Agent OS dgram polyfill yet`);
+    error.code = 'ERR_AGENT_OS_DGRAM_UNSUPPORTED';
+    return error;
+  };
+  const normalizeDgramInteger = (value, label) => {
+    const numeric =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.length > 0
+          ? Number(value)
+          : Number.NaN;
+    if (!Number.isInteger(numeric) || numeric < 0) {
+      throw new RangeError(`Agent OS ${label} must be a non-negative integer`);
+    }
+    return numeric;
+  };
+  const normalizeDgramPort = (value) => {
+    const numeric = normalizeDgramInteger(value, 'dgram port');
+    if (numeric > 65535) {
+      throw new RangeError(`Agent OS dgram port must be between 0 and 65535`);
+    }
+    return numeric;
+  };
+  const socketFamilyForAddress = (value) => {
+    if (typeof value !== 'string') {
+      return undefined;
+    }
+    return value.includes(':') ? 'IPv6' : 'IPv4';
+  };
+  const normalizeDgramType = (value) => {
+    if (value === 'udp4' || value === 'udp6') {
+      return value;
+    }
+    throw new TypeError(`Agent OS dgram socket type must be udp4 or udp6`);
+  };
+  const normalizeDgramCreateSocketInvocation = (args) => {
+    const values = [...args];
+    const callback =
+      typeof values[values.length - 1] === 'function' ? values.pop() : undefined;
+
+    let options;
+    if (typeof values[0] === 'string') {
+      options = { type: values[0] };
+    } else if (values[0] != null && typeof values[0] === 'object') {
+      options = { ...values[0] };
+    } else {
+      throw new TypeError('dgram.createSocket requires a socket type or options object');
+    }
+
+    if (options?.recvBufferSize != null || options?.sendBufferSize != null) {
+      throw createUnsupportedDgramError('dgram.createSocket({ recvBufferSize/sendBufferSize })');
+    }
+
+    return {
+      callback,
+      options: {
+        type: normalizeDgramType(options.type),
+      },
+    };
+  };
+  const normalizeDgramBindInvocation = (args, socketType) => {
+    const values = [...args];
+    const callback =
+      typeof values[values.length - 1] === 'function' ? values.pop() : undefined;
+
+    let options;
+    if (values[0] != null && typeof values[0] === 'object') {
+      options = { ...values[0] };
+    } else {
+      options = { port: values[0] };
+      if (typeof values[1] === 'string') {
+        options.address = values[1];
+      }
+    }
+
+    if (options?.exclusive != null || options?.fd != null || options?.signal != null) {
+      throw createUnsupportedDgramError('dgram.Socket.bind advanced options');
+    }
+
+    return {
+      callback,
+      options: {
+        port: normalizeDgramPort(options?.port ?? 0),
+        address:
+          typeof options?.address === 'string' && options.address.length > 0
+            ? options.address
+            : socketType === 'udp6'
+              ? '::'
+              : '0.0.0.0',
+      },
+    };
+  };
+  const normalizeDgramMessageBuffer = (value) => {
+    if (typeof value === 'string') {
+      return Buffer.from(value);
+    }
+    if (Array.isArray(value)) {
+      return Buffer.concat(value.map((entry) => normalizeDgramMessageBuffer(entry)));
+    }
+    return Buffer.from(toGuestBufferView(value, 'dgram payload'));
+  };
+  const normalizeDgramSendInvocation = (args) => {
+    const values = [...args];
+    const callback =
+      typeof values[values.length - 1] === 'function' ? values.pop() : undefined;
+    if (values.length === 0) {
+      throw new TypeError('dgram.Socket.send requires a payload');
+    }
+
+    let payload = normalizeDgramMessageBuffer(values.shift());
+    let port;
+    let address;
+
+    if (
+      values.length >= 3 &&
+      typeof values[0] === 'number' &&
+      typeof values[1] === 'number'
+    ) {
+      const offset = normalizeDgramInteger(values.shift(), 'dgram send offset');
+      const length = normalizeDgramInteger(values.shift(), 'dgram send length');
+      if (offset > payload.length || offset + length > payload.length) {
+        throw new RangeError('Agent OS dgram send offset/length is out of range');
+      }
+      payload = payload.subarray(offset, offset + length);
+      port = normalizeDgramPort(values.shift());
+      if (typeof values[0] === 'string') {
+        address = values.shift();
+      }
+    } else if (values[0] != null && typeof values[0] === 'object') {
+      const options = { ...values.shift() };
+      port = normalizeDgramPort(options.port);
+      address = options.address;
+    } else {
+      port = normalizeDgramPort(values.shift());
+      if (typeof values[0] === 'string') {
+        address = values.shift();
+      }
+    }
+
+    return {
+      callback,
+      options: {
+        port,
+        address: typeof address === 'string' && address.length > 0 ? address : 'localhost',
+      },
+      payload,
+    };
+  };
+  const callCreateSocket = (options) => bridge().callSync('dgram.createSocket', [options]);
+  const callBind = (socketId, options) => bridge().callSync('dgram.bind', [socketId, options]);
+  const callSend = (socketId, payload, options) =>
+    bridge().call('dgram.send', [socketId, toGuestBufferView(payload, 'dgram.send payload'), options]);
+  const callPoll = (socketId, waitMs = 0) => bridge().callSync('dgram.poll', [socketId, waitMs]);
+  const callClose = (socketId) => bridge().call('dgram.close', [socketId]);
+
+  const finalizeDatagramClose = (socket) => {
+    if (socket._agentOsClosed) {
+      return;
+    }
+    socket._agentOsClosed = true;
+    socket._agentOsBound = false;
+    socket._agentOsPollTimer && clearTimeout(socket._agentOsPollTimer);
+    socket._agentOsPollTimer = null;
+    queueMicrotask(() => socket.emit('close'));
+  };
+  const attachDatagramBindState = (socket, result, emitListening = false) => {
+    const alreadyBound = socket._agentOsBound;
+    socket._agentOsBound = true;
+    socket._address = {
+      address: result.localAddress,
+      family: result.family ?? socketFamilyForAddress(result.localAddress),
+      port: result.localPort,
+    };
+    if (emitListening && !alreadyBound) {
+      queueMicrotask(() => {
+        if (!socket._agentOsClosed) {
+          socket.emit('listening');
+        }
+      });
+    }
+    scheduleDatagramPoll(socket, 0);
+  };
+  const scheduleDatagramPoll = (socket, delayMs) => {
+    if (
+      socket._agentOsClosed ||
+      socket._agentOsSocketId == null ||
+      !socket._agentOsBound ||
+      socket._agentOsPollTimer != null
+    ) {
+      return;
+    }
+
+    socket._agentOsPollTimer = setTimeout(() => {
+      socket._agentOsPollTimer = null;
+      if (
+        socket._agentOsClosed ||
+        socket._agentOsSocketId == null ||
+        !socket._agentOsBound
+      ) {
+        return;
+      }
+
+      let event;
+      try {
+        event = callPoll(socket._agentOsSocketId, RPC_POLL_WAIT_MS);
+      } catch (error) {
+        socket.emit('error', error);
+        scheduleDatagramPoll(socket, 0);
+        return;
+      }
+
+      if (!event) {
+        scheduleDatagramPoll(socket, RPC_IDLE_POLL_DELAY_MS);
+        return;
+      }
+
+      if (event.type === 'message') {
+        socket.emit(
+          'message',
+          decodeFsBytesPayload(event.data, 'dgram.message'),
+          {
+            address: event.remoteAddress,
+            family: event.remoteFamily ?? socketFamilyForAddress(event.remoteAddress),
+            port: event.remotePort,
+            size: decodeFsBytesPayload(event.data, 'dgram.message').length,
+          },
+        );
+        scheduleDatagramPoll(socket, 0);
+        return;
+      }
+
+      if (event.type === 'error') {
+        const error = new Error(
+          typeof event.message === 'string' ? event.message : 'Agent OS dgram socket error',
+        );
+        if (typeof event.code === 'string' && event.code.length > 0) {
+          error.code = event.code;
+        }
+        socket.emit('error', error);
+        scheduleDatagramPoll(socket, 0);
+        return;
+      }
+
+      scheduleDatagramPoll(socket, 0);
+    }, delayMs);
+
+    if (!socket._agentOsRefed) {
+      socket._agentOsPollTimer.unref?.();
+    }
+  };
+
+  class AgentOsDatagramSocket extends EventEmitter {
+    constructor(options = {}, messageListener = undefined) {
+      super();
+      this.type = options.type;
+      this._agentOsClosed = false;
+      this._agentOsRefed = true;
+      this._agentOsBound = false;
+      this._agentOsSocketId = null;
+      this._agentOsPollTimer = null;
+      this._address = null;
+      if (typeof messageListener === 'function') {
+        this.on('message', messageListener);
+      }
+      const result = callCreateSocket(options);
+      this._agentOsSocketId = String(result.socketId);
+    }
+
+    address() {
+      return this._address;
+    }
+
+    bind(...args) {
+      const { callback, options } = normalizeDgramBindInvocation(args, this.type);
+      if (typeof callback === 'function') {
+        this.once('listening', callback);
+      }
+      if (this._agentOsClosed) {
+        throw new Error('Agent OS dgram socket is closed');
+      }
+      attachDatagramBindState(this, callBind(this._agentOsSocketId, options), true);
+      return this;
+    }
+
+    close(callback) {
+      if (typeof callback === 'function') {
+        this.once('close', callback);
+      }
+      if (this._agentOsClosed || this._agentOsSocketId == null) {
+        queueMicrotask(() => finalizeDatagramClose(this));
+        return this;
+      }
+      this._agentOsBound = false;
+      this._agentOsPollTimer && clearTimeout(this._agentOsPollTimer);
+      this._agentOsPollTimer = null;
+      const socketId = this._agentOsSocketId;
+      this._agentOsSocketId = null;
+      callClose(socketId).then(
+        () => finalizeDatagramClose(this),
+        (error) => this.emit('error', error),
+      );
+      return this;
+    }
+
+    send(...args) {
+      if (this._agentOsClosed || this._agentOsSocketId == null) {
+        const error = new Error('Agent OS dgram socket is closed');
+        const callback =
+          typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+        if (callback) {
+          queueMicrotask(() => callback(error));
+          return;
+        }
+        throw error;
+      }
+
+      const { callback, options, payload } = normalizeDgramSendInvocation(args);
+      callSend(this._agentOsSocketId, payload, options).then(
+        (result) => {
+          attachDatagramBindState(this, result, true);
+          if (typeof callback === 'function') {
+            callback(null, typeof result?.bytes === 'number' ? result.bytes : payload.length);
+          }
+        },
+        (error) => {
+          if (typeof callback === 'function') {
+            callback(error);
+            return;
+          }
+          this.emit('error', error);
+        },
+      );
+    }
+
+    ref() {
+      this._agentOsRefed = true;
+      this._agentOsPollTimer?.ref?.();
+      return this;
+    }
+
+    unref() {
+      this._agentOsRefed = false;
+      this._agentOsPollTimer?.unref?.();
+      return this;
+    }
+
+    setBroadcast() {
+      return this;
+    }
+
+    setMulticastInterface() {
+      return this;
+    }
+
+    setMulticastLoopback() {
+      return this;
+    }
+
+    setMulticastTTL() {
+      return this;
+    }
+
+    setRecvBufferSize() {
+      return this;
+    }
+
+    setSendBufferSize() {
+      return this;
+    }
+
+    setTTL() {
+      return this;
+    }
+
+    addMembership() {
+      throw createUnsupportedDgramError('dgram.Socket.addMembership');
+    }
+
+    connect() {
+      throw createUnsupportedDgramError('dgram.Socket.connect');
+    }
+
+    disconnect() {
+      throw createUnsupportedDgramError('dgram.Socket.disconnect');
+    }
+
+    dropMembership() {
+      throw createUnsupportedDgramError('dgram.Socket.dropMembership');
+    }
+
+    getRecvBufferSize() {
+      return 0;
+    }
+
+    getSendBufferSize() {
+      return 0;
+    }
+
+    remoteAddress() {
+      throw createUnsupportedDgramError('dgram.Socket.remoteAddress');
+    }
+  }
+
+  const createSocket = (...args) => {
+    const { callback, options } = normalizeDgramCreateSocketInvocation(args);
+    return new AgentOsDatagramSocket(options, callback);
+  };
+  const module = Object.assign(Object.create(dgramModule ?? null), {
+    Socket: AgentOsDatagramSocket,
+    createSocket,
+  });
+
+  return module;
+}
+
 const guestRequireCache = new Map();
 let rootGuestRequire = null;
 const hostFs = fs;
@@ -4278,6 +4719,7 @@ const guestFs = wrapFsModule(hostFs);
 globalThis.__agentOsGuestFs = guestFs;
 const guestChildProcess = createRpcBackedChildProcessModule(INITIAL_GUEST_CWD);
 const guestNet = createRpcBackedNetModule(hostNet, INITIAL_GUEST_CWD);
+const guestDgram = createRpcBackedDgramModule(hostDgram, INITIAL_GUEST_CWD);
 const guestGetUid = () => VIRTUAL_UID;
 const guestGetGid = () => VIRTUAL_GID;
 const VIRTUAL_OS_HOSTNAME = parseVirtualProcessString(
@@ -5013,6 +5455,9 @@ function installGuestHardening() {
       if (normalized === 'net' && ALLOWED_BUILTINS.has('net')) {
         return guestNet;
       }
+      if (normalized === 'dgram' && ALLOWED_BUILTINS.has('dgram')) {
+        return guestDgram;
+      }
       if (normalized === 'child_process' && ALLOWED_BUILTINS.has('child_process')) {
         return guestChildProcess;
       }
@@ -5038,6 +5483,9 @@ function installGuestHardening() {
       }
       if (normalized === 'net' && ALLOWED_BUILTINS.has('net')) {
         return guestNet;
+      }
+      if (normalized === 'dgram' && ALLOWED_BUILTINS.has('dgram')) {
+        return guestDgram;
       }
       if (normalized === 'child_process' && ALLOWED_BUILTINS.has('child_process')) {
         return guestChildProcess;
@@ -5105,6 +5553,9 @@ if (ALLOWED_BUILTINS.has('child_process')) {
 hardenProperty(globalThis, '__agentOsBuiltinFs', guestFs);
 if (ALLOWED_BUILTINS.has('net')) {
   hardenProperty(globalThis, '__agentOsBuiltinNet', guestNet);
+}
+if (ALLOWED_BUILTINS.has('dgram')) {
+  hardenProperty(globalThis, '__agentOsBuiltinDgram', guestDgram);
 }
 if (ALLOWED_BUILTINS.has('os')) {
   hardenProperty(globalThis, '__agentOsBuiltinOs', guestOs);
@@ -6448,6 +6899,11 @@ const BUILTIN_ASSETS: &[BuiltinAsset] = &[
         init_counter_key: "__agentOsBuiltinNetInitCount",
     },
     BuiltinAsset {
+        name: "dgram",
+        module_specifier: "node:dgram",
+        init_counter_key: "__agentOsBuiltinDgramInitCount",
+    },
+    BuiltinAsset {
         name: "os",
         module_specifier: "node:os",
         init_counter_key: "__agentOsBuiltinOsInitCount",
@@ -6735,6 +7191,7 @@ fn render_builtin_asset_source(asset: &BuiltinAsset) -> String {
         "fs-promises" => render_fs_promises_builtin_asset_source(asset.init_counter_key),
         "child-process" => render_child_process_builtin_asset_source(asset.init_counter_key),
         "net" => render_net_builtin_asset_source(asset.init_counter_key),
+        "dgram" => render_dgram_builtin_asset_source(asset.init_counter_key),
         "os" => render_os_builtin_asset_source(asset.init_counter_key),
         _ => {
             render_passthrough_builtin_asset_source(asset.module_specifier, asset.init_counter_key)
@@ -6957,6 +7414,26 @@ export const isIPv4 = mod.isIPv4;\n\
 export const isIPv6 = mod.isIPv6;\n\
 export const setDefaultAutoSelectFamily = mod.setDefaultAutoSelectFamily;\n\
 export const setDefaultAutoSelectFamilyAttemptTimeout = mod.setDefaultAutoSelectFamilyAttemptTimeout;\n"
+    )
+}
+
+fn render_dgram_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const ACCESS_DENIED_CODE = \"ERR_ACCESS_DENIED\";\n\
+const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+if (!globalThis.__agentOsBuiltinDgram) {{\n\
+  const error = new Error(\"node:dgram is not available in the Agent OS guest runtime\");\n\
+  error.code = ACCESS_DENIED_CODE;\n\
+  throw error;\n\
+}}\n\n\
+const mod = globalThis.__agentOsBuiltinDgram;\n\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export const Socket = mod.Socket;\n\
+export const createSocket = mod.createSocket;\n"
     )
 }
 
@@ -7718,5 +8195,21 @@ export async function loadPyodide(options) {
         assert!(net_asset.contains("__agentOsBuiltinNet"));
         assert!(net_asset.contains("export const connect = mod.connect"));
         assert!(net_asset.contains("export const createServer = mod.createServer"));
+    }
+
+    #[test]
+    fn ensure_materialized_writes_dgram_builtin_asset() {
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let dgram_asset =
+            fs::read_to_string(import_cache.asset_root().join("builtins").join("dgram.mjs"))
+                .expect("read dgram builtin asset");
+
+        assert!(dgram_asset.contains("__agentOsBuiltinDgram"));
+        assert!(dgram_asset.contains("export const Socket = mod.Socket"));
+        assert!(dgram_asset.contains("export const createSocket = mod.createSocket"));
     }
 }

@@ -5,6 +5,7 @@
 - Guest-owned Node builtin polyfills that need both ESM and CJS coverage should be wired in three places together: loader import rewriting/asset resolution, the generated Node runner’s `process.getBuiltinModule` and `Module._load` hooks, and the core bridge’s default allowlist in `packages/core/src/sidecar/native-kernel-proxy.ts`.
 - When a Node builtin port is landing in phases, inherit untouched exports from a snapped host module and override only the RPC-backed surface for the current story; this keeps helper APIs working while the follow-on stories replace the remaining host-backed entrypoints.
 - When a guest Node networking port stops using real host listeners, mirror that state in `crates/sidecar/src/service.rs` `ActiveProcess` tracking and consult it from `find_listener`/socket snapshot queries before falling back to `/proc/[pid]/net/*`; procfs only sees host-owned sockets, not sidecar-managed polyfill listeners.
+- UDP guest ports follow the same rule as TCP listeners: keep sidecar-managed datagram sockets on `ActiveProcess`, create the real `UdpSocket` lazily on `bind()`/first `send()`, and answer `find_bound_udp` from that tracked state because `/proc/[pid]/net/udp*` never sees sidecar-owned sockets.
 - Pyodide guest hardening that must not rewrite user code belongs in `crates/execution/src/node_import_cache.rs` as a `pyodide.runPython(...)` bootstrap in the embedded Python runner, installed after package preloads and before `runPythonAsync()`.
 - The Pyodide host Node process is hardened with Node `--permission` in `crates/execution/src/python.rs`; keep its read allowlist scoped to the import-cache root, compile-cache dir, Pyodide bundle, and sandbox cwd, and keep writes limited to the cache paths plus sandbox cwd.
 - Node guest env hardening in `crates/execution/src/node_import_cache.rs` should snapshot `AGENT_OS_*` control vars first, then replace `process.env` with a filtered proxy so runtime internals keep working while guest enumeration/access stays scrubbed; when `node:module` is denied, bootstrap the runner via `process.getBuiltinModule('node:module')` instead of importing it through the guest loader.
@@ -344,4 +345,20 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Sidecar-managed Node listeners must be stored on `ActiveProcess` and surfaced through `find_listener`; once a builtin port stops binding a real host socket, `/proc/[pid]/net/*` no longer reflects guest listener state.
 - Gotchas encountered: Mixed socket-state tests can become noisy once an idle `net.createServer` starts long-polling `net.server_poll`; verify or tear down the listener once its snapshot is asserted, and poll signal-state snapshots until the separate control event has been observed.
 - Useful context: `cargo test -p agent-os-execution --test javascript javascript_execution_routes_net_create_server_through_sync_rpc -- --exact`, `cargo test -p agent-os-sidecar javascript_net_rpc_listens_accepts_connections_and_reports_listener_state -- --exact`, `cargo test -p agent-os-sidecar javascript_net_rpc_connects_to_host_tcp_server -- --exact`, `cargo test -p agent-os-sidecar --test socket_state_queries sidecar_queries_listener_udp_and_signal_state -- --exact`, `cargo check -p agent-os-execution`, and `cargo check -p agent-os-sidecar` all pass after this change.
+---
+## 2026-04-04 23:53:49 PDT - US-020
+- What was implemented
+- Added a guest `node:dgram` builtin asset and runner polyfill in `crates/execution/src/node_import_cache.rs` that routes `createSocket`, `bind`, `send`, message polling, and `close` through the shared JavaScript sync-RPC bridge while preserving the existing allowlist/deny behavior.
+- Extended `crates/sidecar/src/service.rs` with sidecar-managed UDP socket state, `dgram.createSocket`/`dgram.bind`/`dgram.send`/`dgram.poll`/`dgram.close` RPC handlers, lazy host `UdpSocket` binding, and `find_bound_udp` lookup from `ActiveProcess` state before the `/proc` fallback.
+- Added focused execution and sidecar regressions for the new `dgram` RPC surface, builtin asset materialization, a real host UDP round-trip, and revalidated the socket snapshot integration test against the sidecar-managed path.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: UDP ports should mirror the staged `net` approach: keep guest-facing JS state unbound until `bind()` or first `send()`, then route all subsequent message delivery through the shared sync-RPC poll loop instead of host Node’s `dgram` module.
+  - Gotchas encountered: Sidecar-managed UDP bindings never show up in `/proc/[pid]/net/udp*`, so `find_bound_udp` has to consult `ActiveProcess` state first, and the existing mixed socket-state integration test can still flake on the unrelated signal-state polling step and may need a rerun.
+  - Useful context: `cargo test -p agent-os-execution --test javascript javascript_execution_routes_dgram_through_sync_rpc -- --exact`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-sidecar service::tests::javascript_dgram_rpc_sends_and_receives_host_udp_packets -- --exact`, `cargo test -p agent-os-sidecar --test socket_state_queries sidecar_queries_listener_udp_and_signal_state -- --exact`, and `cargo check -p agent-os-execution -p agent-os-sidecar` all pass after this change.
 ---
