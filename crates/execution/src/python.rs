@@ -37,9 +37,11 @@ const PYTHON_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_PYTHON_WARMUP_METRICS__:"
 const PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV: &str = "AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES";
 const PYTHON_VFS_RPC_REQUEST_FD_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_REQUEST_FD";
 const PYTHON_VFS_RPC_RESPONSE_FD_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_RESPONSE_FD";
+const PYTHON_VFS_RPC_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_TIMEOUT_MS";
 const PYTHON_EXIT_CONTROL_PREFIX: &str = "__AGENT_OS_PYTHON_EXIT__:";
 const PYTHON_WARMUP_MARKER_VERSION: &str = "1";
 const DEFAULT_PYTHON_OUTPUT_BUFFER_MAX_BYTES: usize = 1024 * 1024;
+const DEFAULT_PYTHON_VFS_RPC_TIMEOUT_MS: u64 = 30_000;
 const CONTROLLED_STDERR_PREFIXES: &[&str] = &[PYTHON_EXIT_CONTROL_PREFIX];
 const RESERVED_PYTHON_ENV_KEYS: &[&str] = &[
     NODE_COMPILE_CACHE_ENV,
@@ -56,6 +58,7 @@ const RESERVED_PYTHON_ENV_KEYS: &[&str] = &[
     PYTHON_PREWARM_ONLY_ENV,
     PYTHON_VFS_RPC_REQUEST_FD_ENV,
     PYTHON_VFS_RPC_RESPONSE_FD_ENV,
+    PYTHON_VFS_RPC_TIMEOUT_MS_ENV,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,9 +274,24 @@ pub struct PythonExecution {
     stdin: Option<ChildStdin>,
     events: Receiver<PythonProcessEvent>,
     pending_exit_code: Arc<Mutex<Option<i32>>>,
+    pending_vfs_rpc: Arc<Mutex<Option<PendingVfsRpcState>>>,
     vfs_rpc_responses: Arc<Mutex<BufWriter<File>>>,
     stderr_filter: Arc<Mutex<LinePrefixFilter>>,
     output_buffer_max_bytes: usize,
+    vfs_rpc_timeout: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingVfsRpcState {
+    Pending(u64),
+    TimedOut(u64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingVfsRpcResolution {
+    Pending,
+    TimedOut,
+    Missing,
 }
 
 impl PythonExecution {
@@ -320,6 +338,12 @@ impl PythonExecution {
         id: u64,
         payload: PythonVfsRpcResponsePayload,
     ) -> Result<(), PythonExecutionError> {
+        if self.clear_pending_vfs_rpc(id)? == PendingVfsRpcResolution::TimedOut {
+            return Err(PythonExecutionError::RpcResponse(format!(
+                "VFS RPC request {id} is no longer pending"
+            )));
+        }
+
         let result = match payload {
             PythonVfsRpcResponsePayload::Empty => json!({}),
             PythonVfsRpcResponsePayload::Read { content_base64 } => {
@@ -354,6 +378,12 @@ impl PythonExecution {
         code: impl Into<String>,
         message: impl Into<String>,
     ) -> Result<(), PythonExecutionError> {
+        if self.clear_pending_vfs_rpc(id)? == PendingVfsRpcResolution::TimedOut {
+            return Err(PythonExecutionError::RpcResponse(format!(
+                "VFS RPC request {id} is no longer pending"
+            )));
+        }
+
         write_python_vfs_rpc_response(
             &self.vfs_rpc_responses,
             json!({
@@ -397,6 +427,13 @@ impl PythonExecution {
                     return Ok(Some(PythonExecutionEvent::Stderr(filtered)));
                 }
                 Ok(PythonProcessEvent::VfsRpcRequest(request)) => {
+                    self.set_pending_vfs_rpc(request.id)?;
+                    spawn_python_vfs_rpc_timeout(
+                        request.id,
+                        self.vfs_rpc_timeout,
+                        self.pending_vfs_rpc.clone(),
+                        self.vfs_rpc_responses.clone(),
+                    );
                     return Ok(Some(PythonExecutionEvent::VfsRpcRequest(request)));
                 }
                 Ok(PythonProcessEvent::Exited(exit_code)) => {
@@ -513,6 +550,35 @@ impl PythonExecution {
             .lock()
             .map_err(|_| PythonExecutionError::EventChannelClosed)?;
         Ok(pending.take())
+    }
+
+    fn set_pending_vfs_rpc(&self, id: u64) -> Result<(), PythonExecutionError> {
+        let mut pending = self
+            .pending_vfs_rpc
+            .lock()
+            .map_err(|_| PythonExecutionError::EventChannelClosed)?;
+        *pending = Some(PendingVfsRpcState::Pending(id));
+        Ok(())
+    }
+
+    fn clear_pending_vfs_rpc(
+        &self,
+        id: u64,
+    ) -> Result<PendingVfsRpcResolution, PythonExecutionError> {
+        let mut pending = self
+            .pending_vfs_rpc
+            .lock()
+            .map_err(|_| PythonExecutionError::EventChannelClosed)?;
+        match *pending {
+            Some(PendingVfsRpcState::Pending(current)) if current == id => {
+                *pending = None;
+                Ok(PendingVfsRpcResolution::Pending)
+            }
+            Some(PendingVfsRpcState::TimedOut(current)) if current == id => {
+                Ok(PendingVfsRpcResolution::TimedOut)
+            }
+            _ => Ok(PendingVfsRpcResolution::Missing),
+        }
     }
 }
 
@@ -642,9 +708,11 @@ impl PythonExecutionEngine {
             stdin,
             events: receiver,
             pending_exit_code: Arc::new(Mutex::new(None)),
+            pending_vfs_rpc: Arc::new(Mutex::new(None)),
             vfs_rpc_responses: rpc_response_writer,
             stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
             output_buffer_max_bytes: python_output_buffer_max_bytes(&request),
+            vfs_rpc_timeout: python_vfs_rpc_timeout(&request),
         })
     }
 
@@ -689,6 +757,55 @@ fn python_output_buffer_max_bytes(request: &StartPythonExecutionRequest) -> usiz
         .get(PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV)
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(DEFAULT_PYTHON_OUTPUT_BUFFER_MAX_BYTES)
+}
+
+fn python_vfs_rpc_timeout(request: &StartPythonExecutionRequest) -> Duration {
+    Duration::from_millis(
+        request
+            .env
+            .get(PYTHON_VFS_RPC_TIMEOUT_MS_ENV)
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_PYTHON_VFS_RPC_TIMEOUT_MS),
+    )
+}
+
+fn spawn_python_vfs_rpc_timeout(
+    id: u64,
+    timeout: Duration,
+    pending: Arc<Mutex<Option<PendingVfsRpcState>>>,
+    responses: Arc<Mutex<BufWriter<File>>>,
+) {
+    thread::spawn(move || {
+        thread::sleep(timeout);
+        let should_timeout = match pending.lock() {
+            Ok(mut guard) if *guard == Some(PendingVfsRpcState::Pending(id)) => {
+                *guard = Some(PendingVfsRpcState::TimedOut(id));
+                true
+            }
+            Ok(_) => false,
+            Err(_) => false,
+        };
+
+        if !should_timeout {
+            return;
+        }
+
+        let _ = write_python_vfs_rpc_response(
+            &responses,
+            json!({
+                "id": id,
+                "ok": false,
+                "error": {
+                    "code": "ERR_AGENT_OS_PYTHON_VFS_RPC_TIMEOUT",
+                    "message": format!(
+                        "guest Python VFS RPC request {id} timed out after {}ms",
+                        timeout.as_millis()
+                    ),
+                },
+            }),
+        );
+    });
 }
 
 fn spawn_python_waiter<E, FE, FW>(
@@ -783,6 +900,14 @@ fn create_node_child(
         .env(
             PYTHON_VFS_RPC_RESPONSE_FD_ENV,
             rpc_channels.child_response_reader.as_raw_fd().to_string(),
+        )
+        .env(
+            PYTHON_VFS_RPC_TIMEOUT_MS_ENV,
+            request
+                .env
+                .get(PYTHON_VFS_RPC_TIMEOUT_MS_ENV)
+                .cloned()
+                .unwrap_or_else(|| DEFAULT_PYTHON_VFS_RPC_TIMEOUT_MS.to_string()),
         )
         .env(NODE_FROZEN_TIME_ENV, frozen_time_ms.to_string());
 

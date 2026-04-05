@@ -12,6 +12,7 @@ use tempfile::tempdir;
 
 const PYTHON_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_PYTHON_WARMUP_METRICS__:";
 const PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV: &str = "AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES";
+const PYTHON_VFS_RPC_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_TIMEOUT_MS";
 
 #[derive(Debug, Clone, PartialEq)]
 struct PythonPrewarmMetrics {
@@ -801,6 +802,93 @@ export async function loadPyodide() {
         other => panic!("expected timeout error, got {other:?}"),
     }
 
+    assert_process_exits(child_pid);
+}
+
+#[test]
+fn python_vfs_rpc_bridge_times_out_when_sidecar_never_responds() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let pyodide_dir = temp.path().join("pyodide");
+    fs::create_dir_all(&pyodide_dir).expect("create pyodide dir");
+    write_fixture(
+        &pyodide_dir.join("pyodide.mjs"),
+        r#"
+export async function loadPyodide() {
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync() {
+      globalThis.__agentOsPythonVfsRpc.fsReadSync('/workspace/never.txt');
+    },
+  };
+}
+"#,
+    );
+    write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
+
+    let mut engine = PythonExecutionEngine::default();
+    let context = engine.create_context(CreatePythonContextRequest {
+        vm_id: String::from("vm-python"),
+        pyodide_dist_path: pyodide_dir,
+    });
+
+    let execution = engine
+        .start_execution(StartPythonExecutionRequest {
+            vm_id: String::from("vm-python"),
+            context_id: context.context_id,
+            code: String::from("print('rpc timeout')"),
+            file_path: None,
+            env: BTreeMap::from([(
+                String::from(PYTHON_VFS_RPC_TIMEOUT_MS_ENV),
+                String::from("50"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start Python execution");
+    let child_pid = execution.child_pid();
+
+    let mut saw_request = false;
+    let mut stderr = Vec::new();
+    let mut exit_code = None;
+
+    for _ in 0..40 {
+        match execution
+            .poll_event(Duration::from_millis(250))
+            .expect("poll Python event")
+        {
+            Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
+                saw_request = true;
+                assert_eq!(request.method, PythonVfsRpcMethod::Read);
+                assert_eq!(request.path, "/workspace/never.txt");
+            }
+            Some(PythonExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(PythonExecutionEvent::Exited(code)) => {
+                exit_code = Some(code);
+                break;
+            }
+            Some(PythonExecutionEvent::Stdout(chunk)) => {
+                panic!("unexpected stdout: {}", String::from_utf8_lossy(&chunk));
+            }
+            None => {}
+        }
+    }
+
+    assert!(saw_request, "expected a VFS RPC request before timeout");
+    assert_eq!(
+        exit_code,
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+
+    let stderr = String::from_utf8(stderr).expect("stderr utf8");
+    assert!(
+        stderr.contains("ERR_AGENT_OS_PYTHON_VFS_RPC_TIMEOUT")
+            || stderr.contains("timed out waiting for a response")
+            || stderr.contains("timed out after 50ms"),
+        "unexpected stderr: {stderr}"
+    );
     assert_process_exits(child_pid);
 }
 

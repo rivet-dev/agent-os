@@ -92,6 +92,7 @@ const EXECUTION_DRIVER_NAME: &str = "agent-os-sidecar-execution";
 const JAVASCRIPT_COMMAND: &str = "node";
 const PYTHON_COMMAND: &str = "python";
 const WASM_COMMAND: &str = "wasm";
+const PYTHON_VFS_RPC_GUEST_ROOT: &str = "/workspace";
 const EXECUTION_SANDBOX_ROOT_ENV: &str = "AGENT_OS_SANDBOX_ROOT";
 const HOST_REALPATH_MAX_SYMLINK_DEPTH: usize = 40;
 const DISPOSE_VM_SIGTERM_GRACE: Duration = Duration::from_millis(100);
@@ -3458,59 +3459,64 @@ where
         process_id: &str,
         request: PythonVfsRpcRequest,
     ) -> Result<(), SidecarError> {
-        let response = {
-            let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-            match request.method {
-                PythonVfsRpcMethod::Read => vm
-                    .kernel
-                    .read_file(&request.path)
-                    .map(|content| PythonVfsRpcResponsePayload::Read {
-                        content_base64: base64::engine::general_purpose::STANDARD.encode(content),
-                    })
-                    .map_err(kernel_error),
-                PythonVfsRpcMethod::Write => {
-                    let content_base64 = request.content_base64.as_deref().ok_or_else(|| {
-                        SidecarError::InvalidState(format!(
-                            "python VFS fsWrite for {} requires contentBase64",
-                            request.path
-                        ))
-                    })?;
-                    let bytes = base64::engine::general_purpose::STANDARD
-                        .decode(content_base64)
-                        .map_err(|error| {
-                            SidecarError::InvalidState(format!(
-                                "invalid base64 python VFS content for {}: {error}",
-                                request.path
-                            ))
-                        })?;
-                    vm.kernel
-                        .write_file(&request.path, bytes)
+        let response = match normalize_python_vfs_rpc_path(&request.path) {
+            Ok(path) => {
+                let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                match request.method {
+                    PythonVfsRpcMethod::Read => vm
+                        .kernel
+                        .read_file(&path)
+                        .map(|content| PythonVfsRpcResponsePayload::Read {
+                            content_base64: base64::engine::general_purpose::STANDARD
+                                .encode(content),
+                        })
+                        .map_err(kernel_error),
+                    PythonVfsRpcMethod::Write => {
+                        let content_base64 =
+                            request.content_base64.as_deref().ok_or_else(|| {
+                                SidecarError::InvalidState(format!(
+                                    "python VFS fsWrite for {} requires contentBase64",
+                                    path
+                                ))
+                            })?;
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(content_base64)
+                            .map_err(|error| {
+                                SidecarError::InvalidState(format!(
+                                    "invalid base64 python VFS content for {}: {error}",
+                                    path
+                                ))
+                            })?;
+                        vm.kernel
+                            .write_file(&path, bytes)
+                            .map(|()| PythonVfsRpcResponsePayload::Empty)
+                            .map_err(kernel_error)
+                    }
+                    PythonVfsRpcMethod::Stat => vm
+                        .kernel
+                        .stat(&path)
+                        .map(|stat| PythonVfsRpcResponsePayload::Stat {
+                            stat: PythonVfsRpcStat {
+                                mode: stat.mode,
+                                size: stat.size,
+                                is_directory: stat.is_directory,
+                                is_symbolic_link: stat.is_symbolic_link,
+                            },
+                        })
+                        .map_err(kernel_error),
+                    PythonVfsRpcMethod::ReadDir => vm
+                        .kernel
+                        .read_dir(&path)
+                        .map(|entries| PythonVfsRpcResponsePayload::ReadDir { entries })
+                        .map_err(kernel_error),
+                    PythonVfsRpcMethod::Mkdir => vm
+                        .kernel
+                        .mkdir(&path, request.recursive)
                         .map(|()| PythonVfsRpcResponsePayload::Empty)
-                        .map_err(kernel_error)
+                        .map_err(kernel_error),
                 }
-                PythonVfsRpcMethod::Stat => vm
-                    .kernel
-                    .stat(&request.path)
-                    .map(|stat| PythonVfsRpcResponsePayload::Stat {
-                        stat: PythonVfsRpcStat {
-                            mode: stat.mode,
-                            size: stat.size,
-                            is_directory: stat.is_directory,
-                            is_symbolic_link: stat.is_symbolic_link,
-                        },
-                    })
-                    .map_err(kernel_error),
-                PythonVfsRpcMethod::ReadDir => vm
-                    .kernel
-                    .read_dir(&request.path)
-                    .map(|entries| PythonVfsRpcResponsePayload::ReadDir { entries })
-                    .map_err(kernel_error),
-                PythonVfsRpcMethod::Mkdir => vm
-                    .kernel
-                    .mkdir(&request.path, request.recursive)
-                    .map(|()| PythonVfsRpcResponsePayload::Empty)
-                    .map_err(kernel_error),
             }
+            Err(error) => Err(error),
         };
 
         let vm = self.vms.get_mut(vm_id).expect("VM should exist");
@@ -5161,6 +5167,25 @@ fn normalize_path(path: &str) -> String {
         String::from("/")
     } else {
         normalized
+    }
+}
+
+fn normalize_python_vfs_rpc_path(path: &str) -> Result<String, SidecarError> {
+    if !path.starts_with('/') {
+        return Err(SidecarError::InvalidState(format!(
+            "python VFS RPC path {path} must be absolute within {PYTHON_VFS_RPC_GUEST_ROOT}"
+        )));
+    }
+
+    let normalized = normalize_path(path);
+    if normalized == PYTHON_VFS_RPC_GUEST_ROOT
+        || normalized.starts_with(&format!("{PYTHON_VFS_RPC_GUEST_ROOT}/"))
+    {
+        Ok(normalized)
+    } else {
+        Err(SidecarError::InvalidState(format!(
+            "python VFS RPC path {normalized} escapes guest workspace root {PYTHON_VFS_RPC_GUEST_ROOT}"
+        )))
     }
 }
 
@@ -8073,7 +8098,7 @@ export async function loadPyodide() {
                 PythonVfsRpcRequest {
                     id: 1,
                     method: PythonVfsRpcMethod::Mkdir,
-                    path: String::from("/rpc"),
+                    path: String::from("/workspace"),
                     content_base64: None,
                     recursive: false,
                 },
@@ -8086,7 +8111,7 @@ export async function loadPyodide() {
                 PythonVfsRpcRequest {
                     id: 2,
                     method: PythonVfsRpcMethod::Write,
-                    path: String::from("/rpc/note.txt"),
+                    path: String::from("/workspace/note.txt"),
                     content_base64: Some(String::from("aGVsbG8gZnJvbSBzaWRlY2FyIHJwYw==")),
                     recursive: false,
                 },
@@ -8097,7 +8122,7 @@ export async function loadPyodide() {
             let vm = sidecar.vms.get_mut(&vm_id).expect("python vm");
             String::from_utf8(
                 vm.kernel
-                    .read_file("/rpc/note.txt")
+                    .read_file("/workspace/note.txt")
                     .expect("read bridged file from kernel"),
             )
             .expect("utf8 file contents")
@@ -8266,6 +8291,27 @@ await new Promise(() => {});
                 .expect("remove fake javascript process")
         };
         let _ = signal_runtime_process(process.execution.child_pid(), SIGTERM);
+    }
+
+    #[test]
+    fn python_vfs_rpc_paths_are_scoped_to_workspace_root() {
+        assert_eq!(
+            normalize_python_vfs_rpc_path("/workspace/./note.txt")
+                .expect("normalize workspace path"),
+            String::from("/workspace/note.txt")
+        );
+        assert!(
+            normalize_python_vfs_rpc_path("/workspace/../etc/passwd").is_err(),
+            "workspace escape should be rejected",
+        );
+        assert!(
+            normalize_python_vfs_rpc_path("/etc/passwd").is_err(),
+            "non-workspace paths should be rejected",
+        );
+        assert!(
+            normalize_python_vfs_rpc_path("workspace/note.txt").is_err(),
+            "relative paths should be rejected",
+        );
     }
 
     #[test]

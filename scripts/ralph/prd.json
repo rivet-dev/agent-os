@@ -423,7 +423,7 @@
         "Typecheck passes"
       ],
       "priority": 39,
-      "passes": false,
+      "passes": true,
       "notes": "service.rs:2394-2470 passes request.path directly to kernel with no validation. readSync blocks forever if Rust never responds."
     },
     {

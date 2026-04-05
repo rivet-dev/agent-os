@@ -7533,8 +7533,8 @@ function createPythonVfsRpcBridge() {
   }
 
   let nextRequestId = 1;
-  let responseBuffer = '';
   const queuedResponses = new Map();
+  let responseBuffer = '';
 
   function readResponseLineSync() {
     while (true) {

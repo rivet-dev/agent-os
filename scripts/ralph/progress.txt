@@ -1,5 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Python VFS RPCs are intentionally scoped to `/workspace`; normalize and reject anything outside that guest root in `crates/sidecar/src/service.rs` before touching the kernel VFS.
+- Pyodide VFS RPC timeouts are safer to enforce in `crates/execution/src/python.rs` against pending request IDs than inside the embedded runner; touching the bundled Python runner can perturb real Pyodide bootstrap behavior.
 - Non-reaping host child liveness checks in `crates/sidecar/src/service.rs` should use `waitid(..., WNOWAIT | WNOHANG | WEXITED | WSTOPPED | WCONTINUED)`; `waitpid` does not provide a safe non-reaping probe for the PID-reuse hardening path.
 - Native execution engines should own `NodeImportCache` state per `vm_id`, and sidecar VM disposal should call each engine's `dispose_vm`; a single engine-wide cache leaks module state across VMs.
 - WASM runtime hardening is split across three layers together: `ResourceLimits` / sidecar metadata parsing, `crates/sidecar/src/service.rs` injecting reserved `AGENT_OS_WASM_*` env keys, and `crates/execution/src/wasm.rs` validating or enforcing the actual limit before guest code runs.
@@ -678,4 +680,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Host child liveness checks that must not steal exit state from the real waiter should use `waitid(..., WNOWAIT | WNOHANG | WEXITED | WSTOPPED | WCONTINUED)` instead of `waitpid`.
   - Gotchas encountered: `waitpid` rejects the `WNOWAIT` combination here, so using it for PID-reuse hardening returns `EINVAL` and silently leaves the sidecar without a safe non-reaping probe.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test fd_table --test api_surface`, `cargo test -p agent-os-sidecar service::tests::parse_signal_only_accepts_whitelisted_guest_signals -- --exact`, `cargo test -p agent-os-sidecar service::tests::runtime_child_liveness_only_tracks_owned_children -- --exact`, and `cargo check -p agent-os-kernel -p agent-os-sidecar` all pass after this change.
+---
+## 2026-04-05 03:33:42 PDT - US-026
+- What was implemented
+- Scoped Python VFS RPC handling in `crates/sidecar/src/service.rs` to the guest `/workspace` root, normalizing paths before dispatch and rejecting escape attempts before they reach the kernel.
+- Added host-side Python VFS RPC timeout tracking in `crates/execution/src/python.rs`; pending request IDs now auto-expire with `ERR_AGENT_OS_PYTHON_VFS_RPC_TIMEOUT` instead of leaving the guest blocked forever if no response arrives.
+- Added focused regressions for Python VFS path scoping and timeout behavior, and updated the existing sidecar Python VFS unit coverage to use the real `/workspace` bridge root.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/src/python.rs`
+- `crates/execution/tests/python.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Python VFS RPC validation belongs on the sidecar boundary, not in the guest bridge alone; normalizing `/workspace` paths centrally prevents `..` escapes before kernel permission checks run.
+  - Gotchas encountered: Trying to push the timeout into the embedded Pyodide runner can break real bundled Pyodide bootstrap (`process.binding` access during warmup); the safer timeout enforcement point is the Rust execution layer where pending RPC IDs are already visible.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test python`, and `cargo test -p agent-os-sidecar python_vfs_rpc -- --test-threads=1` pass after this change. `cargo test -p agent-os-sidecar --test python -- --test-threads=1` is still failing on the pre-existing Pyodide hardening-order regression tracked separately by `US-035` (`process.binding` denied during warmup).
 ---
