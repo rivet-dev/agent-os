@@ -619,7 +619,7 @@ fn configure_python_node_sandbox(
         &request.cwd,
         &read_paths,
         &write_paths,
-        false,
+        true,
         false,
         false,
     );

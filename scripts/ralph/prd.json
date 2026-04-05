@@ -45,7 +45,7 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Currently python.rs:622 explicitly disables --permission. This removes the defense-in-depth OS-level backstop."
     },
     {

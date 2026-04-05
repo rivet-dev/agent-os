@@ -202,6 +202,8 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
 
     let workspace_root = canonical(&workspace_root()).display().to_string();
     let js_entry_parent = canonical(&js_entry_dir).display().to_string();
+    let python_cwd = canonical(temp.path()).display().to_string();
+    let python_pyodide_dir = canonical(&pyodide_dir).display().to_string();
     let wasm_module_parent = canonical(&wasm_module_dir).display().to_string();
 
     let javascript_args = &invocations[0];
@@ -230,16 +232,42 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
         let python_reads = read_flags(python_args);
         let python_writes = write_flags(python_args);
         assert!(
-            !python_args.iter().any(|arg| arg == "--permission"),
-            "python should not run under Node permission mode because Pyodide requires process.binding: {python_args:?}"
+            python_args.iter().any(|arg| arg == "--permission"),
+            "python should run under Node permission mode: {python_args:?}"
         );
         assert!(
-            python_reads.is_empty(),
-            "python should not receive Node fs read flags without permission mode: {python_args:?}"
+            python_reads.iter().any(|path| *path == python_cwd.as_str()),
+            "python should receive fs read access for the sandbox cwd: {python_args:?}"
         );
         assert!(
-            python_writes.is_empty(),
-            "python should not receive Node fs write flags without permission mode: {python_args:?}"
+            python_reads
+                .iter()
+                .any(|path| *path == python_pyodide_dir.as_str()),
+            "python should receive fs read access for the Pyodide bundle: {python_args:?}"
+        );
+        assert!(
+            python_reads
+                .iter()
+                .any(|path| path.contains("agent-os-node-import-cache-")),
+            "python should receive fs read access for the shared import cache: {python_args:?}"
+        );
+        assert!(
+            python_writes
+                .iter()
+                .any(|path| *path == python_cwd.as_str()),
+            "python should receive fs write access for the sandbox cwd: {python_args:?}"
+        );
+        assert!(
+            python_writes
+                .iter()
+                .any(|path| path.contains("agent-os-node-import-cache-")),
+            "python should receive fs write access for the shared import cache: {python_args:?}"
+        );
+        assert!(
+            !python_writes
+                .iter()
+                .any(|path| *path == python_pyodide_dir.as_str()),
+            "python should not receive fs write access for the readonly Pyodide bundle: {python_args:?}"
         );
     }
 

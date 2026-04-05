@@ -2,6 +2,7 @@
 ## Codebase Patterns
 - Node builtin hardening is split between `packages/core/src/sidecar/native-kernel-proxy.ts` and four generated surfaces in `crates/execution/src/node_import_cache.rs` (loader, Node runner, Python runner, denied asset materialization); update all of them together when changing builtin policy.
 - Pyodide guest hardening that must not rewrite user code belongs in `crates/execution/src/node_import_cache.rs` as a `pyodide.runPython(...)` bootstrap in the embedded Python runner, installed after package preloads and before `runPythonAsync()`.
+- The Pyodide host Node process is hardened with Node `--permission` in `crates/execution/src/python.rs`; keep its read allowlist scoped to the import-cache root, compile-cache dir, Pyodide bundle, and sandbox cwd, and keep writes limited to the cache paths plus sandbox cwd.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -34,4 +35,18 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Pyodide import interception needs both a `sys.modules` override and a builtin `__import__` wrapper to make blocked module behavior deterministic across Pyodide’s import path.
 - Gotchas encountered: Double-underscore helper names inside Python bootstrap classes get name-mangled and can accidentally turn intended `RuntimeError` denials into `NameError`s.
 - Useful context: `cargo test -p agent-os-execution node_import_cache::tests` and `cargo test -p agent-os-execution --test python` pass for this change, while `cargo test -p agent-os-sidecar ...` is still blocked by unrelated pre-existing compile errors in `crates/sidecar/src/service.rs` (`DiagnosticsRequest`/`DiagnosticsSnapshotResponse` imports and nearby test code).
+---
+## 2026-04-04 19:23:48 PDT - US-003
+- What was implemented
+- Enabled Node `--permission` hardening for the Pyodide host process in `crates/execution/src/python.rs`, with the existing read/write allowlists now applied to both prewarm and execution launches.
+- Updated the execution permission regression test to assert Python prewarm and exec both receive scoped fs read/write flags for the sandbox cwd, Pyodide bundle, and shared import-cache paths.
+- Files changed
+- `crates/execution/src/python.rs`
+- `crates/execution/tests/permission_flags.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: Python execution uses the same `harden_node_command(...)` helper as JS/WASM, so Pyodide permission changes should be tested via `crates/execution/tests/permission_flags.rs` rather than ad-hoc process spawning checks.
+- Gotchas encountered: `cargo test -p agent-os-execution` still hits an unrelated pre-existing benchmark failure in `crates/execution/tests/benchmark.rs` on Node `v24.13.0` (`node:module` default export assumption in `runner.mjs`); the focused Python/permission suites pass.
+- Useful context: `cargo test -p agent-os-execution --test permission_flags`, `cargo test -p agent-os-execution --test python_prewarm`, and `cargo test -p agent-os-execution --test python` are the relevant passing checks for Pyodide host-process permission changes.
 ---
