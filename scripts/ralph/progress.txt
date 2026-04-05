@@ -1,6 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
 - JavaScript sync-RPC networking in `crates/sidecar/src/service.rs` bypasses the kernel permission wrappers, so `dns.lookup`/`net.connect`/`net.listen` must enforce `network.dns`/`network.http`/`network.listen` there directly, and errno-style failures should be preserved into `respond_javascript_sync_rpc_error(...)` so guest code sees `EACCES` instead of a generic sync-RPC code.
+- Guest-visible `process` virtualization in `crates/execution/src/node_import_cache.rs` is safest when you harden properties on the real `process` first and let the guest proxy fall through with `Reflect.get(..., proxy)`; using the host `process` as the fallback receiver can leak unsanitized accessor state.
 - Sidecar TCP/Unix socket readers should treat peer EOF as a half-close, not a full close: emit `End` immediately, but only emit `Close` after the local write half has also been shut down, or guest `socket.end(...)` flows can turn into resets.
 - Native sidecar security telemetry should use `bridge.emit_structured_event(...)` with a `timestamp` field and stable keys like `policy`, `path`, `reason`, `source_pid`, and `target_pid`; this makes sidecar tests assertable without scraping free-form logs.
 - Sidecar VM-scoped DNS policy is driven from `CreateVmRequest.metadata`: use `network.dns.servers` for comma-separated upstream resolvers and `network.dns.override.<hostname>` for fixed answers, and emit `network.dns.resolved` / `network.dns.resolve_failed` structured events so resolution is observable in tests.
@@ -913,4 +914,19 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: JavaScript networking sync RPCs are one of the places where sidecar code can bypass kernel permission wrappers, so that layer needs its own explicit permission enforcement and guest-visible errno preservation.
   - Gotchas encountered: `dns.promises.lookup(...)` in the guest can still throw synchronously when the underlying sync RPC fails, so denial regressions should use `try`/`catch` instead of assuming a rejected promise path.
   - Useful context: `cargo fmt --check`, `cargo test -p agent-os-sidecar javascript_network_permission_callbacks_fire_for_dns_lookup_connect_and_listen -- --nocapture`, `cargo test -p agent-os-sidecar javascript_network_permission_denials_surface_eacces_to_guest_code -- --nocapture`, and `cargo test -p agent-os-sidecar javascript_dns_rpc_resolves_localhost -- --nocapture` pass after this change. `cargo test -p agent-os-sidecar -- --test-threads=1` is still red on pre-existing failures outside this story, including the bundled Pyodide warmup `process.binding` denial path and unstable older sidecar net/child-process tests.
+---
+## 2026-04-05 06:39:43 PDT - US-049
+- What was implemented
+- Hardened the guest Node `process` surface in `crates/execution/src/node_import_cache.rs` so `config`, `versions`, `release`, `version`, `platform`, `arch`, `memoryUsage()`, and `uptime()` now return virtualized values instead of host runtime/build details.
+- Reworked the guest `process` proxy fallback to resolve properties through the guest proxy receiver rather than the raw host `process`, which closes accessor-based leaks while preserving the existing hardened property overrides.
+- Added a JavaScript regression that verifies `globalThis.process`, `require("node:process")`, and `process.getBuiltinModule("node:process")` all expose the sanitized surface.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Guest-visible `process` virtualization is more reliable when the real host `process` is hardened first and the guest proxy only controls the receiver path for fallthrough properties.
+  - Gotchas encountered: `process.memoryUsage` in Node also exposes a `rss()` helper on the function object, so replacing the method needs to preserve that nested API or guest compatibility regresses.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test javascript -- --test-threads=1`, and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` all pass after this change.
 ---

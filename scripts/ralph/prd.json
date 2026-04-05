@@ -781,7 +781,7 @@
         "Typecheck passes"
       ],
       "priority": 49,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: guest process proxy only overrides 5 properties (execPath, pid, ppid, getuid, getgid). All others pass through via Reflect.get() fallback, leaking host build config, memory usage, uptime, etc."
     },
     {

@@ -2249,6 +2249,136 @@ console.log(JSON.stringify(result));
 }
 
 #[test]
+fn javascript_execution_blocks_remaining_process_property_leaks() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+function summarize(mod) {
+  return {
+    platform: mod.platform,
+    arch: mod.arch,
+    version: mod.version,
+    release: mod.release,
+    config: mod.config,
+    versions: mod.versions,
+    memoryUsage: typeof mod.memoryUsage === "function" ? mod.memoryUsage() : null,
+    memoryUsageRss:
+      typeof mod.memoryUsage === "function" && typeof mod.memoryUsage.rss === "function"
+        ? mod.memoryUsage.rss()
+        : null,
+    uptime: typeof mod.uptime === "function" ? mod.uptime() : null,
+  };
+}
+
+const result = {
+  globalProcess: summarize(process),
+  requireProcess: summarize(require("node:process")),
+  builtinProcess: summarize(process.getBuiltinModule("node:process")),
+};
+
+console.log(JSON.stringify(result));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let env = BTreeMap::from([
+        (
+            String::from("AGENT_OS_VIRTUAL_OS_ARCH"),
+            String::from("arm64"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_PROCESS_VERSION"),
+            String::from("v24.0.0"),
+        ),
+    ]);
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        env,
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse process leak JSON");
+    for key in ["globalProcess", "requireProcess", "builtinProcess"] {
+        let summary = &parsed[key];
+        assert_eq!(summary["platform"], Value::String(String::from("linux")));
+        assert_eq!(summary["arch"], Value::String(String::from("arm64")));
+        assert_eq!(summary["version"], Value::String(String::from("v24.0.0")));
+        assert_eq!(
+            summary["release"]["name"],
+            Value::String(String::from("node"))
+        );
+        assert_eq!(
+            summary["release"]["lts"],
+            Value::String(String::from("Agent OS"))
+        );
+        assert!(summary["release"]["sourceUrl"].is_null());
+        assert!(summary["release"]["headersUrl"].is_null());
+        assert_eq!(
+            summary["config"]["variables"]["host_arch"],
+            Value::String(String::from("arm64"))
+        );
+        assert_eq!(
+            summary["config"]["variables"]["node_shared"],
+            Value::Bool(false)
+        );
+        assert_eq!(
+            summary["config"]["variables"]["node_use_openssl"],
+            Value::Bool(false)
+        );
+        assert_eq!(
+            summary["versions"]["node"],
+            Value::String(String::from("24.0.0"))
+        );
+        assert_eq!(
+            summary["versions"]["openssl"],
+            Value::String(String::from("0.0.0"))
+        );
+        assert_eq!(
+            summary["versions"]["v8"],
+            Value::String(String::from("0.0"))
+        );
+        assert_eq!(
+            summary["versions"]["zlib"],
+            Value::String(String::from("0.0.0"))
+        );
+
+        let memory_usage = summary["memoryUsage"]
+            .as_object()
+            .expect("memory usage object");
+        for field in ["rss", "heapTotal", "heapUsed", "external", "arrayBuffers"] {
+            assert!(
+                memory_usage[field].as_u64().unwrap_or_default() > 0
+                    || field == "external"
+                    || field == "arrayBuffers"
+            );
+        }
+        assert_eq!(
+            summary["memoryUsageRss"], summary["memoryUsage"]["rss"],
+            "memoryUsage.rss() should match memoryUsage().rss for {key}"
+        );
+        let uptime = summary["uptime"].as_f64().expect("uptime number");
+        assert!(uptime >= 0.0, "uptime should not be negative for {key}");
+        assert!(
+            uptime < 5.0,
+            "uptime should be VM-scoped for {key}, got {uptime}"
+        );
+    }
+}
+
+#[test]
 fn javascript_execution_virtualizes_os_module() {
     assert_node_available();
 

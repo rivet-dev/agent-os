@@ -6034,6 +6034,10 @@ const guestHttps = createRpcBackedHttpsModule(hostHttps, guestTls);
 const guestHttp2 = createRpcBackedHttp2Module(hostHttp2, guestNet, guestTls);
 const guestGetUid = () => VIRTUAL_UID;
 const guestGetGid = () => VIRTUAL_GID;
+const guestMonotonicNow =
+  globalThis.performance && typeof globalThis.performance.now === 'function'
+    ? globalThis.performance.now.bind(globalThis.performance)
+    : Date.now;
 const VIRTUAL_OS_HOSTNAME = parseVirtualProcessString(
   HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_HOSTNAME ?? HOST_PROCESS_ENV.HOSTNAME,
   DEFAULT_VIRTUAL_OS_HOSTNAME,
@@ -6081,6 +6085,33 @@ const VIRTUAL_OS_FREEMEM = Math.min(
   ),
   VIRTUAL_OS_TOTALMEM,
 );
+const DEFAULT_VIRTUAL_PROCESS_VERSION = 'v24.0.0';
+const VIRTUAL_PROCESS_VERSION = parseVirtualProcessString(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_PROCESS_VERSION,
+  DEFAULT_VIRTUAL_PROCESS_VERSION,
+);
+const VIRTUAL_PROCESS_RELEASE = deepFreezeObject({
+  name: 'node',
+  lts: 'Agent OS',
+});
+const VIRTUAL_PROCESS_CONFIG = deepFreezeObject({
+  target_defaults: {},
+  variables: {
+    host_arch: VIRTUAL_OS_ARCH,
+    node_shared: false,
+    node_use_openssl: false,
+  },
+});
+const VIRTUAL_PROCESS_VERSIONS = deepFreezeObject({
+  node: VIRTUAL_PROCESS_VERSION.replace(/^v/, ''),
+  modules: '0',
+  napi: '0',
+  uv: '0.0.0',
+  zlib: '0.0.0',
+  openssl: '0.0.0',
+  v8: '0.0',
+});
+const VIRTUAL_PROCESS_START_TIME_MS = guestMonotonicNow();
 let guestProcess = process;
 
 function syncBuiltinModuleExports(hostModule, wrappedModule) {
@@ -6140,6 +6171,54 @@ function cloneVirtualNetworkInterfaces(networkInterfaces) {
 
 function encodeUserInfoValue(value, encoding) {
   return encoding === 'buffer' ? Buffer.from(String(value)) : String(value);
+}
+
+function deepFreezeObject(value) {
+  if (
+    value == null ||
+    (typeof value !== 'object' && typeof value !== 'function') ||
+    Object.isFrozen(value)
+  ) {
+    return value;
+  }
+
+  for (const nestedValue of Object.values(value)) {
+    deepFreezeObject(nestedValue);
+  }
+
+  return Object.freeze(value);
+}
+
+function createVirtualProcessMemoryUsageSnapshot() {
+  const rss = Math.max(
+    1,
+    Math.min(
+      VIRTUAL_OS_TOTALMEM,
+      Math.max(VIRTUAL_OS_TOTALMEM - VIRTUAL_OS_FREEMEM, Math.floor(VIRTUAL_OS_TOTALMEM / 4)),
+    ),
+  );
+  const heapTotal = Math.max(1, Math.min(rss, Math.floor(rss / 2)));
+  const heapUsed = Math.max(1, Math.min(heapTotal, Math.floor(heapTotal / 2)));
+  const external = Math.max(0, Math.min(rss - heapUsed, Math.floor(rss / 8)));
+  const arrayBuffers = Math.max(0, Math.min(external, Math.floor(external / 2)));
+
+  return {
+    rss,
+    heapTotal,
+    heapUsed,
+    external,
+    arrayBuffers,
+  };
+}
+
+function createGuestMemoryUsage() {
+  const memoryUsage = () => createVirtualProcessMemoryUsageSnapshot();
+  hardenProperty(memoryUsage, 'rss', () => createVirtualProcessMemoryUsageSnapshot().rss);
+  return memoryUsage;
+}
+
+function createGuestProcessUptime() {
+  return () => Math.max(0, (guestMonotonicNow() - VIRTUAL_PROCESS_START_TIME_MS) / 1000);
 }
 
 function createGuestOsModule(osModule) {
@@ -6237,6 +6316,8 @@ function createGuestOsModule(osModule) {
 }
 
 const guestOs = createGuestOsModule(hostOs);
+const guestMemoryUsage = createGuestMemoryUsage();
+const guestProcessUptime = createGuestProcessUptime();
 
 function isProcessSignalEventName(eventName) {
   return typeof eventName === 'string' && SIGNAL_EVENTS.has(eventName);
@@ -6262,52 +6343,13 @@ function createBlockedProcessSignalMethod(methodName) {
 }
 
 function createGuestProcessProxy(target) {
-  return new Proxy(target, {
+  let proxy = null;
+  proxy = new Proxy(target, {
     get(source, key) {
-      switch (key) {
-        case 'execPath':
-          return VIRTUAL_EXEC_PATH;
-        case 'pid':
-          return VIRTUAL_PID;
-        case 'ppid':
-          return VIRTUAL_PPID;
-        case 'getuid':
-          return guestGetUid;
-        case 'getgid':
-          return guestGetGid;
-        default:
-          return Reflect.get(source, key, source);
-      }
-    },
-    getOwnPropertyDescriptor(source, key) {
-      switch (key) {
-        case 'execPath':
-          return { value: VIRTUAL_EXEC_PATH, writable: false, enumerable: true, configurable: true };
-        case 'pid':
-          return { value: VIRTUAL_PID, writable: false, enumerable: true, configurable: true };
-        case 'ppid':
-          return { value: VIRTUAL_PPID, writable: false, enumerable: true, configurable: true };
-        case 'getuid':
-          return { value: guestGetUid, writable: false, enumerable: true, configurable: true };
-        case 'getgid':
-          return { value: guestGetGid, writable: false, enumerable: true, configurable: true };
-        default:
-          return Reflect.getOwnPropertyDescriptor(source, key);
-      }
-    },
-    has(source, key) {
-      switch (key) {
-        case 'execPath':
-        case 'pid':
-        case 'ppid':
-        case 'getuid':
-        case 'getgid':
-          return true;
-        default:
-          return Reflect.has(source, key);
-      }
+      return Reflect.get(source, key, proxy);
     },
   });
+  return proxy;
 }
 
 function createGuestRequire(fromGuestDir) {
@@ -6715,6 +6757,14 @@ function installGuestHardening() {
   hardenProperty(process, 'execPath', VIRTUAL_EXEC_PATH);
   hardenProperty(process, 'pid', VIRTUAL_PID);
   hardenProperty(process, 'ppid', VIRTUAL_PPID);
+  hardenProperty(process, 'version', VIRTUAL_PROCESS_VERSION);
+  hardenProperty(process, 'versions', VIRTUAL_PROCESS_VERSIONS);
+  hardenProperty(process, 'release', VIRTUAL_PROCESS_RELEASE);
+  hardenProperty(process, 'config', VIRTUAL_PROCESS_CONFIG);
+  hardenProperty(process, 'platform', VIRTUAL_OS_PLATFORM);
+  hardenProperty(process, 'arch', VIRTUAL_OS_ARCH);
+  hardenProperty(process, 'memoryUsage', guestMemoryUsage);
+  hardenProperty(process, 'uptime', guestProcessUptime);
   hardenProperty(process, 'getuid', guestGetUid);
   hardenProperty(process, 'getgid', guestGetGid);
 
