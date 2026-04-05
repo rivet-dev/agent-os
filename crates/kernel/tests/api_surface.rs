@@ -1,12 +1,17 @@
 use agent_os_kernel::command_registry::CommandDriver;
-use agent_os_kernel::fd_table::{LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN, O_CREAT, O_RDWR};
+use agent_os_kernel::fd_table::{
+    LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN, O_APPEND, O_CREAT, O_EXCL, O_RDWR,
+};
 use agent_os_kernel::kernel::{
     ExecOptions, KernelVm, KernelVmConfig, OpenShellOptions, SpawnOptions, WaitPidFlags,
     WaitPidResult, SEEK_SET,
 };
 use agent_os_kernel::permissions::Permissions;
 use agent_os_kernel::process_table::ProcessWaitEvent;
-use agent_os_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
+use agent_os_kernel::vfs::{
+    MemoryFileSystem, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
+};
+use std::cell::{Cell, RefCell};
 
 fn assert_kernel_error_code<T: std::fmt::Debug>(
     result: agent_os_kernel::kernel::KernelResult<T>,
@@ -29,6 +34,191 @@ fn spawn_shell(
             },
         )
         .expect("spawn shell")
+}
+
+fn spawn_shell_in<F: VirtualFileSystem>(
+    kernel: &mut KernelVm<F>,
+) -> agent_os_kernel::kernel::KernelProcessHandle {
+    kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn shell")
+}
+
+struct AtomicityProbeFileSystem {
+    inner: RefCell<MemoryFileSystem>,
+    exclusive_race_pending: Cell<bool>,
+    append_race_pending: Cell<bool>,
+    target_path: &'static str,
+}
+
+impl AtomicityProbeFileSystem {
+    fn new(target_path: &'static str) -> Self {
+        let mut inner = MemoryFileSystem::new();
+        inner
+            .write_file(target_path, Vec::new())
+            .expect("seed append target");
+        Self {
+            inner: RefCell::new(inner),
+            exclusive_race_pending: Cell::new(false),
+            append_race_pending: Cell::new(false),
+            target_path,
+        }
+    }
+
+    fn trigger_exclusive_race(&self) {
+        self.inner
+            .borrow_mut()
+            .remove_file(self.target_path)
+            .expect("clear target before exclusive race");
+        self.exclusive_race_pending.set(true);
+    }
+
+    fn trigger_append_race(&self) {
+        self.inner
+            .borrow_mut()
+            .write_file(self.target_path, Vec::new())
+            .expect("reset target before append race");
+        self.append_race_pending.set(true);
+    }
+}
+
+impl VirtualFileSystem for AtomicityProbeFileSystem {
+    fn read_file(&mut self, path: &str) -> VfsResult<Vec<u8>> {
+        self.inner.borrow_mut().read_file(path)
+    }
+
+    fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>> {
+        self.inner.borrow_mut().read_dir(path)
+    }
+
+    fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
+        self.inner.borrow_mut().read_dir_limited(path, max_entries)
+    }
+
+    fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
+        self.inner.borrow_mut().read_dir_with_types(path)
+    }
+
+    fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
+        let content = content.into();
+        if path == self.target_path {
+            if self.exclusive_race_pending.replace(false) {
+                self.inner
+                    .borrow_mut()
+                    .write_file(path, b"winner".to_vec())
+                    .expect("inject competing exclusive creator");
+            }
+            if self.append_race_pending.replace(false) {
+                self.inner
+                    .borrow_mut()
+                    .write_file(path, b"RACE".to_vec())
+                    .expect("inject competing append writer");
+            }
+        }
+        self.inner.borrow_mut().write_file(path, content)
+    }
+
+    fn create_file_exclusive(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
+        if path == self.target_path && self.exclusive_race_pending.replace(false) {
+            self.inner
+                .borrow_mut()
+                .write_file(path, b"winner".to_vec())
+                .expect("inject competing exclusive creator");
+            return Err(agent_os_kernel::vfs::VfsError::new(
+                "EEXIST",
+                format!("file already exists, open '{path}'"),
+            ));
+        }
+        self.inner.borrow_mut().create_file_exclusive(path, content)
+    }
+
+    fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
+        if path == self.target_path && self.append_race_pending.replace(false) {
+            self.inner
+                .borrow_mut()
+                .append_file(path, b"RACE".to_vec())
+                .expect("inject competing append writer");
+        }
+        self.inner.borrow_mut().append_file(path, content)
+    }
+
+    fn create_dir(&mut self, path: &str) -> VfsResult<()> {
+        self.inner.borrow_mut().create_dir(path)
+    }
+
+    fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()> {
+        self.inner.borrow_mut().mkdir(path, recursive)
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        if path == self.target_path && self.exclusive_race_pending.get() {
+            return false;
+        }
+        self.inner.borrow().exists(path)
+    }
+
+    fn stat(&mut self, path: &str) -> VfsResult<VirtualStat> {
+        self.inner.borrow_mut().stat(path)
+    }
+
+    fn remove_file(&mut self, path: &str) -> VfsResult<()> {
+        self.inner.borrow_mut().remove_file(path)
+    }
+
+    fn remove_dir(&mut self, path: &str) -> VfsResult<()> {
+        self.inner.borrow_mut().remove_dir(path)
+    }
+
+    fn rename(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
+        self.inner.borrow_mut().rename(old_path, new_path)
+    }
+
+    fn realpath(&self, path: &str) -> VfsResult<String> {
+        self.inner.borrow().realpath(path)
+    }
+
+    fn symlink(&mut self, target: &str, link_path: &str) -> VfsResult<()> {
+        self.inner.borrow_mut().symlink(target, link_path)
+    }
+
+    fn read_link(&self, path: &str) -> VfsResult<String> {
+        self.inner.borrow().read_link(path)
+    }
+
+    fn lstat(&self, path: &str) -> VfsResult<VirtualStat> {
+        self.inner.borrow().lstat(path)
+    }
+
+    fn link(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
+        self.inner.borrow_mut().link(old_path, new_path)
+    }
+
+    fn chmod(&mut self, path: &str, mode: u32) -> VfsResult<()> {
+        self.inner.borrow_mut().chmod(path, mode)
+    }
+
+    fn chown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()> {
+        self.inner.borrow_mut().chown(path, uid, gid)
+    }
+
+    fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
+        self.inner.borrow_mut().utimes(path, atime_ms, mtime_ms)
+    }
+
+    fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {
+        self.inner.borrow_mut().truncate(path, length)
+    }
+
+    fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {
+        self.inner.borrow_mut().pread(path, offset, length)
+    }
 }
 
 #[test]
@@ -150,6 +340,77 @@ fn kernel_fd_surface_supports_open_seek_positional_io_dup_and_dev_fd_views() {
 
     process.finish(0);
     kernel.waitpid(process.pid()).expect("wait for shell");
+}
+
+#[test]
+fn kernel_fd_surface_uses_atomic_exclusive_create() {
+    let target = "/tmp/race.txt";
+    let filesystem = AtomicityProbeFileSystem::new(target);
+    filesystem.trigger_exclusive_race();
+
+    let mut config = KernelVmConfig::new("vm-api-exclusive-create");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(filesystem, config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let process = spawn_shell_in(&mut kernel);
+    assert_kernel_error_code(
+        kernel.fd_open(
+            "shell",
+            process.pid(),
+            target,
+            O_CREAT | O_EXCL | O_RDWR,
+            None,
+        ),
+        "EEXIST",
+    );
+    assert_eq!(
+        kernel
+            .filesystem_mut()
+            .read_file(target)
+            .expect("winner should remain visible"),
+        b"winner".to_vec()
+    );
+
+    process.finish(0);
+    kernel.waitpid(process.pid()).expect("wait shell");
+}
+
+#[test]
+fn kernel_fd_surface_uses_atomic_append_writes() {
+    let target = "/tmp/race.txt";
+    let filesystem = AtomicityProbeFileSystem::new(target);
+    filesystem.trigger_append_race();
+
+    let mut config = KernelVmConfig::new("vm-api-append-write");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(filesystem, config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let process = spawn_shell_in(&mut kernel);
+    let fd = kernel
+        .fd_open("shell", process.pid(), target, O_APPEND | O_RDWR, None)
+        .expect("open append target");
+    assert_eq!(
+        kernel
+            .fd_write("shell", process.pid(), fd, b"mine")
+            .expect("append write"),
+        4
+    );
+    assert_eq!(
+        kernel
+            .filesystem_mut()
+            .read_file(target)
+            .expect("read appended file"),
+        b"RACEmine".to_vec()
+    );
+
+    process.finish(0);
+    kernel.waitpid(process.pid()).expect("wait shell");
 }
 
 #[test]

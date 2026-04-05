@@ -801,10 +801,15 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
         let path = entry.description.path().to_owned();
         let current_size = self.current_storage_file_size(&path)?;
-        let mut cursor = entry.description.cursor() as usize;
+        let cursor = entry.description.cursor() as usize;
         if entry.description.flags() & O_APPEND != 0 {
-            cursor = current_size as usize;
+            let required_size = current_size.max(checked_write_end(current_size, data.len())?);
+            self.check_path_resize_limits(&path, required_size)?;
+            let new_len = VirtualFileSystem::append_file(&mut self.filesystem, &path, data)?;
+            entry.description.set_cursor(new_len);
+            return Ok(data.len());
         }
+
         let required_size = current_size.max(checked_write_end(cursor as u64, data.len())?);
         self.check_path_resize_limits(&path, required_size)?;
 
@@ -813,9 +818,6 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         } else {
             Vec::new()
         };
-        if entry.description.flags() & O_APPEND != 0 {
-            cursor = existing.len();
-        }
         if cursor > existing.len() {
             existing.resize(cursor, 0);
         }
@@ -1220,14 +1222,18 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         path: &str,
         flags: u32,
     ) -> KernelResult<(u8, Option<FileLockTarget>)> {
+        if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
+            self.check_write_file_limits(path, 0)?;
+            VirtualFileSystem::create_file_exclusive(&mut self.filesystem, path, Vec::new())?;
+            let stat = VirtualFileSystem::stat(&mut self.filesystem, path)?;
+            return Ok((
+                filetype_for_path(path, &stat),
+                Some(FileLockTarget::new(stat.ino)),
+            ));
+        }
+
         let exists = self.filesystem.exists(path)?;
         if exists {
-            if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
-                return Err(KernelError::new(
-                    "EEXIST",
-                    format!("file already exists: {path}"),
-                ));
-            }
             if flags & O_TRUNC != 0 {
                 self.check_truncate_limits(path, 0)?;
                 VirtualFileSystem::truncate(&mut self.filesystem, path, 0)?;

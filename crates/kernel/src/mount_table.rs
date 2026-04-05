@@ -22,6 +22,22 @@ pub trait MountedFileSystem: Any {
     }
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>>;
     fn write_file(&mut self, path: &str, content: Vec<u8>) -> VfsResult<()>;
+    fn create_file_exclusive(&mut self, path: &str, content: Vec<u8>) -> VfsResult<()> {
+        if self.exists(path) {
+            return Err(VfsError::new(
+                "EEXIST",
+                format!("file already exists, open '{path}'"),
+            ));
+        }
+        self.write_file(path, content)
+    }
+    fn append_file(&mut self, path: &str, content: Vec<u8>) -> VfsResult<u64> {
+        let mut existing = self.read_file(path)?;
+        existing.extend_from_slice(&content);
+        let new_len = existing.len() as u64;
+        self.write_file(path, existing)?;
+        Ok(new_len)
+    }
     fn create_dir(&mut self, path: &str) -> VfsResult<()>;
     fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()>;
     fn exists(&self, path: &str) -> bool;
@@ -92,6 +108,14 @@ where
 
     fn write_file(&mut self, path: &str, content: Vec<u8>) -> VfsResult<()> {
         VirtualFileSystem::write_file(&mut self.inner, path, content)
+    }
+
+    fn create_file_exclusive(&mut self, path: &str, content: Vec<u8>) -> VfsResult<()> {
+        VirtualFileSystem::create_file_exclusive(&mut self.inner, path, content)
+    }
+
+    fn append_file(&mut self, path: &str, content: Vec<u8>) -> VfsResult<u64> {
+        VirtualFileSystem::append_file(&mut self.inner, path, content)
     }
 
     fn create_dir(&mut self, path: &str) -> VfsResult<()> {
@@ -691,6 +715,20 @@ impl VirtualFileSystem for MountTable {
         self.mounts[index]
             .filesystem
             .write_file(&relative_path, content.into())
+    }
+
+    fn create_file_exclusive(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
+        let (index, relative_path) = self.resolve_index(path)?;
+        self.mounts[index]
+            .filesystem
+            .create_file_exclusive(&relative_path, content.into())
+    }
+
+    fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
+        let (index, relative_path) = self.resolve_index(path)?;
+        self.mounts[index]
+            .filesystem
+            .append_file(&relative_path, content.into())
     }
 
     fn create_dir(&mut self, path: &str) -> VfsResult<()> {

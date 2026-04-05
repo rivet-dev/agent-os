@@ -158,6 +158,21 @@ pub trait VirtualFileSystem {
     }
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>>;
     fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()>;
+    fn create_file_exclusive(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
+        let content = content.into();
+        if self.exists(path) {
+            return Err(VfsError::already_exists("open", path));
+        }
+        self.write_file(path, content)
+    }
+    fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
+        let content = content.into();
+        let mut existing = self.read_file(path)?;
+        existing.extend_from_slice(&content);
+        let new_len = existing.len() as u64;
+        self.write_file(path, existing)?;
+        Ok(new_len)
+    }
     fn create_dir(&mut self, path: &str) -> VfsResult<()>;
     fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()>;
     fn exists(&self, path: &str) -> bool;
@@ -742,6 +757,40 @@ impl VirtualFileSystem for MemoryFileSystem {
         let ino = self.allocate_inode(InodeKind::File { data }, S_IFREG | 0o644);
         self.path_index.insert(normalized, ino);
         Ok(())
+    }
+
+    fn create_file_exclusive(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
+        let normalized = self.resolve_path(path, 0)?;
+        self.mkdir(&dirname(&normalized), true)?;
+        if self.path_index.contains_key(&normalized) {
+            return Err(VfsError::already_exists("open", path));
+        }
+
+        let ino = self.allocate_inode(
+            InodeKind::File {
+                data: content.into(),
+            },
+            S_IFREG | 0o644,
+        );
+        self.path_index.insert(normalized, ino);
+        Ok(())
+    }
+
+    fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
+        let normalized = self.resolve_path(path, 0)?;
+        let data = content.into();
+        let inode = self.inode_mut_for_existing_path(&normalized, "open", false)?;
+        let now = now_ms();
+        match &mut inode.kind {
+            InodeKind::File { data: existing } => {
+                existing.extend_from_slice(&data);
+                inode.metadata.mtime_ms = now;
+                inode.metadata.ctime_ms = now;
+                Ok(existing.len() as u64)
+            }
+            InodeKind::Directory => Err(VfsError::is_directory("open", path)),
+            InodeKind::SymbolicLink { .. } => Err(VfsError::not_found("open", path)),
+        }
     }
 
     fn create_dir(&mut self, path: &str) -> VfsResult<()> {

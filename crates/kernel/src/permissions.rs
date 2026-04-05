@@ -441,6 +441,16 @@ impl<F: VirtualFileSystem> VirtualFileSystem for PermissionedFileSystem<F> {
         self.inner.write_file(path, content)
     }
 
+    fn create_file_exclusive(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
+        self.check_subject(FsOperation::Write, path)?;
+        self.inner.create_file_exclusive(path, content)
+    }
+
+    fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
+        self.check_subject(FsOperation::Write, path)?;
+        self.inner.append_file(path, content)
+    }
+
     fn create_dir(&mut self, path: &str) -> VfsResult<()> {
         self.check_subject(FsOperation::CreateDir, path)?;
         self.inner.create_dir(path)

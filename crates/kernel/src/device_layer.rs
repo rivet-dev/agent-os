@@ -115,6 +115,25 @@ impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
         self.inner.write_file(path, content)
     }
 
+    fn create_file_exclusive(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
+        if is_device_path(path) || is_device_dir(path) {
+            let _ = content.into();
+            return Err(VfsError::new(
+                "EEXIST",
+                format!("file already exists, open '{path}'"),
+            ));
+        }
+        self.inner.create_file_exclusive(path, content)
+    }
+
+    fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
+        if matches!(path, "/dev/null" | "/dev/zero" | "/dev/urandom") {
+            let _ = content.into();
+            return Ok(0);
+        }
+        self.inner.append_file(path, content)
+    }
+
     fn create_dir(&mut self, path: &str) -> VfsResult<()> {
         if is_device_dir(path) {
             return Ok(());

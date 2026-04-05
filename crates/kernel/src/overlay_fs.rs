@@ -604,6 +604,26 @@ impl VirtualFileSystem for OverlayFileSystem {
         self.writable_upper(path)?.write_file(path, content.into())
     }
 
+    fn create_file_exclusive(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
+        self.remove_whiteout(path);
+        if self.path_exists_in_merged_view(path) {
+            return Err(Self::already_exists(path));
+        }
+        self.ensure_ancestor_directories_in_upper(path)?;
+        self.writable_upper(path)?
+            .create_file_exclusive(path, content.into())
+    }
+
+    fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
+        self.remove_whiteout(path);
+        if self.find_lower_by_entry(path).is_some() {
+            self.copy_up_path(path)?;
+        } else {
+            self.ensure_ancestor_directories_in_upper(path)?;
+        }
+        self.writable_upper(path)?.append_file(path, content.into())
+    }
+
     fn create_dir(&mut self, path: &str) -> VfsResult<()> {
         self.remove_whiteout(path);
         if self.path_exists_in_merged_view(path) {

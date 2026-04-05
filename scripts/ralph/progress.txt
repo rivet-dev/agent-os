@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Kernel filesystem semantic additions must be threaded through every wrapper layer together: `VirtualFileSystem`, `PermissionedFileSystem`, `DeviceLayer`, `MountTable`/`MountedFileSystem`, and the root/overlay delegates, or mounted/device-backed paths silently keep the old behavior.
 - PID-aware POSIX signal side effects belong at `KernelVm` syscall entrypoints, not low-level resource managers: `PipeManager` should stay signal-agnostic and let `crates/kernel/src/kernel.rs` `fd_write` translate broken-pipe `EPIPE` into `SIGPIPE`.
 - Parent-aware `waitpid` state tracking belongs in `crates/kernel/src/process_table.rs`: queue stop/continue notifications there, and let `crates/kernel/src/kernel.rs` clean up resources only after an exited child is actually reaped.
 - Advisory `flock` state should be kernel-global but owned by the shared open-file-description (`FileDescription.id()`), keyed by the opened file identity, and released only when the last refcounted FD closes so dup/fork inheritance shares locks while separate opens still conflict.
@@ -1170,4 +1171,25 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Advisory `flock` ownership belongs to the shared open-file-description, not the PID, so the kernel should key conflicts by file identity while using `FileDescription.id()` as the owner token and releasing on the last refcounted close.
   - Gotchas encountered: Lock release has to run through the same last-close path used by dup2 replacement and process-reap cleanup; closing an individual FD is not enough when other dup/fork references still point at the same `FileDescription`.
   - Useful context: `cargo fmt --package agent-os-kernel`, `cargo test -p agent-os-kernel --test fd_table --test api_surface`, `cargo check -p agent-os-kernel`, and `cargo test -p agent-os-kernel` all pass for this change.
+---
+## 2026-04-05 08:57:03 PDT - US-063
+- What was implemented
+- Added explicit `create_file_exclusive(...)` and `append_file(...)` filesystem operations, then threaded them through the kernel wrappers (`PermissionedFileSystem`, `DeviceLayer`, `MountTable`, `RootFileSystem`, `OverlayFileSystem`) so `fd_open(... O_CREAT|O_EXCL ...)` and `fd_write(... O_APPEND ...)` stop using split `exists/stat/read/write` sequences.
+- Updated `KernelVm::prepare_fd_open(...)` to route `O_CREAT|O_EXCL` through a single exclusive-create call and `KernelVm::fd_write(...)` to route append-mode writes through a single append operation that updates the shared cursor after the append completes.
+- Added regression coverage in `crates/kernel/tests/api_surface.rs` with a probe filesystem that simulates stale `exists` and stale append snapshots, proving the kernel now uses the atomic code paths instead of overwriting a competing creator or dropping a competing append.
+- Files changed
+- `crates/kernel/src/device_layer.rs`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/src/mount_table.rs`
+- `crates/kernel/src/overlay_fs.rs`
+- `crates/kernel/src/permissions.rs`
+- `crates/kernel/src/root_fs.rs`
+- `crates/kernel/src/vfs.rs`
+- `crates/kernel/tests/api_surface.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Kernel filesystem semantic additions have to be propagated through every wrapper layer, not just `MemoryFileSystem`, or mounted/device-backed paths keep the old behavior.
+  - Gotchas encountered: `MountTable` has its own `MountedFileSystem` abstraction separate from `VirtualFileSystem`, so new VFS entrypoints must be added to both traits and to `MountedVirtualFileSystem` forwarding.
+  - Useful context: `cargo fmt --all --check`, `cargo test -p agent-os-kernel --test api_surface -- --test-threads=1`, `cargo check -p agent-os-kernel`, and `cargo test -p agent-os-kernel` all pass for this change.
 ---
