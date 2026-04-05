@@ -239,7 +239,7 @@
         "Typecheck passes"
       ],
       "priority": 15,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-012 (SharedArrayBuffer RPC bridge). Sync methods use Atomics.wait to block until kernel responds."
     },
     {

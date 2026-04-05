@@ -3002,7 +3002,7 @@ where
                         .map(javascript_sync_rpc_stat_value)
                         .map_err(kernel_error)
                 }
-                "fs.promises.lstat" => {
+                "fs.lstatSync" | "fs.promises.lstat" => {
                     let path =
                         javascript_sync_rpc_arg_str(&request.args, 0, "filesystem lstat path")?;
                     vm.kernel
@@ -3028,7 +3028,7 @@ where
                         .map(|()| Value::Null)
                         .map_err(kernel_error)
                 }
-                "fs.promises.access" => {
+                "fs.accessSync" | "fs.promises.access" => {
                     let path =
                         javascript_sync_rpc_arg_str(&request.args, 0, "filesystem access path")?;
                     vm.kernel
@@ -3036,7 +3036,7 @@ where
                         .map(|_| Value::Null)
                         .map_err(kernel_error)
                 }
-                "fs.promises.copyFile" => {
+                "fs.copyFileSync" | "fs.promises.copyFile" => {
                     let source = javascript_sync_rpc_arg_str(
                         &request.args,
                         0,
@@ -3053,7 +3053,43 @@ where
                         .map(|()| Value::Null)
                         .map_err(kernel_error)
                 }
-                "fs.promises.rename" => {
+                "fs.existsSync" => {
+                    let path =
+                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem exists path")?;
+                    vm.kernel
+                        .exists(path)
+                        .map(Value::Bool)
+                        .map_err(kernel_error)
+                }
+                "fs.readlinkSync" => {
+                    let path =
+                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readlink path")?;
+                    vm.kernel
+                        .read_link(path)
+                        .map(Value::String)
+                        .map_err(kernel_error)
+                }
+                "fs.symlinkSync" => {
+                    let target =
+                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem symlink target")?;
+                    let link_path =
+                        javascript_sync_rpc_arg_str(&request.args, 1, "filesystem symlink path")?;
+                    vm.kernel
+                        .symlink(target, link_path)
+                        .map(|()| Value::Null)
+                        .map_err(kernel_error)
+                }
+                "fs.linkSync" => {
+                    let source =
+                        javascript_sync_rpc_arg_str(&request.args, 0, "filesystem link source")?;
+                    let destination =
+                        javascript_sync_rpc_arg_str(&request.args, 1, "filesystem link path")?;
+                    vm.kernel
+                        .link(source, destination)
+                        .map(|()| Value::Null)
+                        .map_err(kernel_error)
+                }
+                "fs.renameSync" | "fs.promises.rename" => {
                     let source =
                         javascript_sync_rpc_arg_str(&request.args, 0, "filesystem rename source")?;
                     let destination = javascript_sync_rpc_arg_str(
@@ -3066,7 +3102,7 @@ where
                         .map(|()| Value::Null)
                         .map_err(kernel_error)
                 }
-                "fs.promises.rmdir" => {
+                "fs.rmdirSync" | "fs.promises.rmdir" => {
                     let path =
                         javascript_sync_rpc_arg_str(&request.args, 0, "filesystem rmdir path")?;
                     vm.kernel
@@ -3074,7 +3110,7 @@ where
                         .map(|()| Value::Null)
                         .map_err(kernel_error)
                 }
-                "fs.promises.unlink" => {
+                "fs.unlinkSync" | "fs.promises.unlink" => {
                     let path =
                         javascript_sync_rpc_arg_str(&request.args, 0, "filesystem unlink path")?;
                     vm.kernel
@@ -3082,7 +3118,7 @@ where
                         .map(|()| Value::Null)
                         .map_err(kernel_error)
                 }
-                "fs.promises.chmod" => {
+                "fs.chmodSync" | "fs.promises.chmod" => {
                     let path =
                         javascript_sync_rpc_arg_str(&request.args, 0, "filesystem chmod path")?;
                     let mode =
@@ -3092,7 +3128,7 @@ where
                         .map(|()| Value::Null)
                         .map_err(kernel_error)
                 }
-                "fs.promises.chown" => {
+                "fs.chownSync" | "fs.promises.chown" => {
                     let path =
                         javascript_sync_rpc_arg_str(&request.args, 0, "filesystem chown path")?;
                     let uid =
@@ -3104,7 +3140,7 @@ where
                         .map(|()| Value::Null)
                         .map_err(kernel_error)
                 }
-                "fs.promises.utimes" => {
+                "fs.utimesSync" | "fs.promises.utimes" => {
                     let path =
                         javascript_sync_rpc_arg_str(&request.args, 0, "filesystem utimes path")?;
                     let atime_ms =
@@ -5535,11 +5571,20 @@ export async function loadPyodide() {
         write_fixture(
             &cwd.join("entry.mjs"),
             r#"
-const bridge = globalThis.__agentOsSyncRpc;
-bridge.callSync("fs.writeFileSync", [
-  "/rpc/note.txt",
-  Buffer.from("hello from sidecar rpc", "utf8"),
-]);
+import fs from "node:fs";
+
+fs.writeFileSync("/rpc/note.txt", "hello from sidecar rpc");
+fs.mkdirSync("/rpc/subdir", { recursive: true });
+fs.symlinkSync("/rpc/note.txt", "/rpc/link.txt");
+const linkTarget = fs.readlinkSync("/rpc/link.txt");
+const existsBefore = fs.existsSync("/rpc/note.txt");
+const lstat = fs.lstatSync("/rpc/link.txt");
+fs.linkSync("/rpc/note.txt", "/rpc/hard.txt");
+fs.renameSync("/rpc/hard.txt", "/rpc/renamed.txt");
+const contents = fs.readFileSync("/rpc/renamed.txt", "utf8");
+fs.unlinkSync("/rpc/renamed.txt");
+fs.rmdirSync("/rpc/subdir");
+console.log(JSON.stringify({ existsBefore, linkTarget, linkIsSymlink: lstat.isSymbolicLink(), contents }));
 await new Promise(() => {});
 "#,
         );
@@ -5593,22 +5638,37 @@ await new Promise(() => {});
             );
         }
 
-        let event = {
-            let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
-            let process = vm
-                .active_processes
-                .get("proc-js-sync")
-                .expect("javascript process should be tracked");
-            process
-                .execution
-                .poll_event(Duration::from_secs(5))
-                .expect("poll javascript sync rpc event")
-                .expect("javascript sync rpc event")
-        };
+        let mut saw_stdout = false;
+        for _ in 0..16 {
+            let event = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get("proc-js-sync")
+                    .expect("javascript process should be tracked");
+                process
+                    .execution
+                    .poll_event(Duration::from_secs(5))
+                    .expect("poll javascript sync rpc event")
+                    .expect("javascript sync rpc event")
+            };
 
-        sidecar
-            .handle_execution_event(&vm_id, "proc-js-sync", event)
-            .expect("handle javascript sync rpc event");
+            if let ActiveExecutionEvent::Stdout(chunk) = &event {
+                let stdout = String::from_utf8(chunk.clone()).expect("stdout utf8");
+                if stdout.contains("\"contents\":\"hello from sidecar rpc\"")
+                    && stdout.contains("\"existsBefore\":true")
+                    && stdout.contains("\"linkTarget\":\"/rpc/note.txt\"")
+                    && stdout.contains("\"linkIsSymlink\":true")
+                {
+                    saw_stdout = true;
+                    break;
+                }
+            }
+
+            sidecar
+                .handle_execution_event(&vm_id, "proc-js-sync", event)
+                .expect("handle javascript sync rpc event");
+        }
 
         let content = {
             let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
@@ -5620,6 +5680,29 @@ await new Promise(() => {});
             .expect("utf8 file contents")
         };
         assert_eq!(content, "hello from sidecar rpc");
+        let link_target = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .read_link("/rpc/link.txt")
+                .expect("read bridged symlink")
+        };
+        assert_eq!(link_target, "/rpc/note.txt");
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            assert!(
+                !vm.kernel
+                    .exists("/rpc/renamed.txt")
+                    .expect("renamed file should be gone"),
+                "expected renamed file to be removed",
+            );
+            assert!(
+                !vm.kernel
+                    .exists("/rpc/subdir")
+                    .expect("subdir should be gone"),
+                "expected subdir to be removed",
+            );
+        }
+        assert!(saw_stdout, "expected guest stdout after sync fs round-trip");
 
         let process = {
             let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");

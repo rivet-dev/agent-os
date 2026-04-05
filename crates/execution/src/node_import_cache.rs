@@ -2201,19 +2201,23 @@ function createGuestFsStats(stat) {
   });
 }
 
-function requireFsPromisesRpcBridge() {
+function requireFsSyncRpcBridge() {
   const bridge = globalThis.__agentOsSyncRpc;
-  if (bridge && typeof bridge.call === 'function') {
+  if (
+    bridge &&
+    typeof bridge.call === 'function' &&
+    typeof bridge.callSync === 'function'
+  ) {
     return bridge;
   }
 
-  const error = new Error('Agent OS fs.promises RPC bridge is unavailable');
+  const error = new Error('Agent OS fs sync RPC bridge is unavailable');
   error.code = 'ERR_AGENT_OS_NODE_SYNC_RPC_UNAVAILABLE';
   throw error;
 }
 
 function createRpcBackedFsPromises(fromGuestDir = '/') {
-  const call = (method, args = []) => requireFsPromisesRpcBridge().call(method, args);
+  const call = (method, args = []) => requireFsSyncRpcBridge().call(method, args);
 
   return {
     access: async (target, mode) => {
@@ -2289,6 +2293,18 @@ function createRpcBackedFsPromises(fromGuestDir = '/') {
   };
 }
 
+function resolveGuestSymlinkTarget(value, fromGuestDir = '/') {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  if (value.startsWith('file:') || value.startsWith('/')) {
+    return resolveGuestFsPath(value, fromGuestDir);
+  }
+
+  return value;
+}
+
 const INITIAL_GUEST_CWD = guestPathFromHostPath(HOST_CWD) ?? HOST_CWD;
 
 function guestMappedChildNames(guestDir) {
@@ -2324,6 +2340,104 @@ function createSyntheticDirent(name) {
     isFile: () => false,
     isSocket: () => false,
     isSymbolicLink: () => false,
+  };
+}
+
+function createGuestDirent(name, stat) {
+  return {
+    name,
+    isBlockDevice: stat.isBlockDevice,
+    isCharacterDevice: stat.isCharacterDevice,
+    isDirectory: stat.isDirectory,
+    isFIFO: stat.isFIFO,
+    isFile: stat.isFile,
+    isSocket: stat.isSocket,
+    isSymbolicLink: stat.isSymbolicLink,
+  };
+}
+
+function createRpcBackedFsSync(fromGuestDir = '/') {
+  const callSync = (method, args = []) => requireFsSyncRpcBridge().callSync(method, args);
+
+  return {
+    accessSync: (target, mode) =>
+      callSync('fs.accessSync', [resolveGuestFsPath(target, fromGuestDir), mode]),
+    chmodSync: (target, mode) =>
+      callSync('fs.chmodSync', [resolveGuestFsPath(target, fromGuestDir), mode]),
+    chownSync: (target, uid, gid) =>
+      callSync('fs.chownSync', [resolveGuestFsPath(target, fromGuestDir), uid, gid]),
+    copyFileSync: (source, destination, mode) =>
+      callSync('fs.copyFileSync', [
+        resolveGuestFsPath(source, fromGuestDir),
+        resolveGuestFsPath(destination, fromGuestDir),
+        mode,
+      ]),
+    existsSync: (target) => {
+      try {
+        return Boolean(callSync('fs.existsSync', [resolveGuestFsPath(target, fromGuestDir)]));
+      } catch {
+        return false;
+      }
+    },
+    linkSync: (existingPath, newPath) =>
+      callSync('fs.linkSync', [
+        resolveGuestFsPath(existingPath, fromGuestDir),
+        resolveGuestFsPath(newPath, fromGuestDir),
+      ]),
+    lstatSync: (target) =>
+      createGuestFsStats(callSync('fs.lstatSync', [resolveGuestFsPath(target, fromGuestDir)])),
+    mkdirSync: (target, options) =>
+      callSync('fs.mkdirSync', [resolveGuestFsPath(target, fromGuestDir), options]),
+    readFileSync: (target, options) =>
+      callSync('fs.readFileSync', [
+        resolveGuestFsPath(target, fromGuestDir),
+        normalizeFsReadOptions(options),
+      ]),
+    readdirSync: (target, options) => {
+      const guestPath = resolveGuestFsPath(target, fromGuestDir);
+      const entries = callSync('fs.readdirSync', [guestPath, options]);
+      if (!options || typeof options !== 'object' || !options.withFileTypes) {
+        return entries;
+      }
+
+      return entries.map((name) =>
+        createGuestDirent(
+          name,
+          createGuestFsStats(callSync('fs.lstatSync', [path.posix.join(guestPath, name)])),
+        ),
+      );
+    },
+    readlinkSync: (target) =>
+      callSync('fs.readlinkSync', [resolveGuestFsPath(target, fromGuestDir)]),
+    renameSync: (source, destination) =>
+      callSync('fs.renameSync', [
+        resolveGuestFsPath(source, fromGuestDir),
+        resolveGuestFsPath(destination, fromGuestDir),
+      ]),
+    rmdirSync: (target, options) =>
+      callSync('fs.rmdirSync', [resolveGuestFsPath(target, fromGuestDir), options]),
+    statSync: (target) =>
+      createGuestFsStats(callSync('fs.statSync', [resolveGuestFsPath(target, fromGuestDir)])),
+    symlinkSync: (target, linkPath, type) =>
+      callSync('fs.symlinkSync', [
+        resolveGuestSymlinkTarget(target, fromGuestDir),
+        resolveGuestFsPath(linkPath, fromGuestDir),
+        type,
+      ]),
+    unlinkSync: (target) =>
+      callSync('fs.unlinkSync', [resolveGuestFsPath(target, fromGuestDir)]),
+    utimesSync: (target, atime, mtime) =>
+      callSync('fs.utimesSync', [
+        resolveGuestFsPath(target, fromGuestDir),
+        normalizeFsTimeValue(atime),
+        normalizeFsTimeValue(mtime),
+      ]),
+    writeFileSync: (target, contents, options) =>
+      callSync('fs.writeFileSync', [
+        resolveGuestFsPath(target, fromGuestDir),
+        normalizeFsWriteContents(contents, options),
+        normalizeFsReadOptions(options),
+      ]),
   };
 }
 
@@ -2413,6 +2527,8 @@ function wrapFsModule(fsModule, fromGuestDir = '/') {
     };
     Object.assign(wrapped.promises, createRpcBackedFsPromises(fromGuestDir));
   }
+
+  Object.assign(wrapped, createRpcBackedFsSync(fromGuestDir));
 
   return wrapped;
 }
@@ -5594,17 +5710,21 @@ function createGuestFsStats(stat) {{\n\
     }},\n\
   }});\n\
 }}\n\n\
-function requireFsPromisesRpcBridge() {{\n\
+function requireFsSyncRpcBridge() {{\n\
   const bridge = globalThis.__agentOsSyncRpc;\n\
-  if (bridge && typeof bridge.call === \"function\") {{\n\
+  if (\n\
+    bridge &&\n\
+    typeof bridge.call === \"function\" &&\n\
+    typeof bridge.callSync === \"function\"\n\
+  ) {{\n\
     return bridge;\n\
   }}\n\n\
-  const error = new Error(\"Agent OS fs.promises RPC bridge is unavailable\");\n\
+  const error = new Error(\"Agent OS fs sync RPC bridge is unavailable\");\n\
   error.code = \"ERR_AGENT_OS_NODE_SYNC_RPC_UNAVAILABLE\";\n\
   throw error;\n\
 }}\n\n\
 function createRpcBackedFsPromises(fromGuestDir = \"/\") {{\n\
-  const call = (method, args = []) => requireFsPromisesRpcBridge().call(method, args);\n\n\
+  const call = (method, args = []) => requireFsSyncRpcBridge().call(method, args);\n\n\
   return {{\n\
     access: async (target, mode) => {{\n\
       await call(\"fs.promises.access\", [\n\
@@ -5678,6 +5798,15 @@ function createRpcBackedFsPromises(fromGuestDir = \"/\") {{\n\
       ]),\n\
   }};\n\
 }}\n\n\
+function resolveGuestSymlinkTarget(value, fromGuestDir = \"/\") {{\n\
+  if (typeof value !== \"string\") {{\n\
+    return value;\n\
+  }}\n\n\
+  if (value.startsWith(\"file:\") || value.startsWith(\"/\")) {{\n\
+    return resolveGuestFsPath(value, fromGuestDir);\n\
+  }}\n\n\
+  return value;\n\
+}}\n\n\
 function guestMappedChildNames(guestDir) {{\n\
   if (typeof guestDir !== \"string\") {{\n\
     return [];\n\
@@ -5707,6 +5836,100 @@ function createSyntheticDirent(name) {{\n\
     isFile: () => false,\n\
     isSocket: () => false,\n\
     isSymbolicLink: () => false,\n\
+  }};\n\
+}}\n\n\
+function createGuestDirent(name, stat) {{\n\
+  return {{\n\
+    name,\n\
+    isBlockDevice: stat.isBlockDevice,\n\
+    isCharacterDevice: stat.isCharacterDevice,\n\
+    isDirectory: stat.isDirectory,\n\
+    isFIFO: stat.isFIFO,\n\
+    isFile: stat.isFile,\n\
+    isSocket: stat.isSocket,\n\
+    isSymbolicLink: stat.isSymbolicLink,\n\
+  }};\n\
+}}\n\n\
+function createRpcBackedFsSync(fromGuestDir = \"/\") {{\n\
+  const callSync = (method, args = []) => requireFsSyncRpcBridge().callSync(method, args);\n\n\
+  return {{\n\
+    accessSync: (target, mode) =>\n\
+      callSync(\"fs.accessSync\", [resolveGuestFsPath(target, fromGuestDir), mode]),\n\
+    chmodSync: (target, mode) =>\n\
+      callSync(\"fs.chmodSync\", [resolveGuestFsPath(target, fromGuestDir), mode]),\n\
+    chownSync: (target, uid, gid) =>\n\
+      callSync(\"fs.chownSync\", [resolveGuestFsPath(target, fromGuestDir), uid, gid]),\n\
+    copyFileSync: (source, destination, mode) =>\n\
+      callSync(\"fs.copyFileSync\", [\n\
+        resolveGuestFsPath(source, fromGuestDir),\n\
+        resolveGuestFsPath(destination, fromGuestDir),\n\
+        mode,\n\
+      ]),\n\
+    existsSync: (target) => {{\n\
+      try {{\n\
+        return Boolean(callSync(\"fs.existsSync\", [resolveGuestFsPath(target, fromGuestDir)]));\n\
+      }} catch {{\n\
+        return false;\n\
+      }}\n\
+    }},\n\
+    linkSync: (existingPath, newPath) =>\n\
+      callSync(\"fs.linkSync\", [\n\
+        resolveGuestFsPath(existingPath, fromGuestDir),\n\
+        resolveGuestFsPath(newPath, fromGuestDir),\n\
+      ]),\n\
+    lstatSync: (target) =>\n\
+      createGuestFsStats(callSync(\"fs.lstatSync\", [resolveGuestFsPath(target, fromGuestDir)])),\n\
+    mkdirSync: (target, options) =>\n\
+      callSync(\"fs.mkdirSync\", [resolveGuestFsPath(target, fromGuestDir), options]),\n\
+    readFileSync: (target, options) =>\n\
+      callSync(\"fs.readFileSync\", [\n\
+        resolveGuestFsPath(target, fromGuestDir),\n\
+        normalizeFsReadOptions(options),\n\
+      ]),\n\
+    readdirSync: (target, options) => {{\n\
+      const guestPath = resolveGuestFsPath(target, fromGuestDir);\n\
+      const entries = callSync(\"fs.readdirSync\", [guestPath, options]);\n\
+      if (!options || typeof options !== \"object\" || !options.withFileTypes) {{\n\
+        return entries;\n\
+      }}\n\n\
+      return entries.map((name) =>\n\
+        createGuestDirent(\n\
+          name,\n\
+          createGuestFsStats(callSync(\"fs.lstatSync\", [path.posix.join(guestPath, name)])),\n\
+        ),\n\
+      );\n\
+    }},\n\
+    readlinkSync: (target) =>\n\
+      callSync(\"fs.readlinkSync\", [resolveGuestFsPath(target, fromGuestDir)]),\n\
+    renameSync: (source, destination) =>\n\
+      callSync(\"fs.renameSync\", [\n\
+        resolveGuestFsPath(source, fromGuestDir),\n\
+        resolveGuestFsPath(destination, fromGuestDir),\n\
+      ]),\n\
+    rmdirSync: (target, options) =>\n\
+      callSync(\"fs.rmdirSync\", [resolveGuestFsPath(target, fromGuestDir), options]),\n\
+    statSync: (target) =>\n\
+      createGuestFsStats(callSync(\"fs.statSync\", [resolveGuestFsPath(target, fromGuestDir)])),\n\
+    symlinkSync: (target, linkPath, type) =>\n\
+      callSync(\"fs.symlinkSync\", [\n\
+        resolveGuestSymlinkTarget(target, fromGuestDir),\n\
+        resolveGuestFsPath(linkPath, fromGuestDir),\n\
+        type,\n\
+      ]),\n\
+    unlinkSync: (target) =>\n\
+      callSync(\"fs.unlinkSync\", [resolveGuestFsPath(target, fromGuestDir)]),\n\
+    utimesSync: (target, atime, mtime) =>\n\
+      callSync(\"fs.utimesSync\", [\n\
+        resolveGuestFsPath(target, fromGuestDir),\n\
+        normalizeFsTimeValue(atime),\n\
+        normalizeFsTimeValue(mtime),\n\
+      ]),\n\
+    writeFileSync: (target, contents, options) =>\n\
+      callSync(\"fs.writeFileSync\", [\n\
+        resolveGuestFsPath(target, fromGuestDir),\n\
+        normalizeFsWriteContents(contents, options),\n\
+        normalizeFsReadOptions(options),\n\
+      ]),\n\
   }};\n\
 }}\n\n\
 function wrapFsModule(fsModule, fromGuestDir = \"/\") {{\n\
@@ -5784,6 +6007,8 @@ function wrapFsModule(fsModule, fromGuestDir = \"/\") {{\n\
 \n\
     Object.assign(wrapped.promises, createRpcBackedFsPromises(fromGuestDir));\n\
   }}\n\n\
+  Object.assign(wrapped, createRpcBackedFsSync(fromGuestDir));\n\
+\n\
   return wrapped;\n\
 }}\n\n\
 function wrapPathFirstAsync(fn, fromGuestDir) {{\n\

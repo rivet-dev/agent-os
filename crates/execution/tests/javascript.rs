@@ -365,26 +365,25 @@ fn javascript_execution_surfaces_shared_array_buffer_sync_rpc_requests() {
     write_fixture(
         &temp.path().join("entry.mjs"),
         r#"
-const bridge = globalThis.__agentOsSyncRpc;
-if (!bridge || typeof bridge.callSync !== "function") {
-  throw new Error("sync RPC bridge missing");
-}
+import fs from "node:fs";
 
-const stat = bridge.callSync("fs.statSync", ["/workspace/note.txt"]);
-const contents = bridge.callSync("fs.readFileSync", [
-  "/workspace/note.txt",
-  { encoding: "utf8" },
-]);
-const raw = Buffer.from(
-  bridge.callSync("fs.readFileSync", ["/workspace/raw.bin"]),
-).toString("hex");
-const entries = bridge.callSync("fs.readdirSync", ["/workspace"]);
-bridge.callSync("fs.mkdirSync", ["/workspace/subdir", { recursive: true }]);
-bridge.callSync("fs.writeFileSync", [
-  "/workspace/out.bin",
-  Buffer.from([1, 2, 3, 4]),
-]);
-console.log(JSON.stringify({ stat, contents, raw, entries }));
+const stat = fs.statSync("/workspace/note.txt");
+const lstat = fs.lstatSync("/workspace/link.txt");
+const contents = fs.readFileSync("/workspace/note.txt", { encoding: "utf8" });
+const raw = Buffer.from(fs.readFileSync("/workspace/raw.bin")).toString("hex");
+const entries = fs.readdirSync("/workspace");
+const missing = fs.existsSync("/workspace/missing.txt");
+
+fs.mkdirSync("/workspace/subdir", { recursive: true });
+fs.writeFileSync("/workspace/out.bin", Buffer.from([1, 2, 3, 4]));
+fs.symlinkSync("/workspace/note.txt", "/workspace/link.txt");
+const linkTarget = fs.readlinkSync("/workspace/link.txt");
+fs.linkSync("/workspace/note.txt", "/workspace/hard.txt");
+fs.renameSync("/workspace/hard.txt", "/workspace/renamed.txt");
+fs.unlinkSync("/workspace/renamed.txt");
+fs.rmdirSync("/workspace/subdir");
+
+console.log(JSON.stringify({ stat, lstat, contents, raw, entries, missing, linkTarget }));
 "#,
     );
 
@@ -435,6 +434,17 @@ console.log(JSON.stringify({ stat, contents, raw, entries }));
                             }),
                         )
                         .expect("respond to stat"),
+                    "fs.lstatSync" => execution
+                        .respond_sync_rpc_success(
+                            request.id,
+                            json!({
+                                "mode": 0o120777,
+                                "size": 19,
+                                "isDirectory": false,
+                                "isSymbolicLink": true,
+                            }),
+                        )
+                        .expect("respond to lstat"),
                     "fs.readFileSync" => {
                         let path = request.args[0].as_str().expect("read path");
                         let result = match path {
@@ -449,6 +459,9 @@ console.log(JSON.stringify({ stat, contents, raw, entries }));
                             .respond_sync_rpc_success(request.id, result)
                             .expect("respond to read");
                     }
+                    "fs.existsSync" => execution
+                        .respond_sync_rpc_success(request.id, json!(false))
+                        .expect("respond to exists"),
                     "fs.readdirSync" => execution
                         .respond_sync_rpc_success(request.id, json!(["note.txt", "raw.bin"]))
                         .expect("respond to readdir"),
@@ -468,6 +481,36 @@ console.log(JSON.stringify({ stat, contents, raw, entries }));
                             .respond_sync_rpc_success(request.id, json!(null))
                             .expect("respond to write");
                     }
+                    "fs.symlinkSync" => {
+                        assert_eq!(request.args[0], json!("/workspace/note.txt"));
+                        assert_eq!(request.args[1], json!("/workspace/link.txt"));
+                        execution
+                            .respond_sync_rpc_success(request.id, json!(null))
+                            .expect("respond to symlink");
+                    }
+                    "fs.readlinkSync" => execution
+                        .respond_sync_rpc_success(request.id, json!("/workspace/note.txt"))
+                        .expect("respond to readlink"),
+                    "fs.linkSync" => {
+                        assert_eq!(request.args[0], json!("/workspace/note.txt"));
+                        assert_eq!(request.args[1], json!("/workspace/hard.txt"));
+                        execution
+                            .respond_sync_rpc_success(request.id, json!(null))
+                            .expect("respond to link");
+                    }
+                    "fs.renameSync" => {
+                        assert_eq!(request.args[0], json!("/workspace/hard.txt"));
+                        assert_eq!(request.args[1], json!("/workspace/renamed.txt"));
+                        execution
+                            .respond_sync_rpc_success(request.id, json!(null))
+                            .expect("respond to rename");
+                    }
+                    "fs.unlinkSync" => execution
+                        .respond_sync_rpc_success(request.id, json!(null))
+                        .expect("respond to unlink"),
+                    "fs.rmdirSync" => execution
+                        .respond_sync_rpc_success(request.id, json!(null))
+                        .expect("respond to rmdir"),
                     other => panic!("unexpected sync RPC method: {other}"),
                 }
             }
@@ -484,11 +527,19 @@ console.log(JSON.stringify({ stat, contents, raw, entries }));
             .collect::<Vec<_>>(),
         vec![
             "fs.statSync",
+            "fs.lstatSync",
             "fs.readFileSync",
             "fs.readFileSync",
             "fs.readdirSync",
+            "fs.existsSync",
             "fs.mkdirSync",
             "fs.writeFileSync",
+            "fs.symlinkSync",
+            "fs.readlinkSync",
+            "fs.linkSync",
+            "fs.renameSync",
+            "fs.unlinkSync",
+            "fs.rmdirSync",
         ]
     );
 
@@ -700,6 +751,18 @@ console.log(
     );
     assert!(
         stdout.contains("\"entries\":[\"note.txt\",\"raw.bin\"]"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"missing\":false"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"linkTarget\":\"/workspace/note.txt\""),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"isSymbolicLink\":true"),
         "unexpected stdout: {stdout}"
     );
 }
@@ -1669,15 +1732,61 @@ console.log(`missing:${missing}`);
         format!("[{{\"guestPath\":\"/guest\",\"hostPath\":\"{guest_mount_host_path}\"}}]"),
     )]);
 
-    let (stdout, _stderr, exit_code) = run_javascript_execution(
-        &mut engine,
-        context.context_id,
-        temp.path(),
-        vec![String::from("./entry.mjs")],
-        env,
-    );
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env,
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
 
-    assert_eq!(exit_code, 0);
+    let mut stdout = Vec::new();
+    let mut exit_code = None;
+    let mut requests = Vec::new();
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => {
+                panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
+            }
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                requests.push((request.method.clone(), request.args.clone()));
+                match request.method.as_str() {
+                    "fs.readFileSync" => execution
+                        .respond_sync_rpc_success(request.id, json!("mapped\n"))
+                        .expect("respond to readFileSync"),
+                    "fs.existsSync" => execution
+                        .respond_sync_rpc_success(request.id, json!(false))
+                        .expect("respond to existsSync"),
+                    other => panic!("unexpected sync RPC method: {other}"),
+                }
+            }
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
+
+    assert_eq!(exit_code, Some(0));
+    assert_eq!(
+        requests
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["fs.readFileSync", "fs.existsSync"]
+    );
+    assert_eq!(
+        requests[0].1,
+        vec![json!("/guest/flag.txt"), json!({"encoding":"utf8"})]
+    );
+    assert_eq!(requests[1].1, vec![json!("/guest/missing.txt")]);
+
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
     assert!(stdout.contains("text:mapped"));
     assert!(stdout.contains("missing:false"));
 }

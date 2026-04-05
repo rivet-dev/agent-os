@@ -14,6 +14,7 @@
 - Execution control data that affects host state should move over the shared `AGENT_OS_CONTROL_PIPE_FD` side channel in `crates/execution/src/node_process.rs`; if a runtime still surfaces compatible debug/control prefixes, strip matching guest `stderr` lines before exposing them so forged prefixes never drive host behavior.
 - The JavaScript sync syscall bridge in `crates/execution/src/node_import_cache.rs` should keep request writes on the guest main thread and use a worker only for blocking response reads plus `SharedArrayBuffer` wakeups; under the current Node permission model, worker-thread writes to the inherited request FD fail with `EBADF`.
 - Guest Node `fs` and `fs/promises` polyfills now share the same JavaScript sync-RPC transport; async methods should dispatch as `fs.promises.*` RPC calls, and guest-visible `readdir` results must filter the kernel VFS `.` / `..` entries back out to match Node semantics.
+- Non-fd guest `fs` sync methods should be overridden onto the wrapped module via a dedicated sync-RPC helper in `crates/execution/src/node_import_cache.rs`; keep fd/stream APIs on the translated host module until their kernel-backed port is implemented, and add matching `fs.*Sync` dispatch arms in `crates/sidecar/src/service.rs`.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -257,4 +258,20 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Guest Node `fs.promises` rides the same JavaScript sync-RPC transport as sync `fs` today; new async VFS methods should use `fs.promises.*` method names and only resolve guest paths, leaving host-path translation to the sidecar/kernel boundary.
 - Gotchas encountered: The direct `JavascriptExecutionEngine` test harness maps the guest cwd to `/`, not `/workspace`, so relative-path RPC assertions need to match `/note.txt`/`/subdir` rather than the sidecar VM’s mounted workspace paths.
 - Useful context: `cargo test -p agent-os-execution --test javascript javascript_execution_routes_fs_promises_through_sync_rpc -- --exact`, `cargo test -p agent-os-execution --test javascript javascript_execution_surfaces_shared_array_buffer_sync_rpc_requests -- --exact`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-sidecar service::tests::javascript_fs_promises_rpc_requests_proxy_into_the_vm_kernel_filesystem -- --exact`, and `cargo test -p agent-os-sidecar service::tests::javascript_sync_rpc_requests_proxy_into_the_vm_kernel_filesystem -- --exact` all pass after this change.
+---
+## 2026-04-04 21:52:54 PDT - US-015
+- What was implemented
+- Ported the non-fd guest `fs` sync surface onto the SharedArrayBuffer sync-RPC bridge in `crates/execution/src/node_import_cache.rs`, covering `readFileSync`, `writeFileSync`, `statSync`, `lstatSync`, `readdirSync`, `mkdirSync`, `existsSync`, `readlinkSync`, `symlinkSync`, `linkSync`, `renameSync`, `unlinkSync`, `rmdirSync`, plus sync aliases for `access`, `copyFile`, `chmod`, `chown`, and `utimes`.
+- Added matching `fs.*Sync` dispatch arms in `crates/sidecar/src/service.rs` so those guest calls execute against the kernel VFS, and expanded the focused execution/sidecar regressions to verify both request surfacing and end-to-end kernel behavior.
+- Files changed
+- `AGENTS.md`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Sync `fs` methods should share the same JS bridge as `fs.promises`, but they need a separate override layer on the wrapped module so fd/stream APIs can remain on the old host-backed path until US-016 lands.
+  - Gotchas encountered: `readdirSync({ withFileTypes: true })` cannot reuse the old synthetic dirent helper for RPC-backed paths; it needs per-entry `lstatSync` round-trips to reconstruct Dirent-like type methods without falling back to host `node:fs`.
+  - Useful context: `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript javascript_execution_surfaces_shared_array_buffer_sync_rpc_requests -- --exact`, `cargo test -p agent-os-execution --test javascript javascript_execution_redirects_computed_node_fs_imports_through_builtin_assets -- --exact`, `cargo test -p agent-os-sidecar service::tests::javascript_sync_rpc_requests_proxy_into_the_vm_kernel_filesystem -- --exact`, `cargo check -p agent-os-execution`, and `cargo check -p agent-os-sidecar` all pass after this change.
 ---
