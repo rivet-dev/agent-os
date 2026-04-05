@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Native sidecar security telemetry should use `bridge.emit_structured_event(...)` with a `timestamp` field and stable keys like `policy`, `path`, `reason`, `source_pid`, and `target_pid`; this makes sidecar tests assertable without scraping free-form logs.
 - Execution host-runner scripts that `NodeImportCache` materializes should live in `crates/execution/assets/runners/` and be loaded with `include_str!`; for temp-cache cleanup regressions, construct the cache with `NodeImportCache::new_in(...)` so the one-time sweep is scoped to the test root.
 - Real bundled-Pyodide coverage belongs in `crates/execution/src/node_import_cache.rs` materialized-runner tests, and those helpers should load `timing-bootstrap.mjs` so frozen `Date`/`performance` behavior matches real execution launches; use `crates/execution/tests/python.rs` for fake-`pyodide.mjs` bootstrap regressions.
 - Sidecar `host_dir` mounts should anchor guest path resolution with `openat2(..., RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` and translate kernel `EXDEV` escape rejections back to guest-facing `EACCES`.
@@ -812,4 +813,20 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Execution-host runner scripts are easier to maintain as checked-in assets loaded with `include_str!` than as multi-hundred-line Rust string literals, and the shared runtime helper module is the right place for cross-runtime Node warmup/compile-cache/path utilities.
   - Gotchas encountered: Temp-cache cleanup needs to be keyed by the chosen base directory instead of a single global one-shot, otherwise tests cannot exercise cleanup safely after other `NodeImportCache::default()` calls have already happened in-process.
   - Useful context: `cargo fmt --all`, `cargo check -p agent-os-execution`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1`, `cargo test -p agent-os-execution --test python -- --test-threads=1`, `cargo test -p agent-os-execution --test wasm -- --test-threads=1`, and `cargo test -p agent-os-execution --test javascript -- --test-threads=1` all pass after this change.
+---
+## 2026-04-05 05:01:06 PDT - US-037
+- What was implemented
+- Added structured security audit events in `crates/sidecar/src/service.rs` for invalid auth tokens, filesystem permission denials, mount/unmount reconciliation, and process kill requests.
+- Added a focused integration test suite in `crates/sidecar/tests/security_audit.rs` that asserts the emitted audit records and their structured fields.
+- Preserved the reusable sidecar audit-logging pattern in `AGENTS.md` and marked the story complete in the PRD.
+- Files changed
+- `AGENTS.md`
+- `crates/sidecar/src/service.rs`
+- `crates/sidecar/tests/security_audit.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Native sidecar security telemetry is easiest to keep stable by emitting `StructuredEventRecord`s with a shared `timestamp` field and event-specific keys, rather than trying to parse free-form log messages later.
+  - Gotchas encountered: Sidecar kill paths see parsed numeric signals internally, so audit fields that need the caller-facing signal name should capture the original request string before `parse_signal(...)`.
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-sidecar`, `cargo test -p agent-os-sidecar --test security_audit -- --test-threads=1`, `cargo test -p agent-os-sidecar service::tests::create_vm_applies_filesystem_permission_descriptors_to_kernel_access -- --exact --test-threads=1`, `cargo test -p agent-os-sidecar service::tests::configure_vm_mounts_require_fs_write_permission -- --exact --test-threads=1`, and `cargo test -p agent-os-sidecar service::tests::configure_vm_sensitive_mounts_require_fs_mount_sensitive_permission -- --exact --test-threads=1` all pass.
 ---

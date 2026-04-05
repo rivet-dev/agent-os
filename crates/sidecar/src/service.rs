@@ -27,7 +27,7 @@ use agent_os_bridge::{
     FilesystemPermissionRequest, FilesystemSnapshot, FlushFilesystemStateRequest,
     LifecycleEventRecord, LifecycleState, LoadFilesystemStateRequest, LogLevel, LogRecord,
     NetworkAccess, NetworkPermissionRequest, PathRequest, ReadDirRequest, ReadFileRequest,
-    RenameRequest, SymlinkRequest, TruncateRequest, WriteFileRequest,
+    RenameRequest, StructuredEventRecord, SymlinkRequest, TruncateRequest, WriteFileRequest,
 };
 use agent_os_execution::wasm::{
     WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV,
@@ -2236,7 +2236,22 @@ where
         payload: crate::protocol::AuthenticateRequest,
     ) -> Result<DispatchResult, SidecarError> {
         let _ = self.connection_id_for(&request.ownership)?;
-        self.validate_auth_token(&payload.auth_token)?;
+        if let Err(error) = self.validate_auth_token(&payload.auth_token) {
+            let mut fields = audit_fields([
+                (String::from("source"), payload.client_name.clone()),
+                (String::from("reason"), error.to_string()),
+            ]);
+            if let OwnershipScope::Connection { connection_id } = &request.ownership {
+                fields.insert(String::from("connection_id"), connection_id.clone());
+            }
+            emit_security_audit_event(
+                &self.bridge,
+                &self.config.sidecar_id,
+                "security.auth.failed",
+                fields,
+            );
+            return Err(error);
+        }
 
         let connection_id = self.allocate_connection_id();
         self.connections.insert(
@@ -3330,6 +3345,7 @@ where
         process_id: &str,
         signal: &str,
     ) -> Result<(), SidecarError> {
+        let signal_name = signal.to_owned();
         let signal = parse_signal(signal)?;
         let vm = self
             .vms
@@ -3340,6 +3356,22 @@ where
         })?;
 
         signal_runtime_process(process.execution.child_pid(), signal)?;
+        emit_security_audit_event(
+            &self.bridge,
+            vm_id,
+            "security.process.kill",
+            audit_fields([
+                (String::from("source"), String::from("control_plane")),
+                (String::from("source_pid"), String::from("0")),
+                (String::from("target_pid"), process.kernel_pid.to_string()),
+                (String::from("process_id"), process_id.to_owned()),
+                (String::from("signal"), signal_name),
+                (
+                    String::from("host_pid"),
+                    process.execution.child_pid().to_string(),
+                ),
+            ]),
+        );
         Ok(())
     }
 
@@ -3933,12 +3965,15 @@ where
         child_process_id: &str,
         signal: &str,
     ) -> Result<(), SidecarError> {
+        let signal_name = signal.to_owned();
         let signal = parse_signal(signal)?;
         let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-        let child = vm
+        let process = vm
             .active_processes
             .get_mut(process_id)
-            .expect("process should still exist")
+            .expect("process should still exist");
+        let source_pid = process.kernel_pid;
+        let child = process
             .child_processes
             .get_mut(child_process_id)
             .ok_or_else(|| {
@@ -3946,7 +3981,24 @@ where
             })?;
         vm.kernel
             .kill_process(EXECUTION_DRIVER_NAME, child.kernel_pid, signal)
-            .map_err(kernel_error)
+            .map_err(kernel_error)?;
+        emit_security_audit_event(
+            &self.bridge,
+            vm_id,
+            "security.process.kill",
+            audit_fields([
+                (String::from("source"), String::from("guest_child_process")),
+                (String::from("source_pid"), source_pid.to_string()),
+                (String::from("target_pid"), child.kernel_pid.to_string()),
+                (String::from("process_id"), process_id.to_owned()),
+                (
+                    String::from("child_process_id"),
+                    child_process_id.to_owned(),
+                ),
+                (String::from("signal"), signal_name),
+            ]),
+        );
+        Ok(())
     }
 
     fn handle_javascript_sync_rpc_request(
@@ -4293,6 +4345,80 @@ fn map_bridge_permission(decision: agent_os_bridge::PermissionDecision) -> Permi
     }
 }
 
+fn audit_timestamp() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_millis()
+        .to_string()
+}
+
+fn audit_fields<I, K, V>(fields: I) -> BTreeMap<String, String>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    let mut mapped = BTreeMap::from([(String::from("timestamp"), audit_timestamp())]);
+    for (key, value) in fields {
+        mapped.insert(key.into(), value.into());
+    }
+    mapped
+}
+
+fn emit_structured_event<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    name: &str,
+    fields: BTreeMap<String, String>,
+) -> Result<(), SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    bridge.with_mut(|bridge| {
+        bridge.emit_structured_event(StructuredEventRecord {
+            vm_id: vm_id.to_owned(),
+            name: name.to_owned(),
+            fields,
+        })
+    })
+}
+
+fn emit_security_audit_event<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    name: &str,
+    fields: BTreeMap<String, String>,
+) where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let _ = emit_structured_event(bridge, vm_id, name, fields);
+}
+
+fn filesystem_operation_label(operation: FsOperation) -> &'static str {
+    match operation {
+        FsOperation::Read => "read",
+        FsOperation::Write => "write",
+        FsOperation::Mkdir => "mkdir",
+        FsOperation::CreateDir => "createDir",
+        FsOperation::ReadDir => "readdir",
+        FsOperation::Stat => "stat",
+        FsOperation::Remove => "rm",
+        FsOperation::Rename => "rename",
+        FsOperation::Exists => "exists",
+        FsOperation::Symlink => "symlink",
+        FsOperation::ReadLink => "readlink",
+        FsOperation::Link => "link",
+        FsOperation::Chmod => "chmod",
+        FsOperation::Chown => "chown",
+        FsOperation::Utimes => "utimes",
+        FsOperation::Truncate => "truncate",
+        FsOperation::MountSensitive => "mount",
+    }
+}
+
 fn map_wasm_signal_registration(
     registration: agent_os_execution::wasm::WasmSignalHandlerRegistration,
 ) -> SignalHandlerRegistration {
@@ -4330,36 +4456,60 @@ where
 
     Permissions {
         filesystem: Some(Arc::new(move |request: &FsAccessRequest| {
-            if request.op == FsOperation::MountSensitive {
-                if let Some(decision) = filesystem_bridge.static_permission_decision(
+            let access = match request.op {
+                FsOperation::Read => FilesystemAccess::Read,
+                FsOperation::Write => FilesystemAccess::Write,
+                FsOperation::Mkdir | FsOperation::CreateDir => FilesystemAccess::CreateDir,
+                FsOperation::ReadDir => FilesystemAccess::ReadDir,
+                FsOperation::Stat | FsOperation::Exists => FilesystemAccess::Stat,
+                FsOperation::Remove => FilesystemAccess::Remove,
+                FsOperation::Rename => FilesystemAccess::Rename,
+                FsOperation::Symlink => FilesystemAccess::Symlink,
+                FsOperation::ReadLink => FilesystemAccess::Read,
+                FsOperation::Link => FilesystemAccess::Write,
+                FsOperation::Chmod => FilesystemAccess::Write,
+                FsOperation::Chown => FilesystemAccess::Write,
+                FsOperation::Utimes => FilesystemAccess::Write,
+                FsOperation::Truncate => FilesystemAccess::Write,
+                FsOperation::MountSensitive => FilesystemAccess::Write,
+            };
+            let policy = if request.op == FsOperation::MountSensitive {
+                "fs.mount_sensitive"
+            } else {
+                filesystem_permission_capability(access)
+            };
+            let decision = if request.op == FsOperation::MountSensitive {
+                filesystem_bridge
+                    .static_permission_decision(&filesystem_vm_id, policy, "fs")
+                    .unwrap_or_else(PermissionDecision::allow)
+            } else {
+                filesystem_bridge.filesystem_decision(&filesystem_vm_id, &request.path, access)
+            };
+
+            if !decision.allow {
+                emit_security_audit_event(
+                    &filesystem_bridge,
                     &filesystem_vm_id,
-                    "fs.mount_sensitive",
-                    "fs",
-                ) {
-                    return decision;
-                }
+                    "security.permission.denied",
+                    audit_fields([
+                        (
+                            String::from("operation"),
+                            filesystem_operation_label(request.op).to_owned(),
+                        ),
+                        (String::from("path"), request.path.clone()),
+                        (String::from("policy"), String::from(policy)),
+                        (
+                            String::from("reason"),
+                            decision
+                                .reason
+                                .clone()
+                                .unwrap_or_else(|| String::from("permission denied")),
+                        ),
+                    ]),
+                );
             }
-            filesystem_bridge.filesystem_decision(
-                &filesystem_vm_id,
-                &request.path,
-                match request.op {
-                    FsOperation::Read => FilesystemAccess::Read,
-                    FsOperation::Write => FilesystemAccess::Write,
-                    FsOperation::Mkdir | FsOperation::CreateDir => FilesystemAccess::CreateDir,
-                    FsOperation::ReadDir => FilesystemAccess::ReadDir,
-                    FsOperation::Stat | FsOperation::Exists => FilesystemAccess::Stat,
-                    FsOperation::Remove => FilesystemAccess::Remove,
-                    FsOperation::Rename => FilesystemAccess::Rename,
-                    FsOperation::Symlink => FilesystemAccess::Symlink,
-                    FsOperation::ReadLink => FilesystemAccess::Read,
-                    FsOperation::Link => FilesystemAccess::Write,
-                    FsOperation::Chmod => FilesystemAccess::Write,
-                    FsOperation::Chown => FilesystemAccess::Write,
-                    FsOperation::Utimes => FilesystemAccess::Write,
-                    FsOperation::Truncate => FilesystemAccess::Write,
-                    FsOperation::MountSensitive => FilesystemAccess::Write,
-                },
-            )
+
+            decision
         })),
         network: Some(Arc::new(move |request: &NetworkAccessRequest| {
             network_bridge.network_decision(&network_vm_id, request)
@@ -4408,10 +4558,19 @@ where
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
     for existing in &vm.configuration.mounts {
-        if let Err(error) = vm.kernel.unmount_filesystem(&existing.guest_path) {
-            if error.code() != "EINVAL" {
-                return Err(kernel_error(error));
-            }
+        match vm.kernel.unmount_filesystem(&existing.guest_path) {
+            Ok(()) => emit_security_audit_event(
+                &context.bridge,
+                &context.vm_id,
+                "security.mount.unmounted",
+                audit_fields([
+                    (String::from("guest_path"), existing.guest_path.clone()),
+                    (String::from("plugin_id"), existing.plugin.id.clone()),
+                    (String::from("read_only"), existing.read_only.to_string()),
+                ]),
+            ),
+            Err(error) if error.code() == "EINVAL" => {}
+            Err(error) => return Err(kernel_error(error)),
         }
     }
 
@@ -4436,6 +4595,16 @@ where
                 MountOptions::new(mount.plugin.id.clone()).read_only(mount.read_only),
             )
             .map_err(kernel_error)?;
+        emit_security_audit_event(
+            &context.bridge,
+            &context.vm_id,
+            "security.mount.mounted",
+            audit_fields([
+                (String::from("guest_path"), mount.guest_path.clone()),
+                (String::from("plugin_id"), mount.plugin.id.clone()),
+                (String::from("read_only"), mount.read_only.to_string()),
+            ]),
+        );
     }
 
     Ok(())
