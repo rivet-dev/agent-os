@@ -18,6 +18,7 @@
 - Node guest process virtualization in `crates/execution/src/node_import_cache.rs` should snapshot the host `process.cwd()` before hardening, use that snapshot for internal module resolution/`createRequire(...)`, and derive guest-visible paths from `AGENT_OS_GUEST_PATH_MAPPINGS` for user-facing `process.*` APIs.
 - Guest-visible `process` identity in `crates/execution/src/node_import_cache.rs` should be virtualized through a `globalThis.process` proxy after bootstrap setup, while `require('node:process')` and `process.getBuiltinModule('node:process')` are routed back to that same proxy; keep internal host-only values in snapped constants like `HOST_EXEC_PATH`.
 - In the generated Node runner, host-only builtin lookups needed for bootstrap/hardening should go through snapped `hostRequire(...)` rather than guest-visible ESM imports, and wrapped `process` methods that return `this` must translate the captured host target back to `guestProcess` after the proxy swap.
+- Nested JavaScript child executions should propagate host Node `--permission` escalation via explicit `AGENT_OS_PARENT_NODE_ALLOW_*` markers in `crates/execution/src/javascript.rs` and `crates/execution/src/node_import_cache.rs`; do not infer child `--allow-worker` or `--allow-child-process` from `AGENT_OS_ALLOWED_NODE_BUILTINS` alone, because top-level loader requirements and child inheritance are different concerns.
 - `wrapChildProcessModule` in `crates/execution/src/node_import_cache.rs` can only sandbox `exec`/`execSync` safely for simple Node-runtime commands; parse shell-free argv and delegate to `execFile`, but deny arbitrary shell strings because host shells bypass Node `--permission`.
 - Guest-visible module path scrubbing in `crates/execution/src/node_import_cache.rs` has to cover both the ESM loader and the generated Node runner: translate `error.message`, `error.stack`, and `requireStack`, and import guest entrypoints through guest-mapped file URLs so top-level stack traces never start on host paths.
 - Execution control data that affects host state should move over the shared `AGENT_OS_CONTROL_PIPE_FD` side channel in `crates/execution/src/node_process.rs`; if a runtime still surfaces compatible debug/control prefixes, strip matching guest `stderr` lines before exposing them so forged prefixes never drive host behavior.
@@ -504,4 +505,20 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Python execution has two different consumers: streaming callers use `poll_event()`, while buffered callers use `wait()`. Internal control/filter noise should be transparent to the streaming API, but buffered `wait()` still needs a hard cap to avoid OOM on large guest output.
   - Gotchas encountered: Python still needs direct access to its own `Child` handle for `kill()`/`Drop`, so the waiter thread cannot consume the child the same way JS/WASM do; the safe compromise here is a dedicated waiter loop over the shared handle, with `kill()` continuing to own the final `wait()`.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test python`, `cargo test -p agent-os-execution --test python_prewarm`, and `cargo check -p agent-os-execution -p agent-os-sidecar` pass after this change. `cargo test -p agent-os-execution --test permission_flags` still has an existing invocation-count assumption (`expected ... 5`, got `4`), and `cargo test -p agent-os-sidecar --test python` currently fails in this checkout during bundled Pyodide warmup with `Error [ERR_ACCESS_DENIED]: process.binding`.
+---
+## 2026-04-05 01:38:58 PDT - US-030
+- What was implemented
+- Added explicit `AGENT_OS_PARENT_NODE_ALLOW_CHILD_PROCESS` and `AGENT_OS_PARENT_NODE_ALLOW_WORKER` markers to JavaScript host launches so nested Node executions only inherit `--allow-child-process` and `--allow-worker` when the parent host process was explicitly allowed to pass them through.
+- Updated the generated `child_process` polyfill to forward those markers into nested spawn envs, keeping top-level loader-only worker permission separate from child-process escalation decisions.
+- Added a permission-flags regression that simulates nested Node child executions and verifies denied parents do not pass either flag while explicitly allowed parents still do.
+- Files changed
+- `crates/execution/src/javascript.rs`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/permission_flags.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Nested JavaScript child executions need explicit parent-permission markers for Node `--permission` escalation; `AGENT_OS_ALLOWED_NODE_BUILTINS` alone is not enough because top-level loader workers are a runtime requirement, not a guest capability grant.
+  - Gotchas encountered: Top-level JavaScript executions still need host `--allow-worker` on Node v24 for `register(loader)`, so child-permission propagation has to be modeled separately instead of reusing the top-level host flag state.
+  - Useful context: `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1` and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` both pass after this change.
 ---

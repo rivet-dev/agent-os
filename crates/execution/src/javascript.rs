@@ -43,6 +43,8 @@ const NODE_VIRTUAL_PROCESS_PID_ENV: &str = "AGENT_OS_VIRTUAL_PROCESS_PID";
 const NODE_VIRTUAL_PROCESS_PPID_ENV: &str = "AGENT_OS_VIRTUAL_PROCESS_PPID";
 const NODE_VIRTUAL_PROCESS_UID_ENV: &str = "AGENT_OS_VIRTUAL_PROCESS_UID";
 const NODE_VIRTUAL_PROCESS_GID_ENV: &str = "AGENT_OS_VIRTUAL_PROCESS_GID";
+const NODE_PARENT_ALLOW_CHILD_PROCESS_ENV: &str = "AGENT_OS_PARENT_NODE_ALLOW_CHILD_PROCESS";
+const NODE_PARENT_ALLOW_WORKER_ENV: &str = "AGENT_OS_PARENT_NODE_ALLOW_WORKER";
 const NODE_EXTRA_FS_READ_PATHS_ENV: &str = "AGENT_OS_EXTRA_FS_READ_PATHS";
 const NODE_EXTRA_FS_WRITE_PATHS_ENV: &str = "AGENT_OS_EXTRA_FS_WRITE_PATHS";
 const NODE_SANDBOX_ROOT_ENV: &str = "AGENT_OS_SANDBOX_ROOT";
@@ -81,6 +83,8 @@ const RESERVED_NODE_ENV_KEYS: &[&str] = &[
     NODE_VIRTUAL_PROCESS_PPID_ENV,
     NODE_VIRTUAL_PROCESS_UID_ENV,
     NODE_VIRTUAL_PROCESS_GID_ENV,
+    NODE_PARENT_ALLOW_CHILD_PROCESS_ENV,
+    NODE_PARENT_ALLOW_WORKER_ENV,
     NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
     NODE_IMPORT_CACHE_LOADER_PATH_ENV,
     NODE_IMPORT_CACHE_PATH_ENV,
@@ -658,6 +662,26 @@ fn create_node_child(
             command.env(key, value);
         }
     }
+    command.env(
+        NODE_PARENT_ALLOW_CHILD_PROCESS_ENV,
+        if inherited_node_permission_enabled(&request.env, NODE_PARENT_ALLOW_CHILD_PROCESS_ENV)
+            .unwrap_or_else(|| env_builtin_enabled(&request.env, "child_process"))
+        {
+            "1"
+        } else {
+            "0"
+        },
+    );
+    command.env(
+        NODE_PARENT_ALLOW_WORKER_ENV,
+        if inherited_node_permission_enabled(&request.env, NODE_PARENT_ALLOW_WORKER_ENV)
+            .unwrap_or_else(|| env_builtin_enabled(&request.env, "worker_threads"))
+        {
+            "1"
+        } else {
+            "0"
+        },
+    );
 
     if let Some(bootstrap_module) = &context.bootstrap_module {
         command.env(NODE_BOOTSTRAP_ENV, bootstrap_module);
@@ -771,10 +795,20 @@ fn configure_node_sandbox(
         &write_paths,
         true,
         false,
-        true,
-        env_builtin_enabled(&request.env, "child_process"),
+        inherited_node_permission_enabled(&request.env, NODE_PARENT_ALLOW_WORKER_ENV)
+            .unwrap_or(true),
+        inherited_node_permission_enabled(&request.env, NODE_PARENT_ALLOW_CHILD_PROCESS_ENV)
+            .unwrap_or_else(|| env_builtin_enabled(&request.env, "child_process")),
     );
     Ok(())
+}
+
+fn inherited_node_permission_enabled(env: &BTreeMap<String, String>, key: &str) -> Option<bool> {
+    env.get(key).and_then(|value| match value.as_str() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    })
 }
 
 fn parse_env_path_list(env: &BTreeMap<String, String>, key: &str) -> Vec<PathBuf> {

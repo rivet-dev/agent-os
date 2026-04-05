@@ -484,7 +484,7 @@
         "Typecheck passes"
       ],
       "priority": 26,
-      "passes": false,
+      "passes": true,
       "notes": "Currently --allow-child-process and --allow-worker are passed unconditionally to all child Node processes."
     },
     {
