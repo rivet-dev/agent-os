@@ -61,7 +61,7 @@
         "pnpm --dir packages/core exec vitest run succeeds (or at least the test runner starts)"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Broken throughout entire runtime-isolation-hardening development, meaning TS-side tests were never consistently verified"
     },
     {

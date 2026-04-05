@@ -4,6 +4,7 @@
 - Sidecar test assertions must check response payload contents, not just match on variant shapes with wildcard discards.
 - Import-cache tests should use `NodeImportCache::new_in()` with unique temp directories to avoid parallel test interference.
 - Full crate test suites (`cargo test -p <crate>`) must pass, not just focused individual test cases.
+- After package renames or workspace dependency changes, validate from the repo root with `pnpm install --frozen-lockfile`; package-local checks can miss broken `workspace:*` resolution.
 - SSRF filters must cover all RFC special-purpose ranges: 0.0.0.0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16, 224/4, 255.255.255.255, plus IPv6 equivalents.
 - S3-compatible loopback endpoints for local Minio or mock servers must opt in explicitly with `allowLoopbackEndpoint`; production defaults should keep loopback/private endpoint SSRF checks enabled.
 - Native-sidecar Node launches must share the same host shadow root between `createVm` metadata `cwd` and `NativeSidecarKernelProxy.shadowRoot`; otherwise sidecar execute rejects the Node cwd as escaping the VM sandbox root.
@@ -44,4 +45,12 @@ Started: Sat Apr  5 2026
   - Local Minio support should be an explicit mount-level opt-in rather than a test-only validator bypass; otherwise Rust unit tests and real sidecar runs diverge.
   - Sidecar integration tests that build raw plugin JSON must mirror the public descriptor shape exactly, including camelCase config keys like `allowLoopbackEndpoint`.
   - Registry package tests that import `@rivet-dev/agent-os` consume the built package surface, so changes under `packages/core/src/` may require `pnpm --dir packages/core build` before Vitest sees them.
+---
+## 2026-04-05 16:29:02 PDT - US-015
+- Verified the workspace package naming and root install flow now resolve correctly from `/home/nathan/a5`; no additional code patch was required on this branch.
+- Quality checks: `pnpm install --frozen-lockfile`, `pnpm --dir packages/core exec tsc --noEmit`, and `pnpm --dir examples/quickstart exec tsc --noEmit` all pass. `pnpm --dir packages/core exec vitest run` starts successfully and progresses into the full suite, with remaining failures belonging to later PRD stories (`US-101` and beyond), not workspace resolution.
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Root-level `pnpm install --frozen-lockfile` is the fastest way to confirm a package rename or `workspace:*` dependency edit did not break the monorepo graph.
+  - Quickstart typechecking is a useful companion check for package-surface renames because it consumes `@rivet-dev/agent-os` like an external workspace client rather than an internal source file.
 ---
