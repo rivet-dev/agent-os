@@ -1713,3 +1713,155 @@ console.log(JSON.stringify(result));
         .expect("exec denial message")
         .contains("child_process.exec"));
 }
+
+#[test]
+fn javascript_execution_translates_require_resolve_and_cjs_errors_to_guest_paths() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("dep.cjs"),
+        "module.exports = { answer: 42 };\n",
+    );
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const result = {
+  resolved: require.resolve('./dep.cjs'),
+};
+
+try {
+  require.resolve('/root/missing.cjs');
+  result.resolveMissing = 'unexpected';
+} catch (error) {
+  result.resolveMissing = {
+    code: error.code ?? null,
+    message: error.message,
+    stack: error.stack ?? null,
+    requireStack: error.requireStack ?? [],
+  };
+}
+
+try {
+  require('/root/missing.cjs');
+  result.requireMissing = 'unexpected';
+} catch (error) {
+  result.requireMissing = {
+    code: error.code ?? null,
+    message: error.message,
+    stack: error.stack ?? null,
+    requireStack: error.requireStack ?? [],
+  };
+}
+
+console.log(JSON.stringify(result));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let cwd_host_path = temp.path().to_string_lossy().replace('\\', "\\\\");
+    let env = BTreeMap::from([(
+        String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+        format!("[{{\"guestPath\":\"/root\",\"hostPath\":\"{cwd_host_path}\"}}]"),
+    )]);
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        env,
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse require JSON");
+    let host_path = temp.path().to_string_lossy();
+
+    assert_eq!(parsed["resolved"], Value::String(String::from("/root/dep.cjs")));
+
+    for field in ["resolveMissing", "requireMissing"] {
+        assert_eq!(
+            parsed[field]["code"],
+            Value::String(String::from("MODULE_NOT_FOUND"))
+        );
+        let message = parsed[field]["message"].as_str().expect("missing message");
+        let stack = parsed[field]["stack"].as_str().expect("missing stack");
+        assert!(message.contains("/root/missing.cjs"), "message: {message}");
+        assert!(
+            !message.contains(host_path.as_ref()),
+            "message leaked host path: {message}"
+        );
+        assert!(
+            !stack.contains(host_path.as_ref()),
+            "stack leaked host path: {stack}"
+        );
+
+        let require_stack = parsed[field]["requireStack"]
+            .as_array()
+            .expect("require stack array");
+        let mut saw_guest_path = false;
+        for entry in require_stack {
+            let entry = entry.as_str().expect("require stack entry");
+            saw_guest_path |= entry.starts_with("/root/");
+            assert!(
+                !entry.contains(host_path.as_ref()),
+                "requireStack leaked host path: {entry}"
+            );
+        }
+        assert!(saw_guest_path, "requireStack should contain guest-visible paths");
+    }
+}
+
+#[test]
+fn javascript_execution_translates_top_level_loader_stacks_to_guest_paths() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+export const broken = ;
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let cwd_host_path = temp.path().to_string_lossy().replace('\\', "\\\\");
+    let env = BTreeMap::from([(
+        String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+        format!("[{{\"guestPath\":\"/root\",\"hostPath\":\"{cwd_host_path}\"}}]"),
+    )]);
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        env,
+    );
+
+    assert_eq!(stdout.trim(), "");
+    assert_eq!(exit_code, 1, "stderr: {stderr}");
+    let host_path = temp.path().to_string_lossy();
+    assert!(
+        stderr.contains("/root/entry.mjs"),
+        "stderr should use guest path: {stderr}"
+    );
+    assert!(
+        stderr.contains("SyntaxError"),
+        "stderr should contain the parse failure: {stderr}"
+    );
+    assert!(
+        !stderr.contains(host_path.as_ref()),
+        "stderr leaked host path: {stderr}"
+    );
+}

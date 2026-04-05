@@ -68,6 +68,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const GUEST_PATH_MAPPINGS = parseGuestPathMappings(process.env.AGENT_OS_GUEST_PATH_MAPPINGS);
 const ALLOWED_BUILTINS = new Set(parseJsonArray(process.env.AGENT_OS_ALLOWED_NODE_BUILTINS));
 const CACHE_PATH = process.env.__NODE_IMPORT_CACHE_PATH_ENV__;
+const CACHE_ROOT = CACHE_PATH ? path.dirname(CACHE_PATH) : null;
+const GUEST_INTERNAL_CACHE_ROOT = '/.agent-os/node-import-cache';
 const PROJECTED_SOURCE_CACHE_ROOT = CACHE_PATH
   ? path.join(path.dirname(CACHE_PATH), 'projected-sources')
   : null;
@@ -206,7 +208,14 @@ export async function resolve(specifier, context, nextResolve) {
   }
 
   const translatedContext = translateContextParentUrl(context);
-  const resolved = await nextResolve(specifier, translatedContext);
+  let resolved;
+  try {
+    resolved = await nextResolve(specifier, translatedContext);
+  } catch (error) {
+    flushCacheState();
+    emitMetrics();
+    throw translateErrorToGuest(error);
+  }
   const translatedUrl = translateResolvedUrlToGuest(resolved.url);
   const translatedResolved =
     translatedUrl === resolved.url ? resolved : { ...resolved, url: translatedUrl };
@@ -231,34 +240,40 @@ export async function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
-  const filePath = filePathFromUrl(url);
-  const format = lookupModuleFormat(url) ?? context.format;
+  try {
+    const filePath = filePathFromUrl(url);
+    const format = lookupModuleFormat(url) ?? context.format;
 
-  if (!filePath || !format || format === 'builtin') {
-    return nextLoad(url, context);
-  }
+    if (!filePath || !format || format === 'builtin') {
+      return await nextLoad(url, context);
+    }
 
-  const projectedPackageSource = loadProjectedPackageSource(url, filePath, format);
-  if (projectedPackageSource != null) {
-    flushCacheState();
-    emitMetrics();
+    const projectedPackageSource = loadProjectedPackageSource(url, filePath, format);
+    if (projectedPackageSource != null) {
+      flushCacheState();
+      emitMetrics();
+      return {
+        shortCircuit: true,
+        format,
+        source: projectedPackageSource,
+      };
+    }
+
+    const source =
+      format === 'wasm'
+        ? fs.readFileSync(filePath)
+        : rewriteBuiltinImports(fs.readFileSync(filePath, 'utf8'), filePath);
+
     return {
       shortCircuit: true,
       format,
-      source: projectedPackageSource,
+      source,
     };
+  } catch (error) {
+    flushCacheState();
+    emitMetrics();
+    throw translateErrorToGuest(error);
   }
-
-  const source =
-    format === 'wasm'
-      ? fs.readFileSync(filePath)
-      : rewriteBuiltinImports(fs.readFileSync(filePath, 'utf8'), filePath);
-
-  return {
-    shortCircuit: true,
-    format,
-    source,
-  };
 }
 
 function loadCacheState() {
@@ -1255,6 +1270,160 @@ function guestPathFromHostPath(hostPath) {
   return null;
 }
 
+function guestInternalPathFromHostPath(hostPath) {
+  if (typeof hostPath !== 'string' || !CACHE_ROOT) {
+    return null;
+  }
+
+  const normalized = path.resolve(hostPath);
+  const hostRoot = path.resolve(CACHE_ROOT);
+  if (
+    normalized !== hostRoot &&
+    !normalized.startsWith(`${hostRoot}${path.sep}`)
+  ) {
+    return null;
+  }
+
+  const suffix =
+    normalized === hostRoot
+      ? ''
+      : normalized.slice(hostRoot.length + path.sep.length);
+  return suffix
+    ? path.posix.join(GUEST_INTERNAL_CACHE_ROOT, suffix.split(path.sep).join('/'))
+    : GUEST_INTERNAL_CACHE_ROOT;
+}
+
+function guestVisiblePathFromHostPath(hostPath) {
+  return guestPathFromHostPath(hostPath) ?? guestInternalPathFromHostPath(hostPath);
+}
+
+function translatePathStringToGuest(value) {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  if (value.startsWith('file:')) {
+    const hostPath = guestFilePathFromUrl(value);
+    const guestPath = hostPath ? guestVisiblePathFromHostPath(hostPath) : null;
+    return guestPath ? pathToFileURL(guestPath).href : value;
+  }
+
+  if (!path.isAbsolute(value)) {
+    return value;
+  }
+
+  return guestVisiblePathFromHostPath(value) ?? value;
+}
+
+function buildHostToGuestTextReplacements() {
+  const replacements = new Map();
+  const addReplacement = (hostValue, guestValue) => {
+    if (
+      typeof hostValue !== 'string' ||
+      hostValue.length === 0 ||
+      typeof guestValue !== 'string' ||
+      guestValue.length === 0
+    ) {
+      return;
+    }
+
+    replacements.set(hostValue, guestValue);
+  };
+
+  for (const mapping of GUEST_PATH_MAPPINGS) {
+    const hostRoot = path.resolve(mapping.hostPath);
+    addReplacement(hostRoot, mapping.guestPath);
+    addReplacement(pathToFileURL(hostRoot).href, pathToFileURL(mapping.guestPath).href);
+    const forwardSlashHostRoot = hostRoot.split(path.sep).join('/');
+    if (forwardSlashHostRoot !== hostRoot) {
+      addReplacement(forwardSlashHostRoot, mapping.guestPath);
+    }
+  }
+
+  if (CACHE_ROOT) {
+    const hostRoot = path.resolve(CACHE_ROOT);
+    addReplacement(hostRoot, GUEST_INTERNAL_CACHE_ROOT);
+    addReplacement(
+      pathToFileURL(hostRoot).href,
+      pathToFileURL(GUEST_INTERNAL_CACHE_ROOT).href,
+    );
+    const forwardSlashHostRoot = hostRoot.split(path.sep).join('/');
+    if (forwardSlashHostRoot !== hostRoot) {
+      addReplacement(forwardSlashHostRoot, GUEST_INTERNAL_CACHE_ROOT);
+    }
+  }
+
+  return [...replacements.entries()].sort((left, right) => right[0].length - left[0].length);
+}
+
+function translateTextToGuest(value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    return value;
+  }
+
+  let translated = value;
+  for (const [hostValue, guestValue] of buildHostToGuestTextReplacements()) {
+    translated = translated.split(hostValue).join(guestValue);
+  }
+  return translated;
+}
+
+function translateErrorToGuest(error) {
+  if (error == null || typeof error !== 'object') {
+    return error;
+  }
+
+  if (typeof error.message === 'string') {
+    try {
+      error.message = translateTextToGuest(error.message);
+    } catch {
+      // Ignore readonly message bindings.
+    }
+  }
+
+  if (typeof error.stack === 'string') {
+    try {
+      error.stack = translateTextToGuest(error.stack);
+    } catch {
+      // Ignore readonly stack bindings.
+    }
+  }
+
+  if (typeof error.path === 'string') {
+    try {
+      error.path = translatePathStringToGuest(error.path);
+    } catch {
+      // Ignore readonly path bindings.
+    }
+  }
+
+  if (typeof error.filename === 'string') {
+    try {
+      error.filename = translatePathStringToGuest(error.filename);
+    } catch {
+      // Ignore readonly filename bindings.
+    }
+  }
+
+  if (typeof error.url === 'string') {
+    try {
+      error.url = translatePathStringToGuest(error.url);
+    } catch {
+      // Ignore readonly url bindings.
+    }
+  }
+
+  if (Array.isArray(error.requireStack)) {
+    try {
+      error.requireStack = error.requireStack.map((entry) => translatePathStringToGuest(entry));
+    } catch {
+      // Ignore readonly requireStack bindings.
+    }
+  }
+
+  return error;
+}
+
 function pathExists(targetPath) {
   try {
     return fs.existsSync(targetPath);
@@ -1408,6 +1577,12 @@ const DEFAULT_VIRTUAL_PID = 1;
 const DEFAULT_VIRTUAL_PPID = 0;
 const DEFAULT_VIRTUAL_UID = 0;
 const DEFAULT_VIRTUAL_GID = 0;
+const NODE_IMPORT_CACHE_PATH = HOST_PROCESS_ENV.AGENT_OS_NODE_IMPORT_CACHE_PATH ?? null;
+const NODE_IMPORT_CACHE_ROOT =
+  typeof NODE_IMPORT_CACHE_PATH === 'string' && NODE_IMPORT_CACHE_PATH.length > 0
+    ? path.dirname(NODE_IMPORT_CACHE_PATH)
+    : null;
+const GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT = '/.agent-os/node-import-cache';
 const VIRTUAL_EXEC_PATH = parseVirtualProcessString(
   HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH,
   DEFAULT_VIRTUAL_EXEC_PATH,
@@ -1435,15 +1610,17 @@ function isPathLike(specifier) {
 
 function toImportSpecifier(specifier) {
   if (specifier.startsWith('file:')) {
-    return specifier;
+    return translatePathStringToGuest(specifier);
   }
   if (isPathLike(specifier)) {
     if (specifier.startsWith('/')) {
       return pathToFileURL(
-        pathExists(specifier) ? path.resolve(specifier) : path.posix.normalize(specifier),
+        translatePathStringToGuest(
+          pathExists(specifier) ? path.resolve(specifier) : path.posix.normalize(specifier),
+        ),
       ).href;
     }
-    return pathToFileURL(path.resolve(HOST_CWD, specifier)).href;
+    return pathToFileURL(translatePathStringToGuest(path.resolve(HOST_CWD, specifier))).href;
   }
   return specifier;
 }
@@ -1658,6 +1835,167 @@ function guestPathFromHostPath(hostPath) {
   }
 
   return null;
+}
+
+function guestInternalPathFromHostPath(hostPath) {
+  if (typeof hostPath !== 'string' || !NODE_IMPORT_CACHE_ROOT) {
+    return null;
+  }
+
+  const normalized = path.resolve(hostPath);
+  const hostRoot = path.resolve(NODE_IMPORT_CACHE_ROOT);
+  if (
+    normalized !== hostRoot &&
+    !normalized.startsWith(`${hostRoot}${path.sep}`)
+  ) {
+    return null;
+  }
+
+  const suffix =
+    normalized === hostRoot
+      ? ''
+      : normalized.slice(hostRoot.length + path.sep.length);
+  return suffix
+    ? path.posix.join(
+        GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT,
+        suffix.split(path.sep).join('/'),
+      )
+    : GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT;
+}
+
+function guestVisiblePathFromHostPath(hostPath) {
+  return guestPathFromHostPath(hostPath) ?? guestInternalPathFromHostPath(hostPath);
+}
+
+function translatePathStringToGuest(value) {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  if (value.startsWith('file:')) {
+    try {
+      const hostPath = new URL(value).pathname;
+      const guestPath = guestVisiblePathFromHostPath(hostPath);
+      return guestPath ? pathToFileURL(guestPath).href : value;
+    } catch {
+      return value;
+    }
+  }
+
+  if (!path.isAbsolute(value)) {
+    return value;
+  }
+
+  return guestVisiblePathFromHostPath(value) ?? value;
+}
+
+function buildHostToGuestTextReplacements() {
+  const replacements = new Map();
+  const addReplacement = (hostValue, guestValue) => {
+    if (
+      typeof hostValue !== 'string' ||
+      hostValue.length === 0 ||
+      typeof guestValue !== 'string' ||
+      guestValue.length === 0
+    ) {
+      return;
+    }
+
+    replacements.set(hostValue, guestValue);
+  };
+
+  for (const mapping of GUEST_PATH_MAPPINGS) {
+    const hostRoot = path.resolve(mapping.hostPath);
+    addReplacement(hostRoot, mapping.guestPath);
+    addReplacement(pathToFileURL(hostRoot).href, pathToFileURL(mapping.guestPath).href);
+    const forwardSlashHostRoot = hostRoot.split(path.sep).join('/');
+    if (forwardSlashHostRoot !== hostRoot) {
+      addReplacement(forwardSlashHostRoot, mapping.guestPath);
+    }
+  }
+
+  if (NODE_IMPORT_CACHE_ROOT) {
+    const hostRoot = path.resolve(NODE_IMPORT_CACHE_ROOT);
+    addReplacement(hostRoot, GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT);
+    addReplacement(
+      pathToFileURL(hostRoot).href,
+      pathToFileURL(GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT).href,
+    );
+    const forwardSlashHostRoot = hostRoot.split(path.sep).join('/');
+    if (forwardSlashHostRoot !== hostRoot) {
+      addReplacement(forwardSlashHostRoot, GUEST_INTERNAL_NODE_IMPORT_CACHE_ROOT);
+    }
+  }
+
+  return [...replacements.entries()].sort((left, right) => right[0].length - left[0].length);
+}
+
+function translateTextToGuest(value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    return value;
+  }
+
+  let translated = value;
+  for (const [hostValue, guestValue] of buildHostToGuestTextReplacements()) {
+    translated = translated.split(hostValue).join(guestValue);
+  }
+  return translated;
+}
+
+function translateErrorToGuest(error) {
+  if (error == null || typeof error !== 'object') {
+    return error;
+  }
+
+  if (typeof error.message === 'string') {
+    try {
+      error.message = translateTextToGuest(error.message);
+    } catch {
+      // Ignore readonly message bindings.
+    }
+  }
+
+  if (typeof error.stack === 'string') {
+    try {
+      error.stack = translateTextToGuest(error.stack);
+    } catch {
+      // Ignore readonly stack bindings.
+    }
+  }
+
+  if (typeof error.path === 'string') {
+    try {
+      error.path = translatePathStringToGuest(error.path);
+    } catch {
+      // Ignore readonly path bindings.
+    }
+  }
+
+  if (typeof error.filename === 'string') {
+    try {
+      error.filename = translatePathStringToGuest(error.filename);
+    } catch {
+      // Ignore readonly filename bindings.
+    }
+  }
+
+  if (typeof error.url === 'string') {
+    try {
+      error.url = translatePathStringToGuest(error.url);
+    } catch {
+      // Ignore readonly url bindings.
+    }
+  }
+
+  if (Array.isArray(error.requireStack)) {
+    try {
+      error.requireStack = error.requireStack.map((entry) => translatePathStringToGuest(entry));
+    } catch {
+      // Ignore readonly requireStack bindings.
+    }
+  }
+
+  return error;
 }
 
 function hostPathForSpecifier(specifier, fromGuestDir) {
@@ -2362,33 +2700,33 @@ function createGuestRequire(fromGuestDir) {
 
   const guestRequire = function(specifier) {
     const translated = hostPathForSpecifier(specifier, normalizedGuestDir);
-    if (translated) {
-      return baseRequire(translated);
-    }
-
     try {
+      if (translated) {
+        return baseRequire(translated);
+      }
+
       return baseRequire(specifier);
     } catch (error) {
       if (rootGuestRequire && rootGuestRequire !== guestRequire && isBareSpecifier(specifier)) {
         return rootGuestRequire(specifier);
       }
-      throw error;
+      throw translateErrorToGuest(error);
     }
   };
 
-  guestRequire.resolve = (specifier) => {
+  guestRequire.resolve = (specifier, options) => {
     const translated = hostPathForSpecifier(specifier, normalizedGuestDir);
-    if (translated) {
-      return baseRequire.resolve(translated);
-    }
-
     try {
-      return baseRequire.resolve(specifier);
+      if (translated) {
+        return translatePathStringToGuest(baseRequire.resolve(translated, options));
+      }
+
+      return translatePathStringToGuest(baseRequire.resolve(specifier, options));
     } catch (error) {
       if (rootGuestRequire && rootGuestRequire !== guestRequire && isBareSpecifier(specifier)) {
-        return rootGuestRequire.resolve(specifier);
+        return rootGuestRequire.resolve(specifier, options);
       }
-      throw error;
+      throw translateErrorToGuest(error);
     }
   };
 
@@ -2588,11 +2926,15 @@ process.argv = [VIRTUAL_EXEC_PATH, guestEntryPoint ?? entrypointPath, ...guestAr
 guestProcess = createGuestProcessProxy(process);
 hardenProperty(globalThis, 'process', guestProcess);
 
-if (bootstrapModule) {
-  await import(toImportSpecifier(bootstrapModule));
-}
+try {
+  if (bootstrapModule) {
+    await import(toImportSpecifier(bootstrapModule));
+  }
 
-await import(toImportSpecifier(entrypoint));
+  await import(toImportSpecifier(entrypoint));
+} catch (error) {
+  throw translateErrorToGuest(error);
+}
 "#;
 
 const NODE_TIMING_BOOTSTRAP_SOURCE: &str = r#"

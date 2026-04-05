@@ -8,6 +8,7 @@
 - Guest-visible `process` identity in `crates/execution/src/node_import_cache.rs` should be virtualized through a `globalThis.process` proxy after bootstrap setup, while `require('node:process')` and `process.getBuiltinModule('node:process')` are routed back to that same proxy; keep internal host-only values in snapped constants like `HOST_EXEC_PATH`.
 - In the generated Node runner, host-only builtin lookups needed for bootstrap/hardening should go through snapped `hostRequire(...)` rather than guest-visible ESM imports, and wrapped `process` methods that return `this` must translate the captured host target back to `guestProcess` after the proxy swap.
 - `wrapChildProcessModule` in `crates/execution/src/node_import_cache.rs` can only sandbox `exec`/`execSync` safely for simple Node-runtime commands; parse shell-free argv and delegate to `execFile`, but deny arbitrary shell strings because host shells bypass Node `--permission`.
+- Guest-visible module path scrubbing in `crates/execution/src/node_import_cache.rs` has to cover both the ESM loader and the generated Node runner: translate `error.message`, `error.stack`, and `requireStack`, and import guest entrypoints through guest-mapped file URLs so top-level stack traces never start on host paths.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -131,4 +132,19 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: For guest `child_process.exec` compatibility, preserve the callback-based API by delegating supported commands to `execFile` and wrapping denied async callbacks rather than inventing a parallel child-process path.
 - Gotchas encountered: `util.promisify(exec)` depends on Node’s built-in custom promisify hook, so execution regressions should exercise the raw callback contract instead of assuming a `{ stdout, stderr }` promise shape from wrapped `exec`.
 - Useful context: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` both pass after this change.
+---
+## 2026-04-04 20:22:11 PDT - US-009
+- What was implemented
+- Added host-to-guest path scrubbing helpers to the embedded Node ESM loader and guest runner so `require.resolve()` returns guest-visible paths and guest-facing error surfaces rewrite host paths out of `message`, `stack`, `path`, `filename`, `url`, and `requireStack`.
+- Switched guest entrypoint/bootstrap imports to use guest-mapped file URLs, which keeps top-level loader/parser stack traces anchored to guest paths instead of the real sandbox path.
+- Added JavaScript regressions covering guest-visible `require.resolve()` results, translated CJS module-not-found errors, and translated top-level loader stack traces.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Host-path scrubbing for Node guests is incomplete unless both the generated loader and the generated runner rewrite errors; CJS `require(...)` and top-level ESM imports leak through different surfaces.
+  - Gotchas encountered: The repo root hit `ENOSPC` during the broader JavaScript suite because thousands of stale `/tmp/agent-os-node-import-cache-*` directories had accumulated; clearing those temp caches restored the real test signal.
+  - Useful context: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` both pass after this change.
 ---
