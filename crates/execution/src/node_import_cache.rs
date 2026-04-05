@@ -11,8 +11,8 @@ pub(crate) const NODE_IMPORT_CACHE_ASSET_ROOT_ENV: &str = "AGENT_OS_NODE_IMPORT_
 const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
-const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "5";
-const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "2";
+const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "6";
+const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "3";
 const PYODIDE_DIST_DIR: &str = "pyodide-dist";
 const AGENT_OS_BUILTIN_SPECIFIER_PREFIX: &str = "agent-os:builtin/";
 const AGENT_OS_POLYFILL_SPECIFIER_PREFIX: &str = "agent-os:polyfill/";
@@ -84,6 +84,7 @@ const POLYFILL_PREFIX = '__AGENT_OS_POLYFILL_SPECIFIER_PREFIX__';
 const FS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}fs`;
 const FS_PROMISES_ASSET_SPECIFIER = `${BUILTIN_PREFIX}fs-promises`;
 const CHILD_PROCESS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}child-process`;
+const NET_ASSET_SPECIFIER = `${BUILTIN_PREFIX}net`;
 const OS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}os`;
 const DENIED_BUILTINS = new Set([
   'child_process',
@@ -537,6 +538,21 @@ function rewriteBuiltinImports(source, filePath) {
     }
   }
 
+  if (ALLOWED_BUILTINS.has('net')) {
+    for (const specifier of ['node:net', 'net']) {
+      rewritten = replaceBuiltinImportSpecifier(
+        rewritten,
+        specifier,
+        NET_ASSET_SPECIFIER,
+      );
+      rewritten = replaceBuiltinDynamicImportSpecifier(
+        rewritten,
+        specifier,
+        NET_ASSET_SPECIFIER,
+      );
+    }
+  }
+
   if (ALLOWED_BUILTINS.has('os')) {
     for (const specifier of ['node:os', 'os']) {
       rewritten = replaceBuiltinImportSpecifier(
@@ -628,6 +644,10 @@ function resolveBuiltinAsset(specifier, context) {
     case 'child_process':
       return ALLOWED_BUILTINS.has('child_process')
         ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'child-process.mjs'))
+        : null;
+    case 'net':
+      return ALLOWED_BUILTINS.has('net')
+        ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'net.mjs'))
         : null;
     case 'os':
       return ALLOWED_BUILTINS.has('os')
@@ -1605,8 +1625,9 @@ if (!Module || typeof Module.createRequire !== 'function') {
 }
 const hostRequire = Module.createRequire(import.meta.url);
 const hostOs = hostRequire('node:os');
+const hostNet = hostRequire('node:net');
 const { EventEmitter } = hostRequire('node:events');
-const { Readable, Writable } = hostRequire('node:stream');
+const { Duplex, Readable, Writable } = hostRequire('node:stream');
 const NODE_SYNC_RPC_ENABLE = HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_ENABLE === '1';
 const hostWorkerThreads = NODE_SYNC_RPC_ENABLE ? hostRequire('node:worker_threads') : null;
 const SIGNAL_EVENTS = new Set(
@@ -3655,6 +3676,321 @@ function createRpcBackedChildProcessModule(fromGuestDir = '/') {
   return module;
 }
 
+function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
+  const RPC_POLL_WAIT_MS = 50;
+  const RPC_IDLE_POLL_DELAY_MS = 10;
+  const bridge = () => requireAgentOsSyncRpcBridge();
+  const createUnsupportedNetError = (subject) => {
+    const error = new Error(`${subject} is not supported by the Agent OS net polyfill yet`);
+    error.code = 'ERR_AGENT_OS_NET_UNSUPPORTED';
+    return error;
+  };
+  const normalizeNetPort = (value) => {
+    const numeric =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.length > 0
+          ? Number(value)
+          : Number.NaN;
+    if (!Number.isInteger(numeric) || numeric < 0 || numeric > 65535) {
+      throw new RangeError(`Agent OS net port must be an integer between 0 and 65535`);
+    }
+    return numeric;
+  };
+  const normalizeNetConnectInvocation = (args) => {
+    const values = [...args];
+    const callback =
+      typeof values[values.length - 1] === 'function' ? values.pop() : undefined;
+
+    let options;
+    if (values[0] != null && typeof values[0] === 'object') {
+      options = { ...values[0] };
+    } else {
+      options = { port: values[0] };
+      if (typeof values[1] === 'string') {
+        options.host = values[1];
+      }
+    }
+
+    if (typeof options?.path === 'string') {
+      throw createUnsupportedNetError('net.connect({ path })');
+    }
+    if (options?.lookup != null) {
+      throw createUnsupportedNetError('net.connect({ lookup })');
+    }
+
+    return {
+      callback,
+      options: {
+        allowHalfOpen: options?.allowHalfOpen === true,
+        host:
+          typeof options?.host === 'string' && options.host.length > 0
+            ? options.host
+            : 'localhost',
+        port: normalizeNetPort(options?.port),
+      },
+    };
+  };
+  const socketFamilyForAddress = (value) => {
+    if (typeof value !== 'string') {
+      return undefined;
+    }
+    return value.includes(':') ? 'IPv6' : 'IPv4';
+  };
+  const callConnect = (options) => bridge().callSync('net.connect', [options]);
+  const callPoll = (socketId, waitMs = 0) => bridge().callSync('net.poll', [socketId, waitMs]);
+  const callWrite = (socketId, chunk) =>
+    bridge().call('net.write', [socketId, toGuestBufferView(chunk, 'net.write chunk')]);
+  const callShutdown = (socketId) => bridge().call('net.shutdown', [socketId]);
+  const callDestroy = (socketId) => bridge().call('net.destroy', [socketId]);
+
+  const finalizeSocketClose = (socket, hadError = false) => {
+    if (socket._agentOsClosed) {
+      return;
+    }
+    socket._agentOsClosed = true;
+    socket.connecting = false;
+    socket.pending = false;
+    socket._pollTimer && clearTimeout(socket._pollTimer);
+    socket._pollTimer = null;
+    if (!socket.readableEnded) {
+      socket.push(null);
+    }
+    queueMicrotask(() => socket.emit('close', hadError));
+  };
+
+  const scheduleSocketPoll = (socket, delayMs) => {
+    if (socket._agentOsClosed || socket._agentOsSocketId == null || socket._pollTimer != null) {
+      return;
+    }
+
+    socket._pollTimer = setTimeout(() => {
+      socket._pollTimer = null;
+      if (socket._agentOsClosed || socket._agentOsSocketId == null) {
+        return;
+      }
+
+      let event;
+      try {
+        event = callPoll(socket._agentOsSocketId, RPC_POLL_WAIT_MS);
+      } catch (error) {
+        socket.destroy(error);
+        return;
+      }
+
+      if (!event) {
+        scheduleSocketPoll(socket, RPC_IDLE_POLL_DELAY_MS);
+        return;
+      }
+
+      if (event.type === 'data') {
+        const chunk = decodeFsBytesPayload(event.data, 'net.data');
+        socket.bytesRead += chunk.length;
+        socket.push(chunk);
+        scheduleSocketPoll(socket, 0);
+        return;
+      }
+
+      if (event.type === 'end') {
+        socket.push(null);
+        if (!socket._agentOsAllowHalfOpen && !socket.writableEnded) {
+          socket.end();
+        }
+        scheduleSocketPoll(socket, 0);
+        return;
+      }
+
+      if (event.type === 'error') {
+        const error = new Error(
+          typeof event.message === 'string' ? event.message : 'Agent OS net socket error',
+        );
+        if (typeof event.code === 'string' && event.code.length > 0) {
+          error.code = event.code;
+        }
+        socket.emit('error', error);
+        scheduleSocketPoll(socket, 0);
+        return;
+      }
+
+      if (event.type === 'close') {
+        finalizeSocketClose(socket, event.hadError === true);
+        return;
+      }
+
+      scheduleSocketPoll(socket, 0);
+    }, delayMs);
+
+    if (!socket._agentOsRefed) {
+      socket._pollTimer.unref?.();
+    }
+  };
+
+  class AgentOsSocket extends Duplex {
+    constructor(options = undefined) {
+      super(options);
+      this._agentOsAllowHalfOpen = options?.allowHalfOpen === true;
+      this._agentOsClosed = false;
+      this._agentOsRefed = true;
+      this._agentOsSocketId = null;
+      this._pollTimer = null;
+      this.bytesRead = 0;
+      this.bytesWritten = 0;
+      this.connecting = false;
+      this.pending = false;
+      this.localAddress = undefined;
+      this.localPort = undefined;
+      this.remoteAddress = undefined;
+      this.remoteFamily = undefined;
+      this.remotePort = undefined;
+    }
+
+    _read() {}
+
+    _write(chunk, encoding, callback) {
+      if (this._agentOsSocketId == null) {
+        callback(new Error('Agent OS net socket is not connected'));
+        return;
+      }
+      const payload =
+        typeof chunk === 'string' ? Buffer.from(chunk, encoding) : Buffer.from(chunk);
+      callWrite(this._agentOsSocketId, payload).then(
+        (written) => {
+          if (typeof written === 'number') {
+            this.bytesWritten += written;
+          } else {
+            this.bytesWritten += payload.length;
+          }
+          callback();
+        },
+        (error) => callback(error),
+      );
+    }
+
+    _final(callback) {
+      if (this._agentOsSocketId == null || this._agentOsClosed) {
+        callback();
+        return;
+      }
+      callShutdown(this._agentOsSocketId).then(
+        () => callback(),
+        (error) => callback(error),
+      );
+    }
+
+    _destroy(error, callback) {
+      const socketId = this._agentOsSocketId;
+      this._agentOsSocketId = null;
+      const finishDestroy = () => {
+        finalizeSocketClose(this, Boolean(error));
+        callback(error);
+      };
+      if (socketId == null) {
+        finishDestroy();
+        return;
+      }
+      callDestroy(socketId).then(finishDestroy, () => finishDestroy());
+    }
+
+    address() {
+      if (typeof this.localAddress !== 'string' || typeof this.localPort !== 'number') {
+        return null;
+      }
+      return {
+        address: this.localAddress,
+        family: socketFamilyForAddress(this.localAddress),
+        port: this.localPort,
+      };
+    }
+
+    connect(...args) {
+      const { callback, options } = normalizeNetConnectInvocation(args);
+      if (typeof callback === 'function') {
+        this.once('connect', callback);
+      }
+      if (this._agentOsSocketId != null || this.connecting) {
+        throw new Error('Agent OS net socket is already connected');
+      }
+
+      this._agentOsAllowHalfOpen = options.allowHalfOpen;
+      this.connecting = true;
+      this.pending = true;
+
+      try {
+        const result = callConnect(options);
+        this._agentOsSocketId = String(result.socketId);
+        this.localAddress = result.localAddress;
+        this.localPort = result.localPort;
+        this.remoteAddress = result.remoteAddress ?? options.host;
+        this.remotePort = result.remotePort ?? options.port;
+        this.remoteFamily =
+          result.remoteFamily ?? socketFamilyForAddress(this.remoteAddress);
+        this.connecting = false;
+        this.pending = false;
+        queueMicrotask(() => {
+          if (this._agentOsClosed) {
+            return;
+          }
+          this.emit('connect');
+          this.emit('ready');
+        });
+        scheduleSocketPoll(this, 0);
+      } catch (error) {
+        this.connecting = false;
+        this.pending = false;
+        this.destroy(error);
+      }
+
+      return this;
+    }
+
+    ref() {
+      this._agentOsRefed = true;
+      this._pollTimer?.ref?.();
+      return this;
+    }
+
+    unref() {
+      this._agentOsRefed = false;
+      this._pollTimer?.unref?.();
+      return this;
+    }
+
+    setKeepAlive() {
+      return this;
+    }
+
+    setNoDelay() {
+      return this;
+    }
+
+    setTimeout(timeout, callback) {
+      if (typeof callback === 'function') {
+        if (Number(timeout) > 0) {
+          setTimeout(() => {
+            if (!this._agentOsClosed) {
+              this.emit('timeout');
+              callback();
+            }
+          }, Number(timeout)).unref?.();
+        } else {
+          queueMicrotask(() => callback());
+        }
+      }
+      return this;
+    }
+  }
+
+  const connect = (...args) => new AgentOsSocket().connect(...args);
+  const module = Object.assign(Object.create(netModule ?? null), {
+    Socket: AgentOsSocket,
+    Stream: AgentOsSocket,
+    connect,
+    createConnection: connect,
+  });
+
+  return module;
+}
+
 const guestRequireCache = new Map();
 let rootGuestRequire = null;
 const hostFs = fs;
@@ -3664,6 +4000,7 @@ const hostFsCloseSync = fs.closeSync.bind(fs);
 const guestFs = wrapFsModule(hostFs);
 globalThis.__agentOsGuestFs = guestFs;
 const guestChildProcess = createRpcBackedChildProcessModule(INITIAL_GUEST_CWD);
+const guestNet = createRpcBackedNetModule(hostNet, INITIAL_GUEST_CWD);
 const guestGetUid = () => VIRTUAL_UID;
 const guestGetGid = () => VIRTUAL_GID;
 const VIRTUAL_OS_HOSTNAME = parseVirtualProcessString(
@@ -4396,6 +4733,9 @@ function installGuestHardening() {
       if (normalized === 'os' && ALLOWED_BUILTINS.has('os')) {
         return guestOs;
       }
+      if (normalized === 'net' && ALLOWED_BUILTINS.has('net')) {
+        return guestNet;
+      }
       if (normalized === 'child_process' && ALLOWED_BUILTINS.has('child_process')) {
         return guestChildProcess;
       }
@@ -4418,6 +4758,9 @@ function installGuestHardening() {
       }
       if (normalized === 'os' && ALLOWED_BUILTINS.has('os')) {
         return guestOs;
+      }
+      if (normalized === 'net' && ALLOWED_BUILTINS.has('net')) {
+        return guestNet;
       }
       if (normalized === 'child_process' && ALLOWED_BUILTINS.has('child_process')) {
         return guestChildProcess;
@@ -4483,6 +4826,9 @@ if (ALLOWED_BUILTINS.has('child_process')) {
   hardenProperty(globalThis, '__agentOsBuiltinChildProcess', guestChildProcess);
 }
 hardenProperty(globalThis, '__agentOsBuiltinFs', guestFs);
+if (ALLOWED_BUILTINS.has('net')) {
+  hardenProperty(globalThis, '__agentOsBuiltinNet', guestNet);
+}
 if (ALLOWED_BUILTINS.has('os')) {
   hardenProperty(globalThis, '__agentOsBuiltinOs', guestOs);
 }
@@ -5820,6 +6166,11 @@ const BUILTIN_ASSETS: &[BuiltinAsset] = &[
         init_counter_key: "__agentOsBuiltinChildProcessInitCount",
     },
     BuiltinAsset {
+        name: "net",
+        module_specifier: "node:net",
+        init_counter_key: "__agentOsBuiltinNetInitCount",
+    },
+    BuiltinAsset {
         name: "os",
         module_specifier: "node:os",
         init_counter_key: "__agentOsBuiltinOsInitCount",
@@ -6106,6 +6457,7 @@ fn render_builtin_asset_source(asset: &BuiltinAsset) -> String {
         "fs" => render_fs_builtin_asset_source(asset.init_counter_key),
         "fs-promises" => render_fs_promises_builtin_asset_source(asset.init_counter_key),
         "child-process" => render_child_process_builtin_asset_source(asset.init_counter_key),
+        "net" => render_net_builtin_asset_source(asset.init_counter_key),
         "os" => render_os_builtin_asset_source(asset.init_counter_key),
         _ => {
             render_passthrough_builtin_asset_source(asset.module_specifier, asset.init_counter_key)
@@ -6295,6 +6647,39 @@ export const execSync = mod.execSync;\n\
 export const fork = mod.fork;\n\
 export const spawn = mod.spawn;\n\
 export const spawnSync = mod.spawnSync;\n"
+    )
+}
+
+fn render_net_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const ACCESS_DENIED_CODE = \"ERR_ACCESS_DENIED\";\n\
+const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+if (!globalThis.__agentOsBuiltinNet) {{\n\
+  const error = new Error(\"node:net is not available in the Agent OS guest runtime\");\n\
+  error.code = ACCESS_DENIED_CODE;\n\
+  throw error;\n\
+}}\n\n\
+const mod = globalThis.__agentOsBuiltinNet;\n\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export const BlockList = mod.BlockList;\n\
+export const Server = mod.Server;\n\
+export const Socket = mod.Socket;\n\
+export const SocketAddress = mod.SocketAddress;\n\
+export const Stream = mod.Stream;\n\
+export const connect = mod.connect;\n\
+export const createConnection = mod.createConnection;\n\
+export const createServer = mod.createServer;\n\
+export const getDefaultAutoSelectFamily = mod.getDefaultAutoSelectFamily;\n\
+export const getDefaultAutoSelectFamilyAttemptTimeout = mod.getDefaultAutoSelectFamilyAttemptTimeout;\n\
+export const isIP = mod.isIP;\n\
+export const isIPv4 = mod.isIPv4;\n\
+export const isIPv6 = mod.isIPv6;\n\
+export const setDefaultAutoSelectFamily = mod.setDefaultAutoSelectFamily;\n\
+export const setDefaultAutoSelectFamilyAttemptTimeout = mod.setDefaultAutoSelectFamilyAttemptTimeout;\n"
     )
 }
 
@@ -7040,5 +7425,21 @@ export async function loadPyodide(options) {
         assert!(os_asset.contains("__agentOsBuiltinOs"));
         assert!(os_asset.contains("export const hostname = mod.hostname"));
         assert!(os_asset.contains("export const userInfo = mod.userInfo"));
+    }
+
+    #[test]
+    fn ensure_materialized_writes_net_builtin_asset() {
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let net_asset =
+            fs::read_to_string(import_cache.asset_root().join("builtins").join("net.mjs"))
+                .expect("read net builtin asset");
+
+        assert!(net_asset.contains("__agentOsBuiltinNet"));
+        assert!(net_asset.contains("export const connect = mod.connect"));
+        assert!(net_asset.contains("export const createServer = mod.createServer"));
     }
 }

@@ -2737,6 +2737,176 @@ console.log(JSON.stringify({
 }
 
 #[test]
+fn javascript_execution_routes_net_connect_through_sync_rpc() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import net from "node:net";
+
+const summary = await new Promise((resolve, reject) => {
+  const socket = net.createConnection({ host: "127.0.0.1", port: 43199 });
+  let data = "";
+  let ended = false;
+  socket.setEncoding("utf8");
+  socket.on("connect", () => {
+    socket.write("ping");
+  });
+  socket.on("data", (chunk) => {
+    data += chunk;
+  });
+  socket.on("end", () => {
+    ended = true;
+  });
+  socket.on("error", reject);
+  socket.on("close", (hadError) => {
+    resolve({
+      data,
+      ended,
+      hadError,
+      localPort: socket.localPort,
+      remoteAddress: socket.remoteAddress,
+      remotePort: socket.remotePort,
+    });
+  });
+});
+
+console.log(JSON.stringify(summary));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let env = BTreeMap::from([(
+        String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+        String::from(
+            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+        ),
+    )]);
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env,
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code = None;
+    let mut socket_events = BTreeMap::<String, Vec<Value>>::new();
+    let mut methods = Vec::new();
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                methods.push(request.method.clone());
+                match request.method.as_str() {
+                    "net.connect" => {
+                        socket_events.insert(
+                            String::from("socket-1"),
+                            vec![
+                                json!({
+                                    "type": "data",
+                                    "data": "pong",
+                                }),
+                                json!({
+                                    "type": "end",
+                                }),
+                                json!({
+                                    "type": "close",
+                                    "hadError": false,
+                                }),
+                            ],
+                        );
+                        execution
+                            .respond_sync_rpc_success(
+                                request.id,
+                                json!({
+                                    "socketId": "socket-1",
+                                    "localAddress": "127.0.0.1",
+                                    "localPort": 42001,
+                                    "remoteAddress": "127.0.0.1",
+                                    "remotePort": 43199,
+                                    "remoteFamily": "IPv4",
+                                }),
+                            )
+                            .expect("respond to net.connect");
+                    }
+                    "net.write" => {
+                        assert_eq!(
+                            request.args[0].as_str(),
+                            Some("socket-1"),
+                            "unexpected socket id for write",
+                        );
+                        execution
+                            .respond_sync_rpc_success(request.id, json!(4))
+                            .expect("respond to net.write");
+                    }
+                    "net.shutdown" => {
+                        execution
+                            .respond_sync_rpc_success(request.id, Value::Null)
+                            .expect("respond to net.shutdown");
+                    }
+                    "net.destroy" => {
+                        execution
+                            .respond_sync_rpc_success(request.id, Value::Null)
+                            .expect("respond to net.destroy");
+                    }
+                    "net.poll" => {
+                        let socket_id = request.args[0].as_str().expect("poll socket id");
+                        let next = socket_events
+                            .get_mut(socket_id)
+                            .and_then(|events| {
+                                if events.is_empty() {
+                                    None
+                                } else {
+                                    Some(events.remove(0))
+                                }
+                            })
+                            .unwrap_or(Value::Null);
+                        execution
+                            .respond_sync_rpc_success(request.id, next)
+                            .expect("respond to net.poll");
+                    }
+                    other => panic!("unexpected net sync RPC method: {other}"),
+                }
+            }
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
+
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(stderr).expect("stderr utf8");
+    assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse net JSON");
+    assert_eq!(parsed["data"], Value::String(String::from("pong")));
+    assert_eq!(parsed["ended"], Value::Bool(true));
+    assert_eq!(parsed["hadError"], Value::Bool(false));
+    assert_eq!(parsed["remoteAddress"], Value::String(String::from("127.0.0.1")));
+    assert_eq!(parsed["remotePort"], Value::from(43199));
+    assert!(methods.iter().any(|method| method == "net.connect"));
+    assert!(methods.iter().any(|method| method == "net.write"));
+    assert!(methods.iter().any(|method| method == "net.shutdown"));
+    assert!(methods.iter().any(|method| method == "net.destroy"));
+    assert!(methods.iter().any(|method| method == "net.poll"));
+}
+
+#[test]
 fn javascript_execution_translates_require_resolve_and_cjs_errors_to_guest_paths() {
     assert_node_available();
 

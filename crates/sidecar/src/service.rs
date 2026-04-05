@@ -72,8 +72,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1304,6 +1306,8 @@ struct ActiveProcess {
     execution: ActiveExecution,
     child_processes: BTreeMap<String, ActiveProcess>,
     next_child_process_id: usize,
+    tcp_sockets: BTreeMap<String, ActiveTcpSocket>,
+    next_tcp_socket_id: usize,
 }
 
 impl ActiveProcess {
@@ -1320,12 +1324,92 @@ impl ActiveProcess {
             execution,
             child_processes: BTreeMap::new(),
             next_child_process_id: 0,
+            tcp_sockets: BTreeMap::new(),
+            next_tcp_socket_id: 0,
         }
     }
 
     fn allocate_child_process_id(&mut self) -> String {
         self.next_child_process_id += 1;
         format!("child-{}", self.next_child_process_id)
+    }
+
+    fn allocate_tcp_socket_id(&mut self) -> String {
+        self.next_tcp_socket_id += 1;
+        format!("socket-{}", self.next_tcp_socket_id)
+    }
+}
+
+#[derive(Debug)]
+enum JavascriptTcpSocketEvent {
+    Data(Vec<u8>),
+    End,
+    Close { had_error: bool },
+    Error { code: Option<String>, message: String },
+}
+
+#[derive(Debug)]
+struct ActiveTcpSocket {
+    stream: Arc<Mutex<TcpStream>>,
+    events: Receiver<JavascriptTcpSocketEvent>,
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+}
+
+impl ActiveTcpSocket {
+    fn connect(host: &str, port: u16) -> Result<Self, SidecarError> {
+        let remote_addr = resolve_tcp_connect_addr(host, port)?;
+        let stream = TcpStream::connect_timeout(&remote_addr, Duration::from_secs(30))
+            .map_err(sidecar_net_error)?;
+        let local_addr = stream.local_addr().map_err(sidecar_net_error)?;
+        let read_stream = stream.try_clone().map_err(sidecar_net_error)?;
+        let stream = Arc::new(Mutex::new(stream));
+        let (sender, events) = mpsc::channel();
+        spawn_tcp_socket_reader(read_stream, sender);
+
+        Ok(Self {
+            stream,
+            events,
+            local_addr,
+            remote_addr,
+        })
+    }
+
+    fn poll(&mut self, wait: Duration) -> Result<Option<JavascriptTcpSocketEvent>, SidecarError> {
+        match self.events.recv_timeout(wait) {
+            Ok(event) => Ok(Some(event)),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => Ok(Some(JavascriptTcpSocketEvent::Close {
+                had_error: false,
+            })),
+        }
+    }
+
+    fn write_all(&self, contents: &[u8]) -> Result<usize, SidecarError> {
+        let mut stream = self
+            .stream
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("TCP socket lock poisoned")))?;
+        stream.write_all(contents).map_err(sidecar_net_error)?;
+        Ok(contents.len())
+    }
+
+    fn shutdown_write(&self) -> Result<(), SidecarError> {
+        let stream = self
+            .stream
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("TCP socket lock poisoned")))?;
+        stream
+            .shutdown(Shutdown::Write)
+            .map_err(sidecar_net_error)
+    }
+
+    fn close(&self) -> Result<(), SidecarError> {
+        let stream = self
+            .stream
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("TCP socket lock poisoned")))?;
+        stream.shutdown(Shutdown::Both).map_err(sidecar_net_error)
     }
 }
 
@@ -3279,20 +3363,19 @@ where
                 ActiveExecutionEvent::JavascriptSyncRpcRequest(request) => {
                     let response = {
                         let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-                        let child_kernel_pid = vm
-                            .active_processes
-                            .get(process_id)
-                            .expect("process should still exist")
-                            .child_processes
-                            .get(child_process_id)
-                            .expect("child process should still exist")
-                            .kernel_pid;
                         if request.method.starts_with("child_process.") {
                             Err(SidecarError::InvalidState(String::from(
                                 "nested child_process calls from a child process are not supported yet",
                             )))
                         } else {
-                            service_javascript_fs_sync_rpc(vm, child_kernel_pid, &request)
+                            let child = vm
+                                .active_processes
+                                .get_mut(process_id)
+                                .expect("process should still exist")
+                                .child_processes
+                                .get_mut(child_process_id)
+                                .expect("child process should still exist");
+                            service_javascript_sync_rpc(&mut vm.kernel, child, &request)
                         }
                     };
 
@@ -3473,12 +3556,11 @@ where
             }
             _ => {
                 let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-                let kernel_pid = vm
+                let process = vm
                     .active_processes
-                    .get(process_id)
-                    .expect("process should still exist")
-                    .kernel_pid;
-                service_javascript_fs_sync_rpc(vm, kernel_pid, &request)
+                    .get_mut(process_id)
+                    .expect("process should still exist");
+                service_javascript_sync_rpc(&mut vm.kernel, process, &request)
             }
         };
 
@@ -4544,7 +4626,95 @@ struct ResolvedChildProcessExecution {
     host_cwd: PathBuf,
 }
 
+#[derive(Debug, Deserialize)]
+struct JavascriptNetConnectRequest {
+    #[serde(default)]
+    host: Option<String>,
+    port: u16,
+}
+
+fn resolve_tcp_connect_addr(host: &str, port: u16) -> Result<SocketAddr, SidecarError> {
+    (host, port)
+        .to_socket_addrs()
+        .map_err(sidecar_net_error)?
+        .next()
+        .ok_or_else(|| {
+            SidecarError::Execution(format!("failed to resolve TCP address {host}:{port}"))
+        })
+}
+
+fn socket_addr_family(addr: &SocketAddr) -> &'static str {
+    match addr {
+        SocketAddr::V4(_) => "IPv4",
+        SocketAddr::V6(_) => "IPv6",
+    }
+}
+
+fn io_error_code(error: &std::io::Error) -> Option<String> {
+    match error.raw_os_error() {
+        Some(libc::ECONNREFUSED) => Some(String::from("ECONNREFUSED")),
+        Some(libc::ECONNRESET) => Some(String::from("ECONNRESET")),
+        Some(libc::EPIPE) => Some(String::from("EPIPE")),
+        Some(libc::ETIMEDOUT) => Some(String::from("ETIMEDOUT")),
+        Some(libc::EHOSTUNREACH) => Some(String::from("EHOSTUNREACH")),
+        Some(libc::ENETUNREACH) => Some(String::from("ENETUNREACH")),
+        _ => None,
+    }
+}
+
+fn sidecar_net_error(error: std::io::Error) -> SidecarError {
+    let message = match io_error_code(&error) {
+        Some(code) => format!("{code}: {error}"),
+        None => error.to_string(),
+    };
+    SidecarError::Execution(message)
+}
+
+fn spawn_tcp_socket_reader(stream: TcpStream, sender: Sender<JavascriptTcpSocketEvent>) {
+    thread::spawn(move || {
+        let mut stream = stream;
+        let mut buffer = vec![0_u8; 64 * 1024];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = sender.send(JavascriptTcpSocketEvent::End);
+                    let _ = sender.send(JavascriptTcpSocketEvent::Close { had_error: false });
+                    break;
+                }
+                Ok(bytes_read) => {
+                    if sender
+                        .send(JavascriptTcpSocketEvent::Data(buffer[..bytes_read].to_vec()))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let code = io_error_code(&error);
+                    let _ = sender.send(JavascriptTcpSocketEvent::Error {
+                        code,
+                        message: error.to_string(),
+                    });
+                    let _ = sender.send(JavascriptTcpSocketEvent::Close { had_error: true });
+                    break;
+                }
+            }
+        }
+    });
+}
+
 fn terminate_child_process_tree(kernel: &mut SidecarKernel, process: &mut ActiveProcess) {
+    let sockets = process
+        .tcp_sockets
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for socket_id in sockets {
+        if let Some(socket) = process.tcp_sockets.remove(&socket_id) {
+            let _ = socket.close();
+        }
+    }
+
     let child_ids = process.child_processes.keys().cloned().collect::<Vec<_>>();
     for child_id in child_ids {
         let Some(mut child) = process.child_processes.remove(&child_id) else {
@@ -4705,8 +4875,132 @@ fn javascript_sync_rpc_bytes_value(bytes: &[u8]) -> Value {
     })
 }
 
+fn service_javascript_sync_rpc(
+    kernel: &mut SidecarKernel,
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    match request.method.as_str() {
+        "net.connect" | "net.poll" | "net.write" | "net.shutdown" | "net.destroy" => {
+            service_javascript_net_sync_rpc(process, request)
+        }
+        _ => service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request),
+    }
+}
+
+fn service_javascript_net_sync_rpc(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    match request.method.as_str() {
+        "net.connect" => {
+            let payload = request
+                .args
+                .first()
+                .cloned()
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from(
+                        "net.connect requires a request payload",
+                    ))
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<JavascriptNetConnectRequest>(value).map_err(
+                        |error| {
+                            SidecarError::InvalidState(format!(
+                                "invalid net.connect payload: {error}"
+                            ))
+                        },
+                    )
+                })?;
+            let socket = ActiveTcpSocket::connect(
+                payload.host.as_deref().unwrap_or("localhost"),
+                payload.port,
+            )?;
+            let socket_id = process.allocate_tcp_socket_id();
+            let local_addr = socket.local_addr;
+            let remote_addr = socket.remote_addr;
+            process.tcp_sockets.insert(socket_id.clone(), socket);
+            Ok(json!({
+                "socketId": socket_id,
+                "localAddress": local_addr.ip().to_string(),
+                "localPort": local_addr.port(),
+                "remoteAddress": remote_addr.ip().to_string(),
+                "remotePort": remote_addr.port(),
+                "remoteFamily": socket_addr_family(&remote_addr),
+            }))
+        }
+        "net.poll" => {
+            let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "net.poll socket id")?;
+            let wait_ms =
+                javascript_sync_rpc_arg_u64_optional(&request.args, 1, "net.poll wait ms")?
+                    .unwrap_or_default();
+            let event = {
+                let socket = process.tcp_sockets.get_mut(socket_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("unknown TCP socket {socket_id}"))
+                })?;
+                socket.poll(Duration::from_millis(wait_ms))?
+            };
+
+            match event {
+                Some(JavascriptTcpSocketEvent::Data(chunk)) => Ok(json!({
+                    "type": "data",
+                    "data": javascript_sync_rpc_bytes_value(&chunk),
+                })),
+                Some(JavascriptTcpSocketEvent::End) => Ok(json!({
+                    "type": "end",
+                })),
+                Some(JavascriptTcpSocketEvent::Error { code, message }) => Ok(json!({
+                    "type": "error",
+                    "code": code,
+                    "message": message,
+                })),
+                Some(JavascriptTcpSocketEvent::Close { had_error }) => {
+                    if let Some(socket) = process.tcp_sockets.remove(socket_id) {
+                        let _ = socket.close();
+                    }
+                    Ok(json!({
+                        "type": "close",
+                        "hadError": had_error,
+                    }))
+                }
+                None => Ok(Value::Null),
+            }
+        }
+        "net.write" => {
+            let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "net.write socket id")?;
+            let chunk = javascript_sync_rpc_bytes_arg(&request.args, 1, "net.write chunk")?;
+            let socket = process.tcp_sockets.get(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown TCP socket {socket_id}"))
+            })?;
+            socket.write_all(&chunk).map(|written| json!(written))
+        }
+        "net.shutdown" => {
+            let socket_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "net.shutdown socket id")?;
+            let socket = process.tcp_sockets.get(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown TCP socket {socket_id}"))
+            })?;
+            socket.shutdown_write()?;
+            Ok(Value::Null)
+        }
+        "net.destroy" => {
+            let socket_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "net.destroy socket id")?;
+            let socket = process.tcp_sockets.remove(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown TCP socket {socket_id}"))
+            })?;
+            let _ = socket.close();
+            Ok(Value::Null)
+        }
+        _ => Err(SidecarError::InvalidState(format!(
+            "unsupported JavaScript net sync RPC method {}",
+            request.method
+        ))),
+    }
+}
+
 fn service_javascript_fs_sync_rpc(
-    vm: &mut VmState,
+    kernel: &mut SidecarKernel,
     kernel_pid: u32,
     request: &JavascriptSyncRpcRequest,
 ) -> Result<Value, SidecarError> {
@@ -4716,7 +5010,7 @@ fn service_javascript_fs_sync_rpc(
             let flags = javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem open flags")?;
             let mode =
                 javascript_sync_rpc_arg_u32_optional(&request.args, 2, "filesystem open mode")?;
-            vm.kernel
+            kernel
                 .fd_open(EXECUTION_DRIVER_NAME, kernel_pid, path, flags, mode)
                 .map(|fd| json!(fd))
                 .map_err(kernel_error)
@@ -4736,12 +5030,10 @@ fn service_javascript_fs_sync_rpc(
             let position =
                 javascript_sync_rpc_arg_u64_optional(&request.args, 2, "filesystem read position")?;
             let bytes = match position {
-                Some(offset) => vm
-                    .kernel
-                    .fd_pread(EXECUTION_DRIVER_NAME, kernel_pid, fd, length, offset),
-                None => vm
-                    .kernel
-                    .fd_read(EXECUTION_DRIVER_NAME, kernel_pid, fd, length),
+                Some(offset) => {
+                    kernel.fd_pread(EXECUTION_DRIVER_NAME, kernel_pid, fd, length, offset)
+                }
+                None => kernel.fd_read(EXECUTION_DRIVER_NAME, kernel_pid, fd, length),
             };
             bytes.map(|payload| javascript_sync_rpc_bytes_value(&payload))
                 .map_err(kernel_error)
@@ -4756,32 +5048,30 @@ fn service_javascript_fs_sync_rpc(
                 "filesystem write position",
             )?;
             let written = match position {
-                Some(offset) => vm.kernel.fd_pwrite(
+                Some(offset) => kernel.fd_pwrite(
                     EXECUTION_DRIVER_NAME,
                     kernel_pid,
                     fd,
                     &contents,
                     offset,
                 ),
-                None => vm
-                    .kernel
-                    .fd_write(EXECUTION_DRIVER_NAME, kernel_pid, fd, &contents),
+                None => kernel.fd_write(EXECUTION_DRIVER_NAME, kernel_pid, fd, &contents),
             };
             written.map(|count| json!(count)).map_err(kernel_error)
         }
         "fs.close" | "fs.closeSync" => {
             let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem close fd")?;
-            vm.kernel
+            kernel
                 .fd_close(EXECUTION_DRIVER_NAME, kernel_pid, fd)
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
         }
         "fs.fstat" | "fs.fstatSync" => {
             let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem fstat fd")?;
-            vm.kernel
+            kernel
                 .fd_stat(EXECUTION_DRIVER_NAME, kernel_pid, fd)
                 .map_err(kernel_error)?;
-            vm.kernel
+            kernel
                 .dev_fd_stat(EXECUTION_DRIVER_NAME, kernel_pid, fd)
                 .map(javascript_sync_rpc_stat_value)
                 .map_err(kernel_error)
@@ -4790,7 +5080,7 @@ fn service_javascript_fs_sync_rpc(
             let path =
                 javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readFile path")?;
             let encoding = javascript_sync_rpc_encoding(&request.args);
-            vm.kernel
+            kernel
                 .read_file(path)
                 .map(|content| match encoding.as_deref() {
                     Some("utf8") | Some("utf-8") => {
@@ -4805,28 +5095,28 @@ fn service_javascript_fs_sync_rpc(
                 javascript_sync_rpc_arg_str(&request.args, 0, "filesystem writeFile path")?;
             let contents =
                 javascript_sync_rpc_bytes_arg(&request.args, 1, "filesystem writeFile contents")?;
-            vm.kernel
+            kernel
                 .write_file(path, contents)
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
         }
         "fs.statSync" | "fs.promises.stat" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem stat path")?;
-            vm.kernel
+            kernel
                 .stat(path)
                 .map(javascript_sync_rpc_stat_value)
                 .map_err(kernel_error)
         }
         "fs.lstatSync" | "fs.promises.lstat" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem lstat path")?;
-            vm.kernel
+            kernel
                 .lstat(path)
                 .map(javascript_sync_rpc_stat_value)
                 .map_err(kernel_error)
         }
         "fs.readdirSync" | "fs.promises.readdir" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readdir path")?;
-            vm.kernel
+            kernel
                 .read_dir(path)
                 .map(javascript_sync_rpc_readdir_value)
                 .map_err(kernel_error)
@@ -4835,14 +5125,14 @@ fn service_javascript_fs_sync_rpc(
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem mkdir path")?;
             let recursive =
                 javascript_sync_rpc_option_bool(&request.args, 1, "recursive").unwrap_or(false);
-            vm.kernel
+            kernel
                 .mkdir(path, recursive)
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
         }
         "fs.accessSync" | "fs.promises.access" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem access path")?;
-            vm.kernel.stat(path).map(|_| Value::Null).map_err(kernel_error)
+            kernel.stat(path).map(|_| Value::Null).map_err(kernel_error)
         }
         "fs.copyFileSync" | "fs.promises.copyFile" => {
             let source =
@@ -4852,30 +5142,27 @@ fn service_javascript_fs_sync_rpc(
                 1,
                 "filesystem copyFile destination",
             )?;
-            let contents = vm.kernel.read_file(source).map_err(kernel_error)?;
-            vm.kernel
+            let contents = kernel.read_file(source).map_err(kernel_error)?;
+            kernel
                 .write_file(destination, contents)
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
         }
         "fs.existsSync" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem exists path")?;
-            vm.kernel.exists(path).map(Value::Bool).map_err(kernel_error)
+            kernel.exists(path).map(Value::Bool).map_err(kernel_error)
         }
         "fs.readlinkSync" => {
             let path =
                 javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readlink path")?;
-            vm.kernel
-                .read_link(path)
-                .map(Value::String)
-                .map_err(kernel_error)
+            kernel.read_link(path).map(Value::String).map_err(kernel_error)
         }
         "fs.symlinkSync" => {
             let target =
                 javascript_sync_rpc_arg_str(&request.args, 0, "filesystem symlink target")?;
             let link_path =
                 javascript_sync_rpc_arg_str(&request.args, 1, "filesystem symlink path")?;
-            vm.kernel
+            kernel
                 .symlink(target, link_path)
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
@@ -4885,7 +5172,7 @@ fn service_javascript_fs_sync_rpc(
                 javascript_sync_rpc_arg_str(&request.args, 0, "filesystem link source")?;
             let destination =
                 javascript_sync_rpc_arg_str(&request.args, 1, "filesystem link path")?;
-            vm.kernel
+            kernel
                 .link(source, destination)
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
@@ -4898,21 +5185,21 @@ fn service_javascript_fs_sync_rpc(
                 1,
                 "filesystem rename destination",
             )?;
-            vm.kernel
+            kernel
                 .rename(source, destination)
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
         }
         "fs.rmdirSync" | "fs.promises.rmdir" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem rmdir path")?;
-            vm.kernel
+            kernel
                 .remove_dir(path)
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
         }
         "fs.unlinkSync" | "fs.promises.unlink" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem unlink path")?;
-            vm.kernel
+            kernel
                 .remove_file(path)
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
@@ -4920,7 +5207,7 @@ fn service_javascript_fs_sync_rpc(
         "fs.chmodSync" | "fs.promises.chmod" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem chmod path")?;
             let mode = javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem chmod mode")?;
-            vm.kernel
+            kernel
                 .chmod(path, mode)
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
@@ -4929,7 +5216,7 @@ fn service_javascript_fs_sync_rpc(
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem chown path")?;
             let uid = javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem chown uid")?;
             let gid = javascript_sync_rpc_arg_u32(&request.args, 2, "filesystem chown gid")?;
-            vm.kernel
+            kernel
                 .chown(path, uid, gid)
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
@@ -4940,7 +5227,7 @@ fn service_javascript_fs_sync_rpc(
                 javascript_sync_rpc_arg_u64(&request.args, 1, "filesystem utimes atime")?;
             let mtime_ms =
                 javascript_sync_rpc_arg_u64(&request.args, 2, "filesystem utimes mtime")?;
-            vm.kernel
+            kernel
                 .utimes(path, atime_ms, mtime_ms)
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
@@ -5109,8 +5396,11 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const TEST_AUTH_TOKEN: &str = "sidecar-test-token";
@@ -6806,6 +7096,165 @@ await new Promise(() => {});
                 .expect("remove fake javascript process")
         };
         let _ = signal_runtime_process(process.execution.child_pid(), SIGTERM);
+    }
+
+    #[test]
+    fn javascript_net_rpc_connects_to_host_tcp_server() {
+        assert_node_available();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind tcp listener");
+        let port = listener
+            .local_addr()
+            .expect("listener address")
+            .port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept tcp client");
+            let mut received = Vec::new();
+            stream
+                .read_to_end(&mut received)
+                .expect("read client payload");
+            assert_eq!(String::from_utf8(received).expect("client utf8"), "ping");
+            stream.write_all(b"pong").expect("write server payload");
+        });
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-net-rpc-cwd");
+        write_fixture(
+            &cwd.join("entry.mjs"),
+            &format!(
+                r#"
+import net from "node:net";
+
+const socket = net.createConnection({{ host: "127.0.0.1", port: {port} }});
+let data = "";
+socket.setEncoding("utf8");
+socket.on("connect", () => {{
+  socket.end("ping");
+}});
+socket.on("data", (chunk) => {{
+  data += chunk;
+}});
+socket.on("error", (error) => {{
+  console.error(error.stack ?? error.message);
+  process.exit(1);
+}});
+socket.on("close", (hadError) => {{
+  console.log(JSON.stringify({{
+    data,
+    hadError,
+    remoteAddress: socket.remoteAddress,
+    remotePort: socket.remotePort,
+    localPort: socket.localPort,
+  }}));
+  process.exit(hadError ? 1 : 0);
+}});
+"#,
+            ),
+        );
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-net"),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
+            );
+        }
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = None;
+        for _ in 0..64 {
+            let next_event = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-net")
+                    .map(|process| {
+                        process
+                            .execution
+                            .poll_event(Duration::from_secs(5))
+                            .expect("poll javascript net rpc event")
+                    })
+                    .flatten()
+            };
+            let Some(event) = next_event else {
+                if exit_code.is_some() {
+                    break;
+                }
+                panic!("javascript net process disappeared before exit");
+            };
+
+            match &event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    stdout.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    stderr.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Exited(code) => {
+                    exit_code = Some(*code);
+                }
+                _ => {}
+            }
+
+            sidecar
+                .handle_execution_event(&vm_id, "proc-js-net", event)
+                .expect("handle javascript net rpc event");
+        }
+
+        server.join().expect("join tcp server");
+        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        assert!(stdout.contains("\"data\":\"pong\""), "stdout: {stdout}");
+        assert!(stdout.contains("\"hadError\":false"), "stdout: {stdout}");
+        assert!(
+            stdout.contains(&format!("\"remotePort\":{port}")),
+            "stdout: {stdout}"
+        );
     }
 
     #[test]

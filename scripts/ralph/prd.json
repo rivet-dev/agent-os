@@ -1,7 +1,7 @@
 {
   "project": "agentOS",
   "branchName": "ralph/runtime-isolation-hardening",
-  "description": "Port the original JS kernel's proven isolation model to the Rust sidecar — kernel-backed polyfills for all Node.js builtins, virtualized process global, Pyodide sandbox hardening, and defense-in-depth resource limits",
+  "description": "Port the original JS kernel's proven isolation model to the Rust sidecar \u2014 kernel-backed polyfills for all Node.js builtins, virtualized process global, Pyodide sandbox hardening, and defense-in-depth resource limits",
   "userStories": [
     {
       "id": "US-001",
@@ -100,7 +100,7 @@
       "title": "Intercept process signal handlers and deny native addon loading",
       "description": "As a security engineer, I want guest signal handler registration intercepted and native addon loading denied so that the guest cannot interfere with process lifecycle or run arbitrary native code",
       "acceptanceCriteria": [
-        "process.on('SIGINT'/SIGTERM/etc) is intercepted — guest cannot prevent sidecar from terminating the process",
+        "process.on('SIGINT'/SIGTERM/etc) is intercepted \u2014 guest cannot prevent sidecar from terminating the process",
         "process.dlopen() throws ERR_ACCESS_DENIED",
         "Module._extensions['.node'] throws ERR_ACCESS_DENIED when attempting to load .node files",
         "Existing tests pass",
@@ -145,7 +145,7 @@
       "title": "Replace in-band control message parsing with side channel",
       "description": "As a security engineer, I want all control messages (exit codes, metrics, signal state) moved to a dedicated side channel so that guest code cannot inject fake control messages via stdout/stderr",
       "acceptanceCriteria": [
-        "__AGENT_OS_PYTHON_EXIT__ parsing removed from stderr — exit detection uses a dedicated mechanism",
+        "__AGENT_OS_PYTHON_EXIT__ parsing removed from stderr \u2014 exit detection uses a dedicated mechanism",
         "__AGENT_OS_SIGNAL_STATE__ parsing removed from stderr",
         "__AGENT_OS_NODE_IMPORT_CACHE_METRICS__ parsing removed from stderr",
         "Control data flows through a dedicated pipe/fd or separate IPC channel",
@@ -273,7 +273,7 @@
         "Returned ChildProcess object is a synthetic EventEmitter backed by kernel pipe fds for stdio",
         "Exit/close events are wired through kernel waitpid",
         ".kill() method routes through kernel kill_process",
-        "Replace wrapChildProcessModule() entirely — no more path-translating wrapper over real child_process",
+        "Replace wrapChildProcessModule() entirely \u2014 no more path-translating wrapper over real child_process",
         "Typecheck passes"
       ],
       "priority": 17,
@@ -296,7 +296,7 @@
         "Typecheck passes"
       ],
       "priority": 18,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-012. Kernel already has socket table + HostNetworkAdapter. Original JS kernel had kernel.socketTable.create/connect/send/recv."
     },
     {
@@ -346,7 +346,7 @@
       ],
       "priority": 21,
       "passes": false,
-      "notes": "dns.lookup uses libuv getaddrinfo internally, not node:net — needs its own interception."
+      "notes": "dns.lookup uses libuv getaddrinfo internally, not node:net \u2014 needs its own interception."
     },
     {
       "id": "US-022",
@@ -391,7 +391,7 @@
         "Existing Python tests pass",
         "Typecheck passes"
       ],
-      "priority": 24,
+      "priority": 37,
       "passes": false,
       "notes": "Currently no Drop impl. Orphaned Node+Pyodide processes leak ~200MB+ each."
     },
@@ -406,7 +406,7 @@
         "Existing Python tests pass",
         "Typecheck passes"
       ],
-      "priority": 25,
+      "priority": 38,
       "passes": false,
       "notes": "Exit detection currently relies on fragile stderr magic prefix parsing. All output accumulated in memory with no cap."
     },
@@ -422,7 +422,7 @@
         "Existing Python tests pass",
         "Typecheck passes"
       ],
-      "priority": 26,
+      "priority": 39,
       "passes": false,
       "notes": "service.rs:2394-2470 passes request.path directly to kernel with no validation. readSync blocks forever if Rust never responds."
     },
@@ -438,7 +438,7 @@
         "When permissions restrict network, guest network operations are denied",
         "Typecheck passes"
       ],
-      "priority": 27,
+      "priority": 24,
       "passes": false,
       "notes": "permissions field is accepted but never consumed. LocalBridge allows everything. PermissionDescriptor exists on Rust side but TS always sends empty array."
     },
@@ -453,7 +453,7 @@
         "--allow-fs-read/--allow-fs-write are scoped to sandbox root, not the raw cwd",
         "Typecheck passes"
       ],
-      "priority": 28,
+      "priority": 25,
       "passes": false,
       "notes": "service.rs:2195-2206 uses cwd directly as real host current_dir AND adds it to --allow-fs-read/--allow-fs-write. No validation."
     },
@@ -468,7 +468,7 @@
         "Cache cleanup happens on VM shutdown",
         "Typecheck passes"
       ],
-      "priority": 29,
+      "priority": 32,
       "passes": false,
       "notes": "flushCacheState reads/merges/writes a shared cache. Two VMs sharing the same cache root enables cross-VM cache poisoning."
     },
@@ -483,7 +483,7 @@
         "Recursive escalation chain is broken",
         "Typecheck passes"
       ],
-      "priority": 30,
+      "priority": 26,
       "passes": false,
       "notes": "Currently --allow-child-process and --allow-worker are passed unconditionally to all child Node processes."
     },
@@ -498,7 +498,7 @@
         "exists() returns false on EACCES instead of leaking file existence",
         "Typecheck passes"
       ],
-      "priority": 31,
+      "priority": 27,
       "passes": false,
       "notes": "permissions.rs checks caller-supplied path, then inner fs resolves symlinks independently. TOCTOU bypass if mounts expose host paths."
     },
@@ -514,7 +514,7 @@
         "PTY foreground PGID changes validate target PGID belongs to same session",
         "Typecheck passes"
       ],
-      "priority": 32,
+      "priority": 33,
       "passes": false,
       "notes": "Sidecar sends real kill(2) to host PIDs. PID reuse could kill wrong host process. dup2 skips fd bounds check."
     },
@@ -531,7 +531,7 @@
         "Exceeding limits returns ENOSPC",
         "Typecheck passes"
       ],
-      "priority": 33,
+      "priority": 30,
       "passes": false,
       "notes": "All file data is in-memory with no cap. Guest can write until host OOM. truncate/pwrite with large values cause immediate OOM."
     },
@@ -549,7 +549,7 @@
         "read_frame checks declared_len against max_frame_bytes before allocation (prevents OOM)",
         "Typecheck passes"
       ],
-      "priority": 34,
+      "priority": 31,
       "passes": false,
       "notes": "No WASM fuel/memory/stack limits. No socket/connection limits. pipe.read/pty.read block forever if write end leaks."
     },
@@ -564,7 +564,7 @@
         "Exceeding queue bound returns an error, not silent accumulation",
         "Typecheck passes"
       ],
-      "priority": 35,
+      "priority": 40,
       "passes": false,
       "notes": "Hardening currently runs AFTER loadPyodide. VFS RPC queue is unbounded."
     },
@@ -573,7 +573,7 @@
       "title": "Add missing Pyodide integration tests",
       "description": "As a developer, I want comprehensive Pyodide tests so that isolation guarantees are verified by the test suite",
       "acceptanceCriteria": [
-        "Test frozen time — Python sees deterministic/controlled time",
+        "Test frozen time \u2014 Python sees deterministic/controlled time",
         "Test node:child_process and node:vm are inaccessible from Python",
         "Test zero network requests during Pyodide init",
         "Test kill (SIGTERM) terminates Python execution",
@@ -582,7 +582,7 @@
         "All new tests pass",
         "Typecheck passes"
       ],
-      "priority": 36,
+      "priority": 41,
       "passes": false,
       "notes": "Multiple Pyodide Phase 1/3 acceptance criteria have no test coverage."
     },
@@ -598,7 +598,7 @@
         "Logs use structured format (JSON or similar) suitable for aggregation",
         "Typecheck passes"
       ],
-      "priority": 37,
+      "priority": 43,
       "passes": false,
       "notes": "No security event logging exists. Auth failures, permission denials, mounts, kills are all silent."
     },
@@ -613,7 +613,7 @@
         "Mounting at sensitive paths (/, /etc, /proc) requires elevated permission",
         "Typecheck passes"
       ],
-      "priority": 38,
+      "priority": 28,
       "passes": false,
       "notes": "Plugins accept arbitrary URLs. mount_filesystem only checks assert_not_terminated, no path or caller validation."
     },
@@ -627,7 +627,7 @@
         "Single mutex poison policy applied consistently (lock_or_recover everywhere OR .expect everywhere)",
         "Typecheck passes"
       ],
-      "priority": 39,
+      "priority": 34,
       "passes": false,
       "notes": "fs::canonicalize + ensure_within_root has TOCTOU race. setpgid allows cross-driver group joining. Inconsistent mutex handling."
     },
@@ -640,7 +640,7 @@
         "Zombie reaper preserves exit codes for zombies with living parents that haven't called waitpid",
         "Typecheck passes"
       ],
-      "priority": 40,
+      "priority": 35,
       "passes": false,
       "notes": "hardenProperty silently falls back to mutable. Zombie reaper loses exit codes."
     },
@@ -655,7 +655,7 @@
         "read-write tier commands cannot spawn processes or make network requests",
         "Typecheck passes"
       ],
-      "priority": 41,
+      "priority": 29,
       "passes": false,
       "notes": "Permission tiers are declared in descriptors but not enforced at runtime."
     },
@@ -686,7 +686,7 @@
         "WASM FFI poll buffer validation, getpwuid buffer trust, usize-to-u32 truncation checks added",
         "Typecheck passes"
       ],
-      "priority": 43,
+      "priority": 36,
       "passes": false,
       "notes": "Collection of minor issues that individually have low impact but collectively improve robustness."
     }
