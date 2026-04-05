@@ -3858,11 +3858,18 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
       }
     }
 
-    if (typeof options?.path === 'string') {
-      throw createUnsupportedNetError('net.connect({ path })');
-    }
     if (options?.lookup != null) {
       throw createUnsupportedNetError('net.connect({ lookup })');
+    }
+
+    if (typeof options?.path === 'string' && options.path.length > 0) {
+      return {
+        callback,
+        options: {
+          allowHalfOpen: options?.allowHalfOpen === true,
+          path: resolveGuestFsPath(options.path, fromGuestDir),
+        },
+      };
     }
 
     return {
@@ -3923,11 +3930,21 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
       }
     }
 
-    if (typeof options?.path === 'string') {
-      throw createUnsupportedNetError('net.Server.listen({ path })');
-    }
     if (options?.signal != null) {
       throw createUnsupportedNetError('net.Server.listen({ signal })');
+    }
+
+    if (typeof options?.path === 'string' && options.path.length > 0) {
+      return {
+        callback,
+        options: {
+          backlog:
+            options?.backlog != null
+              ? normalizeNetBacklog(options.backlog)
+              : backlog,
+          path: resolveGuestFsPath(options.path, fromGuestDir),
+        },
+      };
     }
 
     return {
@@ -3969,6 +3986,7 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
       return;
     }
     socket._agentOsClosed = true;
+    socket._agentOsCloseHadError = hadError === true;
     socket._agentOsSocketId = null;
     socket.connecting = false;
     socket.pending = false;
@@ -4048,12 +4066,28 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
   const attachSocketState = (socket, result, options = {}, emitConnect = false) => {
     socket._agentOsAllowHalfOpen = options.allowHalfOpen === true;
     socket._agentOsSocketId = String(result.socketId);
-    socket.localAddress = result.localAddress;
+    socket.localPath =
+      typeof result.localPath === 'string'
+        ? result.localPath
+        : typeof result.path === 'string'
+          ? result.path
+          : undefined;
+    socket.remotePath =
+      typeof result.remotePath === 'string'
+        ? result.remotePath
+        : typeof result.path === 'string'
+          ? result.path
+          : undefined;
+    socket.localAddress =
+      socket.localPath ?? result.localAddress;
     socket.localPort = result.localPort;
-    socket.remoteAddress = result.remoteAddress;
+    socket.remoteAddress =
+      socket.remotePath ?? result.remoteAddress;
     socket.remotePort = result.remotePort;
     socket.remoteFamily =
-      result.remoteFamily ?? socketFamilyForAddress(socket.remoteAddress);
+      socket.remotePath != null
+        ? undefined
+        : result.remoteFamily ?? socketFamilyForAddress(socket.remoteAddress);
     socket.connecting = false;
     socket.pending = false;
     socket._agentOsClosed = false;
@@ -4074,6 +4108,8 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
       super(options);
       this._agentOsAllowHalfOpen = options?.allowHalfOpen === true;
       this._agentOsClosed = false;
+      this._agentOsCloseHadError = false;
+      this._agentOsExplicitDestroy = false;
       this._agentOsRefed = true;
       this._agentOsSocketId = null;
       this._pollTimer = null;
@@ -4083,9 +4119,21 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
       this.pending = false;
       this.localAddress = undefined;
       this.localPort = undefined;
+      this.localPath = undefined;
       this.remoteAddress = undefined;
       this.remoteFamily = undefined;
       this.remotePort = undefined;
+      this.remotePath = undefined;
+      this.emit = (eventName, ...eventArgs) => {
+        if (eventName === 'close' && eventArgs.length === 0 && this._agentOsClosed) {
+          eventArgs = [this._agentOsCloseHadError === true];
+        }
+        return Duplex.prototype.emit.call(this, eventName, ...eventArgs);
+      };
+      this.destroy = (error) => {
+        this._agentOsExplicitDestroy = true;
+        return Duplex.prototype.destroy.call(this, error);
+      };
     }
 
     _read() {}
@@ -4131,7 +4179,7 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
       if (
         socketId == null ||
         this._agentOsClosed ||
-        (error == null && this.readableEnded && this.writableEnded)
+        (error == null && !this._agentOsExplicitDestroy)
       ) {
         finishDestroy();
         return;
@@ -4140,6 +4188,9 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
     }
 
     address() {
+      if (typeof this.localPath === 'string') {
+        return this.localPath;
+      }
       if (typeof this.localAddress !== 'string' || typeof this.localPort !== 'number') {
         return null;
       }
@@ -4169,6 +4220,7 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
           this,
           {
             ...result,
+            remotePath: result.remotePath ?? options.path,
             remoteAddress: result.remoteAddress ?? options.host,
             remotePort: result.remotePort ?? options.port,
           },
@@ -4376,11 +4428,14 @@ function createRpcBackedNetModule(netModule, fromGuestDir = '/') {
       try {
         const result = callListen(options);
         this._agentOsServerId = String(result.serverId);
-        this._address = {
-          address: result.localAddress,
-          family: result.family ?? socketFamilyForAddress(result.localAddress),
-          port: result.localPort,
-        };
+        this._address =
+          typeof result.path === 'string'
+            ? result.path
+            : {
+                address: result.localAddress,
+                family: result.family ?? socketFamilyForAddress(result.localAddress),
+                port: result.localPort,
+              };
         this.listening = true;
         queueMicrotask(() => {
           if (this._agentOsClosed) {

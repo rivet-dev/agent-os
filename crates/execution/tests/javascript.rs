@@ -2953,7 +2953,6 @@ console.log(JSON.stringify(summary));
     assert!(methods.iter().any(|method| method == "net.connect"));
     assert!(methods.iter().any(|method| method == "net.write"));
     assert!(methods.iter().any(|method| method == "net.shutdown"));
-    assert!(methods.iter().any(|method| method == "net.destroy"));
     assert!(methods.iter().any(|method| method == "net.poll"));
 }
 
@@ -3175,6 +3174,320 @@ console.log(JSON.stringify(summary));
         .any(|method| method == "net.server_connections"));
     assert!(methods.iter().any(|method| method == "net.poll"));
     assert!(methods.iter().any(|method| method == "net.write"));
+    assert!(methods.iter().any(|method| method == "net.shutdown"));
+    assert!(methods.iter().any(|method| method == "net.server_close"));
+}
+
+#[test]
+fn javascript_execution_routes_net_connect_path_through_sync_rpc() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import net from "node:net";
+
+const summary = await new Promise((resolve, reject) => {
+  const socket = net.createConnection({ path: "/tmp/agent-os.sock" });
+  socket.on("connect", () => {
+    socket.end();
+  });
+  socket.on("error", reject);
+  socket.on("close", (hadError) => {
+    resolve({
+      hadError,
+      remoteAddress: socket.remoteAddress,
+      address: socket.address(),
+    });
+  });
+});
+
+console.log(JSON.stringify(summary));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let env = BTreeMap::from([(
+        String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+        String::from(
+            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+        ),
+    )]);
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env,
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code = None;
+    let mut socket_events = BTreeMap::<String, Vec<Value>>::new();
+    let mut methods = Vec::new();
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                methods.push(request.method.clone());
+                match request.method.as_str() {
+                    "net.connect" => {
+                        assert_eq!(
+                            request.args[0]["path"],
+                            Value::String(String::from("/tmp/agent-os.sock"))
+                        );
+                        socket_events.insert(
+                            String::from("unix-socket-1"),
+                            vec![json!({
+                                "type": "close",
+                                "hadError": false,
+                            })],
+                        );
+                        execution
+                            .respond_sync_rpc_success(
+                                request.id,
+                                json!({
+                                    "socketId": "unix-socket-1",
+                                    "remotePath": "/tmp/agent-os.sock",
+                                }),
+                            )
+                            .expect("respond to net.connect");
+                    }
+                    "net.shutdown" => {
+                        execution
+                            .respond_sync_rpc_success(request.id, Value::Null)
+                            .expect("respond to net.shutdown");
+                    }
+                    "net.destroy" => {
+                        execution
+                            .respond_sync_rpc_success(request.id, Value::Null)
+                            .expect("respond to net.destroy");
+                    }
+                    "net.poll" => {
+                        let socket_id = request.args[0].as_str().expect("poll socket id");
+                        let next = socket_events
+                            .get_mut(socket_id)
+                            .and_then(|events| {
+                                if events.is_empty() {
+                                    None
+                                } else {
+                                    Some(events.remove(0))
+                                }
+                            })
+                            .unwrap_or(Value::Null);
+                        execution
+                            .respond_sync_rpc_success(request.id, next)
+                            .expect("respond to net.poll");
+                    }
+                    other => panic!("unexpected net sync RPC method: {other}"),
+                }
+            }
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
+
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(stderr).expect("stderr utf8");
+    assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse net JSON");
+    assert_eq!(parsed["hadError"], Value::Bool(false));
+    assert_eq!(
+        parsed["remoteAddress"],
+        Value::String(String::from("/tmp/agent-os.sock"))
+    );
+    assert_eq!(parsed["address"], Value::Null);
+    assert!(methods.iter().any(|method| method == "net.connect"));
+    assert!(methods.iter().any(|method| method == "net.shutdown"));
+    assert!(methods.iter().any(|method| method == "net.poll"));
+}
+
+#[test]
+fn javascript_execution_routes_net_listen_path_through_sync_rpc() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import net from "node:net";
+
+const summary = await new Promise((resolve, reject) => {
+  const server = net.createServer((socket) => {
+    socket.on("error", reject);
+    socket.on("close", () => {
+      server.close(() => {
+        resolve({
+          address: server.address(),
+          localAddress: socket.localAddress,
+        });
+      });
+    });
+    socket.end();
+  });
+  server.on("error", reject);
+  server.listen({ path: "/tmp/agent-os.sock", backlog: 2 });
+});
+
+console.log(JSON.stringify(summary));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let env = BTreeMap::from([(
+        String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+        String::from(
+            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+        ),
+    )]);
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env,
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code = None;
+    let mut listener_events = BTreeMap::<String, Vec<Value>>::new();
+    let mut socket_events = BTreeMap::<String, Vec<Value>>::new();
+    let mut methods = Vec::new();
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                methods.push(request.method.clone());
+                match request.method.as_str() {
+                    "net.listen" => {
+                        assert_eq!(
+                            request.args[0]["path"],
+                            Value::String(String::from("/tmp/agent-os.sock"))
+                        );
+                        assert_eq!(request.args[0]["backlog"], Value::from(2));
+                        listener_events.insert(
+                            String::from("unix-listener-1"),
+                            vec![json!({
+                                "type": "connection",
+                                "socketId": "unix-socket-1",
+                                "localPath": "/tmp/agent-os.sock",
+                                "remotePath": Value::Null,
+                            })],
+                        );
+                        socket_events.insert(
+                            String::from("unix-socket-1"),
+                            vec![json!({
+                                "type": "close",
+                                "hadError": false,
+                            })],
+                        );
+                        execution
+                            .respond_sync_rpc_success(
+                                request.id,
+                                json!({
+                                    "serverId": "unix-listener-1",
+                                    "path": "/tmp/agent-os.sock",
+                                }),
+                            )
+                            .expect("respond to net.listen");
+                    }
+                    "net.server_poll" => {
+                        let listener_id = request.args[0].as_str().expect("poll listener id");
+                        let next = listener_events
+                            .get_mut(listener_id)
+                            .and_then(|events| {
+                                if events.is_empty() {
+                                    None
+                                } else {
+                                    Some(events.remove(0))
+                                }
+                            })
+                            .unwrap_or(Value::Null);
+                        execution
+                            .respond_sync_rpc_success(request.id, next)
+                            .expect("respond to net.server_poll");
+                    }
+                    "net.poll" => {
+                        let socket_id = request.args[0].as_str().expect("poll socket id");
+                        let next = socket_events
+                            .get_mut(socket_id)
+                            .and_then(|events| {
+                                if events.is_empty() {
+                                    None
+                                } else {
+                                    Some(events.remove(0))
+                                }
+                            })
+                            .unwrap_or(Value::Null);
+                        execution
+                            .respond_sync_rpc_success(request.id, next)
+                            .expect("respond to net.poll");
+                    }
+                    "net.shutdown" => {
+                        execution
+                            .respond_sync_rpc_success(request.id, Value::Null)
+                            .expect("respond to net.shutdown");
+                    }
+                    "net.server_close" => {
+                        execution
+                            .respond_sync_rpc_success(request.id, Value::Null)
+                            .expect("respond to net.server_close");
+                    }
+                    "net.destroy" => {
+                        execution
+                            .respond_sync_rpc_success(request.id, Value::Null)
+                            .expect("respond to net.destroy");
+                    }
+                    other => panic!("unexpected net sync RPC method: {other}"),
+                }
+            }
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
+
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(stderr).expect("stderr utf8");
+    assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse net JSON");
+    assert_eq!(
+        parsed["address"],
+        Value::String(String::from("/tmp/agent-os.sock"))
+    );
+    assert_eq!(
+        parsed["localAddress"],
+        Value::String(String::from("/tmp/agent-os.sock"))
+    );
+    assert!(methods.iter().any(|method| method == "net.listen"));
+    assert!(methods.iter().any(|method| method == "net.server_poll"));
+    assert!(methods.iter().any(|method| method == "net.poll"));
     assert!(methods.iter().any(|method| method == "net.shutdown"));
     assert!(methods.iter().any(|method| method == "net.server_close"));
 }

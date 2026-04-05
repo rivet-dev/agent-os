@@ -85,6 +85,7 @@ use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
     UdpSocket,
 };
+use std::os::unix::net::{SocketAddr as UnixSocketAddr, UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -1464,6 +1465,12 @@ struct VmState {
     signal_states: BTreeMap<String, BTreeMap<u32, SignalHandlerRegistration>>,
 }
 
+#[derive(Debug, Clone)]
+struct JavascriptSocketPathContext {
+    sandbox_root: PathBuf,
+    mounts: Vec<crate::protocol::MountDescriptor>,
+}
+
 #[allow(dead_code)]
 struct ActiveProcess {
     kernel_pid: u32,
@@ -1476,6 +1483,10 @@ struct ActiveProcess {
     next_tcp_listener_id: usize,
     tcp_sockets: BTreeMap<String, ActiveTcpSocket>,
     next_tcp_socket_id: usize,
+    unix_listeners: BTreeMap<String, ActiveUnixListener>,
+    next_unix_listener_id: usize,
+    unix_sockets: BTreeMap<String, ActiveUnixSocket>,
+    next_unix_socket_id: usize,
     udp_sockets: BTreeMap<String, ActiveUdpSocket>,
     next_udp_socket_id: usize,
 }
@@ -1504,6 +1515,10 @@ impl ActiveProcess {
             next_tcp_listener_id: 0,
             tcp_sockets: BTreeMap::new(),
             next_tcp_socket_id: 0,
+            unix_listeners: BTreeMap::new(),
+            next_unix_listener_id: 0,
+            unix_sockets: BTreeMap::new(),
+            next_unix_socket_id: 0,
             udp_sockets: BTreeMap::new(),
             next_udp_socket_id: 0,
         }
@@ -1524,6 +1539,16 @@ impl ActiveProcess {
         format!("socket-{}", self.next_tcp_socket_id)
     }
 
+    fn allocate_unix_listener_id(&mut self) -> String {
+        self.next_unix_listener_id += 1;
+        format!("unix-listener-{}", self.next_unix_listener_id)
+    }
+
+    fn allocate_unix_socket_id(&mut self) -> String {
+        self.next_unix_socket_id += 1;
+        format!("unix-socket-{}", self.next_unix_socket_id)
+    }
+
     fn allocate_udp_socket_id(&mut self) -> String {
         self.next_udp_socket_id += 1;
         format!("udp-socket-{}", self.next_udp_socket_id)
@@ -1531,8 +1556,12 @@ impl ActiveProcess {
 
     fn network_resource_counts(&self) -> NetworkResourceCounts {
         let mut counts = NetworkResourceCounts {
-            sockets: self.tcp_listeners.len() + self.tcp_sockets.len() + self.udp_sockets.len(),
-            connections: self.tcp_sockets.len(),
+            sockets: self.tcp_listeners.len()
+                + self.tcp_sockets.len()
+                + self.unix_listeners.len()
+                + self.unix_sockets.len()
+                + self.udp_sockets.len(),
+            connections: self.tcp_sockets.len() + self.unix_sockets.len(),
         };
 
         for child in self.child_processes.values() {
@@ -1582,6 +1611,7 @@ struct ActiveTcpSocket {
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
     listener_id: Option<String>,
+    saw_local_shutdown: Arc<AtomicBool>,
     saw_remote_end: Arc<AtomicBool>,
     close_notified: Arc<AtomicBool>,
 }
@@ -1610,11 +1640,13 @@ impl ActiveTcpSocket {
         let read_stream = stream.try_clone().map_err(sidecar_net_error)?;
         let stream = Arc::new(Mutex::new(stream));
         let (sender, events) = mpsc::channel();
+        let saw_local_shutdown = Arc::new(AtomicBool::new(false));
         let saw_remote_end = Arc::new(AtomicBool::new(false));
         let close_notified = Arc::new(AtomicBool::new(false));
         spawn_tcp_socket_reader(
             read_stream,
             sender.clone(),
+            Arc::clone(&saw_local_shutdown),
             Arc::clone(&saw_remote_end),
             Arc::clone(&close_notified),
         );
@@ -1626,6 +1658,7 @@ impl ActiveTcpSocket {
             local_addr,
             remote_addr,
             listener_id,
+            saw_local_shutdown,
             saw_remote_end,
             close_notified,
         })
@@ -1635,9 +1668,7 @@ impl ActiveTcpSocket {
         match self.events.recv_timeout(wait) {
             Ok(event) => Ok(Some(event)),
             Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => {
-                Ok(Some(JavascriptTcpSocketEvent::Close { had_error: false }))
-            }
+            Err(RecvTimeoutError::Disconnected) => Ok(None),
         }
     }
 
@@ -1655,6 +1686,7 @@ impl ActiveTcpSocket {
             .stream
             .lock()
             .map_err(|_| SidecarError::InvalidState(String::from("TCP socket lock poisoned")))?;
+        self.saw_local_shutdown.store(true, Ordering::SeqCst);
         stream
             .shutdown(Shutdown::Write)
             .map_err(sidecar_net_error)?;
@@ -1683,6 +1715,206 @@ struct ActiveTcpListener {
     local_addr: SocketAddr,
     backlog: usize,
     active_connection_ids: BTreeSet<String>,
+}
+
+#[derive(Debug)]
+enum JavascriptUnixListenerEvent {
+    Connection(PendingUnixSocket),
+    Error {
+        code: Option<String>,
+        message: String,
+    },
+}
+
+#[derive(Debug)]
+struct PendingUnixSocket {
+    stream: UnixStream,
+    local_path: Option<String>,
+    remote_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct ActiveUnixSocket {
+    stream: Arc<Mutex<UnixStream>>,
+    events: Receiver<JavascriptTcpSocketEvent>,
+    event_sender: Sender<JavascriptTcpSocketEvent>,
+    listener_id: Option<String>,
+    saw_local_shutdown: Arc<AtomicBool>,
+    saw_remote_end: Arc<AtomicBool>,
+    close_notified: Arc<AtomicBool>,
+}
+
+impl ActiveUnixSocket {
+    fn connect(host_path: &Path, guest_path: &str) -> Result<Self, SidecarError> {
+        let stream = UnixStream::connect(host_path).map_err(sidecar_net_error)?;
+        Self::from_stream(stream, None, None, Some(guest_path.to_owned()))
+    }
+
+    fn from_stream(
+        stream: UnixStream,
+        listener_id: Option<String>,
+        _local_path: Option<String>,
+        _remote_path: Option<String>,
+    ) -> Result<Self, SidecarError> {
+        let read_stream = stream.try_clone().map_err(sidecar_net_error)?;
+        let stream = Arc::new(Mutex::new(stream));
+        let (sender, events) = mpsc::channel();
+        let saw_local_shutdown = Arc::new(AtomicBool::new(false));
+        let saw_remote_end = Arc::new(AtomicBool::new(false));
+        let close_notified = Arc::new(AtomicBool::new(false));
+        spawn_unix_socket_reader(
+            read_stream,
+            sender.clone(),
+            Arc::clone(&saw_local_shutdown),
+            Arc::clone(&saw_remote_end),
+            Arc::clone(&close_notified),
+        );
+
+        Ok(Self {
+            stream,
+            events,
+            event_sender: sender,
+            listener_id,
+            saw_local_shutdown,
+            saw_remote_end,
+            close_notified,
+        })
+    }
+
+    fn poll(&mut self, wait: Duration) -> Result<Option<JavascriptTcpSocketEvent>, SidecarError> {
+        match self.events.recv_timeout(wait) {
+            Ok(event) => Ok(Some(event)),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => Ok(None),
+        }
+    }
+
+    fn write_all(&self, contents: &[u8]) -> Result<usize, SidecarError> {
+        let mut stream = self
+            .stream
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("Unix socket lock poisoned")))?;
+        stream.write_all(contents).map_err(sidecar_net_error)?;
+        Ok(contents.len())
+    }
+
+    fn shutdown_write(&self) -> Result<(), SidecarError> {
+        let stream = self
+            .stream
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("Unix socket lock poisoned")))?;
+        self.saw_local_shutdown.store(true, Ordering::SeqCst);
+        stream
+            .shutdown(Shutdown::Write)
+            .map_err(sidecar_net_error)?;
+        if self.saw_remote_end.load(Ordering::SeqCst)
+            && !self.close_notified.swap(true, Ordering::SeqCst)
+        {
+            let _ = self
+                .event_sender
+                .send(JavascriptTcpSocketEvent::Close { had_error: false });
+        }
+        Ok(())
+    }
+
+    fn close(&self) -> Result<(), SidecarError> {
+        let stream = self
+            .stream
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("Unix socket lock poisoned")))?;
+        stream.shutdown(Shutdown::Both).map_err(sidecar_net_error)
+    }
+}
+
+#[derive(Debug)]
+struct ActiveUnixListener {
+    listener: UnixListener,
+    path: String,
+    backlog: usize,
+    active_connection_ids: BTreeSet<String>,
+}
+
+impl ActiveUnixListener {
+    fn bind(
+        host_path: &Path,
+        guest_path: &str,
+        backlog: Option<u32>,
+    ) -> Result<Self, SidecarError> {
+        if let Some(parent) = host_path.parent() {
+            fs::create_dir_all(parent).map_err(sidecar_net_error)?;
+        }
+        let listener = UnixListener::bind(host_path).map_err(sidecar_net_error)?;
+        listener.set_nonblocking(true).map_err(sidecar_net_error)?;
+        Ok(Self {
+            listener,
+            path: guest_path.to_owned(),
+            backlog: usize::try_from(backlog.unwrap_or(DEFAULT_JAVASCRIPT_NET_BACKLOG))
+                .expect("default backlog fits within usize"),
+            active_connection_ids: BTreeSet::new(),
+        })
+    }
+
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn poll(
+        &mut self,
+        wait: Duration,
+    ) -> Result<Option<JavascriptUnixListenerEvent>, SidecarError> {
+        let deadline = Instant::now() + wait;
+        loop {
+            match self.listener.accept() {
+                Ok((stream, remote_addr)) => {
+                    if self.active_connection_ids.len() >= self.backlog {
+                        let _ = stream.shutdown(Shutdown::Both);
+                        if wait.is_zero() || Instant::now() >= deadline {
+                            return Ok(None);
+                        }
+                        continue;
+                    }
+
+                    let local_path = Some(self.path.clone());
+                    let remote_path = unix_socket_path(&remote_addr);
+                    return Ok(Some(JavascriptUnixListenerEvent::Connection(
+                        PendingUnixSocket {
+                            stream,
+                            local_path,
+                            remote_path,
+                        },
+                    )));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if wait.is_zero() || Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    return Ok(Some(JavascriptUnixListenerEvent::Error {
+                        code: io_error_code(&error),
+                        message: error.to_string(),
+                    }));
+                }
+            }
+        }
+    }
+
+    fn close(&self) -> Result<(), SidecarError> {
+        Ok(())
+    }
+
+    fn active_connection_count(&self) -> usize {
+        self.active_connection_ids.len()
+    }
+
+    fn register_connection(&mut self, socket_id: &str) {
+        self.active_connection_ids.insert(socket_id.to_string());
+    }
+
+    fn release_connection(&mut self, socket_id: &str) {
+        self.active_connection_ids.remove(socket_id);
+    }
 }
 
 impl ActiveTcpListener {
@@ -3945,6 +4177,10 @@ where
                         } else {
                             let resource_limits = vm.kernel.resource_limits().clone();
                             let network_counts = vm_network_resource_counts(vm);
+                            let socket_paths = JavascriptSocketPathContext {
+                                sandbox_root: vm.cwd.clone(),
+                                mounts: vm.configuration.mounts.clone(),
+                            };
                             let child = vm
                                 .active_processes
                                 .get_mut(process_id)
@@ -3956,6 +4192,7 @@ where
                                 &self.bridge,
                                 vm_id,
                                 &vm.dns,
+                                &socket_paths,
                                 &mut vm.kernel,
                                 child,
                                 &request,
@@ -4159,6 +4396,10 @@ where
                 let vm = self.vms.get_mut(vm_id).expect("VM should exist");
                 let resource_limits = vm.kernel.resource_limits().clone();
                 let network_counts = vm_network_resource_counts(vm);
+                let socket_paths = JavascriptSocketPathContext {
+                    sandbox_root: vm.cwd.clone(),
+                    mounts: vm.configuration.mounts.clone(),
+                };
                 let process = vm
                     .active_processes
                     .get_mut(process_id)
@@ -4167,6 +4408,7 @@ where
                     &self.bridge,
                     vm_id,
                     &vm.dns,
+                    &socket_paths,
                     &mut vm.kernel,
                     process,
                     &request,
@@ -5284,6 +5526,22 @@ fn find_socket_state_entry(
     let vm = vm.ok_or_else(|| SidecarError::InvalidState(String::from("unknown sidecar VM")))?;
 
     for (process_id, process) in &vm.active_processes {
+        if let Some(path) = request.path.as_deref() {
+            if matches!(kind, SocketQueryKind::TcpListener) {
+                for listener in process.unix_listeners.values() {
+                    if listener.path() != path {
+                        continue;
+                    }
+                    return Ok(Some(SocketStateEntry {
+                        process_id: process_id.to_owned(),
+                        host: None,
+                        port: None,
+                        path: Some(path.to_owned()),
+                    }));
+                }
+            }
+        }
+
         if request.path.is_none() {
             match kind {
                 SocketQueryKind::TcpListener => {
@@ -5407,6 +5665,11 @@ fn parse_socket_inode(target: &Path) -> Option<u64> {
     let value = target.to_string_lossy();
     let trimmed = value.strip_prefix("socket:[")?.strip_suffix(']')?;
     trimmed.parse().ok()
+}
+
+fn unix_socket_path(addr: &UnixSocketAddr) -> Option<String> {
+    addr.as_pathname()
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 fn find_unix_socket_for_pid(
@@ -5806,6 +6069,76 @@ fn host_mount_path_for_guest_path(vm: &VmState, guest_path: &str) -> Option<Path
     None
 }
 
+fn host_mount_path_for_guest_path_from_mounts(
+    mounts: &[crate::protocol::MountDescriptor],
+    guest_path: &str,
+) -> Option<PathBuf> {
+    let normalized = normalize_path(guest_path);
+
+    let mut host_mounts = mounts
+        .iter()
+        .filter_map(|mount| {
+            (mount.plugin.id == "host_dir")
+                .then(|| {
+                    mount
+                        .plugin
+                        .config
+                        .get("hostPath")
+                        .and_then(Value::as_str)
+                        .map(|host_path| (mount.guest_path.as_str(), host_path))
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    host_mounts.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+
+    for (guest_root, host_root) in host_mounts {
+        if normalized != guest_root && !normalized.starts_with(&format!("{guest_root}/")) {
+            continue;
+        }
+
+        let suffix = normalized
+            .strip_prefix(guest_root)
+            .unwrap_or_default()
+            .trim_start_matches('/');
+        let mut path = PathBuf::from(host_root);
+        if !suffix.is_empty() {
+            path.push(suffix);
+        }
+        return Some(path);
+    }
+
+    None
+}
+
+fn resolve_guest_socket_host_path(
+    context: &JavascriptSocketPathContext,
+    guest_path: &str,
+) -> PathBuf {
+    if let Some(path) = host_mount_path_for_guest_path_from_mounts(&context.mounts, guest_path) {
+        return path;
+    }
+
+    let normalized = normalize_path(guest_path);
+    let mut host_path = context.sandbox_root.clone();
+    let suffix = normalized.trim_start_matches('/');
+    if !suffix.is_empty() {
+        host_path.push(suffix);
+    }
+    host_path
+}
+
+fn ensure_kernel_parent_directories(
+    kernel: &mut SidecarKernel,
+    path: &str,
+) -> Result<(), SidecarError> {
+    let parent = dirname(path);
+    if parent != "/" && !kernel.exists(&parent).map_err(kernel_error)? {
+        kernel.mkdir(&parent, true).map_err(kernel_error)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct JavascriptChildProcessSpawnOptions {
     #[serde(default)]
@@ -5842,7 +6175,10 @@ struct ResolvedChildProcessExecution {
 struct JavascriptNetConnectRequest {
     #[serde(default)]
     host: Option<String>,
-    port: u16,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5850,7 +6186,9 @@ struct JavascriptNetListenRequest {
     #[serde(default)]
     host: Option<String>,
     #[serde(default)]
-    port: u16,
+    port: Option<u16>,
+    #[serde(default)]
+    path: Option<String>,
     #[serde(default)]
     backlog: Option<u32>,
 }
@@ -6101,6 +6439,7 @@ fn sidecar_net_error(error: std::io::Error) -> SidecarError {
 fn spawn_tcp_socket_reader(
     stream: TcpStream,
     sender: Sender<JavascriptTcpSocketEvent>,
+    saw_local_shutdown: Arc<AtomicBool>,
     saw_remote_end: Arc<AtomicBool>,
     close_notified: Arc<AtomicBool>,
 ) {
@@ -6112,6 +6451,59 @@ fn spawn_tcp_socket_reader(
                 Ok(0) => {
                     saw_remote_end.store(true, Ordering::SeqCst);
                     let _ = sender.send(JavascriptTcpSocketEvent::End);
+                    if saw_local_shutdown.load(Ordering::SeqCst)
+                        && !close_notified.swap(true, Ordering::SeqCst)
+                    {
+                        let _ = sender.send(JavascriptTcpSocketEvent::Close { had_error: false });
+                    }
+                    break;
+                }
+                Ok(bytes_read) => {
+                    if sender
+                        .send(JavascriptTcpSocketEvent::Data(
+                            buffer[..bytes_read].to_vec(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let code = io_error_code(&error);
+                    let _ = sender.send(JavascriptTcpSocketEvent::Error {
+                        code,
+                        message: error.to_string(),
+                    });
+                    if !close_notified.swap(true, Ordering::SeqCst) {
+                        let _ = sender.send(JavascriptTcpSocketEvent::Close { had_error: true });
+                    }
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn spawn_unix_socket_reader(
+    stream: UnixStream,
+    sender: Sender<JavascriptTcpSocketEvent>,
+    saw_local_shutdown: Arc<AtomicBool>,
+    saw_remote_end: Arc<AtomicBool>,
+    close_notified: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        let mut stream = stream;
+        let mut buffer = vec![0_u8; 64 * 1024];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => {
+                    saw_remote_end.store(true, Ordering::SeqCst);
+                    let _ = sender.send(JavascriptTcpSocketEvent::End);
+                    if saw_local_shutdown.load(Ordering::SeqCst)
+                        && !close_notified.swap(true, Ordering::SeqCst)
+                    {
+                        let _ = sender.send(JavascriptTcpSocketEvent::Close { had_error: false });
+                    }
                     break;
                 }
                 Ok(bytes_read) => {
@@ -6151,6 +6543,20 @@ fn terminate_child_process_tree(kernel: &mut SidecarKernel, process: &mut Active
     let sockets = process.tcp_sockets.keys().cloned().collect::<Vec<_>>();
     for socket_id in sockets {
         if let Some(socket) = process.tcp_sockets.remove(&socket_id) {
+            let _ = socket.close();
+        }
+    }
+
+    let unix_listener_ids = process.unix_listeners.keys().cloned().collect::<Vec<_>>();
+    for listener_id in unix_listener_ids {
+        if let Some(listener) = process.unix_listeners.remove(&listener_id) {
+            let _ = listener.close();
+        }
+    }
+
+    let unix_sockets = process.unix_sockets.keys().cloned().collect::<Vec<_>>();
+    for socket_id in unix_sockets {
+        if let Some(socket) = process.unix_sockets.remove(&socket_id) {
             let _ = socket.close();
         }
     }
@@ -6326,6 +6732,7 @@ fn service_javascript_sync_rpc<B>(
     bridge: &SharedBridge<B>,
     vm_id: &str,
     dns: &VmDnsConfig,
+    socket_paths: &JavascriptSocketPathContext,
     kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
@@ -6352,6 +6759,8 @@ where
             bridge,
             vm_id,
             dns,
+            socket_paths,
+            kernel,
             process,
             request,
             resource_limits,
@@ -6621,6 +7030,8 @@ fn service_javascript_net_sync_rpc<B>(
     bridge: &SharedBridge<B>,
     vm_id: &str,
     dns: &VmDnsConfig,
+    socket_paths: &JavascriptSocketPathContext,
+    kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
     resource_limits: &ResourceLimits,
@@ -6658,25 +7069,42 @@ where
                         SidecarError::InvalidState(format!("invalid net.connect payload: {error}"))
                     })
                 })?;
-            let socket = ActiveTcpSocket::connect(
-                bridge,
-                vm_id,
-                dns,
-                payload.host.as_deref().unwrap_or("localhost"),
-                payload.port,
-            )?;
-            let socket_id = process.allocate_tcp_socket_id();
-            let local_addr = socket.local_addr;
-            let remote_addr = socket.remote_addr;
-            process.tcp_sockets.insert(socket_id.clone(), socket);
-            Ok(json!({
-                "socketId": socket_id,
-                "localAddress": local_addr.ip().to_string(),
-                "localPort": local_addr.port(),
-                "remoteAddress": remote_addr.ip().to_string(),
-                "remotePort": remote_addr.port(),
-                "remoteFamily": socket_addr_family(&remote_addr),
-            }))
+            if let Some(path) = payload.path.as_deref() {
+                let guest_path = normalize_path(path);
+                let host_path = resolve_guest_socket_host_path(socket_paths, &guest_path);
+                let socket = ActiveUnixSocket::connect(&host_path, &guest_path)?;
+                let socket_id = process.allocate_unix_socket_id();
+                process.unix_sockets.insert(socket_id.clone(), socket);
+                Ok(json!({
+                    "socketId": socket_id,
+                    "remotePath": guest_path,
+                }))
+            } else {
+                let port = payload.port.ok_or_else(|| {
+                    SidecarError::InvalidState(String::from(
+                        "net.connect requires either a path or port",
+                    ))
+                })?;
+                let socket = ActiveTcpSocket::connect(
+                    bridge,
+                    vm_id,
+                    dns,
+                    payload.host.as_deref().unwrap_or("localhost"),
+                    port,
+                )?;
+                let socket_id = process.allocate_tcp_socket_id();
+                let local_addr = socket.local_addr;
+                let remote_addr = socket.remote_addr;
+                process.tcp_sockets.insert(socket_id.clone(), socket);
+                Ok(json!({
+                    "socketId": socket_id,
+                    "localAddress": local_addr.ip().to_string(),
+                    "localPort": local_addr.port(),
+                    "remoteAddress": remote_addr.ip().to_string(),
+                    "remotePort": remote_addr.port(),
+                    "remoteFamily": socket_addr_family(&remote_addr),
+                }))
+            }
         }
         "net.listen" => {
             check_network_resource_limit(
@@ -6699,31 +7127,61 @@ where
                         SidecarError::InvalidState(format!("invalid net.listen payload: {error}"))
                     })
                 })?;
-            let listener = ActiveTcpListener::bind(
-                payload.host.as_deref().unwrap_or("0.0.0.0"),
-                payload.port,
-                payload.backlog,
-            )?;
-            let listener_id = process.allocate_tcp_listener_id();
-            let local_addr = listener.local_addr();
-            process.tcp_listeners.insert(listener_id.clone(), listener);
-            Ok(json!({
-                "serverId": listener_id,
-                "localAddress": local_addr.ip().to_string(),
-                "localPort": local_addr.port(),
-                "family": socket_addr_family(&local_addr),
-            }))
+            if let Some(path) = payload.path.as_deref() {
+                let guest_path = normalize_path(path);
+                if kernel.exists(&guest_path).map_err(kernel_error)? {
+                    return Err(sidecar_net_error(std::io::Error::from_raw_os_error(
+                        libc::EADDRINUSE,
+                    )));
+                }
+
+                let host_path = resolve_guest_socket_host_path(socket_paths, &guest_path);
+                let on_host_mount =
+                    host_mount_path_for_guest_path_from_mounts(&socket_paths.mounts, &guest_path)
+                        .is_some();
+                let listener = ActiveUnixListener::bind(&host_path, &guest_path, payload.backlog)?;
+                if !on_host_mount {
+                    ensure_kernel_parent_directories(kernel, &guest_path)?;
+                    kernel
+                        .write_file(&guest_path, Vec::new())
+                        .map_err(kernel_error)?;
+                }
+                let listener_id = process.allocate_unix_listener_id();
+                process.unix_listeners.insert(listener_id.clone(), listener);
+                Ok(json!({
+                    "serverId": listener_id,
+                    "path": guest_path,
+                }))
+            } else {
+                let listener = ActiveTcpListener::bind(
+                    payload.host.as_deref().unwrap_or("0.0.0.0"),
+                    payload.port.unwrap_or(0),
+                    payload.backlog,
+                )?;
+                let listener_id = process.allocate_tcp_listener_id();
+                let local_addr = listener.local_addr();
+                process.tcp_listeners.insert(listener_id.clone(), listener);
+                Ok(json!({
+                    "serverId": listener_id,
+                    "localAddress": local_addr.ip().to_string(),
+                    "localPort": local_addr.port(),
+                    "family": socket_addr_family(&local_addr),
+                }))
+            }
         }
         "net.poll" => {
             let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "net.poll socket id")?;
             let wait_ms =
                 javascript_sync_rpc_arg_u64_optional(&request.args, 1, "net.poll wait ms")?
                     .unwrap_or_default();
-            let event = {
-                let socket = process.tcp_sockets.get_mut(socket_id).ok_or_else(|| {
-                    SidecarError::InvalidState(format!("unknown TCP socket {socket_id}"))
-                })?;
+            let event = if let Some(socket) = process.tcp_sockets.get_mut(socket_id) {
                 socket.poll(Duration::from_millis(wait_ms))?
+            } else if let Some(socket) = process.unix_sockets.get_mut(socket_id) {
+                socket.poll(Duration::from_millis(wait_ms))?
+            } else {
+                return Err(SidecarError::InvalidState(format!(
+                    "unknown net socket {socket_id}"
+                )));
             };
 
             match event {
@@ -6746,6 +7204,12 @@ where
                                 listener.release_connection(socket_id);
                             }
                         }
+                    } else if let Some(socket) = process.unix_sockets.remove(socket_id) {
+                        if let Some(listener_id) = socket.listener_id.as_deref() {
+                            if let Some(listener) = process.unix_listeners.get_mut(listener_id) {
+                                listener.release_connection(socket_id);
+                            }
+                        }
                     }
                     Ok(json!({
                         "type": "close",
@@ -6761,15 +7225,73 @@ where
             let wait_ms =
                 javascript_sync_rpc_arg_u64_optional(&request.args, 1, "net.server_poll wait ms")?
                     .unwrap_or_default();
+            let tcp_event = if let Some(listener) = process.tcp_listeners.get_mut(listener_id) {
+                Some(listener.poll(Duration::from_millis(wait_ms))?)
+            } else {
+                None
+            };
+
+            if let Some(event) = tcp_event {
+                return match event {
+                    Some(JavascriptTcpListenerEvent::Connection(pending)) => {
+                        if let Err(error) = check_network_resource_limit(
+                            resource_limits.max_sockets,
+                            network_counts.sockets,
+                            1,
+                            "socket",
+                        )
+                        .and_then(|()| {
+                            check_network_resource_limit(
+                                resource_limits.max_connections,
+                                network_counts.connections,
+                                1,
+                                "connection",
+                            )
+                        }) {
+                            let _ = pending.stream.shutdown(Shutdown::Both);
+                            return Ok(json!({
+                                "type": "error",
+                                "code": "EAGAIN",
+                                "message": error.to_string(),
+                            }));
+                        }
+                        let socket = ActiveTcpSocket::from_stream(
+                            pending.stream,
+                            Some(listener_id.to_string()),
+                        )?;
+                        let socket_id = process.allocate_tcp_socket_id();
+                        if let Some(listener) = process.tcp_listeners.get_mut(listener_id) {
+                            listener.register_connection(&socket_id);
+                        }
+                        process.tcp_sockets.insert(socket_id.clone(), socket);
+                        Ok(json!({
+                            "type": "connection",
+                            "socketId": socket_id,
+                            "localAddress": pending.local_addr.ip().to_string(),
+                            "localPort": pending.local_addr.port(),
+                            "remoteAddress": pending.remote_addr.ip().to_string(),
+                            "remotePort": pending.remote_addr.port(),
+                            "remoteFamily": socket_addr_family(&pending.remote_addr),
+                        }))
+                    }
+                    Some(JavascriptTcpListenerEvent::Error { code, message }) => Ok(json!({
+                        "type": "error",
+                        "code": code,
+                        "message": message,
+                    })),
+                    None => Ok(Value::Null),
+                };
+            }
+
             let event = {
-                let listener = process.tcp_listeners.get_mut(listener_id).ok_or_else(|| {
-                    SidecarError::InvalidState(format!("unknown TCP listener {listener_id}"))
+                let listener = process.unix_listeners.get_mut(listener_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("unknown net listener {listener_id}"))
                 })?;
                 listener.poll(Duration::from_millis(wait_ms))?
             };
 
             match event {
-                Some(JavascriptTcpListenerEvent::Connection(pending)) => {
+                Some(JavascriptUnixListenerEvent::Connection(pending)) => {
                     if let Err(error) = check_network_resource_limit(
                         resource_limits.max_sockets,
                         network_counts.sockets,
@@ -6791,26 +7313,25 @@ where
                             "message": error.to_string(),
                         }));
                     }
-                    let socket = ActiveTcpSocket::from_stream(
+                    let socket = ActiveUnixSocket::from_stream(
                         pending.stream,
                         Some(listener_id.to_string()),
+                        pending.local_path.clone(),
+                        pending.remote_path.clone(),
                     )?;
-                    let socket_id = process.allocate_tcp_socket_id();
-                    if let Some(listener) = process.tcp_listeners.get_mut(listener_id) {
+                    let socket_id = process.allocate_unix_socket_id();
+                    if let Some(listener) = process.unix_listeners.get_mut(listener_id) {
                         listener.register_connection(&socket_id);
                     }
-                    process.tcp_sockets.insert(socket_id.clone(), socket);
+                    process.unix_sockets.insert(socket_id.clone(), socket);
                     Ok(json!({
                         "type": "connection",
                         "socketId": socket_id,
-                        "localAddress": pending.local_addr.ip().to_string(),
-                        "localPort": pending.local_addr.port(),
-                        "remoteAddress": pending.remote_addr.ip().to_string(),
-                        "remotePort": pending.remote_addr.port(),
-                        "remoteFamily": socket_addr_family(&pending.remote_addr),
+                        "localPath": pending.local_path,
+                        "remotePath": pending.remote_path,
                     }))
                 }
-                Some(JavascriptTcpListenerEvent::Error { code, message }) => Ok(json!({
+                Some(JavascriptUnixListenerEvent::Error { code, message }) => Ok(json!({
                     "type": "error",
                     "code": code,
                     "message": message,
@@ -6824,49 +7345,76 @@ where
                 0,
                 "net.server_connections listener id",
             )?;
-            let listener = process.tcp_listeners.get(listener_id).ok_or_else(|| {
-                SidecarError::InvalidState(format!("unknown TCP listener {listener_id}"))
-            })?;
-            Ok(json!(listener.active_connection_count()))
+            if let Some(listener) = process.tcp_listeners.get(listener_id) {
+                Ok(json!(listener.active_connection_count()))
+            } else {
+                let listener = process.unix_listeners.get(listener_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("unknown net listener {listener_id}"))
+                })?;
+                Ok(json!(listener.active_connection_count()))
+            }
         }
         "net.write" => {
             let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "net.write socket id")?;
             let chunk = javascript_sync_rpc_bytes_arg(&request.args, 1, "net.write chunk")?;
-            let socket = process.tcp_sockets.get(socket_id).ok_or_else(|| {
-                SidecarError::InvalidState(format!("unknown TCP socket {socket_id}"))
-            })?;
-            socket.write_all(&chunk).map(|written| json!(written))
+            if let Some(socket) = process.tcp_sockets.get(socket_id) {
+                socket.write_all(&chunk).map(|written| json!(written))
+            } else {
+                let socket = process.unix_sockets.get(socket_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("unknown net socket {socket_id}"))
+                })?;
+                socket.write_all(&chunk).map(|written| json!(written))
+            }
         }
         "net.shutdown" => {
             let socket_id =
                 javascript_sync_rpc_arg_str(&request.args, 0, "net.shutdown socket id")?;
-            let socket = process.tcp_sockets.get(socket_id).ok_or_else(|| {
-                SidecarError::InvalidState(format!("unknown TCP socket {socket_id}"))
-            })?;
-            socket.shutdown_write()?;
+            if let Some(socket) = process.tcp_sockets.get(socket_id) {
+                socket.shutdown_write()?;
+            } else {
+                let socket = process.unix_sockets.get(socket_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("unknown net socket {socket_id}"))
+                })?;
+                socket.shutdown_write()?;
+            }
             Ok(Value::Null)
         }
         "net.destroy" => {
             let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "net.destroy socket id")?;
-            let socket = process.tcp_sockets.remove(socket_id).ok_or_else(|| {
-                SidecarError::InvalidState(format!("unknown TCP socket {socket_id}"))
-            })?;
-            if let Some(listener_id) = socket.listener_id.as_deref() {
-                if let Some(listener) = process.tcp_listeners.get_mut(listener_id) {
-                    listener.release_connection(socket_id);
+            if let Some(socket) = process.tcp_sockets.remove(socket_id) {
+                if let Some(listener_id) = socket.listener_id.as_deref() {
+                    if let Some(listener) = process.tcp_listeners.get_mut(listener_id) {
+                        listener.release_connection(socket_id);
+                    }
                 }
+                let _ = socket.close();
+                Ok(Value::Null)
+            } else {
+                let socket = process.unix_sockets.remove(socket_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("unknown net socket {socket_id}"))
+                })?;
+                if let Some(listener_id) = socket.listener_id.as_deref() {
+                    if let Some(listener) = process.unix_listeners.get_mut(listener_id) {
+                        listener.release_connection(socket_id);
+                    }
+                }
+                let _ = socket.close();
+                Ok(Value::Null)
             }
-            let _ = socket.close();
-            Ok(Value::Null)
         }
         "net.server_close" => {
             let listener_id =
                 javascript_sync_rpc_arg_str(&request.args, 0, "net.server_close listener id")?;
-            let listener = process.tcp_listeners.remove(listener_id).ok_or_else(|| {
-                SidecarError::InvalidState(format!("unknown TCP listener {listener_id}"))
-            })?;
-            listener.close()?;
-            Ok(Value::Null)
+            if let Some(listener) = process.tcp_listeners.remove(listener_id) {
+                listener.close()?;
+                Ok(Value::Null)
+            } else {
+                let listener = process.unix_listeners.remove(listener_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("unknown net listener {listener_id}"))
+                })?;
+                listener.close()?;
+                Ok(Value::Null)
+            }
         }
         _ => Err(SidecarError::InvalidState(format!(
             "unsupported JavaScript net sync RPC method {}",
@@ -10818,6 +11366,10 @@ server.listen(0, "127.0.0.1", () => {
         let bridge = sidecar.bridge.clone();
         let dns = sidecar.vms.get(&vm_id).expect("javascript vm").dns.clone();
         let limits = ResourceLimits::default();
+        let socket_paths = JavascriptSocketPathContext {
+            sandbox_root: cwd.clone(),
+            mounts: Vec::new(),
+        };
 
         let listen = {
             let counts = sidecar
@@ -10835,6 +11387,8 @@ server.listen(0, "127.0.0.1", () => {
                 &bridge,
                 &vm_id,
                 &dns,
+                &socket_paths,
+                &mut vm.kernel,
                 process,
                 &JavascriptSyncRpcRequest {
                     id: 1,
@@ -10888,6 +11442,8 @@ server.listen(0, "127.0.0.1", () => {
                 &bridge,
                 &vm_id,
                 &dns,
+                &socket_paths,
+                &mut vm.kernel,
                 process,
                 &JavascriptSyncRpcRequest {
                     id: 2,
@@ -10920,6 +11476,8 @@ server.listen(0, "127.0.0.1", () => {
                 &bridge,
                 &vm_id,
                 &dns,
+                &socket_paths,
+                &mut vm.kernel,
                 process,
                 &JavascriptSyncRpcRequest {
                     id: 3,
@@ -10979,6 +11537,8 @@ server.listen(0, "127.0.0.1", () => {
                 &bridge,
                 &vm_id,
                 &dns,
+                &socket_paths,
+                &mut vm.kernel,
                 process,
                 &JavascriptSyncRpcRequest {
                     id: 4,
@@ -11009,6 +11569,8 @@ server.listen(0, "127.0.0.1", () => {
                 &bridge,
                 &vm_id,
                 &dns,
+                &socket_paths,
+                &mut vm.kernel,
                 process,
                 &JavascriptSyncRpcRequest {
                     id: 5,
@@ -11038,6 +11600,8 @@ server.listen(0, "127.0.0.1", () => {
                 &bridge,
                 &vm_id,
                 &dns,
+                &socket_paths,
+                &mut vm.kernel,
                 process,
                 &JavascriptSyncRpcRequest {
                     id: 6,
@@ -11067,6 +11631,8 @@ server.listen(0, "127.0.0.1", () => {
                 &bridge,
                 &vm_id,
                 &dns,
+                &socket_paths,
+                &mut vm.kernel,
                 process,
                 &JavascriptSyncRpcRequest {
                     id: 7,
@@ -11087,6 +11653,585 @@ server.listen(0, "127.0.0.1", () => {
                 DisposeReason::Requested,
             )
             .expect("dispose backlog vm");
+    }
+
+    #[test]
+    fn javascript_net_rpc_listens_and_connects_over_unix_domain_sockets() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-net-unix-cwd");
+        write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-unix"),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
+            );
+        }
+
+        let bridge = sidecar.bridge.clone();
+        let dns = sidecar.vms.get(&vm_id).expect("javascript vm").dns.clone();
+        let limits = ResourceLimits::default();
+        let socket_paths = JavascriptSocketPathContext {
+            sandbox_root: cwd.clone(),
+            mounts: Vec::new(),
+        };
+        let socket_path = "/tmp/agent-os.sock";
+        let host_socket_path = cwd.join("tmp/agent-os.sock");
+
+        let listen = {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "path": socket_path,
+                        "backlog": 1,
+                    })],
+                },
+                &limits,
+                counts,
+            )
+            .expect("listen on unix socket")
+        };
+        let server_id = listen["serverId"].as_str().expect("server id").to_string();
+        assert_eq!(listen["path"], Value::String(String::from(socket_path)));
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            assert!(
+                vm.kernel
+                    .exists(socket_path)
+                    .expect("kernel socket placeholder exists"),
+                "kernel did not expose unix socket path"
+            );
+        }
+        assert!(host_socket_path.exists(), "host unix socket path missing");
+
+        let listener_lookup = sidecar
+            .dispatch(request(
+                2,
+                OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                RequestPayload::FindListener(FindListenerRequest {
+                    host: None,
+                    port: None,
+                    path: Some(String::from(socket_path)),
+                }),
+            ))
+            .expect("query unix listener");
+        match listener_lookup.response.payload {
+            ResponsePayload::ListenerSnapshot(snapshot) => {
+                let listener = snapshot.listener.expect("listener snapshot");
+                assert_eq!(listener.process_id, "proc-js-unix");
+                assert_eq!(listener.path.as_deref(), Some(socket_path));
+            }
+            other => panic!("unexpected listener response payload: {other:?}"),
+        }
+
+        let connect = {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("net.connect"),
+                    args: vec![json!({
+                        "path": socket_path,
+                    })],
+                },
+                &limits,
+                counts,
+            )
+            .expect("connect to unix listener")
+        };
+        let client_socket_id = connect["socketId"]
+            .as_str()
+            .expect("client socket id")
+            .to_string();
+        assert_eq!(
+            connect["remotePath"],
+            Value::String(String::from(socket_path))
+        );
+
+        let accepted = {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 4,
+                    method: String::from("net.server_poll"),
+                    args: vec![json!(server_id), json!(250)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("accept unix socket connection")
+        };
+        let server_socket_id = accepted["socketId"]
+            .as_str()
+            .expect("server socket id")
+            .to_string();
+        assert_eq!(
+            accepted["localPath"],
+            Value::String(String::from(socket_path))
+        );
+
+        {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            let connections = service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 5,
+                    method: String::from("net.server_connections"),
+                    args: vec![json!(server_id)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("query unix server connections");
+            assert_eq!(connections, json!(1));
+        }
+
+        {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 6,
+                    method: String::from("net.write"),
+                    args: vec![
+                        json!(client_socket_id),
+                        json!({
+                            "__agentOsType": "bytes",
+                            "base64": "cGluZw==",
+                        }),
+                    ],
+                },
+                &limits,
+                counts,
+            )
+            .expect("write unix client payload");
+        }
+
+        {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 7,
+                    method: String::from("net.shutdown"),
+                    args: vec![json!(client_socket_id)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("shutdown unix client write half");
+        }
+
+        let server_data = {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 8,
+                    method: String::from("net.poll"),
+                    args: vec![json!(server_socket_id), json!(250)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("poll unix server socket data")
+        };
+        assert_eq!(
+            server_data["data"]["base64"],
+            Value::String(String::from("cGluZw=="))
+        );
+
+        {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            let server_end = service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 9,
+                    method: String::from("net.poll"),
+                    args: vec![json!(server_socket_id), json!(250)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("poll unix server socket end");
+            assert_eq!(server_end["type"], Value::String(String::from("end")));
+        }
+
+        {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 10,
+                    method: String::from("net.write"),
+                    args: vec![
+                        json!(server_socket_id),
+                        json!({
+                            "__agentOsType": "bytes",
+                            "base64": "cG9uZw==",
+                        }),
+                    ],
+                },
+                &limits,
+                counts,
+            )
+            .expect("write unix server payload");
+        }
+
+        {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 11,
+                    method: String::from("net.shutdown"),
+                    args: vec![json!(server_socket_id)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("shutdown unix server write half");
+        }
+
+        let client_data = {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 12,
+                    method: String::from("net.poll"),
+                    args: vec![json!(client_socket_id), json!(250)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("poll unix client socket data")
+        };
+        assert_eq!(
+            client_data["data"]["base64"],
+            Value::String(String::from("cG9uZw=="))
+        );
+
+        {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            let client_end = service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 13,
+                    method: String::from("net.poll"),
+                    args: vec![json!(client_socket_id), json!(250)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("poll unix client socket end");
+            assert_eq!(client_end["type"], Value::String(String::from("end")));
+        }
+
+        for (id, request_id) in [(&client_socket_id, 14_u64), (&server_socket_id, 15_u64)] {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: request_id,
+                    method: String::from("net.destroy"),
+                    args: vec![json!(id)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("destroy unix socket");
+        }
+
+        {
+            let counts = sidecar
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                .expect("unix process")
+                .network_resource_counts();
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-unix")
+                .expect("unix process");
+            service_javascript_net_sync_rpc(
+                &bridge,
+                &vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &JavascriptSyncRpcRequest {
+                    id: 16,
+                    method: String::from("net.server_close"),
+                    args: vec![json!(server_id)],
+                },
+                &limits,
+                counts,
+            )
+            .expect("close unix listener");
+        }
+
+        sidecar
+            .dispose_vm_internal(
+                &connection_id,
+                &session_id,
+                &vm_id,
+                DisposeReason::Requested,
+            )
+            .expect("dispose unix vm");
     }
 
     #[test]

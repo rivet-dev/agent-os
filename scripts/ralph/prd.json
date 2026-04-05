@@ -733,7 +733,7 @@
         "Typecheck passes"
       ],
       "priority": 46,
-      "passes": false,
+      "passes": true,
       "notes": "Currently throws unsupported error. Many Node.js apps and frameworks assume Unix domain socket support."
     },
     {

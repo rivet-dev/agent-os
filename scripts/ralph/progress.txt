@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Sidecar TCP/Unix socket readers should treat peer EOF as a half-close, not a full close: emit `End` immediately, but only emit `Close` after the local write half has also been shut down, or guest `socket.end(...)` flows can turn into resets.
 - Native sidecar security telemetry should use `bridge.emit_structured_event(...)` with a `timestamp` field and stable keys like `policy`, `path`, `reason`, `source_pid`, and `target_pid`; this makes sidecar tests assertable without scraping free-form logs.
 - Sidecar VM-scoped DNS policy is driven from `CreateVmRequest.metadata`: use `network.dns.servers` for comma-separated upstream resolvers and `network.dns.override.<hostname>` for fixed answers, and emit `network.dns.resolved` / `network.dns.resolve_failed` structured events so resolution is observable in tests.
 - Execution host-runner scripts that `NodeImportCache` materializes should live in `crates/execution/assets/runners/` and be loaded with `include_str!`; for temp-cache cleanup regressions, construct the cache with `NodeImportCache::new_in(...)` so the one-time sweep is scoped to the test root.
@@ -390,7 +391,7 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Ported the non-fd guest `fs` sync surface onto the SharedArrayBuffer sync-RPC bridge in `crates/execution/src/node_import_cache.rs`, covering `readFileSync`, `writeFileSync`, `statSync`, `lstatSync`, `readdirSync`, `mkdirSync`, `existsSync`, `readlinkSync`, `symlinkSync`, `linkSync`, `renameSync`, `unlinkSync`, `rmdirSync`, plus sync aliases for `access`, `copyFile`, `chmod`, `chown`, and `utimes`.
 - Added matching `fs.*Sync` dispatch arms in `crates/sidecar/src/service.rs` so those guest calls execute against the kernel VFS, and expanded the focused execution/sidecar regressions to verify both request surfacing and end-to-end kernel behavior.
 - Files changed
-- `AGENTS.md`
+- `CLAUDE.md`
 - `crates/execution/src/node_import_cache.rs`
 - `crates/execution/tests/javascript.rs`
 - `crates/sidecar/src/service.rs`
@@ -863,4 +864,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Node `net` server behavior spans both the guest runner RPC shims and the sidecar’s TCP socket lifecycle bookkeeping, so listener features need paired changes and paired regressions in both layers.
   - Gotchas encountered: Guest stream teardown can easily turn a graceful FIN into a reset if the runner keeps a stale socket id after the sidecar reports close, so normal close/finalize paths should avoid issuing an extra `net.destroy`.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test javascript javascript_execution_routes_net_create_server_through_sync_rpc -- --test-threads=1`, and `cargo test -p agent-os-sidecar javascript_net_rpc_reports_connection_counts_and_enforces_backlog -- --test-threads=1` pass after this change.
+---
+## 2026-04-05 06:08:50 PDT - US-046
+- What was implemented
+- Added guest `node:net` IPC support in `crates/execution/src/node_import_cache.rs` so `net.connect({ path })` and `net.createServer().listen({ path })` now route through the sync RPC bridge, preserve guest-resolved socket paths, and expose string `address()` results for Unix sockets.
+- Extended the native sidecar in `crates/sidecar/src/service.rs` with Unix listener/socket tracking, guest-path-to-host-path resolution, active listener lookup by socket path, and kernel-visible placeholder files for non-mounted Unix socket paths.
+- Added focused regressions for the guest runner IPC RPC surface and a direct sidecar Unix-socket round-trip that verifies connect/listen behavior plus socket-file visibility in the kernel VFS.
+- Files changed
+- `AGENTS.md`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Guest Node `net` Unix sockets need the same two-layer treatment as TCP: update both the generated runner RPC shims and the sidecar’s active socket bookkeeping, then cover both layers with regressions.
+  - Gotchas encountered: Unix socket paths only exist on the host when they resolve onto a host-backed path or the sidecar mirrors them under the VM sandbox root, so non-mounted IPC listeners also need a kernel VFS placeholder for guest `fs` visibility.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test javascript javascript_execution_routes_net_ -- --test-threads=1`, `cargo test -p agent-os-sidecar service::tests::javascript_net_rpc_listens_and_connects_over_unix_domain_sockets -- --exact --test-threads=1`, and `cargo check -p agent-os-execution -p agent-os-sidecar` all pass after this change.
 ---
