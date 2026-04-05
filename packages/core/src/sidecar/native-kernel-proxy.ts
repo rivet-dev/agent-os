@@ -45,18 +45,21 @@ const EXTRA_FS_WRITE_PATHS_ENV = "AGENT_OS_EXTRA_FS_WRITE_PATHS";
 const ALLOWED_NODE_BUILTINS_ENV = "AGENT_OS_ALLOWED_NODE_BUILTINS";
 const LOOPBACK_EXEMPT_PORTS_ENV = "AGENT_OS_LOOPBACK_EXEMPT_PORTS";
 const DEFAULT_ALLOWED_NODE_BUILTINS = [
+	"assert",
+	"buffer",
+	"console",
 	"child_process",
-	"dgram",
-	"dns",
-	"http",
-	"http2",
-	"https",
-	"inspector",
-	"net",
-	"tls",
-	"v8",
-	"vm",
-	"worker_threads",
+	"crypto",
+	"events",
+	"fs",
+	"path",
+	"querystring",
+	"stream",
+	"string_decoder",
+	"timers",
+	"url",
+	"util",
+	"zlib",
 ] as const;
 const PREFERRED_SIGNAL_NAMES = [
 	"SIGHUP",

@@ -84,14 +84,19 @@ const FS_PROMISES_ASSET_SPECIFIER = `${BUILTIN_PREFIX}fs-promises`;
 const CHILD_PROCESS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}child-process`;
 const DENIED_BUILTINS = new Set([
   'child_process',
+  'cluster',
   'dgram',
+  'diagnostics_channel',
   'dns',
   'http',
   'http2',
   'https',
   'inspector',
+  'module',
   'net',
+  'os',
   'tls',
+  'trace_events',
   'v8',
   'vm',
   'worker_threads',
@@ -1349,14 +1354,19 @@ const ALLOWED_BUILTINS = new Set(parseJsonArray(process.env.AGENT_OS_ALLOWED_NOD
 const LOOPBACK_EXEMPT_PORTS = new Set(parseJsonArray(process.env.AGENT_OS_LOOPBACK_EXEMPT_PORTS));
 const DENIED_BUILTINS = new Set([
   'child_process',
+  'cluster',
   'dgram',
+  'diagnostics_channel',
   'dns',
   'http',
   'http2',
   'https',
   'inspector',
+  'module',
   'net',
+  'os',
   'tls',
+  'trace_events',
   'v8',
   'vm',
   'worker_threads',
@@ -2447,14 +2457,19 @@ const SUPPORTED_PRELOAD_PACKAGES = ['numpy', 'pandas'];
 const SUPPORTED_PRELOAD_PACKAGE_SET = new Set(SUPPORTED_PRELOAD_PACKAGES);
 const DENIED_BUILTINS = new Set([
   'child_process',
+  'cluster',
   'dgram',
+  'diagnostics_channel',
   'dns',
   'http',
   'http2',
   'https',
   'inspector',
+  'module',
   'net',
+  'os',
   'tls',
+  'trace_events',
   'v8',
   'vm',
   'worker_threads',
@@ -3339,8 +3354,16 @@ const DENIED_BUILTIN_ASSETS: &[DeniedBuiltinAsset] = &[
         module_specifier: "node:child_process",
     },
     DeniedBuiltinAsset {
+        name: "cluster",
+        module_specifier: "node:cluster",
+    },
+    DeniedBuiltinAsset {
         name: "dgram",
         module_specifier: "node:dgram",
+    },
+    DeniedBuiltinAsset {
+        name: "diagnostics_channel",
+        module_specifier: "node:diagnostics_channel",
     },
     DeniedBuiltinAsset {
         name: "dns",
@@ -3363,12 +3386,24 @@ const DENIED_BUILTIN_ASSETS: &[DeniedBuiltinAsset] = &[
         module_specifier: "node:inspector",
     },
     DeniedBuiltinAsset {
+        name: "module",
+        module_specifier: "node:module",
+    },
+    DeniedBuiltinAsset {
         name: "net",
         module_specifier: "node:net",
     },
     DeniedBuiltinAsset {
+        name: "os",
+        module_specifier: "node:os",
+    },
+    DeniedBuiltinAsset {
         name: "tls",
         module_specifier: "node:tls",
+    },
+    DeniedBuiltinAsset {
+        name: "trace_events",
+        module_specifier: "node:trace_events",
     },
     DeniedBuiltinAsset {
         name: "v8",
@@ -4377,6 +4412,7 @@ fn write_file_if_changed(path: &Path, contents: &str) -> Result<(), io::Error> {
 mod tests {
     use super::NodeImportCache;
     use crate::node_process::node_binary;
+    use std::collections::BTreeSet;
     use std::fs;
     use std::io::Write;
     use std::path::Path;
@@ -4886,5 +4922,59 @@ export async function loadPyodide(options) {
                 "expected bundled Pyodide asset {file_name} to be materialized"
             );
         }
+    }
+
+    #[test]
+    fn ensure_materialized_writes_denied_builtin_assets_for_hardened_modules() {
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let denied_root = import_cache.asset_root().join("denied");
+        let actual = fs::read_dir(&denied_root)
+            .expect("read denied builtin assets")
+            .map(|entry| {
+                entry
+                    .expect("denied builtin asset entry")
+                    .path()
+                    .file_stem()
+                    .expect("denied builtin asset file stem")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<BTreeSet<_>>();
+        let expected = BTreeSet::from([
+            String::from("child_process"),
+            String::from("cluster"),
+            String::from("dgram"),
+            String::from("diagnostics_channel"),
+            String::from("dns"),
+            String::from("http"),
+            String::from("http2"),
+            String::from("https"),
+            String::from("inspector"),
+            String::from("module"),
+            String::from("net"),
+            String::from("os"),
+            String::from("tls"),
+            String::from("trace_events"),
+            String::from("v8"),
+            String::from("vm"),
+            String::from("worker_threads"),
+        ]);
+
+        assert_eq!(actual, expected);
+
+        let os_asset =
+            fs::read_to_string(denied_root.join("os.mjs")).expect("read os denied asset");
+        let module_asset =
+            fs::read_to_string(denied_root.join("module.mjs")).expect("read module denied asset");
+        let trace_events_asset = fs::read_to_string(denied_root.join("trace_events.mjs"))
+            .expect("read trace_events denied asset");
+
+        assert!(os_asset.contains("node:os is not available"));
+        assert!(module_asset.contains("node:module is not available"));
+        assert!(trace_events_asset.contains("ERR_ACCESS_DENIED"));
     }
 }

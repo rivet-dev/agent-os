@@ -1,0 +1,21 @@
+# Ralph Progress Log
+## Codebase Patterns
+- Node builtin hardening is split between `packages/core/src/sidecar/native-kernel-proxy.ts` and four generated surfaces in `crates/execution/src/node_import_cache.rs` (loader, Node runner, Python runner, denied asset materialization); update all of them together when changing builtin policy.
+
+Started: Sat Apr  4 07:06:17 PM PDT 2026
+---
+## 2026-04-04 19:11:19 PDT - US-001
+- What was implemented
+- Hardened the native sidecar default Node builtin allowlist to only kernel-backed/polyfilled modules.
+- Expanded the Rust import-cache deny policy to block `os`, `cluster`, `diagnostics_channel`, `module`, and `trace_events` everywhere the guest runtime hardens builtin access.
+- Added a regression test that verifies all denied builtin asset shims are materialized and still throw `ERR_ACCESS_DENIED`.
+- Files changed
+- `packages/core/src/sidecar/native-kernel-proxy.ts`
+- `crates/execution/src/node_import_cache.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: The sidecar’s default builtin policy is injected through `AGENT_OS_ALLOWED_NODE_BUILTINS`, so JS-side allowlist changes must stay aligned with Rust-side deny shims.
+- Gotchas encountered: Repo-wide `pnpm exec tsc -p packages/core/tsconfig.json --noEmit` already fails in unrelated files (`packages/core/src/agent-os.ts`, `packages/core/src/host-tools-server.ts`, `packages/core/src/sidecar/client.ts`), and `pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts` currently fails because `agent-os-sidecar` does not compile due to missing `DiagnosticsRequest` protocol imports.
+- Useful context: `cargo test -p agent-os-execution node_import_cache::tests` is the focused verification target for `crates/execution/src/node_import_cache.rs` hardening changes.
+---
