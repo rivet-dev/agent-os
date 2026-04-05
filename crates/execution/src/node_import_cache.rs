@@ -84,6 +84,7 @@ const POLYFILL_PREFIX = '__AGENT_OS_POLYFILL_SPECIFIER_PREFIX__';
 const FS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}fs`;
 const FS_PROMISES_ASSET_SPECIFIER = `${BUILTIN_PREFIX}fs-promises`;
 const CHILD_PROCESS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}child-process`;
+const OS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}os`;
 const DENIED_BUILTINS = new Set([
   'child_process',
   'cluster',
@@ -96,7 +97,6 @@ const DENIED_BUILTINS = new Set([
   'inspector',
   'module',
   'net',
-  'os',
   'tls',
   'trace_events',
   'v8',
@@ -537,6 +537,21 @@ function rewriteBuiltinImports(source, filePath) {
     }
   }
 
+  if (ALLOWED_BUILTINS.has('os')) {
+    for (const specifier of ['node:os', 'os']) {
+      rewritten = replaceBuiltinImportSpecifier(
+        rewritten,
+        specifier,
+        OS_ASSET_SPECIFIER,
+      );
+      rewritten = replaceBuiltinDynamicImportSpecifier(
+        rewritten,
+        specifier,
+        OS_ASSET_SPECIFIER,
+      );
+    }
+  }
+
   return rewritten;
 }
 
@@ -613,6 +628,10 @@ function resolveBuiltinAsset(specifier, context) {
     case 'child_process':
       return ALLOWED_BUILTINS.has('child_process')
         ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'child-process.mjs'))
+        : null;
+    case 'os':
+      return ALLOWED_BUILTINS.has('os')
+        ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'os.mjs'))
         : null;
     default:
       return null;
@@ -1558,7 +1577,6 @@ const DENIED_BUILTINS = new Set([
   'inspector',
   'module',
   'net',
-  'os',
   'tls',
   'trace_events',
   'v8',
@@ -1582,10 +1600,11 @@ if (!Module || typeof Module.createRequire !== 'function') {
   throw new Error('node:module builtin access is required for the Agent OS guest runtime');
 }
 const hostRequire = Module.createRequire(import.meta.url);
+const hostOs = hostRequire('node:os');
 const NODE_SYNC_RPC_ENABLE = HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_ENABLE === '1';
 const hostWorkerThreads = NODE_SYNC_RPC_ENABLE ? hostRequire('node:worker_threads') : null;
 const SIGNAL_EVENTS = new Set(
-  Object.keys(hostRequire('node:os').constants?.signals ?? {}).filter((name) =>
+  Object.keys(hostOs.constants?.signals ?? {}).filter((name) =>
     name.startsWith('SIG'),
   ),
 );
@@ -1596,6 +1615,20 @@ const DEFAULT_VIRTUAL_PID = 1;
 const DEFAULT_VIRTUAL_PPID = 0;
 const DEFAULT_VIRTUAL_UID = 0;
 const DEFAULT_VIRTUAL_GID = 0;
+const DEFAULT_VIRTUAL_OS_HOSTNAME = 'agent-os';
+const DEFAULT_VIRTUAL_OS_TYPE = 'Linux';
+const DEFAULT_VIRTUAL_OS_PLATFORM = 'linux';
+const DEFAULT_VIRTUAL_OS_RELEASE = '6.8.0-agent-os';
+const DEFAULT_VIRTUAL_OS_VERSION = '#1 SMP PREEMPT_DYNAMIC Agent OS';
+const DEFAULT_VIRTUAL_OS_ARCH = 'x64';
+const DEFAULT_VIRTUAL_OS_MACHINE = 'x86_64';
+const DEFAULT_VIRTUAL_OS_CPU_MODEL = 'Agent OS Virtual CPU';
+const DEFAULT_VIRTUAL_OS_CPU_COUNT = 1;
+const DEFAULT_VIRTUAL_OS_TOTALMEM = 1024 * 1024 * 1024;
+const DEFAULT_VIRTUAL_OS_FREEMEM = 768 * 1024 * 1024;
+const DEFAULT_VIRTUAL_OS_USER = 'user';
+const DEFAULT_VIRTUAL_OS_SHELL = '/bin/sh';
+const DEFAULT_VIRTUAL_OS_TMPDIR = '/tmp';
 const NODE_SYNC_RPC_REQUEST_FD = parseOptionalFd(HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_REQUEST_FD);
 const NODE_SYNC_RPC_RESPONSE_FD = parseOptionalFd(HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_RESPONSE_FD);
 const NODE_SYNC_RPC_DATA_BYTES = parsePositiveInt(
@@ -2631,6 +2664,53 @@ const guestFs = wrapFsModule(hostFs);
 const guestChildProcess = wrapChildProcessModule(hostChildProcess);
 const guestGetUid = () => VIRTUAL_UID;
 const guestGetGid = () => VIRTUAL_GID;
+const VIRTUAL_OS_HOSTNAME = parseVirtualProcessString(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_HOSTNAME ?? HOST_PROCESS_ENV.HOSTNAME,
+  DEFAULT_VIRTUAL_OS_HOSTNAME,
+);
+const VIRTUAL_OS_TYPE = parseVirtualProcessString(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_TYPE,
+  DEFAULT_VIRTUAL_OS_TYPE,
+);
+const VIRTUAL_OS_PLATFORM = parseVirtualProcessString(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_PLATFORM,
+  DEFAULT_VIRTUAL_OS_PLATFORM,
+);
+const VIRTUAL_OS_RELEASE = parseVirtualProcessString(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_RELEASE,
+  DEFAULT_VIRTUAL_OS_RELEASE,
+);
+const VIRTUAL_OS_VERSION = parseVirtualProcessString(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_VERSION,
+  DEFAULT_VIRTUAL_OS_VERSION,
+);
+const VIRTUAL_OS_ARCH = parseVirtualProcessString(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_ARCH,
+  DEFAULT_VIRTUAL_OS_ARCH,
+);
+const VIRTUAL_OS_MACHINE = parseVirtualProcessString(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_MACHINE,
+  DEFAULT_VIRTUAL_OS_MACHINE,
+);
+const VIRTUAL_OS_CPU_MODEL = parseVirtualProcessString(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_CPU_MODEL,
+  DEFAULT_VIRTUAL_OS_CPU_MODEL,
+);
+const VIRTUAL_OS_CPU_COUNT = parsePositiveInt(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_CPU_COUNT,
+  DEFAULT_VIRTUAL_OS_CPU_COUNT,
+);
+const VIRTUAL_OS_TOTALMEM = parsePositiveInt(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_TOTALMEM,
+  DEFAULT_VIRTUAL_OS_TOTALMEM,
+);
+const VIRTUAL_OS_FREEMEM = Math.min(
+  parsePositiveInt(
+    HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_FREEMEM,
+    DEFAULT_VIRTUAL_OS_FREEMEM,
+  ),
+  VIRTUAL_OS_TOTALMEM,
+);
 let guestProcess = process;
 
 function syncBuiltinModuleExports(hostModule, wrappedModule) {
@@ -2663,6 +2743,130 @@ function cloneFsModule(fsModule) {
   }
   return cloned;
 }
+
+function resolveVirtualPath(value, fallback) {
+  if (typeof value !== 'string' || value.length === 0) {
+    return fallback;
+  }
+
+  return translatePathStringToGuest(value);
+}
+
+function cloneVirtualCpuInfo(cpu) {
+  return {
+    ...cpu,
+    times: { ...cpu.times },
+  };
+}
+
+function cloneVirtualNetworkInterfaces(networkInterfaces) {
+  return Object.fromEntries(
+    Object.entries(networkInterfaces).map(([name, entries]) => [
+      name,
+      entries.map((entry) => ({ ...entry })),
+    ]),
+  );
+}
+
+function encodeUserInfoValue(value, encoding) {
+  return encoding === 'buffer' ? Buffer.from(String(value)) : String(value);
+}
+
+function createGuestOsModule(osModule) {
+  const virtualHomeDir = resolveVirtualPath(
+    HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_HOMEDIR ?? HOST_PROCESS_ENV.HOME,
+    INITIAL_GUEST_CWD,
+  );
+  const virtualTmpDir = resolveVirtualPath(
+    HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_TMPDIR ??
+      HOST_PROCESS_ENV.TMPDIR ??
+      HOST_PROCESS_ENV.TEMP ??
+      HOST_PROCESS_ENV.TMP,
+    DEFAULT_VIRTUAL_OS_TMPDIR,
+  );
+  const virtualUserName = parseVirtualProcessString(
+    HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_USER ??
+      HOST_PROCESS_ENV.USER ??
+      HOST_PROCESS_ENV.LOGNAME,
+    DEFAULT_VIRTUAL_OS_USER,
+  );
+  const virtualShell = resolveVirtualPath(
+    HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_SHELL ?? HOST_PROCESS_ENV.SHELL,
+    DEFAULT_VIRTUAL_OS_SHELL,
+  );
+  const virtualCpuInfo = Object.freeze(
+    Array.from({ length: VIRTUAL_OS_CPU_COUNT }, () =>
+      Object.freeze({
+        model: VIRTUAL_OS_CPU_MODEL,
+        speed: 0,
+        times: Object.freeze({
+          user: 0,
+          nice: 0,
+          sys: 0,
+          idle: 0,
+          irq: 0,
+        }),
+      }),
+    ),
+  );
+  const virtualNetworkInterfaces = Object.freeze({
+    lo: Object.freeze([
+      Object.freeze({
+        address: '127.0.0.1',
+        netmask: '255.0.0.0',
+        family: 'IPv4',
+        mac: '00:00:00:00:00:00',
+        internal: true,
+        cidr: '127.0.0.1/8',
+      }),
+      Object.freeze({
+        address: '::1',
+        netmask: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+        family: 'IPv6',
+        mac: '00:00:00:00:00:00',
+        internal: true,
+        cidr: '::1/128',
+        scopeid: 0,
+      }),
+    ]),
+  });
+
+  return Object.assign(Object.create(osModule ?? null), {
+    arch: () => VIRTUAL_OS_ARCH,
+    availableParallelism: () => VIRTUAL_OS_CPU_COUNT,
+    cpus: () => virtualCpuInfo.map((cpu) => cloneVirtualCpuInfo(cpu)),
+    freemem: () => VIRTUAL_OS_FREEMEM,
+    getPriority: () => 0,
+    homedir: () => virtualHomeDir,
+    hostname: () => VIRTUAL_OS_HOSTNAME,
+    loadavg: () => [0, 0, 0],
+    machine: () => VIRTUAL_OS_MACHINE,
+    networkInterfaces: () => cloneVirtualNetworkInterfaces(virtualNetworkInterfaces),
+    platform: () => VIRTUAL_OS_PLATFORM,
+    release: () => VIRTUAL_OS_RELEASE,
+    setPriority: () => {
+      throw accessDenied('os.setPriority');
+    },
+    tmpdir: () => virtualTmpDir,
+    totalmem: () => VIRTUAL_OS_TOTALMEM,
+    type: () => VIRTUAL_OS_TYPE,
+    uptime: () => 0,
+    userInfo: (options = undefined) => {
+      const encoding =
+        options && typeof options === 'object' ? options.encoding : undefined;
+      return {
+        username: encodeUserInfoValue(virtualUserName, encoding),
+        uid: VIRTUAL_UID,
+        gid: VIRTUAL_GID,
+        shell: encodeUserInfoValue(virtualShell, encoding),
+        homedir: encodeUserInfoValue(virtualHomeDir, encoding),
+      };
+    },
+    version: () => VIRTUAL_OS_VERSION,
+  });
+}
+
+const guestOs = createGuestOsModule(hostOs);
 
 function isProcessSignalEventName(eventName) {
   return typeof eventName === 'string' && SIGNAL_EVENTS.has(eventName);
@@ -3187,6 +3391,9 @@ function installGuestHardening() {
       if (normalized === 'fs') {
         return cloneFsModule(guestFs);
       }
+      if (normalized === 'os' && ALLOWED_BUILTINS.has('os')) {
+        return guestOs;
+      }
       if (normalized === 'child_process' && ALLOWED_BUILTINS.has('child_process')) {
         return guestChildProcess;
       }
@@ -3206,6 +3413,9 @@ function installGuestHardening() {
       }
       if (normalized === 'fs') {
         return cloneFsModule(guestFs);
+      }
+      if (normalized === 'os' && ALLOWED_BUILTINS.has('os')) {
+        return guestOs;
       }
       if (normalized === 'child_process' && ALLOWED_BUILTINS.has('child_process')) {
         return guestChildProcess;
@@ -3271,6 +3481,9 @@ if (ALLOWED_BUILTINS.has('child_process')) {
   hardenProperty(globalThis, '__agentOsBuiltinChildProcess', guestChildProcess);
 }
 hardenProperty(globalThis, '__agentOsBuiltinFs', guestFs);
+if (ALLOWED_BUILTINS.has('os')) {
+  hardenProperty(globalThis, '__agentOsBuiltinOs', guestOs);
+}
 if (guestSyncRpc) {
   hardenProperty(globalThis, '__agentOsSyncRpc', guestSyncRpc);
 }
@@ -3660,7 +3873,6 @@ const DENIED_BUILTINS = new Set([
   'inspector',
   'module',
   'net',
-  'os',
   'tls',
   'trace_events',
   'v8',
@@ -4605,6 +4817,11 @@ const BUILTIN_ASSETS: &[BuiltinAsset] = &[
         module_specifier: "node:child_process",
         init_counter_key: "__agentOsBuiltinChildProcessInitCount",
     },
+    BuiltinAsset {
+        name: "os",
+        module_specifier: "node:os",
+        init_counter_key: "__agentOsBuiltinOsInitCount",
+    },
 ];
 
 const DENIED_BUILTIN_ASSETS: &[DeniedBuiltinAsset] = &[
@@ -4651,10 +4868,6 @@ const DENIED_BUILTIN_ASSETS: &[DeniedBuiltinAsset] = &[
     DeniedBuiltinAsset {
         name: "net",
         module_specifier: "node:net",
-    },
-    DeniedBuiltinAsset {
-        name: "os",
-        module_specifier: "node:os",
     },
     DeniedBuiltinAsset {
         name: "tls",
@@ -4891,6 +5104,7 @@ fn render_builtin_asset_source(asset: &BuiltinAsset) -> String {
         "fs" => render_fs_builtin_asset_source(asset.init_counter_key),
         "fs-promises" => render_fs_promises_builtin_asset_source(asset.init_counter_key),
         "child-process" => render_child_process_builtin_asset_source(asset.init_counter_key),
+        "os" => render_os_builtin_asset_source(asset.init_counter_key),
         _ => {
             render_passthrough_builtin_asset_source(asset.module_specifier, asset.init_counter_key)
         }
@@ -5323,6 +5537,47 @@ export const execSync = mod.execSync;\n\
 export const fork = mod.fork;\n\
 export const spawn = mod.spawn;\n\
 export const spawnSync = mod.spawnSync;\n"
+    )
+}
+
+fn render_os_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const ACCESS_DENIED_CODE = \"ERR_ACCESS_DENIED\";\n\
+const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+if (!globalThis.__agentOsBuiltinOs) {{\n\
+  const error = new Error(\"node:os is not available in the Agent OS guest runtime\");\n\
+  error.code = ACCESS_DENIED_CODE;\n\
+  throw error;\n\
+}}\n\n\
+const mod = globalThis.__agentOsBuiltinOs;\n\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export const EOL = mod.EOL;\n\
+export const arch = mod.arch;\n\
+export const availableParallelism = mod.availableParallelism;\n\
+export const constants = mod.constants;\n\
+export const cpus = mod.cpus;\n\
+export const devNull = mod.devNull;\n\
+export const endianness = mod.endianness;\n\
+export const freemem = mod.freemem;\n\
+export const getPriority = mod.getPriority;\n\
+export const homedir = mod.homedir;\n\
+export const hostname = mod.hostname;\n\
+export const loadavg = mod.loadavg;\n\
+export const machine = mod.machine;\n\
+export const networkInterfaces = mod.networkInterfaces;\n\
+export const platform = mod.platform;\n\
+export const release = mod.release;\n\
+export const setPriority = mod.setPriority;\n\
+export const tmpdir = mod.tmpdir;\n\
+export const totalmem = mod.totalmem;\n\
+export const type = mod.type;\n\
+export const uptime = mod.uptime;\n\
+export const userInfo = mod.userInfo;\n\
+export const version = mod.version;\n"
     )
 }
 
@@ -5995,7 +6250,6 @@ export async function loadPyodide(options) {
             String::from("inspector"),
             String::from("module"),
             String::from("net"),
-            String::from("os"),
             String::from("tls"),
             String::from("trace_events"),
             String::from("v8"),
@@ -6005,15 +6259,28 @@ export async function loadPyodide(options) {
 
         assert_eq!(actual, expected);
 
-        let os_asset =
-            fs::read_to_string(denied_root.join("os.mjs")).expect("read os denied asset");
         let module_asset =
             fs::read_to_string(denied_root.join("module.mjs")).expect("read module denied asset");
         let trace_events_asset = fs::read_to_string(denied_root.join("trace_events.mjs"))
             .expect("read trace_events denied asset");
 
-        assert!(os_asset.contains("node:os is not available"));
         assert!(module_asset.contains("node:module is not available"));
         assert!(trace_events_asset.contains("ERR_ACCESS_DENIED"));
+    }
+
+    #[test]
+    fn ensure_materialized_writes_os_builtin_asset() {
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let os_asset =
+            fs::read_to_string(import_cache.asset_root().join("builtins").join("os.mjs"))
+                .expect("read os builtin asset");
+
+        assert!(os_asset.contains("__agentOsBuiltinOs"));
+        assert!(os_asset.contains("export const hostname = mod.hostname"));
+        assert!(os_asset.contains("export const userInfo = mod.userInfo"));
     }
 }

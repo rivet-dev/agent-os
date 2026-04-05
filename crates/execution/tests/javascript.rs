@@ -1630,6 +1630,231 @@ console.log(JSON.stringify(result));
 }
 
 #[test]
+fn javascript_execution_virtualizes_os_module() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import os from "node:os";
+
+function summarize(mod) {
+  return {
+    hostname: mod.hostname(),
+    cpus: mod.cpus(),
+    totalmem: mod.totalmem(),
+    freemem: mod.freemem(),
+    homedir: mod.homedir(),
+    tmpdir: mod.tmpdir(),
+    platform: mod.platform(),
+    type: mod.type(),
+    release: mod.release(),
+    version: typeof mod.version === "function" ? mod.version() : null,
+    arch: typeof mod.arch === "function" ? mod.arch() : null,
+    machine: typeof mod.machine === "function" ? mod.machine() : null,
+    availableParallelism:
+      typeof mod.availableParallelism === "function"
+        ? mod.availableParallelism()
+        : null,
+    loadavg: typeof mod.loadavg === "function" ? mod.loadavg() : null,
+    uptime: typeof mod.uptime === "function" ? mod.uptime() : null,
+    networkInterfaces: mod.networkInterfaces(),
+    userInfo: mod.userInfo(),
+    userInfoBuffer: mod.userInfo({ encoding: "buffer" }),
+    getPriority: typeof mod.getPriority === "function" ? mod.getPriority(0) : null,
+  };
+}
+
+const result = {
+  importOs: summarize(os),
+  requireOs: summarize(require("node:os")),
+  builtinOs: summarize(process.getBuiltinModule("node:os")),
+};
+
+try {
+  os.setPriority(0, 0);
+  result.setPriority = "unexpected";
+} catch (error) {
+  result.setPriority = {
+    code: error.code ?? null,
+    message: error.message,
+  };
+}
+
+console.log(JSON.stringify(result));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let cwd_host_path = temp.path().to_string_lossy().replace('\\', "\\\\");
+    let env = BTreeMap::from([
+        (
+            String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+            format!("[{{\"guestPath\":\"/root\",\"hostPath\":\"{cwd_host_path}\"}}]"),
+        ),
+        (String::from("HOME"), String::from("/root")),
+        (String::from("SHELL"), String::from("/bin/bash")),
+        (String::from("AGENT_OS_VIRTUAL_PROCESS_UID"), String::from("0")),
+        (String::from("AGENT_OS_VIRTUAL_PROCESS_GID"), String::from("0")),
+        (
+            String::from("AGENT_OS_VIRTUAL_OS_HOSTNAME"),
+            String::from("agent-os-test"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_OS_CPU_COUNT"),
+            String::from("4"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_OS_CPU_MODEL"),
+            String::from("Agent OS Test CPU"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_OS_TOTALMEM"),
+            String::from("2147483648"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_OS_FREEMEM"),
+            String::from("1073741824"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_OS_RELEASE"),
+            String::from("6.8.0-agent-os-test"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_OS_VERSION"),
+            String::from("#1 SMP PREEMPT_DYNAMIC Agent OS Test"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_OS_ARCH"),
+            String::from("x64"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_OS_MACHINE"),
+            String::from("x86_64"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_OS_USER"),
+            String::from("agent"),
+        ),
+        (
+            String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+            String::from(
+                "[\"assert\",\"buffer\",\"console\",\"child_process\",\"crypto\",\"events\",\"fs\",\"os\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+            ),
+        ),
+    ]);
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        env,
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse os JSON");
+
+    for surface in ["importOs", "requireOs", "builtinOs"] {
+        assert_eq!(
+            parsed[surface]["hostname"],
+            Value::String(String::from("agent-os-test"))
+        );
+        assert_eq!(
+            parsed[surface]["homedir"],
+            Value::String(String::from("/root"))
+        );
+        assert_eq!(
+            parsed[surface]["tmpdir"],
+            Value::String(String::from("/tmp"))
+        );
+        assert_eq!(
+            parsed[surface]["platform"],
+            Value::String(String::from("linux"))
+        );
+        assert_eq!(
+            parsed[surface]["type"],
+            Value::String(String::from("Linux"))
+        );
+        assert_eq!(
+            parsed[surface]["release"],
+            Value::String(String::from("6.8.0-agent-os-test"))
+        );
+        assert_eq!(
+            parsed[surface]["version"],
+            Value::String(String::from("#1 SMP PREEMPT_DYNAMIC Agent OS Test"))
+        );
+        assert_eq!(parsed[surface]["arch"], Value::String(String::from("x64")));
+        assert_eq!(
+            parsed[surface]["machine"],
+            Value::String(String::from("x86_64"))
+        );
+        assert_eq!(parsed[surface]["availableParallelism"], Value::from(4));
+        assert_eq!(parsed[surface]["totalmem"], Value::from(2_147_483_648_u64));
+        assert_eq!(parsed[surface]["freemem"], Value::from(1_073_741_824_u64));
+        assert_eq!(parsed[surface]["loadavg"], json!([0, 0, 0]));
+        assert_eq!(parsed[surface]["uptime"], Value::from(0));
+        assert_eq!(parsed[surface]["getPriority"], Value::from(0));
+        assert_eq!(parsed[surface]["cpus"].as_array().map(Vec::len), Some(4));
+        assert_eq!(
+            parsed[surface]["cpus"][0]["model"],
+            Value::String(String::from("Agent OS Test CPU"))
+        );
+        assert_eq!(
+            parsed[surface]["userInfo"]["username"],
+            Value::String(String::from("agent"))
+        );
+        assert_eq!(parsed[surface]["userInfo"]["uid"], Value::from(0));
+        assert_eq!(parsed[surface]["userInfo"]["gid"], Value::from(0));
+        assert_eq!(
+            parsed[surface]["userInfo"]["shell"],
+            Value::String(String::from("/bin/bash"))
+        );
+        assert_eq!(
+            parsed[surface]["userInfo"]["homedir"],
+            Value::String(String::from("/root"))
+        );
+        assert_eq!(
+            parsed[surface]["userInfoBuffer"]["username"]["type"],
+            Value::String(String::from("Buffer"))
+        );
+        assert_eq!(
+            parsed[surface]["userInfoBuffer"]["shell"]["type"],
+            Value::String(String::from("Buffer"))
+        );
+
+        let interfaces = parsed[surface]["networkInterfaces"]
+            .as_object()
+            .expect("network interfaces object");
+        assert_eq!(interfaces.len(), 1);
+        assert!(interfaces.contains_key("lo"));
+        let loopback = interfaces["lo"].as_array().expect("loopback interfaces");
+        assert_eq!(loopback.len(), 2);
+        assert_eq!(
+            loopback[0]["address"],
+            Value::String(String::from("127.0.0.1"))
+        );
+        assert_eq!(loopback[0]["internal"], Value::Bool(true));
+        assert_eq!(loopback[1]["address"], Value::String(String::from("::1")));
+    }
+
+    assert_eq!(
+        parsed["setPriority"]["code"],
+        Value::String(String::from("ERR_ACCESS_DENIED"))
+    );
+    assert!(parsed["setPriority"]["message"]
+        .as_str()
+        .expect("setPriority message")
+        .contains("os.setPriority"));
+}
+
+#[test]
 fn javascript_execution_denies_process_signal_handlers_and_native_addons() {
     assert_node_available();
 

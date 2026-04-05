@@ -23,12 +23,7 @@ describe("AgentOsOptions.allowedNodeBuiltins", () => {
 		}
 	});
 
-	test("overrides the native sidecar Node builtin allowlist for guest executions", async () => {
-		const options: AgentOsOptions = {
-			allowedNodeBuiltins: ["worker_threads"],
-		};
-		fixtureRoot = mkdtempSync(join(tmpdir(), "agent-os-allowed-builtins-"));
-
+	function createMockClient() {
 		let stopped = false;
 		const execute = vi.fn(
 			async (
@@ -54,6 +49,15 @@ describe("AgentOsOptions.allowedNodeBuiltins", () => {
 				stopped = true;
 			}),
 		} as unknown as NativeSidecarProcessClient;
+
+		return { client, execute };
+	}
+
+	async function captureAllowedNodeBuiltins(
+		options: Partial<AgentOsOptions> = {},
+	) {
+		fixtureRoot = mkdtempSync(join(tmpdir(), "agent-os-allowed-builtins-"));
+		const { client, execute } = createMockClient();
 
 		proxy = new NativeSidecarKernelProxy({
 			client,
@@ -84,8 +88,20 @@ describe("AgentOsOptions.allowedNodeBuiltins", () => {
 
 		expect(exitCode).toBe(1);
 		expect(execute).toHaveBeenCalledTimes(1);
-		expect(execute.mock.calls[0]?.[2]?.env?.AGENT_OS_ALLOWED_NODE_BUILTINS).toBe(
+		return execute.mock.calls[0]?.[2]?.env?.AGENT_OS_ALLOWED_NODE_BUILTINS;
+	}
+
+	test("overrides the native sidecar Node builtin allowlist for guest executions", async () => {
+		const options: AgentOsOptions = {
+			allowedNodeBuiltins: ["worker_threads"],
+		};
+
+		expect(await captureAllowedNodeBuiltins(options)).toBe(
 			JSON.stringify(options.allowedNodeBuiltins),
 		);
+	});
+
+	test("uses the hardened default allowlist when guest executions do not override it", async () => {
+		expect(JSON.parse(await captureAllowedNodeBuiltins())).toContain("os");
 	});
 });

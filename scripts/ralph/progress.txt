@@ -2,6 +2,7 @@
 ## Codebase Patterns
 - Node builtin hardening is split between `packages/core/src/sidecar/native-kernel-proxy.ts` and four generated surfaces in `crates/execution/src/node_import_cache.rs` (loader, Node runner, Python runner, denied asset materialization); update all of them together when changing builtin policy.
 - `AGENT_OS_ALLOWED_NODE_BUILTINS` is the shared source of truth for guest Node capability gating, but permissioned top-level JavaScript executions on Node v24 still need `--allow-worker` because `register(loader)` spins an internal loader worker; keep that runtime requirement separate from guest `worker_threads` exposure, and keep child-process permission args aligned with the allowed builtin set.
+- Guest-owned Node builtin polyfills that need both ESM and CJS coverage should be wired in three places together: loader import rewriting/asset resolution, the generated Node runner’s `process.getBuiltinModule` and `Module._load` hooks, and the core bridge’s default allowlist in `packages/core/src/sidecar/native-kernel-proxy.ts`.
 - Pyodide guest hardening that must not rewrite user code belongs in `crates/execution/src/node_import_cache.rs` as a `pyodide.runPython(...)` bootstrap in the embedded Python runner, installed after package preloads and before `runPythonAsync()`.
 - The Pyodide host Node process is hardened with Node `--permission` in `crates/execution/src/python.rs`; keep its read allowlist scoped to the import-cache root, compile-cache dir, Pyodide bundle, and sandbox cwd, and keep writes limited to the cache paths plus sandbox cwd.
 - Node guest env hardening in `crates/execution/src/node_import_cache.rs` should snapshot `AGENT_OS_*` control vars first, then replace `process.env` with a filtered proxy so runtime internals keep working while guest enumeration/access stays scrubbed; when `node:module` is denied, bootstrap the runner via `process.getBuiltinModule('node:module')` instead of importing it through the guest loader.
@@ -218,4 +219,23 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Permissioned Node v24 guest launches that bootstrap through `register(loader)` need `--allow-worker` even when guest `worker_threads` remains denied, because Node uses an internal loader worker before user code runs.
 - Gotchas encountered: The SAB bridge only worked reliably once the child sync-RPC pipe fds stayed alive through `spawn()`, and the guest had to keep request writes on the main thread while a worker blocked on the response pipe; trying to write requests from the worker hit `EBADF`.
 - Useful context: `cargo test -p agent-os-execution --test javascript javascript_execution_runs_bootstrap_and_streams_stdio -- --exact`, `cargo test -p agent-os-execution --test javascript javascript_execution_surfaces_shared_array_buffer_sync_rpc_requests -- --exact`, `cargo test -p agent-os-execution --test permission_flags node_permission_flags_allow_workers_for_internal_javascript_loader_runtime -- --exact`, `cargo check -p agent-os-sidecar`, and `cargo test -p agent-os-sidecar service::tests::javascript_sync_rpc_requests_proxy_into_the_vm_kernel_filesystem -- --exact` all pass after this change.
+---
+## 2026-04-04 21:28:39 PDT - US-013
+- What was implemented
+- Added a guest-owned `node:os` polyfill in `crates/execution/src/node_import_cache.rs` that virtualizes hostname, CPU, memory, loopback networking, home directory, user info, and blocks host-priority mutation via `os.setPriority()`.
+- Routed `node:os` through the generated loader asset pipeline plus the runner’s `require(...)`/`process.getBuiltinModule(...)` hooks, removed `os` from the denied builtin asset set, and enabled it in the core bridge’s default Node builtin allowlist.
+- Added regression coverage for the new builtin asset materialization, direct JavaScript execution of the virtualized `os` surface, the default allowlist propagation, and updated the repo instruction tables so the `os` status is no longer stale.
+- Files changed
+- `AGENTS.md`
+- `CLAUDE.md`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `packages/core/src/sidecar/native-kernel-proxy.ts`
+- `packages/core/tests/allowed-node-builtins.test.ts`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: Guest builtin ports like `os` need both import-cache asset coverage and runtime hook coverage; only doing one leaves either ESM imports or CJS/builtin lookups leaking back to the host module.
+- Gotchas encountered: The Rust `JavascriptExecutionEngine` does not supply the core bridge’s default builtin allowlist on its own, so direct execution tests must pass `AGENT_OS_ALLOWED_NODE_BUILTINS` explicitly when they exercise opt-in builtins like `os`.
+- Useful context: `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript javascript_execution_virtualizes_os_module -- --exact`, `pnpm --dir packages/core exec tsc --noEmit`, and `pnpm --dir packages/core exec vitest run tests/allowed-node-builtins.test.ts` all pass after this change.
 ---

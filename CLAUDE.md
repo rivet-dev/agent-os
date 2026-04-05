@@ -63,7 +63,7 @@ The Rust sidecar kernel already has the VFS, process table, pipe manager, PTY ma
 | `dns` | Kernel DNS resolver polyfill | **No wrapper — falls through to real `node:dns`** | Port: kernel DNS resolver polyfill |
 | `http` / `https` / `http2` | Built on kernel `net` polyfill | **No wrapper — falls through to real module** | Port: builds on `net` polyfill |
 | `tls` | Kernel TLS polyfill | **No wrapper — falls through to real `node:tls`** | Port: kernel TLS polyfill |
-| `os` | Kernel-provided values | **No wrapper — falls through to real `node:os`** | Port: return kernel hostname, etc. |
+| `os` | Kernel-provided values | Guest-owned polyfill in `node_import_cache.rs` virtualizes hostname, CPU, memory, loopback networking, home, and user info | Keep future `os` additions aligned with VM defaults and kernel-backed resource config |
 | `vm` | Must be denied | **No wrapper — falls through to real `node:vm`** | Must stay denied |
 | `worker_threads` | Must be denied | **No wrapper — falls through to real module** | Must stay denied |
 | `inspector` | Must be denied | **No wrapper — falls through to real module** | Must stay denied |
@@ -258,6 +258,10 @@ All agent working files live in `.agent/` at the repo root.
 - **Notes**: `.agent/notes/` -- general notes and tracking.
 
 When the user asks to track something in a note, store it in `.agent/notes/` by default. When something is identified as "do later", add it to `.agent/todo/`. Design documents and interface specs go in `.agent/specs/`.
+
+## CLAUDE.md Convention
+
+- Every directory that has a `CLAUDE.md` must also have an `AGENTS.md` symlink pointing to it (`ln -s CLAUDE.md AGENTS.md`). This ensures other AI agents that look for `AGENTS.md` find the same instructions.
 
 ## Git
 

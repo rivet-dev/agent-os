@@ -205,7 +205,7 @@
         "Typecheck passes"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "Simple polyfill (~100 lines). os module currently leaks real host info (hostname, CPUs, memory, network interfaces)."
     },
     {

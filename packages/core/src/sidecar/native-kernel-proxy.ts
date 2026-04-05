@@ -52,6 +52,7 @@ const DEFAULT_ALLOWED_NODE_BUILTINS = [
 	"crypto",
 	"events",
 	"fs",
+	"os",
 	"path",
 	"querystring",
 	"stream",
