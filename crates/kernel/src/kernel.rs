@@ -17,11 +17,12 @@ use crate::process_table::{
 };
 use crate::pty::{LineDisciplineConfig, PartialTermios, PtyError, PtyManager, Termios};
 use crate::resource_accounting::{
-    ResourceAccountant, ResourceError, ResourceLimits, ResourceSnapshot,
+    measure_filesystem_usage, FileSystemUsage, ResourceAccountant, ResourceError, ResourceLimits,
+    ResourceSnapshot,
 };
 use crate::root_fs::{RootFileSystem, RootFilesystemError, RootFilesystemSnapshot};
 use crate::user::UserManager;
-use crate::vfs::{VfsError, VirtualFileSystem, VirtualStat};
+use crate::vfs::{normalize_path, VfsError, VfsResult, VirtualFileSystem, VirtualStat};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -431,16 +432,20 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
     pub fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        let content = content.into();
+        self.check_write_file_limits(path, content.len() as u64)?;
         Ok(self.filesystem.write_file(path, content)?)
     }
 
     pub fn create_dir(&mut self, path: &str) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        self.check_create_dir_limits(path)?;
         Ok(self.filesystem.create_dir(path)?)
     }
 
     pub fn mkdir(&mut self, path: &str, recursive: bool) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        self.check_mkdir_limits(path, recursive)?;
         Ok(self.filesystem.mkdir(path, recursive)?)
     }
 
@@ -491,6 +496,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
     pub fn symlink(&mut self, target: &str, link_path: &str) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        self.check_symlink_limits(target, link_path)?;
         Ok(self.filesystem.symlink(target, link_path)?)
     }
 
@@ -516,6 +522,7 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 
     pub fn truncate(&mut self, path: &str, length: u64) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        self.check_truncate_limits(path, length)?;
         Ok(self.filesystem.truncate(path, length)?)
     }
 
@@ -743,12 +750,19 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         }
 
         let path = entry.description.path().to_owned();
+        let current_size = self.current_storage_file_size(&path)?;
+        let mut cursor = entry.description.cursor() as usize;
+        if entry.description.flags() & O_APPEND != 0 {
+            cursor = current_size as usize;
+        }
+        let required_size = current_size.max(checked_write_end(cursor as u64, data.len())?);
+        self.check_path_resize_limits(&path, required_size)?;
+
         let mut existing = if VirtualFileSystem::exists(&self.filesystem, &path) {
             VirtualFileSystem::read_file(&mut self.filesystem, &path)?
         } else {
             Vec::new()
         };
-        let mut cursor = entry.description.cursor() as usize;
         if entry.description.flags() & O_APPEND != 0 {
             cursor = existing.len();
         }
@@ -861,6 +875,10 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             return Err(KernelError::new("ESPIPE", "illegal seek"));
         }
 
+        let required_size = self
+            .current_storage_file_size(entry.description.path())?
+            .max(checked_write_end(offset, data.len())?);
+        self.check_path_resize_limits(entry.description.path(), required_size)?;
         VirtualFileSystem::pwrite(
             &mut self.filesystem,
             entry.description.path(),
@@ -1094,9 +1112,11 @@ impl<F: VirtualFileSystem> KernelVm<F> {
                 ));
             }
             if flags & O_TRUNC != 0 {
+                self.check_truncate_limits(path, 0)?;
                 VirtualFileSystem::truncate(&mut self.filesystem, path, 0)?;
             }
         } else if flags & O_CREAT != 0 {
+            self.check_write_file_limits(path, 0)?;
             VirtualFileSystem::write_file(&mut self.filesystem, path, Vec::new())?;
         } else {
             let _ = VirtualFileSystem::stat(&mut self.filesystem, path)?;
@@ -1158,6 +1178,170 @@ impl<F: VirtualFileSystem> KernelVm<F> {
             self.driver_pids.as_ref(),
             pid,
         );
+    }
+
+    fn raw_filesystem_mut(&mut self) -> &mut F {
+        self.filesystem.inner_mut().inner_mut()
+    }
+
+    fn filesystem_usage(&mut self) -> KernelResult<FileSystemUsage> {
+        Ok(measure_filesystem_usage(self.raw_filesystem_mut())?)
+    }
+
+    fn storage_stat(&mut self, path: &str) -> KernelResult<Option<VirtualStat>> {
+        if is_virtual_device_storage_path(path) {
+            return Ok(None);
+        }
+
+        match self.raw_filesystem_mut().stat(path) {
+            Ok(stat) => Ok(Some(stat)),
+            Err(error) if error.code() == "ENOENT" => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn storage_lstat(&mut self, path: &str) -> KernelResult<Option<VirtualStat>> {
+        if is_virtual_device_storage_path(path) {
+            return Ok(None);
+        }
+
+        match self.raw_filesystem_mut().lstat(path) {
+            Ok(stat) => Ok(Some(stat)),
+            Err(error) if error.code() == "ENOENT" => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn current_storage_file_size(&mut self, path: &str) -> KernelResult<u64> {
+        Ok(self
+            .storage_stat(path)?
+            .filter(|stat| !stat.is_directory)
+            .map(|stat| stat.size)
+            .unwrap_or(0))
+    }
+
+    fn check_write_file_limits(&mut self, path: &str, new_size: u64) -> KernelResult<()> {
+        if is_virtual_device_storage_path(path) {
+            return Ok(());
+        }
+
+        let usage = self.filesystem_usage()?;
+        if let Some(existing) = self.storage_stat(path)? {
+            if existing.is_directory {
+                return Ok(());
+            }
+
+            self.resources.check_filesystem_usage(
+                &usage,
+                usage
+                    .total_bytes
+                    .saturating_sub(existing.size)
+                    .saturating_add(new_size),
+                usage.inode_count,
+            )?;
+            return Ok(());
+        }
+
+        let new_inodes =
+            count_missing_directory_components(self.raw_filesystem_mut(), path, false)?
+                .saturating_add(1);
+        self.resources.check_filesystem_usage(
+            &usage,
+            usage.total_bytes.saturating_add(new_size),
+            usage.inode_count.saturating_add(new_inodes),
+        )?;
+        Ok(())
+    }
+
+    fn check_create_dir_limits(&mut self, path: &str) -> KernelResult<()> {
+        if is_virtual_device_storage_path(path) || self.storage_lstat(path)?.is_some() {
+            return Ok(());
+        }
+
+        let parent = parent_path(path);
+        let Some(parent_stat) = self.storage_stat(&parent)? else {
+            return Ok(());
+        };
+        if !parent_stat.is_directory {
+            return Ok(());
+        }
+
+        let usage = self.filesystem_usage()?;
+        self.resources.check_filesystem_usage(
+            &usage,
+            usage.total_bytes,
+            usage.inode_count.saturating_add(1),
+        )?;
+        Ok(())
+    }
+
+    fn check_mkdir_limits(&mut self, path: &str, recursive: bool) -> KernelResult<()> {
+        if is_virtual_device_storage_path(path) {
+            return Ok(());
+        }
+
+        if !recursive {
+            return self.check_create_dir_limits(path);
+        }
+
+        let usage = self.filesystem_usage()?;
+        let new_inodes = count_missing_directory_components(self.raw_filesystem_mut(), path, true)?;
+        self.resources.check_filesystem_usage(
+            &usage,
+            usage.total_bytes,
+            usage.inode_count.saturating_add(new_inodes),
+        )?;
+        Ok(())
+    }
+
+    fn check_symlink_limits(&mut self, target: &str, link_path: &str) -> KernelResult<()> {
+        if is_virtual_device_storage_path(link_path) || self.storage_lstat(link_path)?.is_some() {
+            return Ok(());
+        }
+
+        let parent = parent_path(link_path);
+        let Some(parent_stat) = self.storage_stat(&parent)? else {
+            return Ok(());
+        };
+        if !parent_stat.is_directory {
+            return Ok(());
+        }
+
+        let usage = self.filesystem_usage()?;
+        self.resources.check_filesystem_usage(
+            &usage,
+            usage.total_bytes.saturating_add(target.len() as u64),
+            usage.inode_count.saturating_add(1),
+        )?;
+        Ok(())
+    }
+
+    fn check_truncate_limits(&mut self, path: &str, length: u64) -> KernelResult<()> {
+        self.check_path_resize_limits(path, length)
+    }
+
+    fn check_path_resize_limits(&mut self, path: &str, new_size: u64) -> KernelResult<()> {
+        if is_virtual_device_storage_path(path) {
+            return Ok(());
+        }
+
+        let Some(existing) = self.storage_stat(path)? else {
+            return Ok(());
+        };
+        if existing.is_directory {
+            return Ok(());
+        }
+
+        let usage = self.filesystem_usage()?;
+        self.resources.check_filesystem_usage(
+            &usage,
+            usage
+                .total_bytes
+                .saturating_sub(existing.size)
+                .saturating_add(new_size),
+            usage.inode_count,
+        )?;
+        Ok(())
     }
 
     fn close_special_resource_if_needed(&self, description: &Arc<FileDescription>, filetype: u8) {
@@ -1393,6 +1577,80 @@ fn parse_dev_fd_path(path: &str) -> KernelResult<Option<u32>> {
         .parse::<u32>()
         .map_err(|_| KernelError::new("EBADF", format!("bad file descriptor: {path}")))?;
     Ok(Some(fd))
+}
+
+fn count_missing_directory_components<F: VirtualFileSystem>(
+    filesystem: &mut F,
+    path: &str,
+    include_final: bool,
+) -> VfsResult<usize> {
+    let normalized = normalize_path(path);
+    let parts = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let limit = if include_final {
+        parts.len()
+    } else {
+        parts.len().saturating_sub(1)
+    };
+
+    let mut current = String::from("/");
+    for (index, part) in parts.iter().take(limit).enumerate() {
+        let candidate = if current == "/" {
+            format!("/{}", part)
+        } else {
+            format!("{current}/{}", part)
+        };
+
+        match filesystem.stat(&candidate) {
+            Ok(stat) => {
+                if !stat.is_directory {
+                    return Err(VfsError::new(
+                        "ENOTDIR",
+                        format!("not a directory, mkdir '{candidate}'"),
+                    ));
+                }
+                current = candidate;
+            }
+            Err(error) if error.code() == "ENOENT" => {
+                return Ok(limit.saturating_sub(index));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(0)
+}
+
+fn parent_path(path: &str) -> String {
+    let normalized = normalize_path(path);
+    let Some((head, _)) = normalized.rsplit_once('/') else {
+        return String::from("/");
+    };
+
+    if head.is_empty() {
+        String::from("/")
+    } else {
+        String::from(head)
+    }
+}
+
+fn is_virtual_device_storage_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/dev/null" | "/dev/zero" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr" | "/dev/urandom"
+    ) || path == "/dev"
+        || path == "/dev/fd"
+        || path == "/dev/pts"
+        || path.starts_with("/dev/fd/")
+        || path.starts_with("/dev/pts/")
+}
+
+fn checked_write_end(offset: u64, len: usize) -> KernelResult<u64> {
+    offset
+        .checked_add(len as u64)
+        .ok_or_else(|| KernelError::new("EINVAL", "write offset out of range"))
 }
 
 fn filetype_for_path(path: &str, stat: &VirtualStat) -> u8 {

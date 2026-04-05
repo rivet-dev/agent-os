@@ -532,7 +532,7 @@
         "Typecheck passes"
       ],
       "priority": 30,
-      "passes": false,
+      "passes": true,
       "notes": "All file data is in-memory with no cap. Guest can write until host OOM. truncate/pwrite with large values cause immediate OOM."
     },
     {

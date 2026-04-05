@@ -4447,12 +4447,27 @@ fn extract_guest_env(metadata: &BTreeMap<String, String>) -> BTreeMap<String, St
 fn parse_resource_limits(
     metadata: &BTreeMap<String, String>,
 ) -> Result<ResourceLimits, SidecarError> {
-    Ok(ResourceLimits {
-        max_processes: parse_resource_limit(metadata, "resource.max_processes")?,
-        max_open_fds: parse_resource_limit(metadata, "resource.max_open_fds")?,
-        max_pipes: parse_resource_limit(metadata, "resource.max_pipes")?,
-        max_ptys: parse_resource_limit(metadata, "resource.max_ptys")?,
-    })
+    let mut limits = ResourceLimits::default();
+    if metadata.contains_key("resource.max_processes") {
+        limits.max_processes = parse_resource_limit(metadata, "resource.max_processes")?;
+    }
+    if metadata.contains_key("resource.max_open_fds") {
+        limits.max_open_fds = parse_resource_limit(metadata, "resource.max_open_fds")?;
+    }
+    if metadata.contains_key("resource.max_pipes") {
+        limits.max_pipes = parse_resource_limit(metadata, "resource.max_pipes")?;
+    }
+    if metadata.contains_key("resource.max_ptys") {
+        limits.max_ptys = parse_resource_limit(metadata, "resource.max_ptys")?;
+    }
+    if metadata.contains_key("resource.max_filesystem_bytes") {
+        limits.max_filesystem_bytes =
+            parse_resource_limit_u64(metadata, "resource.max_filesystem_bytes")?;
+    }
+    if metadata.contains_key("resource.max_inode_count") {
+        limits.max_inode_count = parse_resource_limit(metadata, "resource.max_inode_count")?;
+    }
+    Ok(limits)
 }
 
 fn parse_resource_limit(
@@ -4464,6 +4479,20 @@ fn parse_resource_limit(
     };
 
     let parsed = value.parse::<usize>().map_err(|error| {
+        SidecarError::InvalidState(format!("invalid resource limit {key}={value}: {error}"))
+    })?;
+    Ok(Some(parsed))
+}
+
+fn parse_resource_limit_u64(
+    metadata: &BTreeMap<String, String>,
+    key: &str,
+) -> Result<Option<u64>, SidecarError> {
+    let Some(value) = metadata.get(key) else {
+        return Ok(None);
+    };
+
+    let parsed = value.parse::<u64>().map_err(|error| {
         SidecarError::InvalidState(format!("invalid resource limit {key}={value}: {error}"))
     })?;
     Ok(Some(parsed))
@@ -7358,6 +7387,24 @@ ykAheWCsAteSEWVc0w==\n\
                 access: FilesystemAccess::Symlink,
             }]
         );
+    }
+
+    #[test]
+    fn parse_resource_limits_reads_filesystem_limits() {
+        let metadata = BTreeMap::from([
+            (
+                String::from("resource.max_filesystem_bytes"),
+                String::from("4096"),
+            ),
+            (
+                String::from("resource.max_inode_count"),
+                String::from("128"),
+            ),
+        ]);
+
+        let limits = parse_resource_limits(&metadata).expect("parse resource limits");
+        assert_eq!(limits.max_filesystem_bytes, Some(4096));
+        assert_eq!(limits.max_inode_count, Some(128));
     }
 
     #[test]

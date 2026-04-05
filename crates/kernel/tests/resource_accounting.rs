@@ -2,7 +2,7 @@ use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
 use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::resource_accounting::ResourceLimits;
-use agent_os_kernel::vfs::MemoryFileSystem;
+use agent_os_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
 
 #[test]
 fn resource_snapshot_counts_processes_fds_pipes_and_ptys() {
@@ -71,6 +71,7 @@ fn resource_limits_reject_extra_processes_pipes_and_ptys() {
         max_open_fds: Some(6),
         max_pipes: Some(1),
         max_ptys: Some(1),
+        ..ResourceLimits::default()
     };
 
     let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
@@ -116,4 +117,84 @@ fn resource_limits_reject_extra_processes_pipes_and_ptys() {
 
     process.finish(0);
     kernel.wait_and_reap(process.pid()).expect("reap process");
+}
+
+#[test]
+fn filesystem_limits_reject_inode_growth_and_file_expansion() {
+    let mut config = KernelVmConfig::new("vm-filesystem-limits");
+    config.resources = ResourceLimits {
+        max_filesystem_bytes: Some(5),
+        max_inode_count: Some(4),
+        ..ResourceLimits::default()
+    };
+
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .write_file("/tmp/a.txt", b"hello".to_vec())
+        .expect("seed file within byte limit");
+    kernel
+        .create_dir("/tmp/dir")
+        .expect("create directory within inode limit");
+
+    let write_error = kernel
+        .write_file("/tmp/b.txt", b"!".to_vec())
+        .expect_err("additional file should exceed inode limit");
+    assert_eq!(write_error.code(), "ENOSPC");
+
+    let truncate_error = kernel
+        .truncate("/tmp/a.txt", 6)
+        .expect_err("truncate should exceed filesystem byte limit");
+    assert_eq!(truncate_error.code(), "ENOSPC");
+    assert_eq!(
+        kernel
+            .read_file("/tmp/a.txt")
+            .expect("file should stay unchanged"),
+        b"hello".to_vec()
+    );
+}
+
+#[test]
+fn filesystem_limits_reject_fd_pwrite_before_resizing_file() {
+    let mut config = KernelVmConfig::new("vm-fd-pwrite-limit");
+    config.resources = ResourceLimits {
+        max_filesystem_bytes: Some(16),
+        ..ResourceLimits::default()
+    };
+
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    kernel
+        .filesystem_mut()
+        .write_file("/tmp/data.txt", b"abc".to_vec())
+        .expect("seed file");
+
+    let process = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn shell");
+    let fd = kernel
+        .fd_open("shell", process.pid(), "/tmp/data.txt", 0, None)
+        .expect("open file");
+
+    let error = kernel
+        .fd_pwrite("shell", process.pid(), fd, b"z", 16)
+        .expect_err("pwrite should exceed filesystem byte limit");
+    assert_eq!(error.code(), "ENOSPC");
+    assert_eq!(
+        kernel
+            .read_file("/tmp/data.txt")
+            .expect("file should stay unchanged"),
+        b"abc".to_vec()
+    );
+
+    process.finish(0);
+    kernel.wait_and_reap(process.pid()).expect("reap shell");
 }

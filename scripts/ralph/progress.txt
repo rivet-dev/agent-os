@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Sidecar `ResourceLimits` parsing should start from `ResourceLimits::default()` and only override metadata keys that are present; rebuilding the struct from sparse metadata silently drops default filesystem byte/inode caps.
 - WASM command permission tiers have to be threaded through all three layers together: `packages/core` command metadata, sidecar protocol/service request fields (`command_permissions` and per-exec `wasm_permission_tier`), and `StartWasmExecutionRequest.permission_tier`; top-level exec and JS `child_process` launches use separate paths.
 - Sensitive mount paths are gated separately from ordinary writes: kernel mount APIs require `fs.write` on the mount target, and `/`, `/etc`, `/proc` also require `fs.mount_sensitive`; in sidecar tests, `configure_vm` reconciles mounts before `payload.permissions`, so mount-time policy must already be installed on the VM (for example via `bridge.set_vm_permissions(...)`).
 - Filesystem permission checks in `crates/kernel/src/permissions.rs` should resolve the deepest existing ancestor before authorizing create/probe paths, make `exists()` fail closed, and stay aligned with `crates/kernel/src/mount_table.rs` rejecting cross-mount symlink targets with `EXDEV`.
@@ -33,6 +34,24 @@
 - When a newly allowed Node builtin still exposes bypass-capable host-owned helpers or constructors, replace those exports with guest shims or explicit unsupported stubs before adding the builtin to `DEFAULT_ALLOWED_NODE_BUILTINS`; `dns.Resolver` and `dns.promises.Resolver` are the model for this rule.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
+---
+## 2026-04-05 02:40:37 PDT - US-033
+- What was implemented
+- Added filesystem resource accounting in `crates/kernel/src/resource_accounting.rs`, including default `max_filesystem_bytes` / `max_inode_count` limits and a recursive usage walker that measures visible bytes plus unique inodes.
+- Hardened kernel filesystem mutation paths in `crates/kernel/src/kernel.rs` so `write_file`, `create_dir`, `mkdir`, `symlink`, `truncate`, `fd_pwrite`, `fd_write`, and `O_CREAT` / `O_TRUNC` open flows enforce the new limits and fail with `ENOSPC` before resize-driven growth.
+- Updated sidecar metadata parsing in `crates/sidecar/src/service.rs` so sparse VM metadata preserves `ResourceLimits::default()` and only overrides resource keys that are explicitly present.
+- Files changed
+- `CLAUDE.md`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/src/resource_accounting.rs`
+- `crates/kernel/tests/resource_accounting.rs`
+- `crates/sidecar/src/service.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Filesystem resource accounting should scan the raw filesystem beneath `PermissionedFileSystem` / `DeviceLayer`; using the permission-wrapped view couples internal accounting to guest read policy and special `/dev/*` entries.
+  - Gotchas encountered: Sidecar resource parsing has to preserve `ResourceLimits::default()` when metadata is sparse, or new default caps like filesystem bytes/inodes get silently disabled.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test resource_accounting -- --test-threads=1`, `cargo test -p agent-os-kernel --test api_surface kernel_fd_surface_supports_open_seek_positional_io_dup_and_dev_fd_views -- --exact`, `cargo test -p agent-os-sidecar service::tests::parse_resource_limits_reads_filesystem_limits -- --exact`, and `cargo check -p agent-os-kernel -p agent-os-sidecar` all pass after this change.
 ---
 ## 2026-04-05 01:10:03 PDT - US-028
 - What was implemented

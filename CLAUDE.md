@@ -24,6 +24,7 @@ These are hard rules with no exceptions:
 4. **Polyfills are ports, not wrappers.** A path-translating shim over real `node:fs` is not a polyfill — it is a wrapper around a host API. A real polyfill implements the API semantics using only kernel primitives (VFS, socket table, process table, pipe manager). The original JS kernel (`@secure-exec/core` + `@secure-exec/nodejs`, deleted in commit `5a43882`) had full kernel-backed polyfills for `fs`, `net`, `http`, `dns`, `dgram`, `child_process`, and `os`. The Rust sidecar must reach the same level of isolation.
 5. **Control channels must be out-of-band.** The sidecar must not use in-band magic prefixes on stdout/stderr for control signaling (exit codes, metrics, signal registration). Guest code can write these prefixes to inject fake control messages. Use dedicated file descriptors, separate pipes, or a side-channel protocol for all sidecar-internal communication.
 6. **Resource consumption must be bounded.** Every guest-allocatable resource must have a configurable limit enforced by the kernel: filesystem total size, inode count, process count, open FDs, pipes, PTYs, sockets, connections. Unbounded allocation from guest input is a DoS vector. The kernel's `ResourceLimits` must cover all resource types, not just processes and FDs.
+   Sidecar metadata parsing should start from `ResourceLimits::default()` and only override keys that are actually present; rebuilding the struct from sparse metadata drops default filesystem byte/inode caps.
 7. **Permission checks must use resolved paths.** Whenever the kernel checks permissions on a path, it must resolve symlinks first and check the resolved path. Checking the caller-supplied path and then operating on a symlink-resolved target is a TOCTOU bypass. Similarly, `link()` must check permissions on both source and destination.
 8. **The VM must behave like a standard Linux environment.** Agents are written to target Linux. The kernel should implement POSIX semantics faithfully — correct `errno` values, proper signal delivery, standard `/proc` layout, expected filesystem behavior. Deviations from standard Linux behavior cause agent failures and must be documented in the friction log (`.agent/notes/vm-friction.md`). When in doubt, match Linux kernel behavior, not a simplified model.
 
@@ -34,6 +35,7 @@ These are hard rules with no exceptions:
 - **Pipes & PTYs** — Kernel-managed pipes (64KB buffers) enable cross-runtime IPC. PTY master/slave pairs with line discipline support interactive shells. `openShell()` allocates a PTY and spawns sh/bash.
 - **Networking** — Socket table manages TCP/UDP/Unix domain sockets. Loopback connections stay entirely in-kernel. External connections delegate to a `HostNetworkAdapter` (implemented via `node:net`/`node:dgram` on the host). DNS resolution also goes through the adapter.
 - **Permissions** — Deny-by-default access control. Four permission domains: `fs`, `network`, `childProcess`, `env`. Each is a function that returns `{allow, reason}`. The `allowAll` preset grants everything (used in agentOS). See "Node.js Builtin Permission Model" for how these interact with the Node.js builtin interception layer.
+- **Sensitive mount policy is a separate filesystem capability.** Kernel mount APIs check normal `fs.write` permission on the mount path, and mounts targeting `/`, `/etc`, or `/proc` also require `fs.mount_sensitive`. In the Rust sidecar, `configure_vm` reconciles mounts before it applies `payload.permissions`, so mount-time policy must already be present on the VM (or be injected directly in tests) before `ConfigureVm` runs.
 
 ### Node.js Isolation Model
 
@@ -144,6 +146,7 @@ The registry software packages depend on `@rivet-dev/agent-os-registry-types` (i
 - When a newly allowed Node builtin still has bypass-capable host-owned helpers or constructors (for example `dns.Resolver` / `dns.promises.Resolver`), replace those entrypoints with guest-owned shims or explicit unsupported stubs before adding the builtin to `DEFAULT_ALLOWED_NODE_BUILTINS`; inheriting the host module is only safe for exports that cannot escape the kernel-backed port.
 - Command execution mirrors the kernel API (exec, spawn)
 - `fetch(port, request)` reaches services running inside the VM using the kernel network adapter pattern (`proc.network.fetch`)
+- Python execution in `crates/execution/src/python.rs` should keep `poll_event()` blocked until a real guest-visible event arrives or the caller timeout expires; filtered stderr/control messages are internal noise, and `wait()` should bound accumulated stdout/stderr via the hidden `AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES` env knob rather than growing buffers without limit.
 
 ## Linux Compatibility
 
