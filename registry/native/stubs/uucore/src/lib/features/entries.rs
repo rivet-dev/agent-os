@@ -312,7 +312,11 @@ mod wasi_impl {
         if errno != 0 || len == 0 {
             return None;
         }
-        let s = core::str::from_utf8(&buf[..len as usize]).ok()?;
+        let len = usize::try_from(len).ok()?;
+        if len > buf.len() {
+            return None;
+        }
+        let s = core::str::from_utf8(&buf[..len]).ok()?;
         let (name, passwd, pw_uid, pw_gid, gecos, home, shell) = parse_passwd_string(s)?;
         Some(Passwd {
             name,

@@ -48,6 +48,7 @@ index 0000000..c80a680
 +        &ret_len
 +    );
 +    if (err != 0) return NULL;
++    if (ret_len >= sizeof(pw_buf)) return NULL;
 +
 +    pw_buf[ret_len] = '\0';
 +

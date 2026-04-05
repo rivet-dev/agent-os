@@ -19,6 +19,28 @@ pub const ERRNO_NOSYS: Errno = 52;
 pub const ERRNO_NOENT: Errno = 44;
 pub const ERRNO_SRCH: Errno = 71; // No such process
 pub const ERRNO_CHILD: Errno = 10; // No child processes
+const POLLFD_BYTES: usize = 8;
+
+fn checked_u32_len(len: usize) -> Result<u32, Errno> {
+    u32::try_from(len).map_err(|_| ERRNO_INVAL)
+}
+
+fn validate_returned_len(len: u32, capacity: usize) -> Result<u32, Errno> {
+    match usize::try_from(len) {
+        Ok(len) if len <= capacity => Ok(len as u32),
+        _ => Err(ERRNO_INVAL),
+    }
+}
+
+fn validate_poll_buffer_len(buffer_len: usize, nfds: u32) -> Result<(), Errno> {
+    let nfds = usize::try_from(nfds).map_err(|_| ERRNO_INVAL)?;
+    let expected = nfds.checked_mul(POLLFD_BYTES).ok_or(ERRNO_INVAL)?;
+    if buffer_len == expected {
+        Ok(())
+    } else {
+        Err(ERRNO_INVAL)
+    }
+}
 
 // ============================================================
 // host_process module — process management and FD operations
@@ -159,17 +181,20 @@ pub fn spawn(
     cwd: &[u8],
 ) -> Result<u32, Errno> {
     let mut pid: u32 = 0;
+    let argv_len = checked_u32_len(argv.len())?;
+    let envp_len = checked_u32_len(envp.len())?;
+    let cwd_len = checked_u32_len(cwd.len())?;
     let errno = unsafe {
         proc_spawn(
             argv.as_ptr(),
-            argv.len() as u32,
+            argv_len,
             envp.as_ptr(),
-            envp.len() as u32,
+            envp_len,
             stdin_fd,
             stdout_fd,
             stderr_fd,
             cwd.as_ptr(),
-            cwd.len() as u32,
+            cwd_len,
             &mut pid,
         )
     };
@@ -492,7 +517,8 @@ pub fn socket(domain: u32, sock_type: u32, protocol: u32) -> Result<u32, Errno> 
 /// `addr` is a serialized address string (e.g. "host:port").
 /// Returns `Ok(())` on success, `Err(errno)` on failure.
 pub fn connect(fd: u32, addr: &[u8]) -> Result<(), Errno> {
-    let errno = unsafe { net_connect(fd, addr.as_ptr(), addr.len() as u32) };
+    let addr_len = checked_u32_len(addr.len())?;
+    let errno = unsafe { net_connect(fd, addr.as_ptr(), addr_len) };
     if errno == ERRNO_SUCCESS {
         Ok(())
     } else {
@@ -504,10 +530,11 @@ pub fn connect(fd: u32, addr: &[u8]) -> Result<(), Errno> {
 ///
 /// Returns `Ok(bytes_sent)` on success, `Err(errno)` on failure.
 pub fn send(fd: u32, buf: &[u8], flags: u32) -> Result<u32, Errno> {
+    let buf_len = checked_u32_len(buf.len())?;
     let mut sent: u32 = 0;
-    let errno = unsafe { net_send(fd, buf.as_ptr(), buf.len() as u32, flags, &mut sent) };
+    let errno = unsafe { net_send(fd, buf.as_ptr(), buf_len, flags, &mut sent) };
     if errno == ERRNO_SUCCESS {
-        Ok(sent)
+        validate_returned_len(sent, buf.len())
     } else {
         Err(errno)
     }
@@ -517,10 +544,11 @@ pub fn send(fd: u32, buf: &[u8], flags: u32) -> Result<u32, Errno> {
 ///
 /// Returns `Ok(bytes_received)` on success, `Err(errno)` on failure.
 pub fn recv(fd: u32, buf: &mut [u8], flags: u32) -> Result<u32, Errno> {
+    let buf_len = checked_u32_len(buf.len())?;
     let mut received: u32 = 0;
-    let errno = unsafe { net_recv(fd, buf.as_mut_ptr(), buf.len() as u32, flags, &mut received) };
+    let errno = unsafe { net_recv(fd, buf.as_mut_ptr(), buf_len, flags, &mut received) };
     if errno == ERRNO_SUCCESS {
-        Ok(received)
+        validate_returned_len(received, buf.len())
     } else {
         Err(errno)
     }
@@ -543,19 +571,21 @@ pub fn net_close_socket(fd: u32) -> Result<(), Errno> {
 /// Writes the resolved address into `buf` and returns the number of bytes written.
 /// Returns `Ok(len)` on success, `Err(errno)` on failure.
 pub fn getaddrinfo(host: &[u8], port: &[u8], buf: &mut [u8]) -> Result<u32, Errno> {
-    let mut len: u32 = buf.len() as u32;
+    let host_len = checked_u32_len(host.len())?;
+    let port_len = checked_u32_len(port.len())?;
+    let mut len = checked_u32_len(buf.len())?;
     let errno = unsafe {
         net_getaddrinfo(
             host.as_ptr(),
-            host.len() as u32,
+            host_len,
             port.as_ptr(),
-            port.len() as u32,
+            port_len,
             buf.as_mut_ptr(),
             &mut len,
         )
     };
     if errno == ERRNO_SUCCESS {
-        Ok(len)
+        validate_returned_len(len, buf.len())
     } else {
         Err(errno)
     }
@@ -565,7 +595,8 @@ pub fn getaddrinfo(host: &[u8], port: &[u8], buf: &mut [u8]) -> Result<u32, Errn
 ///
 /// Returns `Ok(())` on success, `Err(errno)` on failure.
 pub fn setsockopt(fd: u32, level: u32, optname: u32, optval: &[u8]) -> Result<(), Errno> {
-    let errno = unsafe { net_setsockopt(fd, level, optname, optval.as_ptr(), optval.len() as u32) };
+    let optval_len = checked_u32_len(optval.len())?;
+    let errno = unsafe { net_setsockopt(fd, level, optname, optval.as_ptr(), optval_len) };
     if errno == ERRNO_SUCCESS {
         Ok(())
     } else {
@@ -578,10 +609,10 @@ pub fn setsockopt(fd: u32, level: u32, optname: u32, optval: &[u8]) -> Result<()
 /// Writes the serialized address into `buf` and returns the number of bytes written.
 /// Returns `Ok(len)` on success, `Err(errno)` on failure.
 pub fn getsockname(fd: u32, buf: &mut [u8]) -> Result<u32, Errno> {
-    let mut len: u32 = buf.len() as u32;
+    let mut len = checked_u32_len(buf.len())?;
     let errno = unsafe { net_getsockname(fd, buf.as_mut_ptr(), &mut len) };
     if errno == ERRNO_SUCCESS {
-        Ok(len)
+        validate_returned_len(len, buf.len())
     } else {
         Err(errno)
     }
@@ -592,10 +623,10 @@ pub fn getsockname(fd: u32, buf: &mut [u8]) -> Result<u32, Errno> {
 /// Writes the serialized address into `buf` and returns the number of bytes written.
 /// Returns `Ok(len)` on success, `Err(errno)` on failure.
 pub fn getpeername(fd: u32, buf: &mut [u8]) -> Result<u32, Errno> {
-    let mut len: u32 = buf.len() as u32;
+    let mut len = checked_u32_len(buf.len())?;
     let errno = unsafe { net_getpeername(fd, buf.as_mut_ptr(), &mut len) };
     if errno == ERRNO_SUCCESS {
-        Ok(len)
+        validate_returned_len(len, buf.len())
     } else {
         Err(errno)
     }
@@ -607,7 +638,8 @@ pub fn getpeername(fd: u32, buf: &mut [u8]) -> Result<u32, Errno> {
 /// After success, `send`/`recv` on this fd use the encrypted TLS stream.
 /// Returns `Ok(())` on success, `Err(errno)` on failure.
 pub fn tls_connect(fd: u32, hostname: &[u8]) -> Result<(), Errno> {
-    let errno = unsafe { net_tls_connect(fd, hostname.as_ptr(), hostname.len() as u32) };
+    let hostname_len = checked_u32_len(hostname.len())?;
+    let errno = unsafe { net_tls_connect(fd, hostname.as_ptr(), hostname_len) };
     if errno == ERRNO_SUCCESS {
         Ok(())
     } else {
@@ -621,6 +653,7 @@ pub fn tls_connect(fd: u32, hostname: &[u8]) -> Result<(), Errno> {
 /// `timeout_ms` is the timeout: 0=non-blocking, -1=block forever, >0=milliseconds.
 /// Returns `Ok(ready_count)` on success, `Err(errno)` on failure.
 pub fn poll(fds: &mut [u8], nfds: u32, timeout_ms: i32) -> Result<u32, Errno> {
+    validate_poll_buffer_len(fds.len(), nfds)?;
     let mut ready: u32 = 0;
     let errno = unsafe { net_poll(fds.as_mut_ptr(), nfds, timeout_ms, &mut ready) };
     if errno == ERRNO_SUCCESS {
@@ -635,7 +668,8 @@ pub fn poll(fds: &mut [u8], nfds: u32, timeout_ms: i32) -> Result<u32, Errno> {
 /// `addr` is a serialized address string (e.g. "host:port" or "/path/to/socket").
 /// Returns `Ok(())` on success, `Err(errno)` on failure.
 pub fn bind(fd: u32, addr: &[u8]) -> Result<(), Errno> {
-    let errno = unsafe { net_bind(fd, addr.as_ptr(), addr.len() as u32) };
+    let addr_len = checked_u32_len(addr.len())?;
+    let errno = unsafe { net_bind(fd, addr.as_ptr(), addr_len) };
     if errno == ERRNO_SUCCESS {
         Ok(())
     } else {
@@ -663,10 +697,10 @@ pub fn listen(fd: u32, backlog: u32) -> Result<(), Errno> {
 /// Returns `Err(errno)` on failure.
 pub fn accept(fd: u32, addr_buf: &mut [u8]) -> Result<(u32, u32), Errno> {
     let mut new_fd: u32 = 0;
-    let mut addr_len: u32 = addr_buf.len() as u32;
+    let mut addr_len = checked_u32_len(addr_buf.len())?;
     let errno = unsafe { net_accept(fd, &mut new_fd, addr_buf.as_mut_ptr(), &mut addr_len) };
     if errno == ERRNO_SUCCESS {
-        Ok((new_fd, addr_len))
+        Ok((new_fd, validate_returned_len(addr_len, addr_buf.len())?))
     } else {
         Err(errno)
     }
@@ -677,20 +711,22 @@ pub fn accept(fd: u32, addr_buf: &mut [u8]) -> Result<(u32, u32), Errno> {
 /// `addr` is the destination address string (e.g. "host:port").
 /// Returns `Ok(bytes_sent)` on success, `Err(errno)` on failure.
 pub fn sendto(fd: u32, buf: &[u8], flags: u32, addr: &[u8]) -> Result<u32, Errno> {
+    let buf_len = checked_u32_len(buf.len())?;
+    let addr_len = checked_u32_len(addr.len())?;
     let mut sent: u32 = 0;
     let errno = unsafe {
         net_sendto(
             fd,
             buf.as_ptr(),
-            buf.len() as u32,
+            buf_len,
             flags,
             addr.as_ptr(),
-            addr.len() as u32,
+            addr_len,
             &mut sent,
         )
     };
     if errno == ERRNO_SUCCESS {
-        Ok(sent)
+        validate_returned_len(sent, buf.len())
     } else {
         Err(errno)
     }
@@ -701,13 +737,14 @@ pub fn sendto(fd: u32, buf: &[u8], flags: u32, addr: &[u8]) -> Result<u32, Errno
 /// Writes received data into `buf` and the source address string into `addr_buf`.
 /// Returns `Ok((bytes_received, addr_len))` on success, `Err(errno)` on failure.
 pub fn recvfrom(fd: u32, buf: &mut [u8], flags: u32, addr_buf: &mut [u8]) -> Result<(u32, u32), Errno> {
+    let buf_len = checked_u32_len(buf.len())?;
     let mut received: u32 = 0;
-    let mut addr_len: u32 = addr_buf.len() as u32;
+    let mut addr_len = checked_u32_len(addr_buf.len())?;
     let errno = unsafe {
         net_recvfrom(
             fd,
             buf.as_mut_ptr(),
-            buf.len() as u32,
+            buf_len,
             flags,
             &mut received,
             addr_buf.as_mut_ptr(),
@@ -715,7 +752,10 @@ pub fn recvfrom(fd: u32, buf: &mut [u8], flags: u32, addr_buf: &mut [u8]) -> Res
         )
     };
     if errno == ERRNO_SUCCESS {
-        Ok((received, addr_len))
+        Ok((
+            validate_returned_len(received, buf.len())?,
+            validate_returned_len(addr_len, addr_buf.len())?,
+        ))
     } else {
         Err(errno)
     }
@@ -796,10 +836,29 @@ pub fn is_atty(fd: u32) -> Result<bool, Errno> {
 /// Returns `Ok(len)` on success, `Err(errno)` on failure.
 pub fn get_pwuid(uid: u32, buf: &mut [u8]) -> Result<u32, Errno> {
     let mut len: u32 = 0;
-    let errno = unsafe { getpwuid(uid, buf.as_mut_ptr(), buf.len() as u32, &mut len) };
+    let buf_len = checked_u32_len(buf.len())?;
+    let errno = unsafe { getpwuid(uid, buf.as_mut_ptr(), buf_len, &mut len) };
     if errno == ERRNO_SUCCESS {
-        Ok(len)
+        validate_returned_len(len, buf.len())
     } else {
         Err(errno)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poll_buffer_validation_requires_exact_pollfd_capacity() {
+        assert_eq!(validate_poll_buffer_len(POLLFD_BYTES, 1), Ok(()));
+        assert_eq!(validate_poll_buffer_len(POLLFD_BYTES - 1, 1), Err(ERRNO_INVAL));
+        assert_eq!(validate_poll_buffer_len(POLLFD_BYTES + 1, 1), Err(ERRNO_INVAL));
+    }
+
+    #[test]
+    fn returned_lengths_must_fit_in_the_supplied_buffer() {
+        assert_eq!(validate_returned_len(4, 4), Ok(4));
+        assert_eq!(validate_returned_len(5, 4), Err(ERRNO_INVAL));
     }
 }

@@ -4,6 +4,8 @@ use crate::vfs::{
 };
 use std::collections::BTreeSet;
 
+const MAX_SNAPSHOT_DEPTH: usize = 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayMode {
     Ephemeral,
@@ -289,38 +291,46 @@ impl OverlayFileSystem {
         path: &str,
         entries: &mut Vec<OverlaySnapshotEntry>,
     ) -> VfsResult<()> {
-        let normalized = Self::normalized(path);
-        let stat = self.lstat(&normalized)?;
-
-        if stat.is_symbolic_link {
-            entries.push(OverlaySnapshotEntry {
-                path: normalized,
-                stat,
-                kind: OverlaySnapshotKind::Symlink(self.read_link(path)?),
-            });
-            return Ok(());
-        }
-
-        if stat.is_directory {
-            entries.push(OverlaySnapshotEntry {
-                path: normalized.clone(),
-                stat,
-                kind: OverlaySnapshotKind::Directory,
-            });
-
-            for entry in self.read_dir_with_types(&normalized)? {
-                let child_path = Self::join_path(&normalized, &entry.name);
-                self.collect_snapshot_entries(&child_path, entries)?;
+        let mut pending = vec![(Self::normalized(path), 0usize)];
+        while let Some((current_path, depth)) = pending.pop() {
+            if depth > MAX_SNAPSHOT_DEPTH {
+                return Err(VfsError::new(
+                    "EINVAL",
+                    format!("overlay snapshot depth limit exceeded at '{current_path}'"),
+                ));
             }
 
-            return Ok(());
-        }
+            let stat = self.lstat(&current_path)?;
 
-        entries.push(OverlaySnapshotEntry {
-            path: normalized,
-            stat,
-            kind: OverlaySnapshotKind::File(self.read_file(path)?),
-        });
+            if stat.is_symbolic_link {
+                entries.push(OverlaySnapshotEntry {
+                    path: current_path.clone(),
+                    stat,
+                    kind: OverlaySnapshotKind::Symlink(self.read_link(&current_path)?),
+                });
+                continue;
+            }
+
+            if stat.is_directory {
+                entries.push(OverlaySnapshotEntry {
+                    path: current_path.clone(),
+                    stat,
+                    kind: OverlaySnapshotKind::Directory,
+                });
+
+                let children = self.read_dir_with_types(&current_path)?;
+                for entry in children.into_iter().rev() {
+                    pending.push((Self::join_path(&current_path, &entry.name), depth + 1));
+                }
+                continue;
+            }
+
+            entries.push(OverlaySnapshotEntry {
+                path: current_path.clone(),
+                stat,
+                kind: OverlaySnapshotKind::File(self.read_file(&current_path)?),
+            });
+        }
         Ok(())
     }
 

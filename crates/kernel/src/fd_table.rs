@@ -417,13 +417,16 @@ impl ProcessFdTable {
             return Err(FdTableError::too_many_open_files());
         }
 
-        while self.entries.contains_key(&self.next_fd) {
-            self.next_fd += 1;
+        let start = usize::try_from(self.next_fd).unwrap_or(0) % MAX_FDS_PER_PROCESS;
+        for offset in 0..MAX_FDS_PER_PROCESS {
+            let candidate = ((start + offset) % MAX_FDS_PER_PROCESS) as u32;
+            if !self.entries.contains_key(&candidate) {
+                self.next_fd = candidate.saturating_add(1);
+                return Ok(candidate);
+            }
         }
 
-        let fd = self.next_fd;
-        self.next_fd += 1;
-        Ok(fd)
+        Err(FdTableError::too_many_open_files())
     }
 }
 

@@ -147,6 +147,20 @@ fn overlay_remove_dir_rejects_lower_only_children_in_merged_view() {
 }
 
 #[test]
+fn overlay_rename_rejects_directory_trees_that_exceed_snapshot_depth_limit() {
+    let mut lower = MemoryFileSystem::new();
+    let mut path = String::from("/deep");
+    lower.create_dir(&path).expect("create root of deep tree");
+    for index in 0..1025 {
+        path = format!("{path}/level-{index}");
+        lower.create_dir(&path).expect("create nested directory");
+    }
+
+    let mut overlay = OverlayFileSystem::new(vec![lower], OverlayMode::Ephemeral);
+    assert_error_code(overlay.rename("/deep", "/renamed"), "EINVAL");
+}
+
+#[test]
 fn root_filesystem_uses_bundled_base_and_round_trips_snapshots() {
     let mut root = RootFileSystem::from_descriptor(RootFilesystemDescriptor::default())
         .expect("create default root");

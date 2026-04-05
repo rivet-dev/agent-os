@@ -500,7 +500,7 @@ impl MemoryFileSystem {
                 .inodes
                 .get_mut(&ino)
                 .expect("inode should exist when decrementing link count");
-            inode.metadata.nlink -= 1;
+            inode.metadata.nlink = inode.metadata.nlink.saturating_sub(1);
             inode.metadata.nlink == 0
         };
 
@@ -646,9 +646,9 @@ impl VirtualFileSystem for MemoryFileSystem {
         };
 
         let mut entries = BTreeMap::<String, VirtualDirEntry>::new();
-        for (candidate_path, ino) in &self.path_index {
+        for (candidate_path, ino) in self.path_index.range(prefix.clone()..) {
             if !candidate_path.starts_with(&prefix) {
-                continue;
+                break;
             }
 
             let rest = &candidate_path[prefix.len()..];

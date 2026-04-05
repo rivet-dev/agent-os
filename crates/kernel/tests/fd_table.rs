@@ -189,3 +189,26 @@ fn stat_reports_ebadf_for_invalid_fd() {
 
     assert_error_code(result, "EBADF");
 }
+
+#[test]
+fn open_reuses_a_freed_fd_after_next_fd_moves_past_the_limit() {
+    let mut manager = FdTableManager::new();
+    manager.create(1);
+
+    let table = manager.get_mut(1).expect("FD table should exist");
+    let mut opened = Vec::new();
+    for _ in 3..MAX_FDS_PER_PROCESS {
+        opened.push(
+            table
+                .open("/tmp/test.txt", O_RDONLY)
+                .expect("open should fill remaining slots"),
+        );
+    }
+
+    assert!(table.close(5), "fd 5 should be open before reuse");
+
+    let reused = table
+        .open("/tmp/reused.txt", O_RDONLY)
+        .expect("open should wrap and reuse a freed fd");
+    assert_eq!(reused, 5);
+}

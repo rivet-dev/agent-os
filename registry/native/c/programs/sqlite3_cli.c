@@ -159,7 +159,24 @@ static int wasiFullPathname(sqlite3_vfs *pVfs, const char *zName, int nOut, char
 
 static int wasiRandomness(sqlite3_vfs *pVfs, int nByte, char *zOut) {
     (void)pVfs;
-    /* Simple deterministic fill — no /dev/urandom in WASM */
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        int total = 0;
+        while (total < nByte) {
+            ssize_t read_len = read(fd, zOut + total, (size_t)(nByte - total));
+            if (read_len <= 0) {
+                break;
+            }
+            total += (int)read_len;
+        }
+        close(fd);
+        if (total == nByte) {
+            return nByte;
+        }
+        nByte = total;
+    }
+
+    /* Fallback only if urandom is unexpectedly unavailable in the runtime. */
     for (int i = 0; i < nByte; i++) zOut[i] = (char)(i * 37 + 17);
     return nByte;
 }

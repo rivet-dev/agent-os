@@ -10,6 +10,7 @@
 - WASM runtime hardening is split across three layers together: `ResourceLimits` / sidecar metadata parsing, `crates/sidecar/src/service.rs` injecting reserved `AGENT_OS_WASM_*` env keys, and `crates/execution/src/wasm.rs` validating or enforcing the actual limit before guest code runs.
 - Sidecar `ResourceLimits` parsing should start from `ResourceLimits::default()` and only override metadata keys that are present; rebuilding the struct from sparse metadata silently drops default filesystem byte/inode caps.
 - WASM command permission tiers have to be threaded through all three layers together: `packages/core` command metadata, sidecar protocol/service request fields (`command_permissions` and per-exec `wasm_permission_tier`), and `StartWasmExecutionRequest.permission_tier`; top-level exec and JS `child_process` launches use separate paths.
+- Native WASM host-import wrappers in `registry/native/crates/wasi-ext`, the matching wasi-libc patches, and the uucore WASI stubs should validate every guest buffer length crossing (`usize` -> `u32`) and reject host-returned lengths that exceed the supplied buffer; `poll()` wrappers should also enforce the exact 8-byte-per-`pollfd` layout.
 - Sensitive mount paths are gated separately from ordinary writes: kernel mount APIs require `fs.write` on the mount target, and `/`, `/etc`, `/proc` also require `fs.mount_sensitive`; in sidecar tests, `configure_vm` reconciles mounts before `payload.permissions`, so mount-time policy must already be installed on the VM (for example via `bridge.set_vm_permissions(...)`).
 - Filesystem permission checks in `crates/kernel/src/permissions.rs` should resolve the deepest existing ancestor before authorizing create/probe paths, make `exists()` fail closed, and stay aligned with `crates/kernel/src/mount_table.rs` rejecting cross-mount symlink targets with `EXDEV`.
 - Python execution in `crates/execution/src/python.rs` should keep `poll_event()` blocked until a real guest-visible event arrives or the caller timeout expires; filtered stderr/control traffic is internal noise, and `wait()` should cap buffered stdio via the hidden `AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES` env knob instead of growing unbounded buffers.
@@ -732,4 +733,27 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Guest hardening in `node_import_cache.rs` should fail closed; if a property cannot be made non-writable/non-configurable, treat that as a startup error instead of silently keeping a mutable escape hatch.
   - Gotchas encountered: The process-table zombie TTL is still useful for parentless/orphaned exits, but child zombies with a live parent must be requeued or their exit code disappears before `waitpid`.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test process_table`, `cargo test -p agent-os-execution --test javascript -- --test-threads=1`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, and `cargo check -p agent-os-kernel -p agent-os-execution` all pass after this change.
+---
+## 2026-04-05 04:06:43 PDT - US-043
+- What was implemented
+- Switched `MemoryFileSystem::read_dir_with_types()` to a prefix-bounded `BTreeMap::range(...)` walk instead of scanning the full path index, hardened inode link-count decrements with `saturating_sub`, and made FD allocation wrap within the per-process limit so a freed low-numbered FD is reused even after `next_fd` has advanced past 255.
+- Reworked overlay snapshot collection in `crates/kernel/src/overlay_fs.rs` to use an explicit stack with a depth cap, added a regression that exercises the rename limit on deeply nested lower trees, and kept the rest of the overlay rename behavior unchanged.
+- Hardened the native WASM boundary by validating `usize` -> `u32` length conversions and host-returned buffer lengths in `registry/native/crates/wasi-ext/src/lib.rs`, adding `poll()` buffer-shape checks, rejecting overlong `getpwuid` responses in both the wasi-libc patch and the uucore WASI stub, and switching the SQLite WASM VFS randomness source to `/dev/urandom` with a deterministic fallback only if that device is unavailable.
+- Files changed
+- `crates/kernel/src/fd_table.rs`
+- `crates/kernel/src/overlay_fs.rs`
+- `crates/kernel/src/vfs.rs`
+- `crates/kernel/tests/fd_table.rs`
+- `crates/kernel/tests/root_fs.rs`
+- `registry/AGENTS.md`
+- `registry/native/c/programs/sqlite3_cli.c`
+- `registry/native/crates/wasi-ext/src/lib.rs`
+- `registry/native/patches/wasi-libc/0007-getpwuid.patch`
+- `registry/native/stubs/uucore/src/lib/features/entries.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Native WASM host-import wrappers should validate both directions of every buffer contract: checked `usize` -> `u32` casts before the syscall, then a returned-length bounds check before treating guest memory as initialized.
+  - Gotchas encountered: Running `cargo test` directly against `registry/native/crates/wasi-ext/Cargo.toml` can refresh `registry/native/Cargo.lock`; if the story does not change native manifests, restore the lockfile before committing.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test fd_table --test vfs`, `cargo test -p agent-os-kernel --test root_fs`, `cargo test -p agent-os-kernel --test root_fs overlay_rename_rejects_directory_trees_that_exceed_snapshot_depth_limit -- --exact`, and `cargo test --manifest-path /home/nathan/a5/registry/native/crates/wasi-ext/Cargo.toml` all pass after this change.
 ---
