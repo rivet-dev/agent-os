@@ -22,8 +22,8 @@ use crate::process_table::{
 };
 use crate::pty::{LineDisciplineConfig, PartialTermios, PtyError, PtyManager, Termios};
 use crate::resource_accounting::{
-    measure_filesystem_usage, FileSystemUsage, ResourceAccountant, ResourceError, ResourceLimits,
-    ResourceSnapshot,
+    measure_filesystem_usage_excluding, FileSystemUsage, ResourceAccountant, ResourceError,
+    ResourceLimits, ResourceSnapshot,
 };
 use crate::root_fs::{RootFileSystem, RootFilesystemError, RootFilesystemSnapshot};
 use crate::user::UserManager;
@@ -2413,7 +2413,24 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 
     fn filesystem_usage(&mut self) -> KernelResult<FileSystemUsage> {
-        Ok(measure_filesystem_usage(self.raw_filesystem_mut())?)
+        let skip_paths = self.raw_filesystem_mut().external_mount_points();
+        Ok(measure_filesystem_usage_excluding(
+            self.raw_filesystem_mut(),
+            &skip_paths,
+        )?)
+    }
+
+    fn is_external_storage_path(&mut self, path: &str) -> bool {
+        let normalized = normalize_path(path);
+        self.raw_filesystem_mut()
+            .external_mount_points()
+            .into_iter()
+            .any(|mount_path| {
+                normalized == mount_path
+                    || normalized
+                        .strip_prefix(&mount_path)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
     }
 
     fn storage_stat(&mut self, path: &str) -> KernelResult<Option<VirtualStat>> {
@@ -2490,7 +2507,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 
     fn check_write_file_limits(&mut self, path: &str, new_size: u64) -> KernelResult<()> {
-        if is_virtual_device_storage_path(path) {
+        if is_virtual_device_storage_path(path) || self.is_external_storage_path(path) {
             return Ok(());
         }
 
@@ -2523,7 +2540,10 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 
     fn check_create_dir_limits(&mut self, path: &str) -> KernelResult<()> {
-        if is_virtual_device_storage_path(path) || self.storage_lstat(path)?.is_some() {
+        if is_virtual_device_storage_path(path)
+            || self.is_external_storage_path(path)
+            || self.storage_lstat(path)?.is_some()
+        {
             return Ok(());
         }
 
@@ -2545,7 +2565,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 
     fn check_mkdir_limits(&mut self, path: &str, recursive: bool) -> KernelResult<()> {
-        if is_virtual_device_storage_path(path) {
+        if is_virtual_device_storage_path(path) || self.is_external_storage_path(path) {
             return Ok(());
         }
 
@@ -2564,7 +2584,10 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 
     fn check_symlink_limits(&mut self, target: &str, link_path: &str) -> KernelResult<()> {
-        if is_virtual_device_storage_path(link_path) || self.storage_lstat(link_path)?.is_some() {
+        if is_virtual_device_storage_path(link_path)
+            || self.is_external_storage_path(link_path)
+            || self.storage_lstat(link_path)?.is_some()
+        {
             return Ok(());
         }
 
@@ -2590,7 +2613,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 
     fn check_path_resize_limits(&mut self, path: &str, new_size: u64) -> KernelResult<()> {
-        if is_virtual_device_storage_path(path) {
+        if is_virtual_device_storage_path(path) || self.is_external_storage_path(path) {
             return Ok(());
         }
 
@@ -3168,5 +3191,37 @@ mod tests {
             .setpgid("driver-b", peer_pid, leader_pid)
             .expect_err("cross-driver process-group join should be denied");
         assert_eq!(error.code(), "EPERM");
+    }
+
+    #[test]
+    fn mounted_filesystem_writes_do_not_count_toward_root_filesystem_limits() {
+        let mut config = KernelVmConfig::new("vm-mounted-fs-limits");
+        config.permissions = Permissions::allow_all();
+        config.resources.max_filesystem_bytes = Some(4);
+
+        let mut kernel = KernelVm::new(MountTable::new(MemoryFileSystem::new()), config);
+        kernel
+            .mount_filesystem(
+                "/workspace",
+                MemoryFileSystem::new(),
+                MountOptions::new("memory"),
+            )
+            .expect("mount workspace");
+
+        kernel
+            .write_file("/workspace/large.txt", b"mounted data".to_vec())
+            .expect("writes through mounted filesystem should bypass root quota");
+
+        let error = kernel
+            .write_file("/root.txt", b"12345".to_vec())
+            .expect_err("root filesystem writes should still respect root quota");
+        assert_eq!(error.code(), "ENOSPC");
+
+        assert_eq!(
+            kernel
+                .read_file("/workspace/large.txt")
+                .expect("read mounted file"),
+            b"mounted data".to_vec()
+        );
     }
 }

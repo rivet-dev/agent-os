@@ -199,6 +199,16 @@ pub trait VirtualFileSystem {
     fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()>;
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()>;
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>>;
+
+    /// Returns the set of paths that represent external mount points.
+    ///
+    /// Filesystem usage measurement skips these paths so that external mounts
+    /// (host directories, etc.) do not count toward the guest filesystem size
+    /// limit.  The default implementation returns an empty set.
+    fn external_mount_points(&self) -> std::collections::BTreeSet<String> {
+        std::collections::BTreeSet::new()
+    }
+
     fn pwrite(&mut self, path: &str, content: impl Into<Vec<u8>>, offset: u64) -> VfsResult<()> {
         let content = content.into();
         let mut existing = self.read_file(path)?;

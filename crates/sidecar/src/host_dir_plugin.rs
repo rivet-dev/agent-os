@@ -514,6 +514,18 @@ impl VirtualFileSystem for HostDirFilesystem {
     }
 
     fn lstat(&self, path: &str) -> VfsResult<VirtualStat> {
+        let (normalized, relative) = self.relative_virtual_path(path);
+        if relative == Path::new(".") {
+            // Root of the host dir mount: use fstatat with AT_EMPTY_PATH on
+            // the host root dir FD since there is no parent/name to split.
+            return fstatat(
+                Some(self.host_root_dir.as_raw_fd()),
+                "",
+                AtFlags::AT_EMPTY_PATH | AtFlags::AT_SYMLINK_NOFOLLOW,
+            )
+            .map(Self::stat_from_file_stat)
+            .map_err(|error| io_error_to_vfs("lstat", &normalized, nix_to_io(error)));
+        }
         let (parent_dir, _, name, normalized) = self.split_parent(path, false)?;
         fstatat(
             Some(parent_dir.as_raw_fd()),
@@ -761,6 +773,17 @@ mod tests {
 
         fs::remove_dir_all(host_dir).expect("remove temp dir");
         fs::remove_dir_all(outside_dir).expect("remove outside temp dir");
+    }
+
+    #[test]
+    fn filesystem_lstat_supports_mount_root() {
+        let host_dir = temp_dir("agent-os-host-dir-plugin-root-lstat");
+        let filesystem = HostDirFilesystem::new(&host_dir).expect("create host dir fs");
+
+        let stat = filesystem.lstat("/").expect("lstat mount root");
+        assert!(stat.is_directory);
+
+        fs::remove_dir_all(host_dir).expect("remove temp dir");
     }
 
     #[test]

@@ -234,6 +234,7 @@ interface NativeSidecarKernelProxyOptions {
 	allowedNodeBuiltins?: readonly string[];
 	loopbackExemptPorts?: number[];
 	nodeExecutionCwd: string;
+	shadowRoot?: string;
 	onDispose?: () => Promise<void>;
 }
 
@@ -295,9 +296,9 @@ export class NativeSidecarKernelProxy {
 		this.loopbackExemptPorts = [...(options.loopbackExemptPorts ?? [])];
 		this.nodeExecutionCwd = options.nodeExecutionCwd;
 		this.onDispose = options.onDispose;
-		this.shadowRoot = mkdtempSync(
-			joinHostPath(tmpdir(), "agent-os-native-shadow-"),
-		);
+		this.shadowRoot =
+			options.shadowRoot ??
+			mkdtempSync(joinHostPath(tmpdir(), "agent-os-native-shadow-"));
 		this.materializeHostPathMappings();
 		this.commands = buildCommandMap(this.commandGuestPaths);
 		this.vfs = this.createFilesystemView(true);

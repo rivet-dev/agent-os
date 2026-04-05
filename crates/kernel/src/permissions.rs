@@ -544,4 +544,8 @@ impl<F: VirtualFileSystem> VirtualFileSystem for PermissionedFileSystem<F> {
         self.check_subject(FsOperation::Read, path)?;
         self.inner.pread(path, offset, length)
     }
+
+    fn external_mount_points(&self) -> std::collections::BTreeSet<String> {
+        self.inner.external_mount_points()
+    }
 }

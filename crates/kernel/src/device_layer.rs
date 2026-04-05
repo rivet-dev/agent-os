@@ -253,6 +253,10 @@ impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
 
         self.inner.pread(path, offset, length)
     }
+
+    fn external_mount_points(&self) -> std::collections::BTreeSet<String> {
+        self.inner.external_mount_points()
+    }
 }
 
 fn is_device_path(path: &str) -> bool {

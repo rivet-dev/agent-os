@@ -64,12 +64,7 @@ const NODE_SYNC_RPC_DEFAULT_DATA_BYTES: usize = 4 * 1024 * 1024;
 const NODE_SYNC_RPC_DEFAULT_WAIT_TIMEOUT_MS: u64 = 30_000;
 const NODE_SYNC_RPC_RESPONSE_QUEUE_CAPACITY: usize = 1;
 const NODE_WARMUP_MARKER_VERSION: &str = "1";
-const NODE_WARMUP_SPECIFIERS: &[&str] = &[
-    "agent-os:builtin/path",
-    "agent-os:builtin/url",
-    "agent-os:builtin/fs-promises",
-    "agent-os:polyfill/path",
-];
+const NODE_WARMUP_SPECIFIERS: &[&str] = &["node:path", "node:url", "node:fs/promises"];
 const CONTROLLED_STDERR_PREFIXES: &[&str] =
     &[crate::node_import_cache::NODE_IMPORT_CACHE_METRICS_PREFIX];
 const RESERVED_NODE_ENV_KEYS: &[&str] = &[

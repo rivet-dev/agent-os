@@ -11,7 +11,7 @@ import {
 } from "./protocol.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
-const EXIT_DRAIN_GRACE_MS = 50;
+const EXIT_DRAIN_GRACE_MS = 200;
 const LEGACY_PERMISSION_METHOD = "request/permission";
 const ACP_PERMISSION_METHOD = "session/request_permission";
 const ACP_CANCEL_METHOD = "session/cancel";

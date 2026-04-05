@@ -579,6 +579,18 @@ impl MountTable {
             .collect()
     }
 
+    /// Returns the set of non-root mount point paths.
+    ///
+    /// Useful for filesystem usage measurement: external mounts (host dirs,
+    /// etc.) should not count toward the guest filesystem size limit.
+    pub fn non_root_mount_points(&self) -> std::collections::BTreeSet<String> {
+        self.mounts
+            .iter()
+            .filter(|mount| mount.path != "/")
+            .map(|mount| mount.path.clone())
+            .collect()
+    }
+
     pub fn root_virtual_filesystem_mut<T: VirtualFileSystem + 'static>(
         &mut self,
     ) -> Option<&mut T> {
@@ -875,6 +887,10 @@ impl VirtualFileSystem for MountTable {
         self.mounts[index]
             .filesystem
             .pread(&relative_path, offset, length)
+    }
+
+    fn external_mount_points(&self) -> std::collections::BTreeSet<String> {
+        self.non_root_mount_points()
     }
 }
 

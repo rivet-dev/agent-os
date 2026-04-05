@@ -1235,6 +1235,7 @@ export class AgentOs {
 			let kernel: Kernel | null = null;
 			let client: NativeSidecarProcessClient | null = null;
 			let toolShimDir: string | null = null;
+			let shadowRoot: string | null = null;
 			let cleanedUp = false;
 
 			const cleanup = async (): Promise<void> => {
@@ -1249,6 +1250,10 @@ export class AgentOs {
 				if (toolShimDir) {
 					rmSync(toolShimDir, { recursive: true, force: true });
 					toolShimDir = null;
+				}
+				if (shadowRoot) {
+					rmSync(shadowRoot, { recursive: true, force: true });
+					shadowRoot = null;
 				}
 				preparedCommandDirs.dispose();
 			};
@@ -1285,6 +1290,7 @@ export class AgentOs {
 					args: [],
 					frameTimeoutMs: 60_000,
 				});
+				shadowRoot = mkdtempSync(join(tmpdir(), "agent-os-native-shadow-"));
 				const session = await client.authenticateAndOpenSession();
 				const sidecarPermissions = serializePermissionsForSidecar(
 					options?.permissions,
@@ -1292,7 +1298,7 @@ export class AgentOs {
 				const nativeVm = await client.createVm(session, {
 					runtime: "java_script",
 					metadata: {
-						cwd: "/home/user",
+						cwd: shadowRoot,
 						...Object.fromEntries(
 							Object.entries(env).map(([key, value]) => [`env.${key}`, value]),
 						),
@@ -1331,6 +1337,7 @@ export class AgentOs {
 					allowedNodeBuiltins: options?.allowedNodeBuiltins,
 					loopbackExemptPorts: options?.loopbackExemptPorts,
 					nodeExecutionCwd: "/home/user",
+					shadowRoot,
 					onDispose: cleanup,
 				});
 

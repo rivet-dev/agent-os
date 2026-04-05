@@ -359,14 +359,27 @@ fn merged_env_payload_bytes(
 pub fn measure_filesystem_usage<F: VirtualFileSystem>(
     filesystem: &mut F,
 ) -> VfsResult<FileSystemUsage> {
+    measure_filesystem_usage_excluding(filesystem, &BTreeSet::new())
+}
+
+/// Measure filesystem usage, skipping any paths in `skip_paths`.
+///
+/// This is used to exclude external mount points (host dirs, etc.) from the
+/// guest filesystem size measurement.  Only the root filesystem content
+/// should count toward the configured resource limits.
+pub fn measure_filesystem_usage_excluding<F: VirtualFileSystem>(
+    filesystem: &mut F,
+    skip_paths: &BTreeSet<String>,
+) -> VfsResult<FileSystemUsage> {
     let mut visited = BTreeSet::new();
-    measure_path_usage(filesystem, "/", &mut visited)
+    measure_path_usage(filesystem, "/", &mut visited, skip_paths)
 }
 
 fn measure_path_usage<F: VirtualFileSystem>(
     filesystem: &mut F,
     path: &str,
     visited: &mut BTreeSet<u64>,
+    skip_paths: &BTreeSet<String>,
 ) -> VfsResult<FileSystemUsage> {
     let stat = filesystem.lstat(path)?;
     let mut usage = FileSystemUsage::default();
@@ -392,7 +405,12 @@ fn measure_path_usage<F: VirtualFileSystem>(
         } else {
             format!("{path}/{}", entry.name)
         };
-        let child_usage = measure_path_usage(filesystem, &child_path, visited)?;
+
+        if skip_paths.contains(&child_path) {
+            continue;
+        }
+
+        let child_usage = measure_path_usage(filesystem, &child_path, visited, skip_paths)?;
         usage.total_bytes = usage.total_bytes.saturating_add(child_usage.total_bytes);
         usage.inode_count = usage.inode_count.saturating_add(child_usage.inode_count);
     }
