@@ -7738,32 +7738,7 @@ function installPythonGuestImportBlocklist(pyodide) {
   pyodide.runPython(PYTHON_GUEST_IMPORT_BLOCKLIST_SOURCE);
 }
 
-function installPythonGuestHardening() {
-  const assetRoot = process.env[ASSET_ROOT_ENV];
-  if (assetRoot) {
-    register(new URL('./loader.mjs', import.meta.url), import.meta.url);
-  }
-
-  hardenProperty(process, 'binding', () => {
-    throw accessDenied('process.binding');
-  });
-  hardenProperty(process, '_linkedBinding', () => {
-    throw accessDenied('process._linkedBinding');
-  });
-  hardenProperty(process, 'dlopen', () => {
-    throw accessDenied('process.dlopen');
-  });
-
-  if (originalGetBuiltinModule) {
-    hardenProperty(process, 'getBuiltinModule', (specifier) => {
-      const normalized = normalizeBuiltin(specifier);
-      if (normalized && DENIED_BUILTINS.has(normalized)) {
-        throw accessDenied(`node:${normalized}`);
-      }
-      return originalGetBuiltinModule(specifier);
-    });
-  }
-
+function installPythonGuestPreloadHardening() {
   if (originalRequire) {
     hardenProperty(globalThis, 'require', () => {
       throw accessDenied('require');
@@ -7795,6 +7770,37 @@ function installPythonGuestHardening() {
 
     hardenProperty(globalThis, 'fetch', restrictedFetch);
   }
+}
+
+function installPythonGuestProcessHardening() {
+  hardenProperty(process, 'binding', () => {
+    throw accessDenied('process.binding');
+  });
+  hardenProperty(process, '_linkedBinding', () => {
+    throw accessDenied('process._linkedBinding');
+  });
+  hardenProperty(process, 'dlopen', () => {
+    throw accessDenied('process.dlopen');
+  });
+
+  if (originalGetBuiltinModule) {
+    hardenProperty(process, 'getBuiltinModule', (specifier) => {
+      const normalized = normalizeBuiltin(specifier);
+      if (normalized && DENIED_BUILTINS.has(normalized)) {
+        throw accessDenied(`node:${normalized}`);
+      }
+      return originalGetBuiltinModule(specifier);
+    });
+  }
+}
+
+function installPythonGuestLoaderHooks() {
+  const assetRoot = process.env[ASSET_ROOT_ENV];
+  if (!assetRoot) {
+    return;
+  }
+
+  register(new URL('./loader.mjs', import.meta.url), import.meta.url);
 }
 
 function installPythonVfsRpcBridge() {
@@ -8166,6 +8172,7 @@ try {
     throw new Error(`pyodide.mjs at ${indexUrl} does not export loadPyodide()`);
   }
 
+  installPythonGuestPreloadHardening();
   const loadPyodideStarted = realPerformance.now();
   const pyodide = await loadPyodide({
     indexURL: indexPath,
@@ -8191,12 +8198,13 @@ try {
   installPythonStdin(pyodide);
   pythonVfsRpcBridge = installPythonVfsRpcBridge();
   installPythonWorkspaceFs(pyodide, pythonVfsRpcBridge);
-  installPythonGuestHardening();
+  installPythonGuestLoaderHooks();
   if (preloadPackages.length > 0) {
     const packageLoadStarted = realPerformance.now();
     await pyodide.loadPackage(preloadPackages);
     packageLoadMs = realPerformance.now() - packageLoadStarted;
   }
+  installPythonGuestProcessHardening();
   installPythonGuestImportBlocklist(pyodide);
   const source = process.env[PYTHON_FILE_ENV] != null ? 'file' : 'inline';
   emitPythonStartupMetrics({
@@ -9175,6 +9183,62 @@ mod tests {
         }
 
         child.wait_with_output().expect("wait for python runner")
+    }
+
+    #[test]
+    fn materialized_python_runner_hardens_builtin_access_before_load_pyodide() {
+        assert_node_available();
+
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let pyodide_dir = tempdir().expect("create pyodide fixture dir");
+        write_fixture(
+            &pyodide_dir.path().join("pyodide.mjs"),
+            r#"
+export async function loadPyodide(options) {
+  const capturedFetch = globalThis.fetch;
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync() {
+      try {
+        await capturedFetch('http://127.0.0.1:1/');
+        options.stdout('unexpected');
+      } catch (error) {
+        options.stdout(JSON.stringify({
+          code: error.code ?? null,
+          message: error.message,
+        }));
+      }
+    },
+  };
+}
+"#,
+        );
+        write_fixture(
+            &pyodide_dir.path().join("pyodide-lock.json"),
+            "{\"packages\":[]}\n",
+        );
+
+        let output = run_python_runner(&import_cache, pyodide_dir.path(), "print('hello')");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse hardening JSON");
+
+        assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+        assert_eq!(
+            parsed["code"],
+            Value::String(String::from("ERR_ACCESS_DENIED"))
+        );
+        assert!(
+            parsed["message"]
+                .as_str()
+                .expect("fetch denial message")
+                .contains("network access"),
+            "unexpected stdout: {stdout}"
+        );
     }
 
     #[test]

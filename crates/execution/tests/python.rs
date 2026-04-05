@@ -12,6 +12,8 @@ use tempfile::tempdir;
 
 const PYTHON_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_PYTHON_WARMUP_METRICS__:";
 const PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV: &str = "AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES";
+const PYTHON_VFS_RPC_MAX_PENDING_REQUESTS_ENV: &str =
+    "AGENT_OS_PYTHON_VFS_RPC_MAX_PENDING_REQUESTS";
 const PYTHON_VFS_RPC_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_TIMEOUT_MS";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -750,6 +752,145 @@ export async function loadPyodide(options) {
         stdout.contains("\"size\":14"),
         "unexpected stdout: {stdout}"
     );
+}
+
+#[test]
+fn python_execution_rejects_vfs_rpc_requests_past_queue_limit() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let pyodide_dir = temp.path().join("pyodide");
+    fs::create_dir_all(&pyodide_dir).expect("create pyodide dir");
+    write_fixture(
+        &pyodide_dir.join("pyodide.mjs"),
+        r#"
+import { readSync, writeSync } from 'node:fs';
+
+let responseBuffer = '';
+
+function readResponse(fd) {
+  while (true) {
+    const newlineIndex = responseBuffer.indexOf('\n');
+    if (newlineIndex >= 0) {
+      const line = responseBuffer.slice(0, newlineIndex);
+      responseBuffer = responseBuffer.slice(newlineIndex + 1);
+      return JSON.parse(line);
+    }
+
+    const chunk = Buffer.alloc(4096);
+    const bytesRead = readSync(fd, chunk, 0, chunk.length, null);
+    if (bytesRead === 0) {
+      throw new Error('response pipe closed');
+    }
+    responseBuffer += chunk.subarray(0, bytesRead).toString('utf8');
+  }
+}
+
+export async function loadPyodide(options) {
+  const requestFd = Number.parseInt(process.env.AGENT_OS_PYTHON_VFS_RPC_REQUEST_FD, 10);
+  const responseFd = Number.parseInt(process.env.AGENT_OS_PYTHON_VFS_RPC_RESPONSE_FD, 10);
+
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync() {
+      for (const id of [1, 2, 3]) {
+        writeSync(
+          requestFd,
+          `${JSON.stringify({ id, method: 'fsRead', path: `/workspace/${id}.txt` })}\n`,
+        );
+      }
+
+      const responses = [readResponse(responseFd), readResponse(responseFd), readResponse(responseFd)];
+      options.stdout(JSON.stringify(responses));
+    },
+  };
+}
+"#,
+    );
+    write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
+
+    let mut engine = PythonExecutionEngine::default();
+    let context = engine.create_context(CreatePythonContextRequest {
+        vm_id: String::from("vm-python"),
+        pyodide_dist_path: pyodide_dir,
+    });
+
+    let mut execution = engine
+        .start_execution(StartPythonExecutionRequest {
+            vm_id: String::from("vm-python"),
+            context_id: context.context_id,
+            code: String::from("print('rpc queue bound')"),
+            file_path: None,
+            env: BTreeMap::from([(
+                String::from(PYTHON_VFS_RPC_MAX_PENDING_REQUESTS_ENV),
+                String::from("1"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start Python execution");
+
+    let mut stdout = Vec::new();
+    let mut exit_code = None;
+    let mut requests = Vec::new();
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll Python event")
+        {
+            Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(PythonExecutionEvent::Stderr(chunk)) => {
+                panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
+            }
+            Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
+                requests.push((request.id, request.method.clone(), request.path.clone()));
+                execution
+                    .respond_vfs_rpc_success(
+                        request.id,
+                        PythonVfsRpcResponsePayload::Read {
+                            content_base64: String::from("aGVsbG8="),
+                        },
+                    )
+                    .expect("respond to read");
+            }
+            Some(PythonExecutionEvent::Exited(code)) => exit_code = Some(code),
+            None => panic!("timed out waiting for Python execution event"),
+        }
+    }
+
+    assert_eq!(exit_code, Some(0));
+    assert_eq!(
+        requests,
+        vec![(
+            1,
+            PythonVfsRpcMethod::Read,
+            String::from("/workspace/1.txt"),
+        )]
+    );
+
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("parse rpc queue JSON");
+    let responses = parsed.as_array().expect("responses array");
+    assert_eq!(responses.len(), 3, "stdout: {stdout}");
+
+    let ok_count = responses
+        .iter()
+        .filter(|response| response["ok"] == serde_json::Value::Bool(true))
+        .count();
+    let queue_full_count = responses
+        .iter()
+        .filter(|response| {
+            response["ok"] == serde_json::Value::Bool(false)
+                && response["error"]["code"]
+                    == serde_json::Value::String(String::from(
+                        "ERR_AGENT_OS_PYTHON_VFS_RPC_QUEUE_FULL",
+                    ))
+        })
+        .count();
+
+    assert_eq!(ok_count, 1, "stdout: {stdout}");
+    assert_eq!(queue_full_count, 2, "stdout: {stdout}");
 }
 
 #[test]

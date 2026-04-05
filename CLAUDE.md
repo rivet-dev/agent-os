@@ -149,6 +149,7 @@ The registry software packages depend on `@rivet-dev/agent-os-registry-types` (i
 - Command execution mirrors the kernel API (exec, spawn)
 - `fetch(port, request)` reaches services running inside the VM using the kernel network adapter pattern (`proc.network.fetch`)
 - Python execution in `crates/execution/src/python.rs` should keep `poll_event()` blocked until a real guest-visible event arrives or the caller timeout expires; filtered stderr/control messages are internal noise, and `wait()` should bound accumulated stdout/stderr via the hidden `AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES` env knob rather than growing buffers without limit.
+- Pyodide bootstrap hardening in `crates/execution/src/node_import_cache.rs` must stay staged: `globalThis` guards can go in before `loadPyodide()`, but mutating `process` before `loadPyodide()` breaks the bundled Pyodide runtime under Node `--permission`.
 
 ## Linux Compatibility
 

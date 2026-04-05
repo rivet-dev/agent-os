@@ -3,6 +3,7 @@
 - Sidecar `host_dir` mounts should anchor guest path resolution with `openat2(..., RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` and translate kernel `EXDEV` escape rejections back to guest-facing `EACCES`.
 - Python VFS RPCs are intentionally scoped to `/workspace`; normalize and reject anything outside that guest root in `crates/sidecar/src/service.rs` before touching the kernel VFS.
 - Pyodide VFS RPC timeouts are safer to enforce in `crates/execution/src/python.rs` against pending request IDs than inside the embedded runner; touching the bundled Python runner can perturb real Pyodide bootstrap behavior.
+- Pyodide bootstrap hardening in `crates/execution/src/node_import_cache.rs` must stay staged: `globalThis` guards can go in before `loadPyodide()`, but mutating `process` before `loadPyodide()` breaks the bundled Pyodide runtime under Node `--permission`.
 - Non-reaping host child liveness checks in `crates/sidecar/src/service.rs` should use `waitid(..., WNOWAIT | WNOHANG | WEXITED | WSTOPPED | WCONTINUED)`; `waitpid` does not provide a safe non-reaping probe for the PID-reuse hardening path.
 - `crates/execution/src/node_import_cache.rs` hardening helpers should fail closed: if `Object.defineProperty(...)` cannot lock down a guest-visible property, throw immediately instead of falling back to mutable assignment.
 - Kernel zombie cleanup in `crates/kernel/src/process_table.rs` should only reap exited children once they no longer have a living parent in the table; otherwise reschedule them so `waitpid` can still observe their exit code.
@@ -756,4 +757,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Native WASM host-import wrappers should validate both directions of every buffer contract: checked `usize` -> `u32` casts before the syscall, then a returned-length bounds check before treating guest memory as initialized.
   - Gotchas encountered: Running `cargo test` directly against `registry/native/crates/wasi-ext/Cargo.toml` can refresh `registry/native/Cargo.lock`; if the story does not change native manifests, restore the lockfile before committing.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test fd_table --test vfs`, `cargo test -p agent-os-kernel --test root_fs`, `cargo test -p agent-os-kernel --test root_fs overlay_rename_rejects_directory_trees_that_exceed_snapshot_depth_limit -- --exact`, and `cargo test --manifest-path /home/nathan/a5/registry/native/crates/wasi-ext/Cargo.toml` all pass after this change.
+---
+## 2026-04-05 04:18:27 PDT - US-035
+- What was implemented
+- Split the embedded Pyodide hardening in `crates/execution/src/node_import_cache.rs` so safe `globalThis` guards are installed before `loadPyodide()`, while `process`-level denials stay deferred until after Pyodide bootstrap and package preload work complete.
+- Added bounded Python VFS RPC backlog handling in `crates/execution/src/python.rs`, including a configurable `AGENT_OS_PYTHON_VFS_RPC_MAX_PENDING_REQUESTS` limit and explicit `ERR_AGENT_OS_PYTHON_VFS_RPC_QUEUE_FULL` responses instead of unbounded request accumulation.
+- Added regressions that verify cached pre-load access to hardened globals is blocked and that overflowing the Python VFS RPC request queue returns explicit queue-full errors without surfacing extra requests to the host.
+- Files changed
+- `CLAUDE.md`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/src/python.rs`
+- `crates/execution/tests/python.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Pyodide bootstrap hardening has to be staged; `globalThis` guards can go in before `loadPyodide()`, but mutating `process` before bootstrap breaks the real bundled Pyodide runtime under Node `--permission`.
+  - Gotchas encountered: `cargo test -p agent-os-sidecar --test python -- --test-threads=1` is still red on the pre-existing Pyodide warmup `process.binding` denial path and an unrelated cross-runtime workspace test, so the focused execution suites remain the reliable story-level verification targets for this area.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test python -- --test-threads=1`, `cargo test -p agent-os-execution node_import_cache::tests::materialized_python_runner_hardens_builtin_access_before_load_pyodide -- --exact --test-threads=1`, and `cargo check -p agent-os-execution -p agent-os-sidecar` pass after this change.
 ---

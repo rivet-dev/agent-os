@@ -565,7 +565,7 @@
         "Typecheck passes"
       ],
       "priority": 40,
-      "passes": false,
+      "passes": true,
       "notes": "Hardening currently runs AFTER loadPyodide. VFS RPC queue is unbounded."
     },
     {
