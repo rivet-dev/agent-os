@@ -185,7 +185,10 @@ fn waitpid_resolves_for_exiting_and_already_exited_processes() {
         (pid, 0)
     );
     assert_eq!(table.zombie_timer_count(), 0);
-    assert!(table.get(pid).is_none(), "waitpid should reap exited processes");
+    assert!(
+        table.get(pid).is_none(),
+        "waitpid should reap exited processes"
+    );
 
     let exited_pid = table.allocate_pid();
     table.register(

@@ -1390,12 +1390,39 @@ const originalFetch =
     ? globalThis.fetch.bind(globalThis)
     : null;
 const HOST_CWD = process.cwd();
+const HOST_EXEC_PATH = process.execPath;
+const HOST_EXEC_DIR = path.dirname(HOST_EXEC_PATH);
 if (!Module || typeof Module.createRequire !== 'function') {
   throw new Error('node:module builtin access is required for the Agent OS guest runtime');
 }
 const hostRequire = Module.createRequire(import.meta.url);
 const guestEntryPoint =
   HOST_PROCESS_ENV.AGENT_OS_GUEST_ENTRYPOINT ?? HOST_PROCESS_ENV.AGENT_OS_ENTRYPOINT;
+const DEFAULT_VIRTUAL_EXEC_PATH = '/usr/bin/node';
+const DEFAULT_VIRTUAL_PID = 1;
+const DEFAULT_VIRTUAL_PPID = 0;
+const DEFAULT_VIRTUAL_UID = 0;
+const DEFAULT_VIRTUAL_GID = 0;
+const VIRTUAL_EXEC_PATH = parseVirtualProcessString(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH,
+  DEFAULT_VIRTUAL_EXEC_PATH,
+);
+const VIRTUAL_PID = parseVirtualProcessNumber(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_PROCESS_PID,
+  DEFAULT_VIRTUAL_PID,
+);
+const VIRTUAL_PPID = parseVirtualProcessNumber(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_PROCESS_PPID,
+  DEFAULT_VIRTUAL_PPID,
+);
+const VIRTUAL_UID = parseVirtualProcessNumber(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_PROCESS_UID,
+  DEFAULT_VIRTUAL_UID,
+);
+const VIRTUAL_GID = parseVirtualProcessNumber(
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_PROCESS_GID,
+  DEFAULT_VIRTUAL_GID,
+);
 
 function isPathLike(specifier) {
   return specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('file:');
@@ -1463,6 +1490,19 @@ function parseJsonArray(value) {
   } catch {
     return [];
   }
+}
+
+function parseVirtualProcessNumber(value, fallback) {
+  if (value == null || value === '') {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function parseVirtualProcessString(value, fallback) {
+  return typeof value === 'string' && value.length > 0 ? value : fallback;
 }
 
 function isInternalProcessEnvKey(key) {
@@ -1805,7 +1845,7 @@ function wrapChildProcessModule(childProcessModule, fromGuestDir = '/') {
     isNodeCommand(command) || isNodeScriptCommand(command);
   const translateCommand = (command) =>
     usesNodeRuntime(command)
-      ? process.execPath
+      ? HOST_EXEC_PATH
       : translateGuestPath(command, fromGuestDir);
   const isGuestCommandPath = (command) =>
     typeof command === 'string' &&
@@ -1819,7 +1859,7 @@ function wrapChildProcessModule(childProcessModule, fromGuestDir = '/') {
         safeEnv[key] = translateGuestPath(safeEnv[key], fromGuestDir);
       }
     }
-    const nodeDir = path.dirname(process.execPath);
+    const nodeDir = HOST_EXEC_DIR;
     const existingPath =
       typeof safeEnv.PATH === 'string'
         ? safeEnv.PATH
@@ -2031,6 +2071,9 @@ const hostFsPromises = fs.promises;
 const hostChildProcess = hostRequire('child_process');
 const guestFs = wrapFsModule(hostFs);
 const guestChildProcess = wrapChildProcessModule(hostChildProcess);
+const guestGetUid = () => VIRTUAL_UID;
+const guestGetGid = () => VIRTUAL_GID;
+let guestProcess = process;
 
 function syncBuiltinModuleExports(hostModule, wrappedModule) {
   if (
@@ -2061,6 +2104,55 @@ function cloneFsModule(fsModule) {
     cloned.promises = { ...fsModule.promises };
   }
   return cloned;
+}
+
+function createGuestProcessProxy(target) {
+  return new Proxy(target, {
+    get(source, key) {
+      switch (key) {
+        case 'execPath':
+          return VIRTUAL_EXEC_PATH;
+        case 'pid':
+          return VIRTUAL_PID;
+        case 'ppid':
+          return VIRTUAL_PPID;
+        case 'getuid':
+          return guestGetUid;
+        case 'getgid':
+          return guestGetGid;
+        default:
+          return Reflect.get(source, key, source);
+      }
+    },
+    getOwnPropertyDescriptor(source, key) {
+      switch (key) {
+        case 'execPath':
+          return { value: VIRTUAL_EXEC_PATH, writable: false, enumerable: true, configurable: true };
+        case 'pid':
+          return { value: VIRTUAL_PID, writable: false, enumerable: true, configurable: true };
+        case 'ppid':
+          return { value: VIRTUAL_PPID, writable: false, enumerable: true, configurable: true };
+        case 'getuid':
+          return { value: guestGetUid, writable: false, enumerable: true, configurable: true };
+        case 'getgid':
+          return { value: guestGetGid, writable: false, enumerable: true, configurable: true };
+        default:
+          return Reflect.getOwnPropertyDescriptor(source, key);
+      }
+    },
+    has(source, key) {
+      switch (key) {
+        case 'execPath':
+        case 'pid':
+        case 'ppid':
+        case 'getuid':
+        case 'getgid':
+          return true;
+        default:
+          return Reflect.has(source, key);
+      }
+    },
+  });
 }
 
 function createGuestRequire(fromGuestDir) {
@@ -2144,6 +2236,12 @@ function installGuestHardening() {
     // Ignore runtimes that reject syncing builtin ESM exports.
   }
 
+  hardenProperty(process, 'execPath', VIRTUAL_EXEC_PATH);
+  hardenProperty(process, 'pid', VIRTUAL_PID);
+  hardenProperty(process, 'ppid', VIRTUAL_PPID);
+  hardenProperty(process, 'getuid', guestGetUid);
+  hardenProperty(process, 'getgid', guestGetGid);
+
   hardenProperty(process, 'binding', () => {
     throw accessDenied('process.binding');
   });
@@ -2157,6 +2255,9 @@ function installGuestHardening() {
     hardenProperty(process, 'getBuiltinModule', (specifier) => {
       const normalized =
         typeof specifier === 'string' ? normalizeBuiltin(specifier) : null;
+      if (normalized === 'process') {
+        return guestProcess;
+      }
       if (normalized === 'fs') {
         return cloneFsModule(guestFs);
       }
@@ -2174,6 +2275,9 @@ function installGuestHardening() {
     Module._load = function(request, parent, isMain) {
       const normalized =
         typeof request === 'string' ? normalizeBuiltin(request) : null;
+      if (normalized === 'process') {
+        return guestProcess;
+      }
       if (normalized === 'fs') {
         return cloneFsModule(guestFs);
       }
@@ -2270,7 +2374,9 @@ const entrypointPath = isPathLike(entrypoint)
   ? path.resolve(process.cwd(), entrypoint)
   : entrypoint;
 
-process.argv = [process.execPath, guestEntryPoint ?? entrypointPath, ...guestArgv];
+process.argv = [VIRTUAL_EXEC_PATH, guestEntryPoint ?? entrypointPath, ...guestArgv];
+guestProcess = createGuestProcessProxy(process);
+hardenProperty(globalThis, 'process', guestProcess);
 
 if (bootstrapModule) {
   await import(toImportSpecifier(bootstrapModule));
@@ -4219,18 +4325,15 @@ fn render_child_process_builtin_asset_source(init_counter_key: &str) -> String {
     let init_counter_key = format!("{init_counter_key:?}");
 
     format!(
-        "import childProcess from \"node:child_process\";\n\
-import path from \"node:path\";\n\n\
-const GUEST_PATH_MAPPINGS = parseGuestPathMappings(process.env.AGENT_OS_GUEST_PATH_MAPPINGS);\n\
-const ALLOWED_BUILTINS = new Set(parseJsonArray(process.env.AGENT_OS_ALLOWED_NODE_BUILTINS));\n\
+        "const ACCESS_DENIED_CODE = \"ERR_ACCESS_DENIED\";\n\
 const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
 globalThis[{init_counter_key}] = initCount;\n\
-if (!ALLOWED_BUILTINS.has(\"child_process\")) {{\n\
+if (!globalThis.__agentOsBuiltinChildProcess) {{\n\
   const error = new Error(\"node:child_process is not available in the Agent OS guest runtime\");\n\
-  error.code = \"ERR_ACCESS_DENIED\";\n\
+  error.code = ACCESS_DENIED_CODE;\n\
   throw error;\n\
 }}\n\n\
-const mod = wrapChildProcessModule(childProcess);\n\n\
+const mod = globalThis.__agentOsBuiltinChildProcess;\n\n\
 export const __agentOsInitCount = initCount;\n\
 export default mod;\n\
 export const ChildProcess = mod.ChildProcess;\n\
@@ -4241,308 +4344,7 @@ export const execFileSync = mod.execFileSync;\n\
 export const execSync = mod.execSync;\n\
 export const fork = mod.fork;\n\
 export const spawn = mod.spawn;\n\
-export const spawnSync = mod.spawnSync;\n\n\
-function parseJsonArray(value) {{\n\
-  if (!value) {{\n\
-    return [];\n\
-  }}\n\n\
-  try {{\n\
-    const parsed = JSON.parse(value);\n\
-    return Array.isArray(parsed) ? parsed.filter((entry) => typeof entry === \"string\") : [];\n\
-  }} catch {{\n\
-    return [];\n\
-  }}\n\
-}}\n\n\
-function parseGuestPathMappings(value) {{\n\
-  if (!value) {{\n\
-    return [];\n\
-  }}\n\n\
-  try {{\n\
-    const parsed = JSON.parse(value);\n\
-    if (!Array.isArray(parsed)) {{\n\
-      return [];\n\
-    }}\n\n\
-    return parsed\n\
-      .map((entry) => {{\n\
-        const guestPath =\n\
-          entry && typeof entry.guestPath === \"string\"\n\
-            ? path.posix.normalize(entry.guestPath)\n\
-            : null;\n\
-        const hostPath =\n\
-          entry && typeof entry.hostPath === \"string\"\n\
-            ? path.resolve(entry.hostPath)\n\
-            : null;\n\
-        return guestPath && hostPath ? {{ guestPath, hostPath }} : null;\n\
-      }})\n\
-      .filter(Boolean)\n\
-      .sort((left, right) => right.guestPath.length - left.guestPath.length);\n\
-  }} catch {{\n\
-    return [];\n\
-  }}\n\
-}}\n\n\
-function hostPathFromGuestPath(guestPath) {{\n\
-  if (typeof guestPath !== \"string\") {{\n\
-    return null;\n\
-  }}\n\n\
-  const normalized = path.posix.normalize(guestPath);\n\
-  for (const mapping of GUEST_PATH_MAPPINGS) {{\n\
-    if (mapping.guestPath === \"/\") {{\n\
-      const suffix = normalized.replace(/^\\/+/, \"\");\n\
-      return suffix ? path.join(mapping.hostPath, suffix) : mapping.hostPath;\n\
-    }}\n\n\
-    if (\n\
-      normalized !== mapping.guestPath &&\n\
-      !normalized.startsWith(`${{mapping.guestPath}}/`)\n\
-    ) {{\n\
-      continue;\n\
-    }}\n\n\
-    const suffix =\n\
-      normalized === mapping.guestPath\n\
-        ? \"\"\n\
-        : normalized.slice(mapping.guestPath.length + 1);\n\
-    return suffix ? path.join(mapping.hostPath, suffix) : mapping.hostPath;\n\
-  }}\n\n\
-  return null;\n\
-}}\n\n\
-function translateGuestPath(value, fromGuestDir = \"/\") {{\n\
-  if (typeof value !== \"string\") {{\n\
-    return value;\n\
-  }}\n\n\
-  if (value.startsWith(\"file:\")) {{\n\
-    try {{\n\
-      const hostPath = hostPathFromGuestPath(new URL(value).pathname);\n\
-      return hostPath ?? value;\n\
-    }} catch {{\n\
-      return value;\n\
-    }}\n\
-  }}\n\n\
-  if (value.startsWith(\"/\")) {{\n\
-    return hostPathFromGuestPath(value) ?? value;\n\
-  }}\n\n\
-  if (value.startsWith(\"./\") || value.startsWith(\"../\")) {{\n\
-    const guestPath = path.posix.normalize(path.posix.join(fromGuestDir, value));\n\
-    return hostPathFromGuestPath(guestPath) ?? value;\n\
-  }}\n\n\
-  return value;\n\
-}}\n\n\
-function wrapChildProcessModule(childProcessModule, fromGuestDir = \"/\") {{\n\
-  const isNodeCommand = (command) =>\n\
-    command === \"node\" || String(command).endsWith(\"/node\");\n\
-  const isNodeScriptCommand = (command) =>\n\
-    typeof command === \"string\" &&\n\
-    (command.startsWith(\"./\") ||\n\
-      command.startsWith(\"../\") ||\n\
-      command.startsWith(\"/\") ||\n\
-      command.startsWith(\"file:\")) &&\n\
-    /\\.(?:[cm]?js)$/i.test(command);\n\
-  const usesNodeRuntime = (command) =>\n\
-    isNodeCommand(command) || isNodeScriptCommand(command);\n\
-  const translateCommand = (command) =>\n\
-    usesNodeRuntime(command)\n\
-      ? process.execPath\n\
-      : translateGuestPath(command, fromGuestDir);\n\
-  const isGuestCommandPath = (command) =>\n\
-    typeof command === \"string\" &&\n\
-    (command.startsWith(\"/\") || command.startsWith(\"file:\"));\n\
-  const ensureRuntimeEnv = (env) => {{\n\
-    const sourceEnv =\n\
-      env && typeof env === \"object\" ? env : process.env;\n\
-    const {{ NODE_OPTIONS: _nodeOptions, ...safeEnv }} = sourceEnv;\n\
-    for (const key of [\"HOME\", \"PWD\", \"TMPDIR\", \"TEMP\", \"TMP\", \"PI_CODING_AGENT_DIR\"]) {{\n\
-      if (typeof safeEnv[key] === \"string\") {{\n\
-        safeEnv[key] = translateGuestPath(safeEnv[key], fromGuestDir);\n\
-      }}\n\
-    }}\n\
-    const nodeDir = path.dirname(process.execPath);\n\
-    const existingPath =\n\
-      typeof safeEnv.PATH === \"string\"\n\
-        ? safeEnv.PATH\n\
-        : typeof process.env.PATH === \"string\"\n\
-          ? process.env.PATH\n\
-          : \"\";\n\
-    const segments = existingPath\n\
-      .split(path.delimiter)\n\
-      .filter(Boolean);\n\n\
-    if (!segments.includes(nodeDir)) {{\n\
-      segments.unshift(nodeDir);\n\
-    }}\n\n\
-    return {{\n\
-      ...safeEnv,\n\
-      PATH: segments.join(path.delimiter),\n\
-    }};\n\
-  }};\n\
-  const translateProcessOptions = (options) => {{\n\
-    if (options == null) {{\n\
-      return {{\n\
-        env: ensureRuntimeEnv(process.env),\n\
-      }};\n\
-    }}\n\n\
-    if (typeof options !== \"object\") {{\n\
-      return options;\n\
-    }}\n\n\
-    return {{\n\
-      ...options,\n\
-      cwd:\n\
-        typeof options.cwd === \"string\"\n\
-          ? translateGuestPath(options.cwd, fromGuestDir)\n\
-          : options.cwd,\n\
-      env: ensureRuntimeEnv(options.env),\n\
-    }};\n\
-  }};\n\
-  const translateArgs = (command, args) => {{\n\
-    if (isNodeScriptCommand(command)) {{\n\
-      const translatedScript = translateGuestPath(command, fromGuestDir);\n\
-      const translatedArgs = Array.isArray(args)\n\
-        ? args.map((arg) => translateGuestPath(arg, fromGuestDir))\n\
-        : [];\n\
-      return [translatedScript, ...translatedArgs];\n\
-    }}\n\n\
-    if (!Array.isArray(args)) {{\n\
-      return args;\n\
-    }}\n\
-    if (!isNodeCommand(command)) {{\n\
-      return args.map((arg) => translateGuestPath(arg, fromGuestDir));\n\
-    }}\n\
-    return args.map((arg, index) =>\n\
-      index === 0 ? translateGuestPath(arg, fromGuestDir) : arg,\n\
-    );\n\
-  }};\n\n\
-  const prependNodePermissionArgs = (command, args, options) => {{\n\
-    if (!usesNodeRuntime(command)) {{\n\
-      return args;\n\
-    }}\n\n\
-    const translatedArgs = Array.isArray(args) ? args : [];\n\
-    const readPaths = new Set();\n\
-    const writePaths = new Set();\n\
-    const addReadPathChain = (value) => {{\n\
-      if (typeof value !== \"string\" || value.length === 0) {{\n\
-        return;\n\
-      }}\n\
-      let current = value;\n\
-      while (true) {{\n\
-        readPaths.add(current);\n\
-        const parent = path.dirname(current);\n\
-        if (parent === current) {{\n\
-          break;\n\
-        }}\n\
-        current = parent;\n\
-      }}\n\
-    }};\n\
-    const addWritePath = (value) => {{\n\
-      if (typeof value !== \"string\" || value.length === 0) {{\n\
-        return;\n\
-      }}\n\
-      writePaths.add(value);\n\
-    }};\n\n\
-    if (typeof options?.cwd === \"string\") {{\n\
-      addReadPathChain(options.cwd);\n\
-      addWritePath(options.cwd);\n\
-    }}\n\n\
-    const homePath =\n\
-      typeof options?.env?.HOME === \"string\"\n\
-        ? translateGuestPath(options.env.HOME, fromGuestDir)\n\
-        : typeof process.env.HOME === \"string\"\n\
-          ? translateGuestPath(process.env.HOME, fromGuestDir)\n\
-          : null;\n\
-    if (homePath) {{\n\
-      addReadPathChain(homePath);\n\
-      addWritePath(homePath);\n\
-    }}\n\n\
-    if (translatedArgs.length > 0 && typeof translatedArgs[0] === \"string\") {{\n\
-      addReadPathChain(translatedArgs[0]);\n\
-    }}\n\n\
-    const permissionArgs = [\n\
-      \"--allow-child-process\",\n\
-      \"--allow-worker\",\n\
-      \"--disable-warning=SecurityWarning\",\n\
-    ];\n\n\
-    for (const allowedPath of readPaths) {{\n\
-      permissionArgs.push(`--allow-fs-read=${{allowedPath}}`);\n\
-    }}\n\
-    for (const allowedPath of writePaths) {{\n\
-      permissionArgs.push(`--allow-fs-write=${{allowedPath}}`);\n\
-    }}\n\n\
-    return [...permissionArgs, ...translatedArgs];\n\
-  }};\n\n\
-  return {{\n\
-    ...childProcessModule,\n\
-    exec: childProcessModule.exec.bind(childProcessModule),\n\
-    execFile: (file, args, options, callback) => {{\n\
-      const translatedOptions = translateProcessOptions(options);\n\
-      return childProcessModule.execFile(\n\
-        translateCommand(file),\n\
-        prependNodePermissionArgs(\n\
-          file,\n\
-          translateArgs(file, args),\n\
-          translatedOptions,\n\
-        ),\n\
-        translatedOptions,\n\
-        callback,\n\
-      );\n\
-    }},\n\
-    execFileSync: (file, args, options) => {{\n\
-      const translatedOptions = translateProcessOptions(options);\n\
-      return childProcessModule.execFileSync(\n\
-        translateCommand(file),\n\
-        prependNodePermissionArgs(\n\
-          file,\n\
-          translateArgs(file, args),\n\
-          translatedOptions,\n\
-        ),\n\
-        translatedOptions,\n\
-      );\n\
-    }},\n\
-    execSync: childProcessModule.execSync.bind(childProcessModule),\n\
-    fork: (modulePath, args, options) => {{\n\
-      const translatedOptions = translateProcessOptions(options);\n\
-      return childProcessModule.fork(\n\
-        translateGuestPath(modulePath, fromGuestDir),\n\
-        prependNodePermissionArgs(\n\
-          \"node\",\n\
-          translateArgs(\"node\", args),\n\
-          translatedOptions,\n\
-        ),\n\
-        translatedOptions,\n\
-      );\n\
-    }},\n\
-    spawn: (command, args, options) => {{\n\
-      const translatedOptions = translateProcessOptions(options);\n\
-      return childProcessModule.spawn(\n\
-        translateCommand(command),\n\
-        prependNodePermissionArgs(\n\
-          command,\n\
-          translateArgs(command, args),\n\
-          translatedOptions,\n\
-        ),\n\
-        translatedOptions,\n\
-      );\n\
-    }},\n\
-    spawnSync: (command, args, options) => {{\n\
-      const translatedOptions = translateProcessOptions(options);\n\
-      const result = childProcessModule.spawnSync(\n\
-        translateCommand(command),\n\
-        prependNodePermissionArgs(\n\
-          command,\n\
-          translateArgs(command, args),\n\
-          translatedOptions,\n\
-        ),\n\
-        translatedOptions,\n\
-      );\n\
-      if (\n\
-        isGuestCommandPath(command) &&\n\
-        result?.status == null &&\n\
-        (result.error?.code === \"ENOENT\" || result.error?.code === \"EACCES\")\n\
-      ) {{\n\
-        return {{\n\
-          ...result,\n\
-          status: 1,\n\
-          stderr: Buffer.from(result.error.message),\n\
-        }};\n\
-      }}\n\
-      return result;\n\
-    }},\n\
-  }};\n\
-}}\n"
+export const spawnSync = mod.spawnSync;\n"
     )
 }
 

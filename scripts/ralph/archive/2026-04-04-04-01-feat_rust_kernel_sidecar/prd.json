@@ -15,7 +15,7 @@
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": true,
+      "passes": false,
       "notes": "Zero-effort highest-value security fix. Every builtin without a polyfill currently falls through to real host module via nextResolve()."
     },
     {
@@ -30,7 +30,7 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": true,
+      "passes": false,
       "notes": "CRITICAL: import js exposes all JS globals including process.env, process.kill(), require. Full sandbox escape."
     },
     {
@@ -45,7 +45,7 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": true,
+      "passes": false,
       "notes": "Currently python.rs:622 explicitly disables --permission. This removes the defense-in-depth OS-level backstop."
     },
     {
@@ -61,7 +61,7 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": true,
+      "passes": false,
       "notes": "process.env currently leaks all AGENT_OS_* internal control variables to guest code."
     },
     {
@@ -75,7 +75,7 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": true,
+      "passes": false,
       "notes": "process.cwd() currently returns real host path like /tmp/agent-os-xxx/workspace."
     },
     {
@@ -92,7 +92,7 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": true,
+      "passes": false,
       "notes": "Multiple process properties leak real host state: execPath, argv[0], pid, ppid, getuid, getgid."
     },
     {

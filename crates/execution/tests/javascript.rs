@@ -1389,3 +1389,82 @@ console.log(JSON.stringify(result));
         .expect("chdir message")
         .contains("process.chdir"));
 }
+
+#[test]
+fn javascript_execution_virtualizes_process_identity() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const result = {
+  execPath: process.execPath,
+  argv0: process.argv[0],
+  pid: process.pid,
+  ppid: process.ppid,
+  uid: typeof process.getuid === "function" ? process.getuid() : null,
+  gid: typeof process.getgid === "function" ? process.getgid() : null,
+};
+
+console.log(JSON.stringify(result));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let cwd_host_path = temp.path().to_string_lossy().replace('\\', "\\\\");
+    let env = BTreeMap::from([
+        (
+            String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+            format!("[{{\"guestPath\":\"/root\",\"hostPath\":\"{cwd_host_path}\"}}]"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH"),
+            String::from("/usr/bin/node"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_PROCESS_PID"),
+            String::from("41"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_PROCESS_PPID"),
+            String::from("7"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_PROCESS_UID"),
+            String::from("0"),
+        ),
+        (
+            String::from("AGENT_OS_VIRTUAL_PROCESS_GID"),
+            String::from("0"),
+        ),
+    ]);
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        env,
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse process identity JSON");
+    assert_eq!(
+        parsed["execPath"],
+        Value::String(String::from("/usr/bin/node"))
+    );
+    assert_eq!(
+        parsed["argv0"],
+        Value::String(String::from("/usr/bin/node"))
+    );
+    assert_eq!(parsed["pid"], Value::from(41));
+    assert_eq!(parsed["ppid"], Value::from(7));
+    assert_eq!(parsed["uid"], Value::from(0));
+    assert_eq!(parsed["gid"], Value::from(0));
+}

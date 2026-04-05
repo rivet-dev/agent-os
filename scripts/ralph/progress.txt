@@ -5,6 +5,7 @@
 - The Pyodide host Node process is hardened with Node `--permission` in `crates/execution/src/python.rs`; keep its read allowlist scoped to the import-cache root, compile-cache dir, Pyodide bundle, and sandbox cwd, and keep writes limited to the cache paths plus sandbox cwd.
 - Node guest env hardening in `crates/execution/src/node_import_cache.rs` should snapshot `AGENT_OS_*` control vars first, then replace `process.env` with a filtered proxy so runtime internals keep working while guest enumeration/access stays scrubbed; when `node:module` is denied, bootstrap the runner via `process.getBuiltinModule('node:module')` instead of importing it through the guest loader.
 - Node guest process virtualization in `crates/execution/src/node_import_cache.rs` should snapshot the host `process.cwd()` before hardening, use that snapshot for internal module resolution/`createRequire(...)`, and derive guest-visible paths from `AGENT_OS_GUEST_PATH_MAPPINGS` for user-facing `process.*` APIs.
+- Guest-visible `process` identity in `crates/execution/src/node_import_cache.rs` should be virtualized through a `globalThis.process` proxy after bootstrap setup, while `require('node:process')` and `process.getBuiltinModule('node:process')` are routed back to that same proxy; keep internal host-only values in snapped constants like `HOST_EXEC_PATH`.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -82,4 +83,20 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: Guest-facing process virtualization should translate host paths back through `AGENT_OS_GUEST_PATH_MAPPINGS`, while internal Node bootstrap code continues using a captured host cwd to avoid breaking resolution.
 - Gotchas encountered: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` still shows pre-existing flaky cache-metric assertions (`javascript_execution_invalidates_bare_package_resolution_when_package_metadata_changes`, `javascript_execution_preserves_source_changes_with_cached_resolution`) even though those cases pass when rerun individually; the new cwd regression and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` pass.
 - Useful context: The cwd hardening lives in the embedded runner source inside `crates/execution/src/node_import_cache.rs`, not in `crates/execution/src/javascript.rs`, because the visible `process` object is constructed inside the generated `runner.mjs`.
+---
+## 2026-04-04 19:57:51 PDT - US-006
+- What was implemented
+- Virtualized the Node guest runner’s `process.execPath`, `process.argv[0]`, `process.pid`, `process.ppid`, `process.getuid()`, and `process.getgid()` so guest code sees configured virtual values instead of host state.
+- Added `AGENT_OS_VIRTUAL_PROCESS_*` execution env hooks so upstream callers can inject kernel-derived process identity without exposing those control vars to guest `process.env`.
+- Routed `require('node:process')` and `process.getBuiltinModule('node:process')` back to the same guest `process` proxy, and switched the ESM `child_process` builtin asset to re-export the runner’s wrapped module instead of rebuilding from scrubbed `AGENT_OS_*` env.
+- Files changed
+- `crates/execution/src/javascript.rs`
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: Some Node `process` properties are refreshed or non-configurable, so stable guest identity virtualization works more reliably by swapping `globalThis.process` to a proxy after bootstrap setup than by relying on direct property replacement alone.
+- Gotchas encountered: `process.argv0` is non-configurable in Node v24, so this story can safely virtualize `process.argv[0]` but not the separate `process.argv0` property without violating Proxy invariants.
+- Useful context: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` both pass after this change on the current branch.
 ---

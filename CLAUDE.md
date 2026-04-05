@@ -4,13 +4,28 @@ A high-level wrapper around the Agent OS runtime that provides a clean API for r
 
 ## Agent OS Runtime
 
-Agent OS uses a native kernel sidecar written in Rust. All guest code runs inside the sidecar's isolation boundary — nothing executes as an unsandboxed host process. The kernel orchestrates three execution environments:
+Agent OS is a **fully virtualized operating system**. The kernel, written as a Rust sidecar, provides a complete POSIX-like environment — virtual filesystem, process table, socket table, pipe/PTY management, and permission system. Guest code sees a self-contained OS and must never interact with the host directly. Every system call (file I/O, networking, process spawning, DNS resolution) must be mediated by the kernel. No guest operation may fall through to a real host syscall.
+
+The kernel orchestrates three execution environments:
 
 - **WASM processes** — A custom libc and Rust toolchain compile a full suite of POSIX utilities (coreutils, sh, grep, etc.) to WebAssembly. All WASM execution happens within the sidecar's managed runtime.
-- **Node.js (V8 isolates)** — A sandboxed reimplementation of Node.js APIs (`child_process`, `fs`, `net`, etc.) runs JS/TS inside isolated V8 contexts. Module loading is hijacked to route through the kernel VFS. This is how agent code runs.
+- **Node.js** — JS/TS runs inside Node.js child processes with ESM loader hooks that intercept `require()`/`import` for builtins. Every Node.js builtin module that guest code can import must be a **kernel-backed polyfill** — never the real Node.js module. See "Node.js Isolation Model" below.
 - **Python (Pyodide)** — CPython compiled to WASM via Pyodide, running within the sidecar with kernel-backed file/network I/O.
 
 All runtimes are managed by the sidecar's execution engines and kernel process table. Processes can spawn children across runtimes (e.g., a Node process can spawn a WASM shell). Guest code must never escape the sidecar's isolation boundary to run on the host.
+
+### Virtualization invariants
+
+These are hard rules with no exceptions:
+
+1. **Every guest syscall goes through the kernel.** File reads go through the kernel VFS, not real `node:fs`. Network connections go through the kernel socket table, not real `node:net`. Process spawning goes through the kernel process table, not real `node:child_process`. DNS resolution goes through the kernel's DNS resolver, not real `node:dns`. There are no shortcuts where guest code touches host resources directly.
+2. **No real host builtins.** When a guest does `require('fs')` or `import net from 'node:net'`, the module loader must return a kernel-backed polyfill. If no polyfill exists yet, the builtin must be denied (`ERR_ACCESS_DENIED`). The loader must never fall through to Node.js's default resolution and hand the guest the real host module.
+3. **The host is an implementation detail.** Guest code should not be able to observe that it is running on a host Node.js process. `process.pid` should be the kernel PID, `os.hostname()` should be the kernel hostname, `fs.readdirSync('/')` should show the kernel VFS root. `process.cwd()` should return the kernel CWD, not a host path. `process.env` must not contain internal `AGENT_OS_*` control variables. Error messages and stack traces must not reveal host filesystem paths. `require.resolve()` must return guest-visible paths, not host paths. Any host state leaking through to the guest is a bug.
+4. **Polyfills are ports, not wrappers.** A path-translating shim over real `node:fs` is not a polyfill — it is a wrapper around a host API. A real polyfill implements the API semantics using only kernel primitives (VFS, socket table, process table, pipe manager). The original JS kernel (`@secure-exec/core` + `@secure-exec/nodejs`, deleted in commit `5a43882`) had full kernel-backed polyfills for `fs`, `net`, `http`, `dns`, `dgram`, `child_process`, and `os`. The Rust sidecar must reach the same level of isolation.
+5. **Control channels must be out-of-band.** The sidecar must not use in-band magic prefixes on stdout/stderr for control signaling (exit codes, metrics, signal registration). Guest code can write these prefixes to inject fake control messages. Use dedicated file descriptors, separate pipes, or a side-channel protocol for all sidecar-internal communication.
+6. **Resource consumption must be bounded.** Every guest-allocatable resource must have a configurable limit enforced by the kernel: filesystem total size, inode count, process count, open FDs, pipes, PTYs, sockets, connections. Unbounded allocation from guest input is a DoS vector. The kernel's `ResourceLimits` must cover all resource types, not just processes and FDs.
+7. **Permission checks must use resolved paths.** Whenever the kernel checks permissions on a path, it must resolve symlinks first and check the resolved path. Checking the caller-supplied path and then operating on a symlink-resolved target is a TOCTOU bypass. Similarly, `link()` must check permissions on both source and destination.
+8. **The VM must behave like a standard Linux environment.** Agents are written to target Linux. The kernel should implement POSIX semantics faithfully — correct `errno` values, proper signal delivery, standard `/proc` layout, expected filesystem behavior. Deviations from standard Linux behavior cause agent failures and must be documented in the friction log (`.agent/notes/vm-friction.md`). When in doubt, match Linux kernel behavior, not a simplified model.
 
 ### Key subsystems
 
@@ -18,7 +33,55 @@ All runtimes are managed by the sidecar's execution engines and kernel process t
 - **Process management** — Kernel-wide process table tracks PIDs across all runtimes. Full POSIX process model: parent/child relationships, process groups, sessions, signals (SIGCHLD, SIGTERM, SIGWINCH), zombie cleanup, and `waitpid`. Each process gets its own FD table (0-255) with refcounted file descriptions supporting dup/dup2.
 - **Pipes & PTYs** — Kernel-managed pipes (64KB buffers) enable cross-runtime IPC. PTY master/slave pairs with line discipline support interactive shells. `openShell()` allocates a PTY and spawns sh/bash.
 - **Networking** — Socket table manages TCP/UDP/Unix domain sockets. Loopback connections stay entirely in-kernel. External connections delegate to a `HostNetworkAdapter` (implemented via `node:net`/`node:dgram` on the host). DNS resolution also goes through the adapter.
-- **Permissions** — Deny-by-default access control. Four permission domains: `fs`, `network`, `childProcess`, `env`. Each is a function that returns `{allow, reason}`. The `allowAll` preset grants everything (used in agentOS).
+- **Permissions** — Deny-by-default access control. Four permission domains: `fs`, `network`, `childProcess`, `env`. Each is a function that returns `{allow, reason}`. The `allowAll` preset grants everything (used in agentOS). See "Node.js Builtin Permission Model" for how these interact with the Node.js builtin interception layer.
+
+### Node.js Isolation Model
+
+**Current state (KNOWN DEFICIENT — see `.agent/todo/node-isolation-gaps.md`):**
+
+Guest Node.js code currently runs as **real host Node.js child processes** spawned via `std::process::Command::new("node")` in the Rust sidecar (`crates/execution/src/javascript.rs`). The ESM loader hooks intercept `require()`/`import` but most builtins either fall through to the real host module or are thin wrappers that call real host APIs. This violates the virtualization invariants above.
+
+**Prior art — the original JS kernel had full polyfills:**
+
+Before the Rust sidecar (commit `5a43882`), the JS kernel (`@secure-exec/core` + `@secure-exec/nodejs` + `packages/posix/`) had complete kernel-backed polyfills for all builtins. The pattern was:
+- **Kernel socket table** — `kernel.socketTable.create/connect/send/recv` managed all TCP/UDP. Loopback stayed in-kernel; external connections went through a `HostNetworkAdapter`.
+- **Kernel VFS** — All `fs` operations routed through the kernel VFS via syscall RPC.
+- **Kernel process table** — `child_process.spawn` routed through `kernel.spawn()`.
+- **SharedArrayBuffer RPC** — Synchronous syscalls from worker threads used `Atomics.wait` + shared memory buffers (same pattern the Pyodide VFS bridge uses today).
+- **Module hijacking** — `require('net')` returned the kernel-backed socket implementation, not real `node:net`.
+
+The Rust sidecar kernel already has the VFS, process table, pipe manager, PTY manager, and permission system. What's missing is porting the **polyfill layer** — the code that makes `require('fs')` return a kernel-backed implementation instead of real `node:fs`. This is a port of proven patterns, not a greenfield design.
+
+**Current reality vs required state:**
+
+| Builtin | Required | Current | Gap |
+|---------|----------|---------|-----|
+| `fs` / `fs/promises` | Kernel VFS polyfill | Path-translating wrapper over real `node:fs` | Port: route through kernel VFS via RPC |
+| `child_process` | Kernel process table polyfill | Path-translating wrapper over real `node:child_process` | Port: route through kernel process table |
+| `net` | Kernel socket table polyfill | **No wrapper — falls through to real `node:net`** | Port: kernel socket table polyfill |
+| `dgram` | Kernel socket table polyfill | **No wrapper — falls through to real `node:dgram`** | Port: kernel socket table polyfill |
+| `dns` | Kernel DNS resolver polyfill | **No wrapper — falls through to real `node:dns`** | Port: kernel DNS resolver polyfill |
+| `http` / `https` / `http2` | Built on kernel `net` polyfill | **No wrapper — falls through to real module** | Port: builds on `net` polyfill |
+| `tls` | Kernel TLS polyfill | **No wrapper — falls through to real `node:tls`** | Port: kernel TLS polyfill |
+| `os` | Kernel-provided values | **No wrapper — falls through to real `node:os`** | Port: return kernel hostname, etc. |
+| `vm` | Must be denied | **No wrapper — falls through to real `node:vm`** | Must stay denied |
+| `worker_threads` | Must be denied | **No wrapper — falls through to real module** | Must stay denied |
+| `inspector` | Must be denied | **No wrapper — falls through to real module** | Must stay denied |
+| `v8` | Must be denied | **No wrapper — falls through to real module** | Must stay denied |
+
+**How the loader interception works** (`crates/execution/src/node_import_cache.rs`):
+
+ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) are generated from Rust string templates. Every `import`/`require` is intercepted:
+1. `resolveBuiltinAsset()` — checks `BUILTIN_ASSETS` list. Redirects to a kernel-backed polyfill file.
+2. `resolveDeniedBuiltin()` — checks `DENIED_BUILTINS` set. Redirects to a stub that throws `ERR_ACCESS_DENIED`. A builtin is in `DENIED_BUILTINS` only if it is NOT in `ALLOWED_BUILTINS`.
+3. **Fall through to `nextResolve()`** — Node.js default resolution. Returns the real host module. **This must never happen for any builtin that guest code can import.**
+
+`AGENT_OS_ALLOWED_NODE_BUILTINS` (JSON string array env var) controls which builtins are removed from the deny list. `DEFAULT_ALLOWED_NODE_BUILTINS` in `packages/core/src/sidecar/native-kernel-proxy.ts` currently includes all builtins — this must be reduced to only builtins that have kernel-backed polyfills.
+
+**Additional hardening layers (defense-in-depth, NOT primary isolation):**
+1. **`globalThis.fetch` hardening** — Replaced with `restrictedFetch` (loopback-only on exempt ports). Does NOT cover `http.request()`, `net.connect()`, or `dgram.createSocket()`.
+2. **Node.js `--permission` flag** — OS-level backstop for filesystem and child_process only. No network restrictions. This is a safety net, not the isolation boundary.
+3. **Guest env stripping** — `NODE_OPTIONS`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `LD_LIBRARY_PATH` stripped before spawn.
 
 ### What agentOS adds on top
 
@@ -67,6 +130,7 @@ The registry software packages depend on `@rivet-dev/agent-os-registry-types` (i
 - **The default VM filesystem model should be Docker-like.** The root filesystem should be a layered overlay view with one writable upper layer on top of one or more immutable lower snapshot layers. The base filesystem artifact is the initial lower layer; additional frozen lower layers may be stacked beneath the writable upper if needed. Do not design the default VM root as a pile of ad hoc post-boot mutations.
 - **Everything runs inside the VM.** Agent processes, servers, network requests -- all spawned inside the Agent OS kernel, never on the host. This is a hard rule with no exceptions.
 - **All guest code must execute within the kernel's isolation boundary (WASM or in-kernel isolate).** No runtime may escape to a host-native process. If a language runtime requires a JavaScript host (e.g., Emscripten-compiled WASM like Pyodide), the JS host must itself run inside the kernel — not as a host-side Node.js subprocess. Spawning an unsandboxed host process to run guest code is never acceptable, even as a convenience shortcut. New runtimes must either compile to WASI (so they run in the kernel's WASM engine directly) or run inside an already-sandboxed in-kernel isolate.
+- **Guest code must never touch real host APIs.** Every `require('fs')`, `require('net')`, `require('child_process')`, `require('dns')`, `require('dgram')`, `require('http')`, etc. must return a kernel-backed polyfill that routes operations through the kernel's VFS, socket table, process table, and DNS resolver respectively. Path-translating wrappers over real `node:fs` or real `node:child_process` are NOT acceptable — they call real host syscalls. The original JS kernel had full polyfills for all of these; the Rust sidecar must match that level of isolation. If a polyfill does not exist yet for a builtin, that builtin must be denied at the loader level until one is built.
 - **`sandbox_agent` mounts on `sandbox-agent@0.4.2` only get basic file endpoints (`entries`, `file`, `mkdir`, `move`, `stat`) from the HTTP fs API.** When the sidecar needs symlink/readlink/realpath/link/chmod/chown/utimes semantics, it must use the remote process API as a fallback and return `ENOSYS` when that helper path is unavailable.
 - The `AgentOs` class wraps the kernel and proxies its API directly
 - **All public methods on AgentOs must accept and return JSON-serializable data.** No object references (Session, ManagedProcess, ShellHandle) in the public API. Reference resources by ID (session ID, PID, shell ID). This keeps the API flat and portable across serialization boundaries (HTTP, RPC, IPC).
@@ -74,6 +138,19 @@ The registry software packages depend on `@rivet-dev/agent-os-registry-types` (i
 - **readdir returns `.` and `..` entries** — always filter them when iterating children to avoid infinite recursion
 - Command execution mirrors the kernel API (exec, spawn)
 - `fetch(port, request)` reaches services running inside the VM using the kernel network adapter pattern (`proc.network.fetch`)
+
+## Linux Compatibility
+
+The VM must behave like a standard Linux environment. Agents are written to target Linux and will break on non-standard behavior.
+
+- **Target: Linux userspace compatibility.** The kernel is not reimplementing the Linux kernel — it is providing a POSIX-like userspace environment. The goal is that a program written for Linux should run inside the VM without modification, subject to the execution runtimes available (Node.js, WASM, Python).
+- **Correct errno values.** Every kernel operation that fails must return the correct POSIX errno (`ENOENT`, `EACCES`, `EEXIST`, `EISDIR`, `ENOTDIR`, `EXDEV`, `EBADF`, `EPERM`, `ENOSYS`, etc.). Agents check errno values to decide control flow — wrong errnos cause cascading failures.
+- **Standard `/proc` layout.** `/proc/self/`, `/proc/[pid]/`, `/proc/[pid]/fd/`, `/proc/[pid]/environ`, `/proc/[pid]/cwd`, `/proc/[pid]/cmdline` should contain the expected content. Many tools and runtimes read `/proc` to discover their own state.
+- **Standard `/dev` devices.** `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/*`, `/dev/pts/*` must exist and behave correctly. `/dev/urandom` must return cryptographically random bytes, not deterministic values.
+- **Correct signal semantics.** `SIGCHLD` must be delivered to parent on child exit. `SIGPIPE` must be generated on write to broken pipe. `SIGWINCH` must be delivered on terminal resize. Signal delivery must respect process groups and sessions.
+- **Standard filesystem paths.** `/tmp` must be writable. `/etc/hostname`, `/etc/resolv.conf`, `/etc/passwd`, `/etc/group` should contain valid content. `/usr/bin/env` should exist for shebangs. Shell (`/bin/sh`, `/bin/bash`) must be available.
+- **Environment variable conventions.** `HOME`, `USER`, `PATH`, `SHELL`, `TERM`, `HOSTNAME`, `PWD`, `LANG` must be set to reasonable values. `PATH` must include standard directories where commands are found.
+- **Document deviations in the friction log.** Any behavior that differs from standard Linux must be documented in `.agent/notes/vm-friction.md` with the deviation, root cause, and whether a fix exists or is planned.
 
 ## Virtual Filesystem Design Reference
 
