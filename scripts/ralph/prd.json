@@ -813,7 +813,7 @@
         "Typecheck passes"
       ],
       "priority": 51,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: os polyfill uses HOST_PROCESS_ENV.HOME/USER/SHELL/TMPDIR as fallback when AGENT_OS_VIRTUAL_OS_* not set, leaking host username, home dir, temp dir, shell path."
     },
     {

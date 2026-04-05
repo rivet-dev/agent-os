@@ -2492,6 +2492,10 @@ console.log(JSON.stringify(result));
             String::from("agent"),
         ),
         (
+            String::from("AGENT_OS_VIRTUAL_OS_SHELL"),
+            String::from("/bin/bash"),
+        ),
+        (
             String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
             String::from(
                 "[\"assert\",\"buffer\",\"console\",\"child_process\",\"crypto\",\"events\",\"fs\",\"os\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
@@ -2601,6 +2605,97 @@ console.log(JSON.stringify(result));
         .as_str()
         .expect("setPriority message")
         .contains("os.setPriority"));
+}
+
+#[test]
+fn javascript_execution_os_module_safe_defaults_ignore_host_env() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import os from "node:os";
+
+console.log(JSON.stringify({
+  hostname: os.hostname(),
+  homedir: os.homedir(),
+  tmpdir: os.tmpdir(),
+  userInfo: os.userInfo(),
+}));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let env = BTreeMap::from([
+        (
+            String::from("HOME"),
+            String::from("/Users/host-user/should-not-leak"),
+        ),
+        (
+            String::from("USER"),
+            String::from("host-user-should-not-leak"),
+        ),
+        (
+            String::from("LOGNAME"),
+            String::from("host-logname-should-not-leak"),
+        ),
+        (
+            String::from("TMPDIR"),
+            String::from("/var/folders/host-tmp-should-not-leak"),
+        ),
+        (
+            String::from("TEMP"),
+            String::from("/tmp/host-temp-should-not-leak"),
+        ),
+        (
+            String::from("TMP"),
+            String::from("/tmp/host-tmp-should-not-leak"),
+        ),
+        (
+            String::from("HOSTNAME"),
+            String::from("host-machine-should-not-leak"),
+        ),
+        (String::from("SHELL"), String::from("/bin/zsh")),
+        (
+            String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+            String::from(
+                "[\"assert\",\"buffer\",\"console\",\"child_process\",\"crypto\",\"events\",\"fs\",\"os\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+            ),
+        ),
+    ]);
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        env,
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse os defaults JSON");
+
+    assert_eq!(parsed["hostname"], Value::String(String::from("agent-os")));
+    assert_eq!(parsed["homedir"], Value::String(String::from("/root")));
+    assert_eq!(parsed["tmpdir"], Value::String(String::from("/tmp")));
+    assert_eq!(
+        parsed["userInfo"]["username"],
+        Value::String(String::from("root"))
+    );
+    assert_eq!(
+        parsed["userInfo"]["shell"],
+        Value::String(String::from("/bin/sh"))
+    );
+    assert_eq!(
+        parsed["userInfo"]["homedir"],
+        Value::String(String::from("/root"))
+    );
 }
 
 #[test]

@@ -1791,7 +1791,8 @@ const DEFAULT_VIRTUAL_OS_CPU_MODEL = 'Agent OS Virtual CPU';
 const DEFAULT_VIRTUAL_OS_CPU_COUNT = 1;
 const DEFAULT_VIRTUAL_OS_TOTALMEM = 1024 * 1024 * 1024;
 const DEFAULT_VIRTUAL_OS_FREEMEM = 768 * 1024 * 1024;
-const DEFAULT_VIRTUAL_OS_USER = 'user';
+const DEFAULT_VIRTUAL_OS_USER = 'root';
+const DEFAULT_VIRTUAL_OS_HOMEDIR = '/root';
 const DEFAULT_VIRTUAL_OS_SHELL = '/bin/sh';
 const DEFAULT_VIRTUAL_OS_TMPDIR = '/tmp';
 const NODE_SYNC_RPC_REQUEST_FD = parseOptionalFd(HOST_PROCESS_ENV.AGENT_OS_NODE_SYNC_RPC_REQUEST_FD);
@@ -6045,7 +6046,7 @@ const guestMonotonicNow =
     ? globalThis.performance.now.bind(globalThis.performance)
     : Date.now;
 const VIRTUAL_OS_HOSTNAME = parseVirtualProcessString(
-  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_HOSTNAME ?? HOST_PROCESS_ENV.HOSTNAME,
+  HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_HOSTNAME,
   DEFAULT_VIRTUAL_OS_HOSTNAME,
 );
 const VIRTUAL_OS_TYPE = parseVirtualProcessString(
@@ -6229,24 +6230,19 @@ function createGuestProcessUptime() {
 
 function createGuestOsModule(osModule) {
   const virtualHomeDir = resolveVirtualPath(
-    HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_HOMEDIR ?? HOST_PROCESS_ENV.HOME,
-    INITIAL_GUEST_CWD,
+    HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_HOMEDIR,
+    DEFAULT_VIRTUAL_OS_HOMEDIR,
   );
   const virtualTmpDir = resolveVirtualPath(
-    HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_TMPDIR ??
-      HOST_PROCESS_ENV.TMPDIR ??
-      HOST_PROCESS_ENV.TEMP ??
-      HOST_PROCESS_ENV.TMP,
+    HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_TMPDIR,
     DEFAULT_VIRTUAL_OS_TMPDIR,
   );
   const virtualUserName = parseVirtualProcessString(
-    HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_USER ??
-      HOST_PROCESS_ENV.USER ??
-      HOST_PROCESS_ENV.LOGNAME,
+    HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_USER,
     DEFAULT_VIRTUAL_OS_USER,
   );
   const virtualShell = resolveVirtualPath(
-    HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_SHELL ?? HOST_PROCESS_ENV.SHELL,
+    HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_SHELL,
     DEFAULT_VIRTUAL_OS_SHELL,
   );
   const virtualCpuInfo = Object.freeze(

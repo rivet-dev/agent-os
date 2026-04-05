@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- The guest `os` polyfill in `crates/execution/src/node_import_cache.rs` should only honor explicit `AGENT_OS_VIRTUAL_OS_*` overrides; safe defaults like `agent-os`, `/root`, `/tmp`, and `/bin/sh` must not fall back to host env vars.
 - JavaScript sync-RPC networking in `crates/sidecar/src/service.rs` bypasses the kernel permission wrappers, so `dns.lookup`/`net.connect`/`net.listen` must enforce `network.dns`/`network.http`/`network.listen` there directly, and errno-style failures should be preserved into `respond_javascript_sync_rpc_error(...)` so guest code sees `EACCES` instead of a generic sync-RPC code.
 - Guest-visible `process` virtualization in `crates/execution/src/node_import_cache.rs` is safest when you harden properties on the real `process` first and let the guest proxy fall through with `Reflect.get(..., proxy)`; using the host `process` as the fallback receiver can leak unsanitized accessor state.
 - Sidecar TCP/Unix socket readers should treat peer EOF as a half-close, not a full close: emit `End` immediately, but only emit `Close` after the local write half has also been shut down, or guest `socket.end(...)` flows can turn into resets.
@@ -945,4 +946,19 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: CommonJS isolation has to happen at the loader level, because local `require()` inside a loaded `.cjs` module does not use the top-level `createGuestRequire()` wrapper.
   - Gotchas encountered: Node’s ESM-to-CJS bridge does not expose a stable local `require.cache` surface for assertions, so cache translation regressions are more reliable when checked from the guest global `require`.
   - Useful context: `cargo fmt --check`, `cargo test -p agent-os-execution --test javascript -- --test-threads=1`, and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` all pass after this change.
+---
+## 2026-04-05 06:57:59 PDT - US-051
+- What was implemented
+- Hardened the guest `os` polyfill in `crates/execution/src/node_import_cache.rs` so `hostname`, `homedir`, `tmpdir`, `userInfo`, and shell defaults now come only from `AGENT_OS_VIRTUAL_OS_*` overrides or safe VM defaults, never host `HOME`/`USER`/`TMPDIR`/`HOSTNAME`/`SHELL` fallbacks.
+- Updated the existing `os` virtualization regression to set `AGENT_OS_VIRTUAL_OS_SHELL` explicitly, matching the new contract that plain host `SHELL` must be ignored.
+- Added a JavaScript regression that feeds host-looking env vars into the guest and verifies `node:os` still returns `agent-os`, `/root`, `/tmp`, `root`, and `/bin/sh`.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: `node:os` virtualization should treat host env vars as implementation detail leakage; only explicit `AGENT_OS_VIRTUAL_OS_*` knobs are valid inputs for guest-visible overrides.
+  - Gotchas encountered: The JavaScript execution tests can trip the import-cache temp-root cleanup path if multiple `cargo test` invocations run concurrently, so this suite is more reliable when executed sequentially.
+  - Useful context: `cargo test -p agent-os-execution javascript_execution_virtualizes_os_module -- --test-threads=1`, `cargo test -p agent-os-execution javascript_execution_os_module_safe_defaults_ignore_host_env -- --test-threads=1`, and `cargo test -p agent-os-execution --test javascript -- --test-threads=1` pass after this change.
 ---
