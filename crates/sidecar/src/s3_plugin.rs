@@ -42,6 +42,7 @@ struct S3MountConfig {
     region: Option<String>,
     credentials: Option<S3MountCredentials>,
     endpoint: Option<String>,
+    allow_loopback_endpoint: Option<bool>,
     chunk_size: Option<usize>,
     inline_threshold: Option<usize>,
 }
@@ -108,6 +109,7 @@ impl S3BackedFilesystem {
             bucket,
             config.region.unwrap_or_else(|| DEFAULT_REGION.to_owned()),
             config.endpoint,
+            config.allow_loopback_endpoint.unwrap_or(false),
             config.credentials,
         )?;
 
@@ -429,6 +431,7 @@ impl S3ObjectStore {
         bucket: String,
         region: String,
         endpoint: Option<String>,
+        allow_loopback_endpoint: bool,
         credentials: Option<S3MountCredentials>,
     ) -> Result<Self, PluginError> {
         let runtime = Runtime::new()
@@ -451,7 +454,8 @@ impl S3ObjectStore {
 
         let mut builder = S3ConfigBuilder::from(&shared_config).force_path_style(true);
         if let Some(endpoint) = endpoint {
-            builder = builder.endpoint_url(validate_s3_endpoint(&endpoint)?);
+            builder =
+                builder.endpoint_url(validate_s3_endpoint(&endpoint, allow_loopback_endpoint)?);
         }
 
         Ok(Self {
@@ -544,7 +548,7 @@ impl S3ObjectStore {
     }
 }
 
-fn validate_s3_endpoint(raw: &str) -> Result<String, PluginError> {
+fn validate_s3_endpoint(raw: &str, allow_loopback_endpoint: bool) -> Result<String, PluginError> {
     let normalized = raw.trim().trim_end_matches('/').to_owned();
     if normalized.is_empty() {
         return Err(PluginError::invalid_input(
@@ -559,17 +563,16 @@ fn validate_s3_endpoint(raw: &str) -> Result<String, PluginError> {
         .host_str()
         .ok_or_else(|| PluginError::invalid_input("s3 mount endpoint must include a host"))?;
 
-    if is_allowed_test_endpoint_host(host) {
-        return Ok(normalized);
-    }
-
     if host.eq_ignore_ascii_case("localhost") {
+        if allow_loopback_endpoint {
+            return Ok(normalized);
+        }
         return Err(PluginError::invalid_input(
             "s3 mount endpoint must not target localhost",
         ));
     }
     if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_disallowed_s3_endpoint_ip(ip) {
+        if is_disallowed_s3_endpoint_ip(ip, allow_loopback_endpoint) {
             return Err(PluginError::invalid_input(format!(
                 "s3 mount endpoint must not target a private or local IP address ({host})"
             )));
@@ -579,34 +582,22 @@ fn validate_s3_endpoint(raw: &str) -> Result<String, PluginError> {
     Ok(normalized)
 }
 
-fn is_disallowed_s3_endpoint_ip(ip: IpAddr) -> bool {
+fn is_disallowed_s3_endpoint_ip(ip: IpAddr, allow_loopback_endpoint: bool) -> bool {
     match ip {
         IpAddr::V4(ip) => {
             ip.is_private()
-                || ip.is_loopback()
+                || (!allow_loopback_endpoint && ip.is_loopback())
                 || ip.is_link_local()
                 || ip.is_multicast()
                 || ip.is_unspecified()
         }
         IpAddr::V6(ip) => {
-            ip.is_loopback()
+            (!allow_loopback_endpoint && ip.is_loopback())
                 || ip.is_unique_local()
                 || ip.is_unicast_link_local()
                 || ip.is_multicast()
                 || ip.is_unspecified()
         }
-    }
-}
-
-fn is_allowed_test_endpoint_host(host: &str) -> bool {
-    #[cfg(test)]
-    {
-        matches!(host, "127.0.0.1" | "localhost" | "::1")
-    }
-    #[cfg(not(test))]
-    {
-        let _ = host;
-        false
     }
 }
 
@@ -1193,6 +1184,7 @@ mod tests {
                 secret_access_key: String::from("minioadmin"),
             }),
             endpoint: Some(server.base_url().to_owned()),
+            allow_loopback_endpoint: Some(true),
             chunk_size: Some(8),
             inline_threshold: Some(4),
         }
@@ -1203,9 +1195,28 @@ mod tests {
         let server = MockS3Server::start();
         let mut config = test_config(&server, "reject-private-endpoint");
         config.endpoint = Some(String::from("http://169.254.169.254/latest"));
+        config.allow_loopback_endpoint = Some(true);
 
         let error = match S3BackedFilesystem::from_config(config) {
             Ok(_) => panic!("private IP endpoint should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("s3 mount endpoint must not target a private or local IP address"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn s3_plugin_rejects_loopback_endpoints_without_explicit_opt_in() {
+        let server = MockS3Server::start();
+        let mut config = test_config(&server, "reject-loopback-endpoint");
+        config.allow_loopback_endpoint = Some(false);
+
+        let error = match S3BackedFilesystem::from_config(config) {
+            Ok(_) => panic!("loopback endpoint should fail without opt-in"),
             Err(error) => error,
         };
         assert!(

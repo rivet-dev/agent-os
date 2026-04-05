@@ -14,6 +14,7 @@ export interface S3FsOptions {
 	region?: string;
 	credentials?: S3Credentials;
 	endpoint?: string;
+	allowLoopbackEndpoint?: boolean;
 	chunkSize?: number;
 	inlineThreshold?: number;
 }
@@ -24,6 +25,7 @@ export type S3MountPluginConfig = MountConfigJsonObject & {
 	region?: string;
 	credentials?: S3Credentials;
 	endpoint?: string;
+	allowLoopbackEndpoint?: boolean;
 	chunkSize?: number;
 	inlineThreshold?: number;
 };
@@ -45,6 +47,9 @@ export function createS3Backend(
 			...(options.region ? { region: options.region } : {}),
 			...(options.credentials ? { credentials: options.credentials } : {}),
 			...(options.endpoint ? { endpoint: options.endpoint } : {}),
+			...(options.allowLoopbackEndpoint
+				? { allowLoopbackEndpoint: true }
+				: {}),
 			...(options.chunkSize != null ? { chunkSize: options.chunkSize } : {}),
 			...(options.inlineThreshold != null
 				? { inlineThreshold: options.inlineThreshold }

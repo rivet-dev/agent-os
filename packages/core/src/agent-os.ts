@@ -410,6 +410,7 @@ interface S3MountPluginConfig {
 	region?: string;
 	credentials?: S3MountPluginCredentials;
 	endpoint?: string;
+	allowLoopbackEndpoint?: boolean;
 	chunkSize?: number;
 	inlineThreshold?: number;
 }
@@ -506,6 +507,9 @@ function getS3MountPluginConfig(
 	}
 	if (typeof object.endpoint === "string") {
 		s3Config.endpoint = object.endpoint;
+	}
+	if (typeof object.allowLoopbackEndpoint === "boolean") {
+		s3Config.allowLoopbackEndpoint = object.allowLoopbackEndpoint;
 	}
 	if (typeof object.chunkSize === "number") {
 		s3Config.chunkSize = object.chunkSize;

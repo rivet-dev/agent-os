@@ -30,6 +30,7 @@ function createMount(prefix: string) {
 		prefix,
 		region: "us-east-1",
 		endpoint: minio.endpoint,
+		allowLoopbackEndpoint: true,
 		credentials: {
 			accessKeyId: minio.accessKeyId,
 			secretAccessKey: minio.secretAccessKey,
@@ -48,6 +49,7 @@ describe("@rivet-dev/agent-os-s3", () => {
 				prefix: "descriptor-test",
 				region: "us-east-1",
 				endpoint: minio.endpoint,
+				allowLoopbackEndpoint: true,
 				credentials: {
 					accessKeyId: minio.accessKeyId,
 					secretAccessKey: minio.secretAccessKey,

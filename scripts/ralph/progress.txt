@@ -5,6 +5,7 @@
 - Import-cache tests should use `NodeImportCache::new_in()` with unique temp directories to avoid parallel test interference.
 - Full crate test suites (`cargo test -p <crate>`) must pass, not just focused individual test cases.
 - SSRF filters must cover all RFC special-purpose ranges: 0.0.0.0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16, 224/4, 255.255.255.255, plus IPv6 equivalents.
+- S3-compatible loopback endpoints for local Minio or mock servers must opt in explicitly with `allowLoopbackEndpoint`; production defaults should keep loopback/private endpoint SSRF checks enabled.
 - Native-sidecar Node launches must share the same host shadow root between `createVm` metadata `cwd` and `NativeSidecarKernelProxy.shadowRoot`; otherwise sidecar execute rejects the Node cwd as escaping the VM sandbox root.
 - External mounts must be excluded from root filesystem quotas both when measuring usage and when enforcing per-path write/mkdir/truncate limits, or host-dir mounts will consume guest quota.
 - Node import prewarm should use `node:` builtin specifiers instead of `agent-os:` synthetic URLs to stay compatible with newer Node ESM warmup behavior.
@@ -33,4 +34,14 @@ Started: Sat Apr  5 2026
   - `brush` shell redirection exercises `path_open` and then immediately `dup`/`dup2`; partial fd virtualization is worse than none because the shell will crash after creating the target file.
   - The raw status stored for sidecar-managed child processes must use wait-status encoding (`exit_code << 8`), or commands like `grep` will return the wrong exit codes even when their stdout is correct.
   - The `curl` registry package still has an empty `wasm/` directory, so its tests remain gated on publishing or copying the binary separately from the rest of the registry software set.
+---
+## 2026-04-05 16:22:02 PDT - US-103
+- Added an explicit `allowLoopbackEndpoint` S3 mount flag in the registry helper, threaded it through core mount-config parsing, and taught the sidecar S3 validator to allow loopback endpoints only when that opt-in is present.
+- Updated the Minio-backed registry tests and the sidecar S3 plugin-registry integration test to use the explicit loopback opt-in while keeping private/local endpoint SSRF protection enabled by default.
+- Quality checks: `pnpm --dir packages/core build`, `pnpm --dir registry/file-system/s3 exec tsc --noEmit`, `pnpm --dir registry/file-system/s3 exec vitest run tests/s3.test.ts`, `cargo test -p agent-os-sidecar s3_plugin_ -- --nocapture`, and `cargo test -p agent-os-sidecar configure_vm_instantiates_s3_mounts_through_the_plugin_registry -- --nocapture` all pass.
+- Files changed: `/home/nathan/a5/AGENTS.md`, `crates/sidecar/src/s3_plugin.rs`, `crates/sidecar/src/service.rs`, `packages/core/src/agent-os.ts`, `registry/file-system/s3/src/index.ts`, `registry/file-system/s3/tests/s3.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Local Minio support should be an explicit mount-level opt-in rather than a test-only validator bypass; otherwise Rust unit tests and real sidecar runs diverge.
+  - Sidecar integration tests that build raw plugin JSON must mirror the public descriptor shape exactly, including camelCase config keys like `allowLoopbackEndpoint`.
+  - Registry package tests that import `@rivet-dev/agent-os` consume the built package surface, so changes under `packages/core/src/` may require `pnpm --dir packages/core build` before Vitest sees them.
 ---

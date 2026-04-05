@@ -9804,6 +9804,7 @@ ykAheWCsAteSEWVc0w==\n\
                                 "prefix": "service-test",
                                 "region": "us-east-1",
                                 "endpoint": server.base_url(),
+                                "allowLoopbackEndpoint": true,
                                 "credentials": {
                                     "accessKeyId": "minioadmin",
                                     "secretAccessKey": "minioadmin",
