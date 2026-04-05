@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- WASM permission tiers should drive both guest-side preopen behavior and host Node permission flags in `crates/execution/src/wasm.rs`; `Isolated` must keep `--allow-wasi` off entirely, while `ReadOnly` / `ReadWrite` / `Full` differ through the WASI layer's read/write scope.
 - Pyodide runtime hardening knobs should stay in reserved `AGENT_OS_PYTHON_*` execution env keys: apply heap caps to both prewarm and execution host launches, and make `PythonExecution::wait(None)` honor the configured per-run timeout instead of treating `None` as unbounded.
 - WASM runtime limits span both `crates/execution/src/wasm.rs` and the generated `wasm-runner.mjs` in `crates/execution/src/node_import_cache.rs`: pass `AGENT_OS_WASM_MAX_*` through reserved env, keep the Node argv flags in sync, and cap the module memory section before `WebAssembly.compile()` so `memory.grow()` obeys the configured limit even when the module omits a maximum.
 - Per-process filesystem state such as `umask` belongs in `ProcessContext` / `ProcessTable`; when guest Node code needs it, thread it through `crates/kernel/src/kernel.rs`, `crates/sidecar/src/service.rs`, and `crates/execution/src/node_import_cache.rs` together instead of reading host `process`.
@@ -85,6 +86,22 @@
 - Registry external-network tests should stay behind `AGENTOS_E2E_NETWORK=1`, preflight host connectivity before enabling CI coverage, and retry the in-VM outbound command so transient internet issues skip or self-heal instead of creating flaky regressions.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
+---
+## 2026-04-05 12:29:56 PDT - US-081
+- What was implemented
+- Derived the `allow_wasi` argument for `harden_node_command(...)` from `StartWasmExecutionRequest.permission_tier` in `crates/execution/src/wasm.rs`, so `Isolated` launches no longer get host Node `--allow-wasi` while the other tiers keep WASI enabled.
+- Added a permission-flags regression in `crates/execution/tests/permission_flags.rs` that runs all four WASM permission tiers and asserts `--allow-wasi` is only present for `ReadOnly`, `ReadWrite`, and `Full`.
+- Added a reusable WASM permission-tier note to `CLAUDE.md`.
+- Files changed
+- `CLAUDE.md`
+- `crates/execution/src/wasm.rs`
+- `crates/execution/tests/permission_flags.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: WASM permission tiers must gate both host Node permission flags and guest-side WASI preopens; changing only the guest runtime layer still leaves `Isolated` executions with host WASI access.
+  - Gotchas encountered: WASM warmup caching reuses identical module paths across contexts, so permission-flag tests that expect one prewarm plus one execution per launch need tier-specific module paths to avoid collapsing invocations.
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-execution`, `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1`, and `cargo test -p agent-os-execution --test wasm -- --test-threads=1` pass after this change.
 ---
 ## 2026-04-05 10:33:43 PDT - US-072
 - What was implemented

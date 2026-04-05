@@ -1286,7 +1286,7 @@
         "Typecheck passes"
       ],
       "priority": 81,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: wasm.rs line 612 hardcodes allow_wasi = true for all WASM execution regardless of permission tier. Even Isolated tier gets WASI."
     }
   ]

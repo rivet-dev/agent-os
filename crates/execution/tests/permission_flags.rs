@@ -18,6 +18,7 @@ const ENV_PREFIX: &str = "ENV=";
 const INVOCATION_BREAK: &str = "--END--";
 const NODE_ALLOW_CHILD_PROCESS_FLAG: &str = "--allow-child-process";
 const NODE_ALLOW_WORKER_FLAG: &str = "--allow-worker";
+const NODE_ALLOW_WASI_FLAG: &str = "--allow-wasi";
 const NODE_ALLOW_FS_READ_FLAG: &str = "--allow-fs-read=";
 const NODE_ALLOW_FS_WRITE_FLAG: &str = "--allow-fs-write=";
 const NODE_MAX_OLD_SPACE_SIZE_FLAG_PREFIX: &str = "--max-old-space-size=";
@@ -628,5 +629,71 @@ fn wasm_execution_passes_runtime_memory_and_fuel_limits_to_node_process() {
             Some("25"),
             "wasm invocations should receive the configured fuel limit env: {env:?}"
         );
+    }
+}
+
+#[test]
+fn wasm_permission_tiers_only_enable_wasi_outside_isolated_mode() {
+    let temp = tempdir().expect("create temp dir");
+    let fake_node_path = temp.path().join("fake-node.sh");
+    let log_path = temp.path().join("node-args.log");
+    write_fake_node_binary(&fake_node_path, &log_path);
+    let _node_binary = EnvVarGuard::set("AGENT_OS_NODE_BINARY", &fake_node_path);
+
+    let mut engine = WasmExecutionEngine::default();
+    let tiers = [
+        WasmPermissionTier::Isolated,
+        WasmPermissionTier::ReadOnly,
+        WasmPermissionTier::ReadWrite,
+        WasmPermissionTier::Full,
+    ];
+
+    for tier in tiers {
+        let tier_name = match tier {
+            WasmPermissionTier::Isolated => "isolated",
+            WasmPermissionTier::ReadOnly => "read-only",
+            WasmPermissionTier::ReadWrite => "read-write",
+            WasmPermissionTier::Full => "full",
+        };
+        let wasm_cwd = temp.path().join(format!("wasm-{tier_name}"));
+        fs::create_dir_all(&wasm_cwd).expect("create tier-specific wasm cwd");
+        fs::write(wasm_cwd.join("guest.wasm"), b"\0asm\x01\0\0\0").expect("write wasm module");
+
+        let context = engine.create_context(CreateWasmContextRequest {
+            vm_id: String::from("vm-wasm"),
+            module_path: Some(String::from("./guest.wasm")),
+        });
+
+        let result = engine
+            .start_execution(StartWasmExecutionRequest {
+                vm_id: String::from("vm-wasm"),
+                context_id: context.context_id,
+                argv: vec![String::from("./guest.wasm")],
+                env: BTreeMap::new(),
+                cwd: wasm_cwd,
+                permission_tier: tier,
+            })
+            .expect("start wasm execution")
+            .wait()
+            .expect("wait for wasm execution");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    let invocations = parse_invocations(&log_path);
+    assert_eq!(
+        invocations.len(),
+        tiers.len() * 2,
+        "expected prewarm and execution invocations for each tier"
+    );
+
+    for (index, tier) in tiers.iter().enumerate() {
+        for args in &invocations[index * 2..index * 2 + 2] {
+            let has_wasi_flag = args.iter().any(|arg| arg == NODE_ALLOW_WASI_FLAG);
+            assert_eq!(
+                has_wasi_flag,
+                !matches!(tier, WasmPermissionTier::Isolated),
+                "unexpected --allow-wasi flag for tier {tier:?}: {args:?}"
+            );
+        }
     }
 }

@@ -92,6 +92,10 @@ impl WasmPermissionTier {
     fn workspace_write_enabled(self) -> bool {
         matches!(self, Self::Full | Self::ReadWrite)
     }
+
+    fn wasi_enabled(self) -> bool {
+        !matches!(self, Self::Isolated)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -627,7 +631,7 @@ fn configure_wasm_node_sandbox(
         &read_paths,
         &write_paths,
         true,
-        true,
+        request.permission_tier.wasi_enabled(),
         env_builtin_enabled(&request.env, "worker_threads"),
         false,
     );
