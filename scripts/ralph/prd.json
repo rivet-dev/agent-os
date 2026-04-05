@@ -454,7 +454,7 @@
         "Typecheck passes"
       ],
       "priority": 25,
-      "passes": false,
+      "passes": true,
       "notes": "service.rs:2195-2206 uses cwd directly as real host current_dir AND adds it to --allow-fs-read/--allow-fs-write. No validation."
     },
     {

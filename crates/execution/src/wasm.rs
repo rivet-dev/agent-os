@@ -28,6 +28,7 @@ const WASM_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_WASM_WARMUP_METRICS__:";
 const NODE_COMPILE_CACHE_ENV: &str = "NODE_COMPILE_CACHE";
 const NODE_DISABLE_COMPILE_CACHE_ENV: &str = "NODE_DISABLE_COMPILE_CACHE";
 const NODE_FROZEN_TIME_ENV: &str = "AGENT_OS_FROZEN_TIME_MS";
+const NODE_SANDBOX_ROOT_ENV: &str = "AGENT_OS_SANDBOX_ROOT";
 const WASM_WARMUP_MARKER_VERSION: &str = "1";
 const SIGNAL_STATE_CONTROL_PREFIX: &str = "__AGENT_OS_SIGNAL_STATE__:";
 const CONTROLLED_STDERR_PREFIXES: &[&str] = &[SIGNAL_STATE_CONTROL_PREFIX];
@@ -35,6 +36,7 @@ const RESERVED_WASM_ENV_KEYS: &[&str] = &[
     NODE_COMPILE_CACHE_ENV,
     NODE_DISABLE_COMPILE_CACHE_ENV,
     NODE_FROZEN_TIME_ENV,
+    NODE_SANDBOX_ROOT_ENV,
     WASM_GUEST_ARGV_ENV,
     WASM_GUEST_ENV_ENV,
     WASM_MODULE_PATH_ENV,
@@ -492,6 +494,11 @@ fn configure_wasm_node_sandbox(
     context: &WasmContext,
     request: &StartWasmExecutionRequest,
 ) -> Result<(), WasmExecutionError> {
+    let sandbox_root = request
+        .env
+        .get(NODE_SANDBOX_ROOT_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| request.cwd.clone());
     let cache_root = import_cache
         .cache_path()
         .parent()
@@ -499,7 +506,7 @@ fn configure_wasm_node_sandbox(
         .to_path_buf();
     let compile_cache_dir = import_cache.shared_compile_cache_dir();
     let mut read_paths = vec![cache_root.clone(), compile_cache_dir.clone()];
-    let write_paths = vec![cache_root, compile_cache_dir, request.cwd.clone()];
+    let write_paths = vec![cache_root, compile_cache_dir, sandbox_root.clone()];
 
     if let Some(module_path) =
         resolve_path_like_specifier(&request.cwd, &module_path(context, request)?)
@@ -519,7 +526,7 @@ fn configure_wasm_node_sandbox(
 
     harden_node_command(
         command,
-        &request.cwd,
+        &sandbox_root,
         &read_paths,
         &write_paths,
         true,

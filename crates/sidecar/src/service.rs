@@ -87,6 +87,7 @@ const EXECUTION_DRIVER_NAME: &str = "agent-os-sidecar-execution";
 const JAVASCRIPT_COMMAND: &str = "node";
 const PYTHON_COMMAND: &str = "python";
 const WASM_COMMAND: &str = "wasm";
+const EXECUTION_SANDBOX_ROOT_ENV: &str = "AGENT_OS_SANDBOX_ROOT";
 const HOST_REALPATH_MAX_SYMLINK_DEPTH: usize = 40;
 const DISPOSE_VM_SIGTERM_GRACE: Duration = Duration::from_millis(100);
 const DISPOSE_VM_SIGKILL_GRACE: Duration = Duration::from_millis(100);
@@ -2824,18 +2825,12 @@ where
         };
         let mut env = vm.guest_env.clone();
         env.extend(payload.env.clone());
-        let cwd = payload
-            .cwd
-            .as_ref()
-            .map(|cwd| {
-                let candidate = PathBuf::from(cwd);
-                if candidate.is_absolute() {
-                    candidate
-                } else {
-                    vm.cwd.join(candidate)
-                }
-            })
-            .unwrap_or_else(|| vm.cwd.clone());
+        let sandbox_root = normalize_host_path(&vm.cwd);
+        let cwd = resolve_execution_cwd(vm, payload.cwd.as_deref())?;
+        env.insert(
+            String::from(EXECUTION_SANDBOX_ROOT_ENV),
+            sandbox_root.to_string_lossy().into_owned(),
+        );
         let argv = std::iter::once(payload.entrypoint.clone())
             .chain(payload.args.iter().cloned())
             .collect::<Vec<_>>();
@@ -4382,6 +4377,32 @@ fn resolve_cwd(value: Option<&String>) -> Result<PathBuf, SidecarError> {
     }
 }
 
+fn resolve_execution_cwd(vm: &VmState, value: Option<&str>) -> Result<PathBuf, SidecarError> {
+    let sandbox_root = normalize_host_path(&vm.cwd);
+    let candidate = match value {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                path
+            } else {
+                sandbox_root.join(path)
+            }
+        }
+        None => sandbox_root.clone(),
+    };
+    let normalized = normalize_host_path(&candidate);
+
+    if !path_is_within_root(&normalized, &sandbox_root) {
+        return Err(SidecarError::InvalidState(format!(
+            "execute cwd {} escapes VM sandbox root {}",
+            normalized.display(),
+            sandbox_root.display()
+        )));
+    }
+
+    Ok(normalized)
+}
+
 fn extract_guest_env(metadata: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     metadata
         .iter()
@@ -4974,6 +4995,38 @@ fn normalize_path(path: &str) -> String {
     } else {
         normalized
     }
+}
+
+fn normalize_host_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized != Path::new("/") {
+                    normalized.pop();
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        if path.is_absolute() {
+            PathBuf::from("/")
+        } else {
+            PathBuf::from(".")
+        }
+    } else {
+        normalized
+    }
+}
+
+fn path_is_within_root(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
 }
 
 fn dirname(path: &str) -> String {

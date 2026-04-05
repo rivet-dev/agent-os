@@ -45,6 +45,7 @@ const NODE_VIRTUAL_PROCESS_UID_ENV: &str = "AGENT_OS_VIRTUAL_PROCESS_UID";
 const NODE_VIRTUAL_PROCESS_GID_ENV: &str = "AGENT_OS_VIRTUAL_PROCESS_GID";
 const NODE_EXTRA_FS_READ_PATHS_ENV: &str = "AGENT_OS_EXTRA_FS_READ_PATHS";
 const NODE_EXTRA_FS_WRITE_PATHS_ENV: &str = "AGENT_OS_EXTRA_FS_WRITE_PATHS";
+const NODE_SANDBOX_ROOT_ENV: &str = "AGENT_OS_SANDBOX_ROOT";
 const NODE_ALLOWED_BUILTINS_ENV: &str = "AGENT_OS_ALLOWED_NODE_BUILTINS";
 const NODE_LOOPBACK_EXEMPT_PORTS_ENV: &str = "AGENT_OS_LOOPBACK_EXEMPT_PORTS";
 const NODE_SYNC_RPC_ENABLE_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_ENABLE";
@@ -70,6 +71,7 @@ const RESERVED_NODE_ENV_KEYS: &[&str] = &[
     NODE_ENTRYPOINT_ENV,
     NODE_EXTRA_FS_READ_PATHS_ENV,
     NODE_EXTRA_FS_WRITE_PATHS_ENV,
+    NODE_SANDBOX_ROOT_ENV,
     NODE_FROZEN_TIME_ENV,
     NODE_GUEST_ENTRYPOINT_ENV,
     NODE_GUEST_ARGV_ENV,
@@ -707,13 +709,18 @@ fn configure_node_sandbox(
     context: &JavascriptContext,
     request: &StartJavascriptExecutionRequest,
 ) -> Result<(), JavascriptExecutionError> {
+    let sandbox_root = request
+        .env
+        .get(NODE_SANDBOX_ROOT_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| request.cwd.clone());
     let cache_root = import_cache
         .cache_path()
         .parent()
         .unwrap_or(import_cache.asset_root())
         .to_path_buf();
     let mut read_paths = vec![cache_root.clone()];
-    let mut write_paths = vec![cache_root, request.cwd.clone()];
+    let mut write_paths = vec![cache_root, sandbox_root.clone()];
 
     if let Some(entrypoint_path) = resolve_path_like_specifier(&request.cwd, &request.argv[0]) {
         read_paths.push(entrypoint_path.clone());
@@ -759,7 +766,7 @@ fn configure_node_sandbox(
 
     harden_node_command(
         command,
-        &request.cwd,
+        &sandbox_root,
         &read_paths,
         &write_paths,
         true,

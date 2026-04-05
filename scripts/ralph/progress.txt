@@ -1,6 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
 - Native sidecar permission policy must be serialized into `CreateVmRequest`, not just `configure_vm`, because guest env filtering and bootstrap driver registration both happen during VM construction.
+- Sidecar execute flows should validate host `cwd` against `vm.cwd` before spawn, then pass the sandbox root to the Node permission layer separately from the runtime `current_dir`; the host process can start in a subdirectory without widening `--allow-fs-read/--allow-fs-write`.
 - Node builtin hardening is split between `packages/core/src/sidecar/native-kernel-proxy.ts` and four generated surfaces in `crates/execution/src/node_import_cache.rs` (loader, Node runner, Python runner, denied asset materialization); update all of them together when changing builtin policy.
 - Host `node:http`, `node:https`, and `node:http2` do not pick up patched `net`/`tls` internals automatically; keep them guest-owned by wrapping the host client/server surface and forwarding guest sockets into the host server via `connection`/`secureConnection` exactly once.
 - `AGENT_OS_ALLOWED_NODE_BUILTINS` is the shared source of truth for guest Node capability gating, but permissioned top-level JavaScript executions on Node v24 still need `--allow-worker` because `register(loader)` spins an internal loader worker; keep that runtime requirement separate from guest `worker_threads` exposure, and keep child-process permission args aligned with the allowed builtin set.
@@ -26,6 +27,24 @@
 - When a newly allowed Node builtin still exposes bypass-capable host-owned helpers or constructors, replace those exports with guest shims or explicit unsupported stubs before adding the builtin to `DEFAULT_ALLOWED_NODE_BUILTINS`; `dns.Resolver` and `dns.promises.Resolver` are the model for this rule.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
+---
+## 2026-04-05 01:10:03 PDT - US-028
+- What was implemented
+- Added host-side `cwd` validation in `crates/sidecar/src/service.rs` so `ExecuteRequest.cwd` is normalized against the VM sandbox root and rejected when it escapes, including the `cwd=/` host-root case called out in the PRD.
+- Threaded the VM sandbox root into the Node permission setup for JavaScript, Python, and WASM host launches so `--allow-fs-read` and `--allow-fs-write` stay pinned to the sandbox root even when the runtime starts in a nested working directory.
+- Added sidecar security regressions that verify both the rejection path and the permission-flag scoping behavior with a fake Node binary.
+- Files changed
+- `crates/execution/src/javascript.rs`
+- `crates/execution/src/python.rs`
+- `crates/execution/src/wasm.rs`
+- `crates/sidecar/src/service.rs`
+- `crates/sidecar/tests/security_hardening.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: The execution engines already separate `current_dir(...)` from permission flag construction, so sidecar hardening can flow sandbox metadata through a reserved env key without changing the public execution request types.
+- Gotchas encountered: The Rust permission-flag tests mutate `AGENT_OS_NODE_BINARY`, so they need single-threaded execution (`-- --test-threads=1`) to avoid test-process env races.
+- Useful context: `cargo test -p agent-os-sidecar --test security_hardening execute_rejects_cwd_outside_vm_sandbox_root -- --exact`, `cargo test -p agent-os-sidecar --test security_hardening execute_scopes_node_permission_flags_to_vm_sandbox_root -- --exact`, `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1`, and `cargo check -p agent-os-sidecar -p agent-os-execution` all pass after this change.
 ---
 ## 2026-04-04 19:11:19 PDT - US-001
 - What was implemented

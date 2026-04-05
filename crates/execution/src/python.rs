@@ -25,6 +25,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 const NODE_COMPILE_CACHE_ENV: &str = "NODE_COMPILE_CACHE";
 const NODE_DISABLE_COMPILE_CACHE_ENV: &str = "NODE_DISABLE_COMPILE_CACHE";
 const NODE_FROZEN_TIME_ENV: &str = "AGENT_OS_FROZEN_TIME_MS";
+const NODE_SANDBOX_ROOT_ENV: &str = "AGENT_OS_SANDBOX_ROOT";
 const NODE_ALLOWED_BUILTINS_ENV: &str = "AGENT_OS_ALLOWED_NODE_BUILTINS";
 const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const PYODIDE_INDEX_URL_ENV: &str = "AGENT_OS_PYODIDE_INDEX_URL";
@@ -42,6 +43,7 @@ const RESERVED_PYTHON_ENV_KEYS: &[&str] = &[
     NODE_COMPILE_CACHE_ENV,
     NODE_DISABLE_COMPILE_CACHE_ENV,
     NODE_ALLOWED_BUILTINS_ENV,
+    NODE_SANDBOX_ROOT_ENV,
     NODE_FROZEN_TIME_ENV,
     NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
     NODE_IMPORT_CACHE_PATH_ENV,
@@ -632,6 +634,11 @@ fn configure_python_node_sandbox(
     context: &PythonContext,
     request: &StartPythonExecutionRequest,
 ) {
+    let sandbox_root = request
+        .env
+        .get(NODE_SANDBOX_ROOT_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| request.cwd.clone());
     let cache_root = import_cache
         .cache_path()
         .parent()
@@ -644,11 +651,11 @@ fn configure_python_node_sandbox(
         compile_cache_dir.clone(),
         pyodide_dist_path,
     ];
-    let write_paths = vec![cache_root, compile_cache_dir, request.cwd.clone()];
+    let write_paths = vec![cache_root, compile_cache_dir, sandbox_root.clone()];
 
     harden_node_command(
         command,
-        &request.cwd,
+        &sandbox_root,
         &read_paths,
         &write_paths,
         true,
