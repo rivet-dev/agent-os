@@ -1389,6 +1389,7 @@ const originalFetch =
   typeof globalThis.fetch === 'function'
     ? globalThis.fetch.bind(globalThis)
     : null;
+const HOST_CWD = process.cwd();
 if (!Module || typeof Module.createRequire !== 'function') {
   throw new Error('node:module builtin access is required for the Agent OS guest runtime');
 }
@@ -1410,7 +1411,7 @@ function toImportSpecifier(specifier) {
         pathExists(specifier) ? path.resolve(specifier) : path.posix.normalize(specifier),
       ).href;
     }
-    return pathToFileURL(path.resolve(process.cwd(), specifier)).href;
+    return pathToFileURL(path.resolve(HOST_CWD, specifier)).href;
   }
   return specifier;
 }
@@ -1587,6 +1588,33 @@ function hostPathFromGuestPath(guestPath) {
   return null;
 }
 
+function guestPathFromHostPath(hostPath) {
+  if (typeof hostPath !== 'string') {
+    return null;
+  }
+
+  const normalized = path.resolve(hostPath);
+  for (const mapping of GUEST_PATH_MAPPINGS) {
+    const hostRoot = path.resolve(mapping.hostPath);
+    if (
+      normalized !== hostRoot &&
+      !normalized.startsWith(`${hostRoot}${path.sep}`)
+    ) {
+      continue;
+    }
+
+    const suffix =
+      normalized === hostRoot
+        ? ''
+        : normalized.slice(hostRoot.length + path.sep.length);
+    return suffix
+      ? path.posix.join(mapping.guestPath, suffix.split(path.sep).join('/'))
+      : mapping.guestPath;
+  }
+
+  return null;
+}
+
 function hostPathForSpecifier(specifier, fromGuestDir) {
   if (typeof specifier !== 'string') {
     return null;
@@ -1621,6 +1649,8 @@ function translateGuestPath(value, fromGuestDir = '/') {
   const translated = hostPathForSpecifier(value, fromGuestDir);
   return translated ?? value;
 }
+
+const INITIAL_GUEST_CWD = guestPathFromHostPath(HOST_CWD) ?? HOST_CWD;
 
 function guestMappedChildNames(guestDir) {
   if (typeof guestDir !== 'string') {
@@ -2040,7 +2070,7 @@ function createGuestRequire(fromGuestDir) {
     return cached;
   }
 
-  const hostDir = hostPathFromGuestPath(normalizedGuestDir) ?? process.cwd();
+  const hostDir = hostPathFromGuestPath(normalizedGuestDir) ?? HOST_CWD;
   const baseRequire = Module.createRequire(
     pathToFileURL(path.join(hostDir, '__agent_os_require__.cjs')),
   );
@@ -2102,6 +2132,10 @@ function hardenProperty(target, key, value) {
 
 function installGuestHardening() {
   hardenProperty(process, 'env', createGuestProcessEnv(HOST_PROCESS_ENV));
+  hardenProperty(process, 'cwd', () => INITIAL_GUEST_CWD);
+  hardenProperty(process, 'chdir', () => {
+    throw accessDenied('process.chdir');
+  });
   syncBuiltinModuleExports(hostFs, guestFs);
   syncBuiltinModuleExports(hostFsPromises, guestFs.promises);
   try {

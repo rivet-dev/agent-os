@@ -2,6 +2,7 @@ use agent_os_execution::{
     CreateJavascriptContextRequest, JavascriptExecutionEngine, JavascriptExecutionEvent,
     StartJavascriptExecutionRequest,
 };
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1326,4 +1327,65 @@ console.log(`missing:${missing}`);
     assert_eq!(exit_code, 0);
     assert!(stdout.contains("text:mapped"));
     assert!(stdout.contains("missing:false"));
+}
+
+#[test]
+fn javascript_execution_virtualizes_process_cwd_and_denies_chdir() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const result = {
+  cwd: process.cwd(),
+};
+
+try {
+  process.chdir("/other");
+  result.chdir = "unexpected";
+} catch (error) {
+  result.chdir = {
+    code: error.code ?? null,
+    message: error.message,
+  };
+}
+
+result.cwdAfter = process.cwd();
+console.log(JSON.stringify(result));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let cwd_host_path = temp.path().to_string_lossy().replace('\\', "\\\\");
+    let env = BTreeMap::from([(
+        String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+        format!("[{{\"guestPath\":\"/root\",\"hostPath\":\"{cwd_host_path}\"}}]"),
+    )]);
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        env,
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse cwd JSON");
+    assert_eq!(parsed["cwd"], Value::String(String::from("/root")));
+    assert_eq!(parsed["cwdAfter"], Value::String(String::from("/root")));
+    assert_eq!(
+        parsed["chdir"]["code"],
+        Value::String(String::from("ERR_ACCESS_DENIED"))
+    );
+    assert!(parsed["chdir"]["message"]
+        .as_str()
+        .expect("chdir message")
+        .contains("process.chdir"));
 }

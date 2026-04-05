@@ -75,7 +75,7 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "process.cwd() currently returns real host path like /tmp/agent-os-xxx/workspace."
     },
     {

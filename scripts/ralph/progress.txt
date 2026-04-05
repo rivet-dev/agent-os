@@ -4,6 +4,7 @@
 - Pyodide guest hardening that must not rewrite user code belongs in `crates/execution/src/node_import_cache.rs` as a `pyodide.runPython(...)` bootstrap in the embedded Python runner, installed after package preloads and before `runPythonAsync()`.
 - The Pyodide host Node process is hardened with Node `--permission` in `crates/execution/src/python.rs`; keep its read allowlist scoped to the import-cache root, compile-cache dir, Pyodide bundle, and sandbox cwd, and keep writes limited to the cache paths plus sandbox cwd.
 - Node guest env hardening in `crates/execution/src/node_import_cache.rs` should snapshot `AGENT_OS_*` control vars first, then replace `process.env` with a filtered proxy so runtime internals keep working while guest enumeration/access stays scrubbed; when `node:module` is denied, bootstrap the runner via `process.getBuiltinModule('node:module')` instead of importing it through the guest loader.
+- Node guest process virtualization in `crates/execution/src/node_import_cache.rs` should snapshot the host `process.cwd()` before hardening, use that snapshot for internal module resolution/`createRequire(...)`, and derive guest-visible paths from `AGENT_OS_GUEST_PATH_MAPPINGS` for user-facing `process.*` APIs.
 
 Started: Sat Apr  4 07:06:17 PM PDT 2026
 ---
@@ -66,4 +67,19 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - Patterns discovered: If the Node runner needs denied builtins such as `node:module` for its own bootstrap, it must grab them from `process.getBuiltinModule(...)` before guest hardening rather than importing them through the guest loader.
 - Gotchas encountered: `cargo test -p agent-os-execution --test javascript` is reliable on this branch when run serially with `-- --test-threads=1`; the targeted sidecar security test is still blocked by unrelated pre-existing compile errors in `crates/sidecar/src/service.rs` (`DiagnosticsRequest` / `DiagnosticsSnapshotResponse` imports).
 - Useful context: `javascript_execution_ignores_guest_overrides_for_internal_node_env` in `crates/execution/tests/javascript.rs` is the focused regression for hidden `AGENT_OS_*` env keys, and `crates/sidecar/tests/security_hardening.rs` now has the end-to-end assertions ready once the sidecar crate compiles again.
+---
+## 2026-04-04 19:38:58 PDT - US-005
+- What was implemented
+- Virtualized the Node guest runner’s `process.cwd()` so it returns the guest path derived from `AGENT_OS_GUEST_PATH_MAPPINGS` instead of the host working directory.
+- Denied `process.chdir()` from guest code and kept internal loader/`createRequire(...)` resolution pinned to a snapped host cwd so module loading still resolves against the real sandbox path.
+- Added a regression test that verifies a mapped host cwd is exposed as `/root` to guest code and that `process.chdir()` throws `ERR_ACCESS_DENIED`.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: Guest-facing process virtualization should translate host paths back through `AGENT_OS_GUEST_PATH_MAPPINGS`, while internal Node bootstrap code continues using a captured host cwd to avoid breaking resolution.
+- Gotchas encountered: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` still shows pre-existing flaky cache-metric assertions (`javascript_execution_invalidates_bare_package_resolution_when_package_metadata_changes`, `javascript_execution_preserves_source_changes_with_cached_resolution`) even though those cases pass when rerun individually; the new cwd regression and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` pass.
+- Useful context: The cwd hardening lives in the embedded runner source inside `crates/execution/src/node_import_cache.rs`, not in `crates/execution/src/javascript.rs`, because the visible `process` object is constructed inside the generated `runner.mjs`.
 ---
