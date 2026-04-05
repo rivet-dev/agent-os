@@ -1111,7 +1111,7 @@
         "Typecheck passes"
       ],
       "priority": 70,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: device_layer.rs returns vec![0; 4096] and random_bytes(4096) regardless of requested length. Should return requested length."
     },
     {

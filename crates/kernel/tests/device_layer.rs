@@ -42,19 +42,22 @@ fn special_devices_expose_expected_read_and_write_behavior() {
     filesystem
         .write_file("/dev/zero", "ignored")
         .expect("write /dev/zero");
-    let zeroes = filesystem.read_file("/dev/zero").expect("read /dev/zero");
-    assert_eq!(zeroes.len(), 4096);
+    let zeroes = filesystem
+        .pread("/dev/zero", 0, 5)
+        .expect("pread 5 bytes from /dev/zero");
+    assert_eq!(zeroes.len(), 5);
     assert!(zeroes.iter().all(|byte| *byte == 0));
 
     let first = filesystem
         .pread("/dev/urandom", 0, 1024)
         .expect("pread /dev/urandom");
     let second = filesystem
-        .read_file("/dev/urandom")
-        .expect("read /dev/urandom twice");
+        .pread("/dev/urandom", 0, 1024 * 1024)
+        .expect("pread 1MiB from /dev/urandom");
     assert_eq!(first.len(), 1024);
-    assert_eq!(second.len(), 4096);
+    assert_eq!(second.len(), 1024 * 1024);
     assert_not_trivial_pattern(&first);
+    assert_not_trivial_pattern(&second[..1024]);
     assert_ne!(first, second);
 }
 

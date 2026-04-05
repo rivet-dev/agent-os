@@ -12,6 +12,7 @@ const DEVICE_PATHS: &[&str] = &[
 ];
 
 const DEVICE_DIRS: &[&str] = &["/dev/fd", "/dev/pts"];
+const DEFAULT_STREAM_DEVICE_READ_BYTES: usize = 4096;
 const DEV_DIR_ENTRIES: &[(&str, bool)] = &[
     ("null", false),
     ("zero", false),
@@ -47,12 +48,11 @@ impl<V> DeviceLayer<V> {
 
 impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
     fn read_file(&mut self, path: &str) -> VfsResult<Vec<u8>> {
-        match path {
-            "/dev/null" => Ok(Vec::new()),
-            "/dev/zero" => Ok(vec![0; 4096]),
-            "/dev/urandom" => random_bytes(4096),
-            _ => self.inner.read_file(path),
+        if let Some(bytes) = read_stream_device(path, DEFAULT_STREAM_DEVICE_READ_BYTES) {
+            return bytes;
         }
+
+        self.inner.read_file(path)
     }
 
     fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>> {
@@ -247,12 +247,11 @@ impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
     }
 
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {
-        match path {
-            "/dev/null" => Ok(Vec::new()),
-            "/dev/zero" => Ok(vec![0; length]),
-            "/dev/urandom" => random_bytes(length),
-            _ => self.inner.pread(path, offset, length),
+        if let Some(bytes) = read_stream_device(path, length) {
+            return bytes;
         }
+
+        self.inner.pread(path, offset, length)
     }
 }
 
@@ -317,6 +316,15 @@ fn random_bytes(length: usize) -> VfsResult<Vec<u8>> {
     getrandom(&mut buffer)
         .map_err(|error| VfsError::io(format!("failed to read system random bytes: {error}")))?;
     Ok(buffer)
+}
+
+fn read_stream_device(path: &str, length: usize) -> Option<VfsResult<Vec<u8>>> {
+    match path {
+        "/dev/null" => Some(Ok(Vec::new())),
+        "/dev/zero" => Some(Ok(vec![0; length])),
+        "/dev/urandom" => Some(random_bytes(length)),
+        _ => None,
+    }
 }
 
 fn now_ms() -> u64 {

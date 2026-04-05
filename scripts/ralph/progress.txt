@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Stream devices in `crates/kernel/src/device_layer.rs` should share one length-aware helper, and exact Linux-style byte-count behavior for `/dev/zero` / `/dev/urandom` should be asserted through `pread` / `fd_read` rather than `read_file()`.
 - Synthetic procfs entries in `crates/kernel/src/kernel.rs` should authorize the guest-visible `/proc/...` path directly; if procfs checks go through `PermissionedFileSystem::check_path(...)`, missing backing `/proc` directories in the mounted root can accidentally break the virtual proc layer.
 - OverlayFS mutating ops should not trust merged `read_dir()` for emptiness once copy-up marks directories opaque; raw upper/lower listings are required for `rmdir`, and rename-like moves should stage source entries into the upper and then use the upper filesystem's native `rename` to preserve hardlinks/inode identity.
 - Process-table exit-path changes should be implemented as one bundle: reparent orphaned children, reevaluate orphaned stopped groups for `SIGHUP`/`SIGCONT`, and keep `max_processes` enforcement counting unreaped zombies so lifecycle semantics and resource limits stay aligned.
@@ -1308,4 +1309,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Synthetic procfs entries should authorize the guest-visible `/proc/...` path directly; if procfs checks go through `PermissionedFileSystem::check_path(...)`, missing backing `/proc` directories in the mounted root can accidentally break the virtual proc layer.
   - Gotchas encountered: The sidecar’s JavaScript sync-RPC procfs coverage is more stable as a direct `service_javascript_fs_sync_rpc(...)` unit test than as a late assertion inside a full guest-runtime security script, because unrelated denied-builtin paths can dispose the Node sync bridge first.
   - Useful context: `cargo check -p agent-os-kernel -p agent-os-sidecar`, `cargo test -p agent-os-kernel --test api_surface proc_filesystem_exposes_live_process_metadata_and_fd_symlinks -- --nocapture`, `cargo test -p agent-os-kernel --test api_surface proc_mounts_lists_root_and_active_mounts -- --nocapture`, `cargo test -p agent-os-sidecar javascript_fs_sync_rpc_resolves_proc_self_against_the_kernel_process -- --nocapture`, and `cargo test -p agent-os-sidecar --test security_hardening guest_execution_clears_host_env_and_blocks_network_and_escape_paths -- --nocapture` all pass after this change.
+---
+## 2026-04-05 10:14:13 PDT - US-070
+- What was implemented
+- Centralized `/dev/null`, `/dev/zero`, and `/dev/urandom` reads in `crates/kernel/src/device_layer.rs` so both `read_file()` and `pread()` use the same length-aware device-byte helper instead of duplicating stream-device logic.
+- Updated `crates/kernel/tests/device_layer.rs` to assert exact 5-byte zero reads and exact 1 MiB urandom reads at the VFS layer.
+- Added a kernel FD regression in `crates/kernel/tests/api_surface.rs` that opens `/dev/zero` and `/dev/urandom` and verifies `fd_read()` returns the requested byte counts.
+- Files changed
+- `AGENTS.md`
+- `crates/kernel/src/device_layer.rs`
+- `crates/kernel/tests/api_surface.rs`
+- `crates/kernel/tests/device_layer.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Stream devices should keep their byte-generation logic in one helper so `pread()` / FD reads stay aligned with any bounded `read_file()` fallback.
+  - Gotchas encountered: Exact-byte Linux semantics for `/dev/zero` and `/dev/urandom` need to be asserted on length-aware read surfaces (`pread`, `fd_read`), because `read_file()` has no request-size parameter.
+  - Useful context: `cargo fmt --all`, `cargo check -p agent-os-kernel`, `cargo test -p agent-os-kernel --test device_layer -- --nocapture`, `cargo test -p agent-os-kernel --test api_surface kernel_fd_surface_reads_exact_byte_counts_from_device_nodes -- --exact --nocapture`, and `cargo test -p agent-os-kernel` all pass after this change.
 ---

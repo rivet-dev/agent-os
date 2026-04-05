@@ -53,6 +53,14 @@ fn spawn_shell_in<F: VirtualFileSystem + 'static>(
         .expect("spawn shell")
 }
 
+fn assert_not_trivial_pattern(bytes: &[u8]) {
+    assert!(bytes.iter().any(|byte| *byte != 0));
+    assert!(
+        bytes.windows(2).any(|window| window[0] != window[1]),
+        "random data should not collapse to a repeated byte"
+    );
+}
+
 struct AtomicityProbeFileSystem {
     inner: RefCell<MemoryFileSystem>,
     exclusive_race_pending: Cell<bool>,
@@ -339,6 +347,39 @@ fn kernel_fd_surface_supports_open_seek_positional_io_dup_and_dev_fd_views() {
     assert_eq!(pipe_stat.mode, 0o666);
     assert_eq!(pipe_stat.size, 0);
     assert!(!pipe_stat.is_directory);
+
+    process.finish(0);
+    kernel.waitpid(process.pid()).expect("wait for shell");
+}
+
+#[test]
+fn kernel_fd_surface_reads_exact_byte_counts_from_device_nodes() {
+    let mut config = KernelVmConfig::new("vm-api-fd-devices");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let process = spawn_shell(&mut kernel);
+
+    let zero_fd = kernel
+        .fd_open("shell", process.pid(), "/dev/zero", O_RDWR, None)
+        .expect("open /dev/zero");
+    let zeroes = kernel
+        .fd_read("shell", process.pid(), zero_fd, 5)
+        .expect("read 5 bytes from /dev/zero");
+    assert_eq!(zeroes.len(), 5);
+    assert!(zeroes.iter().all(|byte| *byte == 0));
+
+    let random_fd = kernel
+        .fd_open("shell", process.pid(), "/dev/urandom", O_RDWR, None)
+        .expect("open /dev/urandom");
+    let random = kernel
+        .fd_read("shell", process.pid(), random_fd, 1024 * 1024)
+        .expect("read 1MiB from /dev/urandom");
+    assert_eq!(random.len(), 1024 * 1024);
+    assert_not_trivial_pattern(&random[..1024]);
 
     process.finish(0);
     kernel.waitpid(process.pid()).expect("wait for shell");
