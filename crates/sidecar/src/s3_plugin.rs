@@ -17,7 +17,9 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
 use tokio::runtime::Runtime;
+use url::Url;
 
 const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const DEFAULT_INLINE_THRESHOLD: usize = 64 * 1024;
@@ -449,7 +451,7 @@ impl S3ObjectStore {
 
         let mut builder = S3ConfigBuilder::from(&shared_config).force_path_style(true);
         if let Some(endpoint) = endpoint {
-            builder = builder.endpoint_url(endpoint);
+            builder = builder.endpoint_url(validate_s3_endpoint(&endpoint)?);
         }
 
         Ok(Self {
@@ -539,6 +541,72 @@ impl S3ObjectStore {
                 ))),
             }
         })
+    }
+}
+
+fn validate_s3_endpoint(raw: &str) -> Result<String, PluginError> {
+    let normalized = raw.trim().trim_end_matches('/').to_owned();
+    if normalized.is_empty() {
+        return Err(PluginError::invalid_input(
+            "s3 mount endpoint must be a valid URL",
+        ));
+    }
+
+    let url = Url::parse(&normalized).map_err(|error| {
+        PluginError::invalid_input(format!("s3 mount endpoint is not a valid URL: {error}"))
+    })?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| PluginError::invalid_input("s3 mount endpoint must include a host"))?;
+
+    if is_allowed_test_endpoint_host(host) {
+        return Ok(normalized);
+    }
+
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(PluginError::invalid_input(
+            "s3 mount endpoint must not target localhost",
+        ));
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_disallowed_s3_endpoint_ip(ip) {
+            return Err(PluginError::invalid_input(format!(
+                "s3 mount endpoint must not target a private or local IP address ({host})"
+            )));
+        }
+    }
+
+    Ok(normalized)
+}
+
+fn is_disallowed_s3_endpoint_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_multicast()
+                || ip.is_unspecified()
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.is_multicast()
+                || ip.is_unspecified()
+        }
+    }
+}
+
+fn is_allowed_test_endpoint_host(host: &str) -> bool {
+    #[cfg(test)]
+    {
+        matches!(host, "127.0.0.1" | "localhost" | "::1")
+    }
+    #[cfg(not(test))]
+    {
+        let _ = host;
+        false
     }
 }
 
@@ -1128,6 +1196,24 @@ mod tests {
             chunk_size: Some(8),
             inline_threshold: Some(4),
         }
+    }
+
+    #[test]
+    fn s3_plugin_rejects_private_ip_endpoints() {
+        let server = MockS3Server::start();
+        let mut config = test_config(&server, "reject-private-endpoint");
+        config.endpoint = Some(String::from("http://169.254.169.254/latest"));
+
+        let error = match S3BackedFilesystem::from_config(config) {
+            Ok(_) => panic!("private IP endpoint should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("s3 mount endpoint must not target a private or local IP address"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

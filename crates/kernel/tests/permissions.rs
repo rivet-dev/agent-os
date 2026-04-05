@@ -1,5 +1,6 @@
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
+use agent_os_kernel::mount_table::{MountOptions, MountTable};
 use agent_os_kernel::permissions::{
     filter_env, EnvAccessRequest, FsAccessRequest, PermissionDecision, PermissionedFileSystem,
     Permissions,
@@ -339,4 +340,92 @@ fn driver_pid_ownership_is_enforced_across_kernel_operations() {
     beta.finish(0);
     kernel.wait_and_reap(alpha.pid()).expect("reap alpha");
     kernel.wait_and_reap(beta.pid()).expect("reap beta");
+}
+
+#[test]
+fn kernel_mounts_require_write_permission_on_the_mount_path() {
+    let checked = Arc::new(Mutex::new(Vec::new()));
+    let checked_for_permission = Arc::clone(&checked);
+    let mut config = KernelVmConfig::new("vm-mount-permissions");
+    config.permissions = Permissions {
+        filesystem: Some(Arc::new(move |request: &FsAccessRequest| {
+            checked_for_permission
+                .lock()
+                .expect("checked mount paths lock poisoned")
+                .push((request.op, request.path.clone()));
+            PermissionDecision::deny("mounts disabled")
+        })),
+        ..Permissions::default()
+    };
+
+    let mut kernel = KernelVm::new(MountTable::new(MemoryFileSystem::new()), config);
+    let error = kernel
+        .mount_filesystem(
+            "/workspace",
+            MemoryFileSystem::new(),
+            MountOptions::new("memory"),
+        )
+        .expect_err("mount should be denied");
+    assert_eq!(error.code(), "EACCES");
+    assert!(error.to_string().contains("mounts disabled"));
+    assert_eq!(
+        checked
+            .lock()
+            .expect("checked mount paths lock poisoned")
+            .as_slice(),
+        [(
+            agent_os_kernel::permissions::FsOperation::Write,
+            String::from("/workspace")
+        )]
+        .as_slice()
+    );
+}
+
+#[test]
+fn kernel_sensitive_mounts_require_explicit_sensitive_permission() {
+    let checked = Arc::new(Mutex::new(Vec::new()));
+    let checked_for_permission = Arc::clone(&checked);
+    let mut config = KernelVmConfig::new("vm-sensitive-mounts");
+    config.permissions = Permissions {
+        filesystem: Some(Arc::new(move |request: &FsAccessRequest| {
+            checked_for_permission
+                .lock()
+                .expect("checked mount paths lock poisoned")
+                .push((request.op, request.path.clone()));
+            match request.op {
+                agent_os_kernel::permissions::FsOperation::Write => PermissionDecision::allow(),
+                agent_os_kernel::permissions::FsOperation::MountSensitive => {
+                    PermissionDecision::deny("sensitive mounts require elevation")
+                }
+                other => panic!("unexpected filesystem permission probe: {other:?}"),
+            }
+        })),
+        ..Permissions::default()
+    };
+
+    let mut kernel = KernelVm::new(MountTable::new(MemoryFileSystem::new()), config);
+    let error = kernel
+        .mount_filesystem("/etc", MemoryFileSystem::new(), MountOptions::new("memory"))
+        .expect_err("sensitive mount should be denied");
+    assert_eq!(error.code(), "EACCES");
+    assert!(error
+        .to_string()
+        .contains("sensitive mounts require elevation"));
+    assert_eq!(
+        checked
+            .lock()
+            .expect("checked mount paths lock poisoned")
+            .as_slice(),
+        [
+            (
+                agent_os_kernel::permissions::FsOperation::Write,
+                String::from("/etc"),
+            ),
+            (
+                agent_os_kernel::permissions::FsOperation::MountSensitive,
+                String::from("/etc"),
+            ),
+        ]
+        .as_slice()
+    );
 }

@@ -15,6 +15,7 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
+use url::Url;
 
 const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const DEFAULT_INLINE_THRESHOLD: usize = 64 * 1024;
@@ -22,6 +23,8 @@ const MANIFEST_FORMAT: &str = "agent_os_google_drive_filesystem_manifest_v1";
 const DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
 const DEFAULT_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const DEFAULT_API_BASE_URL: &str = "https://www.googleapis.com";
+const GOOGLE_TOKEN_HOSTS: &[&str] = &["oauth2.googleapis.com"];
+const GOOGLE_API_BASE_HOSTS: &[&str] = &["www.googleapis.com"];
 const TOKEN_REFRESH_SKEW_SECONDS: u64 = 60;
 const MAX_PERSISTED_MANIFEST_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -273,9 +276,8 @@ impl GoogleDriveObjectStore {
         token_url: String,
         api_base_url: String,
     ) -> Result<Self, PluginError> {
-        let api_base_url = normalize_base_url(&api_base_url).ok_or_else(|| {
-            PluginError::invalid_input("google_drive mount requires a valid apiBaseUrl")
-        })?;
+        let api_base_url =
+            validate_google_drive_url(&api_base_url, "apiBaseUrl", GOOGLE_API_BASE_HOSTS, false)?;
 
         Ok(Self {
             auth: GoogleServiceAccountAuth::new(credentials, token_url)?,
@@ -533,6 +535,8 @@ impl GoogleServiceAccountAuth {
                     "google_drive mount credentials.privateKey is not valid PEM: {error}"
                 ))
             })?;
+        let token_url =
+            validate_google_drive_url(&token_url, "tokenUrl", GOOGLE_TOKEN_HOSTS, true)?;
 
         Ok(Self {
             client_email: credentials.client_email,
@@ -881,6 +885,83 @@ fn normalize_base_url(raw: &str) -> Option<String> {
         None
     } else {
         Some(String::from(trimmed))
+    }
+}
+
+fn validate_google_drive_url(
+    raw: &str,
+    field_name: &str,
+    allowed_hosts: &[&str],
+    allow_path: bool,
+) -> Result<String, PluginError> {
+    let normalized = normalize_base_url(raw).ok_or_else(|| {
+        PluginError::invalid_input(format!("google_drive mount requires a valid {field_name}"))
+    })?;
+    let url = Url::parse(&normalized).map_err(|error| {
+        PluginError::invalid_input(format!(
+            "google_drive mount {field_name} is not a valid URL: {error}"
+        ))
+    })?;
+
+    if is_google_drive_test_url(&url) {
+        return Ok(normalized);
+    }
+
+    if url.scheme() != "https" {
+        return Err(PluginError::invalid_input(format!(
+            "google_drive mount {field_name} must use https"
+        )));
+    }
+    if url.host_str().is_none() {
+        return Err(PluginError::invalid_input(format!(
+            "google_drive mount {field_name} must include a host"
+        )));
+    }
+    if url.port().is_some() {
+        return Err(PluginError::invalid_input(format!(
+            "google_drive mount {field_name} must not override the default port"
+        )));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(PluginError::invalid_input(format!(
+            "google_drive mount {field_name} must not include user credentials"
+        )));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(PluginError::invalid_input(format!(
+            "google_drive mount {field_name} must not include query or fragment components"
+        )));
+    }
+    if !allow_path && url.path() != "/" {
+        return Err(PluginError::invalid_input(format!(
+            "google_drive mount {field_name} must not include a path"
+        )));
+    }
+
+    let host = url.host_str().expect("host checked above");
+    if !allowed_hosts.iter().any(|candidate| candidate == &host) {
+        return Err(PluginError::invalid_input(format!(
+            "google_drive mount {field_name} host must be one of: {}",
+            allowed_hosts.join(", ")
+        )));
+    }
+
+    Ok(normalized)
+}
+
+fn is_google_drive_test_url(url: &Url) -> bool {
+    #[cfg(test)]
+    {
+        matches!(url.scheme(), "http" | "https")
+            && matches!(
+                url.host_str(),
+                Some("127.0.0.1") | Some("localhost") | Some("[::1]")
+            )
+    }
+    #[cfg(not(test))]
+    {
+        let _ = url;
+        false
     }
 }
 
@@ -1492,6 +1573,42 @@ oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==\n\
             token_url: Some(format!("{}/token", server.base_url())),
             api_base_url: Some(String::from(server.base_url())),
         }
+    }
+
+    #[test]
+    fn google_drive_plugin_rejects_untrusted_token_hosts() {
+        let server = MockGoogleDriveServer::start();
+        let mut config = test_config(&server, "reject-token-host");
+        config.token_url = Some(String::from("https://evil.example/token"));
+
+        let error = match GoogleDriveBackedFilesystem::from_config(config) {
+            Ok(_) => panic!("untrusted token host should be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("google_drive mount tokenUrl host must be one of"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn google_drive_plugin_rejects_untrusted_api_base_hosts() {
+        let server = MockGoogleDriveServer::start();
+        let mut config = test_config(&server, "reject-api-host");
+        config.api_base_url = Some(String::from("https://metadata.google.internal"));
+
+        let error = match GoogleDriveBackedFilesystem::from_config(config) {
+            Ok(_) => panic!("untrusted api base host should be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("google_drive mount apiBaseUrl host must be one of"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

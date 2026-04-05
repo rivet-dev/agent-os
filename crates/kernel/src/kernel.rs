@@ -8,7 +8,7 @@ use crate::fd_table::{
 };
 use crate::mount_table::{MountEntry, MountOptions, MountTable, MountedFileSystem};
 use crate::permissions::{
-    check_command_execution, PermissionError, PermissionedFileSystem, Permissions,
+    check_command_execution, FsOperation, PermissionError, PermissionedFileSystem, Permissions,
 };
 use crate::pipe_manager::{PipeError, PipeManager};
 use crate::process_table::{
@@ -1166,6 +1166,18 @@ impl<F: VirtualFileSystem> KernelVm<F> {
 }
 
 impl KernelVm<MountTable> {
+    fn check_mount_permissions(&self, path: &str) -> KernelResult<()> {
+        self.filesystem
+            .check_path(FsOperation::Write, path)
+            .map_err(KernelError::from)?;
+        if is_sensitive_mount_path(path) {
+            self.filesystem
+                .check_path(FsOperation::MountSensitive, path)
+                .map_err(KernelError::from)?;
+        }
+        Ok(())
+    }
+
     pub fn mount_filesystem(
         &mut self,
         path: &str,
@@ -1173,6 +1185,7 @@ impl KernelVm<MountTable> {
         options: MountOptions,
     ) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        self.check_mount_permissions(path)?;
         self.filesystem
             .inner_mut()
             .inner_mut()
@@ -1187,6 +1200,7 @@ impl KernelVm<MountTable> {
         options: MountOptions,
     ) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        self.check_mount_permissions(path)?;
         self.filesystem
             .inner_mut()
             .inner_mut()
@@ -1300,6 +1314,15 @@ impl From<VfsError> for KernelError {
     fn from(error: VfsError) -> Self {
         map_error(error.code(), error.to_string())
     }
+}
+
+fn is_sensitive_mount_path(path: &str) -> bool {
+    let normalized = crate::vfs::normalize_path(path);
+    normalized == "/"
+        || normalized == "/etc"
+        || normalized.starts_with("/etc/")
+        || normalized == "/proc"
+        || normalized.starts_with("/proc/")
 }
 
 impl From<FdTableError> for KernelError {

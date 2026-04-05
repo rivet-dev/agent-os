@@ -137,6 +137,13 @@ const FS_PERMISSION_SAMPLES: FsPermissionSample[] = [
 			{ path: "/tmp/policy-probe.txt", operation: "truncate" },
 		],
 	},
+	{
+		capability: "fs.mount_sensitive",
+		requests: [
+			{ path: "/etc", operation: "mountSensitive" },
+			{ path: "/proc", operation: "mountSensitive" },
+		],
+	},
 ] as const;
 
 const NETWORK_PERMISSION_SAMPLES: NetworkPermissionSample[] = [

@@ -4255,6 +4255,15 @@ where
 
     Permissions {
         filesystem: Some(Arc::new(move |request: &FsAccessRequest| {
+            if request.op == FsOperation::MountSensitive {
+                if let Some(decision) = filesystem_bridge.static_permission_decision(
+                    &filesystem_vm_id,
+                    "fs.mount_sensitive",
+                    "fs",
+                ) {
+                    return decision;
+                }
+            }
             filesystem_bridge.filesystem_decision(
                 &filesystem_vm_id,
                 &request.path,
@@ -4273,6 +4282,7 @@ where
                     FsOperation::Chown => FilesystemAccess::Write,
                     FsOperation::Utimes => FilesystemAccess::Write,
                     FsOperation::Truncate => FilesystemAccess::Write,
+                    FsOperation::MountSensitive => FilesystemAccess::Write,
                 },
             )
         })),
@@ -7306,24 +7316,12 @@ ykAheWCsAteSEWVc0w==\n\
             &session_id,
             vec![
                 PermissionDescriptor {
+                    capability: String::from("fs"),
+                    mode: PermissionMode::Allow,
+                },
+                PermissionDescriptor {
                     capability: String::from("fs.read"),
                     mode: PermissionMode::Deny,
-                },
-                PermissionDescriptor {
-                    capability: String::from("fs.write"),
-                    mode: PermissionMode::Allow,
-                },
-                PermissionDescriptor {
-                    capability: String::from("network"),
-                    mode: PermissionMode::Allow,
-                },
-                PermissionDescriptor {
-                    capability: String::from("child_process"),
-                    mode: PermissionMode::Allow,
-                },
-                PermissionDescriptor {
-                    capability: String::from("env"),
-                    mode: PermissionMode::Allow,
                 },
             ],
         )
@@ -7341,6 +7339,121 @@ ykAheWCsAteSEWVc0w==\n\
             .read_file("/blocked.txt")
             .expect_err("read should be denied");
         assert_eq!(read_error.code(), "EACCES");
+    }
+
+    #[test]
+    fn configure_vm_mounts_require_fs_write_permission() {
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
+        sidecar
+            .bridge
+            .set_vm_permissions(
+                &vm_id,
+                &[PermissionDescriptor {
+                    capability: String::from("fs.write"),
+                    mode: PermissionMode::Deny,
+                }],
+            )
+            .expect("set vm permissions");
+
+        let result = sidecar
+            .dispatch(request(
+                4,
+                OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                RequestPayload::ConfigureVm(ConfigureVmRequest {
+                    mounts: vec![MountDescriptor {
+                        guest_path: String::from("/workspace"),
+                        read_only: false,
+                        plugin: MountPluginDescriptor {
+                            id: String::from("memory"),
+                            config: json!({}),
+                        },
+                    }],
+                    software: Vec::new(),
+                    permissions: Vec::new(),
+                    instructions: Vec::new(),
+                    projected_modules: Vec::new(),
+                }),
+            ))
+            .expect("dispatch configure vm");
+
+        match result.response.payload {
+            ResponsePayload::Rejected(rejected) => {
+                assert_eq!(rejected.code, "kernel_error");
+                assert!(
+                    rejected.message.contains("EACCES"),
+                    "unexpected error: {}",
+                    rejected.message
+                );
+            }
+            other => panic!("expected rejected response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_vm_sensitive_mounts_require_fs_mount_sensitive_permission() {
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id =
+            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
+        sidecar
+            .bridge
+            .set_vm_permissions(
+                &vm_id,
+                &[
+                    PermissionDescriptor {
+                        capability: String::from("fs.write"),
+                        mode: PermissionMode::Allow,
+                    },
+                    PermissionDescriptor {
+                        capability: String::from("fs.mount_sensitive"),
+                        mode: PermissionMode::Deny,
+                    },
+                ],
+            )
+            .expect("set vm permissions");
+
+        let result = sidecar
+            .dispatch(request(
+                4,
+                OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                RequestPayload::ConfigureVm(ConfigureVmRequest {
+                    mounts: vec![MountDescriptor {
+                        guest_path: String::from("/etc"),
+                        read_only: false,
+                        plugin: MountPluginDescriptor {
+                            id: String::from("memory"),
+                            config: json!({}),
+                        },
+                    }],
+                    software: Vec::new(),
+                    permissions: Vec::new(),
+                    instructions: Vec::new(),
+                    projected_modules: Vec::new(),
+                }),
+            ))
+            .expect("dispatch configure vm");
+
+        match result.response.payload {
+            ResponsePayload::Rejected(rejected) => {
+                assert_eq!(rejected.code, "kernel_error");
+                assert!(
+                    rejected.message.contains("EACCES"),
+                    "unexpected error: {}",
+                    rejected.message
+                );
+                assert!(
+                    rejected.message.contains("fs.mount_sensitive"),
+                    "unexpected error: {}",
+                    rejected.message
+                );
+            }
+            other => panic!("expected rejected response, got {other:?}"),
+        }
     }
 
     #[test]

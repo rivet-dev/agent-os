@@ -86,6 +86,7 @@ pub enum FsOperation {
     Chown,
     Utimes,
     Truncate,
+    MountSensitive,
 }
 
 impl FsOperation {
@@ -107,6 +108,7 @@ impl FsOperation {
             Self::Chown => "chown",
             Self::Utimes => "utimes",
             Self::Truncate => "truncate",
+            Self::MountSensitive => "mount",
         }
     }
 }
@@ -387,7 +389,8 @@ impl<F: VirtualFileSystem> PermissionedFileSystem<F> {
             | FsOperation::CreateDir
             | FsOperation::Rename
             | FsOperation::Symlink
-            | FsOperation::Link => self.resolved_destination_path(path),
+            | FsOperation::Link
+            | FsOperation::MountSensitive => self.resolved_destination_path(path),
             FsOperation::Remove => Ok(crate::vfs::normalize_path(path)),
         }
     }
@@ -395,6 +398,10 @@ impl<F: VirtualFileSystem> PermissionedFileSystem<F> {
     fn check_subject(&self, op: FsOperation, path: &str) -> VfsResult<()> {
         let subject = self.permission_subject(op, path)?;
         self.check(op, &subject)
+    }
+
+    pub fn check_path(&self, op: FsOperation, path: &str) -> VfsResult<()> {
+        self.check_subject(op, path)
     }
 
     pub fn exists(&self, path: &str) -> VfsResult<bool> {

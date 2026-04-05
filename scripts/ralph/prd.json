@@ -614,7 +614,7 @@
         "Typecheck passes"
       ],
       "priority": 28,
-      "passes": false,
+      "passes": true,
       "notes": "Plugins accept arbitrary URLs. mount_filesystem only checks assert_not_terminated, no path or caller validation."
     },
     {

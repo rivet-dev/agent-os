@@ -31,6 +31,7 @@ describe("serializePermissionsForSidecar", () => {
 			{ capability: "fs.readlink", mode: "deny" },
 			{ capability: "fs.chmod", mode: "deny" },
 			{ capability: "fs.truncate", mode: "deny" },
+			{ capability: "fs.mount_sensitive", mode: "deny" },
 			{ capability: "network", mode: "deny" },
 			{ capability: "child_process", mode: "deny" },
 			{ capability: "env", mode: "deny" },

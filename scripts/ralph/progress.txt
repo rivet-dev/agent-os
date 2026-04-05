@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Sensitive mount paths are gated separately from ordinary writes: kernel mount APIs require `fs.write` on the mount target, and `/`, `/etc`, `/proc` also require `fs.mount_sensitive`; in sidecar tests, `configure_vm` reconciles mounts before `payload.permissions`, so mount-time policy must already be installed on the VM (for example via `bridge.set_vm_permissions(...)`).
 - Filesystem permission checks in `crates/kernel/src/permissions.rs` should resolve the deepest existing ancestor before authorizing create/probe paths, make `exists()` fail closed, and stay aligned with `crates/kernel/src/mount_table.rs` rejecting cross-mount symlink targets with `EXDEV`.
 - Python execution in `crates/execution/src/python.rs` should keep `poll_event()` blocked until a real guest-visible event arrives or the caller timeout expires; filtered stderr/control traffic is internal noise, and `wait()` should cap buffered stdio via the hidden `AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES` env knob instead of growing unbounded buffers.
 - Native sidecar permission policy must be serialized into `CreateVmRequest`, not just `configure_vm`, because guest env filtering and bootstrap driver registration both happen during VM construction.
@@ -540,4 +541,28 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Permission checks for filesystem paths should split into two cases: existing-target operations use `realpath`, while create/probe operations resolve the deepest existing ancestor and then append the unresolved suffix so missing paths still inherit symlink-aware policy.
   - Gotchas encountered: `PermissionedFileSystem::exists()` is part of kernel open/create flows, so it must stay fail-closed for denied or missing paths without surfacing `ENOENT` back to callers that expect a simple boolean probe.
   - Useful context: `cargo test -p agent-os-kernel -- --test-threads=1`, `cargo test -p agent-os-kernel --test permissions -- --test-threads=1`, `cargo test -p agent-os-kernel --test mount_table -- --test-threads=1`, and `cargo check -p agent-os-kernel` all pass after this change.
+---
+## 2026-04-05 02:06:50 PDT - US-038
+- What was implemented
+- Added kernel mount authorization so `mount_filesystem` and `mount_boxed_filesystem` now require ordinary write permission on the mount target, and sensitive targets under `/`, `/etc`, and `/proc` also require a separate `fs.mount_sensitive` capability.
+- Hardened the Google Drive and S3 native mount plugins against SSRF by validating Google OAuth/API hosts and rejecting private/local S3 endpoint IPs, while still allowing the loopback mock servers used by unit tests under `cfg(test)`.
+- Extended sidecar permission serialization/tests to emit `fs.mount_sensitive`, added kernel and sidecar regressions for mount gating, and added plugin regressions for the new URL validation paths.
+- Files changed
+- `AGENTS.md`
+- `Cargo.lock`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/src/permissions.rs`
+- `crates/kernel/tests/permissions.rs`
+- `crates/sidecar/Cargo.toml`
+- `crates/sidecar/src/google_drive_plugin.rs`
+- `crates/sidecar/src/s3_plugin.rs`
+- `crates/sidecar/src/service.rs`
+- `packages/core/src/sidecar/permission-descriptors.ts`
+- `packages/core/tests/sidecar-permission-descriptors.test.ts`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Sensitive mount checks piggyback on the existing filesystem permission model instead of a separate mount subsystem; ordinary mount checks should reuse the resolved-path write subject, and only the elevated path list needs the extra capability.
+  - Gotchas encountered: In the Rust sidecar, `ConfigureVm` mounts are applied before `payload.permissions`, so mount-denial tests must seed the VM permission map before dispatch rather than relying on the request body.
+  - Useful context: `cargo test -p agent-os-kernel --test permissions`, `cargo test -p agent-os-sidecar google_drive_plugin_rejects_`, `cargo test -p agent-os-sidecar s3_plugin_rejects_private_ip_endpoints`, `cargo test -p agent-os-sidecar configure_vm_mounts_require_fs_write_permission`, `cargo test -p agent-os-sidecar configure_vm_sensitive_mounts_require_fs_mount_sensitive_permission`, `cargo test -p agent-os-sidecar create_vm_applies_filesystem_permission_descriptors_to_kernel_access -- --test-threads=1`, `pnpm --dir packages/core exec vitest run tests/sidecar-permission-descriptors.test.ts`, and `pnpm --dir packages/core exec tsc --noEmit` pass. A broader `cargo test -p agent-os-sidecar` run still hits unrelated existing failures in host-dir, Python warmup, child-process worker permissions, and TCP runtime tests on this branch.
 ---

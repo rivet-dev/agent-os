@@ -53,6 +53,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "ureq",
+ "url",
  "wat",
 ]
 
