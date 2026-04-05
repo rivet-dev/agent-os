@@ -1345,13 +1345,21 @@ register(loaderPath, import.meta.url);
 
 const NODE_EXECUTION_RUNNER_SOURCE: &str = r#"
 import fs from 'node:fs';
-import Module, { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const GUEST_PATH_MAPPINGS = parseGuestPathMappings(process.env.AGENT_OS_GUEST_PATH_MAPPINGS);
-const ALLOWED_BUILTINS = new Set(parseJsonArray(process.env.AGENT_OS_ALLOWED_NODE_BUILTINS));
-const LOOPBACK_EXEMPT_PORTS = new Set(parseJsonArray(process.env.AGENT_OS_LOOPBACK_EXEMPT_PORTS));
+const HOST_PROCESS_ENV = { ...process.env };
+const Module =
+  typeof process.getBuiltinModule === 'function'
+    ? process.getBuiltinModule('node:module')
+    : null;
+const syncBuiltinESMExports =
+  typeof Module?.syncBuiltinESMExports === 'function'
+    ? Module.syncBuiltinESMExports.bind(Module)
+    : () => {};
+const GUEST_PATH_MAPPINGS = parseGuestPathMappings(HOST_PROCESS_ENV.AGENT_OS_GUEST_PATH_MAPPINGS);
+const ALLOWED_BUILTINS = new Set(parseJsonArray(HOST_PROCESS_ENV.AGENT_OS_ALLOWED_NODE_BUILTINS));
+const LOOPBACK_EXEMPT_PORTS = new Set(parseJsonArray(HOST_PROCESS_ENV.AGENT_OS_LOOPBACK_EXEMPT_PORTS));
 const DENIED_BUILTINS = new Set([
   'child_process',
   'cluster',
@@ -1371,14 +1379,22 @@ const DENIED_BUILTINS = new Set([
   'vm',
   'worker_threads',
 ].filter((name) => !ALLOWED_BUILTINS.has(name)));
+const originalGetBuiltinModule =
+  typeof process.getBuiltinModule === 'function'
+    ? process.getBuiltinModule.bind(process)
+    : null;
 const originalModuleLoad =
-  typeof Module._load === 'function' ? Module._load.bind(Module) : null;
+  typeof Module?._load === 'function' ? Module._load.bind(Module) : null;
 const originalFetch =
   typeof globalThis.fetch === 'function'
     ? globalThis.fetch.bind(globalThis)
     : null;
+if (!Module || typeof Module.createRequire !== 'function') {
+  throw new Error('node:module builtin access is required for the Agent OS guest runtime');
+}
 const hostRequire = Module.createRequire(import.meta.url);
-const guestEntryPoint = process.env.AGENT_OS_GUEST_ENTRYPOINT ?? process.env.AGENT_OS_ENTRYPOINT;
+const guestEntryPoint =
+  HOST_PROCESS_ENV.AGENT_OS_GUEST_ENTRYPOINT ?? HOST_PROCESS_ENV.AGENT_OS_ENTRYPOINT;
 
 function isPathLike(specifier) {
   return specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('file:');
@@ -1446,6 +1462,70 @@ function parseJsonArray(value) {
   } catch {
     return [];
   }
+}
+
+function isInternalProcessEnvKey(key) {
+  return typeof key === 'string' && key.startsWith('AGENT_OS_');
+}
+
+function createGuestProcessEnv(env) {
+  const guestEnv = {};
+
+  for (const [key, value] of Object.entries(env ?? {})) {
+    if (typeof value !== 'string' || isInternalProcessEnvKey(key)) {
+      continue;
+    }
+    guestEnv[key] = value;
+  }
+
+  return new Proxy(guestEnv, {
+    defineProperty(target, key, descriptor) {
+      if (typeof key === 'string' && isInternalProcessEnvKey(key)) {
+        return true;
+      }
+
+      const normalized = { ...descriptor };
+      if ('value' in normalized) {
+        normalized.value = String(normalized.value);
+      }
+      return Reflect.defineProperty(target, key, normalized);
+    },
+    deleteProperty(target, key) {
+      if (typeof key === 'string' && isInternalProcessEnvKey(key)) {
+        return true;
+      }
+      return Reflect.deleteProperty(target, key);
+    },
+    get(target, key, receiver) {
+      if (typeof key === 'string' && isInternalProcessEnvKey(key)) {
+        return undefined;
+      }
+      return Reflect.get(target, key, receiver);
+    },
+    getOwnPropertyDescriptor(target, key) {
+      if (typeof key === 'string' && isInternalProcessEnvKey(key)) {
+        return undefined;
+      }
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+    has(target, key) {
+      if (typeof key === 'string' && isInternalProcessEnvKey(key)) {
+        return false;
+      }
+      return Reflect.has(target, key);
+    },
+    ownKeys(target) {
+      return Reflect.ownKeys(target).filter(
+        (key) => typeof key !== 'string' || !isInternalProcessEnvKey(key),
+      );
+    },
+    set(target, key, value, receiver) {
+      if (typeof key === 'string' && isInternalProcessEnvKey(key)) {
+        return true;
+      }
+      return Reflect.set(target, key, String(value), receiver);
+    },
+  });
 }
 
 function parseGuestPathMappings(value) {
@@ -2021,6 +2101,7 @@ function hardenProperty(target, key, value) {
 }
 
 function installGuestHardening() {
+  hardenProperty(process, 'env', createGuestProcessEnv(HOST_PROCESS_ENV));
   syncBuiltinModuleExports(hostFs, guestFs);
   syncBuiltinModuleExports(hostFsPromises, guestFs.promises);
   try {
@@ -2038,6 +2119,22 @@ function installGuestHardening() {
   hardenProperty(process, 'dlopen', () => {
     throw accessDenied('process.dlopen');
   });
+  if (originalGetBuiltinModule) {
+    hardenProperty(process, 'getBuiltinModule', (specifier) => {
+      const normalized =
+        typeof specifier === 'string' ? normalizeBuiltin(specifier) : null;
+      if (normalized === 'fs') {
+        return cloneFsModule(guestFs);
+      }
+      if (normalized === 'child_process' && ALLOWED_BUILTINS.has('child_process')) {
+        return guestChildProcess;
+      }
+      if (normalized && DENIED_BUILTINS.has(normalized)) {
+        throw accessDenied(`node:${normalized}`);
+      }
+      return originalGetBuiltinModule(specifier);
+    });
+  }
 
   if (originalModuleLoad) {
     Module._load = function(request, parent, isMain) {
@@ -2098,7 +2195,7 @@ function installGuestHardening() {
   }
 }
 
-const entrypoint = process.env.AGENT_OS_ENTRYPOINT;
+const entrypoint = HOST_PROCESS_ENV.AGENT_OS_ENTRYPOINT;
 if (!entrypoint) {
   throw new Error('AGENT_OS_ENTRYPOINT is required');
 }
@@ -2118,7 +2215,7 @@ hardenProperty(
   createGuestRequire(path.posix.dirname(guestEntryPoint ?? entrypoint)),
 );
 
-if (process.env.AGENT_OS_KEEP_STDIN_OPEN === '1') {
+if (HOST_PROCESS_ENV.AGENT_OS_KEEP_STDIN_OPEN === '1') {
   let stdinKeepalive = setInterval(() => {}, 1_000_000);
   const releaseStdinKeepalive = () => {
     if (stdinKeepalive !== null) {
@@ -2133,8 +2230,8 @@ if (process.env.AGENT_OS_KEEP_STDIN_OPEN === '1') {
   process.stdin.once('error', releaseStdinKeepalive);
 }
 
-const guestArgv = JSON.parse(process.env.AGENT_OS_GUEST_ARGV ?? '[]');
-const bootstrapModule = process.env.AGENT_OS_BOOTSTRAP_MODULE;
+const guestArgv = JSON.parse(HOST_PROCESS_ENV.AGENT_OS_GUEST_ARGV ?? '[]');
+const bootstrapModule = HOST_PROCESS_ENV.AGENT_OS_BOOTSTRAP_MODULE;
 const entrypointPath = isPathLike(entrypoint)
   ? path.resolve(process.cwd(), entrypoint)
   : entrypoint;

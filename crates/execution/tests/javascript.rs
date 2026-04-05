@@ -222,7 +222,7 @@ for await (const chunk of process.stdin) {
   input += chunk;
 }
 
-console.log(`stdout:${process.env.AGENT_OS_TEST_ENV}:${input}`);
+console.log(`stdout:${process.env.VISIBLE_TEST_ENV}:${input}`);
 console.error(`stderr:${process.argv.slice(2).join(",")}`);
 "#,
     );
@@ -243,7 +243,7 @@ console.error(`stderr:${process.argv.slice(2).join(",")}`);
                 String::from("alpha"),
                 String::from("beta"),
             ],
-            env: BTreeMap::from([(String::from("AGENT_OS_TEST_ENV"), String::from("ok"))]),
+            env: BTreeMap::from([(String::from("VISIBLE_TEST_ENV"), String::from("ok"))]),
             cwd: temp.path().to_path_buf(),
         })
         .expect("start JavaScript execution");
@@ -362,6 +362,10 @@ console.log(`entrypoint:${process.argv[1]}`);
 console.log(`args:${process.argv.slice(2).join(",")}`);
 console.log(`node-options:${process.env.NODE_OPTIONS ?? "missing"}`);
 console.log(`loader-path:${process.env.AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH ?? "missing"}`);
+console.log(`loader-visible:${'AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH' in process.env}`);
+console.log(
+  `internal-keys:${Object.keys(process.env).filter((key) => key.startsWith("AGENT_OS_")).length}`,
+);
 "#,
     );
     write_fixture(
@@ -405,6 +409,9 @@ console.log("evil override executed");
     );
     assert!(stdout.contains("args:safe-arg"), "stdout: {stdout}");
     assert!(stdout.contains("node-options:missing"), "stdout: {stdout}");
+    assert!(stdout.contains("loader-path:missing"), "stdout: {stdout}");
+    assert!(stdout.contains("loader-visible:false"), "stdout: {stdout}");
+    assert!(stdout.contains("internal-keys:0"), "stdout: {stdout}");
     assert!(
         !stdout.contains("evil override executed"),
         "stdout: {stdout}"

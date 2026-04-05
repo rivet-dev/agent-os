@@ -61,7 +61,7 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "process.env currently leaks all AGENT_OS_* internal control variables to guest code."
     },
     {

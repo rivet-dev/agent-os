@@ -73,7 +73,12 @@ fn guest_execution_clears_host_env_and_blocks_network_and_escape_paths() {
   const result = {
     path: process.env.PATH ?? null,
     home: process.env.HOME ?? null,
-    marker: process.env.AGENT_OS_ALLOWED ?? null,
+    marker: process.env.VISIBLE_MARKER ?? null,
+    internalMarker: process.env.AGENT_OS_ALLOWED ?? null,
+    guestPathMappings: process.env.AGENT_OS_GUEST_PATH_MAPPINGS ?? null,
+    importCachePath: process.env.AGENT_OS_NODE_IMPORT_CACHE_PATH ?? null,
+    hasInternalMarker: 'AGENT_OS_ALLOWED' in process.env,
+    keys: Object.keys(process.env).filter((key) => key.startsWith('AGENT_OS_')),
   };
 
   const dataResponse = await fetch('data:text/plain,agent-os-ok');
@@ -132,10 +137,7 @@ fn guest_execution_clears_host_env_and_blocks_network_and_escape_paths() {
         &session_id,
         GuestRuntimeKind::JavaScript,
         &cwd,
-        BTreeMap::from([(
-            String::from("env.AGENT_OS_ALLOWED"),
-            String::from("present"),
-        )]),
+        BTreeMap::from([(String::from("env.VISIBLE_MARKER"), String::from("present"))]),
     );
 
     execute(
@@ -164,6 +166,11 @@ fn guest_execution_clears_host_env_and_blocks_network_and_escape_paths() {
     assert_eq!(parsed["path"], Value::Null);
     assert_eq!(parsed["home"], Value::Null);
     assert_eq!(parsed["marker"], Value::String(String::from("present")));
+    assert_eq!(parsed["internalMarker"], Value::Null);
+    assert_eq!(parsed["guestPathMappings"], Value::Null);
+    assert_eq!(parsed["importCachePath"], Value::Null);
+    assert_eq!(parsed["hasInternalMarker"], Value::Bool(false));
+    assert_eq!(parsed["keys"], Value::Array(Vec::new()));
     assert_eq!(
         parsed["dataText"],
         Value::String(String::from("agent-os-ok"))
