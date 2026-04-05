@@ -5,7 +5,8 @@ use agent_os_execution::{
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -156,11 +157,29 @@ fn run_python_execution(
         })
         .expect("start Python execution");
 
-    let result = execution.wait().expect("wait for Python execution");
+    let result = execution.wait(None).expect("wait for Python execution");
     let stdout = String::from_utf8(result.stdout).expect("stdout utf8");
     let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
 
     (stdout, stderr, result.exit_code)
+}
+
+fn assert_process_exits(pid: u32) {
+    for _ in 0..20 {
+        let status = Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("probe process with kill -0");
+        if !status.success() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    panic!("process {pid} was still alive after waiting for cleanup");
 }
 
 #[test]
@@ -677,4 +696,143 @@ export async function loadPyodide(options) {
         stdout.contains("\"size\":14"),
         "unexpected stdout: {stdout}"
     );
+}
+
+#[test]
+fn python_execution_wait_timeout_cleans_up_hanging_child() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let pyodide_dir = temp.path().join("pyodide");
+    fs::create_dir_all(&pyodide_dir).expect("create pyodide dir");
+    write_fixture(
+        &pyodide_dir.join("pyodide.mjs"),
+        r#"
+export async function loadPyodide() {
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync() {
+      await new Promise(() => setInterval(() => {}, 1000));
+    },
+  };
+}
+"#,
+    );
+    write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
+
+    let mut engine = PythonExecutionEngine::default();
+    let context = engine.create_context(CreatePythonContextRequest {
+        vm_id: String::from("vm-python"),
+        pyodide_dist_path: pyodide_dir,
+    });
+
+    let execution = engine
+        .start_execution(StartPythonExecutionRequest {
+            vm_id: String::from("vm-python"),
+            context_id: context.context_id,
+            code: String::from("print('hang')"),
+            file_path: None,
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start Python execution");
+    let child_pid = execution.child_pid();
+
+    let error = execution
+        .wait(Some(Duration::from_millis(100)))
+        .expect_err("timed out wait");
+    match error {
+        agent_os_execution::PythonExecutionError::TimedOut(timeout) => {
+            assert_eq!(timeout, Duration::from_millis(100));
+        }
+        other => panic!("expected timeout error, got {other:?}"),
+    }
+
+    assert_process_exits(child_pid);
+}
+
+#[test]
+fn python_execution_kill_stops_inflight_process_and_emits_exit() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let pyodide_dir = temp.path().join("pyodide");
+    fs::create_dir_all(&pyodide_dir).expect("create pyodide dir");
+    write_fixture(
+        &pyodide_dir.join("pyodide.mjs"),
+        r#"
+export async function loadPyodide(options) {
+  options.stdout("ready\n");
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync() {
+      await new Promise(() => setInterval(() => {}, 1000));
+    },
+  };
+}
+"#,
+    );
+    write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
+
+    let mut engine = PythonExecutionEngine::default();
+    let context = engine.create_context(CreatePythonContextRequest {
+        vm_id: String::from("vm-python"),
+        pyodide_dist_path: pyodide_dir,
+    });
+
+    let mut execution = engine
+        .start_execution(StartPythonExecutionRequest {
+            vm_id: String::from("vm-python"),
+            context_id: context.context_id,
+            code: String::from("print('hang')"),
+            file_path: None,
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start Python execution");
+    let child_pid = execution.child_pid();
+
+    let mut saw_ready = false;
+    while !saw_ready {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll Python event before kill")
+        {
+            Some(PythonExecutionEvent::Stdout(chunk)) => {
+                saw_ready = String::from_utf8(chunk)
+                    .expect("stdout utf8")
+                    .contains("ready");
+            }
+            Some(PythonExecutionEvent::Stderr(chunk)) => {
+                panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
+            }
+            Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
+                panic!("unexpected VFS RPC request during kill test: {request:?}");
+            }
+            Some(PythonExecutionEvent::Exited(code)) => {
+                panic!("execution exited unexpectedly before kill with code {code}");
+            }
+            None => panic!("timed out waiting for Python execution readiness"),
+        }
+    }
+
+    execution.kill().expect("kill hanging Python execution");
+
+    let mut exit_code = None;
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_millis(100))
+            .expect("poll Python event after kill")
+        {
+            Some(PythonExecutionEvent::Exited(code)) => exit_code = Some(code),
+            Some(PythonExecutionEvent::Stdout(_)) | Some(PythonExecutionEvent::Stderr(_)) => {}
+            Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
+                panic!("unexpected VFS RPC request after kill: {request:?}");
+            }
+            None => {}
+        }
+    }
+
+    assert_eq!(exit_code, Some(1));
+    assert_process_exits(child_pid);
 }

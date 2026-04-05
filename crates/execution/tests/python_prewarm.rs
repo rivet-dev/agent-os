@@ -124,7 +124,7 @@ fn start_python_execution(
             cwd: cwd.to_path_buf(),
         })
         .expect("start Python execution")
-        .wait()
+        .wait(None)
         .expect("wait for Python execution");
     assert_eq!(result.exit_code, 0);
 }

@@ -2,8 +2,8 @@ use crate::common::{encode_json_string, frozen_time_ms, stable_hash64};
 use crate::node_import_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV};
 use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
-    env_builtin_enabled, harden_node_command, node_binary, spawn_node_control_reader,
-    spawn_stream_reader, LinePrefixFilter, NodeControlMessage,
+    harden_node_command, node_binary, spawn_node_control_reader, spawn_stream_reader,
+    LinePrefixFilter, NodeControlMessage,
 };
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
 use nix::unistd::pipe2;
@@ -180,7 +180,9 @@ pub enum PythonExecutionError {
     Spawn(std::io::Error),
     StdinClosed,
     Stdin(std::io::Error),
+    Kill(std::io::Error),
     Wait(std::io::Error),
+    TimedOut(Duration),
     PendingVfsRpcRequest(u64),
     RpcChannel(String),
     RpcResponse(String),
@@ -223,7 +225,13 @@ impl fmt::Display for PythonExecutionError {
             Self::Spawn(err) => write!(f, "failed to start guest Python runtime: {err}"),
             Self::StdinClosed => f.write_str("guest Python stdin is already closed"),
             Self::Stdin(err) => write!(f, "failed to write guest stdin: {err}"),
+            Self::Kill(err) => write!(f, "failed to kill guest Python runtime: {err}"),
             Self::Wait(err) => write!(f, "failed to wait for guest Python runtime: {err}"),
+            Self::TimedOut(timeout) => write!(
+                f,
+                "guest Python runtime timed out after {}ms",
+                timeout.as_millis()
+            ),
             Self::PendingVfsRpcRequest(id) => {
                 write!(
                     f,
@@ -286,6 +294,18 @@ impl PythonExecution {
     pub fn close_stdin(&mut self) -> Result<(), PythonExecutionError> {
         if let Some(stdin) = self.stdin.take() {
             drop(stdin);
+        }
+        Ok(())
+    }
+
+    pub fn cancel(&mut self) -> Result<(), PythonExecutionError> {
+        self.kill()
+    }
+
+    pub fn kill(&mut self) -> Result<(), PythonExecutionError> {
+        self.close_stdin()?;
+        if let Some(exit_code) = self.terminate_child()? {
+            self.store_pending_exit_code(exit_code)?;
         }
         Ok(())
     }
@@ -364,7 +384,8 @@ impl PythonExecution {
             }
             Ok(PythonProcessEvent::Control(NodeControlMessage::PythonExit { exit_code })) => {
                 self.store_pending_exit_code(exit_code)?;
-                Ok(None)
+                self.finalize_child_exit(exit_code)?;
+                Ok(Some(PythonExecutionEvent::Exited(exit_code)))
             }
             Ok(PythonProcessEvent::Control(_)) => Ok(None),
             Err(RecvTimeoutError::Timeout) => {
@@ -387,14 +408,29 @@ impl PythonExecution {
         }
     }
 
-    pub fn wait(mut self) -> Result<PythonExecutionResult, PythonExecutionError> {
+    pub fn wait(
+        mut self,
+        timeout: Option<Duration>,
+    ) -> Result<PythonExecutionResult, PythonExecutionError> {
         self.close_stdin()?;
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        let started = Instant::now();
 
         loop {
-            match self.poll_event(Duration::from_millis(50))? {
+            let poll_timeout = timeout
+                .map(|limit| {
+                    let elapsed = started.elapsed();
+                    if elapsed >= limit {
+                        Duration::ZERO
+                    } else {
+                        limit.saturating_sub(elapsed).min(Duration::from_millis(50))
+                    }
+                })
+                .unwrap_or_else(|| Duration::from_millis(50));
+
+            match self.poll_event(poll_timeout)? {
                 Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
                 Some(PythonExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
                 Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
@@ -402,7 +438,7 @@ impl PythonExecution {
                 }
                 Some(PythonExecutionEvent::Exited(exit_code)) => {
                     return Ok(PythonExecutionResult {
-                        execution_id: self.execution_id,
+                        execution_id: self.execution_id.clone(),
                         exit_code,
                         stdout,
                         stderr,
@@ -410,7 +446,38 @@ impl PythonExecution {
                 }
                 None => {}
             }
+
+            if let Some(limit) = timeout {
+                if started.elapsed() >= limit {
+                    return Err(PythonExecutionError::TimedOut(limit));
+                }
+            }
         }
+    }
+
+    fn terminate_child(&self) -> Result<Option<i32>, PythonExecutionError> {
+        let mut child_slot = self
+            .child
+            .lock()
+            .map_err(|_| PythonExecutionError::EventChannelClosed)?;
+        let Some(child) = child_slot.as_mut() else {
+            return Ok(None);
+        };
+
+        let exit_code = match child.try_wait().map_err(PythonExecutionError::Wait)? {
+            Some(status) => status.code().unwrap_or(1),
+            None => {
+                child.kill().map_err(PythonExecutionError::Kill)?;
+                child
+                    .wait()
+                    .map_err(PythonExecutionError::Wait)?
+                    .code()
+                    .unwrap_or(1)
+            }
+        };
+
+        *child_slot = None;
+        Ok(Some(exit_code))
     }
 
     fn poll_child_exit(&self) -> Result<Option<PythonExecutionEvent>, PythonExecutionError> {
@@ -451,23 +518,15 @@ impl PythonExecution {
     }
 
     fn finalize_child_exit(&self, _exit_code: i32) -> Result<(), PythonExecutionError> {
-        let mut child_slot = self
-            .child
-            .lock()
-            .map_err(|_| PythonExecutionError::EventChannelClosed)?;
-        if let Some(child) = child_slot.as_mut() {
-            match child.try_wait().map_err(PythonExecutionError::Wait)? {
-                Some(_) => {
-                    *child_slot = None;
-                }
-                None => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    *child_slot = None;
-                }
-            }
-        }
+        let _ = self.terminate_child()?;
         Ok(())
+    }
+}
+
+impl Drop for PythonExecution {
+    fn drop(&mut self) {
+        let _ = self.close_stdin();
+        let _ = self.terminate_child();
     }
 }
 
@@ -660,7 +719,7 @@ fn configure_python_node_sandbox(
         &write_paths,
         true,
         false,
-        env_builtin_enabled(&request.env, "worker_threads"),
+        true,
         false,
     );
 }

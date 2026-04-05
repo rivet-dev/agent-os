@@ -172,7 +172,7 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
             cwd: temp.path().to_path_buf(),
         })
         .expect("start python execution")
-        .wait()
+        .wait(None)
         .expect("wait for python execution");
     assert_eq!(python_result.exit_code, 0);
 
