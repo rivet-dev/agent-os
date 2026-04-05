@@ -369,23 +369,6 @@ impl OverlayFileSystem {
         VfsError::new("ENOTEMPTY", format!("directory not empty, rmdir '{path}'"))
     }
 
-    fn remove_existing_destination(&mut self, path: &str) -> VfsResult<()> {
-        let stat = match self.merged_lstat(path) {
-            Ok(stat) => stat,
-            Err(error) if error.code() == "ENOENT" => return Ok(()),
-            Err(error) => return Err(error),
-        };
-
-        if stat.is_directory && !stat.is_symbolic_link {
-            if !self.read_dir(path)?.is_empty() {
-                return Err(Self::not_empty(path));
-            }
-            self.remove_dir(path)
-        } else {
-            self.remove_file(path)
-        }
-    }
-
     fn collect_snapshot_entries(
         &mut self,
         path: &str,
@@ -434,40 +417,6 @@ impl OverlayFileSystem {
         Ok(())
     }
 
-    fn materialize_snapshot_entries(
-        &mut self,
-        old_root: &str,
-        new_root: &str,
-        entries: &[OverlaySnapshotEntry],
-    ) -> VfsResult<()> {
-        for entry in entries {
-            let destination = Self::rebase_path(&entry.path, old_root, new_root);
-
-            match &entry.kind {
-                OverlaySnapshotKind::Directory => {
-                    self.create_dir(&destination)?;
-                    self.chmod(&destination, entry.stat.mode)?;
-                    self.chown(&destination, entry.stat.uid, entry.stat.gid)?;
-                    self.mark_opaque_directory(&destination)?;
-                }
-                OverlaySnapshotKind::File(data) => {
-                    self.clear_opaque_directory(&destination)?;
-                    self.write_file(&destination, data.clone())?;
-                    self.chmod(&destination, entry.stat.mode)?;
-                    self.chown(&destination, entry.stat.uid, entry.stat.gid)?;
-                }
-                OverlaySnapshotKind::Symlink(target) => {
-                    self.clear_path_metadata(&destination)?;
-                    self.ensure_ancestor_directories_in_upper(&destination)?;
-                    self.writable_upper(&destination)?
-                        .symlink(target, &destination)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     fn remove_snapshot_entries(&mut self, entries: &[OverlaySnapshotEntry]) -> VfsResult<()> {
         for entry in entries.iter().rev() {
             if self.has_entry_in_upper(&entry.path) {
@@ -486,6 +435,155 @@ impl OverlayFileSystem {
                 self.add_whiteout(&entry.path)?;
             } else {
                 self.clear_path_metadata(&entry.path)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn directory_has_raw_children(&mut self, path: &str) -> VfsResult<bool> {
+        let normalized = Self::normalized(path);
+        let mut directory_exists = false;
+
+        if let Some(upper) = self.upper.as_mut() {
+            if let Ok(entries) = upper.read_dir(&normalized) {
+                directory_exists = true;
+                if entries.into_iter().any(|entry| {
+                    entry != "."
+                        && entry != ".."
+                        && !Self::should_hide_directory_entry(&normalized, &entry)
+                }) {
+                    return Ok(true);
+                }
+            }
+        }
+
+        for lower in self.lowers.iter_mut().rev() {
+            if let Ok(entries) = lower.read_dir(&normalized) {
+                directory_exists = true;
+                if entries.into_iter().any(|entry| {
+                    entry != "."
+                        && entry != ".."
+                        && !Self::should_hide_directory_entry(&normalized, &entry)
+                }) {
+                    return Ok(true);
+                }
+            }
+        }
+
+        if !directory_exists {
+            return Err(Self::directory_not_found(path));
+        }
+
+        Ok(false)
+    }
+
+    fn marker_paths_in_upper(&mut self, kind: OverlayMarkerKind) -> VfsResult<Vec<String>> {
+        let Some(upper) = self.upper.as_mut() else {
+            return Ok(Vec::new());
+        };
+
+        let marker_dir = Self::marker_directory(kind);
+        let entries = match upper.read_dir(marker_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.code() == "ENOENT" => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+
+        let mut marker_paths = Vec::new();
+        for entry in entries {
+            if entry == "." || entry == ".." {
+                continue;
+            }
+
+            let marker_file = Self::join_path(marker_dir, &entry);
+            let marker_path =
+                String::from_utf8(upper.read_file(&marker_file).map_err(|_| {
+                    VfsError::io(format!("invalid overlay marker '{marker_file}'"))
+                })?)
+                .map_err(|_| VfsError::io(format!("invalid overlay marker '{marker_file}'")))?;
+            marker_paths.push(Self::normalized(&marker_path));
+        }
+
+        Ok(marker_paths)
+    }
+
+    fn path_in_subtree(path: &str, root: &str) -> bool {
+        path == root || path.starts_with(&(String::from(root) + "/"))
+    }
+
+    fn clear_subtree_metadata(&mut self, path: &str) -> VfsResult<()> {
+        let normalized = Self::normalized(path);
+        for kind in [OverlayMarkerKind::Whiteout, OverlayMarkerKind::Opaque] {
+            for marker_path in self.marker_paths_in_upper(kind)? {
+                if Self::path_in_subtree(&marker_path, &normalized) {
+                    self.set_marker(kind, &marker_path, false)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_subtree_metadata(&mut self, old_root: &str, new_root: &str) -> VfsResult<()> {
+        let old_normalized = Self::normalized(old_root);
+        let new_normalized = Self::normalized(new_root);
+
+        for kind in [OverlayMarkerKind::Whiteout, OverlayMarkerKind::Opaque] {
+            for marker_path in self.marker_paths_in_upper(kind)? {
+                if Self::path_in_subtree(&marker_path, &old_normalized) {
+                    let destination =
+                        Self::rebase_path(&marker_path, &old_normalized, &new_normalized);
+                    self.set_marker(kind, &destination, true)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn stage_snapshot_entries_in_upper(
+        &mut self,
+        entries: &[OverlaySnapshotEntry],
+    ) -> VfsResult<()> {
+        for entry in entries {
+            match &entry.kind {
+                OverlaySnapshotKind::Directory => {
+                    if !self.has_entry_in_upper(&entry.path) {
+                        self.ensure_ancestor_directories_in_upper(&entry.path)?;
+                        self.writable_upper(&entry.path)?.create_dir(&entry.path)?;
+                    }
+                    self.writable_upper(&entry.path)?
+                        .chmod(&entry.path, entry.stat.mode)?;
+                    self.writable_upper(&entry.path)?.chown(
+                        &entry.path,
+                        entry.stat.uid,
+                        entry.stat.gid,
+                    )?;
+                    self.mark_opaque_directory(&entry.path)?;
+                }
+                OverlaySnapshotKind::File(data) => {
+                    if self.has_entry_in_upper(&entry.path) {
+                        continue;
+                    }
+                    self.ensure_ancestor_directories_in_upper(&entry.path)?;
+                    self.writable_upper(&entry.path)?
+                        .write_file(&entry.path, data.clone())?;
+                    self.writable_upper(&entry.path)?
+                        .chmod(&entry.path, entry.stat.mode)?;
+                    self.writable_upper(&entry.path)?.chown(
+                        &entry.path,
+                        entry.stat.uid,
+                        entry.stat.gid,
+                    )?;
+                }
+                OverlaySnapshotKind::Symlink(target) => {
+                    if self.has_entry_in_upper(&entry.path) {
+                        continue;
+                    }
+                    self.ensure_ancestor_directories_in_upper(&entry.path)?;
+                    self.writable_upper(&entry.path)?
+                        .symlink(target, &entry.path)?;
+                }
             }
         }
 
@@ -882,7 +980,7 @@ impl VirtualFileSystem for OverlayFileSystem {
             return Err(Self::not_directory(path));
         }
 
-        if !self.read_dir(path)?.is_empty() {
+        if self.directory_has_raw_children(path)? {
             return Err(Self::not_empty(path));
         }
 
@@ -932,8 +1030,31 @@ impl VirtualFileSystem for OverlayFileSystem {
 
         let mut snapshot_entries = Vec::new();
         self.collect_snapshot_entries(&old_normalized, &mut snapshot_entries)?;
-        self.remove_existing_destination(&new_normalized)?;
-        self.materialize_snapshot_entries(&old_normalized, &new_normalized, &snapshot_entries)?;
+
+        if let Ok(destination_stat) = self.merged_lstat(&new_normalized) {
+            if destination_stat.is_directory
+                && !destination_stat.is_symbolic_link
+                && !self.read_dir(&new_normalized)?.is_empty()
+            {
+                return Err(Self::not_empty(&new_normalized));
+            }
+
+            if self.has_entry_in_upper(&new_normalized) {
+                if destination_stat.is_directory && !destination_stat.is_symbolic_link {
+                    self.writable_upper(&new_normalized)?
+                        .remove_dir(&new_normalized)?;
+                } else {
+                    self.writable_upper(&new_normalized)?
+                        .remove_file(&new_normalized)?;
+                }
+            }
+            self.clear_subtree_metadata(&new_normalized)?;
+        }
+
+        self.stage_snapshot_entries_in_upper(&snapshot_entries)?;
+        self.copy_subtree_metadata(&old_normalized, &new_normalized)?;
+        self.writable_upper(&old_normalized)?
+            .rename(&old_normalized, &new_normalized)?;
         self.remove_snapshot_entries(&snapshot_entries)
     }
 

@@ -1078,7 +1078,7 @@
         "Typecheck passes"
       ],
       "priority": 68,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: Hardlink copy-up resolves wrong path. removeDir succeeds even when lower layer has children. Hardlink across mounts doesn't check mount index. Rename uses non-atomic read+write+delete."
     },
     {

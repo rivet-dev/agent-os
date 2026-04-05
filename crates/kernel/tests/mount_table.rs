@@ -82,3 +82,25 @@ fn mount_table_rejects_symlinks_that_cross_mount_boundaries() {
         .expect_err("cross-mount symlink should fail");
     assert_eq!(error.code(), "EXDEV");
 }
+
+#[test]
+fn mount_table_rejects_hardlinks_that_cross_mount_boundaries() {
+    let mut root = MemoryFileSystem::new();
+    root.write_file("/root.txt", b"root".to_vec())
+        .expect("seed root file");
+
+    let mut mounted = MemoryFileSystem::new();
+    mounted
+        .write_file("/inside.txt", b"inside".to_vec())
+        .expect("seed mounted file");
+
+    let mut table = MountTable::new(root);
+    table
+        .mount("/mounted", mounted, MountOptions::new("memory"))
+        .expect("mount memory filesystem");
+
+    let error = table
+        .link("/root.txt", "/mounted/root-link")
+        .expect_err("cross-mount hardlink should fail");
+    assert_eq!(error.code(), "EXDEV");
+}

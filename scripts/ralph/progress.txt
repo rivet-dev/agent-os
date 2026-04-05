@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- OverlayFS mutating ops should not trust merged `read_dir()` for emptiness once copy-up marks directories opaque; raw upper/lower listings are required for `rmdir`, and rename-like moves should stage source entries into the upper and then use the upper filesystem's native `rename` to preserve hardlinks/inode identity.
 - Process-table exit-path changes should be implemented as one bundle: reparent orphaned children, reevaluate orphaned stopped groups for `SIGHUP`/`SIGCONT`, and keep `max_processes` enforcement counting unreaped zombies so lifecycle semantics and resource limits stay aligned.
 - Overlay whiteout and opaque-directory state should live under a reserved hidden metadata root in the writable upper, and every merged overlay listing or snapshot path must filter that metadata root back out of user-visible results.
 - Cross-resource kernel readiness waits should use the shared `PollNotifier` in `crates/kernel/src/poll.rs`; when pipe or PTY state changes, notify it alongside the manager condvar so mixed-FD `poll_fds` calls do not miss wakeups.
@@ -1270,4 +1271,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Durable overlay state can live in ordinary VFS files as long as it is kept under a reserved hidden metadata root and the merged overlay view consistently filters that root back out.
   - Gotchas encountered: Overlay durability has two separate concerns: reopening with the same writable upper must preserve live whiteouts and opaque markers, while sealing a layer should still snapshot the merged view so those markers materialize away in frozen lower layers.
   - Useful context: `cargo fmt --all`, `cargo check -p agent-os-kernel --quiet`, `cargo test -p agent-os-kernel -- --nocapture`, `pnpm --dir packages/core exec tsc --noEmit --pretty false`, and `pnpm --dir packages/core exec vitest run tests/overlay-backend.test.ts tests/layers.test.ts` all pass after this change.
+---
+## 2026-04-05 09:43:59 PDT - US-068
+- What was implemented
+- Updated `crates/kernel/src/overlay_fs.rs` so `remove_dir()` checks raw upper and lower entries instead of the merged `read_dir()` view, which prevents opaque copy-up directories from incorrectly dropping lower children.
+- Reworked overlay `rename()` to stage source entries into the writable upper layer, copy overlay subtree markers onto the destination, and then call the upper filesystem's native `rename()` so hardlinks keep their inode identity across moves.
+- Added kernel regressions proving lower-file hardlink copy-up survives a later rename, opaque directory `rmdir` still returns `ENOTEMPTY`, and mount-table cross-mount hardlinks return `EXDEV`.
+- Files changed
+- `CLAUDE.md`
+- `crates/kernel/src/overlay_fs.rs`
+- `crates/kernel/tests/mount_table.rs`
+- `crates/kernel/tests/root_fs.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: Overlay mutations that preserve identity should first materialize the source subtree in the writable upper and then defer the actual move to the upper filesystem's native `rename`; rebuilding destinations with read/write/delete breaks hardlinks.
+  - Gotchas encountered: Once a lower directory is copied up and marked opaque, merged directory iteration intentionally hides lower children, so `rmdir` emptiness checks must inspect raw upper and lower layers directly instead of reusing merged `read_dir()`.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test root_fs -- --nocapture`, `cargo test -p agent-os-kernel --test mount_table -- --nocapture`, `cargo test -p agent-os-kernel -- --nocapture`, and `cargo check -p agent-os-kernel` all pass after this change.
 ---
