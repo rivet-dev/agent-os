@@ -274,11 +274,10 @@ Each agent type needs:
 
 ### WASM Binaries and Quickstart Examples
 
-- **WASM command binaries are not checked into git.** The `registry/software/*/wasm/` directories are build artifacts produced by compiling Rust/C source in `registry/native/`. They are published to npm as part of software packages (e.g., `@rivet-dev/agent-os-coreutils` is ~54MB with WASM binaries included).
-- **Quickstart examples that use `exec()` or shell commands require WASM binaries.** Examples like `processes.ts`, `bash.ts`, `git.ts`, `nodejs.ts`, and `tools.ts` import `@rivet-dev/agent-os-common` which resolves to local `registry/software/*/wasm/` directories in a dev checkout. Without built WASM binaries, these fail with "No shell available."
-- **To build WASM binaries locally:** Run `make` in `registry/native/`, then `make copy-wasm` and `make build` in `registry/`. This requires Rust nightly + wasi-sdk.
+- **WASM command binaries are checked into git via Git LFS.** The `registry/software/*/wasm/` directories contain pre-built WASM binaries (~63MB total, 138 files) tracked by Git LFS (see `.gitattributes`). They are available immediately after `git clone` / `git lfs pull` — no local Rust/WASM build step needed for development or testing.
+- **To rebuild WASM binaries from source:** Run `make` in `registry/native/`, then `make copy-wasm` in `registry/`. This requires Rust nightly + wasi-sdk. After rebuilding, commit the updated binaries (they'll go through LFS automatically).
+- **Quickstart examples that use `exec()` or shell commands require WASM binaries.** Examples like `processes.ts`, `bash.ts`, `git.ts`, `nodejs.ts`, and `tools.ts` import `@rivet-dev/agent-os-common` which resolves to local `registry/software/*/wasm/` directories in a dev checkout.
 - **Examples that work without WASM binaries:** `hello-world.ts`, `filesystem.ts`, `cron.ts` (schedule/cancel only). These only use the Node runtime and don't need shell commands.
-- **When testing quickstart examples**, don't treat WASM-dependent failures as regressions unless the WASM binaries are present. The published npm flow works because npm packages bundle the pre-built WASM binaries.
 
 ### Known VM Limitations
 

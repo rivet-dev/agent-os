@@ -1,0 +1,2 @@
+# WASM command binaries — tracked via Git LFS
+registry/software/*/wasm/* filter=lfs diff=lfs merge=lfs -text

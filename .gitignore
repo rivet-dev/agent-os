@@ -35,7 +35,7 @@ registry/native/c/vendor/
 registry/native/c/libs/
 registry/native/c/.cache/
 registry/native/c/sysroot/
-registry/software/*/wasm/
+# registry/software/*/wasm/ — tracked via Git LFS (see .gitattributes)
 registry/software/*/agent-os-package.meta.json
 registry/.last-publish-hash
 registry/software/*/.last-publish-hash

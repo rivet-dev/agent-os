@@ -6,7 +6,7 @@ WASM command packages for agentOS, split by Debian/apt naming conventions.
 
 Each package in `software/` corresponds to a Debian package name and contains:
 - `src/index.ts` -- exports a descriptor object with command metadata
-- `wasm/` -- WASM command binaries (gitignored, populated by `make copy-wasm`)
+- `wasm/` -- WASM command binaries (tracked via Git LFS, rebuilt with `make copy-wasm`)
 - `dist/` -- compiled TypeScript output
 
 ### Package Types
@@ -81,7 +81,7 @@ Commands declare a default permission tier that controls WASI host imports:
 - Aliases (bash->sh, egrep->grep) are **full copies** of the target binary, not symlinks. npm publish does not preserve symlinks.
 - Rust command source lives in `native/crates/commands/` with shared libraries in `native/crates/libs/`.
 - C command source lives in `native/c/programs/`.
-- All WASM binaries are built in-repo via `make build-wasm`. No external dependencies except Rust toolchain and wasi-sdk.
+- All WASM binaries are built in-repo via `make build-wasm` and tracked via Git LFS. No native build step needed for dev/test — just `git lfs pull`. Rebuilding requires Rust nightly + wasi-sdk.
 
 ### Descriptor Format
 

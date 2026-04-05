@@ -5,7 +5,7 @@
  * that resolves to the package's wasm/ directory. Pass these directly
  * to AgentOs.create({ software: [...] }).
  *
- * Requires: `cd ~/agent-os-registry && make copy-wasm && make build`
+ * WASM binaries are tracked via Git LFS. Run `git lfs pull` if missing.
  */
 
 import { existsSync } from "node:fs";
@@ -52,4 +52,4 @@ export const hasRegistryCommands = existsSync(coreutils.commandDir);
 /** Skip reason for tests that need registry commands. */
 export const registrySkipReason = hasRegistryCommands
 	? false
-	: "Registry WASM binaries not available (run: cd ~/agent-os-registry && make copy-wasm && make build)";
+	: "Registry WASM binaries not available (run: git lfs pull)";
