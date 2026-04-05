@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- PID-aware POSIX signal side effects belong at `KernelVm` syscall entrypoints, not low-level resource managers: `PipeManager` should stay signal-agnostic and let `crates/kernel/src/kernel.rs` `fd_write` translate broken-pipe `EPIPE` into `SIGPIPE`.
 - WebAssembly parser hardening in `crates/execution/src/wasm.rs` should stat module files before `fs::read()`, cap section entry counts before iteration, and bound varuint byte length so malformed modules fail closed without parser DoS.
 - Child-facing control/RPC pipes in `crates/execution` should keep their original `pipe2(O_CLOEXEC)` FDs private and use `ExportedChildFds` in `crates/execution/src/node_process.rs` to duplicate only the child ends into reserved `1000+` FD numbers right before `Command::spawn()`.
 - `KernelVmConfig::new()` is deny-all by default; any kernel or browser-sidecar fixture that expects unrestricted filesystem/process access must opt in with `config.permissions = Permissions::allow_all()`.
@@ -1114,4 +1115,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: JavaScript signal support needs all three layers updated together: guest runner registration/hardening, execution-event plumbing, and sidecar state/delivery logic.
   - Gotchas encountered: Fast-exiting processes can clear `vm.signal_states` before tests or clients query them; retaining the last snapshot after exit makes signal-state inspection deterministic without affecting live delivery.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-kernel --test process_table -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript -- --test-threads=1`, `cargo test -p agent-os-sidecar --test socket_state_queries -- --test-threads=1`, and `cargo check -p agent-os-kernel -p agent-os-execution -p agent-os-sidecar` all pass. The focused `javascript_execution_denies_process_signal_handlers_and_native_addons` test hit the known temp import-cache race once (`register.mjs` missing) and passed on immediate rerun; the full `agent-os-execution` javascript suite passed in this session.
+---
+## 2026-04-05 08:28:25 PDT - US-060
+- What was implemented
+- Added `SIGPIPE` to `crates/kernel/src/process_table.rs` and taught `crates/kernel/src/kernel.rs` `fd_write` to deliver that signal when a pipe write fails with `EPIPE`, while preserving the existing broken-pipe error return.
+- Added a kernel integration regression that closes a pipe's read end, verifies the write still fails with `EPIPE`, and asserts the writer records `SIGPIPE` and exits with the corresponding signal status.
+- Files changed
+- `AGENTS.md`
+- `CLAUDE.md`
+- `crates/kernel/src/kernel.rs`
+- `crates/kernel/src/process_table.rs`
+- `crates/kernel/tests/kernel_integration.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: PID-aware POSIX signal side effects belong in `KernelVm` syscall entrypoints; low-level helpers like `PipeManager` should keep returning primitive errno results and let the syscall layer add process-table behavior such as `SIGPIPE`.
+  - Gotchas encountered: `PipeManager::write(...)` can only report `EPIPE`; the kernel layer has to translate that into signal delivery after the pipe lock is released, or exit cleanup risks re-entering the same primitive while it is still borrowed.
+  - Useful context: `cargo test -p agent-os-kernel --test kernel_integration`, `cargo test -p agent-os-kernel --test pipe_manager`, `cargo test -p agent-os-kernel --test process_table`, `cargo test -p agent-os-kernel`, and `cargo check -p agent-os-kernel` all pass for this change.
 ---

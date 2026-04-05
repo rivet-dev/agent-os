@@ -2,6 +2,7 @@ use agent_os_kernel::bridge::LifecycleState;
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
 use agent_os_kernel::permissions::Permissions;
+use agent_os_kernel::process_table::SIGPIPE;
 use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::vfs::MemoryFileSystem;
 use std::time::Duration;
@@ -155,6 +156,41 @@ fn process_exit_cleanup_closes_pipe_writers_and_returns_eof_to_readers() {
         .fd_read("shell", reader.pid(), read_fd, 64)
         .expect("read EOF after writer exit");
     assert!(eof.is_empty());
+}
+
+#[test]
+fn broken_pipe_writes_deliver_sigpipe_and_return_epipe() {
+    let mut config = KernelVmConfig::new("vm-broken-pipe-sigpipe");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let writer = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn writer");
+    let (read_fd, write_fd) = kernel
+        .open_pipe("shell", writer.pid())
+        .expect("open writer pipe");
+
+    kernel
+        .fd_close("shell", writer.pid(), read_fd)
+        .expect("close inherited read end");
+
+    let error = kernel
+        .fd_write("shell", writer.pid(), write_fd, b"fail")
+        .expect_err("broken pipe writes should fail");
+    assert_eq!(error.code(), "EPIPE");
+    assert_eq!(writer.kill_signals(), vec![SIGPIPE]);
+    assert_eq!(writer.wait(Duration::from_millis(50)), Some(128 + SIGPIPE));
 }
 
 #[test]

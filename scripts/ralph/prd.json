@@ -953,7 +953,7 @@
         "Typecheck passes"
       ],
       "priority": 60,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: pipe_manager returns EPIPE error but does not deliver SIGPIPE signal. Linux requires both signal delivery AND EPIPE error."
     },
     {

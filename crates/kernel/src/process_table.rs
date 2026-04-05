@@ -10,6 +10,7 @@ const ZOMBIE_TTL: Duration = Duration::from_secs(60);
 pub const SIGCHLD: i32 = 17;
 pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
+pub const SIGPIPE: i32 = 13;
 
 pub type ProcessResult<T> = Result<T, ProcessTableError>;
 pub type ProcessExitCallback = Arc<dyn Fn(i32) + Send + Sync + 'static>;

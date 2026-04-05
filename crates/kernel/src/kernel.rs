@@ -13,7 +13,7 @@ use crate::permissions::{
 use crate::pipe_manager::{PipeError, PipeManager};
 use crate::process_table::{
     DriverProcess, ProcessContext, ProcessExitCallback, ProcessInfo, ProcessStatus, ProcessTable,
-    ProcessTableError,
+    ProcessTableError, SIGPIPE,
 };
 use crate::pty::{LineDisciplineConfig, PartialTermios, PtyError, PtyManager, Termios};
 use crate::resource_accounting::{
@@ -755,7 +755,15 @@ impl<F: VirtualFileSystem> KernelVm<F> {
         };
 
         if self.pipes.is_pipe(entry.description.id()) {
-            return Ok(self.pipes.write(entry.description.id(), data)?);
+            return match self.pipes.write(entry.description.id(), data) {
+                Ok(bytes) => Ok(bytes),
+                Err(error) => {
+                    if error.code() == "EPIPE" {
+                        self.processes.kill(pid as i32, SIGPIPE)?;
+                    }
+                    Err(error.into())
+                }
+            };
         }
 
         if self.ptys.is_pty(entry.description.id()) {
