@@ -8534,6 +8534,375 @@ console.log(JSON.stringify(summary));
     }
 
     #[test]
+    fn javascript_http_rpc_requests_gets_and_serves_over_guest_net() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-http-rpc-cwd");
+        write_fixture(
+            &cwd.join("entry.mjs"),
+            r#"
+import http from "node:http";
+
+const summary = await new Promise((resolve, reject) => {
+  const requests = [];
+  let requestResponse = "";
+  let getResponse = "";
+
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      requests.push({
+        method: req.method,
+        url: req.url,
+        body,
+      });
+      res.end(`pong:${req.method}:${body || req.url}`);
+    });
+  });
+
+  let port = null;
+  server.on("error", reject);
+  server.listen(0, "127.0.0.1", () => {
+    port = server.address().port;
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        method: "POST",
+        path: "/submit",
+        port,
+      },
+      (res) => {
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          requestResponse += chunk;
+        });
+        res.on("end", () => {
+          http
+            .get(`http://127.0.0.1:${port}/health`, (getRes) => {
+              getRes.setEncoding("utf8");
+              getRes.on("data", (chunk) => {
+                getResponse += chunk;
+              });
+              getRes.on("end", () => {
+                server.close(() => {
+                  resolve({
+                    getResponse,
+                    port,
+                    requestResponse,
+                    requests,
+                  });
+                });
+              });
+            })
+            .on("error", reject);
+        });
+      },
+    );
+    req.on("error", reject);
+    req.end("ping");
+  });
+});
+
+console.log(JSON.stringify(summary));
+"#,
+        );
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"http\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-http"),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
+            );
+        }
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = None;
+        for _ in 0..192 {
+            let next_event = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-http")
+                    .map(|process| {
+                        process
+                            .execution
+                            .poll_event(Duration::from_secs(5))
+                            .expect("poll javascript http rpc event")
+                    })
+                    .flatten()
+            };
+            let Some(event) = next_event else {
+                if exit_code.is_some() {
+                    break;
+                }
+                continue;
+            };
+
+            match &event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    stdout.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    stderr.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Exited(code) => {
+                    exit_code = Some(*code);
+                }
+                _ => {}
+            }
+
+            sidecar
+                .handle_execution_event(&vm_id, "proc-js-http", event)
+                .expect("handle javascript http rpc event");
+        }
+
+        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse http JSON");
+        assert_eq!(
+            parsed["requestResponse"],
+            Value::String(String::from("pong:POST:ping"))
+        );
+        assert_eq!(
+            parsed["getResponse"],
+            Value::String(String::from("pong:GET:/health"))
+        );
+        assert_eq!(
+            parsed["requests"][0]["url"],
+            Value::String(String::from("/submit"))
+        );
+        assert_eq!(
+            parsed["requests"][1]["url"],
+            Value::String(String::from("/health"))
+        );
+        assert!(
+            parsed["port"].as_u64().is_some_and(|port| port > 0),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn javascript_https_rpc_requests_and_serves_over_guest_tls() {
+        assert_node_available();
+
+        let mut sidecar = create_test_sidecar();
+        let (connection_id, session_id) =
+            authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+        let vm_id = create_vm(&mut sidecar, &connection_id, &session_id).expect("create vm");
+        let cwd = temp_dir("agent-os-sidecar-js-https-rpc-cwd");
+        let entry = format!(
+            r#"
+import https from "node:https";
+
+const key = {key:?};
+const cert = {cert:?};
+
+const summary = await new Promise((resolve, reject) => {{
+  let received = "";
+  let response = "";
+  const server = https.createServer({{ key, cert }}, (req, res) => {{
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {{
+      received += chunk;
+    }});
+    req.on("end", () => {{
+      res.end(`pong:${{req.method}}:${{received}}`);
+    }});
+  }});
+
+  let port = null;
+  server.on("error", reject);
+  server.listen(0, "127.0.0.1", () => {{
+    port = server.address().port;
+    const req = https.request({{
+      host: "127.0.0.1",
+      method: "POST",
+      path: "/secure",
+      port,
+      rejectUnauthorized: false,
+    }}, (res) => {{
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => {{
+        response += chunk;
+      }});
+      res.on("end", () => {{
+        server.close(() => {{
+          resolve({{
+            port,
+            received,
+            response,
+          }});
+        }});
+      }});
+    }});
+    req.on("error", reject);
+    req.end("ping");
+  }});
+}});
+
+console.log(JSON.stringify(summary));
+"#,
+            key = TLS_TEST_KEY_PEM,
+            cert = TLS_TEST_CERT_PEM,
+        );
+        write_fixture(&cwd.join("entry.mjs"), &entry);
+
+        let context = sidecar
+            .javascript_engine
+            .create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: None,
+            });
+        let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"https\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+        let kernel_handle = {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    vec![String::from("./entry.mjs")],
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        cwd: Some(String::from("/")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn kernel javascript process")
+        };
+
+        {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                String::from("proc-js-https"),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                ),
+            );
+        }
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = None;
+        for _ in 0..192 {
+            let next_event = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-https")
+                    .map(|process| {
+                        process
+                            .execution
+                            .poll_event(Duration::from_secs(5))
+                            .expect("poll javascript https rpc event")
+                    })
+                    .flatten()
+            };
+            let Some(event) = next_event else {
+                if exit_code.is_some() {
+                    break;
+                }
+                continue;
+            };
+
+            match &event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    stdout.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    stderr.push_str(&String::from_utf8_lossy(chunk));
+                }
+                ActiveExecutionEvent::Exited(code) => {
+                    exit_code = Some(*code);
+                }
+                _ => {}
+            }
+
+            sidecar
+                .handle_execution_event(&vm_id, "proc-js-https", event)
+                .expect("handle javascript https rpc event");
+        }
+
+        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse https JSON");
+        assert_eq!(parsed["received"], Value::String(String::from("ping")));
+        assert_eq!(
+            parsed["response"],
+            Value::String(String::from("pong:POST:ping"))
+        );
+        assert!(
+            parsed["port"].as_u64().is_some_and(|port| port > 0),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
     fn javascript_net_rpc_listens_accepts_connections_and_reports_listener_state() {
         assert_node_available();
 

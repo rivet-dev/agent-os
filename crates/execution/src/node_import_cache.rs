@@ -11,8 +11,8 @@ pub(crate) const NODE_IMPORT_CACHE_ASSET_ROOT_ENV: &str = "AGENT_OS_NODE_IMPORT_
 const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
-const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "6";
-const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "3";
+const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "7";
+const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "4";
 const PYODIDE_DIST_DIR: &str = "pyodide-dist";
 const AGENT_OS_BUILTIN_SPECIFIER_PREFIX: &str = "agent-os:builtin/";
 const AGENT_OS_POLYFILL_SPECIFIER_PREFIX: &str = "agent-os:polyfill/";
@@ -87,6 +87,9 @@ const CHILD_PROCESS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}child-process`;
 const NET_ASSET_SPECIFIER = `${BUILTIN_PREFIX}net`;
 const DGRAM_ASSET_SPECIFIER = `${BUILTIN_PREFIX}dgram`;
 const DNS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}dns`;
+const HTTP_ASSET_SPECIFIER = `${BUILTIN_PREFIX}http`;
+const HTTP2_ASSET_SPECIFIER = `${BUILTIN_PREFIX}http2`;
+const HTTPS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}https`;
 const TLS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}tls`;
 const OS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}os`;
 const DENIED_BUILTINS = new Set([
@@ -586,6 +589,51 @@ function rewriteBuiltinImports(source, filePath) {
     }
   }
 
+  if (ALLOWED_BUILTINS.has('http')) {
+    for (const specifier of ['node:http', 'http']) {
+      rewritten = replaceBuiltinImportSpecifier(
+        rewritten,
+        specifier,
+        HTTP_ASSET_SPECIFIER,
+      );
+      rewritten = replaceBuiltinDynamicImportSpecifier(
+        rewritten,
+        specifier,
+        HTTP_ASSET_SPECIFIER,
+      );
+    }
+  }
+
+  if (ALLOWED_BUILTINS.has('http2')) {
+    for (const specifier of ['node:http2', 'http2']) {
+      rewritten = replaceBuiltinImportSpecifier(
+        rewritten,
+        specifier,
+        HTTP2_ASSET_SPECIFIER,
+      );
+      rewritten = replaceBuiltinDynamicImportSpecifier(
+        rewritten,
+        specifier,
+        HTTP2_ASSET_SPECIFIER,
+      );
+    }
+  }
+
+  if (ALLOWED_BUILTINS.has('https')) {
+    for (const specifier of ['node:https', 'https']) {
+      rewritten = replaceBuiltinImportSpecifier(
+        rewritten,
+        specifier,
+        HTTPS_ASSET_SPECIFIER,
+      );
+      rewritten = replaceBuiltinDynamicImportSpecifier(
+        rewritten,
+        specifier,
+        HTTPS_ASSET_SPECIFIER,
+      );
+    }
+  }
+
   if (ALLOWED_BUILTINS.has('tls')) {
     for (const specifier of ['node:tls', 'tls']) {
       rewritten = replaceBuiltinImportSpecifier(
@@ -704,6 +752,18 @@ function resolveBuiltinAsset(specifier, context) {
     case 'dns':
       return ALLOWED_BUILTINS.has('dns')
         ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'dns.mjs'))
+        : null;
+    case 'http':
+      return ALLOWED_BUILTINS.has('http')
+        ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'http.mjs'))
+        : null;
+    case 'http2':
+      return ALLOWED_BUILTINS.has('http2')
+        ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'http2.mjs'))
+        : null;
+    case 'https':
+      return ALLOWED_BUILTINS.has('https')
+        ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'https.mjs'))
         : null;
     case 'tls':
       return ALLOWED_BUILTINS.has('tls')
@@ -1688,6 +1748,9 @@ const hostOs = hostRequire('node:os');
 const hostNet = hostRequire('node:net');
 const hostDgram = hostRequire('node:dgram');
 const hostDns = hostRequire('node:dns');
+const hostHttp = hostRequire('node:http');
+const hostHttp2 = hostRequire('node:http2');
+const hostHttps = hostRequire('node:https');
 const hostTls = hostRequire('node:tls');
 const { EventEmitter } = hostRequire('node:events');
 const { Duplex, Readable, Writable } = hostRequire('node:stream');
@@ -4584,6 +4647,588 @@ function createRpcBackedTlsModule(tlsModule, netModule) {
   return module;
 }
 
+function createTransportBackedServer(
+  hostServer,
+  transportServer,
+  connectionEventName,
+  forwardedEvents = [],
+) {
+  const forward = (sourceEvent, targetEvent = sourceEvent) => {
+    transportServer.on(sourceEvent, (...args) => {
+      hostServer.emit(targetEvent, ...args);
+    });
+  };
+
+  forward(connectionEventName);
+  forward('close');
+  forward('error');
+  forward('listening');
+  for (const entry of forwardedEvents) {
+    if (Array.isArray(entry)) {
+      forward(entry[0], entry[1] ?? entry[0]);
+    } else {
+      forward(entry);
+    }
+  }
+
+  const definePassthroughProperty = (property, getter, setter = undefined) => {
+    try {
+      Object.defineProperty(hostServer, property, {
+        configurable: true,
+        enumerable: true,
+        get: getter,
+        set: setter,
+      });
+    } catch {
+      // Ignore host properties that reject redefinition.
+    }
+  };
+
+  hostServer.address = () => transportServer.address();
+  hostServer.close = (callback) => {
+    transportServer.close(callback);
+    return hostServer;
+  };
+  hostServer.getConnections = (callback) => transportServer.getConnections(callback);
+  hostServer.listen = (...args) => {
+    transportServer.listen(...args);
+    return hostServer;
+  };
+  hostServer.ref = () => {
+    transportServer.ref();
+    return hostServer;
+  };
+  hostServer.unref = () => {
+    transportServer.unref();
+    return hostServer;
+  };
+
+  definePassthroughProperty('listening', () => transportServer.listening);
+  definePassthroughProperty(
+    'maxConnections',
+    () => transportServer.maxConnections,
+    (value) => {
+      transportServer.maxConnections = value;
+    },
+  );
+
+  return hostServer;
+}
+
+function normalizeHttpPort(value, subject = 'Agent OS http port') {
+  const numeric =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.length > 0
+        ? Number(value)
+        : Number.NaN;
+  if (!Number.isInteger(numeric) || numeric < 0 || numeric > 65535) {
+    throw new RangeError(`${subject} must be an integer between 0 and 65535`);
+  }
+  return numeric;
+}
+
+function defaultPortForProtocol(protocol) {
+  switch (protocol) {
+    case 'https:':
+      return 443;
+    case 'http2:':
+    case 'http:':
+    default:
+      return 80;
+  }
+}
+
+function parseRequestTargetFromHostOption(value, protocol) {
+  if (typeof value !== 'string' || value.length === 0) {
+    return null;
+  }
+  if (hostNet.isIP(value) !== 0) {
+    return {
+      hostname: value,
+      port: null,
+    };
+  }
+
+  const looksLikeHostPort =
+    value.startsWith('[') || /^[^:]+:\d+$/.test(value);
+  if (!looksLikeHostPort) {
+    return {
+      hostname: value,
+      port: null,
+    };
+  }
+
+  try {
+    const parsed = new URL(`${protocol}//${value}`);
+    return {
+      hostname: parsed.hostname || 'localhost',
+      port:
+        parsed.port.length > 0 ? normalizeHttpPort(parsed.port) : null,
+    };
+  } catch {
+    return {
+      hostname: value,
+      port: null,
+    };
+  }
+}
+
+function parseRequestTargetFromUrl(value, defaultProtocol) {
+  if (!(value instanceof URL) && typeof value !== 'string') {
+    return null;
+  }
+
+  const parsed = value instanceof URL ? value : new URL(String(value));
+  const protocol =
+    typeof parsed.protocol === 'string' && parsed.protocol.length > 0
+      ? parsed.protocol
+      : defaultProtocol;
+  const auth =
+    parsed.username.length > 0 || parsed.password.length > 0
+      ? `${decodeURIComponent(parsed.username)}:${decodeURIComponent(parsed.password)}`
+      : undefined;
+  return {
+    protocol,
+    hostname: parsed.hostname || 'localhost',
+    port:
+      parsed.port.length > 0
+        ? normalizeHttpPort(parsed.port)
+        : defaultPortForProtocol(protocol),
+    path: `${parsed.pathname || '/'}${parsed.search || ''}`,
+    auth,
+  };
+}
+
+function createRpcBackedHttpModule(httpModule, transportModule, defaultProtocol = 'http:') {
+  const createUnsupportedHttpError = (subject) => {
+    const error = new Error(`${subject} is not supported by the Agent OS http polyfill yet`);
+    error.code = 'ERR_AGENT_OS_HTTP_UNSUPPORTED';
+    return error;
+  };
+  const normalizeRequestInvocation = (args) => {
+    const values = [...args];
+    const callback =
+      typeof values[values.length - 1] === 'function' ? values.pop() : undefined;
+
+    let options = {};
+    if (values[0] instanceof URL || typeof values[0] === 'string') {
+      options = {
+        ...options,
+        ...parseRequestTargetFromUrl(values.shift(), defaultProtocol),
+      };
+    }
+    if (values[0] != null) {
+      if (typeof values[0] !== 'object') {
+        throw new TypeError('Agent OS http request options must be an object');
+      }
+      options = {
+        ...options,
+        ...values[0],
+      };
+    }
+
+    if (typeof options.socketPath === 'string') {
+      throw createUnsupportedHttpError('http request socketPath');
+    }
+    if (options.lookup != null) {
+      throw createUnsupportedHttpError('http request lookup');
+    }
+
+    const protocol =
+      typeof options.protocol === 'string' && options.protocol.length > 0
+        ? options.protocol
+        : defaultProtocol;
+    const hostTarget = parseRequestTargetFromHostOption(options.host, protocol);
+    const hostname =
+      typeof options.hostname === 'string' && options.hostname.length > 0
+        ? options.hostname
+        : hostTarget?.hostname ?? 'localhost';
+    const port =
+      options.port != null
+        ? normalizeHttpPort(options.port)
+        : hostTarget?.port ?? defaultPortForProtocol(protocol);
+    const path =
+      typeof options.path === 'string' && options.path.length > 0
+        ? options.path
+        : '/';
+    const requestOptions = {
+      ...options,
+      protocol,
+      hostname,
+      port,
+      path,
+      agent: false,
+    };
+    delete requestOptions.agent;
+    delete requestOptions.createConnection;
+    delete requestOptions.host;
+    delete requestOptions.lookup;
+    delete requestOptions.socketPath;
+
+    return {
+      callback,
+      requestOptions,
+      connectionOptions: {
+        allowHalfOpen: options.allowHalfOpen === true,
+        family: options.family,
+        host: hostname,
+        localAddress: options.localAddress,
+        port,
+      },
+    };
+  };
+  const createRequest = (options, callback) => {
+    const request = httpModule.request(
+      {
+        ...options.requestOptions,
+        agent: false,
+        createConnection: () => transportModule.connect(options.connectionOptions),
+      },
+      callback,
+    );
+    return request;
+  };
+  const normalizeServerCreation = (args) => {
+    let options = {};
+    let requestListener;
+
+    if (typeof args[0] === 'function') {
+      requestListener = args[0];
+    } else {
+      if (args[0] != null) {
+        if (typeof args[0] !== 'object') {
+          throw new TypeError('http.createServer options must be an object');
+        }
+        options = { ...args[0] };
+      }
+      if (typeof args[1] === 'function') {
+        requestListener = args[1];
+      }
+    }
+
+    return {
+      options,
+      requestListener,
+      transportOptions: {
+        allowHalfOpen: options.allowHalfOpen === true,
+        pauseOnConnect: options.pauseOnConnect === true,
+      },
+    };
+  };
+
+  const request = (...args) => {
+    const normalized = normalizeRequestInvocation(args);
+    return createRequest(normalized, normalized.callback);
+  };
+  const get = (...args) => {
+    const req = request(...args);
+    req.end();
+    return req;
+  };
+  const createServer = (...args) => {
+    const { options, requestListener, transportOptions } =
+      normalizeServerCreation(args);
+    const server = httpModule.createServer(options, requestListener);
+    const transportServer = transportModule.createServer(transportOptions);
+    return createTransportBackedServer(server, transportServer, 'connection');
+  };
+  const module = Object.assign(Object.create(httpModule ?? null), {
+    Agent: httpModule.Agent,
+    globalAgent: httpModule.globalAgent,
+    get,
+    request,
+    createServer,
+  });
+
+  return module;
+}
+
+function createRpcBackedHttpsModule(httpsModule, tlsModule) {
+  const createUnsupportedHttpsError = (subject) => {
+    const error = new Error(`${subject} is not supported by the Agent OS https polyfill yet`);
+    error.code = 'ERR_AGENT_OS_HTTPS_UNSUPPORTED';
+    return error;
+  };
+  const normalizeRequestInvocation = (args) => {
+    const values = [...args];
+    const callback =
+      typeof values[values.length - 1] === 'function' ? values.pop() : undefined;
+
+    let options = {};
+    if (values[0] instanceof URL || typeof values[0] === 'string') {
+      options = {
+        ...options,
+        ...parseRequestTargetFromUrl(values.shift(), 'https:'),
+      };
+    }
+    if (values[0] != null) {
+      if (typeof values[0] !== 'object') {
+        throw new TypeError('Agent OS https request options must be an object');
+      }
+      options = {
+        ...options,
+        ...values[0],
+      };
+    }
+
+    if (typeof options.socketPath === 'string') {
+      throw createUnsupportedHttpsError('https request socketPath');
+    }
+    if (options.lookup != null) {
+      throw createUnsupportedHttpsError('https request lookup');
+    }
+
+    const hostTarget = parseRequestTargetFromHostOption(options.host, 'https:');
+    const hostname =
+      typeof options.hostname === 'string' && options.hostname.length > 0
+        ? options.hostname
+        : hostTarget?.hostname ?? 'localhost';
+    const port =
+      options.port != null
+        ? normalizeHttpPort(options.port)
+        : hostTarget?.port ?? 443;
+    const path =
+      typeof options.path === 'string' && options.path.length > 0
+        ? options.path
+        : '/';
+    const requestOptions = {
+      ...options,
+      protocol: 'https:',
+      hostname,
+      port,
+      path,
+      agent: false,
+    };
+    delete requestOptions.agent;
+    delete requestOptions.createConnection;
+    delete requestOptions.host;
+    delete requestOptions.lookup;
+    delete requestOptions.socketPath;
+
+    const tlsConnectOptions = {
+      allowHalfOpen: options.allowHalfOpen === true,
+      ALPNProtocols: options.ALPNProtocols,
+      ca: options.ca,
+      cert: options.cert,
+      ciphers: options.ciphers,
+      crl: options.crl,
+      ecdhCurve: options.ecdhCurve,
+      family: options.family,
+      host: hostname,
+      key: options.key,
+      localAddress: options.localAddress,
+      maxVersion: options.maxVersion,
+      minVersion: options.minVersion,
+      passphrase: options.passphrase,
+      pfx: options.pfx,
+      port,
+      rejectUnauthorized: options.rejectUnauthorized,
+      secureContext: options.secureContext,
+      servername: options.servername,
+      session: options.session,
+      sigalgs: options.sigalgs,
+    };
+
+    return {
+      callback,
+      requestOptions,
+      tlsConnectOptions,
+    };
+  };
+  const normalizeServerCreation = (args) => {
+    let options = {};
+    let requestListener;
+
+    if (typeof args[0] === 'function') {
+      requestListener = args[0];
+    } else {
+      if (args[0] != null) {
+        if (typeof args[0] !== 'object') {
+          throw new TypeError('https.createServer options must be an object');
+        }
+        options = { ...args[0] };
+      }
+      if (typeof args[1] === 'function') {
+        requestListener = args[1];
+      }
+    }
+
+    return {
+      options,
+      requestListener,
+    };
+  };
+
+  const request = (...args) => {
+    const normalized = normalizeRequestInvocation(args);
+    return httpsModule.request(
+      {
+        ...normalized.requestOptions,
+        agent: false,
+        createConnection: () => tlsModule.connect(normalized.tlsConnectOptions),
+      },
+      normalized.callback,
+    );
+  };
+  const get = (...args) => {
+    const req = request(...args);
+    req.end();
+    return req;
+  };
+  const createServer = (...args) => {
+    const { options, requestListener } = normalizeServerCreation(args);
+    const server = httpsModule.createServer(options, requestListener);
+    const transportServer = tlsModule.createServer(options);
+    return createTransportBackedServer(server, transportServer, 'secureConnection', [
+      'tlsClientError',
+    ]);
+  };
+  const module = Object.assign(Object.create(httpsModule ?? null), {
+    Agent: httpsModule.Agent,
+    globalAgent: httpsModule.globalAgent,
+    get,
+    request,
+    createServer,
+  });
+
+  return module;
+}
+
+function createRpcBackedHttp2Module(http2Module, netModule, tlsModule) {
+  const createUnsupportedHttp2Error = (subject) => {
+    const error = new Error(`${subject} is not supported by the Agent OS http2 polyfill yet`);
+    error.code = 'ERR_AGENT_OS_HTTP2_UNSUPPORTED';
+    return error;
+  };
+  const normalizeConnectInvocation = (args) => {
+    const values = [...args];
+    const authority =
+      values[0] instanceof URL || typeof values[0] === 'string'
+        ? values.shift()
+        : 'http://localhost';
+    const authorityTarget = parseRequestTargetFromUrl(authority, 'http:');
+    const callback =
+      typeof values[values.length - 1] === 'function' ? values.pop() : undefined;
+    const options =
+      values[0] != null && typeof values[0] === 'object' ? { ...values[0] } : {};
+
+    if (typeof options.socketPath === 'string') {
+      throw createUnsupportedHttp2Error('http2.connect socketPath');
+    }
+    if (options.lookup != null) {
+      throw createUnsupportedHttp2Error('http2.connect lookup');
+    }
+
+    const connectOptions = { ...options };
+    delete connectOptions.createConnection;
+    delete connectOptions.host;
+    delete connectOptions.hostname;
+    delete connectOptions.lookup;
+    delete connectOptions.port;
+    delete connectOptions.socketPath;
+
+    const isSecure = authorityTarget.protocol === 'https:';
+    return {
+      authority,
+      callback,
+      connectOptions,
+      createConnection: () =>
+        isSecure
+          ? tlsModule.connect({
+              ALPNProtocols: options.ALPNProtocols ?? ['h2'],
+              ca: options.ca,
+              cert: options.cert,
+              ciphers: options.ciphers,
+              family: options.family,
+              host: authorityTarget.hostname,
+              key: options.key,
+              localAddress: options.localAddress,
+              passphrase: options.passphrase,
+              pfx: options.pfx,
+              port: authorityTarget.port,
+              rejectUnauthorized: options.rejectUnauthorized,
+              secureContext: options.secureContext,
+              servername: options.servername,
+              session: options.session,
+            })
+          : netModule.connect({
+              allowHalfOpen: options.allowHalfOpen === true,
+              family: options.family,
+              host: authorityTarget.hostname,
+              localAddress: options.localAddress,
+              port: authorityTarget.port,
+            }),
+    };
+  };
+  const normalizeServerCreation = (args, secure) => {
+    let options = {};
+    let onStream;
+
+    if (typeof args[0] === 'function') {
+      onStream = args[0];
+    } else {
+      if (args[0] != null) {
+        if (typeof args[0] !== 'object') {
+          throw new TypeError(
+            `http2.${secure ? 'createSecureServer' : 'createServer'} options must be an object`,
+          );
+        }
+        options = { ...args[0] };
+      }
+      if (typeof args[1] === 'function') {
+        onStream = args[1];
+      }
+    }
+
+    return {
+      onStream,
+      options,
+    };
+  };
+
+  const connect = (...args) => {
+    const normalized = normalizeConnectInvocation(args);
+    return http2Module.connect(
+      normalized.authority,
+      {
+        ...normalized.connectOptions,
+        createConnection: normalized.createConnection,
+      },
+      normalized.callback,
+    );
+  };
+  const createServer = (...args) => {
+    const { onStream, options } = normalizeServerCreation(args, false);
+    const server = http2Module.createServer(options, onStream);
+    const transportServer = netModule.createServer({
+      allowHalfOpen: options.allowHalfOpen === true,
+      pauseOnConnect: options.pauseOnConnect === true,
+    });
+    return createTransportBackedServer(server, transportServer, 'connection');
+  };
+  const createSecureServer = (...args) => {
+    const { onStream, options } = normalizeServerCreation(args, true);
+    const server = http2Module.createSecureServer(options, onStream);
+    const transportServer = tlsModule.createServer(
+      {
+        ...options,
+        ALPNProtocols: options.ALPNProtocols ?? ['h2'],
+      },
+    );
+    return createTransportBackedServer(server, transportServer, 'secureConnection', [
+      'tlsClientError',
+    ]);
+  };
+  const module = Object.assign(Object.create(http2Module ?? null), {
+    connect,
+    createServer,
+    createSecureServer,
+  });
+
+  return module;
+}
+
 function createRpcBackedDgramModule(dgramModule, fromGuestDir = '/') {
   const RPC_POLL_WAIT_MS = 50;
   const RPC_IDLE_POLL_DELAY_MS = 10;
@@ -5294,6 +5939,9 @@ const guestNet = createRpcBackedNetModule(hostNet, INITIAL_GUEST_CWD);
 const guestDgram = createRpcBackedDgramModule(hostDgram, INITIAL_GUEST_CWD);
 const guestDns = createRpcBackedDnsModule(hostDns);
 const guestTls = createRpcBackedTlsModule(hostTls, guestNet);
+const guestHttp = createRpcBackedHttpModule(hostHttp, guestNet);
+const guestHttps = createRpcBackedHttpsModule(hostHttps, guestTls);
+const guestHttp2 = createRpcBackedHttp2Module(hostHttp2, guestNet, guestTls);
 const guestGetUid = () => VIRTUAL_UID;
 const guestGetGid = () => VIRTUAL_GID;
 const VIRTUAL_OS_HOSTNAME = parseVirtualProcessString(
@@ -6035,6 +6683,15 @@ function installGuestHardening() {
       if (normalized === 'dns' && ALLOWED_BUILTINS.has('dns')) {
         return guestDns;
       }
+      if (normalized === 'http' && ALLOWED_BUILTINS.has('http')) {
+        return guestHttp;
+      }
+      if (normalized === 'http2' && ALLOWED_BUILTINS.has('http2')) {
+        return guestHttp2;
+      }
+      if (normalized === 'https' && ALLOWED_BUILTINS.has('https')) {
+        return guestHttps;
+      }
       if (normalized === 'tls' && ALLOWED_BUILTINS.has('tls')) {
         return guestTls;
       }
@@ -6069,6 +6726,15 @@ function installGuestHardening() {
       }
       if (normalized === 'dns' && ALLOWED_BUILTINS.has('dns')) {
         return guestDns;
+      }
+      if (normalized === 'http' && ALLOWED_BUILTINS.has('http')) {
+        return guestHttp;
+      }
+      if (normalized === 'http2' && ALLOWED_BUILTINS.has('http2')) {
+        return guestHttp2;
+      }
+      if (normalized === 'https' && ALLOWED_BUILTINS.has('https')) {
+        return guestHttps;
       }
       if (normalized === 'tls' && ALLOWED_BUILTINS.has('tls')) {
         return guestTls;
@@ -6145,6 +6811,15 @@ if (ALLOWED_BUILTINS.has('dgram')) {
 }
 if (ALLOWED_BUILTINS.has('dns')) {
   hardenProperty(globalThis, '__agentOsBuiltinDns', guestDns);
+}
+if (ALLOWED_BUILTINS.has('http')) {
+  hardenProperty(globalThis, '__agentOsBuiltinHttp', guestHttp);
+}
+if (ALLOWED_BUILTINS.has('http2')) {
+  hardenProperty(globalThis, '__agentOsBuiltinHttp2', guestHttp2);
+}
+if (ALLOWED_BUILTINS.has('https')) {
+  hardenProperty(globalThis, '__agentOsBuiltinHttps', guestHttps);
 }
 if (ALLOWED_BUILTINS.has('tls')) {
   hardenProperty(globalThis, '__agentOsBuiltinTls', guestTls);
@@ -7501,6 +8176,21 @@ const BUILTIN_ASSETS: &[BuiltinAsset] = &[
         init_counter_key: "__agentOsBuiltinDnsInitCount",
     },
     BuiltinAsset {
+        name: "http",
+        module_specifier: "node:http",
+        init_counter_key: "__agentOsBuiltinHttpInitCount",
+    },
+    BuiltinAsset {
+        name: "http2",
+        module_specifier: "node:http2",
+        init_counter_key: "__agentOsBuiltinHttp2InitCount",
+    },
+    BuiltinAsset {
+        name: "https",
+        module_specifier: "node:https",
+        init_counter_key: "__agentOsBuiltinHttpsInitCount",
+    },
+    BuiltinAsset {
         name: "tls",
         module_specifier: "node:tls",
         init_counter_key: "__agentOsBuiltinTlsInitCount",
@@ -7787,6 +8477,9 @@ fn render_builtin_asset_source(asset: &BuiltinAsset) -> String {
         "net" => render_net_builtin_asset_source(asset.init_counter_key),
         "dgram" => render_dgram_builtin_asset_source(asset.init_counter_key),
         "dns" => render_dns_builtin_asset_source(asset.init_counter_key),
+        "http" => render_http_builtin_asset_source(asset.init_counter_key),
+        "http2" => render_http2_builtin_asset_source(asset.init_counter_key),
+        "https" => render_https_builtin_asset_source(asset.init_counter_key),
         "tls" => render_tls_builtin_asset_source(asset.init_counter_key),
         "os" => render_os_builtin_asset_source(asset.init_counter_key),
         _ => {
@@ -8064,6 +8757,94 @@ export const resolve6 = mod.resolve6;\n\
 export const reverse = mod.reverse;\n\
 export const setDefaultResultOrder = mod.setDefaultResultOrder;\n\
 export const setServers = mod.setServers;\n"
+    )
+}
+
+fn render_http_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const ACCESS_DENIED_CODE = \"ERR_ACCESS_DENIED\";\n\
+const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+if (!globalThis.__agentOsBuiltinHttp) {{\n\
+  const error = new Error(\"node:http is not available in the Agent OS guest runtime\");\n\
+  error.code = ACCESS_DENIED_CODE;\n\
+  throw error;\n\
+}}\n\n\
+const mod = globalThis.__agentOsBuiltinHttp;\n\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export const Agent = mod.Agent;\n\
+export const ClientRequest = mod.ClientRequest;\n\
+export const IncomingMessage = mod.IncomingMessage;\n\
+export const METHODS = mod.METHODS;\n\
+export const OutgoingMessage = mod.OutgoingMessage;\n\
+export const STATUS_CODES = mod.STATUS_CODES;\n\
+export const Server = mod.Server;\n\
+export const ServerResponse = mod.ServerResponse;\n\
+export const createServer = mod.createServer;\n\
+export const get = mod.get;\n\
+export const globalAgent = mod.globalAgent;\n\
+export const maxHeaderSize = mod.maxHeaderSize;\n\
+export const request = mod.request;\n\
+export const setMaxIdleHTTPParsers = mod.setMaxIdleHTTPParsers;\n\
+export const validateHeaderName = mod.validateHeaderName;\n\
+export const validateHeaderValue = mod.validateHeaderValue;\n"
+    )
+}
+
+fn render_http2_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const ACCESS_DENIED_CODE = \"ERR_ACCESS_DENIED\";\n\
+const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+if (!globalThis.__agentOsBuiltinHttp2) {{\n\
+  const error = new Error(\"node:http2 is not available in the Agent OS guest runtime\");\n\
+  error.code = ACCESS_DENIED_CODE;\n\
+  throw error;\n\
+}}\n\n\
+const mod = globalThis.__agentOsBuiltinHttp2;\n\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export const Http2ServerRequest = mod.Http2ServerRequest;\n\
+export const Http2ServerResponse = mod.Http2ServerResponse;\n\
+export const Http2Session = mod.Http2Session;\n\
+export const Http2Stream = mod.Http2Stream;\n\
+export const constants = mod.constants;\n\
+export const connect = mod.connect;\n\
+export const createServer = mod.createServer;\n\
+export const createSecureServer = mod.createSecureServer;\n\
+export const getDefaultSettings = mod.getDefaultSettings;\n\
+export const getPackedSettings = mod.getPackedSettings;\n\
+export const getUnpackedSettings = mod.getUnpackedSettings;\n\
+export const sensitiveHeaders = mod.sensitiveHeaders;\n"
+    )
+}
+
+fn render_https_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const ACCESS_DENIED_CODE = \"ERR_ACCESS_DENIED\";\n\
+const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+if (!globalThis.__agentOsBuiltinHttps) {{\n\
+  const error = new Error(\"node:https is not available in the Agent OS guest runtime\");\n\
+  error.code = ACCESS_DENIED_CODE;\n\
+  throw error;\n\
+}}\n\n\
+const mod = globalThis.__agentOsBuiltinHttps;\n\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export const Agent = mod.Agent;\n\
+export const Server = mod.Server;\n\
+export const createServer = mod.createServer;\n\
+export const get = mod.get;\n\
+export const globalAgent = mod.globalAgent;\n\
+export const request = mod.request;\n"
     )
 }
 
@@ -8842,6 +9623,29 @@ export async function loadPyodide(options) {
         assert!(os_asset.contains("__agentOsBuiltinOs"));
         assert!(os_asset.contains("export const hostname = mod.hostname"));
         assert!(os_asset.contains("export const userInfo = mod.userInfo"));
+    }
+
+    #[test]
+    fn ensure_materialized_writes_http_builtin_assets() {
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let builtins_root = import_cache.asset_root().join("builtins");
+        let http_asset =
+            fs::read_to_string(builtins_root.join("http.mjs")).expect("read http builtin asset");
+        let http2_asset =
+            fs::read_to_string(builtins_root.join("http2.mjs")).expect("read http2 builtin asset");
+        let https_asset =
+            fs::read_to_string(builtins_root.join("https.mjs")).expect("read https builtin asset");
+
+        assert!(http_asset.contains("__agentOsBuiltinHttp"));
+        assert!(http_asset.contains("export const request = mod.request"));
+        assert!(http2_asset.contains("__agentOsBuiltinHttp2"));
+        assert!(http2_asset.contains("export const connect = mod.connect"));
+        assert!(https_asset.contains("__agentOsBuiltinHttps"));
+        assert!(https_asset.contains("export const createServer = mod.createServer"));
     }
 
     #[test]

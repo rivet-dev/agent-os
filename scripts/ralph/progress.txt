@@ -1,6 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
 - Node builtin hardening is split between `packages/core/src/sidecar/native-kernel-proxy.ts` and four generated surfaces in `crates/execution/src/node_import_cache.rs` (loader, Node runner, Python runner, denied asset materialization); update all of them together when changing builtin policy.
+- Host `node:http`, `node:https`, and `node:http2` do not pick up patched `net`/`tls` internals automatically; keep them guest-owned by wrapping the host client/server surface and forwarding guest sockets into the host server via `connection`/`secureConnection` exactly once.
 - `AGENT_OS_ALLOWED_NODE_BUILTINS` is the shared source of truth for guest Node capability gating, but permissioned top-level JavaScript executions on Node v24 still need `--allow-worker` because `register(loader)` spins an internal loader worker; keep that runtime requirement separate from guest `worker_threads` exposure, and keep child-process permission args aligned with the allowed builtin set.
 - Guest-owned Node builtin polyfills that need both ESM and CJS coverage should be wired in three places together: loader import rewriting/asset resolution, the generated Node runner’s `process.getBuiltinModule` and `Module._load` hooks, and the core bridge’s default allowlist in `packages/core/src/sidecar/native-kernel-proxy.ts`.
 - When a Node builtin port is landing in phases, inherit untouched exports from a snapped host module and override only the RPC-backed surface for the current story; this keeps helper APIs working while the follow-on stories replace the remaining host-backed entrypoints.
@@ -399,6 +400,24 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
 - `scripts/ralph/progress.txt`
 - **Learnings for future iterations:**
   - Patterns discovered: TLS can stay guest-owned without new sidecar RPC methods by layering host TLS state over preconnected guest `net` sockets; `tls.connect({ socket })` and server-side `new TLSSocket(socket, { isServer: true, ... })` are the safe entrypoints.
-  - Gotchas encountered: Server-side wrapped `TLSSocket`s signal handshake readiness on the `secure` event, not `secureConnect`, and the local `packages/core` toolchain is still unavailable in this checkout (`pnpm --dir packages/core exec tsc --noEmit` / `vitest` both fail because the commands are not installed).
-  - Useful context: `cargo check -p agent-os-execution -p agent-os-sidecar`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript javascript_execution_imports_tls_builtin_when_allowed -- --exact`, and `cargo test -p agent-os-sidecar javascript_tls_rpc_connects_and_serves_over_guest_net -- --exact` all pass after this change.
+- Gotchas encountered: Server-side wrapped `TLSSocket`s signal handshake readiness on the `secure` event, not `secureConnect`, and the local `packages/core` toolchain is still unavailable in this checkout (`pnpm --dir packages/core exec tsc --noEmit` / `vitest` both fail because the commands are not installed).
+- Useful context: `cargo check -p agent-os-execution -p agent-os-sidecar`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript javascript_execution_imports_tls_builtin_when_allowed -- --exact`, and `cargo test -p agent-os-sidecar javascript_tls_rpc_connects_and_serves_over_guest_net -- --exact` all pass after this change.
+---
+## 2026-04-05 00:44:32 PDT - US-023
+- What was implemented
+- Added guest-owned `http`, `https`, and `http2` builtin wrappers in `crates/execution/src/node_import_cache.rs`, wired them through the loader, Node runner, builtin asset materialization, and `process.getBuiltinModule` / `Module._load` hooks, and exposed them from the default sidecar allowlist.
+- Implemented transport-backed `http` / `https` client and server shims on top of the existing guest `net` / `tls` polyfills, plus `http2.connect`, `createServer`, and `createSecureServer` wrappers so the modules no longer fall through to host builtins.
+- Added regression coverage for builtin asset materialization, direct JavaScript import of the new modules, and VM-level `http.request` / `http.get` / `http.createServer` plus `https.request` / `https.createServer` behavior.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `crates/sidecar/src/service.rs`
+- `packages/core/src/sidecar/native-kernel-proxy.ts`
+- `packages/core/tests/allowed-node-builtins.test.ts`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- Patterns discovered: Host `http` / `https` / `http2` do not automatically honor patched builtin dependencies, so the stable pattern is to keep the host parser/stream implementation but bridge guest sockets into host servers with `connection` / `secureConnection` forwarding and to force client requests through guest-owned `createConnection`.
+- Gotchas encountered: When bridging host servers to guest transports, do not register both a transport-server callback and a forwarded event for the same socket event; double delivery replays requests for `http` and triggers `ERR_HTTP2_SOCKET_BOUND` for `http2`.
+- Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript javascript_execution_imports_http_builtins_when_allowed -- --exact`, `cargo test -p agent-os-sidecar service::tests::javascript_http_rpc_requests_gets_and_serves_over_guest_net -- --exact`, `cargo test -p agent-os-sidecar service::tests::javascript_https_rpc_requests_and_serves_over_guest_tls -- --exact`, `cargo test -p agent-os-sidecar service::tests::javascript_tls_rpc_connects_and_serves_over_guest_net -- --exact`, `pnpm exec tsc --noEmit` (run from `packages/core` after `pnpm install --ignore-workspace --ignore-scripts` there), and `pnpm exec vitest run tests/allowed-node-builtins.test.ts` (also from `packages/core`) all passed after this change.
 ---

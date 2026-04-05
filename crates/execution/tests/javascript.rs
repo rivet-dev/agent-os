@@ -3538,6 +3538,123 @@ console.log(JSON.stringify({
 }
 
 #[test]
+fn javascript_execution_imports_http_builtins_when_allowed() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import http from "node:http";
+import http2 from "node:http2";
+import https from "node:https";
+
+const builtinHttp = process.getBuiltinModule("node:http");
+const builtinHttp2 = process.getBuiltinModule("node:http2");
+const builtinHttps = process.getBuiltinModule("node:https");
+
+console.log(JSON.stringify({
+  http: {
+    request: typeof http.request,
+    get: typeof http.get,
+    createServer: typeof http.createServer,
+    builtinRequest: typeof builtinHttp?.request,
+  },
+  http2: {
+    connect: typeof http2.connect,
+    createServer: typeof http2.createServer,
+    createSecureServer: typeof http2.createSecureServer,
+    builtinConnect: typeof builtinHttp2?.connect,
+  },
+  https: {
+    request: typeof https.request,
+    get: typeof https.get,
+    createServer: typeof https.createServer,
+    builtinRequest: typeof builtinHttps?.request,
+  },
+}));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let env = BTreeMap::from([(
+        String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+        String::from(
+            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"http\",\"http2\",\"https\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+        ),
+    )]);
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env,
+            cwd: temp.path().to_path_buf(),
+        })
+        .expect("start JavaScript execution");
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code = None;
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event(Duration::from_secs(5))
+            .expect("poll execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::Exited(code)) => exit_code = Some(code),
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                panic!(
+                    "unexpected http builtin sync RPC method: {}",
+                    request.method
+                )
+            }
+            None => panic!("timed out waiting for JavaScript execution event"),
+        }
+    }
+
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(stderr).expect("stderr utf8");
+    assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse http JSON");
+    assert_eq!(
+        parsed["http"]["request"],
+        Value::String(String::from("function"))
+    );
+    assert_eq!(
+        parsed["http"]["get"],
+        Value::String(String::from("function"))
+    );
+    assert_eq!(
+        parsed["http"]["createServer"],
+        Value::String(String::from("function"))
+    );
+    assert_eq!(
+        parsed["http2"]["connect"],
+        Value::String(String::from("function"))
+    );
+    assert_eq!(
+        parsed["http2"]["createSecureServer"],
+        Value::String(String::from("function"))
+    );
+    assert_eq!(
+        parsed["https"]["request"],
+        Value::String(String::from("function"))
+    );
+    assert_eq!(
+        parsed["https"]["createServer"],
+        Value::String(String::from("function"))
+    );
+}
+
+#[test]
 fn javascript_execution_translates_require_resolve_and_cjs_errors_to_guest_paths() {
     assert_node_available();
 

@@ -376,7 +376,7 @@
         "Typecheck passes"
       ],
       "priority": 23,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-018 (net), US-022 (tls). May work automatically if Node.js internal require('net') is intercepted by loader hooks."
     },
     {
