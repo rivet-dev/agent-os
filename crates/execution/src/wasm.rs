@@ -61,6 +61,7 @@ const MAX_WASM_IMPORT_SECTION_ENTRIES: usize = 16_384;
 const MAX_WASM_MEMORY_SECTION_ENTRIES: usize = 1_024;
 const MAX_WASM_VARUINT_BYTES: usize = 10;
 const DEFAULT_WASM_PREWARM_TIMEOUT_MS: u64 = 30_000;
+const WASM_MAX_MEM_PAGES_FLAG: &str = "--wasm-max-mem-pages=";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WasmSignalDispositionAction {
@@ -648,6 +649,17 @@ fn configure_node_command(
         command.arg(format!("--stack-size={stack_kib}"));
     }
 
+    if let Some(memory_limit_bytes) = wasm_memory_limit_bytes(request)? {
+        let memory_limit_pages = wasm_memory_limit_pages(memory_limit_bytes)?;
+        command
+            .arg(format!("{WASM_MAX_MEM_PAGES_FLAG}{memory_limit_pages}"))
+            .env(WASM_MAX_MEMORY_BYTES_ENV, memory_limit_bytes.to_string());
+    }
+
+    if let Some(fuel_limit) = wasm_limit_u64(&request.env, WASM_MAX_FUEL_ENV)? {
+        command.env(WASM_MAX_FUEL_ENV, fuel_limit.to_string());
+    }
+
     command.env(NODE_FROZEN_TIME_ENV, frozen_time_ms.to_string());
     Ok(())
 }
@@ -788,7 +800,7 @@ fn wait_for_child_with_optional_timeout(
                     let _ = child.wait();
                     return Err(ChildWaitError::TimedOut);
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(1));
             }
             Err(_) => return Err(ChildWaitError::WaitFailed),
         }
@@ -798,6 +810,10 @@ fn wait_for_child_with_optional_timeout(
 fn resolve_wasm_execution_timeout(
     request: &StartWasmExecutionRequest,
 ) -> Result<Option<Duration>, WasmExecutionError> {
+    // Node's WASI runtime does not expose per-instruction fuel metering, so the
+    // configured "fuel" budget is currently enforced as a tight wall-clock
+    // timeout while still being passed through to the child process for
+    // observability and future in-runtime enforcement.
     Ok(wasm_limit_u64(&request.env, WASM_MAX_FUEL_ENV)?.map(Duration::from_millis))
 }
 
@@ -849,6 +865,15 @@ fn wasm_memory_limit_bytes(
     request: &StartWasmExecutionRequest,
 ) -> Result<Option<u64>, WasmExecutionError> {
     wasm_limit_u64(&request.env, WASM_MAX_MEMORY_BYTES_ENV)
+}
+
+fn wasm_memory_limit_pages(memory_limit_bytes: u64) -> Result<u32, WasmExecutionError> {
+    let pages = memory_limit_bytes / WASM_PAGE_BYTES;
+    u32::try_from(pages).map_err(|_| {
+        WasmExecutionError::InvalidLimit(format!(
+            "{WASM_MAX_MEMORY_BYTES_ENV}={memory_limit_bytes}: exceeds V8's wasm page limit range"
+        ))
+    })
 }
 
 fn wasm_limit_u64(
@@ -928,11 +953,6 @@ fn validate_module_limits(
             ),
         )),
         Some(_) => Ok(()),
-        None if module_limits.initial_memory_bytes.is_some() => Err(WasmExecutionError::InvalidModule(
-            String::from(
-                "configured WebAssembly memory limit requires the module to declare a memory maximum",
-            ),
-        )),
         None => Ok(()),
     }
 }
@@ -1144,8 +1164,8 @@ impl From<NodeSignalHandlerRegistration> for WasmSignalHandlerRegistration {
 mod tests {
     use super::{
         resolve_wasm_execution_timeout, resolve_wasm_prewarm_timeout, resolved_module_path,
-        StartWasmExecutionRequest, WasmPermissionTier, WASM_MAX_FUEL_ENV,
-        WASM_PREWARM_TIMEOUT_MS_ENV,
+        wasm_memory_limit_pages, StartWasmExecutionRequest, WasmPermissionTier, WASM_MAX_FUEL_ENV,
+        WASM_MAX_MEMORY_BYTES_ENV, WASM_PAGE_BYTES, WASM_PREWARM_TIMEOUT_MS_ENV,
     };
     use std::collections::BTreeMap;
     use std::fs;
@@ -1202,6 +1222,58 @@ mod tests {
         assert_eq!(
             resolve_wasm_prewarm_timeout(&request).expect("prewarm timeout"),
             Duration::from_millis(750)
+        );
+    }
+
+    #[test]
+    fn wasm_memory_limit_pages_floor_to_whole_wasm_pages() {
+        assert_eq!(
+            wasm_memory_limit_pages(WASM_PAGE_BYTES + 123).expect("page limit"),
+            1
+        );
+        assert_eq!(
+            wasm_memory_limit_pages(2 * WASM_PAGE_BYTES).expect("page limit"),
+            2
+        );
+    }
+
+    #[test]
+    fn wasm_memory_limit_no_longer_requires_declared_module_maximum() {
+        let temp = tempdir().expect("create temp dir");
+        let request = request_with_env(
+            temp.path(),
+            BTreeMap::from([(
+                String::from(WASM_MAX_MEMORY_BYTES_ENV),
+                (2 * WASM_PAGE_BYTES).to_string(),
+            )]),
+        );
+
+        assert!(
+            super::validate_module_limits(
+                &super::ResolvedWasmModule {
+                    specifier: String::from("./guest.wasm"),
+                    resolved_path: {
+                        let path = temp.path().join("guest.wasm");
+                        fs::write(
+                            &path,
+                            wat::parse_str(
+                                r#"
+(module
+  (memory (export "memory") 1)
+  (func (export "_start"))
+)
+"#,
+                            )
+                            .expect("compile wasm fixture"),
+                        )
+                        .expect("write wasm fixture");
+                        path
+                    },
+                },
+                &request,
+            )
+            .is_ok(),
+            "runtime memory cap should allow modules without a declared maximum"
         );
     }
 }

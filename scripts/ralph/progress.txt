@@ -1,6 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
 - Pyodide runtime hardening knobs should stay in reserved `AGENT_OS_PYTHON_*` execution env keys: apply heap caps to both prewarm and execution host launches, and make `PythonExecution::wait(None)` honor the configured per-run timeout instead of treating `None` as unbounded.
+- WASM runtime limits span both `crates/execution/src/wasm.rs` and the generated `wasm-runner.mjs` in `crates/execution/src/node_import_cache.rs`: pass `AGENT_OS_WASM_MAX_*` through reserved env, keep the Node argv flags in sync, and cap the module memory section before `WebAssembly.compile()` so `memory.grow()` obeys the configured limit even when the module omits a maximum.
 - Per-process filesystem state such as `umask` belongs in `ProcessContext` / `ProcessTable`; when guest Node code needs it, thread it through `crates/kernel/src/kernel.rs`, `crates/sidecar/src/service.rs`, and `crates/execution/src/node_import_cache.rs` together instead of reading host `process`.
 - `VirtualStat` field additions must be propagated as one bundle across kernel stat producers, sidecar protocol serialization, mount/plugin adapters, and the TypeScript `VirtualStat` / `GuestFilesystemStat` surfaces or some callers will silently keep incomplete metadata.
 - Filesystem errno hardening usually needs both layers updated together: enforce fast-fail guest-path validation in `crates/kernel/src/permissions.rs` so overlong paths do not degrade into permission errors, and keep `crates/kernel/src/vfs.rs` path traversal authoritative for semantic errors like `ENOTDIR`.
@@ -1508,4 +1509,21 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Pyodide execution-level hardening fits the existing reserved-env pattern; runtime-only knobs should be read from `StartPythonExecutionRequest.env`, consumed host-side, and stripped from guest-visible `process.env`.
   - Gotchas encountered: `wait(None)` is part of the security boundary for Python runs now; treating `None` as “unbounded” would silently bypass the per-run timeout even when the request config set one.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test python -- --test-threads=1`, `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1`, and `cargo check -p agent-os-execution` all pass after this change. The Python suite showed one transient `loader.mjs`-missing import-cache race on the first run, then passed cleanly on rerun.
+---
+## 2026-04-05 12:24:42 PDT - US-080
+- What was implemented
+- Wired WASM runtime limit propagation in `crates/execution/src/wasm.rs` so Node child processes receive `AGENT_OS_WASM_MAX_MEMORY_BYTES` / `AGENT_OS_WASM_MAX_FUEL`, apply `--wasm-max-mem-pages`, and use a tighter 1ms timeout poll when fuel falls back to wall-clock enforcement.
+- Hardened the generated WASM runner in `crates/execution/src/node_import_cache.rs` to rewrite the memory section before `WebAssembly.compile()`, capping declared or undeclared memories to the configured page limit so runtime `memory.grow()` fails at the configured cap.
+- Added regressions in `crates/execution/tests/wasm.rs` and `crates/execution/tests/permission_flags.rs` covering runtime memory growth enforcement plus Node env/flag propagation for prewarm and execution launches.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/src/wasm.rs`
+- `crates/execution/tests/permission_flags.rs`
+- `crates/execution/tests/wasm.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: WASM memory caps are a two-layer enforcement problem here; compile-time validation alone is insufficient, so the Node-hosted runner must cap the memory section it compiles when the module omits or overstates its maximum.
+  - Gotchas encountered: `cargo test -p agent-os-execution --test wasm` is reliable with `--test-threads=1`; parallel runs can hit the known shared import-cache cleanup race and fail with missing `timing-bootstrap.mjs`.
+  - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test wasm -- --test-threads=1`, `cargo test -p agent-os-execution --test permission_flags -- --test-threads=1`, `cargo test -p agent-os-execution --lib wasm::tests::wasm_memory_limit_no_longer_requires_declared_module_maximum -- --exact`, and `cargo check -p agent-os-execution` all pass after this change.
 ---

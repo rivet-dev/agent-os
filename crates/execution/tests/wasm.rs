@@ -353,6 +353,46 @@ fn wasm_memory_capped_module() -> Vec<u8> {
     .expect("compile memory-capped wasm fixture")
 }
 
+fn wasm_memory_grow_until_runtime_limit_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+(module
+  (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (type $fd_write_t)))
+  (memory (export "memory") 1)
+  (data (i32.const 32) "memory-grow-limited\n")
+  (func $_start (export "_start")
+    (if
+      (i32.ne
+        (memory.grow (i32.const 1))
+        (i32.const 1)
+      )
+      (then unreachable)
+    )
+    (if
+      (i32.ne
+        (memory.grow (i32.const 1))
+        (i32.const -1)
+      )
+      (then unreachable)
+    )
+    (i32.store (i32.const 0) (i32.const 32))
+    (i32.store (i32.const 4) (i32.const 20))
+    (drop
+      (call $fd_write
+        (i32.const 1)
+        (i32.const 0)
+        (i32.const 1)
+        (i32.const 24)
+      )
+    )
+  )
+)
+"#,
+    )
+    .expect("compile runtime memory-limit wasm fixture")
+}
+
 fn raw_wasm_module(section_id: u8, section_contents: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::from(*b"\0asm");
     bytes.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
@@ -994,6 +1034,42 @@ fn wasm_execution_rejects_modules_whose_memory_cap_exceeds_limit() {
     assert!(
         error.to_string().contains("memory maximum"),
         "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn wasm_execution_enforces_runtime_memory_growth_limit_for_modules_without_declared_maximum() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &wasm_memory_grow_until_runtime_limit_module(),
+    );
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let (stdout, stderr, exit_code) = run_wasm_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        Vec::new(),
+        BTreeMap::from([(
+            String::from(WASM_MAX_MEMORY_BYTES_ENV),
+            (2 * 65_536_u64).to_string(),
+        )]),
+        WasmPermissionTier::Full,
+    );
+
+    assert_eq!(exit_code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.is_empty(), "stderr={stderr}");
+    assert!(
+        stdout.contains("memory-grow-limited"),
+        "stdout should confirm runtime memory.grow enforcement: {stdout}"
     );
 }
 

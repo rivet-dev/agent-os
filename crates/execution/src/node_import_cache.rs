@@ -7711,6 +7711,7 @@ const WASI_ERRNO_SUCCESS = 0;
 const WASI_ERRNO_ROFS = 69;
 const WASI_ERRNO_FAULT = 21;
 const WASI_RIGHT_FD_WRITE = 64n;
+const WASM_PAGE_BYTES = 65536;
 
 function isPathLike(specifier) {
   return specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('file:');
@@ -7735,6 +7736,10 @@ const guestArgv = JSON.parse(process.env.AGENT_OS_GUEST_ARGV ?? '[]');
 const guestEnv = JSON.parse(process.env.AGENT_OS_GUEST_ENV ?? '{}');
 const permissionTier = process.env.AGENT_OS_WASM_PERMISSION_TIER ?? 'full';
 const prewarmOnly = process.env.AGENT_OS_WASM_PREWARM_ONLY === '1';
+const maxMemoryBytesValue = Number(process.env.AGENT_OS_WASM_MAX_MEMORY_BYTES);
+const maxMemoryPages = Number.isFinite(maxMemoryBytesValue)
+  ? Math.max(0, Math.floor(maxMemoryBytesValue / WASM_PAGE_BYTES))
+  : null;
 const frozenTimeValue = Number(process.env.AGENT_OS_FROZEN_TIME_MS);
 const frozenTimeMs = Number.isFinite(frozenTimeValue) ? Math.trunc(frozenTimeValue) : Date.now();
 const frozenTimeNs = BigInt(frozenTimeMs) * 1000000n;
@@ -7754,7 +7759,133 @@ function buildPreopens() {
   }
 }
 
-const moduleBytes = await fs.readFile(resolveModulePath(modulePath));
+function readVarUint(bytes, offset, label) {
+  let value = 0;
+  let shift = 0;
+  let cursor = offset;
+  for (let count = 0; count < 10; count += 1) {
+    if (cursor >= bytes.length) {
+      throw new Error(`WebAssembly ${label} truncated`);
+    }
+    const byte = bytes[cursor];
+    cursor += 1;
+    value += (byte & 0x7f) * 2 ** shift;
+    if ((byte & 0x80) === 0) {
+      return { value, offset: cursor };
+    }
+    shift += 7;
+  }
+  throw new Error(`WebAssembly ${label} exceeds varuint limit`);
+}
+
+function encodeVarUint(value) {
+  const encoded = [];
+  let remaining = Math.trunc(value);
+  do {
+    let byte = remaining & 0x7f;
+    remaining = Math.floor(remaining / 128);
+    if (remaining > 0) {
+      byte |= 0x80;
+    }
+    encoded.push(byte);
+  } while (remaining > 0);
+  return encoded;
+}
+
+function rewriteMemorySection(sectionBytes, limitPages) {
+  let offset = 0;
+  const countResult = readVarUint(sectionBytes, offset, 'memory count');
+  const count = countResult.value;
+  offset = countResult.offset;
+  const rewritten = [...encodeVarUint(count)];
+
+  for (let index = 0; index < count; index += 1) {
+    const flagsResult = readVarUint(sectionBytes, offset, 'memory flags');
+    const flags = flagsResult.value;
+    offset = flagsResult.offset;
+
+    if ((flags & ~1) !== 0) {
+      throw new Error(
+        `configured WebAssembly memory limit does not support memory flags ${flags}`,
+      );
+    }
+
+    const initialResult = readVarUint(sectionBytes, offset, 'memory minimum');
+    const initialPages = initialResult.value;
+    offset = initialResult.offset;
+
+    let maximumPages = null;
+    if ((flags & 1) !== 0) {
+      const maximumResult = readVarUint(sectionBytes, offset, 'memory maximum');
+      maximumPages = maximumResult.value;
+      offset = maximumResult.offset;
+    }
+
+    if (initialPages > limitPages) {
+      throw new Error(
+        `initial WebAssembly memory of ${initialPages * WASM_PAGE_BYTES} bytes exceeds the configured limit of ${limitPages * WASM_PAGE_BYTES} bytes`,
+      );
+    }
+
+    const cappedMaximumPages =
+      maximumPages == null ? limitPages : Math.min(maximumPages, limitPages);
+    rewritten.push(...encodeVarUint(1));
+    rewritten.push(...encodeVarUint(initialPages));
+    rewritten.push(...encodeVarUint(cappedMaximumPages));
+  }
+
+  if (offset !== sectionBytes.length) {
+    throw new Error('memory section parsing did not consume the full section');
+  }
+
+  return rewritten;
+}
+
+function enforceMemoryLimit(moduleBytes, limitPages) {
+  if (!Number.isInteger(limitPages)) {
+    return moduleBytes;
+  }
+
+  const bytes = moduleBytes instanceof Uint8Array ? moduleBytes : new Uint8Array(moduleBytes);
+  if (bytes.length < 8 || bytes[0] !== 0 || bytes[1] !== 0x61 || bytes[2] !== 0x73 || bytes[3] !== 0x6d) {
+    throw new Error('module is not a valid WebAssembly binary');
+  }
+
+  const rewritten = Array.from(bytes.slice(0, 8));
+  let offset = 8;
+
+  while (offset < bytes.length) {
+    const sectionStart = offset;
+    const sectionId = bytes[offset];
+    offset += 1;
+    const sectionSizeResult = readVarUint(bytes, offset, 'section size');
+    const sectionSize = sectionSizeResult.value;
+    offset = sectionSizeResult.offset;
+    const sectionEnd = offset + sectionSize;
+    if (sectionEnd > bytes.length) {
+      throw new Error('section extends past end of module');
+    }
+
+    if (sectionId !== 5) {
+      rewritten.push(...bytes.slice(sectionStart, sectionEnd));
+      offset = sectionEnd;
+      continue;
+    }
+
+    const rewrittenSection = rewriteMemorySection(bytes.slice(offset, sectionEnd), limitPages);
+    rewritten.push(sectionId);
+    rewritten.push(...encodeVarUint(rewrittenSection.length));
+    rewritten.push(...rewrittenSection);
+    offset = sectionEnd;
+  }
+
+  return Buffer.from(rewritten);
+}
+
+const moduleBytes = enforceMemoryLimit(
+  await fs.readFile(resolveModulePath(modulePath)),
+  maxMemoryPages,
+);
 const module = await WebAssembly.compile(moduleBytes);
 
 if (prewarmOnly) {

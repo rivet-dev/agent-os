@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 const ARG_PREFIX: &str = "ARG=";
+const ENV_PREFIX: &str = "ENV=";
 const INVOCATION_BREAK: &str = "--END--";
 const NODE_ALLOW_CHILD_PROCESS_FLAG: &str = "--allow-child-process";
 const NODE_ALLOW_WORKER_FLAG: &str = "--allow-worker";
@@ -21,7 +22,10 @@ const NODE_ALLOW_FS_READ_FLAG: &str = "--allow-fs-read=";
 const NODE_ALLOW_FS_WRITE_FLAG: &str = "--allow-fs-write=";
 const NODE_MAX_OLD_SPACE_SIZE_FLAG_PREFIX: &str = "--max-old-space-size=";
 const NODE_STACK_SIZE_FLAG_PREFIX: &str = "--stack-size=";
+const NODE_WASM_MAX_MEM_PAGES_FLAG_PREFIX: &str = "--wasm-max-mem-pages=";
 const PYTHON_MAX_OLD_SPACE_MB_ENV: &str = "AGENT_OS_PYTHON_MAX_OLD_SPACE_MB";
+const WASM_MAX_FUEL_ENV: &str = "AGENT_OS_WASM_MAX_FUEL";
+const WASM_MAX_MEMORY_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_MEMORY_BYTES";
 
 struct EnvVarGuard {
     key: &'static str,
@@ -76,8 +80,10 @@ fn canonical(path: &Path) -> PathBuf {
 
 fn write_fake_node_binary(path: &Path, log_path: &Path) {
     let script = format!(
-        "#!/bin/sh\nset -eu\nlog=\"{}\"\nfor arg in \"$@\"; do\n  printf 'ARG=%s\\n' \"$arg\" >> \"$log\"\ndone\nprintf '%s\\n' '{}' >> \"$log\"\nexit 0\n",
+        "#!/bin/sh\nset -eu\nlog=\"{}\"\nfor arg in \"$@\"; do\n  printf 'ARG=%s\\n' \"$arg\" >> \"$log\"\ndone\nfor key in {} {}; do\n  value=$(printenv \"$key\" || true)\n  if [ -n \"$value\" ]; then\n    printf 'ENV=%s=%s\\n' \"$key\" \"$value\" >> \"$log\"\n  fi\ndone\nprintf '%s\\n' '{}' >> \"$log\"\nexit 0\n",
         log_path.display(),
+        WASM_MAX_FUEL_ENV,
+        WASM_MAX_MEMORY_BYTES_ENV,
         INVOCATION_BREAK,
     );
     fs::write(path, script).expect("write fake node binary");
@@ -100,6 +106,23 @@ fn parse_invocations(log_path: &Path) -> Vec<Vec<String>> {
                 .filter_map(|line| line.strip_prefix(ARG_PREFIX))
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn parse_invocation_env(log_path: &Path) -> Vec<BTreeMap<String, String>> {
+    let contents = fs::read_to_string(log_path).expect("read invocation log");
+    let separator = format!("{INVOCATION_BREAK}\n");
+    contents
+        .split(&separator)
+        .filter(|block| !block.trim().is_empty())
+        .map(|block| {
+            block
+                .lines()
+                .filter_map(|line| line.strip_prefix(ENV_PREFIX))
+                .filter_map(|entry| entry.split_once('='))
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect::<BTreeMap<_, _>>()
         })
         .collect()
 }
@@ -534,6 +557,76 @@ fn python_execution_applies_configured_heap_limit_to_prewarm_and_exec_processes(
             args.iter()
                 .any(|arg| arg == &format!("{NODE_MAX_OLD_SPACE_SIZE_FLAG_PREFIX}256")),
             "python invocations should apply the configured Node heap limit: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn wasm_execution_passes_runtime_memory_and_fuel_limits_to_node_process() {
+    let temp = tempdir().expect("create temp dir");
+    let fake_node_path = temp.path().join("fake-node.sh");
+    let log_path = temp.path().join("node-args.log");
+    write_fake_node_binary(&fake_node_path, &log_path);
+    let _node_binary = EnvVarGuard::set("AGENT_OS_NODE_BINARY", &fake_node_path);
+
+    let wasm_cwd = temp.path().join("wasm-project");
+    fs::create_dir_all(&wasm_cwd).expect("create wasm cwd");
+    fs::write(wasm_cwd.join("guest.wasm"), b"\0asm\x01\0\0\0").expect("write wasm module");
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let result = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: vec![String::from("./guest.wasm")],
+            env: BTreeMap::from([
+                (String::from(WASM_MAX_FUEL_ENV), String::from("25")),
+                (
+                    String::from(WASM_MAX_MEMORY_BYTES_ENV),
+                    String::from("131072"),
+                ),
+            ]),
+            cwd: wasm_cwd,
+            permission_tier: WasmPermissionTier::Full,
+        })
+        .expect("start wasm execution")
+        .wait()
+        .expect("wait for wasm execution");
+    assert_eq!(result.exit_code, 0);
+
+    let invocations = parse_invocations(&log_path);
+    let envs = parse_invocation_env(&log_path);
+    assert_eq!(
+        invocations.len(),
+        2,
+        "expected prewarm and execution invocations"
+    );
+    assert_eq!(
+        envs.len(),
+        2,
+        "expected one env capture per prewarm and execution invocation"
+    );
+
+    for (args, env) in invocations.iter().zip(envs.iter()) {
+        assert!(
+            args.iter()
+                .any(|arg| arg == &format!("{NODE_WASM_MAX_MEM_PAGES_FLAG_PREFIX}2")),
+            "wasm invocations should enforce the configured runtime page limit: {args:?}"
+        );
+        assert_eq!(
+            env.get(WASM_MAX_MEMORY_BYTES_ENV).map(String::as_str),
+            Some("131072"),
+            "wasm invocations should receive the configured memory limit env: {env:?}"
+        );
+        assert_eq!(
+            env.get(WASM_MAX_FUEL_ENV).map(String::as_str),
+            Some("25"),
+            "wasm invocations should receive the configured fuel limit env: {env:?}"
         );
     }
 }

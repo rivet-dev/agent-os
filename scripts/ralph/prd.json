@@ -1270,7 +1270,7 @@
         "Typecheck passes"
       ],
       "priority": 80,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: WASM_MAX_MEMORY_BYTES_ENV only validated at compile time in validate_module_limits(). Not passed to Node.js runtime. Fuel converted to millisecond timeout with 10ms granularity. Guest WASM can grow memory unbounded at runtime."
     },
     {
