@@ -4266,6 +4266,133 @@ console.log(JSON.stringify(result));
 }
 
 #[test]
+fn javascript_execution_blocks_cjs_require_from_hidden_parent_node_modules() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let guest_root = temp.path().join("guest-root");
+    let guest_package_dir = guest_root.join("node_modules/visible-pkg");
+    let hidden_parent_package_dir = temp.path().join("node_modules/host-only-pkg");
+    fs::create_dir_all(&guest_package_dir).expect("create guest package dir");
+    fs::create_dir_all(&hidden_parent_package_dir).expect("create hidden parent package dir");
+
+    write_fixture(
+        &guest_root.join("dep.cjs"),
+        "module.exports = { answer: 41 };\n",
+    );
+    write_fixture(
+        &guest_package_dir.join("package.json"),
+        "{\n  \"name\": \"visible-pkg\",\n  \"main\": \"./index.js\"\n}\n",
+    );
+    write_fixture(
+        &guest_package_dir.join("index.js"),
+        "module.exports = { answer: 42 };\n",
+    );
+    write_fixture(
+        &hidden_parent_package_dir.join("package.json"),
+        "{\n  \"name\": \"host-only-pkg\",\n  \"main\": \"./index.js\"\n}\n",
+    );
+    write_fixture(
+        &hidden_parent_package_dir.join("index.js"),
+        "module.exports = { compromised: true };\n",
+    );
+    write_fixture(
+        &guest_root.join("consumer.cjs"),
+        r#"
+const dep = require("./dep.cjs");
+const visible = require("visible-pkg");
+
+let hidden;
+try {
+  hidden = require("host-only-pkg");
+} catch (error) {
+  hidden = {
+    code: error.code ?? null,
+    message: error.message,
+  };
+}
+
+module.exports = {
+  dep: dep.answer,
+  visible: visible.answer,
+  hidden,
+};
+"#,
+    );
+    write_fixture(
+        &guest_root.join("entry.mjs"),
+        r#"
+import result from "./consumer.cjs";
+result.cacheKeys = Object.keys(require.cache)
+  .filter((key) =>
+    key.includes("consumer.cjs") ||
+    key.includes("dep.cjs") ||
+    key.includes("visible-pkg"),
+  )
+  .sort();
+console.log(JSON.stringify(result));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let guest_root_host_path = guest_root.to_string_lossy().replace('\\', "\\\\");
+    let env = BTreeMap::from([(
+        String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+        format!("[{{\"guestPath\":\"/root\",\"hostPath\":\"{guest_root_host_path}\"}}]"),
+    )]);
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        &guest_root,
+        vec![String::from("./entry.mjs")],
+        env,
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse CJS JSON");
+
+    assert_eq!(parsed["dep"], Value::from(41));
+    assert_eq!(parsed["visible"], Value::from(42));
+    assert_eq!(
+        parsed["hidden"]["code"],
+        Value::String(String::from("MODULE_NOT_FOUND"))
+    );
+    let hidden_message = parsed["hidden"]["message"]
+        .as_str()
+        .expect("hidden module missing message");
+    assert!(
+        hidden_message.contains("host-only-pkg"),
+        "message should mention blocked package: {hidden_message}"
+    );
+
+    let cache_keys = parsed["cacheKeys"].as_array().expect("cache keys array");
+    let cache_key_values: Vec<&str> = cache_keys
+        .iter()
+        .map(|entry| entry.as_str().expect("cache key"))
+        .collect();
+    assert!(
+        cache_key_values.contains(&"/root/consumer.cjs"),
+        "consumer cache key should use guest path: {cache_key_values:?}"
+    );
+    assert!(
+        cache_key_values.contains(&"/root/dep.cjs"),
+        "dep cache key should use guest path: {cache_key_values:?}"
+    );
+    assert!(
+        cache_key_values
+            .iter()
+            .any(|entry| entry.starts_with("/root/node_modules/visible-pkg/")),
+        "package cache key should stay in guest path space: {cache_key_values:?}"
+    );
+}
+
+#[test]
 fn javascript_execution_translates_top_level_loader_stacks_to_guest_paths() {
     assert_node_available();
 

@@ -797,7 +797,7 @@
         "Typecheck passes"
       ],
       "priority": 50,
-      "passes": false,
+      "passes": true,
       "notes": "Audit finding: createGuestRequire() uses Module.createRequire() + baseRequire() which resolves packages from HOST node_modules. Guest code can load arbitrary host packages."
     },
     {

@@ -25,6 +25,7 @@
 - Native sidecar permission policy must be serialized into `CreateVmRequest`, not just `configure_vm`, because guest env filtering and bootstrap driver registration both happen during VM construction.
 - Sidecar execute flows should validate host `cwd` against `vm.cwd` before spawn, then pass the sandbox root to the Node permission layer separately from the runtime `current_dir`; the host process can start in a subdirectory without widening `--allow-fs-read/--allow-fs-write`.
 - Node builtin hardening is split between `packages/core/src/sidecar/native-kernel-proxy.ts` and four generated surfaces in `crates/execution/src/node_import_cache.rs` (loader, Node runner, Python runner, denied asset materialization); update all of them together when changing builtin policy.
+- CJS module isolation in `crates/execution/src/node_import_cache.rs` has to patch `Module._resolveFilename` and the guest-facing `Module._cache` / `require.cache` view together; wrapping only `createGuestRequire()` leaves local `require()` inside loaded `.cjs` modules free to walk host `node_modules`.
 - Host `node:http`, `node:https`, and `node:http2` do not pick up patched `net`/`tls` internals automatically; keep them guest-owned by wrapping the host client/server surface and forwarding guest sockets into the host server via `connection`/`secureConnection` exactly once.
 - `AGENT_OS_ALLOWED_NODE_BUILTINS` is the shared source of truth for guest Node capability gating, but permissioned top-level JavaScript executions on Node v24 still need `--allow-worker` because `register(loader)` spins an internal loader worker; keep that runtime requirement separate from guest `worker_threads` exposure, and keep child-process permission args aligned with the allowed builtin set.
 - Permissioned Pyodide host launches need the same `--allow-worker` treatment as JavaScript in `crates/execution/src/python.rs`; Node's internal loader worker is a host runtime requirement there too, not guest `worker_threads` exposure.
@@ -929,4 +930,19 @@ Started: Sat Apr  4 07:06:17 PM PDT 2026
   - Patterns discovered: Guest-visible `process` virtualization is more reliable when the real host `process` is hardened first and the guest proxy only controls the receiver path for fallthrough properties.
   - Gotchas encountered: `process.memoryUsage` in Node also exposes a `rss()` helper on the function object, so replacing the method needs to preserve that nested API or guest compatibility regresses.
   - Useful context: `cargo fmt --all`, `cargo test -p agent-os-execution --test javascript -- --test-threads=1`, and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` all pass after this change.
+---
+## 2026-04-05 06:50:49 PDT - US-050
+- What was implemented
+- Hardened the generated Node runner’s CommonJS loader in `crates/execution/src/node_import_cache.rs` so `Module._resolveFilename` now translates guest paths before resolution and rejects resolved host files outside guest-visible mappings or the current execution root.
+- Swapped the guest-facing `require.cache` surface onto a translated proxy over `Module._cache`, keeping cache keys in guest path space while preserving host-path internals for Node’s loader.
+- Added a JavaScript regression that loads a CommonJS module from a mapped guest workspace, verifies a package under guest-visible `node_modules` still loads, and confirms a hidden ancestor `node_modules/host-only-pkg` outside the mapping is blocked.
+- Files changed
+- `crates/execution/src/node_import_cache.rs`
+- `crates/execution/tests/javascript.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: CommonJS isolation has to happen at the loader level, because local `require()` inside a loaded `.cjs` module does not use the top-level `createGuestRequire()` wrapper.
+  - Gotchas encountered: Node’s ESM-to-CJS bridge does not expose a stable local `require.cache` surface for assertions, so cache translation regressions are more reliable when checked from the guest global `require`.
+  - Useful context: `cargo fmt --check`, `cargo test -p agent-os-execution --test javascript -- --test-threads=1`, and `cargo test -p agent-os-execution node_import_cache::tests -- --test-threads=1` all pass after this change.
 ---

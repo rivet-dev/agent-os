@@ -1737,8 +1737,14 @@ const originalGetBuiltinModule =
   typeof process.getBuiltinModule === 'function'
     ? process.getBuiltinModule.bind(process)
     : null;
+const originalModuleResolveFilename =
+  typeof Module?._resolveFilename === 'function'
+    ? Module._resolveFilename.bind(Module)
+    : null;
 const originalModuleLoad =
   typeof Module?._load === 'function' ? Module._load.bind(Module) : null;
+const originalModuleCache =
+  Module?._cache && typeof Module._cache === 'object' ? Module._cache : null;
 const originalFetch =
   typeof globalThis.fetch === 'function'
     ? globalThis.fetch.bind(globalThis)
@@ -6352,16 +6358,216 @@ function createGuestProcessProxy(target) {
   return proxy;
 }
 
+function normalizeGuestRequireDir(fromGuestDir) {
+  if (typeof fromGuestDir !== 'string' || fromGuestDir.length === 0) {
+    return INITIAL_GUEST_CWD;
+  }
+
+  if (fromGuestDir.startsWith('file:')) {
+    try {
+      return path.posix.normalize(new URL(fromGuestDir).pathname);
+    } catch {
+      return INITIAL_GUEST_CWD;
+    }
+  }
+
+  if (path.posix.isAbsolute(fromGuestDir)) {
+    return path.posix.normalize(fromGuestDir);
+  }
+
+  return path.posix.normalize(path.posix.join(INITIAL_GUEST_CWD, fromGuestDir));
+}
+
+function isPathWithinRoot(candidatePath, rootPath) {
+  if (typeof candidatePath !== 'string' || typeof rootPath !== 'string') {
+    return false;
+  }
+
+  const normalizedCandidate = path.resolve(candidatePath);
+  const normalizedRoot = path.resolve(rootPath);
+  return (
+    normalizedCandidate === normalizedRoot ||
+    normalizedCandidate.startsWith(`${normalizedRoot}${path.sep}`)
+  );
+}
+
+function runtimeHostPathFromGuestPath(guestPath) {
+  if (typeof guestPath !== 'string') {
+    return null;
+  }
+
+  const translated = hostPathFromGuestPath(guestPath);
+  if (translated) {
+    return translated;
+  }
+
+  const cwdGuestPath = guestPathFromHostPath(HOST_CWD);
+  if (
+    typeof cwdGuestPath !== 'string' ||
+    !path.posix.isAbsolute(guestPath) ||
+    !path.posix.isAbsolute(cwdGuestPath)
+  ) {
+    return null;
+  }
+
+  const relative = path.posix.relative(cwdGuestPath, path.posix.normalize(guestPath));
+  if (
+    relative.startsWith('..') ||
+    relative === '..' ||
+    path.posix.isAbsolute(relative)
+  ) {
+    return null;
+  }
+
+  return relative ? path.join(HOST_CWD, ...relative.split('/')) : HOST_CWD;
+}
+
+function translateModuleResolutionPath(value) {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  if (value.startsWith('file:')) {
+    try {
+      const guestPath = path.posix.normalize(new URL(value).pathname);
+      const hostPath = runtimeHostPathFromGuestPath(guestPath);
+      return hostPath ? pathToFileURL(hostPath).href : value;
+    } catch {
+      return value;
+    }
+  }
+
+  if (path.posix.isAbsolute(value)) {
+    return runtimeHostPathFromGuestPath(value) ?? value;
+  }
+
+  return value;
+}
+
+function translateModuleResolutionParent(parent) {
+  if (!parent || typeof parent !== 'object') {
+    return parent;
+  }
+
+  let nextParent = parent;
+  let changed = false;
+
+  if (typeof parent.filename === 'string') {
+    const translatedFilename = translateModuleResolutionPath(parent.filename);
+    if (translatedFilename !== parent.filename) {
+      nextParent = { ...nextParent, filename: translatedFilename };
+      changed = true;
+    }
+  }
+
+  if (Array.isArray(parent.paths)) {
+    const translatedPaths = parent.paths.map((entry) =>
+      translateModuleResolutionPath(entry),
+    );
+    if (translatedPaths.some((entry, index) => entry !== parent.paths[index])) {
+      nextParent = { ...nextParent, paths: translatedPaths };
+      changed = true;
+    }
+  }
+
+  return changed ? nextParent : parent;
+}
+
+function translateModuleResolutionOptions(options) {
+  if (Array.isArray(options)) {
+    return options.map((entry) => translateModuleResolutionPath(entry));
+  }
+
+  if (!options || typeof options !== 'object' || !Array.isArray(options.paths)) {
+    return options;
+  }
+
+  const translatedPaths = options.paths.map((entry) =>
+    translateModuleResolutionPath(entry),
+  );
+  if (translatedPaths.every((entry, index) => entry === options.paths[index])) {
+    return options;
+  }
+
+  return {
+    ...options,
+    paths: translatedPaths,
+  };
+}
+
+function ensureGuestVisibleModuleResolution(specifier, resolved, parent) {
+  if (typeof resolved !== 'string' || !path.isAbsolute(resolved)) {
+    return resolved;
+  }
+
+  if (
+    guestVisiblePathFromHostPath(resolved) ||
+    isPathWithinRoot(resolved, HOST_CWD)
+  ) {
+    return resolved;
+  }
+
+  const error = new Error(`Cannot find module '${specifier}'`);
+  error.code = 'MODULE_NOT_FOUND';
+  if (typeof parent?.filename === 'string') {
+    error.requireStack = [translatePathStringToGuest(parent.filename)];
+  }
+  throw translateErrorToGuest(error);
+}
+
+function createGuestModuleCacheProxy(moduleCache) {
+  if (!moduleCache || typeof moduleCache !== 'object') {
+    return moduleCache;
+  }
+
+  const toHostKey = (key) =>
+    typeof key === 'string' ? translateModuleResolutionPath(key) : key;
+  const toGuestKey = (key) =>
+    typeof key === 'string' ? translatePathStringToGuest(key) : key;
+
+  return new Proxy(moduleCache, {
+    defineProperty(target, key, descriptor) {
+      return Reflect.defineProperty(target, toHostKey(key), descriptor);
+    },
+    deleteProperty(target, key) {
+      return Reflect.deleteProperty(target, toHostKey(key));
+    },
+    get(target, key, receiver) {
+      return Reflect.get(target, toHostKey(key), receiver);
+    },
+    getOwnPropertyDescriptor(target, key) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, toHostKey(key));
+      if (!descriptor) {
+        return descriptor;
+      }
+      return {
+        ...descriptor,
+        configurable: true,
+      };
+    },
+    has(target, key) {
+      return Reflect.has(target, toHostKey(key));
+    },
+    ownKeys(target) {
+      return Reflect.ownKeys(target).map((key) => toGuestKey(key));
+    },
+    set(target, key, value, receiver) {
+      return Reflect.set(target, toHostKey(key), value, receiver);
+    },
+  });
+}
+
+const guestModuleCache = createGuestModuleCacheProxy(originalModuleCache);
+
 function createGuestRequire(fromGuestDir) {
-  const normalizedGuestDir = path.posix.normalize(fromGuestDir || '/');
+  const normalizedGuestDir = normalizeGuestRequireDir(fromGuestDir);
   const cached = guestRequireCache.get(normalizedGuestDir);
   if (cached) {
     return cached;
   }
 
-  const hostDir = hostPathFromGuestPath(normalizedGuestDir) ?? HOST_CWD;
   const baseRequire = Module.createRequire(
-    pathToFileURL(path.join(hostDir, '__agent_os_require__.cjs')),
+    pathToFileURL(path.posix.join(normalizedGuestDir, '__agent_os_require__.cjs')),
   );
 
   const guestRequire = function(specifier) {
@@ -6395,6 +6601,8 @@ function createGuestRequire(fromGuestDir) {
       throw translateErrorToGuest(error);
     }
   };
+
+  guestRequire.cache = guestModuleCache;
 
   guestRequireCache.set(normalizedGuestDir, guestRequire);
   return guestRequire;
@@ -6881,6 +7089,29 @@ function installGuestHardening() {
 
       return originalModuleLoad(request, parent, isMain);
     };
+  }
+
+  if (originalModuleResolveFilename) {
+    Module._resolveFilename = function(request, parent, isMain, options) {
+      const translatedRequest = translateModuleResolutionPath(request);
+      const translatedParent = translateModuleResolutionParent(parent);
+      const translatedOptions = translateModuleResolutionOptions(options);
+      const resolved = originalModuleResolveFilename(
+        translatedRequest,
+        translatedParent,
+        isMain,
+        translatedOptions,
+      );
+      return ensureGuestVisibleModuleResolution(
+        request,
+        resolved,
+        translatedParent,
+      );
+    };
+  }
+
+  if (guestModuleCache) {
+    hardenProperty(Module, '_cache', guestModuleCache);
   }
 
   if (originalFetch) {
