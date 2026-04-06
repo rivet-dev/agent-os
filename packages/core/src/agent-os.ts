@@ -19,6 +19,7 @@ import {
 	relative as relativeHostPath,
 	resolve as resolveHostPath,
 } from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { type ToolKit, validateToolkits } from "./host-tools.js";
 import { generateToolReference } from "./host-tools-prompt.js";
@@ -2537,23 +2538,7 @@ export class AgentOs {
 	}
 
 	private _resolvePackageBin(packageName: string, binName?: string): string {
-		const vmPrefix = `/root/node_modules/${packageName}`;
-		let hostPkgJsonPath: string | null = null;
-		for (const root of this._softwareRoots) {
-			if (root.vmPath === vmPrefix) {
-				hostPkgJsonPath = join(root.hostPath, "package.json");
-				break;
-			}
-		}
-		// Fall back to CWD-based node_modules.
-		if (!hostPkgJsonPath) {
-			hostPkgJsonPath = join(
-				this._moduleAccessCwd,
-				"node_modules",
-				packageName,
-				"package.json",
-			);
-		}
+		const hostPkgJsonPath = this._resolveHostPackageJson(packageName);
 		const pkg = JSON.parse(readFileSync(hostPkgJsonPath, "utf-8"));
 
 		let binEntry: string | undefined;
@@ -2575,16 +2560,7 @@ export class AgentOs {
 
 	private _resolvePackageDir(packageName: string): string {
 		const vmPrefix = `/root/node_modules/${packageName}`;
-		let hostPackageDir: string | null = null;
-		for (const root of this._softwareRoots) {
-			if (root.vmPath === vmPrefix) {
-				hostPackageDir = root.hostPath;
-				break;
-			}
-		}
-		if (!hostPackageDir) {
-			hostPackageDir = join(this._moduleAccessCwd, "node_modules", packageName);
-		}
+		const hostPackageDir = dirname(this._resolveHostPackageJson(packageName));
 
 		const resolvedHostDir = realpathSync(hostPackageDir);
 		const repoNodeModules = join(
@@ -2610,6 +2586,62 @@ export class AgentOs {
 		}
 
 		return vmPrefix;
+	}
+
+	/**
+	 * Resolve the host-side package.json path for a package.
+	 * Tries (in order):
+	 * 1. Software roots (packages registered via `software: [...]`)
+	 * 2. moduleAccessCwd/node_modules/<package>
+	 * 3. Node require.resolve from each software root (finds dependencies of software packages)
+	 * 4. Node require.resolve from moduleAccessCwd (handles pnpm hoisting)
+	 */
+	private _resolveHostPackageJson(packageName: string): string {
+		const vmPrefix = `/root/node_modules/${packageName}`;
+
+		// 1. Check software roots for a direct match.
+		for (const root of this._softwareRoots) {
+			if (root.vmPath === vmPrefix) {
+				return join(root.hostPath, "package.json");
+			}
+		}
+
+		// 2. Check moduleAccessCwd/node_modules.
+		const cwdCandidate = join(
+			this._moduleAccessCwd,
+			"node_modules",
+			packageName,
+			"package.json",
+		);
+		if (existsSync(cwdCandidate)) {
+			return cwdCandidate;
+		}
+
+		// 3. Try resolving from each software root's host directory.
+		//    This finds dependencies of software packages (e.g. pi-acp
+		//    as a dependency of @rivet-dev/agent-os-pi).
+		for (const root of this._softwareRoots) {
+			try {
+				const req = createRequire(join(root.hostPath, "package.json"));
+				return req.resolve(`${packageName}/package.json`);
+			} catch {
+				// Not resolvable from this root, try next.
+			}
+		}
+
+		// 4. Try Node resolution from moduleAccessCwd.
+		try {
+			const req = createRequire(
+				join(this._moduleAccessCwd, "package.json"),
+			);
+			return req.resolve(`${packageName}/package.json`);
+		} catch {
+			// Fall through to throw a descriptive error.
+		}
+
+		throw new Error(
+			`Cannot find package '${packageName}'. Ensure it is installed or provided via the software option.`,
+		);
 	}
 
 	/**
