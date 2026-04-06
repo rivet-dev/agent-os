@@ -972,6 +972,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.assert_not_terminated()?;
         self.assert_driver_owns(requester_driver, pid)?;
         if let Some(existing_fd) = parse_dev_fd_path(path)? {
+            self.check_fd_allocation_limit(1)?;
             let mut tables = lock_or_recover(&self.fd_tables);
             let table = tables
                 .get_mut(pid)
@@ -1009,6 +1010,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             self.filesystem
                 .check_virtual_path(FsOperation::Read, path)
                 .map_err(KernelError::from)?;
+            self.check_fd_allocation_limit(1)?;
             let mut tables = lock_or_recover(&self.fd_tables);
             let table = tables
                 .get_mut(pid)
@@ -1026,6 +1028,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         } else {
             false
         };
+        self.check_fd_allocation_limit(1)?;
         let (filetype, lock_target) = self.prepare_fd_open(path, flags)?;
         if flags & O_CREAT != 0 && !existed {
             let umask = self.processes.get_umask(pid)?;
@@ -1370,6 +1373,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
     pub fn fd_dup(&mut self, requester_driver: &str, pid: u32, fd: u32) -> KernelResult<u32> {
         self.assert_driver_owns(requester_driver, pid)?;
+        self.check_fd_allocation_limit(1)?;
         let mut tables = lock_or_recover(&self.fd_tables);
         let table = tables
             .get_mut(pid)
@@ -1385,6 +1389,18 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         new_fd: u32,
     ) -> KernelResult<()> {
         self.assert_driver_owns(requester_driver, pid)?;
+        if old_fd != new_fd {
+            let needs_new_slot = {
+                let tables = lock_or_recover(&self.fd_tables);
+                let table = tables
+                    .get(pid)
+                    .ok_or_else(|| KernelError::no_such_process(pid))?;
+                table.get(new_fd).is_none()
+            };
+            if needs_new_slot {
+                self.check_fd_allocation_limit(1)?;
+            }
+        }
         let replaced = {
             let mut tables = lock_or_recover(&self.fd_tables);
             let table = tables
@@ -2605,6 +2621,21 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             usage.total_bytes.saturating_add(target.len() as u64),
             usage.inode_count.saturating_add(1),
         )?;
+        Ok(())
+    }
+
+    fn check_fd_allocation_limit(&self, additional_fds: usize) -> KernelResult<()> {
+        if additional_fds == 0 {
+            return Ok(());
+        }
+
+        if let Some(limit) = self.resources.limits().max_open_fds {
+            let snapshot = self.resource_snapshot();
+            if snapshot.open_fds.saturating_add(additional_fds) > limit {
+                return Err(KernelError::new("EMFILE", "too many open files"));
+            }
+        }
+
         Ok(())
     }
 

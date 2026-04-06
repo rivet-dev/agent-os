@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Kernel resource-exhaustion tests should drive one shared `KernelVm` through `Arc<Mutex<_>>` with `Barrier`-released worker threads and an `AtomicUsize` attempt counter; global `max_open_fds` enforcement belongs on `fd_open`, `fd_dup`, and `fd_dup2`, not just spawn/pipe/pty allocation paths.
 - Permissioned VFS tests that probe symlink TOCTOU should swap the alias target after `permission_subject(...)` resolves it; follow-symlink operations in `crates/kernel/src/permissions.rs` must call the inner VFS with that resolved subject, not the original alias path.
 - Overlay filesystem coverage belongs in `crates/kernel/tests/overlay_fs.rs` and should assert merged VFS behavior, not internal marker files; `/.agent-os-overlay` is intentionally hidden from guest-visible paths.
 - Malformed sidecar bridge frame tests should target `crates/sidecar/tests/stdio_binary.rs` and assert real child stderr/exit status; `NativeSidecar::dispatch(...)` sits past codec/stdio parsing and cannot cover truncated or binary-garbage frames.
@@ -104,6 +105,16 @@ Started: Sat Apr  5 2026
   - Guest Node networking may still be using sync-RPC after the entry module resolves, so bridge teardown belongs on process exit rather than module completion.
   - Top-level `NativeSidecar::execute(...)` still needs an explicit bridge command-permission callback if tests or audit hooks expect `cmd:` permission events; kernel spawn permission enforcement alone does not satisfy that contract.
   - Guest JavaScript child-process cwd `/root` should map back to the parent host cwd when the runtime is backed by a host workspace mirror; otherwise nested `node ./child.mjs` resolves against a nonexistent `<host-cwd>/root/...` path.
+---
+## 2026-04-06 10:02:55 PDT - US-505
+- Added concurrent adversarial resource-accounting coverage in `crates/kernel/tests/resource_accounting.rs` for process floods, regular-file FD floods, inode floods, and filesystem-byte floods, all against a shared kernel instance so limit accounting is exercised under contended access rather than one-call-at-a-time unit cases.
+- Tightened `crates/kernel/src/kernel.rs` so global `max_open_fds` is enforced for `fd_open`, `/dev/fd/*` dup opens, `fd_dup`, and `fd_dup2`, returning `EMFILE` before those paths mutate kernel state.
+- Quality checks: `cargo test --package agent-os-kernel --test resource_accounting` and `cargo test --package agent-os-kernel` pass.
+- Files changed: `crates/kernel/src/kernel.rs`, `crates/kernel/tests/resource_accounting.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Global FD exhaustion is not covered by the existing pipe/PTY/process-limit checks alone; regular file opens and dup paths need the same `max_open_fds` guard or stress tests will silently over-allocate descriptors.
+  - For concurrent kernel stress tests, a shared `KernelVm` behind `Arc<Mutex<_>>` is enough to validate accounting invariants under heavy interleaving without inventing extra thread-safe test-only APIs.
+  - Filesystem-byte and inode flood tests are easiest to keep deterministic when they write unique files directly under `/`, which avoids accidental directory-inode growth changing the expected limit math.
 ---
 ## 2026-04-05 19:33:58 PDT - US-308
 - What was implemented

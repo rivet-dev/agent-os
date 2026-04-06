@@ -263,7 +263,7 @@
         "Existing resource_accounting.rs tests (small thresholds) are preserved."
       ],
       "priority": 17,
-      "passes": false,
+      "passes": true,
       "notes": "resource_accounting.rs tests limits with small thresholds (1 process, 6 FDs) but never tests concurrent adversarial pressure."
     }
   ]
