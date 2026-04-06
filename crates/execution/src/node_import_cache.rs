@@ -8367,7 +8367,7 @@ fn cleanup_stale_node_import_caches(base_dir: &Path) {
 }
 
 impl NodeImportCache {
-    fn new_in(base_dir: PathBuf) -> Self {
+    pub(crate) fn new_in(base_dir: PathBuf) -> Self {
         cleanup_stale_node_import_caches_once(&base_dir);
         let cache_id = NEXT_NODE_IMPORT_CACHE_ID.fetch_add(1, Ordering::Relaxed);
         let root_dir = base_dir.join(format!(

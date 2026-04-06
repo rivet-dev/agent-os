@@ -235,7 +235,7 @@ fn guest_execution_clears_host_env_and_blocks_network_and_escape_paths() {
         "proc-security",
     );
 
-    assert_eq!(exit_code, 0);
+    assert_eq!(exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stderr.is_empty(), "unexpected security stderr: {stderr}");
 
     let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse security JSON");

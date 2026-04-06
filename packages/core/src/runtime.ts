@@ -1946,6 +1946,10 @@ class NativeKernel implements Kernel {
 
 		const startIndex = this.mountedCommandDirs.length;
 		const newGuestPaths = collectGuestCommandPaths(commandDirs, startIndex);
+		const commandMountMappings = commandDirs.map((commandDir, index) => ({
+			guestPath: `/__agentos/commands/${startIndex + index}`,
+			hostPath: commandDir,
+		}));
 		const sidecarMounts = commandDirs.map((commandDir, index) =>
 			serializeMountConfigForSidecar({
 				path: `/__agentos/commands/${startIndex + index}`,
@@ -2097,16 +2101,15 @@ class NativeKernel implements Kernel {
 			this.options.filesystem instanceof NodeFileSystem
 				? this.options.filesystem.rootPath
 				: null;
-		const rootFilesystem = hostRoot
-			? {
-					disableDefaultBaseLayer: true,
-				}
-			: {
-					disableDefaultBaseLayer: true,
-					bootstrapEntries: await snapshotFilesystemEntries(
-						this.options.filesystem,
-					),
-				};
+		const rootFilesystem = {
+			disableDefaultBaseLayer: true,
+			lowers: [
+				{
+					kind: "snapshot" as const,
+					entries: await snapshotFilesystemEntries(this.options.filesystem),
+				},
+			],
+		};
 
 		const client = NativeSidecarProcessClient.spawn({
 			cwd: REPO_ROOT,
@@ -2130,23 +2133,6 @@ class NativeKernel implements Kernel {
 				event.payload.type === "vm_lifecycle" && event.payload.state === "ready",
 			10_000,
 		);
-
-		const sidecarMounts = hostRoot
-			? [
-					serializeMountConfigForSidecar({
-						path: "/",
-						readOnly: false,
-						plugin: {
-							id: "host_dir",
-							config: {
-								hostPath: hostRoot,
-								readOnly: false,
-							},
-						},
-					}),
-				]
-			: [];
-		await client.configureVm(session, vm, { mounts: sidecarMounts });
 
 		const proxy = new NativeSidecarKernelProxy({
 			client,
