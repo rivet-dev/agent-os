@@ -145,7 +145,7 @@
         "Final state recorded in progress.txt."
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Capstone story. Cannot pass until all other stories hold under full-suite run."
     },
     {

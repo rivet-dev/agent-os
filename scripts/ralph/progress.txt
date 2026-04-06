@@ -281,3 +281,14 @@ Started: Sat Apr  5 2026
 - Permission-sensitive file tools (`chmod`, `stat`, `ls -l`) need to query the VM's imported `host_fs` mode helpers rather than trusting the default WASI metadata path, which synthesized incorrect `0777`-style modes in this suite.
 - Cross-package pipeline regressions in this area were caused by command implementations that assumed unsupported WASI process/thread behavior; small in-repo wrappers using `wasi-spawn` and direct Rust data processing are more reliable than thin upstream adapters here.
 ---
+## 2026-04-06 05:48:23 PDT - US-200
+- What was implemented
+- Re-ran the full repository validation from the repo root and confirmed two consecutive green cycles for both `cargo test --workspace --no-fail-fast` and `pnpm test`.
+- Verified the root Turbo test run still uses streamed logging and exits cleanly with the grouped test layout, registry suites, sidecar-backed TypeScript suites, and Rust crates all passing.
+- Files changed
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- The capstone repo validation should be recorded only after two back-to-back green runs of both the Rust workspace suite and the root Turbo-managed TypeScript suite, not after a single successful pass.
+- Root `pnpm test` remains the authoritative TypeScript/integration validation path because it exercises the full workspace graph and streamed Turbo log order in one command.
+---
