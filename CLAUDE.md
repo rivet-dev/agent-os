@@ -268,6 +268,7 @@ Each agent type needs:
 - **API tokens**: All tests use `@copilotkit/llmock` with `ANTHROPIC_API_KEY='mock-key'`. No real API tokens needed. Do not load tokens from `~/misc/env.txt` or any external file.
 - **Mock LLM testing**: Use `@copilotkit/llmock` to run a mock LLM server on the HOST (not inside the VM). Use `loopbackExemptPorts` in `AgentOs.create()` to exempt the mock port from SSRF checks. The kernel needs `permissions: allowAll` for network access.
 - **Module access**: Set `moduleAccessCwd` in `AgentOs.create()` to a host dir with `node_modules/`. pnpm puts devDeps in `packages/core/node_modules/` which are accessible via the ModuleAccessFileSystem overlay.
+- Registry-backed tests should mount the smallest software set they need. Pulling in `REGISTRY_SOFTWARE` for tests that only need one command package makes unrelated registry/runtime failures mask the feature under test.
 
 ### Test Quality Requirements
 

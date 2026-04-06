@@ -22,6 +22,7 @@
 - Native-sidecar WASM executions read and write against the host `shadowRoot`, so the shadow root must include the standard POSIX bootstrap directories up front; missing `/tmp` breaks shell redirection and file-based command tests even when the guest root filesystem contains `/tmp`.
 - If the WASM runner virtualizes `path_open`, it also needs matching virtual-FD handlers for follow-on syscalls such as `fd_read`, `fd_write`, `fd_seek`, `fd_tell`, `fd_pread`, `fd_pwrite`, and `fd_filestat_get`; shell redirection and coreutils file commands assume the full open-file-description lifecycle works after `dup`/`dup2`.
 - The grouped test layout is now part of the contract: `packages/core/tests/` is organized by domain and `registry/tests/e2e/` by integration family, so any future moves must rebase relative `src`/`helpers` imports and `moduleAccessCwd` or fixture-root path math to match the new directory depth.
+- Registry-backed tests should mount the smallest software set they need; pulling in `REGISTRY_SOFTWARE` for single-package scenarios makes unrelated registry/runtime failures hide the feature actually under test.
 - In `crates/execution/src/node_import_cache.rs`, `guestVisiblePathFromHostPath(...)` returning `/unknown` is only safe for redaction; using it as a truthy visibility check lets hidden host-only modules slip past `MODULE_NOT_FOUND` guards.
 - On newer Node builds, top-level `await import(...)` parse failures ignore a mutated `error.stack` when rethrown, so guest-path-safe stderr needs an explicit formatter in the generated runner.
 
@@ -209,5 +210,17 @@ Started: Sat Apr  5 2026
   - The `host_dir_plugin.rs` `openat2(RESOLVE_BENEATH)` is a Linux kernel-level security check that cannot be worked around by just adding more VFS mounts. Symlink-following operations must either use the correct mount (not follow cross-mount symlinks) or resolve through the guest VFS which composes multiple mounts.
   - PI `session/new` fails because pi-acp spawns a nested child process (`PI_ACP_PI_COMMAND`) inside the VM. The sidecar's `host_path_for_guest_path` needs the `.pnpm` mount in `vm.configuration.mounts` to resolve the guest path, but the nested spawn goes through the kernel process table → sidecar execute → JS execution engine, and the execution engine's `configure_node_sandbox` must include the `.pnpm` host path in `--allow-fs-read`.
   - Codex step-13 spun for ~3 hours (600+ edits to node_import_cache.rs, 219 edits to each PI test file) trying to fix the same pnpm path translation issue. The root cause was identified but the fix required changes across 3 layers (agent-os.ts mounts, node_import_cache.rs loader/runner, sidecar service.rs path resolution).
-  - `software-projection.test.ts` has 1 pre-existing failure unrelated to PI tests.
+- `software-projection.test.ts` has 1 pre-existing failure unrelated to PI tests.
+---
+## 2026-04-06 01:10:11 PDT - US-308
+- What was implemented
+- Revalidated the grouped test layout already landed on `ralph/test-quality-hardening`: `packages/core/tests/` remains domain-grouped, `registry/tests/kernel/` is now `registry/tests/e2e/` with `npm/` and `cross-runtime/` subgroups, `crates/execution/tests/javascript.rs` stays split through `javascript/mod.rs`, and the slow sidecar isolation tests remain `#[ignore]`.
+- Captured the reusable test-isolation rule in `CLAUDE.md`: registry-backed tests should mount only the command packages they actually exercise instead of the whole `REGISTRY_SOFTWARE` bundle.
+- Files changed
+- `CLAUDE.md`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Focused moved-path smoke checks are the useful validation layer for layout-only stories on this branch; full `packages/core` and `agent-os-execution` runs still surface later PRD stories (`US-301`, `US-307`) that are not caused by the file moves.
+  - For grouped test suites, path validation includes non-test consumers too: the Vitest include globs, the Rust `#[path = "javascript/mod.rs"]` shim, and the ignored sidecar integration binaries are all part of the layout contract.
+  - Quality checks: `pnpm --dir packages/core exec vitest run tests/unit/host-tools-prompt.test.ts tests/filesystem/overlay.test.ts tests/process/management.test.ts tests/session/protocol.test.ts tests/network/network.test.ts tests/sidecar/client.test.ts` passed; `cargo test --package agent-os-sidecar -- --ignored` passed; `cargo test --package agent-os-execution --test javascript builtin_interception::javascript_execution_imports_http_builtins_when_allowed`, `cargo test --package agent-os-execution --test javascript env_hardening::javascript_execution_virtualizes_process_identity`, and `cargo test --package agent-os-execution --test javascript sync_rpc::javascript_execution_runs_bootstrap_and_streams_stdio` passed.
 ---
