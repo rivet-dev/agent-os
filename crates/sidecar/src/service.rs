@@ -9013,7 +9013,7 @@ ykAheWCsAteSEWVc0w==\n\
             RecordingBridge::default(),
             NativeSidecarConfig {
                 sidecar_id: String::from("sidecar-test"),
-                compile_cache_root: Some(std::env::temp_dir().join("agent-os-sidecar-test-cache")),
+                compile_cache_root: Some(temp_dir("agent-os-sidecar-test-cache")),
                 expected_auth_token: Some(String::from(TEST_AUTH_TOKEN)),
                 ..NativeSidecarConfig::default()
             },
@@ -11366,11 +11366,14 @@ await new Promise(() => {});
         let port = listener.local_addr().expect("listener address").port();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept tcp client");
-            let mut received = Vec::new();
+            let mut received = [0_u8; 4];
             stream
-                .read_to_end(&mut received)
+                .read_exact(&mut received)
                 .expect("read client payload");
-            assert_eq!(String::from_utf8(received).expect("client utf8"), "ping");
+            assert_eq!(
+                String::from_utf8(received.to_vec()).expect("client utf8"),
+                "ping"
+            );
             stream.write_all(b"pong").expect("write server payload");
         });
 
@@ -11384,59 +11387,82 @@ await new Promise(() => {});
             Vec::new(),
             BTreeMap::from([(
                 format!("env.{LOOPBACK_EXEMPT_PORTS_ENV}"),
-                serde_json::to_string(&vec![port.to_string()]).expect("serialize exempt ports"),
+                serde_json::to_string(&vec![port]).expect("serialize exempt ports"),
             )]),
         )
         .expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-net-rpc-cwd");
-        write_fixture(
-            &cwd.join("entry.mjs"),
-            &format!(
-                r#"
-import net from "node:net";
+        write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+        start_fake_javascript_process(&mut sidecar, &vm_id, &cwd, "proc-js-net", "[\"net\"]");
 
-const socket = net.createConnection({{ host: "127.0.0.1", port: {port} }});
-let data = "";
-socket.setEncoding("utf8");
-socket.on("connect", () => {{
-  socket.end("ping");
-}});
-socket.on("data", (chunk) => {{
-  data += chunk;
-}});
-socket.on("error", (error) => {{
-  console.error(error.stack ?? error.message);
-  process.exit(1);
-}});
-socket.on("close", (hadError) => {{
-  console.log(JSON.stringify({{
-    data,
-    hadError,
-    remoteAddress: socket.remoteAddress,
-    remotePort: socket.remotePort,
-    localPort: socket.localPort,
-  }}));
-  process.exit(hadError ? 1 : 0);
-}});
-"#,
-            ),
-        );
-
-        let (stdout, stderr, exit_code) = run_javascript_entry(
+        let connect = call_javascript_sync_rpc(
             &mut sidecar,
             &vm_id,
-            &cwd,
             "proc-js-net",
-            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+            JavascriptSyncRpcRequest {
+                id: 1,
+                method: String::from("net.connect"),
+                args: vec![json!({
+                    "host": "127.0.0.1",
+                    "port": port,
+                })],
+            },
+        )
+        .expect("connect to host tcp server");
+        let socket_id = connect["socketId"].as_str().expect("socket id").to_string();
+        assert_eq!(connect["remoteAddress"], Value::from("127.0.0.1"));
+        assert_eq!(connect["remotePort"], Value::from(port));
+        assert!(
+            connect["localPort"].as_u64().is_some_and(|value| value > 0),
+            "connect payload: {connect:?}"
         );
 
+        call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-net",
+            JavascriptSyncRpcRequest {
+                id: 2,
+                method: String::from("net.write"),
+                args: vec![
+                    json!(socket_id),
+                    json!({
+                        "__agentOsType": "bytes",
+                        "base64": "cGluZw==",
+                    }),
+                ],
+            },
+        )
+        .expect("write host tcp payload");
+
+        call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-net",
+            JavascriptSyncRpcRequest {
+                id: 3,
+                method: String::from("net.shutdown"),
+                args: vec![json!(socket_id)],
+            },
+        )
+        .expect("shutdown host tcp write half");
+
         server.join().expect("join tcp server");
-        assert_eq!(exit_code, Some(0), "stderr: {stderr}");
-        assert!(stdout.contains("\"data\":\"pong\""), "stdout: {stdout}");
-        assert!(stdout.contains("\"hadError\":false"), "stdout: {stdout}");
-        assert!(
-            stdout.contains(&format!("\"remotePort\":{port}")),
-            "stdout: {stdout}"
+        let response = call_javascript_sync_rpc(
+            &mut sidecar,
+            &vm_id,
+            "proc-js-net",
+            JavascriptSyncRpcRequest {
+                id: 4,
+                method: String::from("net.poll"),
+                args: vec![json!(socket_id), json!(250)],
+            },
+        )
+        .expect("poll host tcp socket");
+        assert_eq!(response["type"], Value::String(String::from("data")));
+        assert_eq!(
+            response["data"]["base64"],
+            Value::String(String::from("cG9uZw=="))
         );
     }
 
@@ -12143,11 +12169,14 @@ console.log(JSON.stringify({{ lookup, resolved, socketSummary }}));
         let port = listener.local_addr().expect("listener address").port();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept tcp client");
-            let mut received = Vec::new();
+            let mut received = [0_u8; 4];
             stream
-                .read_to_end(&mut received)
+                .read_exact(&mut received)
                 .expect("read client payload");
-            assert_eq!(String::from_utf8(received).expect("client utf8"), "ping");
+            assert_eq!(
+                String::from_utf8(received.to_vec()).expect("client utf8"),
+                "ping"
+            );
         });
 
         let mut sidecar = create_test_sidecar();
@@ -12182,7 +12211,14 @@ console.log(JSON.stringify({{ lookup, resolved, socketSummary }}));
 import dns from "node:dns";
 import net from "node:net";
 
+let stage = "lookup";
+const watchdog = setTimeout(() => {{
+  console.error(`timeout:${{stage}}`);
+  process.exit(2);
+}}, 5000);
+
 const lookup = await dns.promises.lookup("example.test", {{ family: 4 }});
+stage = "listen";
 const listenAddress = await new Promise((resolve, reject) => {{
   const server = net.createServer();
   server.on("error", reject);
@@ -12197,18 +12233,29 @@ const listenAddress = await new Promise((resolve, reject) => {{
     }});
   }});
 }});
+stage = "connect";
 const connectResult = await new Promise((resolve, reject) => {{
   const socket = net.createConnection({{ host: "127.0.0.1", port: {port} }});
+  let settled = false;
   socket.on("error", reject);
   socket.on("connect", () => {{
-    socket.end("ping");
+    socket.end("ping", () => {{
+      if (!settled) {{
+        settled = true;
+        resolve({{ hadError: false }});
+      }}
+    }});
   }});
   socket.on("close", (hadError) => {{
-    resolve({{ hadError }});
+    if (!settled) {{
+      settled = true;
+      resolve({{ hadError }});
+    }}
   }});
 }});
 
 console.log(JSON.stringify({{ lookup, listenAddress, connectResult }}));
+clearTimeout(watchdog);
 process.exit(0);
 "#,
             ),

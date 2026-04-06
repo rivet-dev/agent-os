@@ -165,7 +165,7 @@
         "The workflow is documented in CLAUDE.md under a new 'CI' section."
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "This is the final gate. All prior stories fix tests locally; this story ensures they stay fixed by running in CI on every push. The iteration loop is: push -> check CI -> fix failures -> push again until green. CI must test everything: Rust crates, TS packages, WASM commands, registry tests. Git LFS support is required so WASM binaries are available in CI without a native build step."
     },
     {

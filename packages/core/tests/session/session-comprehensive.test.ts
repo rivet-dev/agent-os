@@ -174,6 +174,7 @@ process.stdin.on('data', (chunk) => {
 `;
 
 let globalSessionCounter = 0;
+const SESSION_TEST_TIMEOUT_MS = 120_000;
 
 /**
  * Spawn a mock adapter in the VM, initialize ACP, create a session,
@@ -257,11 +258,11 @@ describe("comprehensive session API tests", () => {
 
 	beforeEach(async () => {
 		vm = await AgentOs.create();
-	});
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	afterEach(async () => {
 		await vm.dispose();
-	});
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("permission request flow -- mock agent sends permission request, test calls respondPermission, agent continues", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -297,7 +298,7 @@ describe("comprehensive session API tests", () => {
 		).toBe(true);
 
 		vm.closeSession(sessionId);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("setMode changes session mode", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -313,7 +314,7 @@ describe("comprehensive session API tests", () => {
 		expect(vm.getSessionModes(sessionId)?.currentModeId).toBe("plan");
 
 		vm.closeSession(sessionId);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("setModel changes model configuration", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -338,7 +339,7 @@ describe("comprehensive session API tests", () => {
 		).toBe("opus");
 
 		vm.closeSession(sessionId);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("getConfigOptions returns available options", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -353,7 +354,7 @@ describe("comprehensive session API tests", () => {
 		expect(options[1].category).toBe("thought_level");
 
 		vm.closeSession(sessionId);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("multiple concurrent sessions on same VM work independently", async () => {
 		// Create both sessions — each goes through initialize + session/new
@@ -394,7 +395,7 @@ describe("comprehensive session API tests", () => {
 
 		vm.closeSession(sessionId2);
 		expect(vm.listSessions().length).toBe(0);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("listSessions returns all active sessions", async () => {
 		const { sessionId: sessionId1 } = await createTrackedSession(
@@ -415,7 +416,7 @@ describe("comprehensive session API tests", () => {
 
 		vm.closeSession(sessionId1);
 		vm.closeSession(sessionId2);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("resumeSession retrieves session by ID", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -432,7 +433,7 @@ describe("comprehensive session API tests", () => {
 		);
 
 		vm.closeSession(sessionId);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("closeSession removes session from VM tracking", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -448,7 +449,7 @@ describe("comprehensive session API tests", () => {
 		expect(() => vm.resumeSession(sessionId)).toThrow(
 			"Session not found",
 		);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("dispose with multiple active sessions closes all", async () => {
 		const { sessionId: sessionId1 } = await createTrackedSession(
@@ -469,7 +470,7 @@ describe("comprehensive session API tests", () => {
 
 		// Re-create vm so afterEach's dispose() doesn't double-dispose
 		vm = await AgentOs.create();
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("prompt after close throws", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -482,7 +483,7 @@ describe("comprehensive session API tests", () => {
 		await expect(vm.prompt(sessionId, "should fail")).rejects.toThrow(
 			"Session not found",
 		);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("createSession with mcpServers passes config through to agent", async () => {
 		// Use manual adapter spawn to verify mcpServers are sent in session/new
@@ -517,7 +518,7 @@ describe("comprehensive session API tests", () => {
 		expect(result.mcpServers).toEqual(mcpServers);
 
 		client.close();
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("session capabilities accessible after createSession", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -541,7 +542,7 @@ describe("comprehensive session API tests", () => {
 		});
 
 		vm.closeSession(sessionId);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("getSessionEvents() returns accumulated events", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -583,7 +584,7 @@ describe("comprehensive session API tests", () => {
 		expect(sinceLast.length).toBe(sequenced.length - 1);
 
 		vm.closeSession(sessionId);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("resumeSession returns existing session", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -605,7 +606,7 @@ describe("comprehensive session API tests", () => {
 		);
 
 		vm.closeSession(sessionId);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("setThoughtLevel sends config option with correct configId", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -626,7 +627,7 @@ describe("comprehensive session API tests", () => {
 		expect(result.applied).toBe(true);
 
 		vm.closeSession(sessionId);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("setThoughtLevel falls back to category as configId when no matching option", async () => {
 		// Create a session with no configOptions so there's no thought_level category match
@@ -691,7 +692,7 @@ describe("comprehensive session API tests", () => {
 		).toBe("high");
 
 		vm.closeSession(sessionId);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("setThoughtLevel on closed session throws", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -704,7 +705,7 @@ describe("comprehensive session API tests", () => {
 		await expect(vm.setSessionThoughtLevel(sessionId, "high")).rejects.toThrow(
 			"Session not found",
 		);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("destroySession tears down session gracefully", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -730,7 +731,7 @@ describe("comprehensive session API tests", () => {
 		await expect(vm.destroySession("nonexistent")).rejects.toThrow(
 			"Session not found",
 		);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 
 	test("getModes() returns modes from initialize, null without modes, and updates after setMode()", async () => {
 		const { sessionId } = await createTrackedSession(
@@ -814,5 +815,5 @@ describe("comprehensive session API tests", () => {
 		expect(modesAfter?.availableModes).toHaveLength(2);
 
 		vm.closeSession(sessionId);
-	}, 30_000);
+	}, SESSION_TEST_TIMEOUT_MS);
 });

@@ -256,7 +256,7 @@ Each agent type needs:
 - `agentPackage`: npm package name for the underlying agent (e.g., `@mariozechner/pi-coding-agent`)
 - Any environment variables or flags needed
 
-## Testing
+## CI
 
 - **CI lives in `.github/workflows/ci.yml` and runs on every push plus PRs targeting `main`.** Keep the workflow aligned with the repo's actual prerequisites instead of treating it as a generic Node-only pipeline.
 - **CI must pull Git LFS assets before tests.** `registry/software/*/wasm/` binaries are committed through Git LFS, so workflow jobs should run `git lfs pull` after checkout or the WASM command suites will skip or fail for the wrong reason.
@@ -269,6 +269,9 @@ Each agent type needs:
 - **Sandbox toolkit tests should not assume a prebuilt Docker image exists.** `packages/core/src/test/docker.ts` now falls back to the bundled `sandbox-agent` CLI when `sandbox-agent-test:dev` is unavailable, so CI does not need a bespoke Docker image just to exercise `registry/tool/sandbox`.
 - **Cross-crate Rust test helpers must use repo-relative paths, never machine-local absolute paths.** `#[path = "..."]` includes under `crates/*` are compiled on CI runners with different checkout roots, so absolute developer paths like `/home/nathan/...` will break `cargo test --workspace`.
 - **Local CI reproduction:** `git lfs pull && cargo test --workspace --no-fail-fast && cargo test -p agent-os-sidecar -- --ignored --test-threads=1 && cargo build -p agent-os-sidecar && AGENTOS_E2E_NETWORK=1 pnpm test`
+
+## Testing
+
 - **Framework**: vitest
 - `packages/core/tests/` is grouped by domain under `unit/`, `filesystem/`, `process/`, `session/`, `agents/{pi,claude,opencode,codex}/`, `wasm/`, `network/`, `sidecar/`, and `cron/`. When moving or adding tests, rebase relative `../src` and `helpers/` imports plus any `moduleAccessCwd` or repo-root paths to match the subdirectory depth.
 - When test files move, also update hard-coded path consumers outside the test tree itself, especially root `package.json` scripts and `scripts/benchmarks/bench-utils.ts`; those path references are part of the layout contract too.

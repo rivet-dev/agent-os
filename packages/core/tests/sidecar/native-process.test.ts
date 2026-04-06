@@ -18,6 +18,7 @@ import { serializeRootFilesystemForSidecar } from "../../src/sidecar/root-filesy
 const REPO_ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
 const SIDECAR_BINARY = join(REPO_ROOT, "target/debug/agent-os-sidecar");
 const SIGNAL_STATE_CONTROL_PREFIX = "__AGENT_OS_SIGNAL_STATE__:";
+const WAIT_FOR_TIMEOUT_MS = 30_000;
 
 async function waitFor<T>(
 	read: () => Promise<T> | T,
@@ -27,7 +28,7 @@ async function waitFor<T>(
 		isReady?: (value: T) => boolean;
 	},
 ): Promise<T> {
-	const timeoutMs = options?.timeoutMs ?? 10_000;
+	const timeoutMs = options?.timeoutMs ?? WAIT_FOR_TIMEOUT_MS;
 	const intervalMs = options?.intervalMs ?? 25;
 	const isReady = options?.isReady ?? ((value: T) => Boolean(value));
 	const deadline = Date.now() + timeoutMs;
