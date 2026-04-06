@@ -135,6 +135,7 @@ make clean         # Remove dist/ and wasm/ from all packages
 ## Testing
 
 - External-network registry tests should stay behind `AGENTOS_E2E_NETWORK=1`, probe host connectivity up front so CI can skip cleanly when the internet is unavailable, and retry the in-VM command itself for transient outbound failures instead of hard-failing on the first flaky request.
+- Registry integration coverage lives under `tests/e2e/`, with `npm/` and `cross-runtime/` subgroups below it. Tests inside those subdirectories should import shared helpers from `../helpers.ts`, and any fixture/cache path math must account for the extra directory depth.
 
 ## Native Source
 

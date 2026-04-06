@@ -251,6 +251,7 @@ Each agent type needs:
 ## Testing
 
 - **Framework**: vitest
+- `packages/core/tests/` is grouped by domain under `unit/`, `filesystem/`, `process/`, `session/`, `agents/{pi,claude,opencode,codex}/`, `wasm/`, `network/`, `sidecar/`, and `cron/`. When moving or adding tests, rebase relative `../src` and `helpers/` imports plus any `moduleAccessCwd` or repo-root paths to match the subdirectory depth.
 - **All tests run inside the VM** -- network servers, file I/O, agent processes
 - Network tests: write a server script file, run it with `node` inside the VM, then `vm.fetch()` against it
 - Agent tests must be run sequentially in layers:

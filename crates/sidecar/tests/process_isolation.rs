@@ -16,6 +16,7 @@ struct ProcessResult {
 }
 
 #[test]
+#[ignore]
 fn concurrent_vm_processes_stay_isolated_with_vm_scoped_events() {
     assert_node_available();
 

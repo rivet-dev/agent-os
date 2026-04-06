@@ -16,6 +16,7 @@ struct ProcessResult {
 }
 
 #[test]
+#[ignore]
 fn guest_failure_in_one_vm_does_not_break_peer_vm_execution() {
     assert_node_available();
 

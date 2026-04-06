@@ -15,6 +15,7 @@
 - Node import prewarm should use `node:` builtin specifiers instead of `agent-os:` synthetic URLs to stay compatible with newer Node ESM warmup behavior.
 - Native-sidecar WASM executions read and write against the host `shadowRoot`, so the shadow root must include the standard POSIX bootstrap directories up front; missing `/tmp` breaks shell redirection and file-based command tests even when the guest root filesystem contains `/tmp`.
 - If the WASM runner virtualizes `path_open`, it also needs matching virtual-FD handlers for follow-on syscalls such as `fd_read`, `fd_write`, `fd_seek`, `fd_tell`, `fd_pread`, `fd_pwrite`, and `fd_filestat_get`; shell redirection and coreutils file commands assume the full open-file-description lifecycle works after `dup`/`dup2`.
+- The grouped test layout is now part of the contract: `packages/core/tests/` is organized by domain and `registry/tests/e2e/` by integration family, so any future moves must rebase relative `src`/`helpers` imports and `moduleAccessCwd` or fixture-root path math to match the new directory depth.
 
 Started: Sat Apr  5 2026
 ---
@@ -77,4 +78,30 @@ Started: Sat Apr  5 2026
   - Guest Node networking may still be using sync-RPC after the entry module resolves, so bridge teardown belongs on process exit rather than module completion.
   - Top-level `NativeSidecar::execute(...)` still needs an explicit bridge command-permission callback if tests or audit hooks expect `cmd:` permission events; kernel spawn permission enforcement alone does not satisfy that contract.
   - Guest JavaScript child-process cwd `/root` should map back to the parent host cwd when the runtime is backed by a host workspace mirror; otherwise nested `node ./child.mjs` resolves against a nonexistent `<host-cwd>/root/...` path.
+---
+## 2026-04-05 19:33:58 PDT - US-308
+- What was implemented
+- Reorganized `packages/core/tests/` into the new grouped layout (`unit`, `filesystem`, `process`, `session`, `agents/*`, `wasm`, `network`, `sidecar`, `cron`) using file moves, moved `registry/tests/kernel/` into `registry/tests/e2e/` with `npm/` and `cross-runtime/` subgroups, split `crates/execution/tests/javascript.rs` into `javascript/{builtin_interception,module_resolution,env_hardening,sync_rpc}.rs`, and marked the four slow sidecar integration tests `#[ignore]`.
+- Rebased moved test imports and fixed depth-sensitive path helpers (`moduleAccessCwd`, repo-root fixtures, registry project-matrix paths) so the restructured files still point at the same source, helper, and fixture locations as before the move.
+- Files changed
+- `AGENTS.md`
+- `crates/execution/tests/javascript.rs`
+- `crates/execution/tests/javascript/mod.rs`
+- `crates/execution/tests/javascript/builtin_interception.rs`
+- `crates/execution/tests/javascript/env_hardening.rs`
+- `crates/execution/tests/javascript/module_resolution.rs`
+- `crates/execution/tests/javascript/sync_rpc.rs`
+- `crates/sidecar/tests/crash_isolation.rs`
+- `crates/sidecar/tests/process_isolation.rs`
+- `crates/sidecar/tests/session_isolation.rs`
+- `crates/sidecar/tests/vm_lifecycle.rs`
+- `packages/core/tests/`
+- `packages/core/vitest.config.ts`
+- `registry/AGENTS.md`
+- `registry/tests/e2e/`
+- `registry/vitest.config.ts`
+- **Learnings for future iterations:**
+-   Patterns discovered: grouped test directories change both import depth and runtime path math; when a test uses `moduleAccessCwd`, `import.meta.dirname`, `new URL(...)`, or fixture-cache roots, treat the move as a behavior change until those paths are rebased.
+-   Gotchas encountered: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` still has two pre-existing failures (`javascript_execution_blocks_cjs_require_from_hidden_parent_node_modules` and `javascript_execution_translates_top_level_loader_stacks_to_guest_paths`), and both reproduce on detached `HEAD`, so they are not caused by the file split.
+-   Useful context: `cargo test -p agent-os-sidecar -- --test-threads=1` passes with the new ignored tests skipped, `cargo test -p agent-os-sidecar -- --ignored --test-threads=1` passes for the four ignored suites, registry sample files under `tests/e2e/` load cleanly under `pnpm dlx vitest` and skip via their normal environment gates, and TypeScript `tsc`/Vitest verification from this worktree is blocked by missing package-local installs (`vitest`, `croner`, `zod`, `sandbox-agent`, etc.).
 ---

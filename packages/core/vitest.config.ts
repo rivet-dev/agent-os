@@ -7,6 +7,16 @@ export default defineConfig({
 		// intermittent SIGKILLs and early agent exits under resource pressure.
 		fileParallelism: false,
 		testTimeout: 30000,
-		include: ["tests/**/*.test.ts"],
+		include: [
+			"tests/unit/**/*.test.ts",
+			"tests/filesystem/**/*.test.ts",
+			"tests/process/**/*.test.ts",
+			"tests/session/**/*.test.ts",
+			"tests/agents/**/*.test.ts",
+			"tests/wasm/**/*.test.ts",
+			"tests/network/**/*.test.ts",
+			"tests/sidecar/**/*.test.ts",
+			"tests/cron/**/*.test.ts",
+		],
 	},
 });

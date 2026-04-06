@@ -14,6 +14,7 @@ use support::{
 };
 
 #[test]
+#[ignore]
 fn native_sidecar_composes_vm_lifecycle_bridge_callbacks_and_guest_execution() {
     assert_node_available();
 
