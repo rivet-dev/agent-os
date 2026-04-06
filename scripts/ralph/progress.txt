@@ -1,6 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
 - After a fresh workspace install, linked registry agent/software packages still need their built `dist/` outputs before adapter-backed or software-backed `packages/core` Vitest suites are meaningful; otherwise Vite fails on package entry resolution before test logic runs.
+- Sidecar integration tests that override `AGENT_OS_NODE_BINARY` must hold a shared lock across the full test body, including sibling tests in the same binary that use the real Node runtime; the env var is process-global and fake-node shims otherwise leak into unrelated tests.
 - Sidecar-owned JavaScript, Python, and WASM engines should use per-VM import-cache roots; sharing one temp cache lets stale-runner cleanup delete another VM's assets.
 - Rust execution tests that spin up JavaScript, Python, or WASM engines should call `set_import_cache_base_dir(...)` with a unique temp root per test VM; the default `/tmp` cache root is not parallel-test-safe because each engine instance sweeps stale cache directories once.
 - Rust execution tests that override `AGENT_OS_NODE_BINARY` need a shared test-process lock around the full test body; otherwise parallel tests can redirect each other into the wrong fake node shim or a deleted temp fixture.
@@ -156,4 +157,12 @@ Started: Sat Apr  5 2026
   - `AGENT_OS_NODE_BINARY` is process-global test state, so any fake-node assertion harness must hold a shared mutex from env-var setup through child-process teardown.
   - The import-cache stale-root sweep affects library/unit tests too, not just integration-style execution suites; `NodeImportCache::default()` is unsafe in parallel tests that materialize runner assets.
   - For this branch, `cargo test -p agent-os-execution --test permission_flags` verifies the story acceptance, while `cargo test -p agent-os-execution --lib` is a useful regression net for nearby import-cache test harness changes.
+---
+## 2026-04-05 20:28:07 PDT - US-304
+- Fixed the three `agent-os-sidecar` security-hardening failures by making `crates/sidecar/tests/security_hardening.rs` parallel-safe. The tests that rely on the real Node binary and the fake `AGENT_OS_NODE_BINARY` shim now share a process-wide mutex, so the fake binary cannot leak into sibling tests in the same test binary.
+- Quality checks: `cargo test --package agent-os-sidecar --test security_hardening` and `cargo test --package agent-os-sidecar` both pass.
+- Files changed: `crates/sidecar/tests/security_hardening.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Sidecar integration tests live in the same process per test binary, so any test that overrides `AGENT_OS_NODE_BINARY` must serialize with other tests in that file that execute real Node; otherwise fake-node shims produce misleading empty-stdout and missing-invocation failures.
+  - When `cargo test -p agent-os-sidecar` shows empty stdout from guest JavaScript or unexpected fake-node invocation counts, check for process-wide env races before debugging sidecar execution logic.
 ---

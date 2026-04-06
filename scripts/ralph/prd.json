@@ -84,7 +84,7 @@
         "Fix: guest_execution_clears_host_env_and_blocks_network_and_escape_paths, vm_resource_limits_cap_active_processes_without_poisoning_followup_execs, execute_scopes_node_permission_flags_to_vm_sandbox_root."
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "105 pass, 3 fail."
     },
     {

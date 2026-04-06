@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use support::{
     assert_node_available, authenticate, collect_process_output, create_vm,
     create_vm_with_metadata, execute, open_session, request, temp_dir, write_fixture,
@@ -19,6 +20,7 @@ const ARG_PREFIX: &str = "ARG=";
 const INVOCATION_BREAK: &str = "--END--";
 const NODE_ALLOW_FS_READ_FLAG: &str = "--allow-fs-read=";
 const NODE_ALLOW_FS_WRITE_FLAG: &str = "--allow-fs-write=";
+static NODE_BINARY_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 struct EnvVarGuard {
     key: &'static str,
@@ -47,6 +49,13 @@ impl Drop for EnvVarGuard {
             },
         }
     }
+}
+
+fn node_binary_env_guard() -> MutexGuard<'static, ()> {
+    NODE_BINARY_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock node binary env guard")
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -144,6 +153,7 @@ fn sidecar_rejects_oversized_request_frames_before_dispatch() {
 
 #[test]
 fn guest_execution_clears_host_env_and_blocks_network_and_escape_paths() {
+    let _env_lock = node_binary_env_guard();
     assert_node_available();
 
     let mut sidecar = support::new_sidecar("security-hardening");
@@ -275,6 +285,7 @@ fn guest_execution_clears_host_env_and_blocks_network_and_escape_paths() {
 
 #[test]
 fn vm_resource_limits_cap_active_processes_without_poisoning_followup_execs() {
+    let _env_lock = node_binary_env_guard();
     assert_node_available();
 
     let mut sidecar = support::new_sidecar("resource-budgets");
@@ -418,6 +429,7 @@ fn execute_rejects_cwd_outside_vm_sandbox_root() {
 
 #[test]
 fn execute_scopes_node_permission_flags_to_vm_sandbox_root() {
+    let _env_lock = node_binary_env_guard();
     let root = temp_dir("execute-cwd-permission-root");
     let fake_node_path = root.join("fake-node.sh");
     let log_path = root.join("node-args.log");
