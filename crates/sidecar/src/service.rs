@@ -1,24 +1,20 @@
 use crate::google_drive_plugin::GoogleDriveMountPlugin;
 use crate::host_dir_plugin::HostDirMountPlugin;
 use crate::protocol::{
-    AuthenticatedResponse, BoundUdpSnapshotResponse, CloseStdinRequest, ConfigureVmRequest,
-    DisposeReason, DisposeVmRequest, EventFrame, EventPayload, ExecuteRequest, FindBoundUdpRequest,
-    FindListenerRequest, GetSignalStateRequest, GetZombieTimerCountRequest,
-    GuestFilesystemCallRequest, GuestFilesystemOperation, GuestFilesystemResultResponse,
-    GuestFilesystemStat, GuestRuntimeKind, JavascriptChildProcessSpawnRequest,
-    JavascriptDgramBindRequest, JavascriptDgramCreateSocketRequest, JavascriptDgramSendRequest,
-    JavascriptDnsLookupRequest, JavascriptDnsResolveRequest, JavascriptNetConnectRequest,
-    JavascriptNetListenRequest, KillProcessRequest, ListenerSnapshotResponse, OpenSessionRequest,
-    OwnershipScope,
+    AuthenticatedResponse, BoundUdpSnapshotResponse, CloseStdinRequest, DisposeReason,
+    EventFrame, EventPayload, ExecuteRequest, FindBoundUdpRequest, FindListenerRequest,
+    GetSignalStateRequest, GetZombieTimerCountRequest, GuestFilesystemCallRequest,
+    GuestFilesystemOperation, GuestFilesystemResultResponse, GuestFilesystemStat,
+    GuestRuntimeKind, JavascriptChildProcessSpawnRequest, JavascriptDgramBindRequest,
+    JavascriptDgramCreateSocketRequest, JavascriptDgramSendRequest, JavascriptDnsLookupRequest,
+    JavascriptDnsResolveRequest, JavascriptNetConnectRequest, JavascriptNetListenRequest,
+    KillProcessRequest, ListenerSnapshotResponse, OpenSessionRequest, OwnershipScope,
     ProcessExitedEvent, ProcessKilledResponse, ProcessOutputEvent, ProcessStartedResponse,
     ProtocolSchema, RejectedResponse, RequestFrame, RequestPayload, ResponseFrame, ResponsePayload,
-    RootFilesystemBootstrappedResponse, RootFilesystemDescriptor, RootFilesystemEntry,
-    RootFilesystemEntryEncoding, RootFilesystemEntryKind, RootFilesystemLowerDescriptor,
-    RootFilesystemMode, RootFilesystemSnapshotResponse, SessionOpenedResponse,
-    SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse,
-    SnapshotRootFilesystemRequest, SocketStateEntry, StdinClosedResponse, StdinWrittenResponse,
-    StreamChannel, VmConfiguredResponse, VmCreatedResponse, VmDisposedResponse, VmLifecycleEvent,
-    VmLifecycleState, WasmPermissionTier, WriteStdinRequest, ZombieTimerCountResponse,
+    RootFilesystemEntryEncoding, SessionOpenedResponse, SignalDispositionAction,
+    SignalHandlerRegistration, SignalStateResponse, SocketStateEntry, StdinClosedResponse,
+    StdinWrittenResponse, StreamChannel, VmLifecycleEvent, VmLifecycleState, WasmPermissionTier,
+    WriteStdinRequest, ZombieTimerCountResponse,
 };
 use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
@@ -27,12 +23,10 @@ use crate::state::{
     JavascriptTcpListenerEvent, JavascriptTcpSocketEvent, JavascriptUdpFamily,
     JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts,
     PendingTcpSocket, PendingUnixSocket, ProcNetEntry, ResolvedChildProcessExecution,
-    ResolvedTcpConnectAddr, SessionState, SharedBridge, SidecarKernel, SocketQueryKind,
-    VmConfiguration, VmDnsConfig, VmListenPolicy, VmState, DEFAULT_JAVASCRIPT_NET_BACKLOG,
-    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME,
+    ResolvedTcpConnectAddr, SessionState, SharedBridge, SidecarKernel, SocketQueryKind, VmDnsConfig,
+    VmListenPolicy, VmState, DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME,
     EXECUTION_SANDBOX_ROOT_ENV, HOST_REALPATH_MAX_SYMLINK_DEPTH, JAVASCRIPT_COMMAND,
     LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND, PYTHON_VFS_RPC_GUEST_ROOT,
-    VM_DNS_OVERRIDE_METADATA_PREFIX, VM_DNS_SERVERS_METADATA_KEY,
     VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
     VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
 };
@@ -42,8 +36,7 @@ use crate::NativeSidecarBridge;
 use agent_os_bridge::{
     ChmodRequest, CommandPermissionRequest, CreateDirRequest, EnvironmentAccess,
     EnvironmentPermissionRequest, FileKind, FileMetadata, FilesystemAccess,
-    FilesystemPermissionRequest, FilesystemSnapshot, FlushFilesystemStateRequest,
-    LifecycleEventRecord, LifecycleState, LoadFilesystemStateRequest, LogLevel, LogRecord,
+    FilesystemPermissionRequest, LifecycleEventRecord, LifecycleState, LogLevel, LogRecord,
     NetworkAccess, NetworkPermissionRequest, PathRequest, ReadDirRequest, ReadFileRequest,
     RenameRequest, StructuredEventRecord, SymlinkRequest, TruncateRequest, WriteFileRequest,
 };
@@ -60,27 +53,20 @@ use agent_os_execution::{
     StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionError,
     WasmExecutionEvent, WasmPermissionTier as ExecutionWasmPermissionTier,
 };
-use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{
-    KernelError, KernelProcessHandle, KernelVm, KernelVmConfig, SpawnOptions,
+    KernelError, KernelProcessHandle, SpawnOptions,
 };
 use agent_os_kernel::mount_plugin::{
     FileSystemPluginFactory, FileSystemPluginRegistry, OpenFileSystemPluginRequest, PluginError,
 };
-use agent_os_kernel::mount_table::{MountOptions, MountTable, MountedVirtualFileSystem};
+use agent_os_kernel::mount_table::MountedVirtualFileSystem;
 use agent_os_kernel::permissions::{
-    filter_env, CommandAccessRequest, EnvAccessRequest, EnvironmentOperation, FsAccessRequest,
-    FsOperation, NetworkAccessRequest, NetworkOperation, PermissionDecision, Permissions,
+    CommandAccessRequest, EnvAccessRequest, EnvironmentOperation, NetworkAccessRequest,
+    NetworkOperation, PermissionDecision,
 };
 use agent_os_kernel::process_table::{SIGKILL, SIGTERM};
 use agent_os_kernel::resource_accounting::ResourceLimits;
-use agent_os_kernel::root_fs::{
-    decode_snapshot as decode_root_snapshot, encode_snapshot as encode_root_snapshot,
-    FilesystemEntry as KernelFilesystemEntry, FilesystemEntryKind as KernelFilesystemEntryKind,
-    RootFileSystem, RootFilesystemDescriptor as KernelRootFilesystemDescriptor,
-    RootFilesystemMode as KernelRootFilesystemMode, RootFilesystemSnapshot,
-    ROOT_FILESYSTEM_SNAPSHOT_FORMAT,
-};
+// root_fs types moved to crate::vm
 use agent_os_kernel::vfs::{
     MemoryFileSystem, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
 };
@@ -131,7 +117,7 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    fn with_mut<T>(
+    pub(crate) fn with_mut<T>(
         &self,
         operation: impl FnOnce(&mut B) -> Result<T, BridgeError<B>>,
     ) -> Result<T, SidecarError> {
@@ -148,7 +134,7 @@ where
         Ok(operation(&mut bridge))
     }
 
-    fn emit_lifecycle(&self, vm_id: &str, state: LifecycleState) -> Result<(), SidecarError> {
+    pub(crate) fn emit_lifecycle(&self, vm_id: &str, state: LifecycleState) -> Result<(), SidecarError> {
         self.with_mut(|bridge| {
             bridge.emit_lifecycle(LifecycleEventRecord {
                 vm_id: vm_id.to_owned(),
@@ -158,7 +144,7 @@ where
         })
     }
 
-    fn emit_log(&self, vm_id: &str, message: impl Into<String>) -> Result<(), SidecarError> {
+    pub(crate) fn emit_log(&self, vm_id: &str, message: impl Into<String>) -> Result<(), SidecarError> {
         self.with_mut(|bridge| {
             bridge.emit_log(LogRecord {
                 vm_id: vm_id.to_owned(),
@@ -168,7 +154,7 @@ where
         })
     }
 
-    fn filesystem_decision(
+    pub(crate) fn filesystem_decision(
         &self,
         vm_id: &str,
         path: &str,
@@ -191,7 +177,7 @@ where
         }
     }
 
-    fn command_decision(&self, vm_id: &str, request: &CommandAccessRequest) -> PermissionDecision {
+    pub(crate) fn command_decision(&self, vm_id: &str, request: &CommandAccessRequest) -> PermissionDecision {
         if let Some(decision) =
             self.static_permission_decision(vm_id, "child_process.spawn", "child_process")
         {
@@ -211,7 +197,7 @@ where
         }
     }
 
-    fn environment_decision(&self, vm_id: &str, request: &EnvAccessRequest) -> PermissionDecision {
+    pub(crate) fn environment_decision(&self, vm_id: &str, request: &EnvAccessRequest) -> PermissionDecision {
         if let Some(decision) = self.static_permission_decision(
             vm_id,
             environment_permission_capability(request.op),
@@ -235,7 +221,7 @@ where
         }
     }
 
-    fn network_decision(&self, vm_id: &str, request: &NetworkAccessRequest) -> PermissionDecision {
+    pub(crate) fn network_decision(&self, vm_id: &str, request: &NetworkAccessRequest) -> PermissionDecision {
         if let Some(decision) = self.static_permission_decision(
             vm_id,
             network_permission_capability(request.op),
@@ -286,7 +272,7 @@ where
         Err(SidecarError::Execution(message))
     }
 
-    fn set_vm_permissions(
+    pub(crate) fn set_vm_permissions(
         &self,
         vm_id: &str,
         permissions: &[crate::protocol::PermissionDescriptor],
@@ -303,7 +289,7 @@ where
         Ok(())
     }
 
-    fn clear_vm_permissions(&self, vm_id: &str) -> Result<(), SidecarError> {
+    pub(crate) fn clear_vm_permissions(&self, vm_id: &str) -> Result<(), SidecarError> {
         let mut stored = self.permissions.lock().map_err(|_| {
             SidecarError::Bridge(String::from(
                 "native sidecar permission policy lock poisoned",
@@ -313,7 +299,7 @@ where
         Ok(())
     }
 
-    fn static_permission_decision(
+    pub(crate) fn static_permission_decision(
         &self,
         vm_id: &str,
         capability: &str,
@@ -374,7 +360,7 @@ fn permission_mode_to_kernel_decision(
     }
 }
 
-fn filesystem_permission_capability(access: FilesystemAccess) -> &'static str {
+pub(crate) fn filesystem_permission_capability(access: FilesystemAccess) -> &'static str {
     match access {
         FilesystemAccess::Read => "fs.read",
         FilesystemAccess::Write => "fs.write",
@@ -1337,9 +1323,9 @@ where
 }
 
 #[derive(Clone)]
-struct MountPluginContext<B> {
-    bridge: SharedBridge<B>,
-    vm_id: String,
+pub(crate) struct MountPluginContext<B> {
+    pub(crate) bridge: SharedBridge<B>,
+    pub(crate) vm_id: String,
 }
 
 #[derive(Debug)]
@@ -2146,19 +2132,19 @@ impl ActiveExecution {
 }
 
 pub struct NativeSidecar<B> {
-    config: NativeSidecarConfig,
-    bridge: SharedBridge<B>,
-    mount_plugins: FileSystemPluginRegistry<MountPluginContext<B>>,
-    cache_root: PathBuf,
-    javascript_engine: JavascriptExecutionEngine,
-    python_engine: PythonExecutionEngine,
-    wasm_engine: WasmExecutionEngine,
-    next_connection_id: usize,
-    next_session_id: usize,
-    next_vm_id: usize,
-    connections: BTreeMap<String, ConnectionState>,
-    sessions: BTreeMap<String, SessionState>,
-    vms: BTreeMap<String, VmState>,
+    pub(crate) config: NativeSidecarConfig,
+    pub(crate) bridge: SharedBridge<B>,
+    pub(crate) mount_plugins: FileSystemPluginRegistry<MountPluginContext<B>>,
+    pub(crate) cache_root: PathBuf,
+    pub(crate) javascript_engine: JavascriptExecutionEngine,
+    pub(crate) python_engine: PythonExecutionEngine,
+    pub(crate) wasm_engine: WasmExecutionEngine,
+    pub(crate) next_connection_id: usize,
+    pub(crate) next_session_id: usize,
+    pub(crate) next_vm_id: usize,
+    pub(crate) connections: BTreeMap<String, ConnectionState>,
+    pub(crate) sessions: BTreeMap<String, SessionState>,
+    pub(crate) vms: BTreeMap<String, VmState>,
 }
 
 impl<B> fmt::Debug for NativeSidecar<B> {
@@ -2435,202 +2421,7 @@ where
         })
     }
 
-    fn create_vm(
-        &mut self,
-        request: &RequestFrame,
-        payload: crate::protocol::CreateVmRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id) = self.session_scope_for(&request.ownership)?;
-        self.require_owned_session(&connection_id, &session_id)?;
-
-        self.next_vm_id += 1;
-        let vm_id = format!("vm-{}", self.next_vm_id);
-        let cwd = resolve_cwd(payload.metadata.get("cwd"))?;
-        let resource_limits = parse_resource_limits(&payload.metadata)?;
-        let dns = parse_vm_dns_config(&payload.metadata)?;
-        self.bridge
-            .set_vm_permissions(&vm_id, &payload.permissions)?;
-        let permissions = bridge_permissions(self.bridge.clone(), &vm_id);
-        let guest_env = filter_env(&vm_id, &extract_guest_env(&payload.metadata), &permissions);
-        let loaded_snapshot = self.bridge.with_mut(|bridge| {
-            bridge.load_filesystem_state(LoadFilesystemStateRequest {
-                vm_id: vm_id.clone(),
-            })
-        })?;
-
-        let mut config = KernelVmConfig::new(vm_id.clone());
-        config.cwd = String::from("/");
-        config.env = guest_env.clone();
-        config.permissions = permissions;
-        config.resources = resource_limits;
-        let root_filesystem =
-            build_root_filesystem(&payload.root_filesystem, loaded_snapshot.as_ref())?;
-        let mut kernel = KernelVm::new(MountTable::new(root_filesystem), config);
-        kernel
-            .register_driver(CommandDriver::new(
-                EXECUTION_DRIVER_NAME,
-                [JAVASCRIPT_COMMAND, PYTHON_COMMAND, WASM_COMMAND],
-            ))
-            .map_err(kernel_error)?;
-        kernel
-            .root_filesystem_mut()
-            .expect("native sidecar root filesystem should exist")
-            .finish_bootstrap();
-
-        self.bridge
-            .emit_lifecycle(&vm_id, LifecycleState::Starting)?;
-        self.bridge.emit_lifecycle(&vm_id, LifecycleState::Ready)?;
-        self.bridge.emit_log(
-            &vm_id,
-            format!("created VM {vm_id} for session {session_id}"),
-        )?;
-
-        self.sessions
-            .get_mut(&session_id)
-            .expect("owned session should exist")
-            .vm_ids
-            .insert(vm_id.clone());
-        self.vms.insert(
-            vm_id.clone(),
-            VmState {
-                connection_id: connection_id.clone(),
-                session_id: session_id.clone(),
-                metadata: payload.metadata,
-                dns,
-                guest_env,
-                requested_runtime: payload.runtime,
-                cwd,
-                kernel,
-                loaded_snapshot,
-                configuration: VmConfiguration::default(),
-                command_guest_paths: BTreeMap::new(),
-                command_permissions: BTreeMap::new(),
-                active_processes: BTreeMap::new(),
-                signal_states: BTreeMap::new(),
-            },
-        );
-
-        let events = vec![
-            self.vm_lifecycle_event(
-                &connection_id,
-                &session_id,
-                &vm_id,
-                VmLifecycleState::Creating,
-            ),
-            self.vm_lifecycle_event(&connection_id, &session_id, &vm_id, VmLifecycleState::Ready),
-        ];
-
-        Ok(DispatchResult {
-            response: self.respond(
-                request,
-                ResponsePayload::VmCreated(VmCreatedResponse { vm_id }),
-            ),
-            events,
-        })
-    }
-
-    fn dispose_vm(
-        &mut self,
-        request: &RequestFrame,
-        payload: DisposeVmRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        let events =
-            self.dispose_vm_internal(&connection_id, &session_id, &vm_id, payload.reason)?;
-
-        Ok(DispatchResult {
-            response: self.respond(
-                request,
-                ResponsePayload::VmDisposed(VmDisposedResponse { vm_id }),
-            ),
-            events,
-        })
-    }
-
-    fn bootstrap_root_filesystem(
-        &mut self,
-        request: &RequestFrame,
-        entries: Vec<RootFilesystemEntry>,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let root = vm.kernel.root_filesystem_mut().ok_or_else(|| {
-            SidecarError::InvalidState(String::from("VM root filesystem is unavailable"))
-        })?;
-        for entry in &entries {
-            apply_root_filesystem_entry(root, entry)?;
-        }
-
-        Ok(DispatchResult {
-            response: self.respond(
-                request,
-                ResponsePayload::RootFilesystemBootstrapped(RootFilesystemBootstrappedResponse {
-                    entry_count: entries.len() as u32,
-                }),
-            ),
-            events: Vec::new(),
-        })
-    }
-
-    fn configure_vm(
-        &mut self,
-        request: &RequestFrame,
-        payload: ConfigureVmRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let mount_plugins = &self.mount_plugins;
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        reconcile_mounts(
-            mount_plugins,
-            vm,
-            &payload.mounts,
-            MountPluginContext {
-                bridge: self.bridge.clone(),
-                vm_id: vm_id.clone(),
-            },
-        )?;
-        vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);
-        let mut execution_commands = vec![
-            String::from(JAVASCRIPT_COMMAND),
-            String::from(PYTHON_COMMAND),
-            String::from(WASM_COMMAND),
-        ];
-        execution_commands.extend(vm.command_guest_paths.keys().cloned());
-        vm.kernel
-            .register_driver(CommandDriver::new(
-                EXECUTION_DRIVER_NAME,
-                execution_commands,
-            ))
-            .map_err(kernel_error)?;
-        vm.command_permissions = payload.command_permissions.clone();
-        vm.configuration = VmConfiguration {
-            mounts: payload.mounts.clone(),
-            software: payload.software.clone(),
-            permissions: payload.permissions.clone(),
-            instructions: payload.instructions.clone(),
-            projected_modules: payload.projected_modules.clone(),
-            command_permissions: payload.command_permissions.clone(),
-        };
-        if !payload.permissions.is_empty() {
-            self.bridge
-                .set_vm_permissions(&vm_id, &payload.permissions)?;
-        }
-
-        Ok(DispatchResult {
-            response: self.respond(
-                request,
-                ResponsePayload::VmConfigured(VmConfiguredResponse {
-                    applied_mounts: payload.mounts.len() as u32,
-                    applied_software: payload.software.len() as u32,
-                }),
-            ),
-            events: Vec::new(),
-        })
-    }
+    // create_vm, dispose_vm, bootstrap_root_filesystem, configure_vm moved to crate::vm
 
     fn guest_filesystem_call(
         &mut self,
@@ -2950,27 +2741,7 @@ where
         })
     }
 
-    fn snapshot_root_filesystem(
-        &mut self,
-        request: &RequestFrame,
-        _payload: SnapshotRootFilesystemRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let snapshot = vm.kernel.snapshot_root_filesystem().map_err(kernel_error)?;
-
-        Ok(DispatchResult {
-            response: self.respond(
-                request,
-                ResponsePayload::RootFilesystemSnapshot(RootFilesystemSnapshotResponse {
-                    entries: snapshot.entries.iter().map(root_snapshot_entry).collect(),
-                }),
-            ),
-            events: Vec::new(),
-        })
-    }
+    // snapshot_root_filesystem moved to crate::vm
 
     fn execute(
         &mut self,
@@ -3331,138 +3102,9 @@ where
         Ok(events)
     }
 
-    fn dispose_vm_internal(
-        &mut self,
-        connection_id: &str,
-        session_id: &str,
-        vm_id: &str,
-        _reason: DisposeReason,
-    ) -> Result<Vec<EventFrame>, SidecarError> {
-        self.require_owned_vm(connection_id, session_id, vm_id)?;
+    // dispose_vm_internal, terminate_vm_processes, wait_for_vm_processes_to_exit moved to crate::vm
 
-        let mut events = vec![self.vm_lifecycle_event(
-            connection_id,
-            session_id,
-            vm_id,
-            VmLifecycleState::Disposing,
-        )];
-        self.terminate_vm_processes(vm_id, &mut events)?;
-
-        let mut vm = self
-            .vms
-            .remove(vm_id)
-            .expect("owned VM should exist before disposal");
-        let snapshot = FilesystemSnapshot {
-            format: String::from(ROOT_FILESYSTEM_SNAPSHOT_FORMAT),
-            bytes: encode_root_snapshot(
-                &vm.kernel.snapshot_root_filesystem().map_err(kernel_error)?,
-            )
-            .map_err(root_filesystem_error)?,
-        };
-
-        self.bridge
-            .emit_lifecycle(vm_id, LifecycleState::Terminated)?;
-        vm.kernel.dispose().map_err(kernel_error)?;
-        self.bridge.with_mut(|bridge| {
-            bridge.flush_filesystem_state(FlushFilesystemStateRequest {
-                vm_id: vm_id.to_owned(),
-                snapshot,
-            })
-        })?;
-        self.bridge.clear_vm_permissions(vm_id)?;
-        self.javascript_engine.dispose_vm(vm_id);
-        self.python_engine.dispose_vm(vm_id);
-        self.wasm_engine.dispose_vm(vm_id);
-
-        if let Some(session) = self.sessions.get_mut(session_id) {
-            session.vm_ids.remove(vm_id);
-        }
-
-        events.push(self.vm_lifecycle_event(
-            connection_id,
-            session_id,
-            vm_id,
-            VmLifecycleState::Disposed,
-        ));
-        Ok(events)
-    }
-
-    fn terminate_vm_processes(
-        &mut self,
-        vm_id: &str,
-        events: &mut Vec<EventFrame>,
-    ) -> Result<(), SidecarError> {
-        let process_ids = self
-            .vms
-            .get(vm_id)
-            .map(|vm| vm.active_processes.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        if process_ids.is_empty() {
-            return Ok(());
-        }
-
-        for process_id in process_ids {
-            if self
-                .vms
-                .get(vm_id)
-                .is_some_and(|vm| vm.active_processes.contains_key(&process_id))
-            {
-                self.kill_process_internal(vm_id, &process_id, "SIGTERM")?;
-            }
-        }
-        self.wait_for_vm_processes_to_exit(vm_id, DISPOSE_VM_SIGTERM_GRACE, events)?;
-
-        if !self.vm_has_active_processes(vm_id) {
-            return Ok(());
-        }
-
-        let remaining = self
-            .vms
-            .get(vm_id)
-            .map(|vm| vm.active_processes.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for process_id in remaining {
-            if self
-                .vms
-                .get(vm_id)
-                .is_some_and(|vm| vm.active_processes.contains_key(&process_id))
-            {
-                self.kill_process_internal(vm_id, &process_id, "SIGKILL")?;
-            }
-        }
-        self.wait_for_vm_processes_to_exit(vm_id, DISPOSE_VM_SIGKILL_GRACE, events)?;
-
-        if self.vm_has_active_processes(vm_id) {
-            return Err(SidecarError::Execution(format!(
-                "failed to terminate active guest executions for VM {vm_id}"
-            )));
-        }
-
-        Ok(())
-    }
-
-    fn wait_for_vm_processes_to_exit(
-        &mut self,
-        vm_id: &str,
-        timeout: Duration,
-        events: &mut Vec<EventFrame>,
-    ) -> Result<(), SidecarError> {
-        let ownership = self.vm_ownership(vm_id)?;
-        let deadline = Instant::now() + timeout;
-
-        while self.vm_has_active_processes(vm_id) && Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if let Some(event) =
-                self.poll_event(&ownership, remaining.min(Duration::from_millis(10)))?
-            {
-                events.push(event);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn kill_process_internal(
+    pub(crate) fn kill_process_internal(
         &self,
         vm_id: &str,
         process_id: &str,
@@ -4297,7 +3939,7 @@ where
         }
     }
 
-    fn vm_ownership(&self, vm_id: &str) -> Result<OwnershipScope, SidecarError> {
+    pub(crate) fn vm_ownership(&self, vm_id: &str) -> Result<OwnershipScope, SidecarError> {
         let vm = self
             .vms
             .get(vm_id)
@@ -4305,7 +3947,7 @@ where
         Ok(OwnershipScope::vm(&vm.connection_id, &vm.session_id, vm_id))
     }
 
-    fn vm_has_active_processes(&self, vm_id: &str) -> bool {
+    pub(crate) fn vm_has_active_processes(&self, vm_id: &str) -> bool {
         self.vms
             .get(vm_id)
             .is_some_and(|vm| !vm.active_processes.is_empty())
@@ -4321,7 +3963,7 @@ where
         }
     }
 
-    fn require_owned_session(
+    pub(crate) fn require_owned_session(
         &self,
         connection_id: &str,
         session_id: &str,
@@ -4339,7 +3981,7 @@ where
         }
     }
 
-    fn require_owned_vm(
+    pub(crate) fn require_owned_vm(
         &self,
         connection_id: &str,
         session_id: &str,
@@ -4388,7 +4030,7 @@ where
         format!("conn-{}", self.next_connection_id)
     }
 
-    fn session_scope_for(
+    pub(crate) fn session_scope_for(
         &self,
         ownership: &OwnershipScope,
     ) -> Result<(String, String), SidecarError> {
@@ -4405,7 +4047,7 @@ where
         }
     }
 
-    fn vm_scope_for(
+    pub(crate) fn vm_scope_for(
         &self,
         ownership: &OwnershipScope,
     ) -> Result<(String, String, String), SidecarError> {
@@ -4435,7 +4077,7 @@ where
         }
     }
 
-    fn respond(&self, request: &RequestFrame, payload: ResponsePayload) -> ResponseFrame {
+    pub(crate) fn respond(&self, request: &RequestFrame, payload: ResponsePayload) -> ResponseFrame {
         self.response_with_ownership(request.request_id, request.ownership.clone(), payload)
     }
 
@@ -4449,7 +4091,7 @@ where
         )
     }
 
-    fn vm_lifecycle_event(
+    pub(crate) fn vm_lifecycle_event(
         &self,
         connection_id: &str,
         session_id: &str,
@@ -4508,7 +4150,7 @@ fn audit_timestamp() -> String {
         .to_string()
 }
 
-fn audit_fields<I, K, V>(fields: I) -> BTreeMap<String, String>
+pub(crate) fn audit_fields<I, K, V>(fields: I) -> BTreeMap<String, String>
 where
     I: IntoIterator<Item = (K, V)>,
     K: Into<String>,
@@ -4540,7 +4182,7 @@ where
     })
 }
 
-fn emit_security_audit_event<B>(
+pub(crate) fn emit_security_audit_event<B>(
     bridge: &SharedBridge<B>,
     vm_id: &str,
     name: &str,
@@ -4552,27 +4194,7 @@ fn emit_security_audit_event<B>(
     let _ = emit_structured_event(bridge, vm_id, name, fields);
 }
 
-fn filesystem_operation_label(operation: FsOperation) -> &'static str {
-    match operation {
-        FsOperation::Read => "read",
-        FsOperation::Write => "write",
-        FsOperation::Mkdir => "mkdir",
-        FsOperation::CreateDir => "createDir",
-        FsOperation::ReadDir => "readdir",
-        FsOperation::Stat => "stat",
-        FsOperation::Remove => "rm",
-        FsOperation::Rename => "rename",
-        FsOperation::Exists => "exists",
-        FsOperation::Symlink => "symlink",
-        FsOperation::ReadLink => "readlink",
-        FsOperation::Link => "link",
-        FsOperation::Chmod => "chmod",
-        FsOperation::Chown => "chown",
-        FsOperation::Utimes => "utimes",
-        FsOperation::Truncate => "truncate",
-        FsOperation::MountSensitive => "mount",
-    }
-}
+// filesystem_operation_label moved to crate::vm
 
 fn map_wasm_signal_registration(
     registration: agent_os_execution::wasm::WasmSignalHandlerRegistration,
@@ -4608,89 +4230,7 @@ fn map_node_signal_registration(
     }
 }
 
-fn bridge_permissions<B>(bridge: SharedBridge<B>, vm_id: &str) -> Permissions
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
-    let vm_id = vm_id.to_owned();
-
-    let filesystem_bridge = bridge.clone();
-    let filesystem_vm_id = vm_id.clone();
-    let network_bridge = bridge.clone();
-    let network_vm_id = vm_id.clone();
-    let command_bridge = bridge.clone();
-    let command_vm_id = vm_id.clone();
-    let environment_bridge = bridge;
-
-    Permissions {
-        filesystem: Some(Arc::new(move |request: &FsAccessRequest| {
-            let access = match request.op {
-                FsOperation::Read => FilesystemAccess::Read,
-                FsOperation::Write => FilesystemAccess::Write,
-                FsOperation::Mkdir | FsOperation::CreateDir => FilesystemAccess::CreateDir,
-                FsOperation::ReadDir => FilesystemAccess::ReadDir,
-                FsOperation::Stat | FsOperation::Exists => FilesystemAccess::Stat,
-                FsOperation::Remove => FilesystemAccess::Remove,
-                FsOperation::Rename => FilesystemAccess::Rename,
-                FsOperation::Symlink => FilesystemAccess::Symlink,
-                FsOperation::ReadLink => FilesystemAccess::Read,
-                FsOperation::Link => FilesystemAccess::Write,
-                FsOperation::Chmod => FilesystemAccess::Write,
-                FsOperation::Chown => FilesystemAccess::Write,
-                FsOperation::Utimes => FilesystemAccess::Write,
-                FsOperation::Truncate => FilesystemAccess::Write,
-                FsOperation::MountSensitive => FilesystemAccess::Write,
-            };
-            let policy = if request.op == FsOperation::MountSensitive {
-                "fs.mount_sensitive"
-            } else {
-                filesystem_permission_capability(access)
-            };
-            let decision = if request.op == FsOperation::MountSensitive {
-                filesystem_bridge
-                    .static_permission_decision(&filesystem_vm_id, policy, "fs")
-                    .unwrap_or_else(PermissionDecision::allow)
-            } else {
-                filesystem_bridge.filesystem_decision(&filesystem_vm_id, &request.path, access)
-            };
-
-            if !decision.allow {
-                emit_security_audit_event(
-                    &filesystem_bridge,
-                    &filesystem_vm_id,
-                    "security.permission.denied",
-                    audit_fields([
-                        (
-                            String::from("operation"),
-                            filesystem_operation_label(request.op).to_owned(),
-                        ),
-                        (String::from("path"), request.path.clone()),
-                        (String::from("policy"), String::from(policy)),
-                        (
-                            String::from("reason"),
-                            decision
-                                .reason
-                                .clone()
-                                .unwrap_or_else(|| String::from("permission denied")),
-                        ),
-                    ]),
-                );
-            }
-
-            decision
-        })),
-        network: Some(Arc::new(move |request: &NetworkAccessRequest| {
-            network_bridge.network_decision(&network_vm_id, request)
-        })),
-        child_process: Some(Arc::new(move |request: &CommandAccessRequest| {
-            command_bridge.command_decision(&command_vm_id, request)
-        })),
-        environment: Some(Arc::new(move |request: &EnvAccessRequest| {
-            environment_bridge.environment_decision(&vm_id, request)
-        })),
-    }
-}
+// bridge_permissions moved to crate::vm
 
 fn build_mount_plugin_registry<B>(
 ) -> Result<FileSystemPluginRegistry<MountPluginContext<B>>, SidecarError>
@@ -4716,89 +4256,7 @@ where
     Ok(registry)
 }
 
-fn reconcile_mounts<B>(
-    mount_plugins: &FileSystemPluginRegistry<MountPluginContext<B>>,
-    vm: &mut VmState,
-    mounts: &[crate::protocol::MountDescriptor],
-    context: MountPluginContext<B>,
-) -> Result<(), SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
-    for existing in &vm.configuration.mounts {
-        match vm.kernel.unmount_filesystem(&existing.guest_path) {
-            Ok(()) => emit_security_audit_event(
-                &context.bridge,
-                &context.vm_id,
-                "security.mount.unmounted",
-                audit_fields([
-                    (String::from("guest_path"), existing.guest_path.clone()),
-                    (String::from("plugin_id"), existing.plugin.id.clone()),
-                    (String::from("read_only"), existing.read_only.to_string()),
-                ]),
-            ),
-            Err(error) if error.code() == "EINVAL" => {}
-            Err(error) => return Err(kernel_error(error)),
-        }
-    }
-
-    for mount in mounts {
-        let filesystem = mount_plugins
-            .open(
-                &mount.plugin.id,
-                OpenFileSystemPluginRequest {
-                    vm_id: &context.vm_id,
-                    guest_path: &mount.guest_path,
-                    read_only: mount.read_only,
-                    config: &mount.plugin.config,
-                    context: &context,
-                },
-            )
-            .map_err(plugin_error)?;
-
-        vm.kernel
-            .mount_boxed_filesystem(
-                &mount.guest_path,
-                filesystem,
-                MountOptions::new(mount.plugin.id.clone()).read_only(mount.read_only),
-            )
-            .map_err(kernel_error)?;
-        emit_security_audit_event(
-            &context.bridge,
-            &context.vm_id,
-            "security.mount.mounted",
-            audit_fields([
-                (String::from("guest_path"), mount.guest_path.clone()),
-                (String::from("plugin_id"), mount.plugin.id.clone()),
-                (String::from("read_only"), mount.read_only.to_string()),
-            ]),
-        );
-    }
-
-    Ok(())
-}
-
-fn resolve_cwd(value: Option<&String>) -> Result<PathBuf, SidecarError> {
-    match value {
-        Some(path) => {
-            let cwd = PathBuf::from(path);
-            let resolved = if cwd.is_absolute() {
-                cwd
-            } else {
-                std::env::current_dir()
-                    .map_err(|error| {
-                        SidecarError::Io(format!("failed to resolve current directory: {error}"))
-                    })?
-                    .join(cwd)
-            };
-            Ok(resolved)
-        }
-        None => std::env::current_dir().map_err(|error| {
-            SidecarError::Io(format!("failed to resolve current directory: {error}"))
-        }),
-    }
-}
+// reconcile_mounts, resolve_cwd moved to crate::vm
 
 fn resolve_execution_cwd(vm: &VmState, value: Option<&str>) -> Result<PathBuf, SidecarError> {
     let sandbox_root = normalize_host_path(&vm.cwd);
@@ -4826,15 +4284,7 @@ fn resolve_execution_cwd(vm: &VmState, value: Option<&str>) -> Result<PathBuf, S
     Ok(normalized)
 }
 
-fn extract_guest_env(metadata: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    metadata
-        .iter()
-        .filter_map(|(key, value)| {
-            key.strip_prefix("env.")
-                .map(|env_key| (env_key.to_owned(), value.clone()))
-        })
-        .collect()
-}
+// extract_guest_env moved to crate::vm
 
 fn apply_wasm_limit_env(env: &mut BTreeMap<String, String>, limits: &ResourceLimits) {
     if let Some(limit) = limits.max_wasm_fuel {
@@ -4848,138 +4298,8 @@ fn apply_wasm_limit_env(env: &mut BTreeMap<String, String>, limits: &ResourceLim
     }
 }
 
-fn parse_resource_limits(
-    metadata: &BTreeMap<String, String>,
-) -> Result<ResourceLimits, SidecarError> {
-    let mut limits = ResourceLimits::default();
-    if metadata.contains_key("resource.max_processes") {
-        limits.max_processes = parse_resource_limit(metadata, "resource.max_processes")?;
-    }
-    if metadata.contains_key("resource.max_open_fds") {
-        limits.max_open_fds = parse_resource_limit(metadata, "resource.max_open_fds")?;
-    }
-    if metadata.contains_key("resource.max_pipes") {
-        limits.max_pipes = parse_resource_limit(metadata, "resource.max_pipes")?;
-    }
-    if metadata.contains_key("resource.max_ptys") {
-        limits.max_ptys = parse_resource_limit(metadata, "resource.max_ptys")?;
-    }
-    if metadata.contains_key("resource.max_sockets") {
-        limits.max_sockets = parse_resource_limit(metadata, "resource.max_sockets")?;
-    }
-    if metadata.contains_key("resource.max_connections") {
-        limits.max_connections = parse_resource_limit(metadata, "resource.max_connections")?;
-    }
-    if metadata.contains_key("resource.max_filesystem_bytes") {
-        limits.max_filesystem_bytes =
-            parse_resource_limit_u64(metadata, "resource.max_filesystem_bytes")?;
-    }
-    if metadata.contains_key("resource.max_inode_count") {
-        limits.max_inode_count = parse_resource_limit(metadata, "resource.max_inode_count")?;
-    }
-    if metadata.contains_key("resource.max_blocking_read_ms") {
-        limits.max_blocking_read_ms =
-            parse_resource_limit_u64(metadata, "resource.max_blocking_read_ms")?;
-    }
-    if metadata.contains_key("resource.max_pread_bytes") {
-        limits.max_pread_bytes = parse_resource_limit(metadata, "resource.max_pread_bytes")?;
-    }
-    if metadata.contains_key("resource.max_fd_write_bytes") {
-        limits.max_fd_write_bytes = parse_resource_limit(metadata, "resource.max_fd_write_bytes")?;
-    }
-    if metadata.contains_key("resource.max_process_argv_bytes") {
-        limits.max_process_argv_bytes =
-            parse_resource_limit(metadata, "resource.max_process_argv_bytes")?;
-    }
-    if metadata.contains_key("resource.max_process_env_bytes") {
-        limits.max_process_env_bytes =
-            parse_resource_limit(metadata, "resource.max_process_env_bytes")?;
-    }
-    if metadata.contains_key("resource.max_readdir_entries") {
-        limits.max_readdir_entries =
-            parse_resource_limit(metadata, "resource.max_readdir_entries")?;
-    }
-    if metadata.contains_key("resource.max_wasm_fuel") {
-        limits.max_wasm_fuel = parse_resource_limit_u64(metadata, "resource.max_wasm_fuel")?;
-    }
-    if metadata.contains_key("resource.max_wasm_memory_bytes") {
-        limits.max_wasm_memory_bytes =
-            parse_resource_limit_u64(metadata, "resource.max_wasm_memory_bytes")?;
-    }
-    if metadata.contains_key("resource.max_wasm_stack_bytes") {
-        limits.max_wasm_stack_bytes =
-            parse_resource_limit(metadata, "resource.max_wasm_stack_bytes")?;
-    }
-    Ok(limits)
-}
-
-fn parse_resource_limit(
-    metadata: &BTreeMap<String, String>,
-    key: &str,
-) -> Result<Option<usize>, SidecarError> {
-    let Some(value) = metadata.get(key) else {
-        return Ok(None);
-    };
-
-    let parsed = value.parse::<usize>().map_err(|error| {
-        SidecarError::InvalidState(format!("invalid resource limit {key}={value}: {error}"))
-    })?;
-    Ok(Some(parsed))
-}
-
-fn parse_resource_limit_u64(
-    metadata: &BTreeMap<String, String>,
-    key: &str,
-) -> Result<Option<u64>, SidecarError> {
-    let Some(value) = metadata.get(key) else {
-        return Ok(None);
-    };
-
-    let parsed = value.parse::<u64>().map_err(|error| {
-        SidecarError::InvalidState(format!("invalid resource limit {key}={value}: {error}"))
-    })?;
-    Ok(Some(parsed))
-}
-
-fn parse_vm_dns_config(metadata: &BTreeMap<String, String>) -> Result<VmDnsConfig, SidecarError> {
-    let mut config = VmDnsConfig::default();
-
-    if let Some(value) = metadata.get(VM_DNS_SERVERS_METADATA_KEY) {
-        config.name_servers = value
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(parse_vm_dns_nameserver)
-            .collect::<Result<Vec<_>, _>>()?;
-    }
-
-    for (key, value) in metadata {
-        let Some(hostname) = key.strip_prefix(VM_DNS_OVERRIDE_METADATA_PREFIX) else {
-            continue;
-        };
-        let normalized_hostname = normalize_dns_hostname(hostname)?;
-        let addresses = value
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(|entry| {
-                entry.parse::<IpAddr>().map_err(|error| {
-                    SidecarError::InvalidState(format!(
-                        "invalid DNS override {key}={value}: {error}"
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if addresses.is_empty() {
-            return Err(SidecarError::InvalidState(format!(
-                "DNS override {key} must contain at least one IP address"
-            )));
-        }
-        config.overrides.insert(normalized_hostname, addresses);
-    }
-
-    Ok(config)
-}
+// parse_resource_limits, parse_resource_limit, parse_resource_limit_u64,
+// parse_vm_dns_config moved to crate::vm
 
 fn parse_vm_listen_policy(
     metadata: &BTreeMap<String, String>,
@@ -5066,28 +4386,7 @@ fn parse_loopback_exempt_ports(
     Ok(ports)
 }
 
-fn parse_vm_dns_nameserver(value: &str) -> Result<SocketAddr, SidecarError> {
-    if let Ok(address) = value.parse::<SocketAddr>() {
-        return Ok(address);
-    }
-    if let Ok(ip) = value.parse::<IpAddr>() {
-        return Ok(SocketAddr::new(ip, 53));
-    }
-    Err(SidecarError::InvalidState(format!(
-        "invalid {} entry {value}; expected IP or IP:port",
-        VM_DNS_SERVERS_METADATA_KEY
-    )))
-}
-
-fn normalize_dns_hostname(hostname: &str) -> Result<String, SidecarError> {
-    let normalized = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
-    if normalized.is_empty() {
-        return Err(SidecarError::InvalidState(String::from(
-            "DNS hostname must not be empty",
-        )));
-    }
-    Ok(normalized)
-}
+// parse_vm_dns_nameserver, normalize_dns_hostname moved to crate::vm
 
 fn vm_dns_resolver_config(dns: &VmDnsConfig) -> Option<ResolverConfig> {
     if dns.name_servers.is_empty() {
@@ -5230,130 +4529,8 @@ fn emit_dns_resolution_failure_event<B>(
     );
 }
 
-fn build_root_filesystem(
-    descriptor: &RootFilesystemDescriptor,
-    loaded_snapshot: Option<&FilesystemSnapshot>,
-) -> Result<RootFileSystem, SidecarError> {
-    let restored_snapshot = match loaded_snapshot {
-        Some(snapshot) if snapshot.format == ROOT_FILESYSTEM_SNAPSHOT_FORMAT => {
-            Some(decode_root_snapshot(&snapshot.bytes).map_err(root_filesystem_error)?)
-        }
-        _ => None,
-    };
-    let has_restored_snapshot = restored_snapshot.is_some();
-
-    let lowers = if let Some(snapshot) = restored_snapshot {
-        vec![snapshot]
-    } else {
-        descriptor
-            .lowers
-            .iter()
-            .map(convert_root_lower_descriptor)
-            .collect::<Result<Vec<_>, _>>()?
-    };
-
-    RootFileSystem::from_descriptor(KernelRootFilesystemDescriptor {
-        mode: match descriptor.mode {
-            RootFilesystemMode::Ephemeral => KernelRootFilesystemMode::Ephemeral,
-            RootFilesystemMode::ReadOnly => KernelRootFilesystemMode::ReadOnly,
-        },
-        disable_default_base_layer: has_restored_snapshot || descriptor.disable_default_base_layer,
-        lowers,
-        bootstrap_entries: descriptor
-            .bootstrap_entries
-            .iter()
-            .map(convert_root_filesystem_entry)
-            .collect::<Result<Vec<_>, _>>()?,
-    })
-    .map_err(root_filesystem_error)
-}
-
-fn convert_root_lower_descriptor(
-    lower: &RootFilesystemLowerDescriptor,
-) -> Result<RootFilesystemSnapshot, SidecarError> {
-    match lower {
-        RootFilesystemLowerDescriptor::Snapshot { entries } => Ok(RootFilesystemSnapshot {
-            entries: entries
-                .iter()
-                .map(convert_root_filesystem_entry)
-                .collect::<Result<Vec<_>, _>>()?,
-        }),
-    }
-}
-
-fn convert_root_filesystem_entry(
-    entry: &RootFilesystemEntry,
-) -> Result<KernelFilesystemEntry, SidecarError> {
-    let mode = entry.mode.unwrap_or_else(|| match entry.kind {
-        RootFilesystemEntryKind::File => {
-            if entry.executable {
-                0o755
-            } else {
-                0o644
-            }
-        }
-        RootFilesystemEntryKind::Directory => 0o755,
-        RootFilesystemEntryKind::Symlink => 0o777,
-    });
-
-    let content = match entry.content.as_ref() {
-        Some(content) => match entry.encoding {
-            Some(RootFilesystemEntryEncoding::Base64) => Some(
-                base64::engine::general_purpose::STANDARD
-                    .decode(content)
-                    .map_err(|error| {
-                        SidecarError::InvalidState(format!(
-                            "invalid base64 root filesystem content for {}: {error}",
-                            entry.path
-                        ))
-                    })?,
-            ),
-            Some(RootFilesystemEntryEncoding::Utf8) | None => Some(content.as_bytes().to_vec()),
-        },
-        None => None,
-    };
-
-    Ok(KernelFilesystemEntry {
-        path: normalize_path(&entry.path),
-        kind: match entry.kind {
-            RootFilesystemEntryKind::File => KernelFilesystemEntryKind::File,
-            RootFilesystemEntryKind::Directory => KernelFilesystemEntryKind::Directory,
-            RootFilesystemEntryKind::Symlink => KernelFilesystemEntryKind::Symlink,
-        },
-        mode,
-        uid: entry.uid.unwrap_or(0),
-        gid: entry.gid.unwrap_or(0),
-        content,
-        target: entry.target.clone(),
-    })
-}
-
-fn root_snapshot_entry(entry: &KernelFilesystemEntry) -> RootFilesystemEntry {
-    let (content, encoding) = match entry.content.as_ref() {
-        Some(bytes) => {
-            let (content, encoding) = encode_guest_filesystem_content(bytes.clone());
-            (Some(content), Some(encoding))
-        }
-        None => (None, None),
-    };
-
-    RootFilesystemEntry {
-        path: entry.path.clone(),
-        kind: match entry.kind {
-            KernelFilesystemEntryKind::File => RootFilesystemEntryKind::File,
-            KernelFilesystemEntryKind::Directory => RootFilesystemEntryKind::Directory,
-            KernelFilesystemEntryKind::Symlink => RootFilesystemEntryKind::Symlink,
-        },
-        mode: Some(entry.mode),
-        uid: Some(entry.uid),
-        gid: Some(entry.gid),
-        content,
-        encoding,
-        target: entry.target.clone(),
-        executable: matches!(entry.kind, KernelFilesystemEntryKind::File)
-            && (entry.mode & 0o111) != 0,
-    }
-}
+// build_root_filesystem, convert_root_lower_descriptor, convert_root_filesystem_entry,
+// root_snapshot_entry moved to crate::vm
 
 fn guest_filesystem_stat(stat: VirtualStat) -> GuestFilesystemStat {
     GuestFilesystemStat {
@@ -5375,7 +4552,7 @@ fn guest_filesystem_stat(stat: VirtualStat) -> GuestFilesystemStat {
     }
 }
 
-fn encode_guest_filesystem_content(content: Vec<u8>) -> (String, RootFilesystemEntryEncoding) {
+pub(crate) fn encode_guest_filesystem_content(content: Vec<u8>) -> (String, RootFilesystemEntryEncoding) {
     match String::from_utf8(content) {
         Ok(text) => (text, RootFilesystemEntryEncoding::Utf8),
         Err(error) => (
@@ -5408,58 +4585,7 @@ fn decode_guest_filesystem_content(
     }
 }
 
-fn apply_root_filesystem_entry<F>(
-    filesystem: &mut F,
-    entry: &RootFilesystemEntry,
-) -> Result<(), SidecarError>
-where
-    F: VirtualFileSystem,
-{
-    let kernel_entry = convert_root_filesystem_entry(entry)?;
-    ensure_parent_directories(filesystem, &kernel_entry.path)?;
-
-    match kernel_entry.kind {
-        KernelFilesystemEntryKind::Directory => filesystem
-            .mkdir(&kernel_entry.path, true)
-            .map_err(vfs_error)?,
-        KernelFilesystemEntryKind::File => filesystem
-            .write_file(&kernel_entry.path, kernel_entry.content.unwrap_or_default())
-            .map_err(vfs_error)?,
-        KernelFilesystemEntryKind::Symlink => filesystem
-            .symlink(
-                kernel_entry.target.as_deref().ok_or_else(|| {
-                    SidecarError::InvalidState(format!(
-                        "root filesystem bootstrap for symlink {} requires a target",
-                        entry.path
-                    ))
-                })?,
-                &kernel_entry.path,
-            )
-            .map_err(vfs_error)?,
-    }
-
-    if !matches!(kernel_entry.kind, KernelFilesystemEntryKind::Symlink) {
-        filesystem
-            .chmod(&kernel_entry.path, kernel_entry.mode)
-            .map_err(vfs_error)?;
-        filesystem
-            .chown(&kernel_entry.path, kernel_entry.uid, kernel_entry.gid)
-            .map_err(vfs_error)?;
-    }
-
-    Ok(())
-}
-
-fn ensure_parent_directories<F>(filesystem: &mut F, path: &str) -> Result<(), SidecarError>
-where
-    F: VirtualFileSystem,
-{
-    let parent = dirname(path);
-    if parent != "/" && !filesystem.exists(&parent) {
-        filesystem.mkdir(&parent, true).map_err(vfs_error)?;
-    }
-    Ok(())
-}
+// apply_root_filesystem_entry, ensure_parent_directories moved to crate::vm
 
 // ProcNetEntry moved to crate::state
 
@@ -5764,7 +4890,7 @@ fn collect_javascript_socket_port_state(
 fn build_javascript_socket_path_context(
     vm: &VmState,
 ) -> Result<JavascriptSocketPathContext, SidecarError> {
-    let internal_env = extract_guest_env(&vm.metadata);
+    let internal_env = crate::vm::extract_guest_env(&vm.metadata);
     let mut tcp_loopback_guest_to_host_ports = BTreeMap::new();
     let mut udp_loopback_guest_to_host_ports = BTreeMap::new();
     let mut udp_loopback_host_to_guest_ports = BTreeMap::new();
@@ -5973,11 +5099,11 @@ fn parse_proc_ip_port(value: &str) -> Option<(String, u16)> {
     Some((host, port))
 }
 
-fn root_filesystem_error(error: impl std::fmt::Display) -> SidecarError {
+pub(crate) fn root_filesystem_error(error: impl std::fmt::Display) -> SidecarError {
     SidecarError::InvalidState(format!("root filesystem: {error}"))
 }
 
-fn normalize_path(path: &str) -> String {
+pub(crate) fn normalize_path(path: &str) -> String {
     let mut segments = Vec::new();
     for component in Path::new(path).components() {
         match component {
@@ -6052,7 +5178,7 @@ fn path_is_within_root(path: &Path, root: &Path) -> bool {
     path == root || path.starts_with(root)
 }
 
-fn dirname(path: &str) -> String {
+pub(crate) fn dirname(path: &str) -> String {
     let normalized = normalize_path(path);
     let parent = Path::new(&normalized)
         .parent()
@@ -6071,34 +5197,7 @@ fn python_file_entrypoint(entrypoint: &str) -> Option<PathBuf> {
         .then(|| path.to_path_buf())
 }
 
-fn discover_command_guest_paths(kernel: &mut SidecarKernel) -> BTreeMap<String, String> {
-    let mut command_guest_paths = BTreeMap::new();
-    let Ok(command_roots) = kernel.read_dir("/__agentos/commands") else {
-        return command_guest_paths;
-    };
-
-    let mut ordered_roots = command_roots
-        .into_iter()
-        .filter(|entry| !entry.is_empty() && entry.chars().all(|ch| ch.is_ascii_digit()))
-        .collect::<Vec<_>>();
-    ordered_roots.sort();
-
-    for root in ordered_roots {
-        let guest_root = format!("/__agentos/commands/{root}");
-        let Ok(entries) = kernel.read_dir(&guest_root) else {
-            continue;
-        };
-
-        for entry in entries {
-            if entry.starts_with('.') || command_guest_paths.contains_key(&entry) {
-                continue;
-            }
-            command_guest_paths.insert(entry.clone(), format!("{guest_root}/{entry}"));
-        }
-    }
-
-    command_guest_paths
-}
+// discover_command_guest_paths moved to crate::vm
 
 fn is_path_like_specifier(specifier: &str) -> bool {
     specifier.starts_with('/')
@@ -6495,7 +5594,7 @@ where
         return Ok(addresses);
     }
 
-    let normalized_hostname = normalize_dns_hostname(hostname)?;
+    let normalized_hostname = crate::vm::normalize_dns_hostname(hostname)?;
     if let Some(addresses) = dns.overrides.get(&normalized_hostname) {
         emit_dns_resolution_event(
             bridge,
@@ -7962,11 +7061,11 @@ fn service_javascript_fs_sync_rpc(
     }
 }
 
-fn kernel_error(error: KernelError) -> SidecarError {
+pub(crate) fn kernel_error(error: KernelError) -> SidecarError {
     SidecarError::Kernel(error.to_string())
 }
 
-fn plugin_error(error: PluginError) -> SidecarError {
+pub(crate) fn plugin_error(error: PluginError) -> SidecarError {
     SidecarError::Plugin(error.to_string())
 }
 
@@ -7982,7 +7081,7 @@ fn python_error(error: PythonExecutionError) -> SidecarError {
     SidecarError::Execution(error.to_string())
 }
 
-fn vfs_error(error: VfsError) -> SidecarError {
+pub(crate) fn vfs_error(error: VfsError) -> SidecarError {
     SidecarError::Kernel(error.to_string())
 }
 
@@ -8127,8 +7226,11 @@ mod tests {
     use crate::s3_plugin::test_support::MockS3Server;
     use crate::sandbox_agent_plugin::test_support::MockSandboxAgentServer;
     use agent_os_kernel::command_registry::CommandDriver;
-    use agent_os_kernel::kernel::SpawnOptions;
-    use agent_os_kernel::mount_table::MountEntry;
+    use agent_os_kernel::kernel::{KernelVmConfig, SpawnOptions};
+    use agent_os_kernel::mount_table::{MountEntry, MountTable};
+    use agent_os_kernel::permissions::{FsAccessRequest, FsOperation, Permissions};
+    use crate::protocol::VmCreatedResponse;
+    use crate::state::VM_DNS_SERVERS_METADATA_KEY;
     use bridge_support::RecordingBridge;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -9354,7 +8456,7 @@ ykAheWCsAteSEWVc0w==\n\
     #[test]
     fn bridge_permissions_map_symlink_operations_to_symlink_access() {
         let bridge = SharedBridge::new(RecordingBridge::default());
-        let permissions = bridge_permissions(bridge.clone(), "vm-symlink");
+        let permissions = crate::vm::bridge_permissions(bridge.clone(), "vm-symlink");
         let check = permissions
             .filesystem
             .as_ref()
@@ -9428,7 +8530,8 @@ ykAheWCsAteSEWVc0w==\n\
             ),
         ]);
 
-        let limits = parse_resource_limits(&metadata).expect("parse resource limits");
+        let limits =
+            crate::vm::parse_resource_limits(&metadata).expect("parse resource limits");
         assert_eq!(limits.max_sockets, Some(8));
         assert_eq!(limits.max_connections, Some(4));
         assert_eq!(limits.max_filesystem_bytes, Some(4096));

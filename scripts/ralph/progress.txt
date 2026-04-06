@@ -9,6 +9,11 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Internal state types without Deserialize belong in state.rs
 - Pre-existing flaky tests in security_hardening.rs fail when run in parallel but pass individually (Node import cache race conditions)
 - Rust allows splitting impl blocks across modules — struct definition in state.rs, method impls in service.rs
+- NativeSidecar<B> fields are `pub(crate)` so impl blocks in vm.rs (and future domain modules) can access them
+- Cross-module method calls require `pub(crate)` visibility on the called method (e.g., vm.rs calling service.rs helper methods)
+- Shared free functions (kernel_error, audit_fields, emit_security_audit_event, etc.) are `pub(crate)` in service.rs and imported by domain modules
+- MountPluginContext<B> is `pub(crate)` with `pub(crate)` fields so vm.rs reconcile_mounts can construct it
+- When extracting methods, check test modules — `use super::*` only imports from the parent module, so removed imports need explicit test-module imports
 
 ## 2026-04-06 - US-001
 - Extracted shared state types from service.rs into new state.rs module (~450 lines)
@@ -22,4 +27,21 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - lib.rs re-exports through service.rs which re-exports from state.rs: lib.rs → service.rs `pub use crate::state::*` → state.rs
   - HostFilesystem, ScopedHostFilesystem, MountPluginContext, MemoryMountPlugin, JsBridgeMountPlugin were NOT moved to state.rs — they are bridge/plugin types that will go to bridge.rs (US-003) and plugins/ (US-006)
   - security_hardening tests are flaky in parallel due to Node import cache races — not a regression
+---
+
+## 2026-04-06 - US-002
+- Extracted VM lifecycle functions from service.rs into new vm.rs module (985 lines)
+- Methods moved to vm.rs impl block: create_vm, dispose_vm, bootstrap_root_filesystem, configure_vm, snapshot_root_filesystem, dispose_vm_internal, terminate_vm_processes, wait_for_vm_processes_to_exit
+- Free functions moved: bridge_permissions, filesystem_operation_label, reconcile_mounts, resolve_cwd, extract_guest_env, parse_resource_limits, parse_resource_limit, parse_resource_limit_u64, parse_vm_dns_config, parse_vm_dns_nameserver, normalize_dns_hostname, build_root_filesystem, convert_root_lower_descriptor, convert_root_filesystem_entry, root_snapshot_entry, apply_root_filesystem_entry, ensure_parent_directories, discover_command_guest_paths
+- Made NativeSidecar<B> fields pub(crate) so vm.rs impl block can access self.* fields
+- Made cross-module helper methods pub(crate) (session_scope_for, vm_scope_for, require_owned_session, require_owned_vm, respond, vm_lifecycle_event, vm_ownership, vm_has_active_processes, kill_process_internal, poll_event)
+- Made shared free functions pub(crate) in service.rs (kernel_error, plugin_error, vfs_error, root_filesystem_error, normalize_path, encode_guest_filesystem_content, audit_fields, emit_security_audit_event, filesystem_permission_capability, dirname)
+- Made MountPluginContext<B> pub(crate) with pub(crate) fields
+- service.rs reduced from 13,791 to 12,894 lines
+- Files changed: crates/sidecar/src/vm.rs (new), crates/sidecar/src/service.rs (code removed, visibility updated), crates/sidecar/src/lib.rs (vm module declared)
+- **Learnings for future iterations:**
+  - kill_process_internal is shared between vm.rs (terminate_vm_processes) and service.rs (kill_process RPC handler) — stays in service.rs as pub(crate)
+  - extract_guest_env and normalize_dns_hostname are also used by execution code in service.rs (build_javascript_socket_path_context and resolve_dns_with_overrides) — made pub(crate) in vm.rs
+  - Root filesystem types (decode/encode snapshot, KernelFilesystemEntry, etc.) moved entirely to vm.rs since no other service.rs code uses them
+  - Test module `use super::*` only brings in parent module scope — when parent stops importing types (KernelVmConfig, MountTable, FsAccessRequest, etc.), test module needs explicit imports
 ---

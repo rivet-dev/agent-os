@@ -32,7 +32,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Step 0a. Depends on US-001 (state types must be in state.rs first). VM lifecycle is the top-level entry point for sidecar operations."
     },
     {
