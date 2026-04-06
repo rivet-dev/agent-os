@@ -3,6 +3,7 @@
 - When TS integration tests boot `AgentOs.create({ software })`, build the software list from packages whose `commandDir` actually exists locally; optional registry packages with missing `wasm/` directories abort VM startup before the target behavior can be tested.
 - For network-capable WASM command packages in the current runtime, prefer a tiny `wasi-spawn` wrapper that launches guest `node` over linking directly to `wasi-http`; the generic WASM runner does not expose `host_net` imports yet.
 - After a fresh workspace install, linked registry agent/software packages still need their built `dist/` outputs before adapter-backed or software-backed `packages/core` Vitest suites are meaningful; otherwise Vite fails on package entry resolution before test logic runs.
+- Sandbox VM-integration tests that boot a real `AgentOs` instance per case need explicit hook/test timeouts under Turbo CI load; the default 30s Vitest budget is too tight once the sandbox mount plus WASM shell path are exercised in parallel with `packages/core`.
 - Sidecar service tests must use a unique `compile_cache_root` per test sidecar instance; sharing one import-cache root lets the one-time stale-cache sweep delete another parallel test's `register.mjs` and runner assets.
 - When moving grouped test files, update root `package.json` test scripts and `scripts/benchmarks/bench-utils.ts` path constants along with the test files themselves; those hard-coded references are part of the test layout contract.
 - Sidecar integration tests that override `AGENT_OS_NODE_BINARY` must hold a shared lock across the full test body, including sibling tests in the same binary that use the real Node runtime; the env var is process-global and fake-node shims otherwise leak into unrelated tests.
@@ -310,4 +311,15 @@ Started: Sat Apr  5 2026
   - CI-only TypeScript failures in `packages/core` are often hook/test-timeout budget issues under Turbo load rather than logic regressions; raise the timeout on the specific heavy suite before widening it repo-wide.
   - Deterministic sidecar networking tests are more reliable when they drive the `net` sync-RPC surface directly instead of relying on guest event-loop timing around socket close semantics.
   - Quality checks: `cargo test --package agent-os-sidecar -- --nocapture` passed, `cargo test --package agent-os-sidecar -- --ignored --test-threads=1` passed, `pnpm --dir packages/core exec vitest run tests/session/session-comprehensive.test.ts tests/sidecar/native-process.test.ts` passed, and `pnpm --dir packages/core exec vitest run tests/session/protocol.test.ts` passed.
+---
+## 2026-04-06 07:38:47 PDT - US-400
+- What was implemented
+- Pulled the failed GitHub Actions logs for run `24035754667`, identified the remaining CI-only failure as `registry/tool/sandbox/tests/vm-integration.test.ts` exhausting Vitest's default 30s hook budget, and raised the timeout only for that VM-backed sandbox suite.
+- Files changed
+- `registry/tool/sandbox/tests/vm-integration.test.ts`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The sandbox toolkit package can pass locally and still fail in the root Turbo run because its VM integration suite starts a real sandbox agent plus a fresh `AgentOs` VM per test while `packages/core` is running in parallel; treat it like the other heavy sidecar/session suites when budgeting hook timeouts.
+  - GitHub job logs are readable before the overall workflow finishes by querying the failed job log endpoint directly; for this run the actionable signal was `tests/vm-integration.test.ts > should cat a sandbox file from the WASM shell` reporting `Hook timed out in 30000ms`.
+  - Quality checks: `CI=1 AGENTOS_E2E_NETWORK=1 pnpm --dir registry/tool/sandbox exec vitest run` passed, and `CI=1 pnpm --dir packages/core exec vitest run tests/session/session-comprehensive.test.ts tests/sidecar/native-process.test.ts` passed while the sandbox VM integration suite ran concurrently.
 ---

@@ -19,6 +19,7 @@ import { createSandboxFs, createSandboxToolkit } from "../src/index.js";
 
 let sandbox: SandboxAgentContainerHandle;
 const sandboxBasePath = "/tmp/agent-os-sandbox-vm";
+const SANDBOX_VM_TEST_TIMEOUT_MS = 120_000;
 
 const hasWasm = existsSync(coreutils.commandDir);
 const skipReason = process.env.SKIP_SANDBOX_TESTS
@@ -40,11 +41,11 @@ beforeAll(async () => {
 			`Failed to prepare sandbox base path ${sandboxBasePath}: ${mkdir.stderr}`,
 		);
 	}
-}, 150_000);
+}, SANDBOX_VM_TEST_TIMEOUT_MS);
 
 afterAll(async () => {
 	if (sandbox) await sandbox.stop();
-});
+}, SANDBOX_VM_TEST_TIMEOUT_MS);
 
 describe.skipIf(skipReason)("VM integration", () => {
 	let vm: AgentOs;
@@ -63,11 +64,11 @@ describe.skipIf(skipReason)("VM integration", () => {
 			],
 			toolKits: [createSandboxToolkit({ client: sandbox.client })],
 		});
-	});
+	}, SANDBOX_VM_TEST_TIMEOUT_MS);
 
 	afterEach(async () => {
 		await vm.dispose();
-	});
+	}, SANDBOX_VM_TEST_TIMEOUT_MS);
 
 	// -- Filesystem mount tests --
 
@@ -98,7 +99,7 @@ describe.skipIf(skipReason)("VM integration", () => {
 		const result = await vm.exec("cat /sandbox/shell-read.txt");
 		expect(result.exitCode).toBe(0);
 		expect(result.stdout).toBe("read by shell");
-	});
+	}, SANDBOX_VM_TEST_TIMEOUT_MS);
 
 	// -- Toolkit shim installation --
 
