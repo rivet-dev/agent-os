@@ -8,6 +8,7 @@ pub const S_IFREG: u32 = 0o100000;
 pub const S_IFDIR: u32 = 0o040000;
 pub const S_IFLNK: u32 = 0o120000;
 const MEMORY_FILESYSTEM_DEVICE_ID: u64 = 1;
+const MAX_PATH_COMPONENT_LENGTH: usize = 255;
 
 const DEFAULT_UID: u32 = 1000;
 const DEFAULT_GID: u32 = 1000;
@@ -1152,6 +1153,26 @@ impl Default for MemoryFileSystem {
 }
 
 pub fn validate_path(path: &str) -> VfsResult<()> {
+    if path.as_bytes().contains(&0) {
+        return Err(VfsError::invalid_input(format!(
+            "path contains NUL byte: {path:?}"
+        )));
+    }
+
+    let candidate = if path.starts_with('/') {
+        path
+    } else {
+        path.strip_prefix("./").unwrap_or(path)
+    };
+    for component in candidate.split('/') {
+        if matches!(component, "" | "." | "..") {
+            continue;
+        }
+        if component.len() > MAX_PATH_COMPONENT_LENGTH {
+            return Err(VfsError::path_too_long(path));
+        }
+    }
+
     let normalized = normalize_path(path);
     if normalized.len() > MAX_PATH_LENGTH {
         return Err(VfsError::path_too_long(path));

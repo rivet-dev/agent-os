@@ -404,6 +404,12 @@ impl<F: VirtualFileSystem> PermissionedFileSystem<F> {
         self.check(op, &subject)
     }
 
+    fn checked_subject(&self, op: FsOperation, path: &str) -> VfsResult<String> {
+        let subject = self.permission_subject(op, path)?;
+        self.check(op, &subject)?;
+        Ok(subject)
+    }
+
     pub fn check_path(&self, op: FsOperation, path: &str) -> VfsResult<()> {
         self.check_subject(op, path)
     }
@@ -413,60 +419,69 @@ impl<F: VirtualFileSystem> PermissionedFileSystem<F> {
     }
 
     pub fn exists(&self, path: &str) -> VfsResult<bool> {
-        if let Err(error) = self.check_subject(FsOperation::Exists, path) {
+        let subject = match self.checked_subject(FsOperation::Exists, path) {
+            Ok(subject) => subject,
+            Err(error) => {
+                if matches!(error.code(), "EACCES" | "ENOENT" | "ENOTDIR" | "ELOOP") {
+                    return Ok(false);
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.inner.realpath(&subject) {
             if matches!(error.code(), "EACCES" | "ENOENT" | "ENOTDIR" | "ELOOP") {
                 return Ok(false);
             }
             return Err(error);
         }
-        Ok(self.inner.exists(path))
+        Ok(self.inner.exists(&subject))
     }
 }
 
 impl<F: VirtualFileSystem> VirtualFileSystem for PermissionedFileSystem<F> {
     fn read_file(&mut self, path: &str) -> VfsResult<Vec<u8>> {
-        self.check_subject(FsOperation::Read, path)?;
-        self.inner.read_file(path)
+        let subject = self.checked_subject(FsOperation::Read, path)?;
+        self.inner.read_file(&subject)
     }
 
     fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>> {
-        self.check_subject(FsOperation::ReadDir, path)?;
-        self.inner.read_dir(path)
+        let subject = self.checked_subject(FsOperation::ReadDir, path)?;
+        self.inner.read_dir(&subject)
     }
 
     fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
-        self.check_subject(FsOperation::ReadDir, path)?;
-        self.inner.read_dir_limited(path, max_entries)
+        let subject = self.checked_subject(FsOperation::ReadDir, path)?;
+        self.inner.read_dir_limited(&subject, max_entries)
     }
 
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
-        self.check_subject(FsOperation::ReadDir, path)?;
-        self.inner.read_dir_with_types(path)
+        let subject = self.checked_subject(FsOperation::ReadDir, path)?;
+        self.inner.read_dir_with_types(&subject)
     }
 
     fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
-        self.check_subject(FsOperation::Write, path)?;
-        self.inner.write_file(path, content)
+        let subject = self.checked_subject(FsOperation::Write, path)?;
+        self.inner.write_file(&subject, content)
     }
 
     fn create_file_exclusive(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
-        self.check_subject(FsOperation::Write, path)?;
-        self.inner.create_file_exclusive(path, content)
+        let subject = self.checked_subject(FsOperation::Write, path)?;
+        self.inner.create_file_exclusive(&subject, content)
     }
 
     fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
-        self.check_subject(FsOperation::Write, path)?;
-        self.inner.append_file(path, content)
+        let subject = self.checked_subject(FsOperation::Write, path)?;
+        self.inner.append_file(&subject, content)
     }
 
     fn create_dir(&mut self, path: &str) -> VfsResult<()> {
-        self.check_subject(FsOperation::CreateDir, path)?;
-        self.inner.create_dir(path)
+        let subject = self.checked_subject(FsOperation::CreateDir, path)?;
+        self.inner.create_dir(&subject)
     }
 
     fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()> {
-        self.check_subject(FsOperation::Mkdir, path)?;
-        self.inner.mkdir(path, recursive)
+        let subject = self.checked_subject(FsOperation::Mkdir, path)?;
+        self.inner.mkdir(&subject, recursive)
     }
 
     fn exists(&self, path: &str) -> bool {
@@ -474,8 +489,8 @@ impl<F: VirtualFileSystem> VirtualFileSystem for PermissionedFileSystem<F> {
     }
 
     fn stat(&mut self, path: &str) -> VfsResult<VirtualStat> {
-        self.check_subject(FsOperation::Stat, path)?;
-        self.inner.stat(path)
+        let subject = self.checked_subject(FsOperation::Stat, path)?;
+        self.inner.stat(&subject)
     }
 
     fn remove_file(&mut self, path: &str) -> VfsResult<()> {
@@ -495,8 +510,8 @@ impl<F: VirtualFileSystem> VirtualFileSystem for PermissionedFileSystem<F> {
     }
 
     fn realpath(&self, path: &str) -> VfsResult<String> {
-        self.check_subject(FsOperation::Read, path)?;
-        self.inner.realpath(path)
+        let subject = self.checked_subject(FsOperation::Read, path)?;
+        self.inner.realpath(&subject)
     }
 
     fn symlink(&mut self, target: &str, link_path: &str) -> VfsResult<()> {
@@ -521,28 +536,28 @@ impl<F: VirtualFileSystem> VirtualFileSystem for PermissionedFileSystem<F> {
     }
 
     fn chmod(&mut self, path: &str, mode: u32) -> VfsResult<()> {
-        self.check_subject(FsOperation::Chmod, path)?;
-        self.inner.chmod(path, mode)
+        let subject = self.checked_subject(FsOperation::Chmod, path)?;
+        self.inner.chmod(&subject, mode)
     }
 
     fn chown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()> {
-        self.check_subject(FsOperation::Chown, path)?;
-        self.inner.chown(path, uid, gid)
+        let subject = self.checked_subject(FsOperation::Chown, path)?;
+        self.inner.chown(&subject, uid, gid)
     }
 
     fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
-        self.check_subject(FsOperation::Utimes, path)?;
-        self.inner.utimes(path, atime_ms, mtime_ms)
+        let subject = self.checked_subject(FsOperation::Utimes, path)?;
+        self.inner.utimes(&subject, atime_ms, mtime_ms)
     }
 
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {
-        self.check_subject(FsOperation::Truncate, path)?;
-        self.inner.truncate(path, length)
+        let subject = self.checked_subject(FsOperation::Truncate, path)?;
+        self.inner.truncate(&subject, length)
     }
 
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {
-        self.check_subject(FsOperation::Read, path)?;
-        self.inner.pread(path, offset, length)
+        let subject = self.checked_subject(FsOperation::Read, path)?;
+        self.inner.pread(&subject, offset, length)
     }
 
     fn external_mount_points(&self) -> std::collections::BTreeSet<String> {

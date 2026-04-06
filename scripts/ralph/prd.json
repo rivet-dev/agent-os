@@ -247,7 +247,7 @@
         "All tests run at the kernel crate level (crates/kernel/tests/)."
       ],
       "priority": 16,
-      "passes": false,
+      "passes": true,
       "notes": "TS-side host-dir-backend.test.ts has one ../../etc/passwd test. Kernel VFS has zero adversarial path tests."
     },
     {

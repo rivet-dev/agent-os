@@ -8,6 +8,7 @@ use agent_os_kernel::permissions::{
 use agent_os_kernel::vfs::{MemoryFileSystem, VfsResult, VirtualFileSystem};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn filesystem_fixture() -> MemoryFileSystem {
@@ -31,6 +32,135 @@ fn wrap_filesystem(permissions: Permissions) -> PermissionedFileSystem<MemoryFil
 fn assert_fs_access_denied<T: Debug>(result: VfsResult<T>) {
     let error = result.expect_err("filesystem operation should be denied");
     assert_eq!(error.code(), "EACCES");
+}
+
+struct SwapSymlinkOnReadFile {
+    inner: MemoryFileSystem,
+    swap_on_read: Arc<AtomicBool>,
+}
+
+impl SwapSymlinkOnReadFile {
+    fn new(inner: MemoryFileSystem, swap_on_read: Arc<AtomicBool>) -> Self {
+        Self {
+            inner,
+            swap_on_read,
+        }
+    }
+
+    fn maybe_swap_alias(&mut self) {
+        if !self.swap_on_read.swap(false, Ordering::SeqCst) {
+            return;
+        }
+
+        self.inner
+            .remove_file("/allowed/alias.txt")
+            .expect("remove original alias");
+        self.inner
+            .symlink("/private/secret.txt", "/allowed/alias.txt")
+            .expect("swap alias target");
+    }
+}
+
+impl VirtualFileSystem for SwapSymlinkOnReadFile {
+    fn read_file(&mut self, path: &str) -> VfsResult<Vec<u8>> {
+        self.maybe_swap_alias();
+        self.inner.read_file(path)
+    }
+
+    fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>> {
+        self.inner.read_dir(path)
+    }
+
+    fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
+        self.inner.read_dir_limited(path, max_entries)
+    }
+
+    fn read_dir_with_types(
+        &mut self,
+        path: &str,
+    ) -> VfsResult<Vec<agent_os_kernel::vfs::VirtualDirEntry>> {
+        self.inner.read_dir_with_types(path)
+    }
+
+    fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
+        self.inner.write_file(path, content)
+    }
+
+    fn create_file_exclusive(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
+        self.inner.create_file_exclusive(path, content)
+    }
+
+    fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
+        self.inner.append_file(path, content)
+    }
+
+    fn create_dir(&mut self, path: &str) -> VfsResult<()> {
+        self.inner.create_dir(path)
+    }
+
+    fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()> {
+        self.inner.mkdir(path, recursive)
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        self.inner.exists(path)
+    }
+
+    fn stat(&mut self, path: &str) -> VfsResult<agent_os_kernel::vfs::VirtualStat> {
+        self.inner.stat(path)
+    }
+
+    fn remove_file(&mut self, path: &str) -> VfsResult<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn remove_dir(&mut self, path: &str) -> VfsResult<()> {
+        self.inner.remove_dir(path)
+    }
+
+    fn rename(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
+        self.inner.rename(old_path, new_path)
+    }
+
+    fn realpath(&self, path: &str) -> VfsResult<String> {
+        self.inner.realpath(path)
+    }
+
+    fn symlink(&mut self, target: &str, link_path: &str) -> VfsResult<()> {
+        self.inner.symlink(target, link_path)
+    }
+
+    fn read_link(&self, path: &str) -> VfsResult<String> {
+        self.inner.read_link(path)
+    }
+
+    fn lstat(&self, path: &str) -> VfsResult<agent_os_kernel::vfs::VirtualStat> {
+        self.inner.lstat(path)
+    }
+
+    fn link(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
+        self.inner.link(old_path, new_path)
+    }
+
+    fn chmod(&mut self, path: &str, mode: u32) -> VfsResult<()> {
+        self.inner.chmod(path, mode)
+    }
+
+    fn chown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()> {
+        self.inner.chown(path, uid, gid)
+    }
+
+    fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
+        self.inner.utimes(path, atime_ms, mtime_ms)
+    }
+
+    fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {
+        self.inner.truncate(path, length)
+    }
+
+    fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {
+        self.inner.pread(path, offset, length)
+    }
 }
 
 #[test]
@@ -149,6 +279,49 @@ fn permission_wrapped_filesystem_resolves_symlinks_before_permission_checks() {
             .expect("permission path lock poisoned")
             .as_slice(),
         [String::from("/private/secret.txt")].as_slice()
+    );
+}
+
+#[test]
+fn permission_wrapped_filesystem_uses_resolved_path_after_permission_check() {
+    let mut inner = MemoryFileSystem::new();
+    inner.mkdir("/allowed", true).expect("seed allowed dir");
+    inner.mkdir("/private", true).expect("seed private dir");
+    inner
+        .write_file("/allowed/public.txt", b"public".to_vec())
+        .expect("seed public file");
+    inner
+        .write_file("/private/secret.txt", b"secret".to_vec())
+        .expect("seed secret file");
+    inner
+        .symlink("/allowed/public.txt", "/allowed/alias.txt")
+        .expect("seed alias");
+
+    let swap_on_read = Arc::new(AtomicBool::new(false));
+    let swap_on_read_for_permission = Arc::clone(&swap_on_read);
+    let permissions = Permissions {
+        filesystem: Some(Arc::new(move |request: &FsAccessRequest| {
+            if request.path == "/allowed/public.txt" {
+                swap_on_read_for_permission.store(true, Ordering::SeqCst);
+                PermissionDecision::allow()
+            } else {
+                PermissionDecision::deny("allowed-only")
+            }
+        })),
+        ..Permissions::default()
+    };
+
+    let mut filesystem = PermissionedFileSystem::new(
+        SwapSymlinkOnReadFile::new(inner, swap_on_read),
+        "vm-permissions",
+        permissions,
+    );
+
+    assert_eq!(
+        filesystem
+            .read_file("/allowed/alias.txt")
+            .expect("read should stay pinned to the resolved target"),
+        b"public".to_vec()
     );
 }
 

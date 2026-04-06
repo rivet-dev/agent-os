@@ -145,6 +145,71 @@ fn symlink_loops_fail_closed() {
 }
 
 #[test]
+fn path_traversal_stays_within_the_virtual_root() {
+    let mut filesystem = MemoryFileSystem::new();
+
+    filesystem
+        .write_file("/etc/passwd", "guest-root")
+        .expect("write virtual passwd");
+
+    assert_eq!(
+        filesystem
+            .read_text_file("../../../etc/passwd")
+            .expect("read virtual traversal target"),
+        "guest-root"
+    );
+    assert_eq!(
+        filesystem
+            .realpath("../../../etc/passwd")
+            .expect("realpath virtual traversal target"),
+        "/etc/passwd"
+    );
+}
+
+#[test]
+fn paths_with_nul_bytes_are_rejected() {
+    let mut filesystem = MemoryFileSystem::new();
+    let nul_path = "/tmp/evil\0suffix";
+
+    assert_error_code(filesystem.write_file(nul_path, "blocked"), "EINVAL");
+    assert_error_code(filesystem.stat(nul_path), "EINVAL");
+    assert_error_code(filesystem.mkdir(nul_path, true), "EINVAL");
+}
+
+#[test]
+fn overlong_path_components_are_rejected() {
+    let mut filesystem = MemoryFileSystem::new();
+    let component = "a".repeat(256);
+    let long_path = format!("/{component}/file.txt");
+
+    assert_error_code(filesystem.write_file(&long_path, "blocked"), "ENAMETOOLONG");
+    assert_error_code(filesystem.stat(&long_path), "ENAMETOOLONG");
+}
+
+#[test]
+fn symlink_chains_beyond_linux_limit_return_eloop() {
+    let mut filesystem = MemoryFileSystem::new();
+    let symlink_limit = 40;
+
+    filesystem
+        .write_file("/target.txt", "reachable")
+        .expect("write target");
+    for index in 0..=symlink_limit {
+        let source = format!("/chain-{index}.txt");
+        let target = if index == symlink_limit {
+            String::from("/target.txt")
+        } else {
+            format!("/chain-{}.txt", index + 1)
+        };
+        filesystem
+            .symlink(&target, &source)
+            .expect("create chain entry");
+    }
+
+    assert_error_code(filesystem.read_file("/chain-0.txt"), "ELOOP");
+}
+
+#[test]
 fn intermediate_symlink_components_are_resolved_for_reads_writes_and_stats() {
     let mut filesystem = MemoryFileSystem::new();
 

@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Permissioned VFS tests that probe symlink TOCTOU should swap the alias target after `permission_subject(...)` resolves it; follow-symlink operations in `crates/kernel/src/permissions.rs` must call the inner VFS with that resolved subject, not the original alias path.
 - Overlay filesystem coverage belongs in `crates/kernel/tests/overlay_fs.rs` and should assert merged VFS behavior, not internal marker files; `/.agent-os-overlay` is intentionally hidden from guest-visible paths.
 - Malformed sidecar bridge frame tests should target `crates/sidecar/tests/stdio_binary.rs` and assert real child stderr/exit status; `NativeSidecar::dispatch(...)` sits past codec/stdio parsing and cannot cover truncated or binary-garbage frames.
 - Kernel socket lifecycle coverage lives in `crates/kernel/src/socket_table.rs` with direct assertions in `crates/kernel/tests/socket_table.rs`; update both together when ownership cleanup or socket limits change.
@@ -203,8 +204,18 @@ Started: Sat Apr  5 2026
 - `scripts/ralph/progress.txt`
 - **Learnings for future iterations:**
   - Parallel `agent-os-execution` Python tests need the same import-cache isolation as the JavaScript and WASM suites; otherwise the shared `/tmp` stale-cache sweep deletes another test's `timing-bootstrap.mjs` and warm-path assets.
-  - Any Python execution test in the same binary that swaps `AGENT_OS_NODE_BINARY` must serialize with real-Node tests for the full test body, not just the env-var mutation site, because sibling tests can otherwise inherit the fake node shim and report misleading heap-OOM failures.
-  - Quality checks: `cargo test --package agent-os-execution --test python` passes with `15/15`; the adjacent `cargo test --package agent-os-execution --test python_prewarm` target still has a separate pre-existing failure in `python_execution_invalidates_prewarm_stamp_when_pyodide_bundle_changes`, outside this story's acceptance scope.
+- Any Python execution test in the same binary that swaps `AGENT_OS_NODE_BINARY` must serialize with real-Node tests for the full test body, not just the env-var mutation site, because sibling tests can otherwise inherit the fake node shim and report misleading heap-OOM failures.
+- Quality checks: `cargo test --package agent-os-execution --test python` passes with `15/15`; the adjacent `cargo test --package agent-os-execution --test python_prewarm` target still has a separate pre-existing failure in `python_execution_invalidates_prewarm_stamp_when_pyodide_bundle_changes`, outside this story's acceptance scope.
+---
+## 2026-04-06 09:54:26 PDT - US-504
+- Added kernel-level adversarial VFS coverage for `../../../etc/passwd` traversal normalization, NUL-byte path rejection, overlong path components, deep symlink-chain `ELOOP`, and a permission-wrapper TOCTOU probe that swaps a symlink target after permission resolution.
+- Tightened `crates/kernel/src/vfs.rs` path validation to reject NUL bytes and >255-byte components, and updated `crates/kernel/src/permissions.rs` so follow-symlink operations execute against the resolved permission subject instead of the original alias path.
+- Files changed: `AGENTS.md`, `crates/kernel/src/{permissions.rs,vfs.rs}`, `crates/kernel/tests/{permissions.rs,vfs.rs}`, `scripts/ralph/{prd.json,progress.txt}`.
+- **Learnings for future iterations:**
+  - Kernel adversarial path coverage belongs in the existing `vfs.rs` and `permissions.rs` subsystem tests; this crate's one-file-per-subsystem layout is still the right home for these cases.
+  - Reject raw-path NUL bytes and >255-byte components in `validate_path(...)` before normalization; normalization alone will not catch those Linux-path failure modes.
+  - Permission wrappers that resolve a symlink only for the access decision still have a check/use race if they pass the original alias into the inner VFS call afterward.
+  - Quality checks: `cargo test --package agent-os-kernel --test vfs --test permissions` and `cargo test --package agent-os-kernel` both pass.
 ---
 ## 2026-04-06 01:01 PDT - US-306 (partial, manual intervention)
 - What was implemented
