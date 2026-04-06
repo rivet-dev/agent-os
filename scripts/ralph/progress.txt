@@ -11,6 +11,7 @@
 - Sidecar-owned JavaScript, Python, and WASM engines should use per-VM import-cache roots; sharing one temp cache lets stale-runner cleanup delete another VM's assets.
 - `agent-os-sidecar` should run in its own serialized CI job instead of inside the workspace-wide `cargo test --workspace` process; the full sidecar integration matrix passes with `--test-threads=1` but still hangs or times out when competing with the rest of the Rust workspace under GitHub's job budget.
 - The root Turbo workspace test should stay at `--concurrency=2`; `packages/core` already serializes its own Vitest files, and pushing Turbo to `--concurrency=3` is enough to get `@rivet-dev/agent-os#test` SIGKILLed with exit `137` while the same workload passes at concurrency 2.
+- Rust CI jobs that exercise `agent-os-execution` or `agent-os-sidecar` must also run `actions/setup-node` before `cargo test`; the stock GitHub runner `/usr/local/bin/node` can be too old for the `--permission` flag that the execution hosts require.
 - Rust execution tests that spin up JavaScript, Python, or WASM engines should call `set_import_cache_base_dir(...)` with a unique temp root per test VM; the default `/tmp` cache root is not parallel-test-safe because each engine instance sweeps stale cache directories once.
 - Rust execution tests that override `AGENT_OS_NODE_BINARY` need a shared test-process lock around the full test body; otherwise parallel tests can redirect each other into the wrong fake node shim or a deleted temp fixture.
 - Timer-driven guest Node networking can outlive top-level module evaluation, so the sync-RPC bridge must stay alive until process exit rather than being disposed when the entry module resolves.
@@ -353,4 +354,16 @@ Started: Sat Apr  5 2026
   - The `packages/core` Vitest config already runs with `fileParallelism: false`; if the root workspace still reports exit `137`, look at outer Turbo concurrency and competing browser/sandbox jobs before widening per-test timeouts again.
   - The decisive reproduction was `CI=1 AGENTOS_E2E_NETWORK=1 npx turbo test --concurrency=2 --ui=stream --log-order=stream`, which completed successfully in `4m33.218s` after the same workspace failed twice with `pnpm test` at `--concurrency=3`.
   - Quality checks: `cargo test --workspace --exclude agent-os-sidecar --no-fail-fast` passed, `cargo test --package agent-os-sidecar -- --test-threads=1` passed, `cargo test --package agent-os-sidecar -- --ignored --test-threads=1` passed, `CI=1 AGENTOS_E2E_NETWORK=1 npx turbo test --concurrency=2 --ui=stream --log-order=stream` passed with `90 successful, 90 total`, and `CI=1 AGENTOS_E2E_NETWORK=1 pnpm test` passed after updating the root script to the same concurrency.
+---
+## 2026-04-06 08:41:43 PDT - US-400
+- What was implemented
+- Pulled the failed Rust workspace job logs from GitHub run `24038361260`, identified the common failure as `/usr/local/bin/node: bad option: --permission` inside `agent-os-execution` benchmark/javascript/python/wasm tests, and updated both Rust CI jobs to install the same Node.js version as the TypeScript job before running `cargo test`.
+- Files changed
+- `.github/workflows/ci.yml`
+- `CLAUDE.md`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - If Rust execution tests fail broadly at `start ... execution` with `WarmupFailed { exit_code: 9, stderr: "/usr/local/bin/node: bad option: --permission" }`, the problem is the host Node on the CI runner, not the Rust crates themselves.
+  - GitHub job-log API access (`gh api repos/.../actions/jobs/<job-id>/logs`) is useful while the overall workflow is still running; `gh run view --job ... --log` waits for the whole run to complete.
+  - Quality checks: local validation was unchanged from the prior commit, and `node --permission -e "console.log(process.version)"` confirmed the local Node runtime supports the required host flag while the workflow fix targets the GitHub runner environment.
 ---

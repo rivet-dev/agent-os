@@ -40,6 +40,11 @@ jobs:
         with:
           shared-key: ci-rust
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
       - name: Run Rust workspace tests
         run: cargo test --workspace --exclude agent-os-sidecar --no-fail-fast
 
@@ -66,6 +71,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-rust
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Run sidecar tests serially
         run: cargo test --package agent-os-sidecar -- --test-threads=1
