@@ -4,10 +4,13 @@
 - For network-capable WASM command packages in the current runtime, prefer a tiny `wasi-spawn` wrapper that launches guest `node` over linking directly to `wasi-http`; the generic WASM runner does not expose `host_net` imports yet.
 - After a fresh workspace install, linked registry agent/software packages still need their built `dist/` outputs before adapter-backed or software-backed `packages/core` Vitest suites are meaningful; otherwise Vite fails on package entry resolution before test logic runs.
 - Sandbox VM-integration tests that boot a real `AgentOs` instance per case need explicit hook/test timeouts under Turbo CI load; the default 30s Vitest budget is too tight once the sandbox mount plus WASM shell path are exercised in parallel with `packages/core`.
+- `packages/core/tests/session/protocol.test.ts` also needs explicit per-test 120s budgets under the full Turbo CI run; its mock-ACP session flows can hit the default 30s timeout even when the suite passes locally in isolation.
 - Sidecar service tests must use a unique `compile_cache_root` per test sidecar instance; sharing one import-cache root lets the one-time stale-cache sweep delete another parallel test's `register.mjs` and runner assets.
 - When moving grouped test files, update root `package.json` test scripts and `scripts/benchmarks/bench-utils.ts` path constants along with the test files themselves; those hard-coded references are part of the test layout contract.
 - Sidecar integration tests that override `AGENT_OS_NODE_BINARY` must hold a shared lock across the full test body, including sibling tests in the same binary that use the real Node runtime; the env var is process-global and fake-node shims otherwise leak into unrelated tests.
 - Sidecar-owned JavaScript, Python, and WASM engines should use per-VM import-cache roots; sharing one temp cache lets stale-runner cleanup delete another VM's assets.
+- `agent-os-sidecar` should run in its own serialized CI job instead of inside the workspace-wide `cargo test --workspace` process; the full sidecar integration matrix passes with `--test-threads=1` but still hangs or times out when competing with the rest of the Rust workspace under GitHub's job budget.
+- The root Turbo workspace test should stay at `--concurrency=2`; `packages/core` already serializes its own Vitest files, and pushing Turbo to `--concurrency=3` is enough to get `@rivet-dev/agent-os#test` SIGKILLed with exit `137` while the same workload passes at concurrency 2.
 - Rust execution tests that spin up JavaScript, Python, or WASM engines should call `set_import_cache_base_dir(...)` with a unique temp root per test VM; the default `/tmp` cache root is not parallel-test-safe because each engine instance sweeps stale cache directories once.
 - Rust execution tests that override `AGENT_OS_NODE_BINARY` need a shared test-process lock around the full test body; otherwise parallel tests can redirect each other into the wrong fake node shim or a deleted temp fixture.
 - Timer-driven guest Node networking can outlive top-level module evaluation, so the sync-RPC bridge must stay alive until process exit rather than being disposed when the entry module resolves.
@@ -322,4 +325,32 @@ Started: Sat Apr  5 2026
   - The sandbox toolkit package can pass locally and still fail in the root Turbo run because its VM integration suite starts a real sandbox agent plus a fresh `AgentOs` VM per test while `packages/core` is running in parallel; treat it like the other heavy sidecar/session suites when budgeting hook timeouts.
   - GitHub job logs are readable before the overall workflow finishes by querying the failed job log endpoint directly; for this run the actionable signal was `tests/vm-integration.test.ts > should cat a sandbox file from the WASM shell` reporting `Hook timed out in 30000ms`.
   - Quality checks: `CI=1 AGENTOS_E2E_NETWORK=1 pnpm --dir registry/tool/sandbox exec vitest run` passed, and `CI=1 pnpm --dir packages/core exec vitest run tests/session/session-comprehensive.test.ts tests/sidecar/native-process.test.ts` passed while the sandbox VM integration suite ran concurrently.
+---
+## 2026-04-06 08:16:42 PDT - US-400
+- What was implemented
+- Pulled the next failed GitHub Actions logs for run `24036206575`, widened the CI-only timeout budgets in `packages/core/tests/session/protocol.test.ts` and the `curl` keep-alive timing assertion in `packages/core/tests/wasm/commands.test.ts`, and split `agent-os-sidecar` out of the generic Rust workspace workflow into its own serialized CI job with a longer job budget.
+- Files changed
+- `.github/workflows/ci.yml`
+- `CLAUDE.md`
+- `packages/core/tests/session/protocol.test.ts`
+- `packages/core/tests/wasm/commands.test.ts`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - GitHub run `24036206575` showed two distinct failure modes: TypeScript suites timing out under full Turbo load (`packages/core/tests/session/protocol.test.ts`) and the sidecar crate exhausting the job budget when run inside the shared Rust workspace process.
+  - The `curl exits promptly after a keep-alive response` smoke test should preserve the regression check that the command exits promptly, but its CI budget needs to reflect slower GitHub runners; a 15s test timeout with an `< 8s` assertion was too tight for the current environment.
+  - `US-400` is not complete until a GitHub Actions run on this branch finishes green; if CI regresses after a local pass, keep the story marked `passes: false` until the next workflow proves otherwise.
+  - Quality checks: `pnpm --dir packages/core exec vitest run tests/session/protocol.test.ts` passed, `pnpm --dir packages/core exec vitest run tests/wasm/commands.test.ts -t "curl exits promptly after a keep-alive response"` passed, and `cargo test --package agent-os-sidecar -- --test-threads=1` passed before the next push.
+---
+## 2026-04-06 08:36:42 PDT - US-400
+- What was implemented
+- Reproduced the remaining local workspace failure as `@rivet-dev/agent-os#test` exiting `137` only when the root Turbo run used `--concurrency=3`, verified that the same full workspace test graph passes at `--concurrency=2`, and updated the root `pnpm test` script plus CI notes to keep that lower concurrency budget.
+- Files changed
+- `CLAUDE.md`
+- `package.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The `packages/core` Vitest config already runs with `fileParallelism: false`; if the root workspace still reports exit `137`, look at outer Turbo concurrency and competing browser/sandbox jobs before widening per-test timeouts again.
+  - The decisive reproduction was `CI=1 AGENTOS_E2E_NETWORK=1 npx turbo test --concurrency=2 --ui=stream --log-order=stream`, which completed successfully in `4m33.218s` after the same workspace failed twice with `pnpm test` at `--concurrency=3`.
+  - Quality checks: `cargo test --workspace --exclude agent-os-sidecar --no-fail-fast` passed, `cargo test --package agent-os-sidecar -- --test-threads=1` passed, `cargo test --package agent-os-sidecar -- --ignored --test-threads=1` passed, `CI=1 AGENTOS_E2E_NETWORK=1 npx turbo test --concurrency=2 --ui=stream --log-order=stream` passed with `90 successful, 90 total`, and `CI=1 AGENTOS_E2E_NETWORK=1 pnpm test` passed after updating the root script to the same concurrency.
 ---

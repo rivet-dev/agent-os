@@ -19,7 +19,7 @@ jobs:
   rust:
     name: Rust workspace
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -41,7 +41,34 @@ jobs:
           shared-key: ci-rust
 
       - name: Run Rust workspace tests
-        run: cargo test --workspace --no-fail-fast
+        run: cargo test --workspace --exclude agent-os-sidecar --no-fail-fast
+
+  rust-sidecar:
+    name: Rust sidecar
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Ensure Git LFS assets are present
+        run: |
+          git lfs install --local
+          git lfs pull
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust
+
+      - name: Run sidecar tests serially
+        run: cargo test --package agent-os-sidecar -- --test-threads=1
 
       - name: Run ignored sidecar integration tests
         run: cargo test --package agent-os-sidecar -- --ignored --test-threads=1
@@ -49,7 +76,7 @@ jobs:
   typescript:
     name: TypeScript workspace
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository

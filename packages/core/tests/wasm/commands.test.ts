@@ -9,6 +9,8 @@ import {
 	registrySkipReason,
 } from "../helpers/registry-commands.js";
 
+const WASM_COMMANDS_TEST_TIMEOUT_MS = 120_000;
+
 /**
  * Comprehensive tests for WASM command packages.
  * Each section tests a specific registry package end-to-end.
@@ -18,11 +20,11 @@ describe.skipIf(registrySkipReason)("WASM command packages", () => {
 
 	beforeEach(async () => {
 		vm = await AgentOs.create({ software: AVAILABLE_REGISTRY_SOFTWARE });
-	});
+	}, WASM_COMMANDS_TEST_TIMEOUT_MS);
 
 	afterEach(async () => {
 		await vm.dispose();
-	});
+	}, WASM_COMMANDS_TEST_TIMEOUT_MS);
 
 	// ── coreutils: shell ──────────────────────────────────────────────
 
@@ -680,12 +682,12 @@ server.listen(0, "0.0.0.0", () => {
 					expect(r.exitCode).toBe(0);
 					expect(r.stdout).toContain("hello from keepalive");
 					expect(r.stderr).not.toContain("i/o error");
-					expect(elapsedMs).toBeLessThan(8000);
+					expect(elapsedMs).toBeLessThan(20_000);
 				} finally {
 					vm.killProcess(pid);
 				}
 			},
-			15000,
+			30_000,
 		);
 	});
 

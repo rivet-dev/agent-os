@@ -17,7 +17,7 @@
         "No functional changes — only file moves, renames, and config updates."
       ],
       "priority": 1,
-      "passes": true,
+      "passes": false,
       "notes": "Pure structural refactor. See .agent/specs/test-structure.md for the full plan. Must be done as file moves (git mv) to preserve history. Do not combine with functional changes."
     },
     {

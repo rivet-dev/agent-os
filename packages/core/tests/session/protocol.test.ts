@@ -751,6 +751,8 @@ async function spawnAdapterWithTimeout(
 	return { proc, client };
 }
 
+const PROTOCOL_TEST_TIMEOUT_MS = 120_000;
+
 describe("ACP protocol comprehensive tests", () => {
 	let vm: AgentOs;
 
@@ -785,7 +787,7 @@ describe("ACP protocol comprehensive tests", () => {
 		expect(result.agentCapabilities.mcp_tools).toBe(true);
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("session/new returns sessionId", async () => {
 		const { client } = await spawnAdapter(vm, FULL_MOCK_ACP_ADAPTER);
@@ -805,7 +807,7 @@ describe("ACP protocol comprehensive tests", () => {
 		expect(result.sessionId).toBe("test-session-1");
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("session/prompt receives session/update notifications before response", async () => {
 		const { client } = await spawnAdapter(vm, FULL_MOCK_ACP_ADAPTER);
@@ -848,7 +850,7 @@ describe("ACP protocol comprehensive tests", () => {
 		);
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("session/cancel sends cancel and receives acknowledgement", async () => {
 		const { client } = await spawnAdapter(vm, FULL_MOCK_ACP_ADAPTER);
@@ -871,7 +873,7 @@ describe("ACP protocol comprehensive tests", () => {
 		expect(result.cancelled).toBe(true);
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("session/cancel falls back to ACP notification when request form is unsupported", async () => {
 		const { client } = await spawnAdapter(vm, NOTIFICATION_CANCEL_MOCK_ADAPTER);
@@ -903,7 +905,7 @@ describe("ACP protocol comprehensive tests", () => {
 		expect((countResponse.result as { cancelCount: number }).cancelCount).toBe(1);
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("session/set_mode sends mode change", async () => {
 		const { client } = await spawnAdapter(vm, FULL_MOCK_ACP_ADAPTER);
@@ -924,7 +926,7 @@ describe("ACP protocol comprehensive tests", () => {
 		expect(result.applied).toBe(true);
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("session/set_config_option sends config change", async () => {
 		const { client } = await spawnAdapter(vm, FULL_MOCK_ACP_ADAPTER);
@@ -951,7 +953,7 @@ describe("ACP protocol comprehensive tests", () => {
 		expect(result.applied).toBe(true);
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("request/permission flow -- agent sends notification, client responds", async () => {
 		const { client } = await spawnAdapter(vm, PERMISSION_MOCK_ADAPTER);
@@ -1002,7 +1004,7 @@ describe("ACP protocol comprehensive tests", () => {
 		).toBe(true);
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("session/request_permission flow -- agent sends ACP request, client responds", async () => {
 		const { client } = await spawnAdapter(vm, MODERN_PERMISSION_MOCK_ADAPTER);
@@ -1066,7 +1068,7 @@ describe("ACP protocol comprehensive tests", () => {
 		).toBe("allow_always");
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("duplicate session/request_permission requests are deduped by request ID", async () => {
 		const { client } = await spawnAdapter(vm, DUPLICATE_MODERN_PERMISSION_MOCK_ADAPTER);
@@ -1126,7 +1128,7 @@ describe("ACP protocol comprehensive tests", () => {
 		).toBe("allow_once");
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("session/request_permission maps replies onto OpenCode-style option IDs", async () => {
 		const { client } = await spawnAdapter(
@@ -1182,7 +1184,7 @@ describe("ACP protocol comprehensive tests", () => {
 		).toBe("once");
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("initialize response carries agentCapabilities and agentInfo", async () => {
 		const { client } = await spawnAdapter(vm, FULL_MOCK_ACP_ADAPTER);
@@ -1219,7 +1221,7 @@ describe("ACP protocol comprehensive tests", () => {
 		});
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("rawSend arbitrary method routes through AcpClient correctly", async () => {
 		const { client } = await spawnAdapter(vm, FULL_MOCK_ACP_ADAPTER);
@@ -1252,7 +1254,7 @@ describe("ACP protocol comprehensive tests", () => {
 		expect(unknownResponse.error?.message).toContain("Method not found");
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("malformed JSON-RPC response is handled gracefully", async () => {
 		const { client } = await spawnAdapter(vm, MALFORMED_MOCK_ADAPTER);
@@ -1273,7 +1275,7 @@ describe("ACP protocol comprehensive tests", () => {
 		expect(result.agentInfo.name).toBe("malformed-agent");
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("request timeout triggers rejection after configured timeout", async () => {
 		// Use a very short timeout (500ms) and a mock that never responds
@@ -1295,7 +1297,7 @@ process.stdin.on('data', () => {
 		).rejects.toThrow(/timed out after 500ms/);
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("request timeout error includes recent ACP activity diagnostics", async () => {
 		const { client } = await spawnAdapterWithTimeout(
@@ -1320,7 +1322,7 @@ process.stdin.on('data', () => {
 		);
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("agent process exit rejects all pending requests", async () => {
 		// Use a short timeout since proc.wait() can hang in the VM (known limitation).
@@ -1340,7 +1342,7 @@ process.stdin.on('data', () => {
 		).rejects.toThrow(/exited|closed|timed out/i);
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("concurrent requests are correlated correctly by id", async () => {
 		const { client } = await spawnAdapter(vm, FULL_MOCK_ACP_ADAPTER);
@@ -1384,7 +1386,7 @@ process.stdin.on('data', () => {
 		expect((configRes.result as { value: string }).value).toBe("opus");
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("non-JSON stdout lines are skipped without error", async () => {
 		const { client } = await spawnAdapter(
@@ -1407,7 +1409,7 @@ process.stdin.on('data', () => {
 		expect(result.agentInfo.name).toBe("banner-agent");
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 
 	test("notification ordering is preserved", async () => {
 		const { client } = await spawnAdapter(
@@ -1454,5 +1456,5 @@ process.stdin.on('data', () => {
 		expect(seenSeqs).toEqual([1, 2, 3, 4, 5]);
 
 		client.close();
-	}, 30_000);
+	}, PROTOCOL_TEST_TIMEOUT_MS);
 });
