@@ -176,3 +176,16 @@ Started: Sat Apr  5 2026
   - In sparse worktrees here, the pnpm store may contain Vitest even when `./node_modules/.bin/vitest` is absent, so root-level one-off test scripts should not assume the shim exists.
   - `pnpm test:post-python-parity` currently still trips separate pre-existing assertions in `packages/core/tests/filesystem/base-filesystem.test.ts` and `packages/dev-shell/test/dev-shell.integration.test.ts`, so layout-only validation is better done with focused moved-path smoke checks plus the relevant Rust compile/test targets.
 ---
+## 2026-04-05 20:42:29 PDT - US-305
+- What was implemented
+- Made `crates/execution/tests/python.rs` parallel-safe by giving each test VM its own import-cache root via `set_import_cache_base_dir(...)`, and by serializing the process-wide `AGENT_OS_NODE_BINARY` override so the fake OOM node shim cannot leak into real-Node tests.
+- Replaced the file's ad hoc `PythonExecutionEngine::default()` setup with a shared `new_python_test_engine()` helper and held the same env lock across every real-Node Python test body.
+- Files changed
+- `crates/execution/tests/python.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Parallel `agent-os-execution` Python tests need the same import-cache isolation as the JavaScript and WASM suites; otherwise the shared `/tmp` stale-cache sweep deletes another test's `timing-bootstrap.mjs` and warm-path assets.
+  - Any Python execution test in the same binary that swaps `AGENT_OS_NODE_BINARY` must serialize with real-Node tests for the full test body, not just the env-var mutation site, because sibling tests can otherwise inherit the fake node shim and report misleading heap-OOM failures.
+  - Quality checks: `cargo test --package agent-os-execution --test python` passes with `15/15`; the adjacent `cargo test --package agent-os-execution --test python_prewarm` target still has a separate pre-existing failure in `python_execution_invalidates_prewarm_stamp_when_pyodide_bundle_changes`, outside this story's acceptance scope.
+---

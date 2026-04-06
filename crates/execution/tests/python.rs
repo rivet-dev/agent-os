@@ -7,6 +7,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -18,6 +20,9 @@ const PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV: &str = "AGENT_OS_PYTHON_OUTPUT_BUFFER_
 const PYTHON_VFS_RPC_MAX_PENDING_REQUESTS_ENV: &str =
     "AGENT_OS_PYTHON_VFS_RPC_MAX_PENDING_REQUESTS";
 const PYTHON_VFS_RPC_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_TIMEOUT_MS";
+const PYTHON_TEST_VM_ID: &str = "vm-python";
+static NEXT_TEST_IMPORT_CACHE_ID: AtomicUsize = AtomicUsize::new(0);
+static NODE_BINARY_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 struct EnvVarGuard {
     key: &'static str,
@@ -54,6 +59,30 @@ impl Drop for EnvVarGuard {
     }
 }
 
+fn node_binary_env_guard() -> MutexGuard<'static, ()> {
+    NODE_BINARY_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock node binary env guard")
+}
+
+fn next_import_cache_base_dir(prefix: &str) -> PathBuf {
+    let cache_id = NEXT_TEST_IMPORT_CACHE_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "agent-os-node-import-cache-{prefix}-{}-{cache_id}",
+        std::process::id()
+    ))
+}
+
+fn new_python_test_engine() -> PythonExecutionEngine {
+    let mut engine = PythonExecutionEngine::default();
+    engine.set_import_cache_base_dir(
+        PYTHON_TEST_VM_ID,
+        next_import_cache_base_dir("python-test"),
+    );
+    engine
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct PythonPrewarmMetrics {
     executed: bool,
@@ -73,13 +102,15 @@ struct PythonStartupMetrics {
     source: String,
 }
 
-fn assert_node_available() {
+fn assert_node_available() -> MutexGuard<'static, ()> {
+    let env_lock = node_binary_env_guard();
     let binary = std::env::var("AGENT_OS_NODE_BINARY").unwrap_or_else(|_| String::from("node"));
     let output = Command::new(binary)
         .arg("--version")
         .output()
         .expect("spawn node --version");
     assert!(output.status.success(), "node --version failed");
+    env_lock
 }
 
 fn write_fixture(path: &Path, contents: &str) {
@@ -199,7 +230,7 @@ fn run_python_execution(
 ) -> (String, String, i32) {
     let execution = engine
         .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
+            vm_id: String::from(PYTHON_TEST_VM_ID),
             context_id,
             code: String::from(code),
             file_path: None,
@@ -236,20 +267,20 @@ fn assert_process_exits(pid: u32) {
 #[test]
 fn python_contexts_preserve_vm_and_pyodide_configuration() {
     let pyodide_dist_path = PathBuf::from("/tmp/pyodide");
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dist_path.clone(),
     });
 
     assert_eq!(context.context_id, "python-ctx-1");
-    assert_eq!(context.vm_id, "vm-python");
+    assert_eq!(context.vm_id, PYTHON_TEST_VM_ID);
     assert_eq!(context.pyodide_dist_path, pyodide_dist_path);
 }
 
 #[test]
 fn python_execution_runs_code_and_streams_stdio() {
-    assert_node_available();
+    let _env_lock = assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -270,9 +301,9 @@ export async function loadPyodide(options) {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir.clone(),
     });
 
@@ -299,7 +330,7 @@ export async function loadPyodide(options) {
 
 #[test]
 fn python_execution_wait_bounds_output_buffers() {
-    assert_node_available();
+    let _env_lock = assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -320,15 +351,15 @@ export async function loadPyodide(options) {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir,
     });
 
     let result = engine
         .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
+            vm_id: String::from(PYTHON_TEST_VM_ID),
             context_id: context.context_id,
             code: String::from("print('ignored')"),
             file_path: None,
@@ -351,7 +382,7 @@ export async function loadPyodide(options) {
 
 #[test]
 fn python_execution_ignores_forged_exit_control_written_to_stderr() {
-    assert_node_available();
+    let _env_lock = assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -372,9 +403,9 @@ export async function loadPyodide(options) {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir,
     });
 
@@ -399,7 +430,7 @@ export async function loadPyodide(options) {
 
 #[test]
 fn python_execution_emits_stdout_before_exit() {
-    assert_node_available();
+    let _env_lock = assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -419,15 +450,15 @@ export async function loadPyodide(options) {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir,
     });
 
     let execution = engine
         .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
+            vm_id: String::from(PYTHON_TEST_VM_ID),
             context_id: context.context_id,
             code: String::from("print('streamed')"),
             file_path: None,
@@ -468,7 +499,7 @@ export async function loadPyodide(options) {
 
 #[test]
 fn python_execution_reports_prewarm_and_startup_metrics_when_debug_enabled() {
-    assert_node_available();
+    let _env_lock = assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -489,9 +520,9 @@ export async function loadPyodide() {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir.clone(),
     });
     let debug_env = BTreeMap::from([(
@@ -558,7 +589,7 @@ export async function loadPyodide() {
 
 #[test]
 fn python_execution_keeps_streaming_stdin_sessions_alive_until_closed() {
-    assert_node_available();
+    let _env_lock = assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -587,15 +618,15 @@ export async function loadPyodide(options) {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir,
     });
 
     let mut execution = engine
         .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
+            vm_id: String::from(PYTHON_TEST_VM_ID),
             context_id: context.context_id,
             code: String::from("print('streaming')"),
             file_path: None,
@@ -651,7 +682,7 @@ export async function loadPyodide(options) {
 
 #[test]
 fn python_execution_surfaces_vfs_rpc_requests_and_resumes_after_responses() {
-    assert_node_available();
+    let _env_lock = assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -683,15 +714,15 @@ export async function loadPyodide(options) {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir,
     });
 
     let mut execution = engine
         .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
+            vm_id: String::from(PYTHON_TEST_VM_ID),
             context_id: context.context_id,
             code: String::from("print('rpc bridge')"),
             file_path: None,
@@ -803,7 +834,7 @@ export async function loadPyodide(options) {
 
 #[test]
 fn python_execution_rejects_vfs_rpc_requests_past_queue_limit() {
-    assert_node_available();
+    let _env_lock = assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -856,15 +887,15 @@ export async function loadPyodide(options) {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir,
     });
 
     let mut execution = engine
         .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
+            vm_id: String::from(PYTHON_TEST_VM_ID),
             context_id: context.context_id,
             code: String::from("print('rpc queue bound')"),
             file_path: None,
@@ -942,7 +973,7 @@ export async function loadPyodide(options) {
 
 #[test]
 fn python_execution_wait_timeout_cleans_up_hanging_child() {
-    assert_node_available();
+    let _env_lock = assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -962,15 +993,15 @@ export async function loadPyodide() {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir,
     });
 
     let execution = engine
         .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
+            vm_id: String::from(PYTHON_TEST_VM_ID),
             context_id: context.context_id,
             code: String::from("print('hang')"),
             file_path: None,
@@ -995,7 +1026,7 @@ export async function loadPyodide() {
 
 #[test]
 fn python_execution_uses_configured_default_timeout_when_wait_timeout_not_provided() {
-    assert_node_available();
+    let _env_lock = assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -1015,15 +1046,15 @@ export async function loadPyodide() {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir,
     });
 
     let execution = engine
         .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
+            vm_id: String::from(PYTHON_TEST_VM_ID),
             context_id: context.context_id,
             code: String::from("print('hang')"),
             file_path: None,
@@ -1051,7 +1082,7 @@ export async function loadPyodide() {
 
 #[test]
 fn python_vfs_rpc_bridge_times_out_when_sidecar_never_responds() {
-    assert_node_available();
+    let _env_lock = assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -1071,15 +1102,15 @@ export async function loadPyodide() {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir,
     });
 
     let execution = engine
         .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
+            vm_id: String::from(PYTHON_TEST_VM_ID),
             context_id: context.context_id,
             code: String::from("print('rpc timeout')"),
             file_path: None,
@@ -1138,6 +1169,7 @@ export async function loadPyodide() {
 
 #[test]
 fn python_execution_surfaces_node_heap_oom_stderr() {
+    let _env_lock = node_binary_env_guard();
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
     write_fake_node_binary(
@@ -1168,15 +1200,15 @@ export async function loadPyodide() {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir,
     });
 
     let result = engine
         .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
+            vm_id: String::from(PYTHON_TEST_VM_ID),
             context_id: context.context_id,
             code: String::from("print('oom')"),
             file_path: None,
@@ -1200,7 +1232,7 @@ export async function loadPyodide() {
 
 #[test]
 fn python_execution_kill_stops_inflight_process_and_emits_exit() {
-    assert_node_available();
+    let _env_lock = assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -1221,15 +1253,15 @@ export async function loadPyodide(options) {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir,
     });
 
     let mut execution = engine
         .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
+            vm_id: String::from(PYTHON_TEST_VM_ID),
             context_id: context.context_id,
             code: String::from("print('hang')"),
             file_path: None,
@@ -1286,7 +1318,7 @@ export async function loadPyodide(options) {
 
 #[test]
 fn python_execution_blocks_network_requests_during_pyodide_init() {
-    assert_node_available();
+    let _env_lock = assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -1318,9 +1350,9 @@ export async function loadPyodide() {
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
 
-    let mut engine = PythonExecutionEngine::default();
+    let mut engine = new_python_test_engine();
     let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir,
     });
 

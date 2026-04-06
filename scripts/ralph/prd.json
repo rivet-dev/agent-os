@@ -96,7 +96,7 @@
         "Root causes: heap OOM during Pyodide init, process.binding denial, import-cache race."
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "2 pass, 13 fail. Multiple root causes."
     },
     {
