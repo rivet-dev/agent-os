@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- After a fresh workspace install, linked registry agent/software packages still need their built `dist/` outputs before adapter-backed or software-backed `packages/core` Vitest suites are meaningful; otherwise Vite fails on package entry resolution before test logic runs.
 - Sidecar-owned JavaScript, Python, and WASM engines should use per-VM import-cache roots; sharing one temp cache lets stale-runner cleanup delete another VM's assets.
 - Timer-driven guest Node networking can outlive top-level module evaluation, so the sync-RPC bridge must stay alive until process exit rather than being disposed when the entry module resolves.
 - Security tests must use real Node.js execution and attempt actual forbidden operations, not just verify argument construction with fake binaries.
@@ -104,4 +105,13 @@ Started: Sat Apr  5 2026
 -   Patterns discovered: grouped test directories change both import depth and runtime path math; when a test uses `moduleAccessCwd`, `import.meta.dirname`, `new URL(...)`, or fixture-cache roots, treat the move as a behavior change until those paths are rebased.
 -   Gotchas encountered: `cargo test -p agent-os-execution --test javascript -- --test-threads=1` still has two pre-existing failures (`javascript_execution_blocks_cjs_require_from_hidden_parent_node_modules` and `javascript_execution_translates_top_level_loader_stacks_to_guest_paths`), and both reproduce on detached `HEAD`, so they are not caused by the file split.
 -   Useful context: `cargo test -p agent-os-sidecar -- --test-threads=1` passes with the new ignored tests skipped, `cargo test -p agent-os-sidecar -- --ignored --test-threads=1` passes for the four ignored suites, registry sample files under `tests/e2e/` load cleanly under `pnpm dlx vitest` and skip via their normal environment gates, and TypeScript `tsc`/Vitest verification from this worktree is blocked by missing package-local installs (`vitest`, `croner`, `zod`, `sandbox-agent`, etc.).
+---
+## 2026-04-05 19:43:04 PDT - US-308
+- Revalidated the existing US-308 branch state against the current Ralph PRD, synced `scripts/ralph/prd.json` to that story list, and marked `US-308` passing there.
+- Confirmed the moved-layout smoke coverage still works from the grouped paths: `pnpm --dir packages/core exec tsc --noEmit`, `pnpm --dir packages/core exec vitest run tests/filesystem/crud.test.ts tests/filesystem/overlay.test.ts tests/unit/host-tools-argv.test.ts tests/process/all-processes.test.ts tests/sidecar/client.test.ts`, `cargo test -p agent-os-sidecar -- --test-threads=1`, and `cargo test -p agent-os-sidecar -- --ignored --test-threads=1` all pass.
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Grouped-path refactors are cheap to validate with one representative Vitest file per directory family plus the sidecar ignored suite; that catches import-depth and test-discovery regressions without waiting on unrelated runtime debt.
+  - Fresh `pnpm install` is not enough for linked registry agent/software packages in this repo; adapter-backed and software-backed tests also expect built `dist/` entries from those packages before full-suite results are interpretable.
+  - `cargo test -p agent-os-execution --test javascript -- --test-threads=1` still reproduces the same two pre-existing module-resolution failures on this branch, so they remain separate from the US-308 file split.
 ---

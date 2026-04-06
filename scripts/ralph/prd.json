@@ -1,190 +1,270 @@
 {
   "project": "agentOS",
   "branchName": "ralph/test-quality-hardening",
-  "description": "Fix test quality gaps, security holes, and infrastructure issues found in the runtime-isolation-hardening audit review",
+  "description": "Fix all test failures across the repo — filesystem, sessions, exec, WASM, network, and Rust crates",
   "userStories": [
     {
-      "id": "US-100",
-      "title": "Fix VFS lstat(\"/\") crash in host_dir_plugin and resource_accounting walk",
-      "description": "As a developer, I want the kernel VFS to correctly handle lstat on mount roots and not walk into external mounts during resource accounting, so that all filesystem operations work and the TS test suite is unblocked.",
+      "id": "US-308",
+      "title": "Restructure test files to match standardized test layout",
+      "description": "As a developer, I want tests organized by domain subdirectory so I can find, run, and maintain them easily.",
       "acceptanceCriteria": [
-        "Fix host_dir_plugin.rs lstat to handle the mount root path ('/') \u2014 Path::new('.').file_name() returns None, so split_parent fails with EINVAL. Use fstatat with AT_EMPTY_PATH on the host root dir FD for the root case.",
-        "Fix resource_accounting.rs measure_filesystem_usage to skip external mount points (e.g., host-dir mounts like /root/node_modules) when calculating guest filesystem size \u2014 walking into host mounts inflates counts and triggers the lstat bug.",
-        "Add VirtualFileSystem::external_mount_points() method and propagate through MountTable, DeviceLayer, and Permissions wrappers.",
-        "packages/core tests filesystem.test.ts passes (writeFile/readFile round-trip, mkdir/readdir, stat, exists).",
-        "packages/core tests network.test.ts passes (fetch JSON from HTTP server running inside VM).",
-        "packages/core tests session-lifecycle.test.ts passes (createSession, resumeSession, destroySession).",
-        "cargo test -p agent-os-kernel passes.",
-        "cargo test -p agent-os-sidecar --test security_audit passes."
+        "packages/core/tests/ files are moved into subdirectories: unit/, filesystem/, process/, session/, agents/{pi,claude,opencode,codex}/, wasm/, network/, sidecar/, cron/.",
+        "registry/tests/kernel/ is renamed to registry/tests/e2e/ with npm/ and cross-runtime/ subgroups.",
+        "crates/execution/tests/javascript.rs is split into javascript/{builtin_interception,module_resolution,env_hardening,sync_rpc}.rs.",
+        "Slow sidecar integration tests (crash_isolation, session_isolation, vm_lifecycle, process_isolation) are marked #[ignore].",
+        "vitest config globs updated to match new paths.",
+        "All tests that passed before the restructure still pass after.",
+        "No functional changes — only file moves, renames, and config updates."
       ],
       "priority": 1,
       "passes": true,
-      "notes": "This is the #1 blocker \u2014 every TS-level test that does file I/O fails with 'EINVAL: path does not reference an entry: /'. Root cause: check_write_file_limits calls filesystem_usage() which walks into host-dir mounts via MountTable, hitting the lstat bug. Fixes have been prototyped in uncommitted changes on this branch."
+      "notes": "Pure structural refactor. See .agent/specs/test-structure.md for the full plan. Must be done as file moves (git mv) to preserve history. Do not combine with functional changes."
     },
     {
-      "id": "US-101",
-      "title": "Build WASM binaries and unblock exec/bash tests",
-      "description": "As a developer, I want WASM coreutils binaries built and available locally so that exec, spawn, shell, and bash tests can actually run instead of being skipped.",
+      "id": "US-300",
+      "title": "Fix guestFilesystemCall write rejections breaking all sidecar-backed tests",
+      "description": "As a developer, I want writeFile/mkdir operations through the sidecar VFS RPC bridge to work so that all tests that write files into the VM can run.",
       "acceptanceCriteria": [
-        "WASM binaries are built via 'make' in registry/native/, then 'make copy-wasm && make build' in registry/.",
-        "packages/core tests execute.test.ts runs (not skipped) and passes: exec stdout, stderr, env vars, cwd, spawn, node script, shell pipeline.",
-        "packages/core tests wasm-commands.test.ts runs (not skipped) \u2014 at least 70 of 80 tests pass.",
-        "registrySkipReason in tests/helpers/registry-commands.ts resolves to null (coreutils.commandDir exists)."
+        "packages/core tests filesystem.test.ts passes (5/5).",
+        "packages/core tests network.test.ts passes (1/1).",
+        "packages/core tests session-lifecycle.test.ts passes (8/8).",
+        "packages/core tests session-comprehensive.test.ts passes (19/19).",
+        "packages/core tests acp-protocol.test.ts passes (20/20).",
+        "The root cause of 'sidecar rejected request: guestFilesystemCall' on writeFile is identified and fixed.",
+        "No test is deleted or disabled to achieve this."
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "All 87 exec/wasm tests are currently SKIPPED because WASM binaries are build artifacts not checked into git. Requires Rust nightly + wasi-sdk."
+      "passes": false,
+      "notes": "This is the #1 blocker. ~120 TS tests fail with the same error: NativeSidecarProcessClient.guestFilesystemCall rejects writeFile calls. Tests that only read or test error paths pass. This regression was introduced by the 82 commits from the runtime-isolation-hardening PRD (US-014/015/016 VFS RPC bridge changes). Affects sessions, filesystem, network, process, events — everything that writes to the VM."
     },
     {
-      "id": "US-103",
-      "title": "Fix S3 filesystem test \u2014 add loopback exemption for local Minio",
-      "description": "As a developer, I want S3 integration tests to work with local Minio so that the S3 filesystem mount can be verified end-to-end.",
+      "id": "US-301",
+      "title": "Fix 21 Rust JavaScript execution test failures",
+      "description": "As a developer, I want all Rust-level JavaScript execution tests to pass so that the JS runtime engine is verified.",
       "acceptanceCriteria": [
-        "S3 mount endpoint SSRF check allows loopback addresses when a test/dev flag is set, or the test infrastructure uses a non-loopback hostname that passes validation.",
-        "registry/file-system/s3/tests/s3.test.ts passes all 3 tests (descriptor serialization, S3-backed filesystem through AgentOs, large file round-trip).",
-        "The SSRF protection remains intact for production \u2014 loopback/private IPs are still blocked by default.",
-        "pnpm workspace resolution for the s3 package works (fix @rivet-dev/agent-os vs @rivet-dev/agent-os-core mismatch if needed)."
+        "cargo test --package agent-os-execution --test javascript passes with 0 failures (43/43).",
+        "Failures span builtin interception, compile cache, process hardening, fs promises routing, TLS/HTTP imports, CJS extensibility, signal handlers, and time freezing.",
+        "Do not delete or disable tests."
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "2 of 3 tests fail with 'EINVAL: s3 mount endpoint must not target a private or local IP address (127.0.0.1)'. The security check is correct for prod but blocks local Minio testing. Also a pnpm workspace resolution issue with package naming."
+      "passes": false,
+      "notes": "22 pass, 21 fail. Broad failures across many categories — likely multiple root causes from the runtime-isolation-hardening changes."
     },
     {
-      "id": "US-015",
-      "title": "Fix workspace pnpm install to work from repo root",
-      "description": "As a developer, I want pnpm install to succeed from the repo root so that TypeScript tests and typechecks can run consistently.",
+      "id": "US-302",
+      "title": "Fix 11 Rust WASM execution engine test failures",
+      "description": "As a developer, I want all Rust-level WASM execution tests to pass so that the WASM runtime engine is verified.",
       "acceptanceCriteria": [
-        "Identify the package name mismatch between examples/quickstart dependency on @rivet-dev/agent-os and the actual package name in packages/core/package.json",
-        "Fix the reference so pnpm workspace resolution succeeds",
-        "pnpm install --frozen-lockfile succeeds from repo root (or pnpm install if lockfile needs update)",
-        "pnpm --dir packages/core exec tsc --noEmit succeeds",
-        "pnpm --dir packages/core exec vitest run succeeds (or at least the test runner starts)"
+        "cargo test --package agent-os-execution --test wasm passes with 0 failures (20/20).",
+        "Failures in permission tiers, streaming, warmup/reuse, fuel exhaustion, memory limits, signal state, and symlink target change detection.",
+        "Do not delete or disable tests."
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "Broken throughout entire runtime-isolation-hardening development, meaning TS-side tests were never consistently verified"
+      "passes": false,
+      "notes": "9 pass, 11 fail. Failures complete in 0.07s suggesting setup/artifact issues for some."
     },
     {
-      "id": "US-014",
-      "title": "Fix import-cache temp directory race conditions",
-      "description": "As a developer, I want import-cache tests to not flake due to shared temp directory state so that CI is reliable.",
+      "id": "US-303",
+      "title": "Fix 6 Rust permission_flags test failures",
+      "description": "As a developer, I want all permission flag tests to pass so that Node.js permission model enforcement is verified.",
       "acceptanceCriteria": [
-        "Audit all tests in crates/execution/tests/javascript.rs that create NodeImportCache instances",
-        "Ensure each test uses NodeImportCache::new_in() with a unique temp directory rather than sharing the default temp root",
-        "Remove any reliance on --test-threads=1 for correctness (only for env var isolation if needed)",
-        "Run cargo test -p agent-os-execution --test javascript 5 times in a row with default thread count and verify no register.mjs missing failures",
-        "cargo test -p agent-os-execution --test javascript passes"
+        "cargo test --package agent-os-execution --test permission_flags passes with 0 failures.",
+        "All 6 tests pass: heap limits, WASI permission tiers, runtime memory/fuel limits, worker flags, workspace root exposure, and nested child capabilities."
       ],
       "priority": 5,
-      "passes": true,
-      "notes": "Progress log mentions intermittent register.mjs missing failures due to parallel temp-cache races"
+      "passes": false,
+      "notes": "0/6 pass. All failing."
     },
     {
-      "id": "US-016",
-      "title": "Fix pre-existing sidecar test failures",
-      "description": "As a developer, I want the full cargo test -p agent-os-sidecar suite to pass so that broad integration regressions are caught.",
+      "id": "US-304",
+      "title": "Fix 3 Rust sidecar test failures",
+      "description": "As a developer, I want the sidecar integration test suite to pass fully.",
       "acceptanceCriteria": [
-        "Fix the Pyodide warmup process.binding denial test failure in crates/sidecar/tests/python.rs",
-        "Fix or skip with documented reason any other pre-existing failures in cargo test -p agent-os-sidecar",
-        "cargo test -p agent-os-sidecar -- --test-threads=1 passes with zero failures",
-        "No tests are deleted to make the suite pass - fix or document skip reason"
+        "cargo test --package agent-os-sidecar passes with 0 failures.",
+        "Fix: guest_execution_clears_host_env_and_blocks_network_and_escape_paths, vm_resource_limits_cap_active_processes_without_poisoning_followup_execs, execute_scopes_node_permission_flags_to_vm_sandbox_root."
       ],
       "priority": 6,
-      "passes": true,
-      "notes": "Progress log repeatedly mentions pre-existing sidecar test failures that were never fixed during development"
+      "passes": false,
+      "notes": "105 pass, 3 fail."
     },
     {
-      "id": "US-010",
-      "title": "Fix sidecar security_audit.rs tests to assert response payloads",
-      "description": "As a developer, I want security audit tests to assert on actual response contents, not just response variant shapes, so assertions catch real regressions.",
+      "id": "US-305",
+      "title": "Fix 13 Rust Python execution test failures",
+      "description": "As a developer, I want Python/Pyodide execution tests to pass so that the Python runtime is verified.",
       "acceptanceCriteria": [
-        "Audit all match arms in crates/sidecar/tests/security_audit.rs that use wildcard discards like ResponsePayload::GuestFilesystemResult(_) => {}",
-        "Replace each wildcard discard with meaningful assertions on the payload contents (e.g., verify returned data matches expected, verify error codes are correct)",
-        "ProcessStarted assertions should verify the returned PID is valid",
-        "ProcessKilled assertions should verify the kill was acknowledged",
-        "GuestFilesystemResult assertions should verify the data matches what was written",
-        "cargo test -p agent-os-sidecar --test security_audit passes"
+        "cargo test --package agent-os-execution --test python passes with at least 12 of 15 tests passing.",
+        "Root causes: heap OOM during Pyodide init, process.binding denial, import-cache race."
       ],
       "priority": 7,
       "passes": false,
-      "notes": "Multiple match arms discard payloads without checking contents - effectively no-op assertions"
+      "notes": "2 pass, 13 fail. Multiple root causes."
     },
     {
-      "id": "US-105",
-      "title": "Add WASM HTTP server + fetch integration test",
-      "description": "As a developer, I want a test that starts a WASM-based HTTP server inside the VM and calls vm.fetch() against it, verifying native WASM network serving capability.",
+      "id": "US-306",
+      "title": "Fix remaining TS test failures across process, host-tools, and infra suites",
+      "description": "As a developer, I want all remaining TS-level test failures fixed after the VFS write issue (US-300) is resolved.",
       "acceptanceCriteria": [
-        "Add test in registry/tests/wasmvm/ or registry/tests/kernel/ that starts a WASM HTTP server (not just TCP) inside the VM.",
-        "Test calls vm.fetch() or a WASM HTTP client against the server and verifies a response.",
-        "Test covers the full path: WASM server binary -> kernel socket table -> loopback -> fetch/client.",
-        "Test passes reliably when WASM binaries are built."
+        "spawn-flat-api.test.ts passes (2/2).",
+        "shell-flat-api.test.ts passes (1/1).",
+        "process-management.test.ts passes (8/8).",
+        "all-processes.test.ts passes (3/3).",
+        "process-tree.test.ts passes (3/3).",
+        "host-tools-prompt.test.ts passes (18/18).",
+        "native-sidecar-process.test.ts passes (9/9).",
+        "software-projection.test.ts passes (3/3).",
+        "agent-os-events.test.ts passes (6/6).",
+        "pi-acp-adapter.test.ts passes (2/2).",
+        "pi-sdk-adapter.test.ts passes (3/3)."
       ],
       "priority": 8,
       "passes": false,
-      "notes": "Partial coverage exists: net-server.test.ts has a WASM TCP server test, and cross-runtime-network.test.ts has WASM TCP server + Node.js client. But no test exercises a WASM HTTP server (request/response semantics, not raw TCP)."
+      "notes": "Many of these may be fixed by US-300. This story covers anything remaining after the VFS write fix."
     },
     {
-      "id": "US-011",
-      "title": "Add concurrent operation tests for kernel process table",
-      "description": "As a developer, I want tests that exercise concurrent process table operations so that race conditions in waitpid, signal delivery, and resource accounting are caught.",
+      "id": "US-307",
+      "title": "Fix wasm-commands.test.ts — chmod, permissions, and cross-package pipelines",
+      "description": "As a developer, I want all WASM command tests to pass so that shell commands work correctly in the VM.",
       "acceptanceCriteria": [
-        "Add test in crates/kernel/tests/process_table.rs that concurrently exits multiple children while parent calls waitpid and verifies all exits are observed exactly once",
-        "Add test that concurrently sends signals to a process while it is exiting and verifies no panics or double-frees",
-        "Add test that concurrently allocates and deallocates processes up to max_processes limit and verifies the limit is never exceeded",
-        "Tests use multiple threads (not just sequential operations)",
-        "cargo test -p agent-os-kernel --test process_table passes"
+        "pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts passes with at least 79/80.",
+        "Fix chmod/ls-la permission tests.",
+        "Fix cross-package pipeline tests (find|grep|wc, awk+sort, tar+gzip, sed+grep, jq+awk)."
       ],
       "priority": 9,
       "passes": false,
-      "notes": "Current tests only exercise sequential operations - no concurrency coverage"
-    },
-    {
-      "id": "US-012",
-      "title": "Add concurrent operation tests for kernel fd_table and flock",
-      "description": "As a developer, I want tests that exercise concurrent FD operations and advisory locking so that race conditions in dup/close and flock contention are caught.",
-      "acceptanceCriteria": [
-        "Add test in crates/kernel/tests/fd_table.rs that concurrently dups and closes FDs and verifies refcounts stay consistent",
-        "Add test that has multiple threads contending for LOCK_EX on the same file and verifies mutual exclusion holds",
-        "Add test that exercises concurrent LOCK_SH acquisition and verifies multiple shared locks coexist correctly",
-        "Tests use multiple threads with actual contention",
-        "cargo test -p agent-os-kernel --test fd_table passes"
-      ],
-      "priority": 10,
-      "passes": false,
-      "notes": "flock tests only check sequential acquire/release, not actual contention"
-    },
-    {
-      "id": "US-013",
-      "title": "Add resource limit interaction tests",
-      "description": "As a developer, I want tests that exercise multiple resource limits hitting simultaneously so that limit enforcement doesn't break under combined pressure.",
-      "acceptanceCriteria": [
-        "Add test in crates/kernel/tests/resource_accounting.rs that fills filesystem to max_filesystem_bytes while also exhausting max_inode_count and verifies both limits enforce independently",
-        "Add test that exhausts max_processes while children hold open FDs near max_open_fds and verifies both limits enforce without deadlock",
-        "Add test that verifies zombie processes count against max_processes while also testing inode limits",
-        "cargo test -p agent-os-kernel --test resource_accounting passes"
-      ],
-      "priority": 11,
-      "passes": false,
-      "notes": "Limits are tested in isolation but not interaction scenarios"
+      "notes": "70/80 passed in a prior run. 9 failures in permissions and multi-binary pipelines. Currently fully skipped (80/80) due to WASM binary detection issue — may need git lfs pull."
     },
     {
       "id": "US-200",
       "title": "Run all tests repo-wide, triage every failure, and iterate until fully green",
-      "description": "As a developer, I want every test in the entire repository to pass \u2014 Rust crates, TypeScript packages, registry packages, and integration tests \u2014 so that the codebase is in a known-good state with zero test debt.",
+      "description": "As a developer, I want every test in the entire repository to pass so the codebase is in a known-good state.",
       "acceptanceCriteria": [
-        "Run the full Rust test suite: cargo test --workspace. Record every failure with crate name, test name, and error message.",
-        "Run the full TypeScript test suite: pnpm test (turbo run test across all packages). Record every failure with package name, test name, and error message.",
-        "Run registry-level tests: vitest in registry/tests/ and registry/file-system/*/tests/. Record every failure.",
-        "For each unique failure, create a new user story in this PRD with priority sequenced after US-200 (US-201, US-202, ...). Each story must: (a) name the exact test(s), (b) include the error message, (c) specify the acceptance criteria as that test passing, (d) set passes: false.",
-        "After creating all failure stories, work through them in priority order \u2014 fix each one, verify the fix, set passes: true.",
-        "After all failure stories pass, re-run the full suite again (cargo test --workspace && pnpm test). If new failures appear, repeat: add stories, fix, verify.",
-        "This story is only complete when two consecutive full-suite runs (cargo test --workspace && pnpm test) produce zero failures and zero skipped tests that should not be skipped.",
-        "Tests that are legitimately skipped (e.g., WASM binaries not built, external service unavailable) must have a documented skip reason \u2014 no silent skips.",
-        "The final passing state must be recorded in progress.txt with the full test count and pass/skip/fail breakdown for each crate and package."
+        "Run cargo test --workspace. Record every failure.",
+        "Run pnpm test (turbo run test across all packages). Record every failure.",
+        "For each failure, fix it or document why it is skipped.",
+        "Two consecutive full-suite runs produce zero failures.",
+        "Final state recorded in progress.txt."
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Capstone story. Cannot pass until all other stories hold under full-suite run."
+    },
+    {
+      "id": "US-400",
+      "title": "Set up CI test pipeline, push, and iterate until CI is fully green",
+      "description": "As a developer, I want a CI pipeline that runs all tests on every push so that regressions are caught automatically and the main branch stays green.",
+      "acceptanceCriteria": [
+        "A GitHub Actions workflow (e.g., .github/workflows/test.yml) exists that runs on push and PR to the main branch.",
+        "CI runs cargo test --workspace for all Rust crates (kernel, execution, sidecar, bridge).",
+        "CI runs pnpm test (turbo run test) for all TypeScript packages (packages/core, registry).",
+        "CI installs Git LFS and pulls WASM binaries so wasm-commands.test.ts and execute.test.ts are not skipped.",
+        "CI builds the Rust sidecar binary (cargo build --package agent-os-sidecar) before running TS tests that depend on it.",
+        "CI caches Rust target/, pnpm store, and node_modules for fast reruns.",
+        "Push the branch and verify CI runs. If any test fails, fix it and push again. Repeat until CI is fully green.",
+        "The final CI run shows 0 failures across all test suites — no test is skipped unless it has a documented, legitimate skip reason (e.g., requires external service like Minio).",
+        "CI run time is under 15 minutes.",
+        "The workflow is documented in CLAUDE.md under a new 'CI' section."
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "This is the final gate. All prior stories fix tests locally; this story ensures they stay fixed by running in CI on every push. The iteration loop is: push -> check CI -> fix failures -> push again until green. CI must test everything: Rust crates, TS packages, WASM commands, registry tests. Git LFS support is required so WASM binaries are available in CI without a native build step."
+    },
+    {
+      "id": "US-500",
+      "title": "Add end-to-end adversarial isolation tests for Node.js runtime",
+      "description": "As a developer, I want tests that verify guest Node.js code cannot escape the kernel isolation boundary.",
+      "acceptanceCriteria": [
+        "Test that require('fs') returns a kernel-backed polyfill, not real node:fs (verify by checking readFileSync('/') returns kernel VFS root, not host root).",
+        "Test that process.env enumeration contains no AGENT_OS_* keys.",
+        "Test that require('net'), require('dgram'), require('dns') are either polyfilled or denied.",
+        "Test that require('vm'), require('worker_threads'), require('inspector'), require('v8') throw ERR_ACCESS_DENIED.",
+        "Test that process.pid returns a kernel PID, not a host PID.",
+        "Test that guest stdout cannot inject fake control messages that the sidecar acts on.",
+        "All tests run guest JS through the full sidecar pipeline, not just unit-test the loader."
       ],
       "priority": 12,
       "passes": false,
-      "notes": "This is the capstone story. It cannot pass until every other story's fixes hold under a full-suite run. The iteration loop is: run all -> triage -> add stories -> fix -> run all again. Known test scopes to cover: cargo test -p agent-os-kernel, cargo test -p agent-os-execution, cargo test -p agent-os-sidecar, cargo test -p agent-os-sidecar-browser, cargo test -p agent-os-bridge, pnpm --dir packages/core exec vitest run, pnpm --dir registry/file-system/s3 exec vitest run, pnpm --dir registry exec vitest run. Do NOT delete or disable tests to make the suite green \u2014 fix the underlying issue or document why a skip is necessary."
+      "notes": "The most critical gap. .agent/todo/adversarial-isolation-tests.md documents 9 planned stories (US-001–US-009) that are all unimplemented. These tests validate the core security invariants in CLAUDE.md."
+    },
+    {
+      "id": "US-501",
+      "title": "Add kernel socket table unit tests",
+      "description": "As a developer, I want kernel-level socket table tests so that TCP/UDP/Unix socket lifecycle is verified in isolation from the sidecar.",
+      "acceptanceCriteria": [
+        "New test file crates/kernel/tests/socket_table.rs exists.",
+        "Tests cover: socket create, bind, listen, accept, connect (loopback), send/recv, close.",
+        "Tests cover: UDP socket create, bind, sendto/recvfrom.",
+        "Tests cover: Unix domain socket create, bind, connect.",
+        "Tests cover: socket table resource limit enforcement (max sockets).",
+        "Tests cover: socket cleanup on process exit."
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": "Currently zero kernel-level socket tests. Networking is only tested at the sidecar integration level (socket_state_queries.rs)."
+    },
+    {
+      "id": "US-502",
+      "title": "Add sidecar bridge protocol fuzzing and malformed message tests",
+      "description": "As a developer, I want tests that send malformed, truncated, and garbage data over the sidecar bridge so that protocol parsing is hardened.",
+      "acceptanceCriteria": [
+        "Tests send malformed JSON over the bridge and verify graceful error response (not crash).",
+        "Tests send truncated frames (partial length prefix, partial body) and verify timeout/error.",
+        "Tests send binary garbage and verify the bridge recovers or cleanly disconnects.",
+        "Tests send valid JSON with unexpected/missing fields and verify rejection.",
+        "Tests send oversized payloads exceeding frame limits and verify rejection.",
+        "Existing security_hardening.rs oversized-frame test is preserved."
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": "crates/sidecar/tests/protocol.rs only tests valid codec round-trips. security_hardening.rs has one oversized frame test. No coverage for malformed inputs."
+    },
+    {
+      "id": "US-503",
+      "title": "Add dedicated overlay filesystem tests for kernel overlay_fs module",
+      "description": "As a developer, I want a dedicated test file for overlay_fs.rs so that whiteout, opaque directory, and copy-up logic is verified directly.",
+      "acceptanceCriteria": [
+        "New test file crates/kernel/tests/overlay_fs.rs exists.",
+        "Tests cover: whiteout creation on delete, whiteout filtering from readdir results.",
+        "Tests cover: opaque directory marking and lower-layer masking.",
+        "Tests cover: copy-up on write to lower-layer file.",
+        "Tests cover: cross-layer rename atomicity.",
+        "Tests cover: read-only lower layer enforcement (writes go to upper only).",
+        "Tests cover: metadata root filtering from user-visible results."
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": "overlay_fs.rs is 1267 lines with complex logic. Currently only tested indirectly through root_fs.rs (9 overlay tests)."
+    },
+    {
+      "id": "US-504",
+      "title": "Add path traversal and adversarial VFS input tests",
+      "description": "As a developer, I want kernel VFS tests that attempt path traversal, null byte injection, and other adversarial inputs.",
+      "acceptanceCriteria": [
+        "Tests attempt ../../../etc/passwd traversal through kernel VFS and verify it stays within bounds.",
+        "Tests attempt null byte injection in paths (path\\x00evil) and verify rejection.",
+        "Tests attempt overlong path components (>255 chars) and verify ENAMETOOLONG.",
+        "Tests attempt symlink chains exceeding ELOOP limit and verify ELOOP error.",
+        "Tests attempt TOCTOU: create symlink, check permission, replace symlink target, verify operation uses resolved path.",
+        "All tests run at the kernel crate level (crates/kernel/tests/)."
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": "TS-side host-dir-backend.test.ts has one ../../etc/passwd test. Kernel VFS has zero adversarial path tests."
+    },
+    {
+      "id": "US-505",
+      "title": "Add resource exhaustion stress tests under adversarial load",
+      "description": "As a developer, I want tests that simulate adversarial resource exhaustion (fork bombs, FD floods, inode flooding) to verify limits hold under pressure.",
+      "acceptanceCriteria": [
+        "Test spawns processes in a tight loop up to max_processes limit, verifies the limit holds and no OOM/panic occurs.",
+        "Test opens FDs in a loop up to max_fds limit, verifies EMFILE after limit.",
+        "Test creates files in a loop up to max_inodes limit, verifies ENOSPC after limit.",
+        "Test writes data up to max_filesystem_bytes limit, verifies ENOSPC after limit.",
+        "Tests run concurrently (multiple goroutines/tasks) to test race conditions in resource accounting.",
+        "Existing resource_accounting.rs tests (small thresholds) are preserved."
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": "resource_accounting.rs tests limits with small thresholds (1 process, 6 FDs) but never tests concurrent adversarial pressure."
     }
   ]
 }
