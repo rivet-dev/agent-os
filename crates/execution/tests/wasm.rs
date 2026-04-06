@@ -10,10 +10,13 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tempfile::tempdir;
 
 const WASM_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_WASM_WARMUP_METRICS__:";
+const WASM_TEST_VM_ID: &str = "vm-wasm";
+static NEXT_TEST_IMPORT_CACHE_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WasmWarmupMetrics {
@@ -123,7 +126,7 @@ fn run_wasm_execution(
 ) -> (String, String, i32) {
     let execution = engine
         .start_execution(StartWasmExecutionRequest {
-            vm_id: String::from("vm-wasm"),
+            vm_id: String::from(WASM_TEST_VM_ID),
             context_id,
             argv,
             env,
@@ -137,6 +140,17 @@ fn run_wasm_execution(
     let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
 
     (stdout, stderr, result.exit_code)
+}
+
+fn new_test_engine() -> WasmExecutionEngine {
+    let mut engine = WasmExecutionEngine::default();
+    let cache_id = NEXT_TEST_IMPORT_CACHE_ID.fetch_add(1, Ordering::Relaxed);
+    let base_dir = std::env::temp_dir().join(format!(
+        "agent-os-wasm-import-cache-test-{}-{cache_id}",
+        std::process::id()
+    ));
+    engine.set_import_cache_base_dir(WASM_TEST_VM_ID, base_dir);
+    engine
 }
 
 fn wasm_stdout_module() -> Vec<u8> {
@@ -419,9 +433,9 @@ fn encode_varuint(mut value: u64) -> Vec<u8> {
 
 #[test]
 fn wasm_contexts_preserve_vm_and_module_configuration() {
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
@@ -437,15 +451,15 @@ fn wasm_execution_runs_guest_module_through_v8() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(&temp.path().join("guest.wasm"), &wasm_stdout_module());
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
     let execution = engine
         .start_execution(StartWasmExecutionRequest {
-            vm_id: String::from("vm-wasm"),
+            vm_id: String::from(WASM_TEST_VM_ID),
             context_id: context.context_id,
             argv: vec![String::from("guest.wasm")],
             env: BTreeMap::from([(String::from("IGNORED_FOR_NOW"), String::from("ok"))]),
@@ -476,9 +490,9 @@ fn wasm_execution_ignores_guest_overrides_for_internal_node_env() {
     write_fixture(&temp.path().join("guest.wasm"), &wasm_stdout_module());
     write_fixture(&temp.path().join("evil.wasm"), &wasm_override_module());
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
@@ -513,9 +527,9 @@ fn wasm_execution_freezes_wasi_clock_time() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(&temp.path().join("guest.wasm"), &wasm_timing_module());
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
@@ -535,9 +549,9 @@ fn wasm_execution_freezes_wasi_clock_time() {
 
 #[test]
 fn wasm_execution_rejects_vm_mismatch() {
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
@@ -564,15 +578,15 @@ fn wasm_execution_streams_exit_event() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(&temp.path().join("guest.wasm"), &wasm_stdout_module());
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
     let execution = engine
         .start_execution(StartWasmExecutionRequest {
-            vm_id: String::from("vm-wasm"),
+            vm_id: String::from(WASM_TEST_VM_ID),
             context_id: context.context_id,
             argv: Vec::new(),
             env: BTreeMap::new(),
@@ -616,15 +630,15 @@ fn wasm_execution_emits_signal_state_from_control_channel() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(&temp.path().join("guest.wasm"), &wasm_signal_state_module());
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
     let execution = engine
         .start_execution(StartWasmExecutionRequest {
-            vm_id: String::from("vm-wasm"),
+            vm_id: String::from(WASM_TEST_VM_ID),
             context_id: context.context_id,
             argv: Vec::new(),
             env: BTreeMap::new(),
@@ -682,13 +696,13 @@ fn wasm_read_only_tier_blocks_workspace_writes_but_read_write_allows_them() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(&temp.path().join("guest.wasm"), &wasm_write_file_module());
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let read_only_context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
     let read_write_context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
@@ -736,13 +750,13 @@ fn wasm_full_tier_exposes_host_process_imports_but_read_write_does_not() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(&temp.path().join("guest.wasm"), &wasm_signal_state_module());
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let full_context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
     let read_write_context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
@@ -784,13 +798,13 @@ fn wasm_execution_reuses_shared_warmup_path_across_contexts() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(&temp.path().join("guest.wasm"), &wasm_stdout_module());
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let first_context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
     let second_context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
     let debug_env = BTreeMap::from([(
@@ -848,13 +862,13 @@ fn wasm_execution_rewarms_when_symlink_target_changes_with_same_size_module() {
     write_fixture(&temp.path().join("evil.wasm"), &wasm_override_module());
     symlink("./good.wasm", &stable_link).expect("create initial wasm symlink");
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let first_context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
     let second_context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
     let debug_env = BTreeMap::from([(
@@ -903,9 +917,9 @@ fn wasm_warmup_metrics_encode_emoji_module_paths_as_json() {
     let module_name = "guest-😀.wasm";
     write_fixture(&temp.path().join(module_name), &wasm_stdout_module());
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(format!("./{module_name}")),
     });
 
@@ -939,9 +953,9 @@ fn wasm_execution_times_out_when_fuel_budget_is_exhausted() {
         &wasm_infinite_loop_module(),
     );
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
@@ -972,9 +986,9 @@ fn wasm_execution_allows_prewarm_timeout_to_differ_from_execution_timeout() {
         &wasm_infinite_loop_module(),
     );
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
@@ -1011,15 +1025,15 @@ fn wasm_execution_rejects_modules_whose_memory_cap_exceeds_limit() {
         &wasm_memory_capped_module(),
     );
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
     let error = engine
         .start_execution(StartWasmExecutionRequest {
-            vm_id: String::from("vm-wasm"),
+            vm_id: String::from(WASM_TEST_VM_ID),
             context_id: context.context_id,
             argv: Vec::new(),
             env: BTreeMap::from([(
@@ -1047,9 +1061,9 @@ fn wasm_execution_enforces_runtime_memory_growth_limit_for_modules_without_decla
         &wasm_memory_grow_until_runtime_limit_module(),
     );
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
@@ -1081,15 +1095,15 @@ fn wasm_execution_rejects_modules_that_exceed_parser_file_size_cap() {
     file.set_len(256_u64 * 1024 * 1024 + 1)
         .expect("sparsely size oversize wasm file");
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
     let error = engine
         .start_execution(StartWasmExecutionRequest {
-            vm_id: String::from("vm-wasm"),
+            vm_id: String::from(WASM_TEST_VM_ID),
             context_id: context.context_id,
             argv: Vec::new(),
             env: BTreeMap::from([(
@@ -1119,15 +1133,15 @@ fn wasm_execution_rejects_modules_with_too_many_import_entries() {
         &raw_wasm_module(2, &import_section),
     );
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
     let error = engine
         .start_execution(StartWasmExecutionRequest {
-            vm_id: String::from("vm-wasm"),
+            vm_id: String::from(WASM_TEST_VM_ID),
             context_id: context.context_id,
             argv: Vec::new(),
             env: BTreeMap::from([(
@@ -1155,15 +1169,15 @@ fn wasm_execution_rejects_modules_with_too_many_memory_entries() {
         &raw_wasm_module(5, &encode_varuint(1_025)),
     );
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
     let error = engine
         .start_execution(StartWasmExecutionRequest {
-            vm_id: String::from("vm-wasm"),
+            vm_id: String::from(WASM_TEST_VM_ID),
             context_id: context.context_id,
             argv: Vec::new(),
             env: BTreeMap::from([(
@@ -1193,15 +1207,15 @@ fn wasm_execution_rejects_varuints_that_exceed_parser_iteration_cap() {
     bytes.push(0x00);
     write_fixture(&temp.path().join("guest.wasm"), &bytes);
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
     let error = engine
         .start_execution(StartWasmExecutionRequest {
-            vm_id: String::from("vm-wasm"),
+            vm_id: String::from(WASM_TEST_VM_ID),
             context_id: context.context_id,
             argv: Vec::new(),
             env: BTreeMap::from([(

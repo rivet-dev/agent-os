@@ -60,7 +60,7 @@
         "Do not delete or disable tests."
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "9 pass, 11 fail. Failures complete in 0.07s suggesting setup/artifact issues for some."
     },
     {

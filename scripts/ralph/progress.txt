@@ -2,6 +2,7 @@
 ## Codebase Patterns
 - After a fresh workspace install, linked registry agent/software packages still need their built `dist/` outputs before adapter-backed or software-backed `packages/core` Vitest suites are meaningful; otherwise Vite fails on package entry resolution before test logic runs.
 - Sidecar-owned JavaScript, Python, and WASM engines should use per-VM import-cache roots; sharing one temp cache lets stale-runner cleanup delete another VM's assets.
+- Rust execution tests that spin up JavaScript, Python, or WASM engines should call `set_import_cache_base_dir(...)` with a unique temp root per test VM; the default `/tmp` cache root is not parallel-test-safe because each engine instance sweeps stale cache directories once.
 - Timer-driven guest Node networking can outlive top-level module evaluation, so the sync-RPC bridge must stay alive until process exit rather than being disposed when the entry module resolves.
 - Security tests must use real Node.js execution and attempt actual forbidden operations, not just verify argument construction with fake binaries.
 - Sidecar test assertions must check response payload contents, not just match on variant shapes with wildcard discards.
@@ -135,4 +136,13 @@ Started: Sat Apr  5 2026
   - `guestVisiblePathFromHostPath(...)` is appropriate for redacting host paths into guest-visible text, but guards that decide whether a resolved module is allowed must treat the `/unknown` sentinel as blocked rather than visible.
   - For ESM parse failures on modern Node, catching an error, mutating `error.stack`, and rethrowing is not enough to scrub host file URLs; the runner has to format stderr explicitly if the top-level import surface must stay guest-only.
   - One focused `cargo test -p agent-os-execution --test javascript` run is enough to validate both the CJS hidden-parent guard and the top-level loader-path translation path because they live entirely in `crates/execution/src/node_import_cache.rs`.
+---
+## 2026-04-05 20:11:40 PDT - US-302
+- Fixed the `agent-os-execution` WASM suite by isolating each test engine's `NodeImportCache` root. `crates/execution/tests/wasm.rs` now creates engines through `new_test_engine()`, which assigns a unique temp base dir with `set_import_cache_base_dir(...)` so parallel tests no longer delete each other's `timing-bootstrap.mjs` and runner assets during stale-cache cleanup.
+- Quality checks: `cargo test -p agent-os-execution --test wasm` passes with `20/20` tests green under the default parallel test runner.
+- Files changed: `AGENTS.md`, `crates/execution/tests/wasm.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Node-backed execution tests can fail as misleading warmup, signal, timeout, or permission regressions when the real issue is shared import-cache cleanup under `/tmp`; check for missing `timing-bootstrap.mjs` or runner assets before debugging runtime semantics.
+  - For `JavascriptExecutionEngine`, `PythonExecutionEngine`, and `WasmExecutionEngine` tests, a tiny `new_test_engine()` helper that calls `set_import_cache_base_dir(...)` is enough to make default `cargo test` parallelism deterministic without touching runtime behavior.
+  - Re-running the whole crate test target under default thread count matters here; `cargo test -p agent-os-execution --test wasm` is what proves the fix, because `--test-threads=1` would mask this stale-cache race.
 ---
