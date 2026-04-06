@@ -34,7 +34,7 @@
         "No test is deleted or disabled to achieve this."
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "This is the #1 blocker. ~120 TS tests fail with the same error: NativeSidecarProcessClient.guestFilesystemCall rejects writeFile calls. Tests that only read or test error paths pass. This regression was introduced by the 82 commits from the runtime-isolation-hardening PRD (US-014/015/016 VFS RPC bridge changes). Affects sessions, filesystem, network, process, events — everything that writes to the VM."
     },
     {

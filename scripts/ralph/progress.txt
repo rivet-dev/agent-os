@@ -12,6 +12,7 @@
 - SSRF filters must cover all RFC special-purpose ranges: 0.0.0.0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16, 224/4, 255.255.255.255, plus IPv6 equivalents.
 - S3-compatible loopback endpoints for local Minio or mock servers must opt in explicitly with `allowLoopbackEndpoint`; production defaults should keep loopback/private endpoint SSRF checks enabled.
 - Native-sidecar Node launches must share the same host shadow root between `createVm` metadata `cwd` and `NativeSidecarKernelProxy.shadowRoot`; otherwise sidecar execute rejects the Node cwd as escaping the VM sandbox root.
+- In `crates/execution/src/node_import_cache.rs`, absolute entrypoints already inside a visible guest-path mapping must stay as host paths in the runner; remapping them as guest paths prefixes the shadow root twice and makes VM-written scripts look missing to Node.
 - External mounts must be excluded from root filesystem quotas both when measuring usage and when enforcing per-path write/mkdir/truncate limits, or host-dir mounts will consume guest quota.
 - Node import prewarm should use `node:` builtin specifiers instead of `agent-os:` synthetic URLs to stay compatible with newer Node ESM warmup behavior.
 - Native-sidecar WASM executions read and write against the host `shadowRoot`, so the shadow root must include the standard POSIX bootstrap directories up front; missing `/tmp` breaks shell redirection and file-based command tests even when the guest root filesystem contains `/tmp`.
@@ -114,4 +115,13 @@ Started: Sat Apr  5 2026
   - Grouped-path refactors are cheap to validate with one representative Vitest file per directory family plus the sidecar ignored suite; that catches import-depth and test-discovery regressions without waiting on unrelated runtime debt.
   - Fresh `pnpm install` is not enough for linked registry agent/software packages in this repo; adapter-backed and software-backed tests also expect built `dist/` entries from those packages before full-suite results are interpretable.
   - `cargo test -p agent-os-execution --test javascript -- --test-threads=1` still reproduces the same two pre-existing module-resolution failures on this branch, so they remain separate from the US-308 file split.
+---
+## 2026-04-05 19:59:11 PDT - US-300
+- Fixed the sidecar Node entrypoint translation bug that was killing ACP/session processes and hanging VM-backed network tests after `vm.writeFile(...)`. The generated Node runner now recognizes absolute host entrypoints that already live under a guest-path mapping and avoids remapping them through `hostPathFromGuestPath(...)`, which had been prefixing the shadow root twice.
+- Added a focused Rust regression test for host-absolute entrypoints under `AGENT_OS_GUEST_PATH_MAPPINGS`, and updated repo guidance with the shadow-root/remapping gotcha.
+- Files changed: `CLAUDE.md`, `crates/execution/src/node_import_cache.rs`, `crates/execution/tests/javascript/env_hardening.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - VM filesystem writes can look healthy in pure VFS tests while sidecar-managed Node launches still fail; if a VM-written script exits with `ENOENT`, inspect the generated runner's guest/host path translation before debugging the write RPC itself.
+  - `AGENT_OS_GUEST_ENTRYPOINT` keeps guest-visible `process.argv[1]`, but the runner still has to detect already-host-resolved entrypoints separately or it will translate them a second time.
+  - For this area, one direct `AgentOs.create() -> vm.writeFile() -> vm.spawn("node", [guestPath])` reproduction is faster than starting in the ACP/session layer because it surfaces raw Node stderr immediately.
 ---

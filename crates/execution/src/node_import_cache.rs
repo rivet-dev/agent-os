@@ -2003,6 +2003,10 @@ function toImportSpecifier(specifier) {
   }
   if (isPathLike(specifier)) {
     if (specifier.startsWith('/')) {
+      const resolvedHostPath = path.resolve(specifier);
+      if (guestPathFromHostPath(resolvedHostPath)) {
+        return pathToFileURL(resolvedHostPath).href;
+      }
       const normalized = path.posix.normalize(specifier);
       const hostPath =
         hostPathFromGuestPath(normalized) ??

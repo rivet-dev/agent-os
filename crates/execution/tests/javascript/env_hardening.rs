@@ -237,6 +237,64 @@ console.log(JSON.stringify(result));
 }
 
 #[test]
+fn javascript_execution_accepts_host_absolute_entrypoints_under_guest_path_mappings() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+console.log(JSON.stringify({
+  argv1: process.argv[1],
+  cwd: process.cwd(),
+  loaded: true,
+}));
+"#,
+    );
+
+    let mut engine = new_test_engine();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let cwd_host_path = temp.path().to_string_lossy().replace('\\', "\\\\");
+    let entrypoint_host_path = temp
+        .path()
+        .join("entry.mjs")
+        .to_string_lossy()
+        .replace('\\', "\\\\");
+    let env = BTreeMap::from([
+        (
+            String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+            format!("[{{\"guestPath\":\"/root\",\"hostPath\":\"{cwd_host_path}\"}}]"),
+        ),
+        (
+            String::from("AGENT_OS_GUEST_ENTRYPOINT"),
+            String::from("/root/entry.mjs"),
+        ),
+    ]);
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![entrypoint_host_path],
+        env,
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+
+    let parsed: Value =
+        serde_json::from_str(stdout.trim()).expect("parse absolute entrypoint JSON");
+    assert_eq!(parsed["argv1"], Value::String(String::from("/root/entry.mjs")));
+    assert_eq!(parsed["cwd"], Value::String(String::from("/root")));
+    assert_eq!(parsed["loaded"], Value::Bool(true));
+}
+
+#[test]
 fn javascript_execution_uses_virtual_root_when_no_guest_path_mapping_exists() {
     assert_node_available();
 
