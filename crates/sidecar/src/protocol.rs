@@ -1351,3 +1351,85 @@ fn validate_requirement(
         Err(ProtocolCodecError::InvalidOwnershipScope { required, actual })
     }
 }
+
+// ---------------------------------------------------------------------------
+// JavaScript sync-RPC request types (deserialized from guest Node.js processes)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, Default)]
+pub struct JavascriptChildProcessSpawnOptions {
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(rename = "internalBootstrapEnv", default)]
+    pub internal_bootstrap_env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub shell: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JavascriptChildProcessSpawnRequest {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub options: JavascriptChildProcessSpawnOptions,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JavascriptNetConnectRequest {
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JavascriptNetListenRequest {
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub backlog: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JavascriptDgramCreateSocketRequest {
+    #[serde(rename = "type")]
+    pub socket_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JavascriptDgramBindRequest {
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JavascriptDgramSendRequest {
+    #[serde(default)]
+    pub address: Option<String>,
+    pub port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JavascriptDnsLookupRequest {
+    pub hostname: String,
+    #[serde(default)]
+    pub family: Option<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JavascriptDnsResolveRequest {
+    pub hostname: String,
+    #[serde(default)]
+    pub rrtype: Option<String>,
+}

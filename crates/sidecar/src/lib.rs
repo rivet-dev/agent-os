@@ -8,6 +8,7 @@ pub mod protocol;
 mod s3_plugin;
 mod sandbox_agent_plugin;
 pub mod service;
+pub(crate) mod state;
 
 pub use service::{DispatchResult, NativeSidecar, NativeSidecarConfig, SidecarError};
 

@@ -5,24 +5,42 @@ use crate::protocol::{
     DisposeReason, DisposeVmRequest, EventFrame, EventPayload, ExecuteRequest, FindBoundUdpRequest,
     FindListenerRequest, GetSignalStateRequest, GetZombieTimerCountRequest,
     GuestFilesystemCallRequest, GuestFilesystemOperation, GuestFilesystemResultResponse,
-    GuestFilesystemStat, GuestRuntimeKind, KillProcessRequest, ListenerSnapshotResponse,
-    OpenSessionRequest, OwnershipScope, ProcessExitedEvent, ProcessKilledResponse,
-    ProcessOutputEvent, ProcessStartedResponse, ProtocolSchema, RejectedResponse, RequestFrame,
-    RequestPayload, ResponseFrame, ResponsePayload, RootFilesystemBootstrappedResponse,
-    RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryEncoding,
-    RootFilesystemEntryKind, RootFilesystemLowerDescriptor, RootFilesystemMode,
-    RootFilesystemSnapshotResponse, SessionOpenedResponse, SidecarPlacement,
+    GuestFilesystemStat, GuestRuntimeKind, JavascriptChildProcessSpawnRequest,
+    JavascriptDgramBindRequest, JavascriptDgramCreateSocketRequest, JavascriptDgramSendRequest,
+    JavascriptDnsLookupRequest, JavascriptDnsResolveRequest, JavascriptNetConnectRequest,
+    JavascriptNetListenRequest, KillProcessRequest, ListenerSnapshotResponse, OpenSessionRequest,
+    OwnershipScope,
+    ProcessExitedEvent, ProcessKilledResponse, ProcessOutputEvent, ProcessStartedResponse,
+    ProtocolSchema, RejectedResponse, RequestFrame, RequestPayload, ResponseFrame, ResponsePayload,
+    RootFilesystemBootstrappedResponse, RootFilesystemDescriptor, RootFilesystemEntry,
+    RootFilesystemEntryEncoding, RootFilesystemEntryKind, RootFilesystemLowerDescriptor,
+    RootFilesystemMode, RootFilesystemSnapshotResponse, SessionOpenedResponse,
     SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse,
     SnapshotRootFilesystemRequest, SocketStateEntry, StdinClosedResponse, StdinWrittenResponse,
     StreamChannel, VmConfiguredResponse, VmCreatedResponse, VmDisposedResponse, VmLifecycleEvent,
     VmLifecycleState, WasmPermissionTier, WriteStdinRequest, ZombieTimerCountResponse,
-    DEFAULT_MAX_FRAME_BYTES,
+};
+use crate::state::{
+    ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
+    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError, ConnectionState,
+    DnsResolutionSource, JavascriptSocketFamily, JavascriptSocketPathContext,
+    JavascriptTcpListenerEvent, JavascriptTcpSocketEvent, JavascriptUdpFamily,
+    JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts,
+    PendingTcpSocket, PendingUnixSocket, ProcNetEntry, ResolvedChildProcessExecution,
+    ResolvedTcpConnectAddr, SessionState, SharedBridge, SidecarKernel, SocketQueryKind,
+    VmConfiguration, VmDnsConfig, VmListenPolicy, VmState, DEFAULT_JAVASCRIPT_NET_BACKLOG,
+    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME,
+    EXECUTION_SANDBOX_ROOT_ENV, HOST_REALPATH_MAX_SYMLINK_DEPTH, JAVASCRIPT_COMMAND,
+    LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND, PYTHON_VFS_RPC_GUEST_ROOT,
+    VM_DNS_OVERRIDE_METADATA_PREFIX, VM_DNS_SERVERS_METADATA_KEY,
+    VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
+    VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
 };
 use crate::s3_plugin::S3MountPlugin;
 use crate::sandbox_agent_plugin::SandboxAgentMountPlugin;
 use crate::NativeSidecarBridge;
 use agent_os_bridge::{
-    BridgeTypes, ChmodRequest, CommandPermissionRequest, CreateDirRequest, EnvironmentAccess,
+    ChmodRequest, CommandPermissionRequest, CreateDirRequest, EnvironmentAccess,
     EnvironmentPermissionRequest, FileKind, FileMetadata, FilesystemAccess,
     FilesystemPermissionRequest, FilesystemSnapshot, FlushFilesystemStateRequest,
     LifecycleEventRecord, LifecycleState, LoadFilesystemStateRequest, LogLevel, LogRecord,
@@ -34,12 +52,12 @@ use agent_os_execution::wasm::{
 };
 use agent_os_execution::{
     CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
-    JavascriptExecution, JavascriptExecutionEngine, JavascriptExecutionError,
+    JavascriptExecutionEngine, JavascriptExecutionError,
     JavascriptExecutionEvent, JavascriptSyncRpcRequest, NodeSignalDispositionAction,
-    NodeSignalHandlerRegistration, PythonExecution, PythonExecutionEngine, PythonExecutionError,
+    NodeSignalHandlerRegistration, PythonExecutionEngine, PythonExecutionError,
     PythonExecutionEvent, PythonVfsRpcMethod, PythonVfsRpcRequest, PythonVfsRpcResponsePayload,
     PythonVfsRpcStat, StartJavascriptExecutionRequest, StartPythonExecutionRequest,
-    StartWasmExecutionRequest, WasmExecution, WasmExecutionEngine, WasmExecutionError,
+    StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionError,
     WasmExecutionEvent, WasmPermissionTier as ExecutionWasmPermissionTier,
 };
 use agent_os_kernel::command_registry::CommandDriver;
@@ -74,11 +92,9 @@ use nix::libc;
 use nix::sys::signal::{kill as send_signal, Signal};
 use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
-use serde::Deserialize;
 use serde_json::json;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
@@ -89,106 +105,23 @@ use std::net::{
 use std::os::unix::net::{SocketAddr as UnixSocketAddr, UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const EXECUTION_DRIVER_NAME: &str = "agent-os-sidecar-execution";
-const JAVASCRIPT_COMMAND: &str = "node";
-const PYTHON_COMMAND: &str = "python";
-const WASM_COMMAND: &str = "wasm";
-const PYTHON_VFS_RPC_GUEST_ROOT: &str = "/workspace";
-const EXECUTION_SANDBOX_ROOT_ENV: &str = "AGENT_OS_SANDBOX_ROOT";
-const HOST_REALPATH_MAX_SYMLINK_DEPTH: usize = 40;
-const DISPOSE_VM_SIGTERM_GRACE: Duration = Duration::from_millis(100);
-const DISPOSE_VM_SIGKILL_GRACE: Duration = Duration::from_millis(100);
-const VM_DNS_SERVERS_METADATA_KEY: &str = "network.dns.servers";
-const VM_DNS_OVERRIDE_METADATA_PREFIX: &str = "network.dns.override.";
-const VM_LISTEN_PORT_MIN_METADATA_KEY: &str = "network.listen.port_min";
-const VM_LISTEN_PORT_MAX_METADATA_KEY: &str = "network.listen.port_max";
-const VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY: &str = "network.listen.allow_privileged";
-const DEFAULT_JAVASCRIPT_NET_BACKLOG: u32 = 511;
-const LOOPBACK_EXEMPT_PORTS_ENV: &str = "AGENT_OS_LOOPBACK_EXEMPT_PORTS";
+// Constants and type aliases moved to crate::state
 
-type BridgeError<B> = <B as BridgeTypes>::Error;
-type SidecarKernel = KernelVm<MountTable>;
+// NativeSidecarConfig, DispatchResult, SidecarError moved to crate::state
+pub use crate::state::{DispatchResult, NativeSidecarConfig, SidecarError};
 
-#[derive(Debug, Clone)]
-pub struct NativeSidecarConfig {
-    pub sidecar_id: String,
-    pub max_frame_bytes: usize,
-    pub compile_cache_root: Option<PathBuf>,
-    pub expected_auth_token: Option<String>,
-}
-
-impl Default for NativeSidecarConfig {
-    fn default() -> Self {
-        Self {
-            sidecar_id: String::from("agent-os-sidecar"),
-            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
-            compile_cache_root: None,
-            expected_auth_token: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct DispatchResult {
-    pub response: ResponseFrame,
-    pub events: Vec<EventFrame>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SidecarError {
-    InvalidState(String),
-    Unauthorized(String),
-    Unsupported(String),
-    FrameTooLarge(String),
-    Kernel(String),
-    Plugin(String),
-    Execution(String),
-    Bridge(String),
-    Io(String),
-}
-
-impl fmt::Display for SidecarError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidState(message)
-            | Self::Unauthorized(message)
-            | Self::Unsupported(message)
-            | Self::FrameTooLarge(message)
-            | Self::Kernel(message)
-            | Self::Plugin(message)
-            | Self::Execution(message)
-            | Self::Bridge(message)
-            | Self::Io(message) => f.write_str(message),
-        }
-    }
-}
-
-impl Error for SidecarError {}
-
-struct SharedBridge<B> {
-    inner: Arc<Mutex<B>>,
-    permissions: Arc<Mutex<BTreeMap<String, BTreeMap<String, crate::protocol::PermissionMode>>>>,
-}
+// SharedBridge struct and Clone impl moved to crate::state
 
 impl<B> SharedBridge<B> {
     fn new(bridge: B) -> Self {
         Self {
             inner: Arc::new(Mutex::new(bridge)),
             permissions: Arc::new(Mutex::new(BTreeMap::new())),
-        }
-    }
-}
-
-impl<B> Clone for SharedBridge<B> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            permissions: Arc::clone(&self.permissions),
         }
     }
 }
@@ -1458,104 +1391,9 @@ where
     }
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-struct ConnectionState {
-    auth_token: String,
-    sessions: BTreeSet<String>,
-}
+// ConnectionState, SessionState, VmConfiguration, VmState moved to crate::state
 
-#[allow(dead_code)]
-#[derive(Debug)]
-struct SessionState {
-    connection_id: String,
-    placement: SidecarPlacement,
-    metadata: BTreeMap<String, String>,
-    vm_ids: BTreeSet<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Default, Clone)]
-struct VmConfiguration {
-    mounts: Vec<crate::protocol::MountDescriptor>,
-    software: Vec<crate::protocol::SoftwareDescriptor>,
-    permissions: Vec<crate::protocol::PermissionDescriptor>,
-    instructions: Vec<String>,
-    projected_modules: Vec<crate::protocol::ProjectedModuleDescriptor>,
-    command_permissions: BTreeMap<String, WasmPermissionTier>,
-}
-
-#[allow(dead_code)]
-struct VmState {
-    connection_id: String,
-    session_id: String,
-    metadata: BTreeMap<String, String>,
-    dns: VmDnsConfig,
-    guest_env: BTreeMap<String, String>,
-    requested_runtime: GuestRuntimeKind,
-    cwd: PathBuf,
-    kernel: SidecarKernel,
-    loaded_snapshot: Option<FilesystemSnapshot>,
-    configuration: VmConfiguration,
-    command_guest_paths: BTreeMap<String, String>,
-    command_permissions: BTreeMap<String, WasmPermissionTier>,
-    active_processes: BTreeMap<String, ActiveProcess>,
-    signal_states: BTreeMap<String, BTreeMap<u32, SignalHandlerRegistration>>,
-}
-
-#[derive(Debug, Clone)]
-struct JavascriptSocketPathContext {
-    sandbox_root: PathBuf,
-    mounts: Vec<crate::protocol::MountDescriptor>,
-    listen_policy: VmListenPolicy,
-    loopback_exempt_ports: BTreeSet<u16>,
-    tcp_loopback_guest_to_host_ports: BTreeMap<(JavascriptSocketFamily, u16), u16>,
-    udp_loopback_guest_to_host_ports: BTreeMap<(JavascriptSocketFamily, u16), u16>,
-    udp_loopback_host_to_guest_ports: BTreeMap<(JavascriptSocketFamily, u16), u16>,
-    used_tcp_guest_ports: BTreeMap<JavascriptSocketFamily, BTreeSet<u16>>,
-    used_udp_guest_ports: BTreeMap<JavascriptSocketFamily, BTreeSet<u16>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum JavascriptSocketFamily {
-    Ipv4,
-    Ipv6,
-}
-
-impl JavascriptSocketFamily {
-    fn from_ip(ip: IpAddr) -> Self {
-        match ip {
-            IpAddr::V4(_) => Self::Ipv4,
-            IpAddr::V6(_) => Self::Ipv6,
-        }
-    }
-}
-
-impl From<JavascriptUdpFamily> for JavascriptSocketFamily {
-    fn from(value: JavascriptUdpFamily) -> Self {
-        match value {
-            JavascriptUdpFamily::Ipv4 => Self::Ipv4,
-            JavascriptUdpFamily::Ipv6 => Self::Ipv6,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct VmListenPolicy {
-    port_min: u16,
-    port_max: u16,
-    allow_privileged: bool,
-}
-
-impl Default for VmListenPolicy {
-    fn default() -> Self {
-        Self {
-            port_min: 1,
-            port_max: u16::MAX,
-            allow_privileged: false,
-        }
-    }
-}
+// JavascriptSocketPathContext, JavascriptSocketFamily, VmListenPolicy moved to crate::state
 
 impl JavascriptSocketPathContext {
     fn loopback_port_allowed(&self, port: u16) -> bool {
@@ -1597,31 +1435,7 @@ impl JavascriptSocketPathContext {
     }
 }
 
-#[allow(dead_code)]
-struct ActiveProcess {
-    kernel_pid: u32,
-    kernel_handle: KernelProcessHandle,
-    runtime: GuestRuntimeKind,
-    execution: ActiveExecution,
-    child_processes: BTreeMap<String, ActiveProcess>,
-    next_child_process_id: usize,
-    tcp_listeners: BTreeMap<String, ActiveTcpListener>,
-    next_tcp_listener_id: usize,
-    tcp_sockets: BTreeMap<String, ActiveTcpSocket>,
-    next_tcp_socket_id: usize,
-    unix_listeners: BTreeMap<String, ActiveUnixListener>,
-    next_unix_listener_id: usize,
-    unix_sockets: BTreeMap<String, ActiveUnixSocket>,
-    next_unix_socket_id: usize,
-    udp_sockets: BTreeMap<String, ActiveUdpSocket>,
-    next_udp_socket_id: usize,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct NetworkResourceCounts {
-    sockets: usize,
-    connections: usize,
-}
+// ActiveProcess, NetworkResourceCounts moved to crate::state
 
 impl ActiveProcess {
     fn new(
@@ -1700,53 +1514,7 @@ impl ActiveProcess {
     }
 }
 
-#[derive(Debug)]
-enum JavascriptTcpListenerEvent {
-    Connection(PendingTcpSocket),
-    Error {
-        code: Option<String>,
-        message: String,
-    },
-}
-
-#[derive(Debug)]
-struct PendingTcpSocket {
-    stream: TcpStream,
-    guest_local_addr: SocketAddr,
-    guest_remote_addr: SocketAddr,
-}
-
-#[derive(Debug)]
-enum JavascriptTcpSocketEvent {
-    Data(Vec<u8>),
-    End,
-    Close {
-        had_error: bool,
-    },
-    Error {
-        code: Option<String>,
-        message: String,
-    },
-}
-
-#[derive(Debug)]
-struct ActiveTcpSocket {
-    stream: Arc<Mutex<TcpStream>>,
-    events: Receiver<JavascriptTcpSocketEvent>,
-    event_sender: Sender<JavascriptTcpSocketEvent>,
-    guest_local_addr: SocketAddr,
-    guest_remote_addr: SocketAddr,
-    listener_id: Option<String>,
-    saw_local_shutdown: Arc<AtomicBool>,
-    saw_remote_end: Arc<AtomicBool>,
-    close_notified: Arc<AtomicBool>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ResolvedTcpConnectAddr {
-    actual_addr: SocketAddr,
-    guest_remote_addr: SocketAddr,
-}
+// TCP types moved to crate::state
 
 impl ActiveTcpSocket {
     fn connect<B>(
@@ -1846,41 +1614,9 @@ impl ActiveTcpSocket {
     }
 }
 
-#[derive(Debug)]
-struct ActiveTcpListener {
-    listener: TcpListener,
-    local_addr: SocketAddr,
-    guest_local_addr: SocketAddr,
-    backlog: usize,
-    active_connection_ids: BTreeSet<String>,
-}
+// ActiveTcpListener moved to crate::state
 
-#[derive(Debug)]
-enum JavascriptUnixListenerEvent {
-    Connection(PendingUnixSocket),
-    Error {
-        code: Option<String>,
-        message: String,
-    },
-}
-
-#[derive(Debug)]
-struct PendingUnixSocket {
-    stream: UnixStream,
-    local_path: Option<String>,
-    remote_path: Option<String>,
-}
-
-#[derive(Debug)]
-struct ActiveUnixSocket {
-    stream: Arc<Mutex<UnixStream>>,
-    events: Receiver<JavascriptTcpSocketEvent>,
-    event_sender: Sender<JavascriptTcpSocketEvent>,
-    listener_id: Option<String>,
-    saw_local_shutdown: Arc<AtomicBool>,
-    saw_remote_end: Arc<AtomicBool>,
-    close_notified: Arc<AtomicBool>,
-}
+// Unix socket types moved to crate::state
 
 impl ActiveUnixSocket {
     fn connect(host_path: &Path, guest_path: &str) -> Result<Self, SidecarError> {
@@ -1964,13 +1700,7 @@ impl ActiveUnixSocket {
     }
 }
 
-#[derive(Debug)]
-struct ActiveUnixListener {
-    listener: UnixListener,
-    path: String,
-    backlog: usize,
-    active_connection_ids: BTreeSet<String>,
-}
+// ActiveUnixListener moved to crate::state
 
 impl ActiveUnixListener {
     fn bind(
@@ -2135,56 +1865,7 @@ impl ActiveTcpListener {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum JavascriptUdpFamily {
-    Ipv4,
-    Ipv6,
-}
-
-impl JavascriptUdpFamily {
-    fn from_socket_type(value: &str) -> Result<Self, SidecarError> {
-        match value {
-            "udp4" => Ok(Self::Ipv4),
-            "udp6" => Ok(Self::Ipv6),
-            other => Err(SidecarError::InvalidState(format!(
-                "unsupported dgram socket type {other}"
-            ))),
-        }
-    }
-
-    fn socket_type(self) -> &'static str {
-        match self {
-            Self::Ipv4 => "udp4",
-            Self::Ipv6 => "udp6",
-        }
-    }
-
-    fn matches_addr(self, addr: &SocketAddr) -> bool {
-        match (self, addr) {
-            (Self::Ipv4, SocketAddr::V4(_)) | (Self::Ipv6, SocketAddr::V6(_)) => true,
-            _ => false,
-        }
-    }
-}
-
-#[derive(Debug)]
-enum JavascriptUdpSocketEvent {
-    Message {
-        data: Vec<u8>,
-        remote_addr: SocketAddr,
-    },
-    Error {
-        code: Option<String>,
-        message: String,
-    },
-}
-
-#[derive(Debug)]
-struct ActiveUdpSocket {
-    family: JavascriptUdpFamily,
-    socket: Option<UdpSocket>,
-    guest_local_addr: Option<SocketAddr>,
-}
+// UDP types moved to crate::state
 
 impl ActiveUdpSocket {
     fn new(family: JavascriptUdpFamily) -> Self {
@@ -2301,31 +1982,7 @@ impl ActiveUdpSocket {
     }
 }
 
-#[derive(Debug)]
-enum ActiveExecution {
-    Javascript(JavascriptExecution),
-    Python(PythonExecution),
-    Wasm(WasmExecution),
-}
-
-#[derive(Debug)]
-enum ActiveExecutionEvent {
-    Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
-    JavascriptSyncRpcRequest(JavascriptSyncRpcRequest),
-    PythonVfsRpcRequest(PythonVfsRpcRequest),
-    SignalState {
-        signal: u32,
-        registration: SignalHandlerRegistration,
-    },
-    Exited(i32),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SocketQueryKind {
-    TcpListener,
-    UdpBound,
-}
+// ActiveExecution, ActiveExecutionEvent, SocketQueryKind moved to crate::state
 
 impl ActiveExecution {
     fn child_pid(&self) -> u32 {
@@ -5804,13 +5461,7 @@ where
     Ok(())
 }
 
-#[derive(Debug)]
-struct ProcNetEntry {
-    local_host: String,
-    local_port: u16,
-    state: String,
-    inode: u64,
-}
+// ProcNetEntry moved to crate::state
 
 fn find_socket_state_entry(
     vm: Option<&VmState>,
@@ -6601,39 +6252,8 @@ fn ensure_kernel_parent_directories(
     Ok(())
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct JavascriptChildProcessSpawnOptions {
-    #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    #[serde(rename = "internalBootstrapEnv", default)]
-    internal_bootstrap_env: BTreeMap<String, String>,
-    #[serde(default)]
-    shell: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct JavascriptChildProcessSpawnRequest {
-    command: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    options: JavascriptChildProcessSpawnOptions,
-}
-
-#[derive(Debug)]
-struct ResolvedChildProcessExecution {
-    command: String,
-    process_args: Vec<String>,
-    runtime: GuestRuntimeKind,
-    entrypoint: String,
-    execution_args: Vec<String>,
-    env: BTreeMap<String, String>,
-    guest_cwd: String,
-    host_cwd: PathBuf,
-    wasm_permission_tier: Option<WasmPermissionTier>,
-}
+// JavascriptChildProcessSpawnOptions, JavascriptChildProcessSpawnRequest moved to crate::protocol
+// ResolvedChildProcessExecution moved to crate::state
 
 fn sanitize_javascript_child_process_internal_bootstrap_env(
     env: &BTreeMap<String, String>,
@@ -6656,85 +6276,9 @@ fn sanitize_javascript_child_process_internal_bootstrap_env(
         .collect()
 }
 
-#[derive(Debug, Deserialize)]
-struct JavascriptNetConnectRequest {
-    #[serde(default)]
-    host: Option<String>,
-    #[serde(default)]
-    port: Option<u16>,
-    #[serde(default)]
-    path: Option<String>,
-}
+// Network request types moved to crate::protocol
 
-#[derive(Debug, Deserialize)]
-struct JavascriptNetListenRequest {
-    #[serde(default)]
-    host: Option<String>,
-    #[serde(default)]
-    port: Option<u16>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    backlog: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct JavascriptDgramCreateSocketRequest {
-    #[serde(rename = "type")]
-    socket_type: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct JavascriptDgramBindRequest {
-    #[serde(default)]
-    address: Option<String>,
-    #[serde(default)]
-    port: u16,
-}
-
-#[derive(Debug, Deserialize)]
-struct JavascriptDgramSendRequest {
-    #[serde(default)]
-    address: Option<String>,
-    port: u16,
-}
-
-#[derive(Debug, Deserialize)]
-struct JavascriptDnsLookupRequest {
-    hostname: String,
-    #[serde(default)]
-    family: Option<u8>,
-}
-
-#[derive(Debug, Deserialize)]
-struct JavascriptDnsResolveRequest {
-    hostname: String,
-    #[serde(default)]
-    rrtype: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct VmDnsConfig {
-    name_servers: Vec<SocketAddr>,
-    overrides: BTreeMap<String, Vec<IpAddr>>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum DnsResolutionSource {
-    Literal,
-    Override,
-    Resolver,
-}
-
-impl DnsResolutionSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Literal => "literal",
-            Self::Override => "override",
-            Self::Resolver => "resolver",
-        }
-    }
-}
+// VmDnsConfig, DnsResolutionSource moved to crate::state
 
 fn resolve_tcp_bind_addr(host: &str, port: u16) -> Result<SocketAddr, SidecarError> {
     (host, port)
