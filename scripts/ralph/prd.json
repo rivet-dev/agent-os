@@ -198,7 +198,7 @@
         "Tests cover: socket cleanup on process exit."
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "Currently zero kernel-level socket tests. Networking is only tested at the sidecar integration level (socket_state_queries.rs)."
     },
     {

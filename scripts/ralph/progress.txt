@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Kernel socket lifecycle coverage lives in `crates/kernel/src/socket_table.rs` with direct assertions in `crates/kernel/tests/socket_table.rs`; update both together when ownership cleanup or socket limits change.
 - Sidecar Node isolation tests that compare guest `process.pid` / `process.ppid` must use `SnapshotProcesses`; `ProcessStartedResponse.pid` is the host runtime child PID, not the kernel PID surfaced inside guest `process`.
 - When a Rust integration test is split into `tests/<name>/...`, keep `tests/<name>.rs` as a tiny `#[path = "<name>/mod.rs"]` shim so Cargo still builds the same test target while the implementation lives in submodules.
 - When TS integration tests boot `AgentOs.create({ software })`, build the software list from packages whose `commandDir` actually exists locally; optional registry packages with missing `wasm/` directories abort VM startup before the target behavior can be tested.
@@ -395,4 +396,19 @@ Started: Sat Apr  5 2026
   - `ResponsePayload::ProcessStarted.pid` is the host runtime child PID; use `SnapshotProcesses` when an isolation test needs the kernel PID exposed through guest `process.pid`.
   - For sidecar control-channel spoofing checks, querying `GetSignalState` after emitting forged stdout is a direct end-to-end assertion that the sidecar ignored the text instead of acting on it.
   - Quality checks: `cargo test --package agent-os-sidecar --test security_hardening -- --test-threads=1` and `cargo test --package agent-os-sidecar -- --test-threads=1` both pass.
+---
+## 2026-04-06 09:06:56 PDT - US-501
+- What was implemented
+- Added a standalone in-memory kernel socket table at `crates/kernel/src/socket_table.rs` and covered TCP listener/connect/accept/send/recv, UDP bind/sendto/recvfrom, Unix domain listener/connect/accept, socket-cap enforcement, and owner-PID cleanup semantics in `crates/kernel/tests/socket_table.rs`.
+- Files changed
+- `crates/kernel/src/lib.rs`
+- `crates/kernel/src/socket_table.rs`
+- `crates/kernel/tests/socket_table.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The kernel crate did not have a standalone socket-table seam on this branch, so adding direct lifecycle coverage required introducing `crates/kernel/src/socket_table.rs` rather than trying to repurpose sidecar networking tests.
+  - Socket ownership cleanup is easiest to verify by cleaning up one PID and asserting the peer socket remains present but transitions to EOF/`EPIPE`; that catches both recursive listener teardown and disconnected-stream semantics.
+  - `cargo test -p agent-os-kernel` is the right regression net here, because the new socket-table target adds API surface to the kernel crate and should be validated alongside the rest of the kernel tests, not in isolation only.
+  - Quality checks: `cargo test -p agent-os-kernel --test socket_table` and `cargo test -p agent-os-kernel` both passed.
 ---
