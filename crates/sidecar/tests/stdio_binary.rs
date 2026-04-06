@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 use support::temp_dir;
 
@@ -20,8 +20,19 @@ fn send_request(stdin: &mut ChildStdin, codec: &NativeFrameCodec, request: Reque
     let encoded = codec
         .encode(&ProtocolFrame::Request(request))
         .expect("encode request");
-    stdin.write_all(&encoded).expect("write request");
+    send_bytes(stdin, &encoded);
+}
+
+fn send_bytes(stdin: &mut ChildStdin, bytes: &[u8]) {
+    stdin.write_all(bytes).expect("write request");
     stdin.flush().expect("flush request");
+}
+
+fn send_raw_frame(stdin: &mut ChildStdin, payload: &[u8]) {
+    let mut framed = Vec::with_capacity(4 + payload.len());
+    framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    framed.extend_from_slice(payload);
+    send_bytes(stdin, &framed);
 }
 
 fn read_frame(stdout: &mut ChildStdout, codec: &NativeFrameCodec) -> ProtocolFrame {
@@ -113,6 +124,11 @@ fn collect_vm_lifecycle_states(
 }
 
 fn spawn_sidecar_binary() -> (Child, ChildStdin, ChildStdout) {
+    let (child, stdin, stdout, _stderr) = spawn_sidecar_binary_with_stderr();
+    (child, stdin, stdout)
+}
+
+fn spawn_sidecar_binary_with_stderr() -> (Child, ChildStdin, ChildStdout, ChildStderr) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_agent-os-sidecar"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -121,7 +137,17 @@ fn spawn_sidecar_binary() -> (Child, ChildStdin, ChildStdout) {
         .expect("spawn native sidecar binary");
     let stdin = child.stdin.take().expect("capture sidecar stdin");
     let stdout = child.stdout.take().expect("capture sidecar stdout");
-    (child, stdin, stdout)
+    let stderr = child.stderr.take().expect("capture sidecar stderr");
+    (child, stdin, stdout, stderr)
+}
+
+fn wait_for_exit(mut child: Child, mut stderr: ChildStderr) -> (std::process::ExitStatus, String) {
+    let status = child.wait().expect("wait for sidecar child");
+    let mut stderr_text = String::new();
+    stderr
+        .read_to_string(&mut stderr_text)
+        .expect("read sidecar stderr");
+    (status, stderr_text)
 }
 
 fn write_script(root: &Path) {
@@ -764,4 +790,127 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
     drop(stdin);
     let status = child.wait().expect("wait for sidecar child");
     assert!(status.success(), "sidecar binary exited with {status}");
+}
+
+#[test]
+fn native_sidecar_binary_rejects_malformed_json_frames() {
+    let (child, mut stdin, stdout, stderr) = spawn_sidecar_binary_with_stderr();
+
+    send_raw_frame(&mut stdin, br#"{"frame_type":"request""#);
+
+    drop(stdin);
+    drop(stdout);
+    let (status, stderr_text) = wait_for_exit(child, stderr);
+
+    assert!(!status.success(), "sidecar unexpectedly accepted malformed JSON");
+    assert!(
+        stderr_text.contains("protocol frame deserialization failed"),
+        "stderr was {stderr_text:?}"
+    );
+}
+
+#[test]
+fn native_sidecar_binary_rejects_binary_garbage_frames() {
+    let (child, mut stdin, stdout, stderr) = spawn_sidecar_binary_with_stderr();
+
+    send_raw_frame(&mut stdin, &[0xff, 0x00, 0x7b, 0x7d, 0x80]);
+
+    drop(stdin);
+    drop(stdout);
+    let (status, stderr_text) = wait_for_exit(child, stderr);
+
+    assert!(!status.success(), "sidecar unexpectedly accepted binary garbage");
+    assert!(
+        stderr_text.contains("protocol frame deserialization failed"),
+        "stderr was {stderr_text:?}"
+    );
+}
+
+#[test]
+fn native_sidecar_binary_exits_cleanly_on_partial_length_prefix() {
+    let (child, mut stdin, stdout, stderr) = spawn_sidecar_binary_with_stderr();
+    let prefix = (64_u32).to_be_bytes();
+
+    send_bytes(&mut stdin, &prefix[..2]);
+
+    drop(stdin);
+    drop(stdout);
+    let (status, stderr_text) = wait_for_exit(child, stderr);
+
+    assert!(status.success(), "sidecar exited with {status} for partial prefix");
+    assert_eq!(stderr_text, "");
+}
+
+#[test]
+fn native_sidecar_binary_rejects_partial_payload_frames() {
+    let (child, mut stdin, stdout, stderr) = spawn_sidecar_binary_with_stderr();
+    let mut framed = Vec::new();
+    framed.extend_from_slice(&(32_u32).to_be_bytes());
+    framed.extend_from_slice(br#"{"frame_ty"#);
+
+    send_bytes(&mut stdin, &framed);
+
+    drop(stdin);
+    drop(stdout);
+    let (status, stderr_text) = wait_for_exit(child, stderr);
+
+    assert!(!status.success(), "sidecar unexpectedly accepted a partial payload");
+    assert!(!stderr_text.is_empty(), "expected an error on stderr");
+}
+
+#[test]
+fn native_sidecar_binary_rejects_schema_invalid_json_frames() {
+    let invalid_frames = [
+        (
+            "missing_auth_token",
+            json!({
+                "frame_type": "request",
+                "schema": { "name": "agent-os-sidecar", "version": 1 },
+                "request_id": 1,
+                "ownership": {
+                    "scope": "connection",
+                    "connection_id": "conn-1"
+                },
+                "payload": {
+                    "type": "authenticate",
+                    "client_name": "stdio-test"
+                }
+            })
+            .to_string(),
+            "auth_token",
+        ),
+        (
+            "unknown_payload_type",
+            json!({
+                "frame_type": "request",
+                "schema": { "name": "agent-os-sidecar", "version": 1 },
+                "request_id": 1,
+                "ownership": {
+                    "scope": "connection",
+                    "connection_id": "conn-1"
+                },
+                "payload": {
+                    "type": "totally_unknown"
+                }
+            })
+            .to_string(),
+            "unknown variant",
+        ),
+    ];
+
+    for (label, payload, expected) in invalid_frames {
+        let (child, mut stdin, stdout, stderr) = spawn_sidecar_binary_with_stderr();
+
+        send_raw_frame(&mut stdin, payload.as_bytes());
+
+        drop(stdin);
+        drop(stdout);
+        let (status, stderr_text) = wait_for_exit(child, stderr);
+
+        assert!(!status.success(), "{label} unexpectedly succeeded");
+        assert!(
+            stderr_text.contains(expected),
+            "{label} stderr was {stderr_text:?}",
+        );
+    }
 }

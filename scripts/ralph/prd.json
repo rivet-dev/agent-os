@@ -214,7 +214,7 @@
         "Existing security_hardening.rs oversized-frame test is preserved."
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": "crates/sidecar/tests/protocol.rs only tests valid codec round-trips. security_hardening.rs has one oversized frame test. No coverage for malformed inputs."
     },
     {

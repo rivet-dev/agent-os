@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Malformed sidecar bridge frame tests should target `crates/sidecar/tests/stdio_binary.rs` and assert real child stderr/exit status; `NativeSidecar::dispatch(...)` sits past codec/stdio parsing and cannot cover truncated or binary-garbage frames.
 - Kernel socket lifecycle coverage lives in `crates/kernel/src/socket_table.rs` with direct assertions in `crates/kernel/tests/socket_table.rs`; update both together when ownership cleanup or socket limits change.
 - Sidecar Node isolation tests that compare guest `process.pid` / `process.ppid` must use `SnapshotProcesses`; `ProcessStartedResponse.pid` is the host runtime child PID, not the kernel PID surfaced inside guest `process`.
 - When a Rust integration test is split into `tests/<name>/...`, keep `tests/<name>.rs` as a tiny `#[path = "<name>/mod.rs"]` shim so Cargo still builds the same test target while the implementation lives in submodules.
@@ -411,4 +412,17 @@ Started: Sat Apr  5 2026
   - Socket ownership cleanup is easiest to verify by cleaning up one PID and asserting the peer socket remains present but transitions to EOF/`EPIPE`; that catches both recursive listener teardown and disconnected-stream semantics.
   - `cargo test -p agent-os-kernel` is the right regression net here, because the new socket-table target adds API surface to the kernel crate and should be validated alongside the rest of the kernel tests, not in isolation only.
   - Quality checks: `cargo test -p agent-os-kernel --test socket_table` and `cargo test -p agent-os-kernel` both passed.
+---
+## 2026-04-06 09:32:45 PDT - US-502
+- What was implemented
+- Added malformed framed-protocol coverage in `crates/sidecar/tests/stdio_binary.rs` by piping raw bytes into the real `agent-os-sidecar` stdio binary and asserting behavior for malformed JSON, binary garbage, partial length prefixes, partial payload bodies, and schema-invalid JSON frames with missing or unexpected payload fields.
+- Kept the existing oversized-frame coverage in `crates/sidecar/tests/security_hardening.rs` as the frame-limit regression net, and captured the binary-vs-dispatch testing rule in the shared `Codebase Patterns` section above.
+- Files changed
+- `crates/sidecar/tests/stdio_binary.rs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Framing failures happen in `crates/sidecar/src/stdio.rs` before `NativeSidecar::dispatch(...)`, so malformed-bridge tests need the spawned stdio binary and must assert process exit status plus stderr instead of looking for `Rejected` responses.
+  - A small helper split between `send_bytes(...)` and `send_raw_frame(...)` keeps it easy to test both truncated length prefixes and fully framed malformed payloads without touching production code.
+  - Quality checks: `cargo test -p agent-os-sidecar --test stdio_binary -- --test-threads=1` and `cargo test -p agent-os-sidecar -- --test-threads=1` both passed.
 ---
