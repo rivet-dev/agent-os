@@ -189,3 +189,25 @@ Started: Sat Apr  5 2026
   - Any Python execution test in the same binary that swaps `AGENT_OS_NODE_BINARY` must serialize with real-Node tests for the full test body, not just the env-var mutation site, because sibling tests can otherwise inherit the fake node shim and report misleading heap-OOM failures.
   - Quality checks: `cargo test --package agent-os-execution --test python` passes with `15/15`; the adjacent `cargo test --package agent-os-execution --test python_prewarm` target still has a separate pre-existing failure in `python_execution_invalidates_prewarm_stamp_when_pyodide_bundle_changes`, outside this story's acceptance scope.
 ---
+## 2026-04-06 01:01 PDT - US-306 (partial, manual intervention)
+- What was implemented
+- Added `discoverPnpmRootsForNodeModules()` to `packages/core/src/agent-os.ts` — walks up from `moduleAccessCwd/node_modules` and mounts every discovered `.pnpm` store root at `/root/node_modules/.pnpm` in the guest VFS. This fixes `EACCES: path escapes host directory` errors for pnpm symlink targets.
+- Added `SnapshotProcesses` sidecar protocol endpoint (`protocol.rs` + `service.rs`) — lists kernel processes with their PIDs, status, and mapped process IDs. Required by the Codex-updated `native-kernel-proxy.ts` process snapshot refresh.
+- Committed Codex node_import_cache.rs changes (987 lines) that add pnpm path mapping to both the ESM loader and CJS runner `GUEST_PATH_MAPPINGS`.
+- Reverted broken `registry/agent/pi/src/adapter.ts` rewrite that Codex left with TS compilation errors.
+- PI `acp-adapter.test.ts` `initialize` test now passes (was timing out before).
+- Files changed
+- `packages/core/src/agent-os.ts` (pnpm mount discovery)
+- `crates/sidecar/src/protocol.rs` (SnapshotProcesses types)
+- `crates/sidecar/src/service.rs` (SnapshotProcesses handler)
+- `crates/execution/src/node_import_cache.rs` (Codex pnpm path mapping changes)
+- `packages/core/src/sidecar/native-kernel-proxy.ts` (Codex process snapshot)
+- `packages/core/src/sidecar/native-process-client.ts` (Codex snapshotProcesses client)
+- `packages/core/tests/agents/pi/*.test.ts` (Codex test updates)
+- **Learnings for future iterations:**
+  - pnpm symlinks in `packages/core/node_modules/` point to `../../node_modules/.pnpm/` via relative symlinks. The host-dir mount uses `openat2(RESOLVE_BENEATH)` which rejects symlink targets that escape the mounted root. Adding a separate `.pnpm` mount is necessary but not sufficient — the CJS `Module.createRequire` and ESM `nextResolve` both operate on HOST filesystem paths, so the `GUEST_PATH_MAPPINGS` env var must include the `.pnpm` mapping for the runner/loader to translate guest paths back to valid host paths.
+  - The `host_dir_plugin.rs` `openat2(RESOLVE_BENEATH)` is a Linux kernel-level security check that cannot be worked around by just adding more VFS mounts. Symlink-following operations must either use the correct mount (not follow cross-mount symlinks) or resolve through the guest VFS which composes multiple mounts.
+  - PI `session/new` fails because pi-acp spawns a nested child process (`PI_ACP_PI_COMMAND`) inside the VM. The sidecar's `host_path_for_guest_path` needs the `.pnpm` mount in `vm.configuration.mounts` to resolve the guest path, but the nested spawn goes through the kernel process table → sidecar execute → JS execution engine, and the execution engine's `configure_node_sandbox` must include the `.pnpm` host path in `--allow-fs-read`.
+  - Codex step-13 spun for ~3 hours (600+ edits to node_import_cache.rs, 219 edits to each PI test file) trying to fix the same pnpm path translation issue. The root cause was identified but the fix required changes across 3 layers (agent-os.ts mounts, node_import_cache.rs loader/runner, sidecar service.rs path resolution).
+  - `software-projection.test.ts` has 1 pre-existing failure unrelated to PI tests.
+---
