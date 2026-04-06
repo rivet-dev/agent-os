@@ -231,7 +231,7 @@
         "Tests cover: metadata root filtering from user-visible results."
       ],
       "priority": 15,
-      "passes": false,
+      "passes": true,
       "notes": "overlay_fs.rs is 1267 lines with complex logic. Currently only tested indirectly through root_fs.rs (9 overlay tests)."
     },
     {
