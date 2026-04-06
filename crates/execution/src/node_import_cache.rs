@@ -10651,9 +10651,11 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
     use std::process::{Command, Output, Stdio};
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tempfile::tempdir;
+
+    static NEXT_TEST_IMPORT_CACHE_ID: AtomicUsize = AtomicUsize::new(0);
 
     fn assert_node_available() {
         let output = Command::new(node_binary())
@@ -10665,6 +10667,14 @@ mod tests {
 
     fn write_fixture(path: &Path, contents: &str) {
         fs::write(path, contents).expect("write fixture");
+    }
+
+    fn new_test_import_cache() -> NodeImportCache {
+        let cache_id = NEXT_TEST_IMPORT_CACHE_ID.fetch_add(1, Ordering::Relaxed);
+        NodeImportCache::new_in(std::env::temp_dir().join(format!(
+            "agent-os-node-import-cache-test-{}-{cache_id}",
+            std::process::id()
+        )))
     }
 
     fn run_python_runner(
@@ -10755,7 +10765,7 @@ mod tests {
     fn materialized_python_runner_hardens_builtin_access_before_load_pyodide() {
         assert_node_available();
 
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -10811,7 +10821,7 @@ export async function loadPyodide(options) {
     fn materialized_python_runner_executes_python_code_via_pyodide_callbacks() {
         assert_node_available();
 
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -10861,7 +10871,7 @@ export async function loadPyodide(options) {
     fn materialized_python_runner_prefers_python_file_over_inline_code() {
         assert_node_available();
 
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -10912,7 +10922,7 @@ export async function loadPyodide(options) {
     fn materialized_python_runner_prewarm_loads_pyodide_without_running_guest_code() {
         assert_node_available();
 
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -10967,7 +10977,7 @@ export async function loadPyodide(options) {
     fn materialized_python_runner_reports_syntax_errors_to_stderr_and_exits_nonzero() {
         assert_node_available();
 
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -11005,7 +11015,7 @@ export async function loadPyodide() {
     fn materialized_python_runner_blocks_pyodide_js_escape_modules() {
         assert_node_available();
 
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -11096,7 +11106,7 @@ print(json.dumps({
     fn materialized_python_runner_exposes_frozen_time_to_python() {
         assert_node_available();
 
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -11144,7 +11154,7 @@ print(json.dumps({
     fn materialized_python_runner_preloads_bundled_packages_from_local_disk() {
         assert_node_available();
 
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -11198,7 +11208,7 @@ export async function loadPyodide(options) {
     fn materialized_python_runner_rejects_unknown_preload_packages() {
         assert_node_available();
 
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -11250,7 +11260,7 @@ export async function loadPyodide() {
     fn materialized_python_runner_streams_multiple_stdin_reads_through_pyodide() {
         assert_node_available();
 
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -11337,7 +11347,7 @@ export async function loadPyodide(options) {
 
     #[test]
     fn ensure_materialized_writes_bundled_pyodide_distribution_assets() {
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -11409,7 +11419,7 @@ export async function loadPyodide(options) {
 
     #[test]
     fn ensure_materialized_writes_denied_builtin_assets_for_hardened_modules() {
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -11457,7 +11467,7 @@ export async function loadPyodide(options) {
 
     #[test]
     fn ensure_materialized_writes_os_builtin_asset() {
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -11473,7 +11483,7 @@ export async function loadPyodide(options) {
 
     #[test]
     fn ensure_materialized_writes_http_builtin_assets() {
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -11496,7 +11506,7 @@ export async function loadPyodide(options) {
 
     #[test]
     fn ensure_materialized_writes_net_builtin_asset() {
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -11512,7 +11522,7 @@ export async function loadPyodide(options) {
 
     #[test]
     fn ensure_materialized_writes_dgram_builtin_asset() {
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -11528,7 +11538,7 @@ export async function loadPyodide(options) {
 
     #[test]
     fn ensure_materialized_writes_dns_builtin_asset() {
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");
@@ -11544,7 +11554,7 @@ export async function loadPyodide(options) {
 
     #[test]
     fn ensure_materialized_writes_tls_builtin_asset() {
-        let import_cache = NodeImportCache::default();
+        let import_cache = new_test_import_cache();
         import_cache
             .ensure_materialized()
             .expect("materialize node import cache");

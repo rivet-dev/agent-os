@@ -3,6 +3,7 @@
 - After a fresh workspace install, linked registry agent/software packages still need their built `dist/` outputs before adapter-backed or software-backed `packages/core` Vitest suites are meaningful; otherwise Vite fails on package entry resolution before test logic runs.
 - Sidecar-owned JavaScript, Python, and WASM engines should use per-VM import-cache roots; sharing one temp cache lets stale-runner cleanup delete another VM's assets.
 - Rust execution tests that spin up JavaScript, Python, or WASM engines should call `set_import_cache_base_dir(...)` with a unique temp root per test VM; the default `/tmp` cache root is not parallel-test-safe because each engine instance sweeps stale cache directories once.
+- Rust execution tests that override `AGENT_OS_NODE_BINARY` need a shared test-process lock around the full test body; otherwise parallel tests can redirect each other into the wrong fake node shim or a deleted temp fixture.
 - Timer-driven guest Node networking can outlive top-level module evaluation, so the sync-RPC bridge must stay alive until process exit rather than being disposed when the entry module resolves.
 - Security tests must use real Node.js execution and attempt actual forbidden operations, not just verify argument construction with fake binaries.
 - Sidecar test assertions must check response payload contents, not just match on variant shapes with wildcard discards.
@@ -145,4 +146,14 @@ Started: Sat Apr  5 2026
   - Node-backed execution tests can fail as misleading warmup, signal, timeout, or permission regressions when the real issue is shared import-cache cleanup under `/tmp`; check for missing `timing-bootstrap.mjs` or runner assets before debugging runtime semantics.
   - For `JavascriptExecutionEngine`, `PythonExecutionEngine`, and `WasmExecutionEngine` tests, a tiny `new_test_engine()` helper that calls `set_import_cache_base_dir(...)` is enough to make default `cargo test` parallelism deterministic without touching runtime behavior.
   - Re-running the whole crate test target under default thread count matters here; `cargo test -p agent-os-execution --test wasm` is what proves the fix, because `--test-threads=1` would mask this stale-cache race.
+---
+## 2026-04-05 20:23:57 PDT - US-303
+- Fixed the `agent-os-execution` permission flag suite by making `crates/execution/tests/permission_flags.rs` parallel-safe: the tests now use unique per-engine import-cache roots and a shared lock around the process-wide `AGENT_OS_NODE_BINARY` override so fake-node fixtures cannot race each other.
+- Hardened the `node_import_cache` library tests the same way by switching them from `NodeImportCache::default()` to unique `NodeImportCache::new_in(...)` roots, which keeps bundled Python runner asset materialization deterministic under parallel `cargo test --lib`.
+- Quality checks: `cargo test -p agent-os-execution --test permission_flags` and `cargo test -p agent-os-execution --lib` both pass.
+- Files changed: `AGENTS.md`, `crates/execution/src/node_import_cache.rs`, `crates/execution/tests/permission_flags.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `AGENT_OS_NODE_BINARY` is process-global test state, so any fake-node assertion harness must hold a shared mutex from env-var setup through child-process teardown.
+  - The import-cache stale-root sweep affects library/unit tests too, not just integration-style execution suites; `NodeImportCache::default()` is unsafe in parallel tests that materialize runner assets.
+  - For this branch, `cargo test -p agent-os-execution --test permission_flags` verifies the story acceptance, while `cargo test -p agent-os-execution --lib` is a useful regression net for nearby import-cache test harness changes.
 ---

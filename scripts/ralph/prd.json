@@ -72,7 +72,7 @@
         "All 6 tests pass: heap limits, WASI permission tiers, runtime memory/fuel limits, worker flags, workspace root exposure, and nested child capabilities."
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "0/6 pass. All failing."
     },
     {

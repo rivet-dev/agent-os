@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::tempdir;
 
 const ARG_PREFIX: &str = "ARG=";
@@ -27,6 +29,11 @@ const NODE_WASM_MAX_MEM_PAGES_FLAG_PREFIX: &str = "--wasm-max-mem-pages=";
 const PYTHON_MAX_OLD_SPACE_MB_ENV: &str = "AGENT_OS_PYTHON_MAX_OLD_SPACE_MB";
 const WASM_MAX_FUEL_ENV: &str = "AGENT_OS_WASM_MAX_FUEL";
 const WASM_MAX_MEMORY_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_MEMORY_BYTES";
+const JAVASCRIPT_TEST_VM_ID: &str = "vm-js";
+const PYTHON_TEST_VM_ID: &str = "vm-python";
+const WASM_TEST_VM_ID: &str = "vm-wasm";
+static NEXT_TEST_IMPORT_CACHE_ID: AtomicUsize = AtomicUsize::new(0);
+static NODE_BINARY_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 struct EnvVarGuard {
     key: &'static str,
@@ -72,6 +79,48 @@ fn workspace_root() -> PathBuf {
         .nth(2)
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
+fn node_binary_env_guard() -> MutexGuard<'static, ()> {
+    NODE_BINARY_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock node binary env guard")
+}
+
+fn next_import_cache_base_dir(prefix: &str) -> PathBuf {
+    let cache_id = NEXT_TEST_IMPORT_CACHE_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "agent-os-node-import-cache-{prefix}-{}-{cache_id}",
+        std::process::id()
+    ))
+}
+
+fn new_javascript_test_engine() -> JavascriptExecutionEngine {
+    let mut engine = JavascriptExecutionEngine::default();
+    engine.set_import_cache_base_dir(
+        JAVASCRIPT_TEST_VM_ID,
+        next_import_cache_base_dir("permission-js"),
+    );
+    engine
+}
+
+fn new_python_test_engine() -> PythonExecutionEngine {
+    let mut engine = PythonExecutionEngine::default();
+    engine.set_import_cache_base_dir(
+        PYTHON_TEST_VM_ID,
+        next_import_cache_base_dir("permission-python"),
+    );
+    engine
+}
+
+fn new_wasm_test_engine() -> WasmExecutionEngine {
+    let mut engine = WasmExecutionEngine::default();
+    engine.set_import_cache_base_dir(
+        WASM_TEST_VM_ID,
+        next_import_cache_base_dir("permission-wasm"),
+    );
+    engine
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -142,6 +191,7 @@ fn write_flags(args: &[String]) -> Vec<&str> {
 
 #[test]
 fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_writes() {
+    let _env_lock = node_binary_env_guard();
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
     let log_path = temp.path().join("node-args.log");
@@ -153,15 +203,15 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
     fs::create_dir_all(&js_entry_dir).expect("create js entry dir");
     fs::write(js_entry_dir.join("entry.mjs"), "console.log('ignored');").expect("write js entry");
 
-    let mut js_engine = JavascriptExecutionEngine::default();
+    let mut js_engine = new_javascript_test_engine();
     let js_context = js_engine.create_context(CreateJavascriptContextRequest {
-        vm_id: String::from("vm-js"),
+        vm_id: String::from(JAVASCRIPT_TEST_VM_ID),
         bootstrap_module: None,
         compile_cache_root: None,
     });
     let js_result = js_engine
         .start_execution(StartJavascriptExecutionRequest {
-            vm_id: String::from("vm-js"),
+            vm_id: String::from(JAVASCRIPT_TEST_VM_ID),
             context_id: js_context.context_id,
             argv: vec![String::from("./nested/entry.mjs")],
             env: BTreeMap::new(),
@@ -187,14 +237,14 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
     fs::write(pyodide_dir.join("pyodide-lock.json"), "{\"packages\":[]}\n")
         .expect("write pyodide lock fixture");
 
-    let mut python_engine = PythonExecutionEngine::default();
+    let mut python_engine = new_python_test_engine();
     let python_context = python_engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir.clone(),
     });
     let python_result = python_engine
         .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
+            vm_id: String::from(PYTHON_TEST_VM_ID),
             context_id: python_context.context_id,
             code: String::from("print('ignored')"),
             file_path: None,
@@ -206,14 +256,14 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
         .expect("wait for python execution");
     assert_eq!(python_result.exit_code, 0);
 
-    let mut wasm_engine = WasmExecutionEngine::default();
+    let mut wasm_engine = new_wasm_test_engine();
     let wasm_context = wasm_engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./modules/guest.wasm")),
     });
     let wasm_result = wasm_engine
         .start_execution(StartWasmExecutionRequest {
-            vm_id: String::from("vm-wasm"),
+            vm_id: String::from(WASM_TEST_VM_ID),
             context_id: wasm_context.context_id,
             argv: vec![String::from("./modules/guest.wasm")],
             env: BTreeMap::from([(
@@ -338,6 +388,7 @@ fn node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_write
 
 #[test]
 fn node_permission_flags_allow_workers_for_internal_javascript_loader_runtime() {
+    let _env_lock = node_binary_env_guard();
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
     let log_path = temp.path().join("node-args.log");
@@ -348,16 +399,16 @@ fn node_permission_flags_allow_workers_for_internal_javascript_loader_runtime() 
     fs::create_dir_all(&js_cwd).expect("create js cwd");
     fs::write(js_cwd.join("entry.mjs"), "console.log('ignored');").expect("write js entry");
 
-    let mut js_engine = JavascriptExecutionEngine::default();
+    let mut js_engine = new_javascript_test_engine();
     let context = js_engine.create_context(CreateJavascriptContextRequest {
-        vm_id: String::from("vm-js"),
+        vm_id: String::from(JAVASCRIPT_TEST_VM_ID),
         bootstrap_module: None,
         compile_cache_root: None,
     });
 
     let default_result = js_engine
         .start_execution(StartJavascriptExecutionRequest {
-            vm_id: String::from("vm-js"),
+            vm_id: String::from(JAVASCRIPT_TEST_VM_ID),
             context_id: context.context_id.clone(),
             argv: vec![String::from("./entry.mjs")],
             env: BTreeMap::new(),
@@ -409,6 +460,7 @@ fn node_permission_flags_allow_workers_for_internal_javascript_loader_runtime() 
 #[test]
 fn node_permission_flags_only_propagate_nested_child_capabilities_when_parent_explicitly_allows_them(
 ) {
+    let _env_lock = node_binary_env_guard();
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
     let log_path = temp.path().join("node-args.log");
@@ -419,9 +471,9 @@ fn node_permission_flags_only_propagate_nested_child_capabilities_when_parent_ex
     fs::create_dir_all(&js_cwd).expect("create js cwd");
     fs::write(js_cwd.join("entry.mjs"), "console.log('ignored');").expect("write js entry");
 
-    let mut js_engine = JavascriptExecutionEngine::default();
+    let mut js_engine = new_javascript_test_engine();
     let context = js_engine.create_context(CreateJavascriptContextRequest {
-        vm_id: String::from("vm-js"),
+        vm_id: String::from(JAVASCRIPT_TEST_VM_ID),
         bootstrap_module: None,
         compile_cache_root: None,
     });
@@ -445,7 +497,7 @@ fn node_permission_flags_only_propagate_nested_child_capabilities_when_parent_ex
 
     let denied_result = js_engine
         .start_execution(StartJavascriptExecutionRequest {
-            vm_id: String::from("vm-js"),
+            vm_id: String::from(JAVASCRIPT_TEST_VM_ID),
             context_id: context.context_id.clone(),
             argv: vec![String::from("./entry.mjs")],
             env: nested_env("0", "0"),
@@ -507,6 +559,7 @@ fn node_permission_flags_only_propagate_nested_child_capabilities_when_parent_ex
 
 #[test]
 fn python_execution_applies_configured_heap_limit_to_prewarm_and_exec_processes() {
+    let _env_lock = node_binary_env_guard();
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
     let log_path = temp.path().join("node-args.log");
@@ -523,15 +576,15 @@ fn python_execution_applies_configured_heap_limit_to_prewarm_and_exec_processes(
     fs::write(pyodide_dir.join("pyodide-lock.json"), "{\"packages\":[]}\n")
         .expect("write pyodide lock fixture");
 
-    let mut python_engine = PythonExecutionEngine::default();
+    let mut python_engine = new_python_test_engine();
     let context = python_engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
+        vm_id: String::from(PYTHON_TEST_VM_ID),
         pyodide_dist_path: pyodide_dir,
     });
 
     let result = python_engine
         .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
+            vm_id: String::from(PYTHON_TEST_VM_ID),
             context_id: context.context_id,
             code: String::from("print('ignored')"),
             file_path: None,
@@ -564,6 +617,7 @@ fn python_execution_applies_configured_heap_limit_to_prewarm_and_exec_processes(
 
 #[test]
 fn wasm_execution_passes_runtime_memory_and_fuel_limits_to_node_process() {
+    let _env_lock = node_binary_env_guard();
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
     let log_path = temp.path().join("node-args.log");
@@ -574,15 +628,15 @@ fn wasm_execution_passes_runtime_memory_and_fuel_limits_to_node_process() {
     fs::create_dir_all(&wasm_cwd).expect("create wasm cwd");
     fs::write(wasm_cwd.join("guest.wasm"), b"\0asm\x01\0\0\0").expect("write wasm module");
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_wasm_test_engine();
     let context = engine.create_context(CreateWasmContextRequest {
-        vm_id: String::from("vm-wasm"),
+        vm_id: String::from(WASM_TEST_VM_ID),
         module_path: Some(String::from("./guest.wasm")),
     });
 
     let result = engine
         .start_execution(StartWasmExecutionRequest {
-            vm_id: String::from("vm-wasm"),
+            vm_id: String::from(WASM_TEST_VM_ID),
             context_id: context.context_id,
             argv: vec![String::from("./guest.wasm")],
             env: BTreeMap::from([
@@ -634,13 +688,14 @@ fn wasm_execution_passes_runtime_memory_and_fuel_limits_to_node_process() {
 
 #[test]
 fn wasm_permission_tiers_only_enable_wasi_outside_isolated_mode() {
+    let _env_lock = node_binary_env_guard();
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
     let log_path = temp.path().join("node-args.log");
     write_fake_node_binary(&fake_node_path, &log_path);
     let _node_binary = EnvVarGuard::set("AGENT_OS_NODE_BINARY", &fake_node_path);
 
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = new_wasm_test_engine();
     let tiers = [
         WasmPermissionTier::Isolated,
         WasmPermissionTier::ReadOnly,
@@ -660,13 +715,13 @@ fn wasm_permission_tiers_only_enable_wasi_outside_isolated_mode() {
         fs::write(wasm_cwd.join("guest.wasm"), b"\0asm\x01\0\0\0").expect("write wasm module");
 
         let context = engine.create_context(CreateWasmContextRequest {
-            vm_id: String::from("vm-wasm"),
+            vm_id: String::from(WASM_TEST_VM_ID),
             module_path: Some(String::from("./guest.wasm")),
         });
 
         let result = engine
             .start_execution(StartWasmExecutionRequest {
-                vm_id: String::from("vm-wasm"),
+                vm_id: String::from(WASM_TEST_VM_ID),
                 context_id: context.context_id,
                 argv: vec![String::from("./guest.wasm")],
                 env: BTreeMap::new(),
