@@ -10,4 +10,5 @@ name = "shims"
 path = "src/lib.rs"
 
 [dependencies]
+wasi-spawn = { package = "secureexec-wasi-spawn", path = "../wasi-spawn" }
 wasi-ext = { path = "../../wasi-ext" }

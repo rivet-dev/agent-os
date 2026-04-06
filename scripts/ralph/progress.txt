@@ -1,5 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- When TS integration tests boot `AgentOs.create({ software })`, build the software list from packages whose `commandDir` actually exists locally; optional registry packages with missing `wasm/` directories abort VM startup before the target behavior can be tested.
+- For network-capable WASM command packages in the current runtime, prefer a tiny `wasi-spawn` wrapper that launches guest `node` over linking directly to `wasi-http`; the generic WASM runner does not expose `host_net` imports yet.
 - After a fresh workspace install, linked registry agent/software packages still need their built `dist/` outputs before adapter-backed or software-backed `packages/core` Vitest suites are meaningful; otherwise Vite fails on package entry resolution before test logic runs.
 - When moving grouped test files, update root `package.json` test scripts and `scripts/benchmarks/bench-utils.ts` path constants along with the test files themselves; those hard-coded references are part of the test layout contract.
 - Sidecar integration tests that override `AGENT_OS_NODE_BINARY` must hold a shared lock across the full test body, including sibling tests in the same binary that use the real Node runtime; the env var is process-global and fake-node shims otherwise leak into unrelated tests.
@@ -235,7 +237,47 @@ Started: Sat Apr  5 2026
 - `scripts/ralph/prd.json`
 - `scripts/ralph/progress.txt`
 - **Learnings for future iterations:**
-  - The native-sidecar signal-state cache is best-effort metadata; keep it warm in the background, but do not put it on the stdout/stderr delivery path for interactive shell/process tests.
-  - The grouped US-306 acceptance paths on this branch are `tests/process/{spawn-flat-api,shell-flat-api,management,all-processes,tree}.test.ts`, `tests/unit/{host-tools-prompt,software-projection}.test.ts`, `tests/sidecar/native-process.test.ts`, `tests/session/agent-os-events.test.ts`, and `tests/agents/pi/{acp-adapter,sdk-adapter}.test.ts`.
-  - Quality checks: `pnpm --dir packages/core exec vitest run tests/process/spawn-flat-api.test.ts tests/process/shell-flat-api.test.ts tests/process/management.test.ts tests/process/all-processes.test.ts tests/process/tree.test.ts tests/unit/host-tools-prompt.test.ts tests/sidecar/native-process.test.ts tests/unit/software-projection.test.ts tests/session/agent-os-events.test.ts tests/agents/pi/acp-adapter.test.ts tests/agents/pi/sdk-adapter.test.ts` passed (`58/58`); `pnpm --dir packages/core exec tsc --noEmit` passed.
+- The native-sidecar signal-state cache is best-effort metadata; keep it warm in the background, but do not put it on the stdout/stderr delivery path for interactive shell/process tests.
+- The grouped US-306 acceptance paths on this branch are `tests/process/{spawn-flat-api,shell-flat-api,management,all-processes,tree}.test.ts`, `tests/unit/{host-tools-prompt,software-projection}.test.ts`, `tests/sidecar/native-process.test.ts`, `tests/session/agent-os-events.test.ts`, and `tests/agents/pi/{acp-adapter,sdk-adapter}.test.ts`.
+- Quality checks: `pnpm --dir packages/core exec vitest run tests/process/spawn-flat-api.test.ts tests/process/shell-flat-api.test.ts tests/process/management.test.ts tests/process/all-processes.test.ts tests/process/tree.test.ts tests/unit/host-tools-prompt.test.ts tests/sidecar/native-process.test.ts tests/unit/software-projection.test.ts tests/session/agent-os-events.test.ts tests/agents/pi/acp-adapter.test.ts tests/agents/pi/sdk-adapter.test.ts` passed (`58/58`); `pnpm --dir packages/core exec tsc --noEmit` passed.
+---
+## 2026-04-06 03:32:57 PDT - US-307
+- What was implemented
+- Fixed `packages/core/tests/wasm/commands.test.ts` so the suite boots with only locally available registry command packages instead of failing early on a missing optional `curl` package.
+- Replaced the failing WASM command implementations behind the permission and pipeline regressions: `sort`, `ln`, `chmod`, `stat`, `ls`, and `xargs` now use in-repo Rust implementations or WASI-safe shims that honor the VM's actual permission and process model.
+- Added a Rust-built `curl` command package under `registry/native/crates/commands/curl/` and packaged `registry/software/curl/wasm/curl`; it uses `wasi-spawn` to launch guest `node` for HTTP so the command works under the current WASM runner without `host_net` imports.
+- Rebuilt the affected registry binaries and verified `pnpm --dir packages/core exec vitest run tests/wasm/commands.test.ts` now passes at `80/80`.
+- Files changed
+- `registry/CLAUDE.md`
+- `packages/core/tests/helpers/registry-commands.ts`
+- `packages/core/tests/wasm/commands.test.ts`
+- `registry/native/Cargo.toml`
+- `registry/native/Cargo.lock`
+- `registry/native/crates/commands/chmod/Cargo.toml`
+- `registry/native/crates/commands/chmod/src/main.rs`
+- `registry/native/crates/commands/curl/Cargo.toml`
+- `registry/native/crates/commands/curl/src/main.rs`
+- `registry/native/crates/commands/ln/Cargo.toml`
+- `registry/native/crates/commands/ln/src/main.rs`
+- `registry/native/crates/commands/ls/Cargo.toml`
+- `registry/native/crates/commands/ls/src/main.rs`
+- `registry/native/crates/commands/sort/src/main.rs`
+- `registry/native/crates/commands/stat/Cargo.toml`
+- `registry/native/crates/commands/stat/src/main.rs`
+- `registry/native/crates/libs/shims/Cargo.toml`
+- `registry/native/crates/libs/shims/src/xargs.rs`
+- `registry/software/coreutils/wasm/chmod`
+- `registry/software/coreutils/wasm/ln`
+- `registry/software/coreutils/wasm/ls`
+- `registry/software/coreutils/wasm/sort`
+- `registry/software/coreutils/wasm/stat`
+- `registry/software/curl/wasm/curl`
+- `registry/software/findutils/wasm/xargs`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+- The WASM command suite can fail before any assertions run if a package descriptor points at a missing `wasm/` directory; filter the software list up front so optional packages do not mask the real runtime regressions.
+- `wasi-http` binaries cannot run through the current generic WASM runner because it only wires `host_process`, `host_user`, and `host_fs`; for now, networked command packages need to hop through a supported runtime such as guest `node`.
+- Permission-sensitive file tools (`chmod`, `stat`, `ls -l`) need to query the VM's imported `host_fs` mode helpers rather than trusting the default WASI metadata path, which synthesized incorrect `0777`-style modes in this suite.
+- Cross-package pipeline regressions in this area were caused by command implementations that assumed unsupported WASI process/thread behavior; small in-repo wrappers using `wasi-spawn` and direct Rust data processing are more reliable than thin upstream adapters here.
 ---

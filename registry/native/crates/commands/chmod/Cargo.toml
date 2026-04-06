@@ -8,6 +8,3 @@ description = "chmod standalone binary for Agent OS WasmVM"
 [[bin]]
 name = "chmod"
 path = "src/main.rs"
-
-[dependencies]
-uu_chmod = "0.7.0"

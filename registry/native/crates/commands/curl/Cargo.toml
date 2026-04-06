@@ -1,0 +1,13 @@
+[package]
+name = "cmd-curl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal curl-compatible HTTP client for WASI"
+
+[[bin]]
+name = "curl"
+path = "src/main.rs"
+
+[dependencies]
+wasi-spawn = { package = "secureexec-wasi-spawn", path = "../../libs/wasi-spawn" }

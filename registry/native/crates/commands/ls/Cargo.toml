@@ -8,6 +8,3 @@ description = "ls standalone binary for Agent OS WasmVM"
 [[bin]]
 name = "ls"
 path = "src/main.rs"
-
-[dependencies]
-uu_ls = "0.7.0"

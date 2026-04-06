@@ -49,10 +49,11 @@ The following packages exist but **cannot be compiled** until a patched wasi-lib
 
 | Package | Reason |
 |---|---|
-| @rivet-dev/agent-os-curl | Needs `<netdb.h>` (patched wasi-libc) |
 | @rivet-dev/agent-os-wget | Needs `<netdb.h>` (patched wasi-libc) |
 | @rivet-dev/agent-os-sqlite3 | Needs patched wasi-libc |
 | @rivet-dev/agent-os-git | WASM binary not yet built |
+
+`@rivet-dev/agent-os-curl` is no longer in this bucket. The current package ships a Rust-built WASI wrapper that uses `wasi-spawn` to launch guest `node` for HTTP requests, which avoids the missing `host_net` imports in the generic WASM runner.
 
 To unblock: run `cd native && ./scripts/patch-wasi-libc.sh` to build the patched sysroot, then `cd .. && make build-wasm-c copy-wasm`.
 
@@ -136,6 +137,7 @@ make clean         # Remove dist/ and wasm/ from all packages
 
 - External-network registry tests should stay behind `AGENTOS_E2E_NETWORK=1`, probe host connectivity up front so CI can skip cleanly when the internet is unavailable, and retry the in-VM command itself for transient outbound failures instead of hard-failing on the first flaky request.
 - Registry integration coverage lives under `tests/e2e/`, with `npm/` and `cross-runtime/` subgroups below it. Tests inside those subdirectories should import shared helpers from `../helpers.ts`, and any fixture/cache path math must account for the extra directory depth.
+- When a TS/WASM integration test bootstraps `AgentOs.create({ software })`, filter the registry package list to `commandDir` values that actually exist locally. Optional software packages may still be absent in some worktrees, and passing a missing `commandDir` into VM creation fails before the real command behavior is exercised.
 
 ## Native Source
 

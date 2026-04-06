@@ -8,6 +8,3 @@ description = "stat standalone binary for Agent OS WasmVM"
 [[bin]]
 name = "stat"
 path = "src/main.rs"
-
-[dependencies]
-uu_stat = "0.7.0"

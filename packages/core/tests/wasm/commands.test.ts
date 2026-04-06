@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { AgentOs } from "../../src/index.js";
 import curlPackage from "@rivet-dev/agent-os-curl";
 import {
-	REGISTRY_SOFTWARE,
+	AVAILABLE_REGISTRY_SOFTWARE,
+	hasRegistryCommandPackage,
 	registrySkipReason,
 } from "../helpers/registry-commands.js";
 
@@ -16,7 +17,7 @@ describe.skipIf(registrySkipReason)("WASM command packages", () => {
 	let vm: AgentOs;
 
 	beforeEach(async () => {
-		vm = await AgentOs.create({ software: REGISTRY_SOFTWARE });
+		vm = await AgentOs.create({ software: AVAILABLE_REGISTRY_SOFTWARE });
 	});
 
 	afterEach(async () => {
@@ -576,7 +577,9 @@ EOF`);
 	// ── curl (requires C build) ───────────────────────────────────────
 
 	describe("curl", () => {
-		const hasCurl = existsSync(join(curlPackage.commandDir, "curl"));
+		const hasCurl =
+			hasRegistryCommandPackage(curlPackage) &&
+			existsSync(join(curlPackage.commandDir, "curl"));
 
 		const CURL_SCRIPT = `
 const http = require("http");
@@ -641,9 +644,7 @@ server.listen(0, "0.0.0.0", () => {
 			return { pid, port };
 		}
 
-		test("curl GET request", async () => {
-			expect(hasCurl).toBe(true);
-
+		test.skipIf(!hasCurl)("curl GET request", async () => {
 			const { pid, port } = await startServer(vm);
 			try {
 				const r = await vm.exec(`curl -s http://localhost:${port}/`);
@@ -654,9 +655,7 @@ server.listen(0, "0.0.0.0", () => {
 			}
 		});
 
-		test("curl POST with data", async () => {
-			expect(hasCurl).toBe(true);
-
+		test.skipIf(!hasCurl)("curl POST with data", async () => {
 			const { pid, port } = await startServer(vm);
 			try {
 				const r = await vm.exec(

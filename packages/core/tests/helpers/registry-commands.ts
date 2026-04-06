@@ -46,6 +46,16 @@ export const REGISTRY_SOFTWARE = [
 	curl,
 ];
 
+/** Registry command packages with a packaged wasm/ directory available locally. */
+export const AVAILABLE_REGISTRY_SOFTWARE = REGISTRY_SOFTWARE.filter((pkg) =>
+	existsSync(pkg.commandDir),
+);
+
+/** True if a specific registry command package is available locally. */
+export function hasRegistryCommandPackage(pkg: { commandDir: string }): boolean {
+	return existsSync(pkg.commandDir);
+}
+
 /** True if registry wasm binaries are available (coreutils/wasm/ exists). */
 export const hasRegistryCommands = existsSync(coreutils.commandDir);
 

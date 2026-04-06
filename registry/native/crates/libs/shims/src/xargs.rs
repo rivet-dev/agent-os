@@ -15,6 +15,7 @@
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, Read, Write};
+use wasi_spawn::spawn_child;
 
 pub fn xargs(args: Vec<OsString>) -> i32 {
     let str_args: Vec<String> = args
@@ -188,14 +189,23 @@ fn run_command(program: &str, args: &[String], trace: bool) -> i32 {
         eprintln!("{}", cmd_line);
     }
 
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args);
+    let cwd = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("xargs: failed to read current directory: {}", error);
+            return 1;
+        }
+    };
+    let cwd = cwd.to_string_lossy().to_string();
+    let argv: Vec<&str> = std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .collect();
 
-    match cmd.output() {
+    match spawn_child(&argv, &[], &cwd).and_then(|mut child| child.consume_output()) {
         Ok(output) => {
             let _ = io::stdout().write_all(&output.stdout);
             let _ = io::stderr().write_all(&output.stderr);
-            output.status.code().unwrap_or(1)
+            output.exit_code
         }
         Err(e) => {
             eprintln!("xargs: {}: {}", program, e);

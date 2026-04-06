@@ -8,6 +8,3 @@ description = "ln standalone binary for Agent OS WasmVM"
 [[bin]]
 name = "ln"
 path = "src/main.rs"
-
-[dependencies]
-uu_ln = "0.7.0"
