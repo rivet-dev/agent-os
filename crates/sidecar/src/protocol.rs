@@ -148,6 +148,7 @@ pub enum RequestPayload {
     ConfigureVm(ConfigureVmRequest),
     GuestFilesystemCall(GuestFilesystemCallRequest),
     SnapshotRootFilesystem(SnapshotRootFilesystemRequest),
+    SnapshotProcesses(SnapshotProcessesRequest),
     Execute(ExecuteRequest),
     WriteStdin(WriteStdinRequest),
     CloseStdin(CloseStdinRequest),
@@ -173,6 +174,7 @@ pub enum ResponsePayload {
     VmConfigured(VmConfiguredResponse),
     GuestFilesystemResult(GuestFilesystemResultResponse),
     RootFilesystemSnapshot(RootFilesystemSnapshotResponse),
+    ProcessSnapshot(ProcessSnapshotResponse),
     ProcessStarted(ProcessStartedResponse),
     StdinWritten(StdinWrittenResponse),
     StdinClosed(StdinClosedResponse),
@@ -417,6 +419,9 @@ pub struct GuestFilesystemCallRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SnapshotRootFilesystemRequest {}
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SnapshotProcessesRequest {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MountDescriptor {
     pub guest_path: String,
@@ -613,6 +618,33 @@ pub struct GuestFilesystemResultResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootFilesystemSnapshotResponse {
     pub entries: Vec<RootFilesystemEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessSnapshotStatus {
+    Running,
+    Exited,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessSnapshotEntry {
+    pub pid: u32,
+    pub ppid: u32,
+    pub pgid: u32,
+    pub sid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<String>,
+    pub driver: String,
+    pub command: String,
+    pub status: ProcessSnapshotStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessSnapshotResponse {
+    pub processes: Vec<ProcessSnapshotEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1070,6 +1102,7 @@ enum ExpectedResponseKind {
     VmConfigured,
     GuestFilesystemResult,
     RootFilesystemSnapshot,
+    ProcessSnapshot,
     ProcessStarted,
     StdinWritten,
     StdinClosed,
@@ -1095,6 +1128,7 @@ impl ExpectedResponseKind {
             Self::VmConfigured => "vm_configured",
             Self::GuestFilesystemResult => "guest_filesystem_result",
             Self::RootFilesystemSnapshot => "root_filesystem_snapshot",
+            Self::ProcessSnapshot => "process_snapshot",
             Self::ProcessStarted => "process_started",
             Self::StdinWritten => "stdin_written",
             Self::StdinClosed => "stdin_closed",
@@ -1130,6 +1164,7 @@ impl RequestPayload {
             | Self::ConfigureVm(_)
             | Self::GuestFilesystemCall(_)
             | Self::SnapshotRootFilesystem(_)
+            | Self::SnapshotProcesses(_)
             | Self::Execute(_)
             | Self::WriteStdin(_)
             | Self::CloseStdin(_)
@@ -1153,6 +1188,7 @@ impl RequestPayload {
             Self::ConfigureVm(_) => ExpectedResponseKind::VmConfigured,
             Self::GuestFilesystemCall(_) => ExpectedResponseKind::GuestFilesystemResult,
             Self::SnapshotRootFilesystem(_) => ExpectedResponseKind::RootFilesystemSnapshot,
+            Self::SnapshotProcesses(_) => ExpectedResponseKind::ProcessSnapshot,
             Self::Execute(_) => ExpectedResponseKind::ProcessStarted,
             Self::WriteStdin(_) => ExpectedResponseKind::StdinWritten,
             Self::CloseStdin(_) => ExpectedResponseKind::StdinClosed,
@@ -1182,6 +1218,7 @@ impl ResponsePayload {
             | Self::VmConfigured(_)
             | Self::GuestFilesystemResult(_)
             | Self::RootFilesystemSnapshot(_)
+            | Self::ProcessSnapshot(_)
             | Self::ProcessStarted(_)
             | Self::StdinWritten(_)
             | Self::StdinClosed(_)
@@ -1205,6 +1242,7 @@ impl ResponsePayload {
             Self::VmConfigured(_) => "vm_configured",
             Self::GuestFilesystemResult(_) => "guest_filesystem_result",
             Self::RootFilesystemSnapshot(_) => "root_filesystem_snapshot",
+            Self::ProcessSnapshot(_) => "process_snapshot",
             Self::ProcessStarted(_) => "process_started",
             Self::StdinWritten(_) => "stdin_written",
             Self::StdinClosed(_) => "stdin_closed",

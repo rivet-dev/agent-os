@@ -903,7 +903,7 @@ console.log(JSON.stringify({
 }
 
 #[test]
-fn javascript_execution_denies_process_signal_handlers_and_native_addons() {
+fn javascript_execution_allows_supported_process_signal_handlers_and_denies_native_addons() {
     assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
@@ -925,15 +925,17 @@ try {
 }
 
 try {
-  process.on('SIGTERM', () => {});
-  result.signalOn = 'unexpected';
+  const returned = process.on('SIGTERM', () => {});
+  result.signalOnReturnedSelf = returned === process;
+  process.removeAllListeners('SIGTERM');
 } catch (error) {
   result.signalOn = { code: error.code ?? null, message: error.message };
 }
 
 try {
-  process.once('SIGINT', () => {});
-  result.signalOnce = 'unexpected';
+  const returned = process.once('SIGINT', () => {});
+  result.signalOnceReturnedSelf = returned === process;
+  process.removeAllListeners('SIGINT');
 } catch (error) {
   result.signalOnce = { code: error.code ?? null, message: error.message };
 }
@@ -982,22 +984,10 @@ console.log(JSON.stringify(result));
     assert_eq!(exit_code, 0, "stderr: {stderr}");
     let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse hardening JSON");
     assert_eq!(parsed["nonSignalReturnedSelf"], Value::Bool(true));
-    assert_eq!(
-        parsed["signalOn"]["code"],
-        Value::String(String::from("ERR_ACCESS_DENIED"))
-    );
-    assert!(parsed["signalOn"]["message"]
-        .as_str()
-        .expect("signal on message")
-        .contains("process.on(SIGTERM)"));
-    assert_eq!(
-        parsed["signalOnce"]["code"],
-        Value::String(String::from("ERR_ACCESS_DENIED"))
-    );
-    assert!(parsed["signalOnce"]["message"]
-        .as_str()
-        .expect("signal once message")
-        .contains("process.once(SIGINT)"));
+    assert_eq!(parsed["signalOnReturnedSelf"], Value::Bool(true));
+    assert_eq!(parsed.get("signalOn"), None);
+    assert_eq!(parsed["signalOnceReturnedSelf"], Value::Bool(true));
+    assert_eq!(parsed.get("signalOnce"), None);
     assert_eq!(parsed.get("sigchld"), None);
     assert_eq!(
         parsed["dlopen"]["code"],
@@ -1015,6 +1005,57 @@ console.log(JSON.stringify(result));
         .as_str()
         .expect("native addon message")
         .contains("native addon loading"));
+}
+
+#[test]
+fn javascript_execution_process_get_builtin_module_returns_undefined_for_denied_probes() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const result = {};
+
+for (const specifier of ["node:v8", "node:vm", "node:worker_threads", "node:inspector"]) {
+  try {
+    result[specifier] = process.getBuiltinModule?.(specifier) === undefined;
+  } catch (error) {
+    result[specifier] = {
+      code: error.code ?? null,
+      message: error.message,
+    };
+  }
+}
+
+console.log(JSON.stringify(result));
+"#,
+    );
+
+    let mut engine = new_test_engine();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        BTreeMap::new(),
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse builtin probe JSON");
+    for specifier in ["node:v8", "node:vm", "node:worker_threads", "node:inspector"] {
+        assert_eq!(
+            parsed[specifier],
+            Value::Bool(true),
+            "expected process.getBuiltinModule({specifier}) to return undefined"
+        );
+    }
 }
 
 #[test]

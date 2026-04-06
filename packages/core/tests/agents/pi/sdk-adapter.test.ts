@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import type { LLMock } from "@copilotkit/llmock";
 import type { ManagedProcess } from "../../../src/runtime-compat.js";
 import {
@@ -21,6 +21,11 @@ import {
 	startLlmock,
 	stopLlmock,
 } from "../../helpers/llmock-helper.js";
+import {
+	PI_AGENT_DIR,
+	PI_TEST_HOME,
+	writePiAnthropicModelsOverride,
+} from "./test-helper.js";
 
 /**
  * Workspace root has shamefully-hoisted node_modules with @rivet-dev/agent-os-pi available.
@@ -53,6 +58,22 @@ function resolvePiSdkBinPath(): string {
 	return `/root/node_modules/@rivet-dev/agent-os-pi/${binEntry}`;
 }
 
+function resolvePiPackageDir(): string {
+	const hostPackageDir = realpathSync(
+		join(MODULE_ACCESS_CWD, "node_modules/@mariozechner/pi-coding-agent"),
+	);
+	const repoRoot = resolve(MODULE_ACCESS_CWD, "../..");
+	const pnpmRoot = join(repoRoot, "node_modules/.pnpm");
+	if (hostPackageDir.startsWith(`${pnpmRoot}/`)) {
+		return `/root/node_modules/.pnpm/${relative(pnpmRoot, hostPackageDir)}`;
+	}
+	const moduleAccessNodeModules = join(MODULE_ACCESS_CWD, "node_modules");
+	if (hostPackageDir.startsWith(`${moduleAccessNodeModules}/`)) {
+		return `/root/node_modules/${relative(moduleAccessNodeModules, hostPackageDir)}`;
+	}
+	throw new Error(`Unsupported PI package directory: ${hostPackageDir}`);
+}
+
 describe("pi-sdk-acp adapter manual spawn", () => {
 	let vm: AgentOs;
 	let mock: LLMock;
@@ -77,6 +98,7 @@ describe("pi-sdk-acp adapter manual spawn", () => {
 			moduleAccessCwd: MODULE_ACCESS_CWD,
 			software: [pi],
 		});
+		await writePiAnthropicModelsOverride(vm, mockUrl);
 	});
 
 	afterEach(async () => {
@@ -105,9 +127,11 @@ describe("pi-sdk-acp adapter manual spawn", () => {
 				stderrOutput += new TextDecoder().decode(data);
 			},
 			env: {
-				HOME: "/home/user",
+				HOME: PI_TEST_HOME,
+				PI_CODING_AGENT_DIR: PI_AGENT_DIR,
 				ANTHROPIC_API_KEY: "mock-key",
 				ANTHROPIC_BASE_URL: mockUrl,
+				PI_PACKAGE_DIR: resolvePiPackageDir(),
 			},
 		});
 

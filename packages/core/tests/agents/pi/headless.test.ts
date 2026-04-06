@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import type { LLMock } from "@copilotkit/llmock";
 import {
 	afterAll,
@@ -15,6 +16,11 @@ import {
 	startLlmock,
 	stopLlmock,
 } from "../../helpers/llmock-helper.js";
+import {
+	PI_AGENT_DIR,
+	PI_TEST_HOME,
+	writePiAnthropicModelsOverride,
+} from "./test-helper.js";
 
 /**
  * Use the workspace root as module access CWD. With shamefully-hoist=true
@@ -22,6 +28,22 @@ import {
  * making them accessible via the ModuleAccessFileSystem overlay.
  */
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "../../..");
+
+function resolvePiPackageDir(): string {
+	const hostPackageDir = realpathSync(
+		join(MODULE_ACCESS_CWD, "node_modules/@mariozechner/pi-coding-agent"),
+	);
+	const repoRoot = resolve(MODULE_ACCESS_CWD, "../..");
+	const pnpmRoot = join(repoRoot, "node_modules/.pnpm");
+	if (hostPackageDir.startsWith(`${pnpmRoot}/`)) {
+		return `/root/node_modules/.pnpm/${relative(pnpmRoot, hostPackageDir)}`;
+	}
+	const moduleAccessNodeModules = join(MODULE_ACCESS_CWD, "node_modules");
+	if (hostPackageDir.startsWith(`${moduleAccessNodeModules}/`)) {
+		return `/root/node_modules/${relative(moduleAccessNodeModules, hostPackageDir)}`;
+	}
+	throw new Error(`Unsupported PI package directory: ${hostPackageDir}`);
+}
 
 describe("PI headless mode", () => {
 	let vm: AgentOs;
@@ -45,6 +67,7 @@ describe("PI headless mode", () => {
 			loopbackExemptPorts: [mockPort],
 			moduleAccessCwd: MODULE_ACCESS_CWD,
 		});
+		await writePiAnthropicModelsOverride(vm, mockUrl);
 	});
 
 	afterEach(async () => {
@@ -79,7 +102,7 @@ console.log(data.content[0].text);
 				stderr += new TextDecoder().decode(data);
 			},
 			env: {
-				HOME: "/home/user",
+				HOME: PI_TEST_HOME,
 				ANTHROPIC_API_KEY: "mock-key",
 			},
 		});
@@ -91,11 +114,13 @@ console.log(data.content[0].text);
 	}, 30_000);
 
 	test("PI main module loads inside VM via CJS require", async () => {
+		const piPackageDir = resolvePiPackageDir();
+
 		// Verify PI's main module can be loaded (CJS path handles export * correctly)
 		const loadScript = `
-const pi = globalThis._requireFrom("/root/node_modules/@mariozechner/pi-coding-agent/dist/main.js", "/");
+const pi = globalThis._requireFrom("${piPackageDir}/dist/main.js", "/");
 console.log("main:" + typeof pi.main);
-const args = globalThis._requireFrom("/root/node_modules/@mariozechner/pi-coding-agent/dist/cli/args.js", "/");
+const args = globalThis._requireFrom("${piPackageDir}/dist/cli/args.js", "/");
 const parsed = args.parseArgs(["-p", "--no-session", "hello"]);
 console.log("print:" + parsed.print);
 console.log("messages:" + JSON.stringify(parsed.messages));
@@ -113,7 +138,7 @@ console.log("messages:" + JSON.stringify(parsed.messages));
 				stderr += new TextDecoder().decode(data);
 			},
 			env: {
-				HOME: "/home/user",
+				HOME: PI_TEST_HOME,
 				PI_OFFLINE: "1",
 			},
 		});
@@ -129,6 +154,8 @@ console.log("messages:" + JSON.stringify(parsed.messages));
 	test("CLI-backed PI headless session completes a real prompt turn", async () => {
 		const { sessionId } = await vm.createSession("pi-cli", {
 			env: {
+				HOME: PI_TEST_HOME,
+				PI_CODING_AGENT_DIR: PI_AGENT_DIR,
 				ANTHROPIC_API_KEY: "mock-key",
 				ANTHROPIC_BASE_URL: mockUrl,
 			},
@@ -172,7 +199,7 @@ console.log("messages:" + JSON.stringify(parsed.messages));
 				stderr += new TextDecoder().decode(data);
 			},
 			env: {
-				HOME: "/home/user",
+				HOME: PI_TEST_HOME,
 				PI_OFFLINE: "1",
 				ANTHROPIC_API_KEY: "mock-key",
 				ANTHROPIC_BASE_URL: mockUrl,

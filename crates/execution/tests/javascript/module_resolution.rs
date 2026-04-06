@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 
 #[test]
 fn javascript_execution_generates_and_reuses_compile_cache_without_leaking_module_state() {
@@ -593,6 +595,166 @@ console.log(`fsReady:${mod.fsReady}`);
         "stdout: {third_stdout}"
     );
     assert!(third_metrics.source_misses >= 1, "stderr: {third_stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn javascript_execution_resolves_projected_pnpm_dependencies_in_guest_path_space() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let workspace_root = temp.path().join("workspace");
+    let projected_root = workspace_root.join("packages/core/node_modules");
+    let pnpm_root = workspace_root.join("node_modules/.pnpm");
+    let package_root = pnpm_root.join("demo-projected@1.0.0/node_modules/demo-projected");
+    let dependency_root = pnpm_root.join("demo-projected@1.0.0/node_modules/demo-dependency");
+
+    fs::create_dir_all(package_root.join("dist")).expect("create projected package dir");
+    fs::create_dir_all(&dependency_root).expect("create projected dependency dir");
+    fs::create_dir_all(&projected_root).expect("create projected node_modules dir");
+
+    write_fixture(
+        &package_root.join("package.json"),
+        "{\n  \"name\": \"demo-projected\",\n  \"type\": \"module\"\n}\n",
+    );
+    write_fixture(
+        &package_root.join("dist/entry.js"),
+        "import { answer, resolved } from 'demo-dependency';\nexport { answer, resolved };\n",
+    );
+    write_fixture(
+        &dependency_root.join("package.json"),
+        "{\n  \"name\": \"demo-dependency\",\n  \"type\": \"module\",\n  \"exports\": \"./index.js\"\n}\n",
+    );
+    write_fixture(
+        &dependency_root.join("index.js"),
+        "export const answer = 42;\nexport const resolved = import.meta.url;\n",
+    );
+    symlink(&package_root, projected_root.join("demo-projected"))
+        .expect("symlink projected package into workspace node_modules");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const mod = await import("/root/node_modules/demo-projected/dist/entry.js");
+console.log(JSON.stringify(mod));
+"#,
+    );
+
+    let mut engine = new_test_engine();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let projected_root_host_path = projected_root.to_string_lossy().replace('\\', "\\\\");
+    let env = BTreeMap::from([(
+        String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+        format!(
+            "[{{\"guestPath\":\"/root/node_modules\",\"hostPath\":\"{projected_root_host_path}\"}}]"
+        ),
+    )]);
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        env,
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse module json");
+    assert_eq!(parsed["answer"], Value::from(42));
+    let resolved = parsed["resolved"]
+        .as_str()
+        .expect("resolved dependency guest url");
+    assert!(
+        resolved.contains("/root/node_modules/.pnpm/demo-projected@1.0.0/node_modules/demo-dependency/index.js"),
+        "resolved dependency should stay in guest path space: {resolved}"
+    );
+    assert!(
+        !resolved.contains(workspace_root.to_string_lossy().as_ref()),
+        "resolved dependency leaked host path: {resolved}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn javascript_execution_resolves_projected_pnpm_cjs_dependencies_in_guest_path_space() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    let workspace_root = temp.path().join("workspace");
+    let projected_root = workspace_root.join("packages/core/node_modules");
+    let pnpm_root = workspace_root.join("node_modules/.pnpm");
+    let package_root = pnpm_root.join("demo-projected@1.0.0/node_modules/demo-projected");
+    let dependency_root = pnpm_root.join("demo-projected@1.0.0/node_modules/demo-dependency");
+
+    fs::create_dir_all(package_root.join("dist")).expect("create projected package dir");
+    fs::create_dir_all(&dependency_root).expect("create projected dependency dir");
+    fs::create_dir_all(&projected_root).expect("create projected node_modules dir");
+
+    write_fixture(
+        &package_root.join("package.json"),
+        "{\n  \"name\": \"demo-projected\",\n  \"type\": \"commonjs\"\n}\n",
+    );
+    write_fixture(
+        &package_root.join("dist/entry.cjs"),
+        "const dep = require('demo-dependency');\nmodule.exports = { answer: dep.answer, resolved: require.resolve('demo-dependency') };\n",
+    );
+    write_fixture(
+        &dependency_root.join("package.json"),
+        "{\n  \"name\": \"demo-dependency\",\n  \"type\": \"commonjs\",\n  \"exports\": \"./index.cjs\"\n}\n",
+    );
+    write_fixture(
+        &dependency_root.join("index.cjs"),
+        "module.exports = { answer: 42 };\n",
+    );
+    symlink(&package_root, projected_root.join("demo-projected"))
+        .expect("symlink projected package into workspace node_modules");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const mod = await import("/root/node_modules/demo-projected/dist/entry.cjs");
+console.log(JSON.stringify(mod.default));
+"#,
+    );
+
+    let mut engine = new_test_engine();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+    let projected_root_host_path = projected_root.to_string_lossy().replace('\\', "\\\\");
+    let env = BTreeMap::from([(
+        String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+        format!(
+            "[{{\"guestPath\":\"/root/node_modules\",\"hostPath\":\"{projected_root_host_path}\"}}]"
+        ),
+    )]);
+
+    let (stdout, stderr, exit_code) = run_javascript_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        vec![String::from("./entry.mjs")],
+        env,
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse module json");
+    assert_eq!(parsed["answer"], Value::from(42));
+    let resolved = parsed["resolved"]
+        .as_str()
+        .expect("resolved dependency guest path");
+    assert!(
+        resolved.contains("/root/node_modules/.pnpm/demo-projected@1.0.0/node_modules/demo-dependency/index.cjs"),
+        "resolved dependency should stay in guest path space: {resolved}"
+    );
+    assert!(
+        !resolved.contains(workspace_root.to_string_lossy().as_ref()),
+        "resolved dependency leaked host path: {resolved}"
+    );
 }
 
 #[test]

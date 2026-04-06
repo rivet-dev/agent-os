@@ -5,12 +5,14 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import {
+	dirname,
 	sep as hostPathSeparator,
 	join,
 	posix as posixPath,
@@ -1091,6 +1093,16 @@ function collectSidecarMountPlan(options: {
 			}),
 			readOnly: true,
 		});
+		for (const pnpmRoot of discoverPnpmRootsForNodeModules(moduleNodeModules)) {
+			pushMount({
+				path: "/root/node_modules/.pnpm",
+				plugin: createHostDirBackend({
+					hostPath: pnpmRoot,
+					readOnly: true,
+				}),
+				readOnly: true,
+			});
+		}
 	}
 
 	for (const root of options.softwareRoots) {
@@ -1131,6 +1143,28 @@ function collectSidecarMountPlan(options: {
 		(left, right) => right.vmPath.length - left.vmPath.length,
 	);
 	return { sidecarMounts, hostMounts, hostPathMappings };
+}
+
+function discoverPnpmRootsForNodeModules(nodeModulesPath: string): string[] {
+	const roots: string[] = [];
+	const seen = new Set<string>();
+	let current = dirname(nodeModulesPath);
+
+	while (true) {
+		const candidate = resolveHostPath(join(current, "node_modules", ".pnpm"));
+		if (existsSync(candidate) && !seen.has(candidate)) {
+			seen.add(candidate);
+			roots.push(candidate);
+		}
+
+		const parent = dirname(current);
+		if (parent === current) {
+			break;
+		}
+		current = parent;
+	}
+
+	return roots;
 }
 
 function materializeToolShimDir(toolKits: ToolKit[]): string {
@@ -1347,6 +1381,7 @@ export class AgentOs {
 					hostPathMappings: hostPathMappings.map((mapping) => ({
 						guestPath: mapping.vmPath,
 						hostPath: mapping.hostPath,
+						readOnly: mapping.readOnly,
 					})),
 					allowedNodeBuiltins: options?.allowedNodeBuiltins,
 					loopbackExemptPorts: options?.loopbackExemptPorts,
@@ -2379,6 +2414,7 @@ export class AgentOs {
 		) {
 			launchEnv = {
 				...launchEnv,
+				PI_PACKAGE_DIR: launchEnv.PI_PACKAGE_DIR ?? this._resolvePackageDir(config.agentPackage),
 				PI_ACP_PI_COMMAND: this._resolvePackageBin(config.agentPackage, "pi"),
 			};
 		}
@@ -2534,7 +2570,46 @@ export class AgentOs {
 			throw new Error(`No bin entry found in ${packageName}/package.json`);
 		}
 
-		return `${vmPrefix}/${binEntry}`;
+		return `${this._resolvePackageDir(packageName)}/${binEntry}`;
+	}
+
+	private _resolvePackageDir(packageName: string): string {
+		const vmPrefix = `/root/node_modules/${packageName}`;
+		let hostPackageDir: string | null = null;
+		for (const root of this._softwareRoots) {
+			if (root.vmPath === vmPrefix) {
+				hostPackageDir = root.hostPath;
+				break;
+			}
+		}
+		if (!hostPackageDir) {
+			hostPackageDir = join(this._moduleAccessCwd, "node_modules", packageName);
+		}
+
+		const resolvedHostDir = realpathSync(hostPackageDir);
+		const repoNodeModules = join(
+			resolveHostPath(this._moduleAccessCwd, "../.."),
+			"node_modules",
+		);
+		const pnpmRoot = join(repoNodeModules, ".pnpm");
+		if (resolvedHostDir.startsWith(`${pnpmRoot}${hostPathSeparator}`)) {
+			return posixPath.join(
+				"/root/node_modules/.pnpm",
+				relativeHostPath(pnpmRoot, resolvedHostDir).split(hostPathSeparator).join("/"),
+			);
+		}
+
+		const moduleAccessNodeModules = join(this._moduleAccessCwd, "node_modules");
+		if (resolvedHostDir.startsWith(`${moduleAccessNodeModules}${hostPathSeparator}`)) {
+			return posixPath.join(
+				"/root/node_modules",
+				relativeHostPath(moduleAccessNodeModules, resolvedHostDir)
+					.split(hostPathSeparator)
+					.join("/"),
+			);
+		}
+
+		return vmPrefix;
 	}
 
 	/**

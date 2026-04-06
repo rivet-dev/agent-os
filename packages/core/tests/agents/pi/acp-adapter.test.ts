@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import type { LLMock } from "@copilotkit/llmock";
 import type { ManagedProcess } from "../../../src/runtime-compat.js";
 import {
@@ -20,6 +20,11 @@ import {
 	startLlmock,
 	stopLlmock,
 } from "../../helpers/llmock-helper.js";
+import {
+	PI_AGENT_DIR,
+	PI_TEST_HOME,
+	writePiAnthropicModelsOverride,
+} from "./test-helper.js";
 
 /**
  * Workspace root has shamefully-hoisted node_modules with pi-acp available.
@@ -39,7 +44,12 @@ function resolvePiBinPath(): string {
 	return resolvePackageBinPath("@mariozechner/pi-coding-agent", "pi");
 }
 
+function resolvePiPackageDir(): string {
+	return resolvePackageGuestDir("@mariozechner/pi-coding-agent");
+}
+
 function resolvePackageBinPath(packageName: string, binName?: string): string {
+	const guestPackageDir = resolvePackageGuestDir(packageName);
 	const hostPkgJson = join(
 		MODULE_ACCESS_CWD,
 		`node_modules/${packageName}/package.json`,
@@ -58,7 +68,23 @@ function resolvePackageBinPath(packageName: string, binName?: string): string {
 		throw new Error(`No bin entry in ${packageName} package.json`);
 	}
 
-	return `/root/node_modules/${packageName}/${binEntry}`;
+	return `${guestPackageDir}/${binEntry}`;
+}
+
+function resolvePackageGuestDir(packageName: string): string {
+	const hostPackageDir = realpathSync(
+		join(MODULE_ACCESS_CWD, `node_modules/${packageName}`),
+	);
+	const repoRoot = resolve(MODULE_ACCESS_CWD, "../..");
+	const pnpmRoot = join(repoRoot, "node_modules/.pnpm");
+	if (hostPackageDir.startsWith(`${pnpmRoot}/`)) {
+		return `/root/node_modules/.pnpm/${relative(pnpmRoot, hostPackageDir)}`;
+	}
+	const moduleAccessNodeModules = join(MODULE_ACCESS_CWD, "node_modules");
+	if (hostPackageDir.startsWith(`${moduleAccessNodeModules}/`)) {
+		return `/root/node_modules/${relative(moduleAccessNodeModules, hostPackageDir)}`;
+	}
+	throw new Error(`Unsupported guest package directory for ${packageName}: ${hostPackageDir}`);
 }
 
 describe("pi-acp adapter manual spawn", () => {
@@ -84,6 +110,7 @@ describe("pi-acp adapter manual spawn", () => {
 			loopbackExemptPorts: [mockPort],
 			moduleAccessCwd: MODULE_ACCESS_CWD,
 		});
+		await writePiAnthropicModelsOverride(vm, mockUrl);
 	});
 
 	afterEach(async () => {
@@ -112,9 +139,11 @@ describe("pi-acp adapter manual spawn", () => {
 				stderrOutput += new TextDecoder().decode(data);
 			},
 			env: {
-				HOME: "/home/user",
+				HOME: PI_TEST_HOME,
+				PI_CODING_AGENT_DIR: PI_AGENT_DIR,
 				ANTHROPIC_API_KEY: "mock-key",
 				ANTHROPIC_BASE_URL: mockUrl,
+				PI_PACKAGE_DIR: resolvePiPackageDir(),
 				PI_ACP_PI_COMMAND: resolvePiBinPath(),
 			},
 		});

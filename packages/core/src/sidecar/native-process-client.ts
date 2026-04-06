@@ -111,6 +111,18 @@ export interface SidecarZombieTimerCount {
 	count: number;
 }
 
+export interface SidecarProcessSnapshotEntry {
+	pid: number;
+	ppid: number;
+	pgid: number;
+	sid: number;
+	processId: string | null;
+	driver: string;
+	command: string;
+	status: "running" | "exited";
+	exitCode: number | null;
+}
+
 type GuestFilesystemOperation =
 	| "read_file"
 	| "write_file"
@@ -169,6 +181,9 @@ type RequestPayload =
 	  }
 	| {
 			type: "snapshot_root_filesystem";
+	  }
+	| {
+			type: "snapshot_processes";
 	  }
 	| {
 			type: "guest_filesystem_call";
@@ -303,6 +318,20 @@ interface ResponseFrame {
 		| {
 				type: "root_filesystem_snapshot";
 				entries: RootFilesystemEntry[];
+		  }
+		| {
+				type: "process_snapshot";
+				processes: Array<{
+					pid: number;
+					ppid: number;
+					pgid: number;
+					sid: number;
+					process_id?: string;
+					driver: string;
+					command: string;
+					status: "running" | "exited";
+					exit_code?: number;
+				}>;
 		  }
 		| {
 				type: "vm_disposed";
@@ -1102,6 +1131,39 @@ export class NativeSidecarProcessClient {
 		return response.payload.socket
 			? toSidecarSocketStateEntry(response.payload.socket)
 			: null;
+	}
+
+	async snapshotProcesses(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+	): Promise<SidecarProcessSnapshotEntry[]> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload: {
+				type: "snapshot_processes",
+			},
+		});
+		if (response.payload.type !== "process_snapshot") {
+			throw new Error(
+				`unexpected snapshot_processes response: ${response.payload.type}`,
+			);
+		}
+		return response.payload.processes.map((process) => ({
+			pid: process.pid,
+			ppid: process.ppid,
+			pgid: process.pgid,
+			sid: process.sid,
+			processId: process.process_id ?? null,
+			driver: process.driver,
+			command: process.command,
+			status: process.status,
+			exitCode: process.exit_code ?? null,
+		}));
 	}
 
 	async getSignalState(

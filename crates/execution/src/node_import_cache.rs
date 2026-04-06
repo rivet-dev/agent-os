@@ -14,7 +14,7 @@ pub(crate) const NODE_IMPORT_CACHE_ASSET_ROOT_ENV: &str = "AGENT_OS_NODE_IMPORT_
 const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
-const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "7";
+const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "18";
 const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "4";
 const NODE_IMPORT_CACHE_DIR_PREFIX: &str = "agent-os-node-import-cache";
 const DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -76,6 +76,8 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const GUEST_PATH_MAPPINGS = parseGuestPathMappings(process.env.AGENT_OS_GUEST_PATH_MAPPINGS);
+const PROJECTED_REALPATH_MAPPINGS = buildProjectedRealpathMappings();
+const PROJECTED_PNPM_PATH_MAPPINGS = buildProjectedPnpmPathMappings();
 const ALLOWED_BUILTINS = new Set(parseJsonArray(process.env.AGENT_OS_ALLOWED_NODE_BUILTINS));
 const CACHE_PATH = process.env.__NODE_IMPORT_CACHE_PATH_ENV__;
 const CACHE_ROOT = CACHE_PATH ? path.dirname(CACHE_PATH) : null;
@@ -497,6 +499,80 @@ function loadProjectedPackageSource(url, filePath, format) {
   return source;
 }
 
+function rewritePiCodingAgentImports(source, filePath) {
+  if (typeof source !== 'string' || typeof filePath !== 'string') {
+    return source;
+  }
+
+  const piCoreRoot = `${path.sep}@mariozechner${path.sep}pi-coding-agent${path.sep}dist${path.sep}core${path.sep}`;
+  if (!filePath.includes(piCoreRoot)) {
+    return source;
+  }
+
+  let rewritten = source;
+
+  if (filePath.endsWith(`${path.sep}agent-session.js`)) {
+    rewritten = rewritten.replace(
+      'import { ExtensionRunner, wrapRegisteredTools, } from "./extensions/index.js";',
+      'import { ExtensionRunner } from "./extensions/runner.js";\nimport { wrapRegisteredTools } from "./extensions/wrapper.js";',
+    );
+  }
+
+  if (filePath.endsWith(`${path.sep}resource-loader.js`)) {
+    rewritten = rewritten.replace(
+      'import { createExtensionRuntime, loadExtensionFromFactory, loadExtensions } from "./extensions/loader.js";',
+      `const createExtensionRuntime = () => {
+  const notInitialized = () => {
+    throw new Error("Extension runtime not initialized. Action methods cannot be called during extension loading.");
+  };
+
+  const runtime = {
+    sendMessage: notInitialized,
+    sendUserMessage: notInitialized,
+    appendEntry: notInitialized,
+    setSessionName: notInitialized,
+    getSessionName: notInitialized,
+    setLabel: notInitialized,
+    getActiveTools: notInitialized,
+    getAllTools: notInitialized,
+    setActiveTools: notInitialized,
+    refreshTools: () => {},
+    getCommands: notInitialized,
+    setModel: () => Promise.reject(new Error("Extension runtime not initialized")),
+    getThinkingLevel: notInitialized,
+    setThinkingLevel: notInitialized,
+    flagValues: new Map(),
+    pendingProviderRegistrations: [],
+    registerProvider: (name, config) => {
+      runtime.pendingProviderRegistrations.push({ name, config });
+    },
+    unregisterProvider: (name) => {
+      runtime.pendingProviderRegistrations = runtime.pendingProviderRegistrations.filter(
+        (entry) => entry.name !== name,
+      );
+    },
+  };
+
+  return runtime;
+};
+
+async function loadExtensionFromFactory() {
+  throw new Error("Loading Pi extension factories is not supported in the Agent OS guest runtime.");
+}
+
+async function loadExtensions(_paths, _cwd, _eventBus) {
+  return {
+    extensions: [],
+    errors: [],
+    runtime: createExtensionRuntime(),
+  };
+}`,
+    );
+  }
+
+  return rewritten;
+}
+
 function resolveAgentOsAsset(specifier) {
   if (typeof specifier !== 'string' || !ASSET_ROOT) {
     return null;
@@ -530,7 +606,7 @@ function rewriteBuiltinImports(source, filePath) {
     return source;
   }
 
-  let rewritten = source;
+  let rewritten = rewritePiCodingAgentImports(source, filePath);
 
   for (const specifier of ['node:fs/promises', 'fs/promises']) {
     rewritten = replaceBuiltinImportSpecifier(
@@ -1314,7 +1390,7 @@ function resolveGuestSpecifier(specifier, context) {
     if (isInternalImportCachePath(filePath)) {
       return null;
     }
-    if (pathExists(filePath) && !guestPathFromHostPath(filePath)) {
+    if (pathExists(filePath)) {
       return null;
     }
     return filePath;
@@ -1382,7 +1458,7 @@ function translateResolvedUrlToHost(url) {
     return url;
   }
 
-  if (pathExists(guestPath) && !guestPathFromHostPath(guestPath)) {
+  if (pathExists(guestPath)) {
     return url;
   }
 
@@ -1433,6 +1509,11 @@ function hostPathFromGuestPath(guestPath) {
     return suffix ? path.join(CACHE_ROOT, ...suffix.split('/')) : CACHE_ROOT;
   }
 
+  const projectedPnpmHostPath = projectedPnpmHostPathFromGuestPath(normalized);
+  if (projectedPnpmHostPath) {
+    return projectedPnpmHostPath;
+  }
+
   for (const mapping of GUEST_PATH_MAPPINGS) {
     if (mapping.guestPath === '/') {
       const suffix = normalized.replace(/^\/+/, '');
@@ -1476,6 +1557,10 @@ function guestPathFromHostPath(hostPath) {
   if (isInternalImportCachePath(normalized)) {
     return null;
   }
+  const projectedRealpathGuestPath = guestPathFromProjectedRealpathHostPath(normalized);
+  if (projectedRealpathGuestPath) {
+    return projectedRealpathGuestPath;
+  }
   for (const mapping of GUEST_PATH_MAPPINGS) {
     const hostRoot = path.resolve(mapping.hostPath);
     if (
@@ -1489,6 +1574,196 @@ function guestPathFromHostPath(hostPath) {
       normalized === hostRoot
         ? ''
         : normalized.slice(hostRoot.length + path.sep.length);
+    return suffix
+      ? path.posix.join(mapping.guestPath, suffix.split(path.sep).join('/'))
+      : mapping.guestPath;
+  }
+
+  const projectedPnpmGuestPath = guestPathFromProjectedPnpmHostPath(normalized);
+  if (projectedPnpmGuestPath) {
+    return projectedPnpmGuestPath;
+  }
+
+  return null;
+}
+
+function buildProjectedRealpathMappings() {
+  const aliases = [];
+  const seen = new Set();
+  const addAlias = (guestPath, hostPath) => {
+    if (typeof guestPath !== 'string' || typeof hostPath !== 'string') {
+      return;
+    }
+    const resolvedHostPath = safeRealpath(hostPath);
+    if (!resolvedHostPath || resolvedHostPath === path.resolve(hostPath)) {
+      return;
+    }
+    const key = `${guestPath}\0${resolvedHostPath}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    aliases.push({ guestPath, hostPath: resolvedHostPath });
+  };
+  const addNodeModulesPackageAliases = (mapping) => {
+    if (
+      !mapping.guestPath.endsWith('/node_modules') ||
+      path.basename(path.resolve(mapping.hostPath)) !== 'node_modules'
+    ) {
+      return;
+    }
+
+    let entries;
+    try {
+      entries = fs.readdirSync(mapping.hostPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (entry.name === '.pnpm') {
+        continue;
+      }
+
+      if (entry.name.startsWith('@')) {
+        const scopeHostPath = path.join(mapping.hostPath, entry.name);
+        let scopeEntries;
+        try {
+          scopeEntries = fs.readdirSync(scopeHostPath, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+
+        for (const scopedEntry of scopeEntries) {
+          addAlias(
+            path.posix.join(mapping.guestPath, entry.name, scopedEntry.name),
+            path.join(scopeHostPath, scopedEntry.name),
+          );
+        }
+        continue;
+      }
+
+      addAlias(
+        path.posix.join(mapping.guestPath, entry.name),
+        path.join(mapping.hostPath, entry.name),
+      );
+    }
+  };
+
+  for (const mapping of GUEST_PATH_MAPPINGS) {
+    if (typeof mapping?.guestPath !== 'string' || typeof mapping?.hostPath !== 'string') {
+      continue;
+    }
+
+    addAlias(mapping.guestPath, mapping.hostPath);
+    addNodeModulesPackageAliases(mapping);
+  }
+
+  return aliases.sort((left, right) => {
+    if (right.guestPath.length !== left.guestPath.length) {
+      return right.guestPath.length - left.guestPath.length;
+    }
+    return right.hostPath.length - left.hostPath.length;
+  });
+}
+
+function guestPathFromProjectedRealpathHostPath(hostPath) {
+  for (const mapping of PROJECTED_REALPATH_MAPPINGS) {
+    const hostRoot = path.resolve(mapping.hostPath);
+    if (
+      hostPath !== hostRoot &&
+      !hostPath.startsWith(`${hostRoot}${path.sep}`)
+    ) {
+      continue;
+    }
+
+    const suffix =
+      hostPath === hostRoot
+        ? ''
+        : hostPath.slice(hostRoot.length + path.sep.length);
+    return suffix
+      ? path.posix.join(mapping.guestPath, suffix.split(path.sep).join('/'))
+      : mapping.guestPath;
+  }
+
+  return null;
+}
+
+function buildProjectedPnpmPathMappings() {
+  const aliases = [];
+  const seen = new Set();
+
+  for (const mapping of GUEST_PATH_MAPPINGS) {
+    if (
+      typeof mapping?.guestPath !== 'string' ||
+      typeof mapping?.hostPath !== 'string' ||
+      !mapping.guestPath.endsWith('/node_modules') ||
+      path.basename(path.resolve(mapping.hostPath)) !== 'node_modules'
+    ) {
+      continue;
+    }
+
+    let current = path.dirname(path.resolve(mapping.hostPath));
+    while (true) {
+      const candidate = path.join(current, 'node_modules', '.pnpm');
+      if (pathExists(candidate)) {
+        const guestPath = path.posix.join(mapping.guestPath, '.pnpm');
+        const key = `${guestPath}\0${candidate}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          aliases.push({ guestPath, hostPath: candidate });
+        }
+      }
+
+      const parent = path.dirname(current);
+      if (parent === current) {
+        break;
+      }
+      current = parent;
+    }
+  }
+
+  return aliases;
+}
+
+function projectedPnpmHostPathFromGuestPath(guestPath) {
+  for (const mapping of PROJECTED_PNPM_PATH_MAPPINGS) {
+    if (
+      guestPath !== mapping.guestPath &&
+      !guestPath.startsWith(`${mapping.guestPath}/`)
+    ) {
+      continue;
+    }
+
+    const suffix =
+      guestPath === mapping.guestPath
+        ? ''
+        : guestPath.slice(mapping.guestPath.length + 1);
+    const candidate = suffix
+      ? path.join(mapping.hostPath, ...suffix.split('/'))
+      : mapping.hostPath;
+    if (pathExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function guestPathFromProjectedPnpmHostPath(hostPath) {
+  for (const mapping of PROJECTED_PNPM_PATH_MAPPINGS) {
+    const hostRoot = path.resolve(mapping.hostPath);
+    if (
+      hostPath !== hostRoot &&
+      !hostPath.startsWith(`${hostRoot}${path.sep}`)
+    ) {
+      continue;
+    }
+
+    const suffix =
+      hostPath === hostRoot
+        ? ''
+        : hostPath.slice(hostRoot.length + path.sep.length);
     return suffix
       ? path.posix.join(mapping.guestPath, suffix.split(path.sep).join('/'))
       : mapping.guestPath;
@@ -1610,6 +1885,36 @@ function buildHostToGuestTextReplacements() {
   };
 
   for (const mapping of GUEST_PATH_MAPPINGS) {
+    const hostRoot = path.resolve(mapping.hostPath);
+    addReplacement(hostRoot, mapping.guestPath);
+    addReplacement(pathToFileURL(hostRoot).href, pathToFileURL(mapping.guestPath).href);
+    const forwardSlashHostRoot = hostRoot.split(path.sep).join('/');
+    if (forwardSlashHostRoot !== hostRoot) {
+      addReplacement(forwardSlashHostRoot, mapping.guestPath);
+    }
+  }
+
+  for (const mapping of PROJECTED_REALPATH_MAPPINGS) {
+    const hostRoot = path.resolve(mapping.hostPath);
+    addReplacement(hostRoot, mapping.guestPath);
+    addReplacement(pathToFileURL(hostRoot).href, pathToFileURL(mapping.guestPath).href);
+    const forwardSlashHostRoot = hostRoot.split(path.sep).join('/');
+    if (forwardSlashHostRoot !== hostRoot) {
+      addReplacement(forwardSlashHostRoot, mapping.guestPath);
+    }
+  }
+
+  for (const mapping of PROJECTED_PNPM_PATH_MAPPINGS) {
+    const hostRoot = path.resolve(mapping.hostPath);
+    addReplacement(hostRoot, mapping.guestPath);
+    addReplacement(pathToFileURL(hostRoot).href, pathToFileURL(mapping.guestPath).href);
+    const forwardSlashHostRoot = hostRoot.split(path.sep).join('/');
+    if (forwardSlashHostRoot !== hostRoot) {
+      addReplacement(forwardSlashHostRoot, mapping.guestPath);
+    }
+  }
+
+  for (const mapping of PROJECTED_PNPM_PATH_MAPPINGS) {
     const hostRoot = path.resolve(mapping.hostPath);
     addReplacement(hostRoot, mapping.guestPath);
     addReplacement(pathToFileURL(hostRoot).href, pathToFileURL(mapping.guestPath).href);
@@ -1795,7 +2100,8 @@ function parseGuestPathMappings(value) {
           : null;
       const hostPath =
         typeof entry.hostPath === 'string' ? path.resolve(entry.hostPath) : null;
-      return guestPath && hostPath ? { guestPath, hostPath } : null;
+      const readOnly = entry.readOnly === true;
+      return guestPath && hostPath ? { guestPath, hostPath, readOnly } : null;
     })
     .filter(Boolean)
     .sort((left, right) => {
@@ -1859,6 +2165,9 @@ const syncBuiltinESMExports =
     ? Module.syncBuiltinESMExports.bind(Module)
     : () => {};
 const GUEST_PATH_MAPPINGS = parseGuestPathMappings(HOST_PROCESS_ENV.AGENT_OS_GUEST_PATH_MAPPINGS);
+const PROJECTED_PNPM_HOST_ROOTS = discoverProjectedPnpmHostRoots();
+const PROJECTED_REALPATH_MAPPINGS = buildProjectedRealpathMappings();
+const PROJECTED_PNPM_PATH_MAPPINGS = buildProjectedPnpmPathMappings();
 const ALLOWED_BUILTINS = new Set(parseJsonArray(HOST_PROCESS_ENV.AGENT_OS_ALLOWED_NODE_BUILTINS));
 const LOOPBACK_EXEMPT_PORTS = new Set(parseJsonArray(HOST_PROCESS_ENV.AGENT_OS_LOOPBACK_EXEMPT_PORTS));
 const DENIED_BUILTINS = new Set([
@@ -1919,7 +2228,7 @@ const SIGNAL_EVENTS = new Set(
     name.startsWith('SIG'),
   ),
 );
-const TRACKED_PROCESS_SIGNAL_EVENTS = new Set(['SIGCHLD']);
+const TRACKED_PROCESS_SIGNAL_EVENTS = new Set(['SIGINT', 'SIGTERM', 'SIGCHLD']);
 const guestEntryPoint =
   HOST_PROCESS_ENV.AGENT_OS_GUEST_ENTRYPOINT ?? HOST_PROCESS_ENV.AGENT_OS_ENTRYPOINT;
 const DEFAULT_VIRTUAL_EXEC_PATH = '/usr/bin/node';
@@ -2054,6 +2363,14 @@ function pathExists(targetPath) {
   }
 }
 
+function safeRealpath(targetPath) {
+  try {
+    return fs.realpathSync.native(targetPath);
+  } catch {
+    return null;
+  }
+}
+
 function parseJsonArray(value) {
   if (!value) {
     return [];
@@ -2183,10 +2500,16 @@ function parseGuestPathMappings(value) {
           entry && typeof entry.hostPath === 'string'
             ? path.resolve(entry.hostPath)
             : null;
-        return guestPath && hostPath ? { guestPath, hostPath } : null;
+        const readOnly = entry?.readOnly === true;
+        return guestPath && hostPath ? { guestPath, hostPath, readOnly } : null;
       })
       .filter(Boolean)
-      .sort((left, right) => right.guestPath.length - left.guestPath.length);
+      .sort((left, right) => {
+        if (right.guestPath.length !== left.guestPath.length) {
+          return right.guestPath.length - left.guestPath.length;
+        }
+        return right.hostPath.length - left.hostPath.length;
+      });
   } catch {
     return [];
   }
@@ -2210,6 +2533,11 @@ function hostPathFromGuestPath(guestPath) {
     return suffix
       ? path.join(NODE_IMPORT_CACHE_ROOT, ...suffix.split('/'))
       : NODE_IMPORT_CACHE_ROOT;
+  }
+
+  const projectedPnpmHostPath = projectedPnpmHostPathFromGuestPath(normalized);
+  if (projectedPnpmHostPath) {
+    return projectedPnpmHostPath;
   }
 
   for (const mapping of GUEST_PATH_MAPPINGS) {
@@ -2252,6 +2580,10 @@ function guestPathFromHostPath(hostPath) {
   }
 
   const normalized = path.resolve(hostPath);
+  const projectedRealpathGuestPath = guestPathFromProjectedRealpathHostPath(normalized);
+  if (projectedRealpathGuestPath) {
+    return projectedRealpathGuestPath;
+  }
   for (const mapping of GUEST_PATH_MAPPINGS) {
     const hostRoot = path.resolve(mapping.hostPath);
     if (
@@ -2265,6 +2597,232 @@ function guestPathFromHostPath(hostPath) {
       normalized === hostRoot
         ? ''
         : normalized.slice(hostRoot.length + path.sep.length);
+    return suffix
+      ? path.posix.join(mapping.guestPath, suffix.split(path.sep).join('/'))
+      : mapping.guestPath;
+  }
+
+  const projectedPnpmGuestPath = guestPathFromProjectedPnpmHostPath(normalized);
+  if (projectedPnpmGuestPath) {
+    return projectedPnpmGuestPath;
+  }
+
+  return null;
+}
+
+function discoverProjectedPnpmHostRoots() {
+  const roots = [];
+  const seen = new Set();
+
+  for (const mapping of GUEST_PATH_MAPPINGS) {
+    if (
+      typeof mapping?.guestPath !== 'string' ||
+      typeof mapping?.hostPath !== 'string' ||
+      !mapping.guestPath.endsWith('/node_modules') ||
+      path.basename(path.resolve(mapping.hostPath)) !== 'node_modules'
+    ) {
+      continue;
+    }
+
+    let current = path.dirname(path.resolve(mapping.hostPath));
+    while (true) {
+      const candidate = path.join(current, 'node_modules', '.pnpm');
+      if (pathExists(candidate)) {
+        const resolvedCandidate = path.resolve(candidate);
+        if (!seen.has(resolvedCandidate)) {
+          seen.add(resolvedCandidate);
+          roots.push(resolvedCandidate);
+        }
+      }
+
+      const parent = path.dirname(current);
+      if (parent === current) {
+        break;
+      }
+      current = parent;
+    }
+  }
+
+  return roots;
+}
+
+function isWithinProjectedPnpmHostRoot(hostPath) {
+  const normalized = path.resolve(hostPath);
+  return PROJECTED_PNPM_HOST_ROOTS.some((root) =>
+    normalized === root || normalized.startsWith(`${root}${path.sep}`),
+  );
+}
+
+function buildProjectedRealpathMappings() {
+  const aliases = [];
+  const seen = new Set();
+  const addAlias = (guestPath, hostPath) => {
+    if (typeof guestPath !== 'string' || typeof hostPath !== 'string') {
+      return;
+    }
+    const resolvedHostPath = safeRealpath(hostPath);
+    if (!resolvedHostPath || resolvedHostPath === path.resolve(hostPath)) {
+      return;
+    }
+    if (isWithinProjectedPnpmHostRoot(resolvedHostPath)) {
+      return;
+    }
+    const key = `${guestPath}\0${resolvedHostPath}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    aliases.push({ guestPath, hostPath: resolvedHostPath });
+  };
+  const addNodeModulesPackageAliases = (mapping) => {
+    if (
+      !mapping.guestPath.endsWith('/node_modules') ||
+      path.basename(path.resolve(mapping.hostPath)) !== 'node_modules'
+    ) {
+      return;
+    }
+
+    let entries;
+    try {
+      entries = fs.readdirSync(mapping.hostPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (entry.name === '.pnpm') {
+        continue;
+      }
+
+      if (entry.name.startsWith('@')) {
+        const scopeHostPath = path.join(mapping.hostPath, entry.name);
+        let scopeEntries;
+        try {
+          scopeEntries = fs.readdirSync(scopeHostPath, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+
+        for (const scopedEntry of scopeEntries) {
+          addAlias(
+            path.posix.join(mapping.guestPath, entry.name, scopedEntry.name),
+            path.join(scopeHostPath, scopedEntry.name),
+          );
+        }
+        continue;
+      }
+
+      addAlias(
+        path.posix.join(mapping.guestPath, entry.name),
+        path.join(mapping.hostPath, entry.name),
+      );
+    }
+  };
+
+  for (const mapping of GUEST_PATH_MAPPINGS) {
+    if (typeof mapping?.guestPath !== 'string' || typeof mapping?.hostPath !== 'string') {
+      continue;
+    }
+
+    addAlias(mapping.guestPath, mapping.hostPath);
+    addNodeModulesPackageAliases(mapping);
+  }
+
+  return aliases.sort((left, right) => {
+    if (right.guestPath.length !== left.guestPath.length) {
+      return right.guestPath.length - left.guestPath.length;
+    }
+    return right.hostPath.length - left.hostPath.length;
+  });
+}
+
+function guestPathFromProjectedRealpathHostPath(hostPath) {
+  for (const mapping of PROJECTED_REALPATH_MAPPINGS) {
+    const hostRoot = path.resolve(mapping.hostPath);
+    if (
+      hostPath !== hostRoot &&
+      !hostPath.startsWith(`${hostRoot}${path.sep}`)
+    ) {
+      continue;
+    }
+
+    const suffix =
+      hostPath === hostRoot
+        ? ''
+        : hostPath.slice(hostRoot.length + path.sep.length);
+    return suffix
+      ? path.posix.join(mapping.guestPath, suffix.split(path.sep).join('/'))
+      : mapping.guestPath;
+  }
+
+  return null;
+}
+
+function buildProjectedPnpmPathMappings() {
+  const aliases = [];
+  const seen = new Set();
+
+  for (const mapping of GUEST_PATH_MAPPINGS) {
+    if (
+      typeof mapping?.guestPath !== 'string' ||
+      typeof mapping?.hostPath !== 'string' ||
+      !mapping.guestPath.endsWith('/node_modules') ||
+      path.basename(path.resolve(mapping.hostPath)) !== 'node_modules'
+    ) {
+      continue;
+    }
+
+    for (const hostPath of PROJECTED_PNPM_HOST_ROOTS) {
+      const guestPath = path.posix.join(mapping.guestPath, '.pnpm');
+      const key = `${guestPath}\0${hostPath}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        aliases.push({ guestPath, hostPath });
+      }
+    }
+  }
+
+  return aliases;
+}
+
+function projectedPnpmHostPathFromGuestPath(guestPath) {
+  for (const mapping of PROJECTED_PNPM_PATH_MAPPINGS) {
+    if (
+      guestPath !== mapping.guestPath &&
+      !guestPath.startsWith(`${mapping.guestPath}/`)
+    ) {
+      continue;
+    }
+
+    const suffix =
+      guestPath === mapping.guestPath
+        ? ''
+        : guestPath.slice(mapping.guestPath.length + 1);
+    const candidate = suffix
+      ? path.join(mapping.hostPath, ...suffix.split('/'))
+      : mapping.hostPath;
+    if (pathExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function guestPathFromProjectedPnpmHostPath(hostPath) {
+  for (const mapping of PROJECTED_PNPM_PATH_MAPPINGS) {
+    const hostRoot = path.resolve(mapping.hostPath);
+    if (
+      hostPath !== hostRoot &&
+      !hostPath.startsWith(`${hostRoot}${path.sep}`)
+    ) {
+      continue;
+    }
+
+    const suffix =
+      hostPath === hostRoot
+        ? ''
+        : hostPath.slice(hostRoot.length + path.sep.length);
     return suffix
       ? path.posix.join(mapping.guestPath, suffix.split(path.sep).join('/'))
       : mapping.guestPath;
@@ -2389,6 +2947,26 @@ function buildHostToGuestTextReplacements() {
   };
 
   for (const mapping of GUEST_PATH_MAPPINGS) {
+    const hostRoot = path.resolve(mapping.hostPath);
+    addReplacement(hostRoot, mapping.guestPath);
+    addReplacement(pathToFileURL(hostRoot).href, pathToFileURL(mapping.guestPath).href);
+    const forwardSlashHostRoot = hostRoot.split(path.sep).join('/');
+    if (forwardSlashHostRoot !== hostRoot) {
+      addReplacement(forwardSlashHostRoot, mapping.guestPath);
+    }
+  }
+
+  for (const mapping of PROJECTED_REALPATH_MAPPINGS) {
+    const hostRoot = path.resolve(mapping.hostPath);
+    addReplacement(hostRoot, mapping.guestPath);
+    addReplacement(pathToFileURL(hostRoot).href, pathToFileURL(mapping.guestPath).href);
+    const forwardSlashHostRoot = hostRoot.split(path.sep).join('/');
+    if (forwardSlashHostRoot !== hostRoot) {
+      addReplacement(forwardSlashHostRoot, mapping.guestPath);
+    }
+  }
+
+  for (const mapping of PROJECTED_PNPM_PATH_MAPPINGS) {
     const hostRoot = path.resolve(mapping.hostPath);
     addReplacement(hostRoot, mapping.guestPath);
     addReplacement(pathToFileURL(hostRoot).href, pathToFileURL(mapping.guestPath).href);
@@ -2532,13 +3110,49 @@ function translateErrorToGuest(error) {
 }
 
 function hostPathForSpecifier(specifier, fromGuestDir) {
+  if (specifier && typeof specifier === 'object') {
+    const href =
+      specifier instanceof URL
+        ? specifier.href
+        : typeof specifier.href === 'string'
+          ? specifier.href
+          : typeof specifier.toString === 'function'
+            ? String(specifier)
+            : null;
+    if (typeof href === 'string' && href.startsWith('file:')) {
+      specifier = href;
+    }
+  }
+
   if (typeof specifier !== 'string') {
     return null;
   }
 
+  if (
+    path.isAbsolute(specifier) &&
+    (pathExists(specifier) ||
+      guestVisiblePathFromHostPath(specifier) !== UNMAPPED_GUEST_PATH ||
+      isPathWithinRoot(specifier, HOST_CWD) ||
+      (NODE_IMPORT_CACHE_ROOT && isPathWithinRoot(specifier, NODE_IMPORT_CACHE_ROOT)))
+  ) {
+    return specifier;
+  }
+
   if (specifier.startsWith('file:')) {
     try {
-      return hostPathFromGuestPath(new URL(specifier).pathname);
+      const candidatePath = new URL(specifier).pathname;
+      if (
+        path.isAbsolute(candidatePath) &&
+        (pathExists(candidatePath) ||
+          guestVisiblePathFromHostPath(candidatePath) !== UNMAPPED_GUEST_PATH ||
+          isPathWithinRoot(candidatePath, HOST_CWD) ||
+          (NODE_IMPORT_CACHE_ROOT &&
+            isPathWithinRoot(candidatePath, NODE_IMPORT_CACHE_ROOT)))
+      ) {
+        return candidatePath;
+      }
+
+      return hostPathFromGuestPath(candidatePath);
     } catch {
       return null;
     }
@@ -2567,6 +3181,32 @@ function translateGuestPath(value, fromGuestDir = '/') {
 }
 
 function resolveGuestFsPath(value, fromGuestDir = '/') {
+  if (value && typeof value === 'object') {
+    const href =
+      value instanceof URL
+        ? value.href
+        : typeof value.href === 'string'
+          ? value.href
+          : typeof value.toString === 'function'
+            ? String(value)
+            : null;
+    if (typeof href === 'string' && href.startsWith('file:')) {
+      try {
+        return path.posix.normalize(new URL(href).pathname);
+      } catch {
+        return href;
+      }
+    }
+  }
+
+  if (value instanceof URL && value.protocol === 'file:') {
+    try {
+      return path.posix.normalize(value.pathname);
+    } catch {
+      return value.href;
+    }
+  }
+
   if (typeof value !== 'string') {
     return value;
   }
@@ -2576,6 +3216,13 @@ function resolveGuestFsPath(value, fromGuestDir = '/') {
       return path.posix.normalize(new URL(value).pathname);
     } catch {
       return value;
+    }
+  }
+
+  if (path.isAbsolute(value)) {
+    const guestVisiblePath = guestVisiblePathFromHostPath(value);
+    if (guestVisiblePath !== UNMAPPED_GUEST_PATH) {
+      return guestVisiblePath;
     }
   }
 
@@ -3445,10 +4092,43 @@ function createGuestWriteStreamClass(fromGuestDir = '/') {
 }
 
 function wrapFsModule(fsModule, fromGuestDir = '/') {
+  const createReadOnlyFsError = (target) => {
+    const error = new Error(`EROFS: read-only file system, open '${target}'`);
+    error.code = 'EROFS';
+    return error;
+  };
+  const assertGuestPathWritable = (target) => {
+    const guestPath = resolveGuestFsPath(target, fromGuestDir);
+    const translatedPath = translateGuestPath(target, fromGuestDir);
+    for (const mapping of GUEST_PATH_MAPPINGS) {
+      const guestPathMatches =
+        typeof guestPath === 'string' &&
+        guestPath.startsWith('/') &&
+        (guestPath === mapping.guestPath || guestPath.startsWith(`${mapping.guestPath}/`));
+      const hostPathMatches =
+        typeof translatedPath === 'string' &&
+        path.isAbsolute(translatedPath) &&
+        (translatedPath === mapping.hostPath ||
+          translatedPath.startsWith(`${mapping.hostPath}${path.sep}`));
+      if (!mapping.readOnly || (!guestPathMatches && !hostPathMatches)) {
+        continue;
+      }
+      throw createReadOnlyFsError(
+        typeof guestPath === 'string' ? guestPath : String(target),
+      );
+    }
+  };
   const wrapPathFirst = (methodName) => {
     const fn = fsModule[methodName];
     return (...args) =>
       fn(translateGuestPath(args[0], fromGuestDir), ...args.slice(1));
+  };
+  const wrapWritePathFirst = (methodName) => {
+    const fn = fsModule[methodName];
+    return (...args) => {
+      assertGuestPathWritable(args[0]);
+      return fn(translateGuestPath(args[0], fromGuestDir), ...args.slice(1));
+    };
   };
   const wrapRenameLike = (methodName) => {
     const fn = fsModule[methodName];
@@ -3459,19 +4139,39 @@ function wrapFsModule(fsModule, fromGuestDir = '/') {
         ...args.slice(2),
       );
   };
+  const wrapWriteRenameLike = (methodName) => {
+    const fn = fsModule[methodName];
+    return (...args) => {
+      assertGuestPathWritable(args[0]);
+      assertGuestPathWritable(args[1]);
+      return fn(
+        translateGuestPath(args[0], fromGuestDir),
+        translateGuestPath(args[1], fromGuestDir),
+        ...args.slice(2),
+      );
+    };
+  };
   const existsSync = fsModule.existsSync.bind(fsModule);
   const readdirSync = fsModule.readdirSync.bind(fsModule);
   const ReadStream = createGuestReadStreamClass(fromGuestDir);
   const WriteStream = createGuestWriteStreamClass(fromGuestDir);
+  const wrappedRealpathSync = wrapPathFirst('realpathSync');
+  if (typeof fsModule.realpathSync?.native === 'function') {
+    wrappedRealpathSync.native = (...args) =>
+      fsModule.realpathSync.native(
+        translateGuestPath(args[0], fromGuestDir),
+        ...args.slice(1),
+      );
+  }
 
   const wrapped = {
     ...fsModule,
     ReadStream,
     WriteStream,
     accessSync: wrapPathFirst('accessSync'),
-    appendFileSync: wrapPathFirst('appendFileSync'),
-    chmodSync: wrapPathFirst('chmodSync'),
-    chownSync: wrapPathFirst('chownSync'),
+    appendFileSync: wrapWritePathFirst('appendFileSync'),
+    chmodSync: wrapWritePathFirst('chmodSync'),
+    chownSync: wrapWritePathFirst('chownSync'),
     createReadStream: (target, options) => new ReadStream(target, options),
     createWriteStream: (target, options) => new WriteStream(target, options),
     existsSync: (target) => {
@@ -3479,7 +4179,7 @@ function wrapFsModule(fsModule, fromGuestDir = '/') {
       return existsSync(translated) || guestMappedChildNames(target).length > 0;
     },
     lstatSync: wrapPathFirst('lstatSync'),
-    mkdirSync: wrapPathFirst('mkdirSync'),
+    mkdirSync: wrapWritePathFirst('mkdirSync'),
     readFileSync: wrapPathFirst('readFileSync'),
     readdirSync: (target, options) => {
       const translated = translateGuestPath(target, fromGuestDir);
@@ -3497,46 +4197,46 @@ function wrapFsModule(fsModule, fromGuestDir = '/') {
       return readdirSync(translated, options);
     },
     readlinkSync: wrapPathFirst('readlinkSync'),
-    realpathSync: wrapPathFirst('realpathSync'),
-    renameSync: wrapRenameLike('renameSync'),
-    rmSync: wrapPathFirst('rmSync'),
-    rmdirSync: wrapPathFirst('rmdirSync'),
+    realpathSync: wrappedRealpathSync,
+    renameSync: wrapWriteRenameLike('renameSync'),
+    rmSync: wrapWritePathFirst('rmSync'),
+    rmdirSync: wrapWritePathFirst('rmdirSync'),
     statSync: wrapPathFirst('statSync'),
-    symlinkSync: wrapRenameLike('symlinkSync'),
-    unlinkSync: wrapPathFirst('unlinkSync'),
+    symlinkSync: wrapWriteRenameLike('symlinkSync'),
+    unlinkSync: wrapWritePathFirst('unlinkSync'),
     unwatchFile: () => {},
-    utimesSync: wrapPathFirst('utimesSync'),
+    utimesSync: wrapWritePathFirst('utimesSync'),
     watch: () => {
       throw createFsWatchUnavailableError('fs.watch');
     },
     watchFile: () => {
       throw createFsWatchUnavailableError('fs.watchFile');
     },
-    writeFileSync: wrapPathFirst('writeFileSync'),
+    writeFileSync: wrapWritePathFirst('writeFileSync'),
   };
 
   if (fsModule.promises) {
     wrapped.promises = {
       ...fsModule.promises,
       access: wrapPathFirstAsync(fsModule.promises.access, fromGuestDir),
-      appendFile: wrapPathFirstAsync(fsModule.promises.appendFile, fromGuestDir),
-      chmod: wrapPathFirstAsync(fsModule.promises.chmod, fromGuestDir),
-      chown: wrapPathFirstAsync(fsModule.promises.chown, fromGuestDir),
+      appendFile: wrapWritePathFirstAsync(fsModule.promises.appendFile, fromGuestDir),
+      chmod: wrapWritePathFirstAsync(fsModule.promises.chmod, fromGuestDir),
+      chown: wrapWritePathFirstAsync(fsModule.promises.chown, fromGuestDir),
       lstat: wrapPathFirstAsync(fsModule.promises.lstat, fromGuestDir),
-      mkdir: wrapPathFirstAsync(fsModule.promises.mkdir, fromGuestDir),
+      mkdir: wrapWritePathFirstAsync(fsModule.promises.mkdir, fromGuestDir),
       open: wrapPathFirstAsync(fsModule.promises.open, fromGuestDir),
       readFile: wrapPathFirstAsync(fsModule.promises.readFile, fromGuestDir),
       readdir: wrapPathFirstAsync(fsModule.promises.readdir, fromGuestDir),
       readlink: wrapPathFirstAsync(fsModule.promises.readlink, fromGuestDir),
       realpath: wrapPathFirstAsync(fsModule.promises.realpath, fromGuestDir),
-      rename: wrapRenameLikeAsync(fsModule.promises.rename, fromGuestDir),
-      rm: wrapPathFirstAsync(fsModule.promises.rm, fromGuestDir),
-      rmdir: wrapPathFirstAsync(fsModule.promises.rmdir, fromGuestDir),
+      rename: wrapWriteRenameLikeAsync(fsModule.promises.rename, fromGuestDir),
+      rm: wrapWritePathFirstAsync(fsModule.promises.rm, fromGuestDir),
+      rmdir: wrapWritePathFirstAsync(fsModule.promises.rmdir, fromGuestDir),
       stat: wrapPathFirstAsync(fsModule.promises.stat, fromGuestDir),
-      symlink: wrapRenameLikeAsync(fsModule.promises.symlink, fromGuestDir),
-      unlink: wrapPathFirstAsync(fsModule.promises.unlink, fromGuestDir),
-      utimes: wrapPathFirstAsync(fsModule.promises.utimes, fromGuestDir),
-      writeFile: wrapPathFirstAsync(fsModule.promises.writeFile, fromGuestDir),
+      symlink: wrapWriteRenameLikeAsync(fsModule.promises.symlink, fromGuestDir),
+      unlink: wrapWritePathFirstAsync(fsModule.promises.unlink, fromGuestDir),
+      utimes: wrapWritePathFirstAsync(fsModule.promises.utimes, fromGuestDir),
+      writeFile: wrapWritePathFirstAsync(fsModule.promises.writeFile, fromGuestDir),
     };
     Object.assign(wrapped.promises, createRpcBackedFsPromises(fromGuestDir));
   }
@@ -3552,6 +4252,32 @@ function wrapPathFirstAsync(fn, fromGuestDir) {
     fn(translateGuestPath(args[0], fromGuestDir), ...args.slice(1));
 }
 
+function wrapWritePathFirstAsync(fn, fromGuestDir) {
+  return (...args) => {
+    const guestPath = resolveGuestFsPath(args[0], fromGuestDir);
+    const translatedPath = translateGuestPath(args[0], fromGuestDir);
+    for (const mapping of GUEST_PATH_MAPPINGS) {
+      const guestPathMatches =
+        typeof guestPath === 'string' &&
+        guestPath.startsWith('/') &&
+        (guestPath === mapping.guestPath || guestPath.startsWith(`${mapping.guestPath}/`));
+      const hostPathMatches =
+        typeof translatedPath === 'string' &&
+        path.isAbsolute(translatedPath) &&
+        (translatedPath === mapping.hostPath ||
+          translatedPath.startsWith(`${mapping.hostPath}${path.sep}`));
+      if (!mapping.readOnly || (!guestPathMatches && !hostPathMatches)) {
+        continue;
+      }
+      const error = new Error(`EROFS: read-only file system, open '${guestPath}'`);
+      error.code = 'EROFS';
+      throw error;
+    }
+
+    return fn(translateGuestPath(args[0], fromGuestDir), ...args.slice(1));
+  };
+}
+
 function wrapRenameLikeAsync(fn, fromGuestDir) {
   return (...args) =>
     fn(
@@ -3559,6 +4285,38 @@ function wrapRenameLikeAsync(fn, fromGuestDir) {
       translateGuestPath(args[1], fromGuestDir),
       ...args.slice(2),
     );
+}
+
+function wrapWriteRenameLikeAsync(fn, fromGuestDir) {
+  return (...args) => {
+    for (const target of [args[0], args[1]]) {
+      const guestPath = resolveGuestFsPath(target, fromGuestDir);
+      const translatedPath = translateGuestPath(target, fromGuestDir);
+      for (const mapping of GUEST_PATH_MAPPINGS) {
+        const guestPathMatches =
+          typeof guestPath === 'string' &&
+          guestPath.startsWith('/') &&
+          (guestPath === mapping.guestPath || guestPath.startsWith(`${mapping.guestPath}/`));
+        const hostPathMatches =
+          typeof translatedPath === 'string' &&
+          path.isAbsolute(translatedPath) &&
+          (translatedPath === mapping.hostPath ||
+            translatedPath.startsWith(`${mapping.hostPath}${path.sep}`));
+        if (!mapping.readOnly || (!guestPathMatches && !hostPathMatches)) {
+          continue;
+        }
+        const error = new Error(`EROFS: read-only file system, open '${guestPath}'`);
+        error.code = 'EROFS';
+        throw error;
+      }
+    }
+
+    return fn(
+      translateGuestPath(args[0], fromGuestDir),
+      translateGuestPath(args[1], fromGuestDir),
+      ...args.slice(2),
+    );
+  };
 }
 
 function createRpcBackedChildProcessModule(fromGuestDir = '/') {
@@ -3821,23 +4579,46 @@ function createRpcBackedChildProcessModule(fromGuestDir = '/') {
     _read() {}
   }
 
+  const isIgnorableClosedChildProcessError = (child, error) => {
+    if (child?._closed) {
+      return true;
+    }
+    if (!error || typeof error !== 'object') {
+      return false;
+    }
+    const code = typeof error.code === 'string' ? error.code : '';
+    if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || code === 'ESRCH') {
+      return true;
+    }
+    const message = typeof error.message === 'string' ? error.message : '';
+    return message.includes('unknown child process');
+  };
+
   class AgentOsChildWritable extends Writable {
-    constructor(childId) {
+    constructor(child) {
       super();
-      this.childId = childId;
+      this.child = child;
     }
 
     _write(chunk, encoding, callback) {
-      callWriteStdin(this.childId, chunk).then(
+      if (this.child._closed) {
+        callback();
+        return;
+      }
+      callWriteStdin(this.child._childId, chunk).then(
         () => callback(),
-        (error) => callback(error),
+        (error) => callback(isIgnorableClosedChildProcessError(this.child, error) ? undefined : error),
       );
     }
 
     _final(callback) {
-      callCloseStdin(this.childId).then(
+      if (this.child._closed) {
+        callback();
+        return;
+      }
+      callCloseStdin(this.child._childId).then(
         () => callback(),
-        (error) => callback(error),
+        (error) => callback(isIgnorableClosedChildProcessError(this.child, error) ? undefined : error),
       );
     }
   }
@@ -3945,18 +4726,21 @@ function createRpcBackedChildProcessModule(fromGuestDir = '/') {
       child.spawnfile,
       ...(Array.isArray(spawnResult.args) ? spawnResult.args.map(String) : []),
     ];
-    child.stdin = options.stdio[0] === 'pipe' ? new AgentOsChildWritable(child._childId) : null;
+    child.stdin = options.stdio[0] === 'pipe' ? new AgentOsChildWritable(child) : null;
     child.stdout = options.stdio[1] === 'pipe' ? new AgentOsChildReadable() : null;
     child.stderr = options.stdio[2] === 'pipe' ? new AgentOsChildReadable() : null;
     child.killed = false;
     child.connected = false;
     child.kill = (signal = 'SIGTERM') => {
+      if (child._closed) {
+        return false;
+      }
       try {
         callKill(child._childId, signal);
         child.killed = true;
         return true;
       } catch (error) {
-        if (error && typeof error === 'object' && error.code === 'ESRCH') {
+        if (isIgnorableClosedChildProcessError(child, error)) {
           return false;
         }
         throw error;
@@ -6622,6 +7406,7 @@ function createGuestOsModule(osModule) {
 const guestOs = createGuestOsModule(hostOs);
 const guestMemoryUsage = createGuestMemoryUsage();
 const guestProcessUptime = createGuestProcessUptime();
+const guestProcessSignalEmitter = new EventEmitter();
 
 function isProcessSignalEventName(eventName) {
   return typeof eventName === 'string' && SIGNAL_EVENTS.has(eventName);
@@ -6661,8 +7446,7 @@ function emitGuestProcessSignalState(eventName) {
     return;
   }
 
-  const listenerCount =
-    typeof process.listenerCount === 'function' ? process.listenerCount(eventName) : 0;
+  const listenerCount = guestProcessSignalEmitter.listenerCount(eventName);
   emitControlMessage({
     type: 'signal_state',
     signal: Number(signal) >>> 0,
@@ -6689,11 +7473,16 @@ function createBlockedProcessSignalMethod(methodName) {
       throw accessDenied(`process.${methodName}(${eventName})`);
     }
 
-    const result = method(...args);
+    let result;
+    if (affectedSignals.length > 0) {
+      result = guestProcessSignalEmitter[methodName](...args);
+    } else {
+      result = method(...args);
+    }
     for (const signalName of affectedSignals) {
       emitGuestProcessSignalState(signalName);
     }
-    return result === target ? guestProcess : result;
+    return result === target || result === guestProcessSignalEmitter ? guestProcess : result;
   };
 }
 
@@ -6776,9 +7565,34 @@ function translateModuleResolutionPath(value) {
     return value;
   }
 
+  if (path.posix.isAbsolute(value)) {
+    const translatedGuestPath = runtimeHostPathFromGuestPath(path.posix.normalize(value));
+    if (translatedGuestPath) {
+      return translatedGuestPath;
+    }
+  }
+
   if (value.startsWith('file:')) {
     try {
-      const guestPath = path.posix.normalize(new URL(value).pathname);
+      const candidatePath = new URL(value).pathname;
+      const translatedGuestPath = runtimeHostPathFromGuestPath(
+        path.posix.normalize(candidatePath),
+      );
+      if (translatedGuestPath) {
+        return pathToFileURL(translatedGuestPath).href;
+      }
+      if (
+        path.isAbsolute(candidatePath) &&
+        (pathExists(candidatePath) ||
+          guestVisiblePathFromHostPath(candidatePath) !== UNMAPPED_GUEST_PATH ||
+          isPathWithinRoot(candidatePath, HOST_CWD) ||
+          (NODE_IMPORT_CACHE_ROOT &&
+            isPathWithinRoot(candidatePath, NODE_IMPORT_CACHE_ROOT)))
+      ) {
+        return value;
+      }
+
+      const guestPath = path.posix.normalize(candidatePath);
       const hostPath = runtimeHostPathFromGuestPath(guestPath);
       return hostPath ? pathToFileURL(hostPath).href : value;
     } catch {
@@ -6787,6 +7601,15 @@ function translateModuleResolutionPath(value) {
   }
 
   if (path.posix.isAbsolute(value)) {
+    if (
+      path.isAbsolute(value) &&
+      (pathExists(value) ||
+        guestVisiblePathFromHostPath(value) !== UNMAPPED_GUEST_PATH ||
+        isPathWithinRoot(value, HOST_CWD) ||
+        (NODE_IMPORT_CACHE_ROOT && isPathWithinRoot(value, NODE_IMPORT_CACHE_ROOT)))
+    ) {
+      return value;
+    }
     return runtimeHostPathFromGuestPath(value) ?? value;
   }
 
@@ -6800,6 +7623,22 @@ function translateModuleResolutionParent(parent) {
 
   let nextParent = parent;
   let changed = false;
+
+  if (typeof parent.id === 'string') {
+    const translatedId = translateModuleResolutionPath(parent.id);
+    if (translatedId !== parent.id) {
+      nextParent = { ...nextParent, id: translatedId };
+      changed = true;
+    }
+  }
+
+  if (typeof parent.path === 'string') {
+    const translatedPath = translateModuleResolutionPath(parent.path);
+    if (translatedPath !== parent.path) {
+      nextParent = { ...nextParent, path: translatedPath };
+      changed = true;
+    }
+  }
 
   if (typeof parent.filename === 'string') {
     const translatedFilename = translateModuleResolutionPath(parent.filename);
@@ -6847,6 +7686,11 @@ function translateModuleResolutionOptions(options) {
 function ensureGuestVisibleModuleResolution(specifier, resolved, parent) {
   if (typeof resolved !== 'string' || !path.isAbsolute(resolved)) {
     return resolved;
+  }
+
+  const translatedResolved = runtimeHostPathFromGuestPath(resolved);
+  if (translatedResolved && pathExists(translatedResolved)) {
+    return translatedResolved;
   }
 
   const guestVisiblePath = guestVisiblePathFromHostPath(resolved);
@@ -6916,8 +7760,17 @@ function createGuestRequire(fromGuestDir) {
     return cached;
   }
 
+  const hostRequireDir = runtimeHostPathFromGuestPath(normalizedGuestDir);
+  const hostRequireBaseDir =
+    hostRequireDir && path.basename(hostRequireDir) === 'node_modules'
+      ? path.dirname(hostRequireDir)
+      : hostRequireDir;
   const baseRequire = Module.createRequire(
-    pathToFileURL(path.posix.join(normalizedGuestDir, '__agent_os_require__.cjs')),
+    pathToFileURL(
+      hostRequireBaseDir
+        ? path.join(hostRequireBaseDir, '__agent_os_require__.cjs')
+        : path.posix.join(normalizedGuestDir, '__agent_os_require__.cjs'),
+    ),
   );
 
   const guestRequire = function(specifier) {
@@ -6967,6 +7820,18 @@ function hardenProperty(target, key, value) {
     });
   } catch (error) {
     throw new Error(`Failed to harden property ${String(key)}`, { cause: error });
+  }
+}
+
+function defineMutableProperty(target, key, value) {
+  try {
+    Object.defineProperty(target, key, {
+      value,
+      writable: true,
+      configurable: true,
+    });
+  } catch (error) {
+    throw new Error(`Failed to define mutable property ${String(key)}`, { cause: error });
   }
 }
 
@@ -7291,8 +8156,8 @@ function createNodeSyncRpcBridge() {
 
 function installGuestHardening() {
   hardenProperty(process, 'env', createGuestProcessEnv(HOST_PROCESS_ENV));
-  hardenProperty(process, 'cwd', () => INITIAL_GUEST_CWD);
-  hardenProperty(process, 'chdir', () => {
+  defineMutableProperty(process, 'cwd', () => INITIAL_GUEST_CWD);
+  defineMutableProperty(process, 'chdir', () => {
     throw accessDenied('process.chdir');
   });
   syncBuiltinModuleExports(hostFs, guestFs);
@@ -7385,7 +8250,7 @@ function installGuestHardening() {
         return guestChildProcess;
       }
       if (normalized && DENIED_BUILTINS.has(normalized)) {
-        throw accessDenied(`node:${normalized}`);
+        return undefined;
       }
       return originalGetBuiltinModule(specifier);
     });
@@ -7438,7 +8303,26 @@ function installGuestHardening() {
 
   if (originalModuleResolveFilename) {
     Module._resolveFilename = function(request, parent, isMain, options) {
-      const translatedRequest = translateModuleResolutionPath(request);
+      let translatedRequest = translateModuleResolutionPath(request);
+      if (
+        translatedRequest === request &&
+        typeof request === 'string' &&
+        (request.startsWith('./') || request.startsWith('../'))
+      ) {
+        const parentFilename =
+          typeof parent?.filename === 'string'
+            ? translatePathStringToGuest(parent.filename)
+            : null;
+        if (typeof parentFilename === 'string' && path.posix.isAbsolute(parentFilename)) {
+          const translatedRelativeRequest = hostPathForSpecifier(
+            request,
+            path.posix.dirname(parentFilename),
+          );
+          if (translatedRelativeRequest) {
+            translatedRequest = translatedRelativeRequest;
+          }
+        }
+      }
       const translatedParent = translateModuleResolutionParent(parent);
       const translatedOptions = translateModuleResolutionOptions(options);
       const resolved = originalModuleResolveFilename(
@@ -7887,7 +8771,8 @@ function parseGuestPathMappings(value) {
           : null;
       const hostPath =
         typeof entry.hostPath === 'string' ? path.resolve(entry.hostPath) : null;
-      return guestPath && hostPath ? { guestPath, hostPath } : null;
+      const readOnly = entry.readOnly === true;
+      return guestPath && hostPath ? { guestPath, hostPath, readOnly } : null;
     })
     .filter(Boolean)
     .sort((left, right) => {

@@ -69,6 +69,7 @@ const KERNEL_POSIX_BOOTSTRAP_DIRS = [
 ] as const;
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const SIDECAR_BINARY = path.join(REPO_ROOT, "target/debug/agent-os-sidecar");
+const ALLOWED_NODE_BUILTINS_ENV = "AGENT_OS_ALLOWED_NODE_BUILTINS";
 const SIDECAR_BUILD_INPUTS = [
 	path.join(REPO_ROOT, "Cargo.toml"),
 	path.join(REPO_ROOT, "Cargo.lock"),
@@ -1653,6 +1654,21 @@ function ensureNativeSidecarBinary(): string {
 	return ensuredSidecarBinary;
 }
 
+function parseJsonStringArrayEnv(value: string | undefined): string[] | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	try {
+		const parsed = JSON.parse(value);
+		if (!Array.isArray(parsed)) {
+			return undefined;
+		}
+		return parsed.filter((entry): entry is string => typeof entry === "string");
+	} catch {
+		return undefined;
+	}
+}
+
 function createBootstrapEntries(commandNames: string[]): RootFilesystemEntry[] {
 	const entries: RootFilesystemEntry[] = [
 		{
@@ -1966,6 +1982,7 @@ class NativeKernel implements Kernel {
 			commandDirs.map((commandDir, index) => ({
 				guestPath: `/__agentos/commands/${startIndex + index}`,
 				hostPath: commandDir,
+				readOnly: true,
 			})),
 		);
 		this.proxy.registerCommandGuestPaths(newGuestPaths);
@@ -2154,6 +2171,10 @@ class NativeKernel implements Kernel {
 			: [];
 		await client.configureVm(session, vm, { mounts: sidecarMounts });
 
+		const allowedNodeBuiltins = parseJsonStringArrayEnv(
+			this.env[ALLOWED_NODE_BUILTINS_ENV],
+		);
+
 		const proxy = new NativeSidecarKernelProxy({
 			client,
 			session,
@@ -2162,7 +2183,10 @@ class NativeKernel implements Kernel {
 			cwd: this.cwd,
 			localMounts: this.pendingLocalMounts,
 			commandGuestPaths: new Map<string, string>(),
-			hostPathMappings: hostRoot ? [{ guestPath: "/", hostPath: hostRoot }] : [],
+			hostPathMappings: hostRoot
+				? [{ guestPath: "/", hostPath: hostRoot, readOnly: false }]
+				: [],
+			allowedNodeBuiltins,
 			nodeExecutionCwd: this.cwd,
 		});
 

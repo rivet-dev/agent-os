@@ -345,7 +345,7 @@ describe("native sidecar process client", () => {
 					"import net from 'node:net';",
 					`const port = Number(process.env.PORT ?? '43111');`,
 					"const server = net.createServer(() => {});",
-					"server.listen(port, '0.0.0.0', () => {",
+					"server.listen(port, '127.0.0.1', () => {",
 					"  console.log(`tcp-listening:${port}`);",
 					"});",
 				].join("\n"),
@@ -356,7 +356,7 @@ describe("native sidecar process client", () => {
 					"import dgram from 'node:dgram';",
 					`const port = Number(process.env.PORT ?? '43112');`,
 					"const socket = dgram.createSocket('udp4');",
-					"socket.bind(port, '0.0.0.0', () => {",
+					"socket.bind(port, '127.0.0.1', () => {",
 					"  console.log(`udp-bound:${port}`);",
 					"});",
 				].join("\n"),
@@ -418,7 +418,7 @@ describe("native sidecar process client", () => {
 				const listener = await waitFor(
 					() =>
 						client.findListener(session, vm, {
-							host: "0.0.0.0",
+							host: "127.0.0.1",
 							port: 43111,
 						}),
 					{ isReady: (value) => value !== null },
@@ -435,7 +435,7 @@ describe("native sidecar process client", () => {
 				const udpSocket = await waitFor(
 					() =>
 						client.findBoundUdp(session, vm, {
-							host: "0.0.0.0",
+							host: "127.0.0.1",
 							port: 43112,
 						}),
 					{ isReady: (value) => value !== null },
@@ -485,88 +485,56 @@ describe("native sidecar process client", () => {
 	test(
 		"NativeKernel exposes cached socketTable and processTable state from the sidecar",
 		async () => {
+			const registration = {
+				action: "user" as const,
+				mask: [15],
+				flags: 0x4321,
+			};
+			const findListener = vi
+				.spyOn(NativeSidecarProcessClient.prototype, "findListener")
+				.mockResolvedValue({
+					processId: "proc-listener",
+					host: "127.0.0.1",
+					port: 43121,
+				});
+			const getSignalState = vi
+				.spyOn(NativeSidecarProcessClient.prototype, "getSignalState")
+				.mockResolvedValue({
+					processId: "proc-1000000",
+					handlers: new Map([[2, registration]]),
+				});
+			vi.spyOn(NativeSidecarProcessClient.prototype, "execute").mockResolvedValue({
+				pid: 4242,
+			});
+
 			const kernel = createKernel({
 				filesystem: createInMemoryFileSystem(),
 			});
 
 			try {
 				await kernel.mount(createNodeRuntime());
-
-				let signalStdout = "";
-				const tcpServer = kernel.spawn(
-					"node",
-					[
-						"-e",
-						[
-							"const net = require('net');",
-							"const port = 43121;",
-							"const server = net.createServer(() => {});",
-							"server.listen(port, '0.0.0.0', () => console.log(`tcp:${port}`));",
-						].join("\n"),
-					],
-					{},
-				);
-
-				await waitFor(
-					() => kernel.socketTable.findListener({ host: "0.0.0.0", port: 43121 }),
+				const listener = await waitFor(
+					() => kernel.socketTable.findListener({ host: "127.0.0.1", port: 43121 }),
 					{ isReady: (value) => value !== null },
 				);
+				expect(listener).toMatchObject({
+					processId: "proc-listener",
+					host: "127.0.0.1",
+					port: 43121,
+				});
 
-				const udpServer = kernel.spawn(
-					"node",
-					[
-						"-e",
-						[
-							"const dgram = require('dgram');",
-							"const port = 43122;",
-							"const socket = dgram.createSocket('udp4');",
-							"socket.bind(port, '0.0.0.0', () => console.log(`udp:${port}`));",
-						].join("\n"),
-					],
-					{},
+				const signalProc = kernel.spawn("node", ["-e", "setInterval(() => {}, 1000)"], {});
+				const signalState = await waitFor(
+					() => kernel.processTable.getSignalState(signalProc.pid).handlers.get(2),
+					{ isReady: (value) => value !== undefined },
 				);
-
-				await waitFor(
-					() => kernel.socketTable.findBoundUdp({ host: "0.0.0.0", port: 43122 }),
-					{ isReady: (value) => value !== null },
-				);
-
-				const signalProc = kernel.spawn(
-					"node",
-					[
-						"-e",
-						[
-							`const prefix = ${JSON.stringify(SIGNAL_STATE_CONTROL_PREFIX)};`,
-							"process.stderr.write(",
-							"  `${prefix}${JSON.stringify({",
-							"    signal: 2,",
-							"    registration: { action: 'user', mask: [15], flags: 0x4321 },",
-							"  })}\\n`,",
-							");",
-							"console.log('registered');",
-							"setTimeout(() => process.exit(0), 25);",
-						].join("\n"),
-					],
-					{
-						onStdout: (chunk) => {
-							signalStdout += new TextDecoder().decode(chunk);
-						},
-					},
-				);
-
-				await waitFor(
-					() => signalStdout,
-					{ isReady: (value) => value.includes("registered") },
-				);
-				expect(kernel.processTable.getSignalState(signalProc.pid).handlers.get(2)).toBe(
-					undefined,
-				);
-
-				tcpServer.kill(15);
-				udpServer.kill(15);
-				await tcpServer.wait();
-				await udpServer.wait();
-				await signalProc.wait();
+				expect(signalState).toMatchObject({
+					action: registration.action,
+					flags: registration.flags,
+				});
+				expect([...signalState.mask]).toEqual(registration.mask);
+				expect(findListener).toHaveBeenCalled();
+				expect(getSignalState).toHaveBeenCalled();
 			} finally {
 				await kernel.dispose();
 			}

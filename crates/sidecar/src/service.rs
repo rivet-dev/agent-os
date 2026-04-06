@@ -11,6 +11,7 @@ use crate::protocol::{
     RequestPayload, ResponseFrame, ResponsePayload, RootFilesystemBootstrappedResponse,
     RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryEncoding,
     RootFilesystemEntryKind, RootFilesystemLowerDescriptor, RootFilesystemMode,
+    ProcessSnapshotEntry, ProcessSnapshotResponse, ProcessSnapshotStatus,
     RootFilesystemSnapshotResponse, SessionOpenedResponse, SidecarPlacement,
     SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse,
     SnapshotRootFilesystemRequest, SocketStateEntry, StdinClosedResponse, StdinWrittenResponse,
@@ -2681,6 +2682,9 @@ where
             RequestPayload::SnapshotRootFilesystem(payload) => {
                 self.snapshot_root_filesystem(&request, payload)
             }
+            RequestPayload::SnapshotProcesses(_) => {
+                self.snapshot_processes(&request)
+            }
             RequestPayload::Execute(payload) => self.execute(&request, payload),
             RequestPayload::WriteStdin(payload) => self.write_stdin(&request, payload),
             RequestPayload::CloseStdin(payload) => self.close_stdin(&request, payload),
@@ -3398,6 +3402,50 @@ where
                 ResponsePayload::RootFilesystemSnapshot(RootFilesystemSnapshotResponse {
                     entries: snapshot.entries.iter().map(root_snapshot_entry).collect(),
                 }),
+            ),
+            events: Vec::new(),
+        })
+    }
+
+    fn snapshot_processes(
+        &mut self,
+        request: &RequestFrame,
+    ) -> Result<DispatchResult, SidecarError> {
+        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
+        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+
+        let vm = self.vms.get(&vm_id).expect("owned VM should exist");
+        let processes = vm.kernel.list_processes();
+        let entries = processes
+            .values()
+            .map(|process| {
+                let process_id = vm
+                    .active_processes
+                    .iter()
+                    .find(|(_, ap)| ap.kernel_pid == process.pid)
+                    .map(|(id, _)| id.clone());
+                ProcessSnapshotEntry {
+                    pid: process.pid,
+                    ppid: process.ppid,
+                    pgid: process.pgid,
+                    sid: process.sid,
+                    process_id,
+                    driver: process.driver.clone(),
+                    command: process.command.clone(),
+                    status: if process.exit_code.is_some() {
+                        ProcessSnapshotStatus::Exited
+                    } else {
+                        ProcessSnapshotStatus::Running
+                    },
+                    exit_code: process.exit_code,
+                }
+            })
+            .collect();
+
+        Ok(DispatchResult {
+            response: self.respond(
+                request,
+                ResponsePayload::ProcessSnapshot(ProcessSnapshotResponse { processes: entries }),
             ),
             events: Vec::new(),
         })
