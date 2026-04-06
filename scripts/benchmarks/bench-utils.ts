@@ -17,9 +17,9 @@ export const ECHO_COMMAND = "echo hello";
 export const EXPECTED_OUTPUT = "hello\n";
 export const PI_BENCHMARK_PROMPT = "Reply with exactly: Hello from llmock";
 export const PI_HEADLESS_BLOCKER_REFERENCE =
-	"packages/core/tests/pi-headless.test.ts";
+	"packages/core/tests/agents/pi/headless.test.ts";
 export const PI_HEADLESS_BLOCKER_REASON =
-	'Standalone `spawn("pi", ...)` is not exposed on the native sidecar PATH; use `createSession("pi-cli")` to benchmark the native PI CLI RPC path tracked in packages/core/tests/pi-headless.test.ts.';
+	'Standalone `spawn("pi", ...)` is not exposed on the native sidecar PATH; use `createSession("pi-cli")` to benchmark the native PI CLI RPC path tracked in packages/core/tests/agents/pi/headless.test.ts.';
 const BENCHMARK_MODULE_ACCESS_CWD = resolve(
 	import.meta.dirname,
 	"../../packages/core",

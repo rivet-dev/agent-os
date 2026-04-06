@@ -1,6 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
 - After a fresh workspace install, linked registry agent/software packages still need their built `dist/` outputs before adapter-backed or software-backed `packages/core` Vitest suites are meaningful; otherwise Vite fails on package entry resolution before test logic runs.
+- When moving grouped test files, update root `package.json` test scripts and `scripts/benchmarks/bench-utils.ts` path constants along with the test files themselves; those hard-coded references are part of the test layout contract.
 - Sidecar integration tests that override `AGENT_OS_NODE_BINARY` must hold a shared lock across the full test body, including sibling tests in the same binary that use the real Node runtime; the env var is process-global and fake-node shims otherwise leak into unrelated tests.
 - Sidecar-owned JavaScript, Python, and WASM engines should use per-VM import-cache roots; sharing one temp cache lets stale-runner cleanup delete another VM's assets.
 - Rust execution tests that spin up JavaScript, Python, or WASM engines should call `set_import_cache_base_dir(...)` with a unique temp root per test VM; the default `/tmp` cache root is not parallel-test-safe because each engine instance sweeps stale cache directories once.
@@ -165,4 +166,13 @@ Started: Sat Apr  5 2026
 - **Learnings for future iterations:**
   - Sidecar integration tests live in the same process per test binary, so any test that overrides `AGENT_OS_NODE_BINARY` must serialize with other tests in that file that execute real Node; otherwise fake-node shims produce misleading empty-stdout and missing-invocation failures.
   - When `cargo test -p agent-os-sidecar` shows empty stdout from guest JavaScript or unexpected fake-node invocation counts, check for process-wide env races before debugging sidecar execution logic.
+---
+## 2026-04-05 20:36:13 PDT - US-308
+- Finished the remaining moved-path cleanup for the grouped test layout by updating the root `test:post-python-parity` script to the new `tests/filesystem/...` and `registry/tests/e2e/...` paths, and by repointing the benchmark blocker reference to `packages/core/tests/agents/pi/headless.test.ts`.
+- Adjusted the root script's registry Vitest invocation to use the pnpm-store-backed CLI path that exists in this workspace, instead of relying on a missing `./node_modules/.bin/vitest` shim.
+- Files changed: `CLAUDE.md`, `package.json`, `scripts/benchmarks/bench-utils.ts`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Test-layout refactors in this repo have path consumers outside the test tree; root scripts and benchmark metadata need the same rename pass as the tests themselves.
+  - In sparse worktrees here, the pnpm store may contain Vitest even when `./node_modules/.bin/vitest` is absent, so root-level one-off test scripts should not assume the shim exists.
+  - `pnpm test:post-python-parity` currently still trips separate pre-existing assertions in `packages/core/tests/filesystem/base-filesystem.test.ts` and `packages/dev-shell/test/dev-shell.integration.test.ts`, so layout-only validation is better done with focused moved-path smoke checks plus the relevant Rust compile/test targets.
 ---
