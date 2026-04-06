@@ -98,8 +98,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-node-modules-${{ env.NODE_VERSION }}-
 
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        run: pnpm --dir packages/browser exec playwright install --with-deps chromium
 
       - name: Build registry types package first
         run: pnpm --filter @rivet-dev/agent-os-registry-types build
