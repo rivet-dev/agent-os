@@ -270,6 +270,7 @@ Each agent type needs:
 - **Sandbox toolkit tests should not assume a prebuilt Docker image exists.** `packages/core/src/test/docker.ts` now falls back to the bundled `sandbox-agent` CLI when `sandbox-agent-test:dev` is unavailable, so CI does not need a bespoke Docker image just to exercise `registry/tool/sandbox`.
 - **Keep the root Turbo test script at `--concurrency=2`.** `packages/core` already disables Vitest file parallelism because its agent-backed ACP suites are memory-heavy; letting Turbo run three workspace test tasks at once reintroduces `SIGKILL`/exit `137` failures in `@rivet-dev/agent-os#test` under the same workload that passes at concurrency 2.
 - **Cross-crate Rust test helpers must use repo-relative paths, never machine-local absolute paths.** `#[path = "..."]` includes under `crates/*` are compiled on CI runners with different checkout roots, so absolute developer paths like `/home/nathan/...` will break `cargo test --workspace`.
+- **Split Rust integration tests should keep a tiny top-level shim file.** When a test target grows into `tests/foo/{...}.rs`, keep `tests/foo.rs` as a `#[path = "foo/mod.rs"] mod foo;` entrypoint so Cargo still exposes the same integration-test target while the implementation lives in submodules.
 - **Local CI reproduction:** `git lfs pull && cargo test --workspace --exclude agent-os-sidecar --no-fail-fast && cargo test -p agent-os-sidecar -- --test-threads=1 && cargo test -p agent-os-sidecar -- --ignored --test-threads=1 && cargo build -p agent-os-sidecar && AGENTOS_E2E_NETWORK=1 pnpm test`
 
 ## Testing

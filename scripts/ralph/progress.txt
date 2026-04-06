@@ -1,5 +1,6 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- When a Rust integration test is split into `tests/<name>/...`, keep `tests/<name>.rs` as a tiny `#[path = "<name>/mod.rs"]` shim so Cargo still builds the same test target while the implementation lives in submodules.
 - When TS integration tests boot `AgentOs.create({ software })`, build the software list from packages whose `commandDir` actually exists locally; optional registry packages with missing `wasm/` directories abort VM startup before the target behavior can be tested.
 - For network-capable WASM command packages in the current runtime, prefer a tiny `wasi-spawn` wrapper that launches guest `node` over linking directly to `wasi-http`; the generic WASM runner does not expose `host_net` imports yet.
 - After a fresh workspace install, linked registry agent/software packages still need their built `dist/` outputs before adapter-backed or software-backed `packages/core` Vitest suites are meaningful; otherwise Vite fails on package entry resolution before test logic runs.
@@ -366,4 +367,18 @@ Started: Sat Apr  5 2026
   - If Rust execution tests fail broadly at `start ... execution` with `WarmupFailed { exit_code: 9, stderr: "/usr/local/bin/node: bad option: --permission" }`, the problem is the host Node on the CI runner, not the Rust crates themselves.
   - GitHub job-log API access (`gh api repos/.../actions/jobs/<job-id>/logs`) is useful while the overall workflow is still running; `gh run view --job ... --log` waits for the whole run to complete.
   - Quality checks: local validation was unchanged from the prior commit, and `node --permission -e "console.log(process.version)"` confirmed the local Node runtime supports the required host flag while the workflow fix targets the GitHub runner environment.
+---
+## 2026-04-06 08:46:12 PDT - US-308
+- What was implemented
+- Revalidated the standardized test layout already present on `ralph/test-quality-hardening`: `packages/core/tests/` remains grouped by domain, `registry/tests/e2e/` keeps the `npm/` and `cross-runtime/` subgroups, `crates/execution/tests/javascript.rs` remains the Cargo shim for `javascript/mod.rs`, and the slow sidecar isolation suites stay `#[ignore]`.
+- Marked `US-308` complete in `scripts/ralph/prd.json` and captured the Rust test-shim rule in the repo guidance so future test-layout refactors keep the integration-test target stable.
+- Files changed
+- `AGENTS.md`
+- `CLAUDE.md`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The `crates/execution/tests/javascript.rs` file is part of the post-restructure contract, not leftover clutter: Cargo still needs a top-level integration-test entrypoint even when the real test bodies live under `tests/javascript/`.
+  - Layout-only story validation should cover the non-test contracts too: Vitest include globs, registry subtree names, and ignored sidecar binaries are all part of the standardized structure.
+  - Quality checks: `pnpm --dir packages/core exec vitest run tests/unit/host-tools-prompt.test.ts tests/filesystem/overlay.test.ts tests/process/management.test.ts tests/session/protocol.test.ts tests/network/network.test.ts tests/sidecar/client.test.ts` passed (`126/126`); `cargo test --package agent-os-sidecar -- --ignored` passed; `cargo test --package agent-os-execution --test javascript builtin_interception::javascript_execution_imports_http_builtins_when_allowed`, `cargo test --package agent-os-execution --test javascript env_hardening::javascript_execution_virtualizes_process_identity`, and `cargo test --package agent-os-execution --test javascript sync_rpc::javascript_execution_runs_bootstrap_and_streams_stdio` all passed.
 ---
