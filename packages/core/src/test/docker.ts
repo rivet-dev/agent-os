@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import { constants as fsConstants } from "node:fs";
-import { access } from "node:fs/promises";
+import { access, readdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -409,33 +409,98 @@ async function isDockerImageAvailable(image: string): Promise<boolean> {
 	}
 }
 
-async function resolveSandboxAgentCli(): Promise<string> {
+interface SandboxAgentCommand {
+	command: string;
+	args?: string[];
+}
+
+async function findPnpmPackageDir(
+	pnpmDir: string,
+	prefix: string,
+): Promise<string | null> {
+	try {
+		const entries = await readdir(pnpmDir);
+		const match = entries.find((entry) => entry.startsWith(prefix));
+		return match ? resolve(pnpmDir, match) : null;
+	} catch {
+		return null;
+	}
+}
+
+async function resolveSandboxAgentCommand(): Promise<SandboxAgentCommand> {
 	const packageDir = dirname(
 		fileURLToPath(new URL("../../package.json", import.meta.url)),
 	);
-	const candidates = [
+	const workspaceRoot = resolve(packageDir, "..", "..");
+	const pnpmDir = resolve(workspaceRoot, "node_modules", ".pnpm");
+	const platformPackage = (() => {
+		if (process.platform === "linux" && process.arch === "x64") {
+			return "@sandbox-agent+cli-linux-x64@";
+		}
+		if (process.platform === "linux" && process.arch === "arm64") {
+			return "@sandbox-agent+cli-linux-arm64@";
+		}
+		if (process.platform === "darwin" && process.arch === "arm64") {
+			return "@sandbox-agent+cli-darwin-arm64@";
+		}
+		if (process.platform === "darwin" && process.arch === "x64") {
+			return "@sandbox-agent+cli-darwin-x64@";
+		}
+		if (process.platform === "win32" && process.arch === "x64") {
+			return "@sandbox-agent+cli-win32-x64@";
+		}
+		return null;
+	})();
+
+	if (platformPackage) {
+		const platformDir = await findPnpmPackageDir(pnpmDir, platformPackage);
+		if (platformDir) {
+			const binName = process.platform === "win32" ? "sandbox-agent.exe" : "sandbox-agent";
+			const candidate = resolve(
+				platformDir,
+				"node_modules",
+				platformPackage.slice(0, -1).replace("+", "/"),
+				"bin",
+				binName,
+			);
+			try {
+				await access(candidate, fsConstants.X_OK);
+				return { command: candidate };
+			} catch {
+				// Fall through to the JS launcher.
+			}
+		}
+	}
+
+	const cliPackageDir = await findPnpmPackageDir(pnpmDir, "@sandbox-agent+cli@");
+	const scriptCandidates = cliPackageDir
+		? [
+				resolve(
+					cliPackageDir,
+					"node_modules",
+					"@sandbox-agent",
+					"cli",
+					"bin",
+					"sandbox-agent",
+				),
+			]
+		: [];
+	const fallbackCandidates = [
 		resolve(
 			packageDir,
-			"node_modules",
-			"sandbox-agent",
-			"node_modules",
-			".bin",
-			"sandbox-agent",
-		),
-		resolve(
-			packageDir,
-			"..",
-			"..",
 			"node_modules",
 			".bin",
 			"sandbox-agent",
 		),
 	];
 
-	for (const candidate of candidates) {
+	for (const candidate of [...scriptCandidates, ...fallbackCandidates]) {
 		try {
 			await access(candidate, fsConstants.X_OK);
-			return candidate;
+			if (candidate.endsWith(".bin/sandbox-agent")) {
+				return { command: candidate };
+			}
+			return { command: process.execPath, args: [candidate] };
 		} catch {
 			// Try the next candidate.
 		}
@@ -473,13 +538,14 @@ async function startLocalSandboxAgent(
 	port: number,
 	timeout: number,
 ): Promise<ContainerHandle> {
-	const cliPath = await resolveSandboxAgentCli();
+	const cli = await resolveSandboxAgentCommand();
 	const name = `sandbox-agent-local-${randomUUID().slice(0, 8)}`;
 	const stdoutChunks: string[] = [];
 	const stderrChunks: string[] = [];
 	const child = spawn(
-		cliPath,
+		cli.command,
 		[
+			...(cli.args ?? []),
 			"server",
 			"--host",
 			"127.0.0.1",
