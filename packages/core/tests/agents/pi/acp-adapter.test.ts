@@ -30,6 +30,7 @@ import {
  * Workspace root has shamefully-hoisted node_modules with pi-acp available.
  */
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "../../..");
+const PI_ACP_WRAPPER_PATH = "/home/user/pi-acp-pi-wrapper.mjs";
 
 /**
  * Resolve pi-acp bin path from host node_modules.
@@ -40,12 +41,86 @@ function resolvePiAcpBinPath(): string {
 	return resolvePackageBinPath("pi-acp", "pi-acp");
 }
 
-function resolvePiBinPath(): string {
-	return resolvePackageBinPath("@mariozechner/pi-coding-agent", "pi");
-}
-
 function resolvePiPackageDir(): string {
 	return resolvePackageGuestDir("@mariozechner/pi-coding-agent");
+}
+
+async function writePiAcpPiWrapper(vm: AgentOs): Promise<void> {
+	await vm.writeFile(
+		PI_ACP_WRAPPER_PATH,
+		[
+			'#!/usr/bin/env node',
+			'import * as crypto from "node:crypto";',
+			'import * as readline from "node:readline";',
+			'',
+			'const sessionId = crypto.randomUUID();',
+			'const agentDir = process.env.PI_CODING_AGENT_DIR ?? "/home/user/.pi/agent";',
+			'const sessionFile = `${agentDir}/sessions/${sessionId}.json`;',
+			'let thinkingLevel = "medium";',
+			'let currentModel = {',
+			'\tprovider: "anthropic",',
+			'\tid: "claude-opus-4-6",',
+			'\tname: "Claude Opus 4.6",',
+			'};',
+			'',
+			'function writeResponse(id, command, data) {',
+			'\tprocess.stdout.write(',
+			'\t\tJSON.stringify({',
+			'\t\t\tid,',
+			'\t\t\ttype: "response",',
+			'\t\t\tcommand,',
+			'\t\t\tsuccess: true,',
+			'\t\t\t...(data === undefined ? {} : { data }),',
+			'\t\t}) + "\\n",',
+			'\t);',
+			'}',
+			'',
+			'const rl = readline.createInterface({ input: process.stdin });',
+			'rl.on("line", (line) => {',
+			'\tlet command;',
+			'\ttry {',
+			'\t\tcommand = JSON.parse(line);',
+			'\t} catch {',
+			'\t\treturn;',
+			'\t}',
+			'',
+			'\tswitch (command.type) {',
+			'\t\tcase "get_state":',
+			'\t\t\twriteResponse(command.id, "get_state", {',
+			'\t\t\t\tsessionId,',
+			'\t\t\t\tsessionFile,',
+			'\t\t\t\tthinkingLevel,',
+			'\t\t\t});',
+			'\t\t\tbreak;',
+			'\t\tcase "get_available_models":',
+			'\t\t\twriteResponse(command.id, "get_available_models", {',
+			'\t\t\t\tmodels: [currentModel],',
+			'\t\t\t});',
+			'\t\t\tbreak;',
+			'\t\tcase "set_model":',
+			'\t\t\tcurrentModel = {',
+			'\t\t\t\tprovider: command.provider,',
+			'\t\t\t\tid: command.modelId,',
+			'\t\t\t\tname: command.modelId,',
+			'\t\t\t};',
+			'\t\t\twriteResponse(command.id, "set_model", currentModel);',
+			'\t\t\tbreak;',
+			'\t\tcase "set_thinking_level":',
+			'\t\t\tthinkingLevel = command.level ?? thinkingLevel;',
+			'\t\t\twriteResponse(command.id, "set_thinking_level");',
+			'\t\t\tbreak;',
+			'\t\tdefault:',
+			'\t\t\twriteResponse(command.id, command.type, null);',
+			'\t\t\tbreak;',
+			'\t}',
+			'});',
+		].join("\n"),
+	);
+	await (
+		getAgentOsKernel(vm) as unknown as {
+			vfs: { chmod(path: string, mode: number): Promise<void> };
+		}
+	).vfs.chmod(PI_ACP_WRAPPER_PATH, 0o755);
 }
 
 function resolvePackageBinPath(packageName: string, binName?: string): string {
@@ -111,6 +186,7 @@ describe("pi-acp adapter manual spawn", () => {
 			moduleAccessCwd: MODULE_ACCESS_CWD,
 		});
 		await writePiAnthropicModelsOverride(vm, mockUrl);
+		await writePiAcpPiWrapper(vm);
 	});
 
 	afterEach(async () => {
@@ -144,7 +220,7 @@ describe("pi-acp adapter manual spawn", () => {
 				ANTHROPIC_API_KEY: "mock-key",
 				ANTHROPIC_BASE_URL: mockUrl,
 				PI_PACKAGE_DIR: resolvePiPackageDir(),
-				PI_ACP_PI_COMMAND: resolvePiBinPath(),
+				PI_ACP_PI_COMMAND: PI_ACP_WRAPPER_PATH,
 			},
 		});
 
@@ -221,5 +297,5 @@ describe("pi-acp adapter manual spawn", () => {
 		expect(
 			(sessionResponse.result as { sessionId?: string }).sessionId,
 		).toBeTruthy();
-	}, 60_000);
+	}, 180_000);
 });

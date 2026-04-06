@@ -32,15 +32,55 @@ import type {
 	SessionNotification,
 } from "@agentclientprotocol/sdk";
 import type { AgentSessionEvent } from "@mariozechner/pi-coding-agent";
-import {
-	SessionManager,
-	createAgentSession,
-} from "@mariozechner/pi-coding-agent";
 import type { AgentSession } from "@mariozechner/pi-coding-agent";
-import { isAbsolute, join, resolve as resolvePath } from "node:path";
+import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+type PiRuntimeModules = {
+	DefaultResourceLoader: typeof import("@mariozechner/pi-coding-agent")["DefaultResourceLoader"];
+	SessionManager: typeof import("@mariozechner/pi-coding-agent")["SessionManager"];
+	createAgentSession: typeof import("@mariozechner/pi-coding-agent")["createAgentSession"];
+};
+
+let piRuntimeModulesPromise: Promise<PiRuntimeModules> | undefined;
+
+function resolvePiPackageDir(): string {
+	const configuredDir = process.env.PI_PACKAGE_DIR;
+	if (configuredDir) {
+		return configuredDir.endsWith("/dist")
+			? resolvePath(configuredDir, "..")
+			: configuredDir;
+	}
+
+	const packageEntry = fileURLToPath(
+		import.meta.resolve("@mariozechner/pi-coding-agent"),
+	);
+	return resolvePath(dirname(packageEntry), "..");
+}
+
+function toPiModuleUrl(relativePath: string): string {
+	const distDir = join(resolvePiPackageDir(), "dist");
+	return pathToFileURL(join(distDir, relativePath)).href;
+}
+
+async function loadPiRuntimeModules(): Promise<PiRuntimeModules> {
+	if (!piRuntimeModulesPromise) {
+		piRuntimeModulesPromise = Promise.all([
+			import(toPiModuleUrl("core/resource-loader.js")),
+			import(toPiModuleUrl("core/session-manager.js")),
+			import(toPiModuleUrl("core/sdk.js")),
+		]).then(([resourceLoaderModule, sessionManagerModule, sdkModule]) => ({
+			DefaultResourceLoader: resourceLoaderModule.DefaultResourceLoader,
+			SessionManager: sessionManagerModule.SessionManager,
+			createAgentSession: sdkModule.createAgentSession,
+		}));
+	}
+
+	return piRuntimeModulesPromise;
+}
 
 // ── CLI argument parsing ────────────────────────────────────────────
 
@@ -136,14 +176,16 @@ class PiSdkAgent implements Agent {
 		params: NewSessionRequest,
 	): Promise<NewSessionResponse> {
 		this.cwd = params.cwd;
+		const {
+			DefaultResourceLoader,
+			SessionManager,
+			createAgentSession,
+		} = await loadPiRuntimeModules();
 
 		// Discover extensions from standard Pi directories and load them
 		// manually (bypasses jiti which requires performance.now).
 		const extensionFactories = discoverExtensionFactories(params.cwd);
 
-		const { DefaultResourceLoader } = await import(
-			"@mariozechner/pi-coding-agent"
-		);
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: params.cwd,
 			...(appendSystemPrompt ? { appendSystemPrompt } : {}),

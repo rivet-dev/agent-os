@@ -1,27 +1,26 @@
+use crate::NativeSidecarBridge;
 use crate::google_drive_plugin::GoogleDriveMountPlugin;
 use crate::host_dir_plugin::HostDirMountPlugin;
 use crate::protocol::{
     AuthenticatedResponse, BoundUdpSnapshotResponse, CloseStdinRequest, ConfigureVmRequest,
-    DisposeReason, DisposeVmRequest, EventFrame, EventPayload, ExecuteRequest, FindBoundUdpRequest,
-    FindListenerRequest, GetSignalStateRequest, GetZombieTimerCountRequest,
-    GuestFilesystemCallRequest, GuestFilesystemOperation, GuestFilesystemResultResponse,
-    GuestFilesystemStat, GuestRuntimeKind, KillProcessRequest, ListenerSnapshotResponse,
-    OpenSessionRequest, OwnershipScope, ProcessExitedEvent, ProcessKilledResponse,
-    ProcessOutputEvent, ProcessStartedResponse, ProtocolSchema, RejectedResponse, RequestFrame,
+    DEFAULT_MAX_FRAME_BYTES, DisposeReason, DisposeVmRequest, EventFrame, EventPayload,
+    ExecuteRequest, FindBoundUdpRequest, FindListenerRequest, GetSignalStateRequest,
+    GetZombieTimerCountRequest, GuestFilesystemCallRequest, GuestFilesystemOperation,
+    GuestFilesystemResultResponse, GuestFilesystemStat, GuestRuntimeKind, KillProcessRequest,
+    ListenerSnapshotResponse, OpenSessionRequest, OwnershipScope, ProcessExitedEvent,
+    ProcessKilledResponse, ProcessOutputEvent, ProcessSnapshotEntry, ProcessSnapshotResponse,
+    ProcessSnapshotStatus, ProcessStartedResponse, ProtocolSchema, RejectedResponse, RequestFrame,
     RequestPayload, ResponseFrame, ResponsePayload, RootFilesystemBootstrappedResponse,
     RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryEncoding,
     RootFilesystemEntryKind, RootFilesystemLowerDescriptor, RootFilesystemMode,
-    ProcessSnapshotEntry, ProcessSnapshotResponse, ProcessSnapshotStatus,
     RootFilesystemSnapshotResponse, SessionOpenedResponse, SidecarPlacement,
     SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse,
     SnapshotRootFilesystemRequest, SocketStateEntry, StdinClosedResponse, StdinWrittenResponse,
     StreamChannel, VmConfiguredResponse, VmCreatedResponse, VmDisposedResponse, VmLifecycleEvent,
     VmLifecycleState, WasmPermissionTier, WriteStdinRequest, ZombieTimerCountResponse,
-    DEFAULT_MAX_FRAME_BYTES,
 };
 use crate::s3_plugin::S3MountPlugin;
 use crate::sandbox_agent_plugin::SandboxAgentMountPlugin;
-use crate::NativeSidecarBridge;
 use agent_os_bridge::{
     BridgeTypes, ChmodRequest, CommandPermissionRequest, CreateDirRequest, EnvironmentAccess,
     EnvironmentPermissionRequest, FileKind, FileMetadata, FilesystemAccess,
@@ -52,32 +51,32 @@ use agent_os_kernel::mount_plugin::{
 };
 use agent_os_kernel::mount_table::{MountOptions, MountTable, MountedVirtualFileSystem};
 use agent_os_kernel::permissions::{
-    filter_env, CommandAccessRequest, EnvAccessRequest, EnvironmentOperation, FsAccessRequest,
-    FsOperation, NetworkAccessRequest, NetworkOperation, PermissionDecision, Permissions,
+    CommandAccessRequest, EnvAccessRequest, EnvironmentOperation, FsAccessRequest, FsOperation,
+    NetworkAccessRequest, NetworkOperation, PermissionDecision, Permissions, filter_env,
 };
 use agent_os_kernel::process_table::{SIGKILL, SIGTERM};
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use agent_os_kernel::root_fs::{
-    decode_snapshot as decode_root_snapshot, encode_snapshot as encode_root_snapshot,
     FilesystemEntry as KernelFilesystemEntry, FilesystemEntryKind as KernelFilesystemEntryKind,
-    RootFileSystem, RootFilesystemDescriptor as KernelRootFilesystemDescriptor,
+    ROOT_FILESYSTEM_SNAPSHOT_FORMAT, RootFileSystem,
+    RootFilesystemDescriptor as KernelRootFilesystemDescriptor,
     RootFilesystemMode as KernelRootFilesystemMode, RootFilesystemSnapshot,
-    ROOT_FILESYSTEM_SNAPSHOT_FORMAT,
+    decode_snapshot as decode_root_snapshot, encode_snapshot as encode_root_snapshot,
 };
 use agent_os_kernel::vfs::{
     MemoryFileSystem, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
 };
 use base64::Engine;
+use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::TokioResolver;
 use nix::libc;
-use nix::sys::signal::{kill as send_signal, Signal};
-use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
+use nix::sys::signal::{Signal, kill as send_signal};
+use nix::sys::wait::{Id as WaitId, WaitPidFlag, WaitStatus, waitid as wait_on_child};
 use nix::unistd::Pid;
 use serde::Deserialize;
-use serde_json::json;
 use serde_json::Value;
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -360,8 +359,7 @@ where
         request: CommandAccessRequest,
     ) -> Result<(), SidecarError> {
         let static_decision =
-            self.static_permission_decision(vm_id, "child_process.spawn", "child_process")
-        ;
+            self.static_permission_decision(vm_id, "child_process.spawn", "child_process");
         if let Some(decision) = static_decision.as_ref() {
             if !decision.allow {
                 let message = match decision.reason.as_deref() {
@@ -389,7 +387,9 @@ where
         if bridge_decision.allow {
             return Ok(());
         }
-        if static_decision.as_ref().is_some_and(|decision| decision.allow)
+        if static_decision
+            .as_ref()
+            .is_some_and(|decision| decision.allow)
             && bridge_decision.reason.as_deref().is_some_and(|reason| {
                 reason.starts_with("no static child_process policy registered for ")
             })
@@ -2347,7 +2347,7 @@ impl ActiveUdpSocket {
                     return Ok(Some(JavascriptUdpSocketEvent::Message {
                         data: buffer[..bytes_read].to_vec(),
                         remote_addr,
-                    }))
+                    }));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if wait.is_zero() || Instant::now() >= deadline {
@@ -2359,7 +2359,7 @@ impl ActiveUdpSocket {
                     return Ok(Some(JavascriptUdpSocketEvent::Error {
                         code: io_error_code(&error),
                         message: error.to_string(),
-                    }))
+                    }));
                 }
             }
         }
@@ -2682,9 +2682,7 @@ where
             RequestPayload::SnapshotRootFilesystem(payload) => {
                 self.snapshot_root_filesystem(&request, payload)
             }
-            RequestPayload::SnapshotProcesses(_) => {
-                self.snapshot_processes(&request)
-            }
+            RequestPayload::SnapshotProcesses(_) => self.snapshot_processes(&request),
             RequestPayload::Execute(payload) => self.execute(&request, payload),
             RequestPayload::WriteStdin(payload) => self.write_stdin(&request, payload),
             RequestPayload::CloseStdin(payload) => self.close_stdin(&request, payload),
@@ -4285,6 +4283,40 @@ where
             )));
         }
 
+        if is_path_like_specifier(&command) {
+            let guest_entrypoint = if command.starts_with('/') {
+                normalize_path(&command)
+            } else if command.starts_with("file:") {
+                normalize_path(command.trim_start_matches("file:"))
+            } else {
+                normalize_path(&format!("{guest_cwd}/{command}"))
+            };
+            let host_entrypoint = if command.starts_with("./") || command.starts_with("../") {
+                host_cwd.join(&command)
+            } else {
+                host_path_for_child_guest_path(
+                    vm,
+                    &request.options.internal_bootstrap_env,
+                    &guest_entrypoint,
+                )
+            };
+
+            if is_javascript_entrypoint_path(&host_entrypoint) {
+                env.insert(String::from("AGENT_OS_GUEST_ENTRYPOINT"), guest_entrypoint);
+                return Ok(ResolvedChildProcessExecution {
+                    command,
+                    process_args: process_args.clone(),
+                    runtime: GuestRuntimeKind::JavaScript,
+                    entrypoint: host_entrypoint.to_string_lossy().into_owned(),
+                    execution_args: process_args,
+                    env,
+                    guest_cwd,
+                    host_cwd,
+                    wasm_permission_tier: None,
+                });
+            }
+        }
+
         let guest_entrypoint = vm
             .command_guest_paths
             .get(&command)
@@ -5189,8 +5221,8 @@ where
     }
 }
 
-fn build_mount_plugin_registry<B>(
-) -> Result<FileSystemPluginRegistry<MountPluginContext<B>>, SidecarError>
+fn build_mount_plugin_registry<B>()
+-> Result<FileSystemPluginRegistry<MountPluginContext<B>>, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
@@ -5554,7 +5586,7 @@ fn parse_loopback_exempt_ports(
             other => {
                 return Err(SidecarError::InvalidState(format!(
                     "invalid {LOOPBACK_EXEMPT_PORTS_ENV} entry {other:?}"
-                )))
+                )));
             }
         };
         ports.insert(port);
@@ -6086,7 +6118,7 @@ fn socket_inodes_for_pid(pid: u32) -> Result<BTreeSet<u64>, SidecarError> {
         Err(error) => {
             return Err(SidecarError::Io(format!(
                 "failed to read socket descriptors for process {pid}: {error}"
-            )))
+            )));
         }
     };
 
@@ -6133,7 +6165,7 @@ fn find_unix_socket_for_pid(
         Err(error) => {
             return Err(SidecarError::Io(format!(
                 "failed to inspect unix sockets for process {pid}: {error}"
-            )))
+            )));
         }
     };
 
@@ -6428,7 +6460,7 @@ fn parse_proc_net_entries(table_path: &str) -> Result<Vec<ProcNetEntry>, Sidecar
         Err(error) => {
             return Err(SidecarError::Io(format!(
                 "failed to inspect socket table {table_path}: {error}"
-            )))
+            )));
         }
     };
 
@@ -6608,6 +6640,25 @@ fn is_path_like_specifier(specifier: &str) -> bool {
         || specifier.starts_with("./")
         || specifier.starts_with("../")
         || specifier.starts_with("file:")
+}
+
+fn is_javascript_entrypoint_path(path: &Path) -> bool {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+    {
+        Some(extension) if matches!(extension.as_str(), "js" | "mjs" | "cjs") => true,
+        _ => fs::read(path)
+            .ok()
+            .and_then(|contents| {
+                contents
+                    .split(|byte| *byte == b'\n')
+                    .next()
+                    .map(|line| String::from_utf8_lossy(line).contains("node"))
+            })
+            .unwrap_or(false),
+    }
 }
 
 fn execution_wasm_permission_tier(tier: WasmPermissionTier) -> ExecutionWasmPermissionTier {
@@ -7297,7 +7348,7 @@ fn filter_dns_ip_addrs(
         other => {
             return Err(SidecarError::InvalidState(format!(
                 "unsupported dns family {other}"
-            )))
+            )));
         }
     };
 
@@ -7677,10 +7728,12 @@ fn javascript_sync_rpc_stat_value(stat: VirtualStat) -> Value {
 }
 
 fn javascript_sync_rpc_readdir_value(entries: Vec<String>) -> Value {
-    json!(entries
-        .into_iter()
-        .filter(|entry| entry != "." && entry != "..")
-        .collect::<Vec<_>>())
+    json!(
+        entries
+            .into_iter()
+            .filter(|entry| entry != "." && entry != "..")
+            .collect::<Vec<_>>()
+    )
 }
 
 fn javascript_sync_rpc_bytes_arg(
@@ -7861,7 +7914,7 @@ where
                     other => {
                         return Err(SidecarError::InvalidState(format!(
                             "unsupported dns rrtype {other}"
-                        )))
+                        )));
                     }
                 },
             };
@@ -9818,11 +9871,12 @@ ykAheWCsAteSEWVc0w==\n\
             .filesystem_mut()
             .remove_file("/workspace/original.txt")
             .expect("remove original hard link");
-        assert!(!vm
-            .kernel
-            .filesystem()
-            .exists("/workspace/original.txt")
-            .expect("check removed original"));
+        assert!(
+            !vm.kernel
+                .filesystem()
+                .exists("/workspace/original.txt")
+                .expect("check removed original")
+        );
         assert_eq!(
             vm.kernel
                 .filesystem_mut()

@@ -111,6 +111,7 @@ const HTTP2_ASSET_SPECIFIER = `${BUILTIN_PREFIX}http2`;
 const HTTPS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}https`;
 const TLS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}tls`;
 const OS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}os`;
+const PI_CODING_AGENT_THEME_ASSET_SPECIFIER = `${POLYFILL_PREFIX}pi-coding-agent-theme`;
 const DENIED_BUILTINS = new Set([
   'child_process',
   'cluster',
@@ -215,7 +216,7 @@ export async function resolve(specifier, context, nextResolve) {
     };
   }
 
-  const deniedBuiltin = resolveDeniedBuiltin(specifier);
+  const deniedBuiltin = resolveDeniedBuiltin(specifier, context);
   if (deniedBuiltin) {
     cacheState.resolutions[key] = {
       kind: 'explicit-file',
@@ -245,6 +246,23 @@ export async function resolve(specifier, context, nextResolve) {
   const translatedUrl = translateResolvedUrlToGuest(resolved.url);
   const translatedResolved =
     translatedUrl === resolved.url ? resolved : { ...resolved, url: translatedUrl };
+  const compatAsset = resolveResolvedCompatAsset(translatedResolved.url);
+  if (compatAsset) {
+    cacheState.resolutions[key] = {
+      kind: 'explicit-file',
+      resolvedUrl: compatAsset.url,
+      format: 'module',
+      resolvedFilePath: compatAsset.filePath,
+    };
+    dirty = true;
+    flushCacheState();
+    emitMetrics();
+    return {
+      shortCircuit: true,
+      url: compatAsset.url,
+      format: 'module',
+    };
+  }
   const entry = buildResolutionEntry(specifier, context, translatedResolved);
   if (entry) {
     cacheState.resolutions[key] = entry;
@@ -504,21 +522,256 @@ function rewritePiCodingAgentImports(source, filePath) {
     return source;
   }
 
+  const piDistRoot = `${path.sep}@mariozechner${path.sep}pi-coding-agent${path.sep}dist${path.sep}`;
   const piCoreRoot = `${path.sep}@mariozechner${path.sep}pi-coding-agent${path.sep}dist${path.sep}core${path.sep}`;
-  if (!filePath.includes(piCoreRoot)) {
+  const piPackageMarker = `${path.sep}@mariozechner${path.sep}pi-coding-agent${path.sep}`;
+  if (!filePath.includes(piDistRoot)) {
     return source;
   }
 
+  function resolvePiAiDistSpecifier(...segments) {
+    const packageIndex = filePath.indexOf(piPackageMarker);
+    if (packageIndex === -1) {
+      return null;
+    }
+
+    const namespaceRoot = filePath.slice(
+      0,
+      packageIndex + `${path.sep}@mariozechner`.length,
+    );
+    const targetPath = path.join(namespaceRoot, 'pi-ai', 'dist', ...segments);
+    let specifier = path.relative(path.dirname(filePath), targetPath);
+    if (!specifier) {
+      return null;
+    }
+    if (!specifier.startsWith('.') && !specifier.startsWith('..')) {
+      specifier = `./${specifier}`;
+    }
+    return specifier.split(path.sep).join('/');
+  }
+
   let rewritten = source;
+  for (const specifier of [
+    './modes/interactive/theme/theme.js',
+    '../modes/interactive/theme/theme.js',
+    '../../modes/interactive/theme/theme.js',
+  ]) {
+    rewritten = replaceBuiltinImportSpecifier(
+      rewritten,
+      specifier,
+      PI_CODING_AGENT_THEME_ASSET_SPECIFIER,
+    );
+  }
+
+  const piAiModelsSpecifier = resolvePiAiDistSpecifier('models.js');
+  const piAiStreamSpecifier = resolvePiAiDistSpecifier('stream.js');
+  const piAiOverflowSpecifier = resolvePiAiDistSpecifier('utils', 'overflow.js');
+  const piAiApiRegistrySpecifier = resolvePiAiDistSpecifier('api-registry.js');
+  const piAiEnvApiKeysSpecifier = resolvePiAiDistSpecifier('env-api-keys.js');
+  const piAiRegisterBuiltinsSpecifier = resolvePiAiDistSpecifier(
+    'providers',
+    'register-builtins.js',
+  );
+
+  if (filePath.endsWith(`${path.sep}main.js`) && piAiModelsSpecifier) {
+    rewritten = rewritten.replace(
+      'import { modelsAreEqual, supportsXhigh } from "@mariozechner/pi-ai";',
+      `import { modelsAreEqual, supportsXhigh } from "${piAiModelsSpecifier}";`,
+    );
+    rewritten = rewritten.replace(
+      'import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.js";',
+      `async function loadInteractiveMode() {
+  return import("./modes/interactive/interactive-mode.js");
+}
+
+async function loadRunPrintMode() {
+  return import("./modes/print-mode.js");
+}
+
+async function loadRunRpcMode() {
+  return import("./modes/rpc/rpc-mode.js");
+}`,
+    );
+    rewritten = rewritten.replace(
+      'import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.js";',
+      `async function loadThemeRuntime() {
+  return import("./modes/interactive/theme/theme.js");
+}`,
+    );
+    rewritten = rewritten.replace(
+      '    initTheme(settingsManager.getTheme(), isInteractive);',
+      `    const { initTheme, stopThemeWatcher } = isInteractive
+        ? await loadThemeRuntime()
+        : {
+            initTheme() {},
+            stopThemeWatcher() {},
+          };
+    initTheme(settingsManager.getTheme(), isInteractive);`,
+    );
+    rewritten = rewritten.replace(
+      '        await runRpcMode(session);',
+      `        const { runRpcMode } = await loadRunRpcMode();
+        await runRpcMode(session);`,
+    );
+    rewritten = rewritten.replace(
+      '        const mode = new InteractiveMode(session, {',
+      `        const { InteractiveMode } = await loadInteractiveMode();
+        const mode = new InteractiveMode(session, {`,
+    );
+    rewritten = rewritten.replace(
+      '        await runPrintMode(session, {',
+      `        const { runPrintMode } = await loadRunPrintMode();
+        await runPrintMode(session, {`,
+    );
+  }
+
+  if (
+    filePath.endsWith(`${path.sep}branch-summarization.js`) &&
+    piAiStreamSpecifier
+  ) {
+    rewritten = rewritten.replace(
+      'import { completeSimple } from "@mariozechner/pi-ai";',
+      `import { completeSimple } from "${piAiStreamSpecifier}";`,
+    );
+  }
+
+  if (filePath.endsWith(`${path.sep}compaction.js`) && piAiStreamSpecifier) {
+    rewritten = rewritten.replace(
+      'import { completeSimple } from "@mariozechner/pi-ai";',
+      `import { completeSimple } from "${piAiStreamSpecifier}";`,
+    );
+  }
+
+  if (filePath.endsWith(`${path.sep}login-dialog.js`)) {
+    rewritten = rewritten.replace(
+      'import { getOAuthProviders } from "@mariozechner/pi-ai/oauth";',
+      `const __agentOsPiOAuthProviderRegistry =
+  globalThis.__agentOsPiOAuthProviderRegistry instanceof Map
+    ? globalThis.__agentOsPiOAuthProviderRegistry
+    : (globalThis.__agentOsPiOAuthProviderRegistry = new Map());
+
+function getOAuthProviders() {
+  return Array.from(__agentOsPiOAuthProviderRegistry.values());
+}`,
+    );
+  }
+
+  if (filePath.endsWith(`${path.sep}oauth-selector.js`)) {
+    rewritten = rewritten.replace(
+      'import { getOAuthProviders } from "@mariozechner/pi-ai/oauth";',
+      `const __agentOsPiOAuthProviderRegistry =
+  globalThis.__agentOsPiOAuthProviderRegistry instanceof Map
+    ? globalThis.__agentOsPiOAuthProviderRegistry
+    : (globalThis.__agentOsPiOAuthProviderRegistry = new Map());
+
+function getOAuthProviders() {
+  return Array.from(__agentOsPiOAuthProviderRegistry.values());
+}`,
+    );
+  }
+
+  if (filePath.endsWith(`${path.sep}rpc-mode.js`)) {
+    rewritten = rewritten.replace(
+      'import { theme } from "../interactive/theme/theme.js";',
+      `const theme = {
+  fg(_color, text) {
+    return text;
+  },
+  bg(_color, text) {
+    return text;
+  },
+  bold(text) {
+    return text;
+  },
+  dim(text) {
+    return text;
+  },
+};`,
+    );
+  }
+
+  if (filePath.endsWith(`${path.sep}model-selector.js`) && piAiModelsSpecifier) {
+    rewritten = rewritten.replace(
+      'import { modelsAreEqual } from "@mariozechner/pi-ai";',
+      `import { modelsAreEqual } from "${piAiModelsSpecifier}";`,
+    );
+  }
+
+  if (filePath.endsWith(`${path.sep}frontmatter.js`)) {
+    rewritten = rewritten.replace(
+      'import { parse } from "yaml";',
+      `function parse(yamlString) {
+  const result = {};
+  for (const rawLine of yamlString.split(/\\r?\\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+
+    const match = line.match(/^([A-Za-z0-9_-]+):\\s*(.*)$/);
+    if (!match) {
+      continue;
+    }
+
+    let value = match[2].trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    } else if (value === 'true') {
+      value = true;
+    } else if (value === 'false') {
+      value = false;
+    }
+
+    result[match[1]] = value;
+  }
+
+  return result;
+}`,
+    );
+  }
+
+  if (!filePath.includes(piCoreRoot)) {
+    return rewritten;
+  }
 
   if (filePath.endsWith(`${path.sep}agent-session.js`)) {
     rewritten = rewritten.replace(
       'import { ExtensionRunner, wrapRegisteredTools, } from "./extensions/index.js";',
       'import { ExtensionRunner } from "./extensions/runner.js";\nimport { wrapRegisteredTools } from "./extensions/wrapper.js";',
     );
+
+    if (
+      piAiModelsSpecifier &&
+      piAiOverflowSpecifier &&
+      piAiRegisterBuiltinsSpecifier
+    ) {
+      rewritten = rewritten.replace(
+        'import { isContextOverflow, modelsAreEqual, resetApiProviders, supportsXhigh } from "@mariozechner/pi-ai";',
+        `import { modelsAreEqual, supportsXhigh } from "${piAiModelsSpecifier}";\nimport { isContextOverflow } from "${piAiOverflowSpecifier}";\nimport { resetApiProviders } from "${piAiRegisterBuiltinsSpecifier}";`,
+      );
+    }
   }
 
   if (filePath.endsWith(`${path.sep}resource-loader.js`)) {
+    rewritten = rewritten.replace(
+      'import { loadThemeFromPath } from "../modes/interactive/theme/theme.js";',
+      `function loadThemeFromPath(themePath) {
+  const normalized =
+    typeof themePath === 'string'
+      ? themePath.replace(/\\\\/g, '/').split('/').pop() ?? ''
+      : '';
+  const dotIndex = normalized.lastIndexOf('.');
+  const name = dotIndex > 0 ? normalized.slice(0, dotIndex) : normalized;
+  return {
+    name: name || 'agent-os',
+    sourcePath: themePath,
+  };
+}`,
+    );
+
     rewritten = rewritten.replace(
       'import { createExtensionRuntime, loadExtensionFromFactory, loadExtensions } from "./extensions/loader.js";',
       `const createExtensionRuntime = () => {
@@ -570,7 +823,155 @@ async function loadExtensions(_paths, _cwd, _eventBus) {
     );
   }
 
+  if (filePath.endsWith(`${path.sep}auth-storage.js`)) {
+    if (piAiEnvApiKeysSpecifier) {
+      rewritten = rewritten.replace(
+        'import { getEnvApiKey, } from "@mariozechner/pi-ai";',
+        `import { getEnvApiKey } from "${piAiEnvApiKeysSpecifier}";`,
+      );
+    }
+
+    rewritten = rewritten.replace(
+      'import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@mariozechner/pi-ai/oauth";',
+      `const __agentOsPiOAuthProviderRegistry =
+  globalThis.__agentOsPiOAuthProviderRegistry instanceof Map
+    ? globalThis.__agentOsPiOAuthProviderRegistry
+    : (globalThis.__agentOsPiOAuthProviderRegistry = new Map());
+
+function getOAuthProvider(id) {
+  return __agentOsPiOAuthProviderRegistry.get(id);
+}
+
+function getOAuthProviders() {
+  return Array.from(__agentOsPiOAuthProviderRegistry.values());
+}
+
+async function getOAuthApiKey(providerId, credentials) {
+  const provider = getOAuthProvider(providerId);
+  if (!provider) {
+    return null;
+  }
+
+  let creds = credentials[providerId];
+  if (!creds) {
+    return null;
+  }
+
+  if (Date.now() >= creds.expires && typeof provider.refreshToken === 'function') {
+    try {
+      creds = await provider.refreshToken(creds);
+    } catch (_error) {
+      throw new Error(\`Failed to refresh OAuth token for \${providerId}\`);
+    }
+  }
+
+  if (typeof provider.getApiKey !== 'function') {
+    return null;
+  }
+
+  return {
+    newCredentials: creds,
+    apiKey: provider.getApiKey(creds),
+  };
+}`,
+    );
+  }
+
+  if (filePath.endsWith(`${path.sep}model-registry.js`)) {
+    rewritten = rewritten.replace(
+      'import { Type } from "@sinclair/typebox";',
+      `const Type = new Proxy(
+  {},
+  {
+    get() {
+      return (..._args) => ({});
+    },
+  },
+);`,
+    );
+    rewritten = rewritten.replace(
+      'import AjvModule from "ajv";',
+      `const ajv = {
+  addSchema() {},
+  getSchema() {
+    const validate = () => true;
+    validate.errors = [];
+    return validate;
+  },
+};`,
+    );
+    rewritten = rewritten.replace(
+      'const Ajv = AjvModule.default || AjvModule;\nconst ajv = new Ajv();',
+      '',
+    );
+
+    if (piAiModelsSpecifier && piAiApiRegistrySpecifier) {
+      rewritten = rewritten.replace(
+        'import { getModels, getProviders, registerApiProvider, resetApiProviders, } from "@mariozechner/pi-ai";',
+        `import { getModels, getProviders } from "${piAiModelsSpecifier}";\nimport { registerApiProvider } from "${piAiApiRegistrySpecifier}";`,
+      );
+    }
+
+    if (piAiRegisterBuiltinsSpecifier) {
+      rewritten = rewritten.replace(
+        'import { existsSync, readFileSync } from "fs";',
+        `import { resetApiProviders } from "${piAiRegisterBuiltinsSpecifier}";\nimport { existsSync, readFileSync } from "fs";`,
+      );
+    }
+
+    rewritten = rewritten.replace(
+      'import { registerOAuthProvider, resetOAuthProviders } from "@mariozechner/pi-ai/oauth";',
+      `const __agentOsPiOAuthProviderRegistry =
+  globalThis.__agentOsPiOAuthProviderRegistry instanceof Map
+    ? globalThis.__agentOsPiOAuthProviderRegistry
+    : (globalThis.__agentOsPiOAuthProviderRegistry = new Map());
+
+function registerOAuthProvider(provider) {
+  if (provider && typeof provider.id === 'string' && provider.id) {
+    __agentOsPiOAuthProviderRegistry.set(provider.id, provider);
+  }
+}
+
+function resetOAuthProviders() {
+  __agentOsPiOAuthProviderRegistry.clear();
+}`,
+    );
+  }
+
+  if (filePath.endsWith(`${path.sep}model-resolver.js`) && piAiModelsSpecifier) {
+    rewritten = rewritten.replace(
+      'import { modelsAreEqual } from "@mariozechner/pi-ai";',
+      `import { modelsAreEqual } from "${piAiModelsSpecifier}";`,
+    );
+  }
+
   return rewritten;
+}
+
+function isPiCodingAgentThemePath(filePath) {
+  if (typeof filePath !== 'string') {
+    return false;
+  }
+
+  const normalized = filePath.split(path.sep).join('/');
+  return normalized.endsWith(
+    '/@mariozechner/pi-coding-agent/dist/modes/interactive/theme/theme.js',
+  );
+}
+
+function resolvePiCodingAgentThemeCompatAsset() {
+  return assetModuleDescriptor(
+    path.join(ASSET_ROOT, 'compat', 'pi-coding-agent-theme.mjs'),
+  );
+}
+
+function resolveResolvedCompatAsset(resolvedUrl) {
+  const filePath = filePathFromUrl(resolvedUrl);
+  if (isPiCodingAgentThemePath(filePath)) {
+    return resolvePiCodingAgentThemeCompatAsset();
+  }
+
+  return null;
 }
 
 function resolveAgentOsAsset(specifier) {
@@ -796,7 +1197,25 @@ function isAssetPath(filePath) {
   );
 }
 
-function resolveDeniedBuiltin(specifier) {
+function isUndiciWorkerThreadsCompatParentPath(filePath) {
+  if (typeof filePath !== 'string') {
+    return false;
+  }
+
+  const normalized = filePath.split(path.sep).join('/');
+  return (
+    normalized.endsWith('/undici/lib/util/runtime-features.js') ||
+    normalized.endsWith('/undici/lib/web/webidl/index.js')
+  );
+}
+
+function resolveUndiciWorkerThreadsCompatAsset() {
+  return assetModuleDescriptor(
+    path.join(ASSET_ROOT, 'compat', 'worker-threads-undici.mjs'),
+  );
+}
+
+function resolveDeniedBuiltin(specifier, context) {
   if (typeof specifier !== 'string' || !ASSET_ROOT) {
     return null;
   }
@@ -805,6 +1224,13 @@ function resolveDeniedBuiltin(specifier) {
     specifier.startsWith('node:') ? specifier.slice('node:'.length) : specifier;
   if (!DENIED_BUILTINS.has(normalized)) {
     return null;
+  }
+
+  if (
+    normalized === 'worker_threads' &&
+    isUndiciWorkerThreadsCompatParentPath(filePathFromUrl(context?.parentURL))
+  ) {
+    return resolveUndiciWorkerThreadsCompatAsset();
   }
 
   return assetModuleDescriptor(
@@ -2289,7 +2715,7 @@ const VIRTUAL_GID = parseVirtualProcessNumber(
   HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_PROCESS_GID,
   DEFAULT_VIRTUAL_GID,
 );
-const DEFAULT_GUEST_CWD = resolveVirtualPath(
+const DEFAULT_GUEST_CWD = resolveVirtualHomeDir(
   HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_HOMEDIR,
   DEFAULT_VIRTUAL_OS_HOMEDIR,
 );
@@ -3128,6 +3554,11 @@ function hostPathForSpecifier(specifier, fromGuestDir) {
     return null;
   }
 
+  const projectedPackageHostPath = hostPathForProjectedPackageSpecifier(specifier);
+  if (projectedPackageHostPath) {
+    return projectedPackageHostPath;
+  }
+
   if (
     path.isAbsolute(specifier) &&
     (pathExists(specifier) ||
@@ -3169,6 +3600,58 @@ function hostPathForSpecifier(specifier, fromGuestDir) {
   }
 
   return null;
+}
+
+function parseProjectedPackageSpecifier(specifier) {
+  if (!isBareSpecifier(specifier)) {
+    return null;
+  }
+
+  const parts = specifier.split('/');
+  if (specifier.startsWith('@')) {
+    if (parts.length < 2) {
+      return null;
+    }
+    return {
+      packageName: `${parts[0]}/${parts[1]}`,
+      packageSubpath: parts.slice(2),
+    };
+  }
+
+  return {
+    packageName: parts[0] ?? null,
+    packageSubpath: parts.slice(1),
+  };
+}
+
+function hostPathForProjectedPackageSpecifier(specifier) {
+  const parsed = parseProjectedPackageSpecifier(specifier);
+  if (!parsed?.packageName) {
+    return null;
+  }
+
+  const candidateGuestPathSuffix = `/node_modules/${parsed.packageName}`;
+  const mapping = GUEST_PATH_MAPPINGS.find(
+    (entry) =>
+      entry?.guestPath === `/root/node_modules/${parsed.packageName}` ||
+      (typeof entry?.guestPath === 'string' &&
+        entry.guestPath.endsWith(candidateGuestPathSuffix)),
+  );
+  if (!mapping || typeof mapping.hostPath !== 'string') {
+    return null;
+  }
+
+  if (parsed.packageSubpath.length > 0) {
+    return path.join(mapping.hostPath, ...parsed.packageSubpath);
+  }
+
+  try {
+    return originalModuleResolveFilename
+      ? originalModuleResolveFilename(mapping.hostPath, null, false)
+      : hostRequire.resolve(mapping.hostPath);
+  } catch {
+    return mapping.hostPath;
+  }
 }
 
 function translateGuestPath(value, fromGuestDir = '/') {
@@ -7246,6 +7729,14 @@ function resolveVirtualPath(value, fallback) {
   return translatePathStringToGuest(value);
 }
 
+function resolveVirtualHomeDir(value, fallback) {
+  if (typeof process.env.HOME === 'string' && process.env.HOME.startsWith('/')) {
+    return path.posix.normalize(process.env.HOME);
+  }
+
+  return resolveVirtualPath(value, fallback);
+}
+
 function cloneVirtualCpuInfo(cpu) {
   return {
     ...cpu,
@@ -7315,7 +7806,7 @@ function createGuestProcessUptime() {
 }
 
 function createGuestOsModule(osModule) {
-  const virtualHomeDir = resolveVirtualPath(
+  const virtualHomeDir = resolveVirtualHomeDir(
     HOST_PROCESS_ENV.AGENT_OS_VIRTUAL_OS_HOMEDIR,
     DEFAULT_VIRTUAL_OS_HOMEDIR,
   );
@@ -7775,7 +8266,11 @@ function createGuestRequire(fromGuestDir) {
 
   const guestRequire = function(specifier) {
     const translated = hostPathForSpecifier(specifier, normalizedGuestDir);
+    const projectedPackageHostPath = hostPathForProjectedPackageSpecifier(specifier);
     try {
+      if (projectedPackageHostPath) {
+        return baseRequire(projectedPackageHostPath);
+      }
       if (translated) {
         return baseRequire(translated);
       }
@@ -7791,7 +8286,11 @@ function createGuestRequire(fromGuestDir) {
 
   guestRequire.resolve = (specifier, options) => {
     const translated = hostPathForSpecifier(specifier, normalizedGuestDir);
+    const projectedPackageHostPath = hostPathForProjectedPackageSpecifier(specifier);
     try {
+      if (projectedPackageHostPath) {
+        return translatePathStringToGuest(projectedPackageHostPath);
+      }
       if (translated) {
         return translatePathStringToGuest(baseRequire.resolve(translated, options));
       }
@@ -7833,6 +8332,21 @@ function defineMutableProperty(target, key, value) {
   } catch (error) {
     throw new Error(`Failed to define mutable property ${String(key)}`, { cause: error });
   }
+}
+
+function isUndiciRuntimeFeaturesParent(parent) {
+  const parentFilename =
+    typeof parent?.filename === 'string'
+      ? parent.filename
+      : typeof parent?.id === 'string'
+        ? parent.id
+        : null;
+  if (typeof parentFilename !== 'string') {
+    return false;
+  }
+
+  const normalized = parentFilename.split(path.sep).join('/');
+  return normalized.endsWith('/undici/lib/util/runtime-features.js');
 }
 
 function encodeSyncRpcValue(value) {
@@ -8292,6 +8806,9 @@ function installGuestHardening() {
       }
       if (normalized === 'child_process' && ALLOWED_BUILTINS.has('child_process')) {
         return guestChildProcess;
+      }
+      if (normalized === 'worker_threads' && isUndiciRuntimeFeaturesParent(parent)) {
+        return Object.freeze({});
       }
       if (normalized && DENIED_BUILTINS.has(normalized)) {
         throw accessDenied(`node:${normalized}`);
@@ -9023,7 +9540,10 @@ function guestUser() {
   const uid = virtualProcessNumber('AGENT_OS_VIRTUAL_PROCESS_UID', 1000);
   const gid = virtualProcessNumber('AGENT_OS_VIRTUAL_PROCESS_GID', uid);
   const username = process.env.AGENT_OS_VIRTUAL_OS_USER ?? 'user';
-  const home = process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR ?? `/home/${username}`;
+  const home = resolveVirtualHomeDir(
+    process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR,
+    process.env.HOME ?? `/home/${username}`,
+  );
   const shell = process.env.AGENT_OS_VIRTUAL_OS_SHELL ?? '/bin/sh';
   return { uid, gid, username, home, shell };
 }
@@ -9209,6 +9729,8 @@ function resolveGuestPath(guestPath, cwd = process.cwd()) {
     const guestAnchor =
       typeof process.env.PWD === 'string' && process.env.PWD.startsWith('/')
         ? path.posix.normalize(process.env.PWD)
+        : typeof process.env.HOME === 'string' && process.env.HOME.startsWith('/')
+          ? path.posix.normalize(process.env.HOME)
         : typeof process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR === 'string' &&
             process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR.startsWith('/')
           ? path.posix.normalize(process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR)
@@ -10923,6 +11445,7 @@ impl NodeImportCacheMaterialization {
 
         fs::create_dir_all(&self.root_dir)?;
         fs::create_dir_all(self.asset_root.join("builtins"))?;
+        fs::create_dir_all(self.asset_root.join("compat"))?;
         fs::create_dir_all(self.asset_root.join("denied"))?;
         fs::create_dir_all(self.asset_root.join("polyfills"))?;
         fs::create_dir_all(&self.pyodide_dist_path)?;
@@ -10956,6 +11479,28 @@ impl NodeImportCacheMaterialization {
             )?;
         }
 
+        write_file_if_changed(
+            &self
+                .asset_root
+                .join("compat")
+                .join("worker-threads-undici.mjs"),
+            &render_undici_worker_threads_compat_asset_source(),
+        )?;
+        write_file_if_changed(
+            &self
+                .asset_root
+                .join("compat")
+                .join("pi-coding-agent-theme.mjs"),
+            &render_pi_coding_agent_theme_compat_asset_source(),
+        )?;
+
+        write_file_if_changed(
+            &self
+                .asset_root
+                .join("polyfills")
+                .join("pi-coding-agent-theme.mjs"),
+            &render_pi_coding_agent_theme_compat_asset_source(),
+        )?;
         write_file_if_changed(
             &self
                 .asset_root
@@ -11496,6 +12041,100 @@ fn render_denied_asset_source(module_specifier: &str) -> String {
     )
 }
 
+fn render_undici_worker_threads_compat_asset_source() -> String {
+    String::from(
+        "export const markAsUncloneable = () => {};\n\
+export default Object.freeze({ markAsUncloneable });\n",
+    )
+}
+
+fn render_pi_coding_agent_theme_compat_asset_source() -> String {
+    String::from(
+        "const identity = (value) => String(value ?? \"\");\n\
+export class Theme {\n\
+  constructor(fgColors = {}, bgColors = {}, mode = \"256color\", options = {}) {\n\
+    this.name = options.name ?? \"agent-os\";\n\
+    this.sourcePath = options.sourcePath;\n\
+    this.fgColors = fgColors;\n\
+    this.bgColors = bgColors;\n\
+    this.mode = mode;\n\
+  }\n\
+}\n\
+let currentTheme = new Theme({}, {}, \"256color\", { name: \"agent-os\" });\n\
+export const theme = new Proxy({}, {\n\
+  get(_target, prop) {\n\
+    if (prop in currentTheme) {\n\
+      return currentTheme[prop];\n\
+    }\n\
+    return (...args) => identity(args[0]);\n\
+  },\n\
+  set(_target, prop, value) {\n\
+    currentTheme[prop] = value;\n\
+    return true;\n\
+  },\n\
+});\n\
+export function loadThemeFromPath(themePath, mode = \"256color\") {\n\
+  const normalized =\n\
+    typeof themePath === \"string\"\n\
+      ? themePath.replace(/\\\\/g, \"/\").split(\"/\").pop() ?? \"\"\n\
+      : \"\";\n\
+  const dotIndex = normalized.lastIndexOf(\".\");\n\
+  const name = dotIndex > 0 ? normalized.slice(0, dotIndex) : normalized;\n\
+  return new Theme({}, {}, mode, {\n\
+    name: name || \"agent-os\",\n\
+    sourcePath: themePath,\n\
+  });\n\
+}\n\
+export function initTheme(themeName = \"agent-os\") {\n\
+  currentTheme = new Theme({}, {}, \"256color\", {\n\
+    name: themeName || \"agent-os\",\n\
+  });\n\
+  return currentTheme;\n\
+}\n\
+export function stopThemeWatcher() {}\n\
+export function highlightCode(code) {\n\
+  return identity(code);\n\
+}\n\
+export function getLanguageFromPath(filePath) {\n\
+  if (typeof filePath !== \"string\") {\n\
+    return undefined;\n\
+  }\n\
+  const normalized = filePath.replace(/\\\\/g, \"/\");\n\
+  const extension = normalized.includes(\".\")\n\
+    ? normalized.slice(normalized.lastIndexOf(\".\") + 1).toLowerCase()\n\
+    : \"\";\n\
+  const languages = {\n\
+    js: \"javascript\",\n\
+    jsx: \"javascript\",\n\
+    ts: \"typescript\",\n\
+    tsx: \"typescript\",\n\
+    py: \"python\",\n\
+    rs: \"rust\",\n\
+    sh: \"bash\",\n\
+    md: \"markdown\",\n\
+    json: \"json\",\n\
+  };\n\
+  return languages[extension] ?? undefined;\n\
+}\n\
+export function getMarkdownTheme() {\n\
+  return {};\n\
+}\n\
+export function getSelectListTheme() {\n\
+  return {};\n\
+}\n\
+export function getSettingsListTheme() {\n\
+  return {};\n\
+}\n\
+export function getResolvedThemeColors() {\n\
+  return {};\n\
+}\n\
+export function getThemeExportColors() {\n\
+  return {};\n\
+}\n\
+export default theme;\n",
+    )
+}
+
 fn render_path_polyfill_source() -> String {
     let init_counter_key = format!("{PATH_POLYFILL_INIT_COUNTER_KEY:?}");
 
@@ -11528,7 +12167,7 @@ fn write_file_if_changed(path: &Path, contents: &str) -> Result<(), io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NodeImportCache, NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_MS};
+    use super::{NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_MS, NodeImportCache};
     use crate::node_process::node_binary;
     use serde_json::Value;
     use std::collections::BTreeSet;
