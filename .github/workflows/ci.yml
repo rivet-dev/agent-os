@@ -1,25 +1,105 @@
 name: CI
+
 on:
   push:
-    branches: [main]
   pull_request:
-    branches: [main]
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10.13.1"
 
 jobs:
-  ci:
+  rust:
+    name: Rust workspace
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          version: latest
-      - uses: actions/setup-node@v4
+          lfs: true
+
+      - name: Ensure Git LFS assets are present
+        run: |
+          git lfs install --local
+          git lfs pull
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          node-version: 22
+          shared-key: ci-rust
+
+      - name: Run Rust workspace tests
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Run ignored sidecar integration tests
+        run: cargo test --package agent-os-sidecar -- --ignored --test-threads=1
+
+  typescript:
+    name: TypeScript workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Ensure Git LFS assets are present
+        run: |
+          git lfs install --local
+          git lfs pull
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm check-types
-      - run: pnpm build
-      - run: pnpm test
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+            examples/*/node_modules
+            registry/*/*/node_modules
+          key: ${{ runner.os }}-node-modules-${{ env.NODE_VERSION }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-node-modules-${{ env.NODE_VERSION }}-
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Rust sidecar binary for TS integration tests
+        run: cargo build --package agent-os-sidecar
+
+      - name: Run TypeScript workspace tests
+        run: pnpm test
         env:
-          AGENTOS_E2E_NETWORK: '1'
+          AGENTOS_E2E_NETWORK: "1"
