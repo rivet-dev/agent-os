@@ -18,6 +18,7 @@ import { startSandboxAgentContainer } from "@rivet-dev/agent-os/test/docker";
 import { createSandboxFs, createSandboxToolkit } from "../src/index.js";
 
 let sandbox: SandboxAgentContainerHandle;
+const sandboxBasePath = "/tmp/agent-os-sandbox-vm";
 
 const hasWasm = existsSync(coreutils.commandDir);
 const skipReason = process.env.SKIP_SANDBOX_TESTS
@@ -29,6 +30,16 @@ const skipReason = process.env.SKIP_SANDBOX_TESTS
 beforeAll(async () => {
 	if (skipReason) return;
 	sandbox = await startSandboxAgentContainer({ healthTimeout: 120_000 });
+	const tk = createSandboxToolkit({ client: sandbox.client });
+	const mkdir = await tk.tools["run-command"].execute({
+		command: "mkdir",
+		args: ["-p", sandboxBasePath],
+	});
+	if (mkdir.exitCode !== 0) {
+		throw new Error(
+			`Failed to prepare sandbox base path ${sandboxBasePath}: ${mkdir.stderr}`,
+		);
+	}
 }, 150_000);
 
 afterAll(async () => {
@@ -44,7 +55,10 @@ describe.skipIf(skipReason)("VM integration", () => {
 			mounts: [
 				{
 					path: "/sandbox",
-					plugin: createSandboxFs({ client: sandbox.client }),
+					plugin: createSandboxFs({
+						client: sandbox.client,
+						basePath: sandboxBasePath,
+					}),
 				},
 			],
 			toolKits: [createSandboxToolkit({ client: sandbox.client })],
