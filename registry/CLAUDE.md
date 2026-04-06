@@ -138,6 +138,7 @@ make clean         # Remove dist/ and wasm/ from all packages
 - External-network registry tests should stay behind `AGENTOS_E2E_NETWORK=1`, probe host connectivity up front so CI can skip cleanly when the internet is unavailable, and retry the in-VM command itself for transient outbound failures instead of hard-failing on the first flaky request.
 - Registry integration coverage lives under `tests/e2e/`, with `npm/` and `cross-runtime/` subgroups below it. Tests inside those subdirectories should import shared helpers from `../helpers.ts`, and any fixture/cache path math must account for the extra directory depth.
 - When a TS/WASM integration test bootstraps `AgentOs.create({ software })`, filter the registry package list to `commandDir` values that actually exist locally. Optional software packages may still be absent in some worktrees, and passing a missing `commandDir` into VM creation fails before the real command behavior is exercised.
+- Sandbox toolkit VM-integration tests that run against the bundled local `sandbox-agent` CLI should scope filesystem mounts to a writable `/tmp/...` base path instead of assuming the server root `/` is writable like the Docker image.
 
 ## Native Source
 
