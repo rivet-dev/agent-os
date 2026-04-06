@@ -182,7 +182,7 @@
         "All tests run guest JS through the full sidecar pipeline, not just unit-test the loader."
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "The most critical gap. .agent/todo/adversarial-isolation-tests.md documents 9 planned stories (US-001–US-009) that are all unimplemented. These tests validate the core security invariants in CLAUDE.md."
     },
     {

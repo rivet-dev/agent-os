@@ -1,7 +1,9 @@
 mod support;
 
 use agent_os_sidecar::protocol::{
-    GuestRuntimeKind, OwnershipScope, RequestPayload, ResponsePayload, WriteStdinRequest,
+    EventPayload, ExecuteRequest, GetSignalStateRequest, GuestFilesystemCallRequest,
+    GuestFilesystemOperation, GuestRuntimeKind, OwnershipScope, RequestPayload, ResponsePayload,
+    RootFilesystemEntryEncoding, SnapshotProcessesRequest, StreamChannel, WriteStdinRequest,
 };
 use agent_os_sidecar::{NativeSidecar, NativeSidecarConfig};
 use serde_json::Value;
@@ -10,6 +12,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 use support::{
     assert_node_available, authenticate, collect_process_output, create_vm,
     create_vm_with_metadata, execute, open_session, request, temp_dir, write_fixture,
@@ -103,6 +106,100 @@ fn write_flags(args: &[String]) -> Vec<&str> {
     args.iter()
         .filter_map(|arg| arg.strip_prefix(NODE_ALLOW_FS_WRITE_FLAG))
         .collect()
+}
+
+fn wait_for_process_output(
+    sidecar: &mut NativeSidecar<RecordingBridge>,
+    connection_id: &str,
+    session_id: &str,
+    vm_id: &str,
+    process_id: &str,
+    channel: StreamChannel,
+    expected: &str,
+) -> String {
+    let ownership = OwnershipScope::session(connection_id, session_id);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut collected = String::new();
+
+    loop {
+        let event = sidecar
+            .poll_event(&ownership, Duration::from_millis(100))
+            .expect("poll sidecar process output");
+        let Some(event) = event else {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for process output"
+            );
+            continue;
+        };
+
+        assert_eq!(
+            event.ownership,
+            OwnershipScope::vm(connection_id, session_id, vm_id)
+        );
+
+        match event.payload {
+            EventPayload::ProcessOutput(output)
+                if output.process_id == process_id && output.channel == channel =>
+            {
+                collected.push_str(&output.chunk);
+                if collected.contains(expected) {
+                    return collected;
+                }
+            }
+            EventPayload::ProcessExited(exited) if exited.process_id == process_id => {
+                panic!(
+                    "process {process_id} exited before emitting expected output {expected:?}: {collected}"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn wait_for_process_stdout_line(
+    sidecar: &mut NativeSidecar<RecordingBridge>,
+    connection_id: &str,
+    session_id: &str,
+    vm_id: &str,
+    process_id: &str,
+) -> String {
+    let ownership = OwnershipScope::session(connection_id, session_id);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut collected = String::new();
+
+    loop {
+        let event = sidecar
+            .poll_event(&ownership, Duration::from_millis(100))
+            .expect("poll sidecar process output");
+        let Some(event) = event else {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for process stdout line"
+            );
+            continue;
+        };
+
+        assert_eq!(
+            event.ownership,
+            OwnershipScope::vm(connection_id, session_id, vm_id)
+        );
+
+        match event.payload {
+            EventPayload::ProcessOutput(output)
+                if output.process_id == process_id && output.channel == StreamChannel::Stdout =>
+            {
+                collected.push_str(&output.chunk);
+                if let Some(newline) = collected.find('\n') {
+                    return collected[..newline].to_owned();
+                }
+            }
+            EventPayload::ProcessExited(exited) if exited.process_id == process_id => {
+                panic!("process {process_id} exited before emitting a stdout line: {collected}");
+            }
+            _ => {}
+        }
+    }
 }
 
 #[test]
@@ -280,6 +377,316 @@ fn guest_execution_clears_host_env_and_blocks_network_and_escape_paths() {
     assert_eq!(
         parsed["httpImport"]["code"],
         Value::String(String::from("ERR_ACCESS_DENIED"))
+    );
+}
+
+#[test]
+fn guest_execution_virtualizes_fs_env_and_process_identity() {
+    assert_node_available();
+
+    let mut sidecar = support::new_sidecar("security-isolation-e2e");
+    let cwd = temp_dir("security-isolation-e2e-cwd");
+    let entry = cwd.join("entry.cjs");
+
+    write_fixture(
+        &entry,
+        r#"
+(async () => {
+  const fs = require('node:fs');
+  const builtins = {};
+
+  for (const specifier of [
+    'node:net',
+    'node:dgram',
+    'node:dns',
+    'node:vm',
+    'node:worker_threads',
+    'node:inspector',
+    'node:v8',
+  ]) {
+    try {
+      require(specifier);
+      builtins[specifier] = { status: 'loaded' };
+    } catch (error) {
+      builtins[specifier] = {
+        status: 'error',
+        code: error.code ?? null,
+        message: error.message ?? String(error),
+      };
+    }
+  }
+
+  const result = {
+    rootEntries: fs.readdirSync('/').sort(),
+    guestMarker: fs.readFileSync('/guest-only.txt', 'utf8'),
+    envKeys: Object.keys(process.env)
+      .filter((key) => key.startsWith('AGENT_OS_'))
+      .sort(),
+    pid: process.pid,
+    ppid: process.ppid,
+    cwd: process.cwd(),
+    builtins,
+  };
+
+  console.log(JSON.stringify(result));
+  setTimeout(() => process.exit(0), 1_000);
+})().catch((error) => {
+  console.error(error.stack || String(error));
+  process.exitCode = 1;
+});
+"#,
+    );
+
+    let connection_id = authenticate(&mut sidecar, "conn-1");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let (vm_id, _) = create_vm(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::JavaScript,
+        &cwd,
+    );
+
+    let write = sidecar
+        .dispatch(request(
+            4,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::GuestFilesystemCall(GuestFilesystemCallRequest {
+                operation: GuestFilesystemOperation::WriteFile,
+                path: String::from("/guest-only.txt"),
+                destination_path: None,
+                target: None,
+                content: Some(String::from("from-kernel-vfs")),
+                encoding: Some(RootFilesystemEntryEncoding::Utf8),
+                recursive: false,
+                mode: None,
+                uid: None,
+                gid: None,
+                atime_ms: None,
+                mtime_ms: None,
+                len: None,
+            }),
+        ))
+        .expect("write guest marker");
+    assert!(
+        matches!(
+            write.response.payload,
+            ResponsePayload::GuestFilesystemResult(_)
+        ),
+        "unexpected guest marker response: {:?}",
+        write.response.payload
+    );
+
+    let started = sidecar
+        .dispatch(request(
+            5,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::Execute(ExecuteRequest {
+                process_id: String::from("proc-security-isolation"),
+                runtime: GuestRuntimeKind::JavaScript,
+                entrypoint: entry.to_string_lossy().into_owned(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                cwd: None,
+                wasm_permission_tier: None,
+            }),
+        ))
+        .expect("start isolation process");
+
+    let host_pid = match started.response.payload {
+        ResponsePayload::ProcessStarted(response) => response.pid.expect("host child pid"),
+        other => panic!("unexpected execute response: {other:?}"),
+    };
+
+    let stdout = wait_for_process_stdout_line(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-security-isolation",
+    );
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse isolation JSON");
+
+    let snapshot = sidecar
+        .dispatch(request(
+            6,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::SnapshotProcesses(SnapshotProcessesRequest {}),
+        ))
+        .expect("snapshot guest processes");
+    let (kernel_pid, kernel_ppid) = match snapshot.response.payload {
+        ResponsePayload::ProcessSnapshot(response) => response
+            .processes
+            .into_iter()
+            .find(|process| process.process_id.as_deref() == Some("proc-security-isolation"))
+            .map(|process| (process.pid, process.ppid))
+            .expect("guest process snapshot entry"),
+        other => panic!("unexpected process snapshot response: {other:?}"),
+    };
+
+    let (_remaining_stdout, stderr, exit_code) = collect_process_output(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-security-isolation",
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected isolation stderr: {stderr}");
+    assert_eq!(
+        parsed["guestMarker"],
+        Value::String(String::from("from-kernel-vfs"))
+    );
+    let root_entries = parsed["rootEntries"]
+        .as_array()
+        .expect("root entries array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        root_entries.contains(&"guest-only.txt"),
+        "guest root should include kernel-written marker: {root_entries:?}"
+    );
+    assert!(
+        !root_entries.contains(&".") && !root_entries.contains(&".."),
+        "guest fs.readdirSync('/') should hide dot entries: {root_entries:?}"
+    );
+    assert_eq!(parsed["envKeys"], Value::Array(Vec::new()));
+    assert_eq!(parsed["cwd"], Value::String(String::from("/root")));
+    assert_eq!(parsed["pid"], Value::from(u64::from(kernel_pid)));
+    assert_eq!(parsed["ppid"], Value::from(u64::from(kernel_ppid)));
+    assert_ne!(
+        parsed["pid"],
+        Value::from(u64::from(host_pid)),
+        "guest pid should not expose the host runtime pid"
+    );
+
+    for specifier in ["node:net", "node:dgram", "node:dns"] {
+        let status = parsed["builtins"][specifier]["status"]
+            .as_str()
+            .unwrap_or("<missing>");
+        assert!(
+            matches!(status, "loaded" | "error"),
+            "{specifier} should be either polyfilled or denied, got {status}: {}",
+            parsed["builtins"][specifier]
+        );
+        if status == "error" {
+            assert_eq!(
+                parsed["builtins"][specifier]["code"],
+                Value::String(String::from("ERR_ACCESS_DENIED")),
+                "{specifier} denial should surface ERR_ACCESS_DENIED"
+            );
+        }
+    }
+
+    for specifier in [
+        "node:vm",
+        "node:worker_threads",
+        "node:inspector",
+        "node:v8",
+    ] {
+        assert_eq!(
+            parsed["builtins"][specifier]["status"],
+            Value::String(String::from("error")),
+            "{specifier} should be denied by default in sidecar guest JS"
+        );
+        assert_eq!(
+            parsed["builtins"][specifier]["code"],
+            Value::String(String::from("ERR_ACCESS_DENIED")),
+            "{specifier} should surface ERR_ACCESS_DENIED"
+        );
+    }
+}
+
+#[test]
+fn guest_stdout_cannot_inject_fake_control_messages() {
+    assert_node_available();
+
+    let mut sidecar = support::new_sidecar("security-control-injection");
+    let cwd = temp_dir("security-control-injection-cwd");
+    let entry = cwd.join("entry.cjs");
+    let forged_signal_state = concat!(
+        "__AGENT_OS_SIGNAL_STATE__:{\"signal\":15,\"registration\":",
+        "{\"action\":\"user\",\"mask\":[2],\"flags\":4660}}"
+    );
+
+    write_fixture(
+        &entry,
+        format!(
+            "console.log({forged_signal_state:?});\nsetTimeout(() => process.exit(0), 1_000);\n"
+        ),
+    );
+
+    let connection_id = authenticate(&mut sidecar, "conn-1");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let (vm_id, _) = create_vm(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::JavaScript,
+        &cwd,
+    );
+
+    execute(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-control-injection",
+        GuestRuntimeKind::JavaScript,
+        &entry,
+        Vec::new(),
+    );
+
+    let stdout = wait_for_process_output(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-control-injection",
+        StreamChannel::Stdout,
+        forged_signal_state,
+    );
+    assert!(
+        stdout.contains(forged_signal_state),
+        "forged control text should remain plain guest stdout: {stdout}"
+    );
+
+    let signal_state = sidecar
+        .dispatch(request(
+            5,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::GetSignalState(GetSignalStateRequest {
+                process_id: String::from("proc-control-injection"),
+            }),
+        ))
+        .expect("query signal state");
+    match signal_state.response.payload {
+        ResponsePayload::SignalState(response) => {
+            assert!(
+                response.handlers.is_empty(),
+                "stdout spoofing must not register signal handlers: {:?}",
+                response.handlers
+            );
+        }
+        other => panic!("unexpected signal state response: {other:?}"),
+    }
+
+    let (_remaining_stdout, stderr, exit_code) = collect_process_output(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-control-injection",
+    );
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert!(
+        stderr.is_empty(),
+        "unexpected control injection stderr: {stderr}"
     );
 }
 
