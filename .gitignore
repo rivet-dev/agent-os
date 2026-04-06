@@ -42,6 +42,7 @@ registry/software/*/.last-publish-hash
 registry/.build-markers/
 
 # Ralph agent artifacts
+scripts/ralph/archive/
 scripts/ralph/codex-streams/
 scripts/ralph/.last-branch
 scripts/ralph/prd.json

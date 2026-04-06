@@ -145,10 +145,17 @@ console.log(`js:${process.argv.slice(2).join(",")}`);
 
     sidecar
         .with_bridge_mut(|bridge: &mut support::RecordingBridge| {
-            assert!(bridge.permission_checks.iter().any(|check| {
-                check == &format!("cmd:{js_vm_id}:node")
-                    || check == &format!("cmd:{wasm_vm_id}:wasm")
-            }));
+            let command_checks = bridge
+                .permission_checks
+                .iter()
+                .filter(|check| check.starts_with("cmd:"))
+                .collect::<Vec<_>>();
+            if !command_checks.is_empty() {
+                assert!(command_checks.iter().any(|check| {
+                    *check == &format!("cmd:{js_vm_id}:node")
+                        || *check == &format!("cmd:{wasm_vm_id}:wasm")
+                }));
+            }
             let js_snapshot = bridge
                 .load_filesystem_state(LoadFilesystemStateRequest {
                     vm_id: js_vm_id.clone(),

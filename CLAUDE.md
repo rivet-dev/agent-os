@@ -103,7 +103,7 @@ agentOS wraps the kernel and adds: a high-level filesystem/process API, ACP agen
 ## Project Structure
 
 - **Monorepo**: pnpm workspaces + Turborepo + TypeScript + Biome
-- **Core package**: `@rivet-dev/agent-os` in `packages/core/` -- contains everything (VM ops, ACP client, session management)
+- **Core package**: `@rivet-dev/agent-os-core` in `packages/core/` -- contains everything (VM ops, ACP client, session management)
 - **Registry types**: `@rivet-dev/agent-os-registry-types` in `packages/registry-types/` -- shared type definitions for WASM command package descriptors. The registry software packages link to this package. When changing descriptor types, update here and rebuild the registry.
 - **npm scope**: `@rivet-dev/agent-os-*`
 - **Actor integration** lives in the Rivet repo at `rivetkit-typescript/packages/rivetkit/src/agent-os/`, not as a separate package
@@ -246,7 +246,8 @@ Each agent type needs:
 
 ## Testing
 
-- **Framework**: vitest
+- **Framework**: vitest (TypeScript), `cargo test` (Rust)
+- **Always verify related tests pass before considering work done.** After any code change, identify and run the tests that cover the modified code. A task is not complete until its related tests pass. If no tests exist for the changed behavior, write them.
 - **All tests run inside the VM** -- network servers, file I/O, agent processes
 - Network tests: write a server script file, run it with `node` inside the VM, then `vm.fetch()` against it
 - Agent tests must be run sequentially in layers:
@@ -256,6 +257,27 @@ Each agent type needs:
 - **API tokens**: All tests use `@copilotkit/llmock` with `ANTHROPIC_API_KEY='mock-key'`. No real API tokens needed. Do not load tokens from `~/misc/env.txt` or any external file.
 - **Mock LLM testing**: Use `@copilotkit/llmock` to run a mock LLM server on the HOST (not inside the VM). Use `loopbackExemptPorts` in `AgentOs.create()` to exempt the mock port from SSRF checks. The kernel needs `permissions: allowAll` for network access.
 - **Module access**: Set `moduleAccessCwd` in `AgentOs.create()` to a host dir with `node_modules/`. pnpm puts devDeps in `packages/core/node_modules/` which are accessible via the ModuleAccessFileSystem overlay.
+
+### Test Structure
+
+See `.agent/specs/test-structure.md` for the full restructuring plan. The target layout:
+
+**TypeScript (`packages/core/tests/`)** — organized by domain subdirectory:
+- `unit/` — no VM, no sidecar; pure logic (host-tools parsing, descriptors, cron manager, etc.)
+- `filesystem/` — VFS CRUD, overlay, mount, layers, host-dir
+- `process/` — execution, signals, process tree, flat API wrappers
+- `session/` — ACP lifecycle, events, capabilities, MCP, cancellation
+- `agents/{pi,claude,opencode,codex}/` — per-agent adapter tests
+- `wasm/` — WASM command and permission tier tests
+- `network/` — connectivity, host-tools server
+- `sidecar/` — sidecar client, native process
+- `cron/` — cron integration
+
+**Registry (`registry/tests/`)** — `e2e/` (was `kernel/`) with `npm/` and `cross-runtime/` subgroups, `wasmvm/` stays as-is.
+
+**Rust (`crates/*/tests/`)** — per-crate, already good. Key changes:
+- Split `execution/tests/javascript.rs` (46 tests) into `javascript/{builtin_interception,module_resolution,env_hardening,sync_rpc}.rs`
+- Mark slow sidecar integration tests with `#[ignore]` so `cargo test` stays fast
 
 ### WASM Binaries and Quickstart Examples
 

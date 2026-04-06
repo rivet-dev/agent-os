@@ -450,6 +450,7 @@ export function processSoftware(
 				const agentConfig: AgentConfig = {
 					acpAdapter: pkg.agent.acpAdapter,
 					agentPackage: pkg.agent.agentPackage,
+					declaringPackageDir: pkg.packageDir,
 					launchArgs: pkg.agent.launchArgs,
 					defaultEnv: Object.keys(combinedEnv).length > 0 ? combinedEnv : undefined,
 					prepareInstructions: pkg.agent.prepareInstructions,

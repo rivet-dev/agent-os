@@ -6,7 +6,6 @@
 
 import { z } from "zod";
 import { AgentOs, hostTool, toolKit } from "@rivet-dev/agent-os";
-import common from "@rivet-dev/agent-os-common";
 
 const weatherToolkit = toolKit({
 	name: "weather",
@@ -43,13 +42,36 @@ const calcToolkit = toolKit({
 });
 
 const vm = await AgentOs.create({
-	software: [common],
 	toolKits: [weatherToolkit, calcToolkit],
 });
 
-// Get the tools RPC port
-const env = await vm.exec("echo $AGENTOS_TOOLS_PORT");
-const port = env.stdout.trim();
+async function readToolsPort(): Promise<string> {
+	let stdout = "";
+	let stderr = "";
+	await vm.writeFile(
+		"/tmp/read-tools-port.cjs",
+		'process.stdout.write(process.env.AGENTOS_TOOLS_PORT||"")',
+	);
+	const proc = vm.spawn("node", ["/tmp/read-tools-port.cjs"], {
+		onStdout: (data) => {
+			stdout += new TextDecoder().decode(data);
+		},
+		onStderr: (data) => {
+			stderr += new TextDecoder().decode(data);
+		},
+	});
+	const exitCode = await vm.waitProcess(proc.pid);
+	if (exitCode !== 0) {
+		throw new Error(`Failed to read AGENTOS_TOOLS_PORT: ${stderr.trim()}`);
+	}
+	const port = stdout.trim();
+	if (!port) {
+		throw new Error("AGENTOS_TOOLS_PORT is not set inside the VM");
+	}
+	return port;
+}
+
+const port = await readToolsPort();
 console.log("Tools RPC port:", port);
 
 // Helper: call a tool via the RPC server using a Node script inside the VM
@@ -59,20 +81,26 @@ async function callTool(
 	input: Record<string, unknown>,
 ): Promise<unknown> {
 	const outFile = `/tmp/${toolkit}-${tool}-out.json`;
-	await vm.writeFile(
-		"/tmp/tool-call.mjs",
-		`
-import { writeFileSync } from "node:fs";
-const res = await fetch("http://127.0.0.1:${port}/call", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(${JSON.stringify({ toolkit, tool, input })}),
-});
-writeFileSync("${outFile}", await res.text());
-`,
-	);
-	const proc = vm.spawn("node", ["/tmp/tool-call.mjs"]);
-	await vm.waitProcess(proc.pid);
+	let stderr = "";
+	const source = [
+		'import{writeFileSync as w}from"node:fs";',
+		`const r=await fetch("http://127.0.0.1:${port}/call",{method:"POST",headers:{"Content-Type":"application/json"},body:${JSON.stringify(
+			JSON.stringify({ toolkit, tool, input }),
+		)}});`,
+		`w(${JSON.stringify(outFile)},await r.text());`,
+	].join("");
+	await vm.writeFile("/tmp/tool-call.mjs", source);
+	const proc = vm.spawn("node", ["/tmp/tool-call.mjs"], {
+		onStderr: (data) => {
+			stderr += new TextDecoder().decode(data);
+		},
+	});
+	const exitCode = await vm.waitProcess(proc.pid);
+	if (exitCode !== 0) {
+		throw new Error(
+			`Tool call process exited with code ${exitCode}: ${stderr.trim()}`,
+		);
+	}
 	const data = await vm.readFile(outFile);
 	return JSON.parse(new TextDecoder().decode(data));
 }
