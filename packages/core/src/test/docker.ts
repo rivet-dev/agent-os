@@ -6,9 +6,14 @@
  * removes the container.
  */
 
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:net";
+import { constants as fsConstants } from "node:fs";
+import { access } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const execFile = promisify(execFileCb);
 
@@ -385,6 +390,175 @@ export interface SandboxAgentContainerHandle extends ContainerHandle {
 	client: import("sandbox-agent").SandboxAgent;
 }
 
+async function isDockerImageAvailable(image: string): Promise<boolean> {
+	try {
+		await execFile("docker", ["image", "inspect", image]);
+		return true;
+	} catch (err) {
+		if (err instanceof Error) {
+			const message = err.message;
+			if (
+				message.includes("ENOENT") ||
+				message.includes("Cannot connect to the Docker daemon") ||
+				message.includes("No such image")
+			) {
+				return false;
+			}
+		}
+		return false;
+	}
+}
+
+async function resolveSandboxAgentCli(): Promise<string> {
+	const packageDir = dirname(
+		fileURLToPath(new URL("../../package.json", import.meta.url)),
+	);
+	const candidates = [
+		resolve(
+			packageDir,
+			"node_modules",
+			"sandbox-agent",
+			"node_modules",
+			".bin",
+			"sandbox-agent",
+		),
+		resolve(
+			packageDir,
+			"..",
+			"..",
+			"node_modules",
+			".bin",
+			"sandbox-agent",
+		),
+	];
+
+	for (const candidate of candidates) {
+		try {
+			await access(candidate, fsConstants.X_OK);
+			return candidate;
+		} catch {
+			// Try the next candidate.
+		}
+	}
+
+	throw new Error(
+		"Sandbox Agent CLI not found. Expected a bundled sandbox-agent binary in node_modules.",
+	);
+}
+
+async function allocateLocalPort(): Promise<number> {
+	return await new Promise((resolvePort, reject) => {
+		const server = createServer();
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", () => {
+			const address = server.address();
+			if (!address || typeof address === "string") {
+				server.close(() =>
+					reject(new Error("Failed to allocate a local port for Sandbox Agent")),
+				);
+				return;
+			}
+			server.close((closeErr) => {
+				if (closeErr) {
+					reject(closeErr);
+					return;
+				}
+				resolvePort(address.port);
+			});
+		});
+	});
+}
+
+async function startLocalSandboxAgent(
+	port: number,
+	timeout: number,
+): Promise<ContainerHandle> {
+	const cliPath = await resolveSandboxAgentCli();
+	const name = `sandbox-agent-local-${randomUUID().slice(0, 8)}`;
+	const stdoutChunks: string[] = [];
+	const stderrChunks: string[] = [];
+	const child = spawn(
+		cliPath,
+		[
+			"server",
+			"--host",
+			"127.0.0.1",
+			"--port",
+			String(port),
+			"--no-token",
+		],
+		{
+			stdio: ["ignore", "pipe", "pipe"],
+		},
+	);
+
+	child.stdout?.setEncoding("utf8");
+	child.stderr?.setEncoding("utf8");
+	child.stdout?.on("data", (chunk: string) => {
+		stdoutChunks.push(chunk);
+		if (stdoutChunks.join("").length > 8_192) {
+			stdoutChunks.splice(0, stdoutChunks.length - 16);
+		}
+	});
+	child.stderr?.on("data", (chunk: string) => {
+		stderrChunks.push(chunk);
+		if (stderrChunks.join("").length > 8_192) {
+			stderrChunks.splice(0, stderrChunks.length - 16);
+		}
+	});
+
+	const stop = async () => {
+		if (child.exitCode !== null || child.killed) return;
+
+		child.kill("SIGTERM");
+		await Promise.race([
+			new Promise<void>((resolve) => {
+				child.once("exit", () => resolve());
+			}),
+			sleep(5_000).then(() => {
+				if (child.exitCode === null && !child.killed) {
+					child.kill("SIGKILL");
+				}
+			}),
+		]);
+	};
+
+	const deadline = Date.now() + timeout;
+	while (Date.now() < deadline) {
+		if (child.exitCode !== null) {
+			const output = `${stdoutChunks.join("")}${stderrChunks.join("")}`.trim();
+			await stop();
+			throw new Error(
+				`Local Sandbox Agent exited before becoming healthy (exit code: ${child.exitCode ?? "unknown"}).` +
+					(output ? `\nLast logs:\n${output}` : ""),
+			);
+		}
+
+		try {
+			const resp = await fetch(`http://127.0.0.1:${port}/`);
+			if (resp.ok) {
+				return {
+					id: `local-${child.pid ?? "sandbox-agent"}`,
+					name,
+					ports: { [`${port}/tcp`]: port },
+					stop,
+				};
+			}
+		} catch {
+			// Server not ready yet.
+		}
+
+		await sleep(500);
+	}
+
+	await stop();
+	const output = `${stdoutChunks.join("")}${stderrChunks.join("")}`.trim();
+	throw new Error(
+		`Local Sandbox Agent at http://127.0.0.1:${port} did not become healthy within ${timeout}ms` +
+			(output ? `\nLast logs:\n${output}` : ""),
+	);
+}
+
 /**
  * Start a Sandbox Agent container and return a connected SandboxAgent client.
  */
@@ -393,19 +567,32 @@ export async function startSandboxAgentContainer(
 ): Promise<SandboxAgentContainerHandle> {
 	const image =
 		options?.image ?? "sandbox-agent-test:dev";
-	const port = options?.port ?? 2468;
+	const timeout = options?.healthTimeout ?? 60_000;
+	const requestedPort = options?.port;
+	const localPort = requestedPort ?? (await allocateLocalPort());
+	const useDocker = await isDockerImageAvailable(image);
 
-	const container = await startContainer({
-		image,
-		ports: [{ host: 0, container: port }],
-		command: ["server", "--host", "0.0.0.0", "--port", String(port), "--no-token"],
-	});
+	const container = useDocker
+		? await startContainer({
+				image,
+				ports: [{ host: 0, container: requestedPort ?? 2468 }],
+				command: [
+					"server",
+					"--host",
+					"0.0.0.0",
+					"--port",
+					String(requestedPort ?? 2468),
+					"--no-token",
+				],
+			})
+		: await startLocalSandboxAgent(localPort, timeout);
 
-	const hostPort = container.ports[`${port}/tcp`];
+	const hostPort = container.ports[
+		`${useDocker ? (requestedPort ?? 2468) : localPort}/tcp`
+	];
 	const baseUrl = `http://127.0.0.1:${hostPort}`;
 
 	// Poll health from the host since the container may not have curl.
-	const timeout = options?.healthTimeout ?? 60_000;
 	const deadline = Date.now() + timeout;
 	while (Date.now() < deadline) {
 		try {

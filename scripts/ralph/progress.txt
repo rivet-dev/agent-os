@@ -16,6 +16,7 @@
 - Guest Node sync-RPC bootstrap FDs should be left for process teardown; closing inherited raw FDs with `fs.closeSync()` emits host warnings on newer Node builds.
 - Full crate test suites (`cargo test -p <crate>`) must pass, not just focused individual test cases.
 - After package renames or workspace dependency changes, validate from the repo root with `pnpm install --frozen-lockfile`; package-local checks can miss broken `workspace:*` resolution.
+- Sandbox toolkit integration tests should use the bundled `sandbox-agent` CLI as a fallback when `sandbox-agent-test:dev` is not present; CI runners should not depend on a locally prebuilt Docker image for that package.
 - SSRF filters must cover all RFC special-purpose ranges: 0.0.0.0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16, 224/4, 255.255.255.255, plus IPv6 equivalents.
 - S3-compatible loopback endpoints for local Minio or mock servers must opt in explicitly with `allowLoopbackEndpoint`; production defaults should keep loopback/private endpoint SSRF checks enabled.
 - Native-sidecar Node launches must share the same host shadow root between `createVm` metadata `cwd` and `NativeSidecarKernelProxy.shadowRoot`; otherwise sidecar execute rejects the Node cwd as escaping the VM sandbox root.
