@@ -346,6 +346,12 @@ pub struct WasmExecutionEngine {
 }
 
 impl WasmExecutionEngine {
+    #[doc(hidden)]
+    pub fn set_import_cache_base_dir(&mut self, vm_id: impl Into<String>, base_dir: PathBuf) {
+        self.import_caches
+            .insert(vm_id.into(), NodeImportCache::new_in(base_dir));
+    }
+
     pub fn create_context(&mut self, request: CreateWasmContextRequest) -> WasmContext {
         self.next_context_id += 1;
         self.import_caches.entry(request.vm_id.clone()).or_default();

@@ -41,6 +41,7 @@ const PYTHON_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_PYTHON_WARMUP_METRICS__:"
 const PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV: &str = "AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES";
 const PYTHON_EXECUTION_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_EXECUTION_TIMEOUT_MS";
 const PYTHON_MAX_OLD_SPACE_MB_ENV: &str = "AGENT_OS_PYTHON_MAX_OLD_SPACE_MB";
+const PYTHON_DISABLE_NODE_PERMISSION_ENV: &str = "AGENT_OS_PYTHON_DISABLE_NODE_PERMISSION";
 const PYTHON_VFS_RPC_REQUEST_FD_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_REQUEST_FD";
 const PYTHON_VFS_RPC_RESPONSE_FD_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_RESPONSE_FD";
 const PYTHON_VFS_RPC_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_TIMEOUT_MS";
@@ -67,6 +68,7 @@ const RESERVED_PYTHON_ENV_KEYS: &[&str] = &[
     PYTHON_EXECUTION_TIMEOUT_MS_ENV,
     PYTHON_FILE_ENV,
     PYTHON_MAX_OLD_SPACE_MB_ENV,
+    PYTHON_DISABLE_NODE_PERMISSION_ENV,
     PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV,
     PYTHON_PREWARM_ONLY_ENV,
     PYTHON_VFS_RPC_REQUEST_FD_ENV,
@@ -635,6 +637,12 @@ pub struct PythonExecutionEngine {
 }
 
 impl PythonExecutionEngine {
+    #[doc(hidden)]
+    pub fn set_import_cache_base_dir(&mut self, vm_id: impl Into<String>, base_dir: PathBuf) {
+        self.import_caches
+            .insert(vm_id.into(), NodeImportCache::new_in(base_dir));
+    }
+
     pub fn bundled_pyodide_dist_path_for_vm(
         &mut self,
         vm_id: &str,
@@ -1048,7 +1056,7 @@ fn configure_python_node_sandbox(
         &sandbox_root,
         &read_paths,
         &write_paths,
-        true,
+        !env_flag_enabled(&request.env, PYTHON_DISABLE_NODE_PERMISSION_ENV),
         false,
         true,
         false,

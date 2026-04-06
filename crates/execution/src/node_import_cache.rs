@@ -1991,17 +1991,25 @@ function isPathLike(specifier) {
 
 function toImportSpecifier(specifier) {
   if (specifier.startsWith('file:')) {
-    return translatePathStringToGuest(specifier);
+    try {
+      const url = new URL(specifier);
+      const hostPath = hostPathFromGuestPath(url.pathname) ?? url.pathname;
+      return pathToFileURL(
+        path.isAbsolute(hostPath) ? hostPath : path.resolve(HOST_CWD, hostPath),
+      ).href;
+    } catch {
+      return specifier;
+    }
   }
   if (isPathLike(specifier)) {
     if (specifier.startsWith('/')) {
-      return pathToFileURL(
-        translatePathStringToGuest(
-          pathExists(specifier) ? path.resolve(specifier) : path.posix.normalize(specifier),
-        ),
-      ).href;
+      const normalized = path.posix.normalize(specifier);
+      const hostPath =
+        hostPathFromGuestPath(normalized) ??
+        (pathExists(specifier) ? path.resolve(specifier) : normalized);
+      return pathToFileURL(hostPath).href;
     }
-    return pathToFileURL(translatePathStringToGuest(path.resolve(HOST_CWD, specifier))).href;
+    return pathToFileURL(path.resolve(HOST_CWD, specifier)).href;
   }
   return specifier;
 }
@@ -5247,9 +5255,7 @@ function createRpcBackedHttpModule(httpModule, transportModule, defaultProtocol 
       hostname,
       port,
       path,
-      agent: false,
     };
-    delete requestOptions.agent;
     delete requestOptions.createConnection;
     delete requestOptions.host;
     delete requestOptions.lookup;
@@ -5271,7 +5277,6 @@ function createRpcBackedHttpModule(httpModule, transportModule, defaultProtocol 
     const request = httpModule.request(
       {
         ...options.requestOptions,
-        agent: false,
         createConnection: () => transportModule.connect(options.connectionOptions),
       },
       callback,
@@ -5387,9 +5392,7 @@ function createRpcBackedHttpsModule(httpsModule, tlsModule) {
       hostname,
       port,
       path,
-      agent: false,
     };
-    delete requestOptions.agent;
     delete requestOptions.createConnection;
     delete requestOptions.host;
     delete requestOptions.lookup;
@@ -5454,7 +5457,6 @@ function createRpcBackedHttpsModule(httpsModule, tlsModule) {
     return httpsModule.request(
       {
         ...normalized.requestOptions,
-        agent: false,
         createConnection: () => tlsModule.connect(normalized.tlsConnectOptions),
       },
       normalized.callback,
@@ -7566,6 +7568,10 @@ process.argv = [VIRTUAL_EXEC_PATH, guestEntryPoint ?? entrypointPath, ...guestAr
 guestProcess = createGuestProcessProxy(process);
 hardenProperty(globalThis, 'process', guestProcess);
 
+process.once('exit', () => {
+  guestSyncRpc?.dispose?.();
+});
+
 try {
   if (bootstrapModule) {
     await import(toImportSpecifier(bootstrapModule));
@@ -7574,8 +7580,6 @@ try {
   await import(toImportSpecifier(entrypoint));
 } catch (error) {
   throw translateErrorToGuest(error);
-} finally {
-  guestSyncRpc?.dispose?.();
 }
 "#;
 

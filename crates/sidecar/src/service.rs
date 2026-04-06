@@ -353,6 +353,56 @@ where
         Err(SidecarError::Execution(message))
     }
 
+    fn require_command_access(
+        &self,
+        vm_id: &str,
+        request: CommandAccessRequest,
+    ) -> Result<(), SidecarError> {
+        let static_decision =
+            self.static_permission_decision(vm_id, "child_process.spawn", "child_process")
+        ;
+        if let Some(decision) = static_decision.as_ref() {
+            if !decision.allow {
+                let message = match decision.reason.as_deref() {
+                    Some(reason) => {
+                        format!("EACCES: permission denied, {}: {reason}", request.command)
+                    }
+                    None => format!("EACCES: permission denied, {}", request.command),
+                };
+                return Err(SidecarError::Execution(message));
+            }
+        }
+
+        let bridge_decision = match self.with_mut(|bridge| {
+            bridge.check_command_execution(CommandPermissionRequest {
+                vm_id: vm_id.to_owned(),
+                command: request.command.clone(),
+                args: request.args.clone(),
+                cwd: request.cwd.clone(),
+                env: request.env.clone(),
+            })
+        }) {
+            Ok(decision) => map_bridge_permission(decision),
+            Err(error) => PermissionDecision::deny(error.to_string()),
+        };
+        if bridge_decision.allow {
+            return Ok(());
+        }
+        if static_decision.as_ref().is_some_and(|decision| decision.allow)
+            && bridge_decision.reason.as_deref().is_some_and(|reason| {
+                reason.starts_with("no static child_process policy registered for ")
+            })
+        {
+            return Ok(());
+        }
+
+        let message = match bridge_decision.reason.as_deref() {
+            Some(reason) => format!("EACCES: permission denied, {}: {reason}", request.command),
+            None => format!("EACCES: permission denied, {}", request.command),
+        };
+        Err(SidecarError::Execution(message))
+    }
+
     fn set_vm_permissions(
         &self,
         vm_id: &str,
@@ -1603,6 +1653,7 @@ struct ActiveProcess {
     kernel_handle: KernelProcessHandle,
     runtime: GuestRuntimeKind,
     execution: ActiveExecution,
+    host_cwd: PathBuf,
     child_processes: BTreeMap<String, ActiveProcess>,
     next_child_process_id: usize,
     tcp_listeners: BTreeMap<String, ActiveTcpListener>,
@@ -1624,17 +1675,35 @@ struct NetworkResourceCounts {
 }
 
 impl ActiveProcess {
+    #[cfg(test)]
     fn new(
         kernel_pid: u32,
         kernel_handle: KernelProcessHandle,
         runtime: GuestRuntimeKind,
         execution: ActiveExecution,
     ) -> Self {
+        Self::new_with_host_cwd(
+            kernel_pid,
+            kernel_handle,
+            runtime,
+            execution,
+            PathBuf::from("/"),
+        )
+    }
+
+    fn new_with_host_cwd(
+        kernel_pid: u32,
+        kernel_handle: KernelProcessHandle,
+        runtime: GuestRuntimeKind,
+        execution: ActiveExecution,
+        host_cwd: PathBuf,
+    ) -> Self {
         Self {
             kernel_pid,
             kernel_handle,
             runtime,
             execution,
+            host_cwd,
             child_processes: BTreeMap::new(),
             next_child_process_id: 0,
             tcp_listeners: BTreeMap::new(),
@@ -2524,6 +2593,13 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
+    fn vm_import_cache_base_dir(&self, vm_id: &str, runtime: &str) -> PathBuf {
+        self.cache_root
+            .join("runtime-import-caches")
+            .join(runtime)
+            .join(vm_id)
+    }
+
     pub fn new(bridge: B) -> Result<Self, SidecarError> {
         Self::with_config(bridge, NativeSidecarConfig::default())
     }
@@ -2833,6 +2909,18 @@ where
             .expect("owned session should exist")
             .vm_ids
             .insert(vm_id.clone());
+        self.javascript_engine.set_import_cache_base_dir(
+            vm_id.clone(),
+            self.vm_import_cache_base_dir(&vm_id, "javascript"),
+        );
+        self.python_engine.set_import_cache_base_dir(
+            vm_id.clone(),
+            self.vm_import_cache_base_dir(&vm_id, "python"),
+        );
+        self.wasm_engine.set_import_cache_base_dir(
+            vm_id.clone(),
+            self.vm_import_cache_base_dir(&vm_id, "wasm"),
+        );
         self.vms.insert(
             vm_id.clone(),
             VmState {
@@ -3347,6 +3435,16 @@ where
         let argv = std::iter::once(payload.entrypoint.clone())
             .chain(payload.args.iter().cloned())
             .collect::<Vec<_>>();
+        self.bridge.require_command_access(
+            &vm_id,
+            CommandAccessRequest {
+                vm_id: vm_id.clone(),
+                command: command.to_owned(),
+                args: argv.clone(),
+                cwd: Some(String::from("/")),
+                env: env.clone(),
+            },
+        )?;
         let kernel_handle = vm
             .kernel
             .spawn_process(
@@ -3396,6 +3494,10 @@ where
                     .python_engine
                     .bundled_pyodide_dist_path_for_vm(&vm_id)
                     .map_err(python_error)?;
+                env.insert(
+                    String::from("AGENT_OS_PYTHON_DISABLE_NODE_PERMISSION"),
+                    String::from("1"),
+                );
                 let context = self
                     .python_engine
                     .create_context(CreatePythonContextRequest {
@@ -3434,7 +3536,7 @@ where
                         context_id: context.context_id,
                         argv: payload.args.clone(),
                         env,
-                        cwd,
+                        cwd: cwd.clone(),
                         permission_tier: execution_wasm_permission_tier(wasm_permission_tier),
                     })
                     .map_err(wasm_error)?;
@@ -3445,11 +3547,12 @@ where
 
         vm.active_processes.insert(
             payload.process_id.clone(),
-            ActiveProcess::new(
+            ActiveProcess::new_with_host_cwd(
                 kernel_handle.pid(),
                 kernel_handle,
                 payload.runtime,
                 execution,
+                cwd,
             ),
         );
         self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
@@ -4044,17 +4147,23 @@ where
     fn resolve_javascript_child_process_execution(
         &self,
         vm: &VmState,
+        parent_host_cwd: &Path,
         request: &JavascriptChildProcessSpawnRequest,
     ) -> Result<ResolvedChildProcessExecution, SidecarError> {
-        let guest_cwd = normalize_path(request.options.cwd.as_deref().unwrap_or("/"));
-        let host_cwd = host_mount_path_for_guest_path(vm, &guest_cwd).unwrap_or_else(|| {
-            let candidate = PathBuf::from(&guest_cwd);
-            if candidate.is_absolute() {
-                candidate
-            } else {
-                vm.cwd.clone()
-            }
-        });
+        let guest_cwd = normalize_path(request.options.cwd.as_deref().unwrap_or("/root"));
+        let host_cwd = request
+            .options
+            .cwd
+            .as_deref()
+            .map(|_| {
+                host_path_for_child_guest_cwd(
+                    vm,
+                    &request.options.internal_bootstrap_env,
+                    parent_host_cwd,
+                    &guest_cwd,
+                )
+            })
+            .unwrap_or_else(|| parent_host_cwd.to_path_buf());
         let mut env = vm.guest_env.clone();
         env.extend(request.options.env.clone());
 
@@ -4097,14 +4206,11 @@ where
                 {
                     host_cwd.join(entrypoint_specifier)
                 } else {
-                    host_mount_path_for_guest_path(vm, &guest_entrypoint).unwrap_or_else(|| {
-                        let candidate = PathBuf::from(&guest_entrypoint);
-                        if candidate.is_absolute() {
-                            candidate
-                        } else {
-                            host_cwd.join(&guest_entrypoint)
-                        }
-                    })
+                    host_path_for_child_guest_path(
+                        vm,
+                        &request.options.internal_bootstrap_env,
+                        &guest_entrypoint,
+                    )
                 };
                 env.insert(String::from("AGENT_OS_GUEST_ENTRYPOINT"), guest_entrypoint);
                 host_entrypoint.to_string_lossy().into_owned()
@@ -4135,15 +4241,7 @@ where
             .command_guest_paths
             .get(&command)
             .ok_or_else(|| SidecarError::InvalidState(format!("command not found: {command}")))?;
-        let host_entrypoint =
-            host_mount_path_for_guest_path(vm, guest_entrypoint).unwrap_or_else(|| {
-                let candidate = PathBuf::from(guest_entrypoint);
-                if candidate.is_absolute() {
-                    candidate
-                } else {
-                    host_cwd.join(guest_entrypoint)
-                }
-            });
+        let host_entrypoint = host_path_for_guest_path(vm, guest_entrypoint);
         let wasm_permission_tier = vm.command_permissions.get(&command).copied();
 
         Ok(ResolvedChildProcessExecution {
@@ -4167,7 +4265,11 @@ where
     ) -> Result<Value, SidecarError> {
         let resolved = {
             let vm = self.vms.get(vm_id).expect("VM should exist");
-            self.resolve_javascript_child_process_execution(vm, &request)?
+            let parent = vm
+                .active_processes
+                .get(process_id)
+                .expect("process should still exist");
+            self.resolve_javascript_child_process_execution(vm, &parent.host_cwd, &request)?
         };
 
         let (parent_kernel_pid, child_process_id) = {
@@ -4263,7 +4365,13 @@ where
             .child_processes
             .insert(
                 child_process_id.clone(),
-                ActiveProcess::new(kernel_pid, kernel_handle, resolved.runtime, execution),
+                ActiveProcess::new_with_host_cwd(
+                    kernel_pid,
+                    kernel_handle,
+                    resolved.runtime,
+                    execution,
+                    resolved.host_cwd.clone(),
+                ),
             );
 
         Ok(json!({
@@ -4326,13 +4434,6 @@ where
                         .expect("process should still exist")
                         .execution
                         .child_pid();
-                    let should_signal_parent = vm
-                        .signal_states
-                        .get(process_id)
-                        .and_then(|handlers| handlers.get(&(libc::SIGCHLD as u32)))
-                        .is_some_and(|registration| {
-                            registration.action != SignalDispositionAction::Default
-                        });
                     let child = vm
                         .active_processes
                         .get_mut(process_id)
@@ -4342,9 +4443,7 @@ where
                         .expect("child process should still exist");
                     child.kernel_handle.finish(exit_code);
                     let _ = vm.kernel.wait_and_reap(child.kernel_pid);
-                    if should_signal_parent {
-                        signal_runtime_process(parent_runtime_pid, libc::SIGCHLD)?;
-                    }
+                    signal_runtime_process(parent_runtime_pid, libc::SIGCHLD)?;
                     return Ok(json!({
                         "type": "exit",
                         "exitCode": exit_code,
@@ -6552,6 +6651,17 @@ fn host_path_for_guest_path(vm: &VmState, guest_path: &str) -> PathBuf {
     path
 }
 
+fn guest_path_for_host_execution_path(host_cwd: &Path, host_path: &Path) -> Option<String> {
+    let normalized_cwd = normalize_host_path(host_cwd);
+    let normalized_path = normalize_host_path(host_path);
+    let relative = normalized_path.strip_prefix(&normalized_cwd).ok()?;
+    let mut guest_path = PathBuf::from("/root");
+    if !relative.as_os_str().is_empty() {
+        guest_path.push(relative);
+    }
+    Some(normalize_path(&guest_path.to_string_lossy()))
+}
+
 fn resolve_javascript_execution_entrypoint(
     vm: &VmState,
     host_cwd: &Path,
@@ -6564,6 +6674,16 @@ fn resolve_javascript_execution_entrypoint(
 
     if entrypoint.starts_with("./") || entrypoint.starts_with("../") {
         return host_cwd.join(entrypoint).to_string_lossy().into_owned();
+    }
+
+    let host_entrypoint = normalize_host_path(Path::new(entrypoint));
+    if host_entrypoint.is_absolute() && host_entrypoint.exists() {
+        if let Some(guest_entrypoint) =
+            guest_path_for_host_execution_path(host_cwd, &host_entrypoint)
+        {
+            env.insert(String::from("AGENT_OS_GUEST_ENTRYPOINT"), guest_entrypoint);
+        }
+        return host_entrypoint.to_string_lossy().into_owned();
     }
 
     let guest_entrypoint = if entrypoint.starts_with("file:") {
@@ -6622,6 +6742,79 @@ fn host_mount_path_for_guest_path_from_mounts(
     None
 }
 
+fn host_path_for_guest_path_from_mappings(
+    mappings: &[JavascriptGuestPathMapping],
+    guest_path: &str,
+) -> Option<PathBuf> {
+    let normalized = normalize_path(guest_path);
+
+    mappings
+        .iter()
+        .filter_map(|mapping| {
+            let guest_root = normalize_path(&mapping.guest_path);
+            if normalized != guest_root && !normalized.starts_with(&format!("{guest_root}/")) {
+                return None;
+            }
+
+            let suffix = normalized
+                .strip_prefix(&guest_root)
+                .unwrap_or_default()
+                .trim_start_matches('/');
+            let mut host_path = PathBuf::from(&mapping.host_path);
+            if !suffix.is_empty() {
+                host_path.push(suffix);
+            }
+
+            Some((guest_root.len(), mapping.host_path.len(), host_path))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)))
+        .map(|(_, _, host_path)| host_path)
+}
+
+fn parse_javascript_guest_path_mappings(
+    env: &BTreeMap<String, String>,
+) -> Vec<JavascriptGuestPathMapping> {
+    env.get("AGENT_OS_GUEST_PATH_MAPPINGS")
+        .and_then(|value| serde_json::from_str::<Vec<JavascriptGuestPathMapping>>(value).ok())
+        .unwrap_or_default()
+}
+
+fn host_path_for_child_guest_path(
+    vm: &VmState,
+    internal_bootstrap_env: &BTreeMap<String, String>,
+    guest_path: &str,
+) -> PathBuf {
+    let mappings = parse_javascript_guest_path_mappings(internal_bootstrap_env);
+    host_path_for_guest_path_from_mappings(&mappings, guest_path)
+        .unwrap_or_else(|| host_path_for_guest_path(vm, guest_path))
+}
+
+fn host_path_for_child_guest_cwd(
+    vm: &VmState,
+    internal_bootstrap_env: &BTreeMap<String, String>,
+    parent_host_cwd: &Path,
+    guest_cwd: &str,
+) -> PathBuf {
+    let normalized = normalize_path(guest_cwd);
+    let mappings = parse_javascript_guest_path_mappings(internal_bootstrap_env);
+    if let Some(path) = host_path_for_guest_path_from_mappings(&mappings, &normalized) {
+        return path;
+    }
+
+    if normalized == "/root" {
+        return normalize_host_path(parent_host_cwd);
+    }
+    if let Some(suffix) = normalized.strip_prefix("/root/") {
+        let mut path = normalize_host_path(parent_host_cwd);
+        if !suffix.is_empty() {
+            path.push(suffix);
+        }
+        return path;
+    }
+
+    host_path_for_guest_path(vm, &normalized)
+}
+
 fn resolve_guest_socket_host_path(
     context: &JavascriptSocketPathContext,
     guest_path: &str,
@@ -6660,6 +6853,14 @@ struct JavascriptChildProcessSpawnOptions {
     internal_bootstrap_env: BTreeMap<String, String>,
     #[serde(default)]
     shell: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct JavascriptGuestPathMapping {
+    #[serde(rename = "guestPath")]
+    guest_path: String,
+    #[serde(rename = "hostPath")]
+    host_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -8984,11 +9185,12 @@ ykAheWCsAteSEWVc0w==\n\
         let vm = sidecar.vms.get_mut(vm_id).expect("javascript vm");
         vm.active_processes.insert(
             process_id.to_owned(),
-            ActiveProcess::new(
+            ActiveProcess::new_with_host_cwd(
                 kernel_handle.pid(),
                 kernel_handle,
                 GuestRuntimeKind::JavaScript,
                 ActiveExecution::Javascript(execution),
+                cwd.to_path_buf(),
             ),
         );
     }
@@ -10948,12 +11150,24 @@ await new Promise(() => {});
                 vm_id: vm_id.clone(),
                 context_id: context.context_id,
                 argv: vec![String::from("./entry.mjs")],
-                env: BTreeMap::from([(
-                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
-                    String::from(
-                        "[\"assert\",\"buffer\",\"console\",\"child_process\",\"crypto\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                env: BTreeMap::from([
+                    (
+                        String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                        String::from(
+                            "[\"assert\",\"buffer\",\"console\",\"child_process\",\"crypto\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                        ),
                     ),
-                )]),
+                    (
+                        String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+                        json!([
+                            {
+                                "guestPath": "/root",
+                                "hostPath": cwd,
+                            }
+                        ])
+                        .to_string(),
+                    ),
+                ]),
                 cwd: cwd.clone(),
             })
             .expect("start fake javascript execution");
@@ -11057,8 +11271,17 @@ await new Promise(() => {});
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id =
-            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
+        let vm_id = create_vm_with_metadata(
+            &mut sidecar,
+            &connection_id,
+            &session_id,
+            Vec::new(),
+            BTreeMap::from([(
+                format!("env.{LOOPBACK_EXEMPT_PORTS_ENV}"),
+                serde_json::to_string(&vec![port.to_string()]).expect("serialize exempt ports"),
+            )]),
+        )
+        .expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-net-rpc-cwd");
         write_fixture(
             &cwd.join("entry.mjs"),
@@ -14132,12 +14355,24 @@ console.log(JSON.stringify({
                 vm_id: vm_id.clone(),
                 context_id: context.context_id,
                 argv: vec![String::from("./entry.mjs")],
-                env: BTreeMap::from([(
-                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
-                    String::from(
-                        "[\"assert\",\"buffer\",\"console\",\"child_process\",\"crypto\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                env: BTreeMap::from([
+                    (
+                        String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                        String::from(
+                            "[\"assert\",\"buffer\",\"console\",\"child_process\",\"crypto\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                        ),
                     ),
-                )]),
+                    (
+                        String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+                        json!([
+                            {
+                                "guestPath": "/root",
+                                "hostPath": cwd,
+                            }
+                        ])
+                        .to_string(),
+                    ),
+                ]),
                 cwd: cwd.clone(),
             })
             .expect("start fake javascript execution");
@@ -14161,11 +14396,12 @@ console.log(JSON.stringify({
             let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
             vm.active_processes.insert(
                 String::from("proc-js-child"),
-                ActiveProcess::new(
+                ActiveProcess::new_with_host_cwd(
                     kernel_handle.pid(),
                     kernel_handle,
                     GuestRuntimeKind::JavaScript,
                     ActiveExecution::Javascript(execution),
+                    cwd.clone(),
                 ),
             );
         }

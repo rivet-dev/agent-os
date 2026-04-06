@@ -90,7 +90,7 @@
         "No tests are deleted to make the suite pass - fix or document skip reason"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Progress log repeatedly mentions pre-existing sidecar test failures that were never fixed during development"
     },
     {

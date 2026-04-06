@@ -1,5 +1,7 @@
 # Ralph Progress Log
 ## Codebase Patterns
+- Sidecar-owned JavaScript, Python, and WASM engines should use per-VM import-cache roots; sharing one temp cache lets stale-runner cleanup delete another VM's assets.
+- Timer-driven guest Node networking can outlive top-level module evaluation, so the sync-RPC bridge must stay alive until process exit rather than being disposed when the entry module resolves.
 - Security tests must use real Node.js execution and attempt actual forbidden operations, not just verify argument construction with fake binaries.
 - Sidecar test assertions must check response payload contents, not just match on variant shapes with wildcard discards.
 - Import-cache tests should use `NodeImportCache::new_in()` with unique temp directories to avoid parallel test interference.
@@ -64,4 +66,15 @@ Started: Sat Apr  5 2026
   - `JavascriptExecutionEngine::default()` still shares `env::temp_dir()` unless a caller overrides the VM import-cache root, so parallel tests should preconfigure a unique base directory per engine.
   - The Node sync-RPC bridge uses inherited bootstrap FDs; closing them from guest JS is unnecessary and can surface host warnings that break stderr-strict tests.
   - Warmup metrics should track the current `NODE_WARMUP_SPECIFIERS` list in `crates/execution/src/javascript.rs`; stale hard-coded counts become false failures after warmup changes.
+---
+## 2026-04-05 19:17:10 PDT - US-016
+- Fixed the pre-existing `agent-os-sidecar` failures across Python, JavaScript child-process, HTTP/HTTPS, raw TCP, SIGCHLD, crash-isolation, and VM lifecycle coverage by tightening sidecar/runtime integration points rather than skipping tests.
+- Added per-VM import-cache roots for Python and WASM sidecar engines, kept the Node sync-RPC bridge alive until process exit for timer-driven networking, restored guest HTTP/HTTPS transport to the sidecar polyfills, repaired host-path and `/root` cwd handling for top-level and nested JavaScript execution, and reinstated top-level command permission callback recording.
+- Quality checks: `cargo test -p agent-os-sidecar -- --test-threads=1` passes with zero failures.
+- Files changed: `AGENTS.md`, `crates/execution/src/node_import_cache.rs`, `crates/execution/src/python.rs`, `crates/execution/src/wasm.rs`, `crates/sidecar/src/service.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Sidecar-managed runtime engines need per-VM import-cache roots, not just test-local `NodeImportCache::new_in(...)`, or stale-cache sweeps from one VM can delete another VM's runner assets.
+  - Guest Node networking may still be using sync-RPC after the entry module resolves, so bridge teardown belongs on process exit rather than module completion.
+  - Top-level `NativeSidecar::execute(...)` still needs an explicit bridge command-permission callback if tests or audit hooks expect `cmd:` permission events; kernel spawn permission enforcement alone does not satisfy that contract.
+  - Guest JavaScript child-process cwd `/root` should map back to the parent host cwd when the runtime is backed by a host workspace mirror; otherwise nested `node ./child.mjs` resolves against a nonexistent `<host-cwd>/root/...` path.
 ---
