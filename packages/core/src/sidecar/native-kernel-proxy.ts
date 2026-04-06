@@ -904,8 +904,9 @@ export class NativeSidecarKernelProxy {
 						continue;
 					}
 					if (!this.signalRefreshes.has(entry.pid)) {
+						// Keep the cached signal table warm, but do not stall stdout/stderr
+						// delivery on an extra sidecar round-trip.
 						this.signalRefreshes.set(entry.pid, this.refreshSignalState(entry));
-						await this.signalRefreshes.get(entry.pid);
 					}
 					const chunk = new TextEncoder().encode(event.payload.chunk);
 					const listeners =

@@ -117,7 +117,7 @@
         "pi-sdk-adapter.test.ts passes (3/3)."
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Many of these may be fixed by US-300. This story covers anything remaining after the VFS write fix."
     },
     {

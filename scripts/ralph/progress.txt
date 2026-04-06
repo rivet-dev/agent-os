@@ -9,6 +9,7 @@
 - Timer-driven guest Node networking can outlive top-level module evaluation, so the sync-RPC bridge must stay alive until process exit rather than being disposed when the entry module resolves.
 - Security tests must use real Node.js execution and attempt actual forbidden operations, not just verify argument construction with fake binaries.
 - Sidecar test assertions must check response payload contents, not just match on variant shapes with wildcard discards.
+- In `packages/core/src/sidecar/native-kernel-proxy.ts`, keep `process_output` forwarding off the critical path for `getSignalState(...)`; signal-state refresh can run in the background, but awaiting it before notifying stdout/stderr listeners makes native-sidecar shell tests flaky under parallel Vitest load.
 - Import-cache tests should use `NodeImportCache::new_in()` with unique temp directories to avoid parallel test interference.
 - Guest Node sync-RPC bootstrap FDs should be left for process teardown; closing inherited raw FDs with `fs.closeSync()` emits host warnings on newer Node builds.
 - Full crate test suites (`cargo test -p <crate>`) must pass, not just focused individual test cases.
@@ -223,4 +224,18 @@ Started: Sat Apr  5 2026
   - Focused moved-path smoke checks are the useful validation layer for layout-only stories on this branch; full `packages/core` and `agent-os-execution` runs still surface later PRD stories (`US-301`, `US-307`) that are not caused by the file moves.
   - For grouped test suites, path validation includes non-test consumers too: the Vitest include globs, the Rust `#[path = "javascript/mod.rs"]` shim, and the ignored sidecar integration binaries are all part of the layout contract.
   - Quality checks: `pnpm --dir packages/core exec vitest run tests/unit/host-tools-prompt.test.ts tests/filesystem/overlay.test.ts tests/process/management.test.ts tests/session/protocol.test.ts tests/network/network.test.ts tests/sidecar/client.test.ts` passed; `cargo test --package agent-os-sidecar -- --ignored` passed; `cargo test --package agent-os-execution --test javascript builtin_interception::javascript_execution_imports_http_builtins_when_allowed`, `cargo test --package agent-os-execution --test javascript env_hardening::javascript_execution_virtualizes_process_identity`, and `cargo test --package agent-os-execution --test javascript sync_rpc::javascript_execution_runs_bootstrap_and_streams_stdio` passed.
+---
+## 2026-04-06 03:04:58 PDT - US-306
+- What was implemented
+- Fixed a native-sidecar load-sensitivity in `packages/core/src/sidecar/native-kernel-proxy.ts` by stopping `process_output` delivery from awaiting a `getSignalState(...)` cache refresh before notifying stdout/stderr listeners.
+- Revalidated the full US-306 acceptance set on the grouped test layout and marked the story complete in `scripts/ralph/prd.json`.
+- Files changed
+- `AGENTS.md`
+- `packages/core/src/sidecar/native-kernel-proxy.ts`
+- `scripts/ralph/prd.json`
+- `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The native-sidecar signal-state cache is best-effort metadata; keep it warm in the background, but do not put it on the stdout/stderr delivery path for interactive shell/process tests.
+  - The grouped US-306 acceptance paths on this branch are `tests/process/{spawn-flat-api,shell-flat-api,management,all-processes,tree}.test.ts`, `tests/unit/{host-tools-prompt,software-projection}.test.ts`, `tests/sidecar/native-process.test.ts`, `tests/session/agent-os-events.test.ts`, and `tests/agents/pi/{acp-adapter,sdk-adapter}.test.ts`.
+  - Quality checks: `pnpm --dir packages/core exec vitest run tests/process/spawn-flat-api.test.ts tests/process/shell-flat-api.test.ts tests/process/management.test.ts tests/process/all-processes.test.ts tests/process/tree.test.ts tests/unit/host-tools-prompt.test.ts tests/sidecar/native-process.test.ts tests/unit/software-projection.test.ts tests/session/agent-os-events.test.ts tests/agents/pi/acp-adapter.test.ts tests/agents/pi/sdk-adapter.test.ts` passed (`58/58`); `pnpm --dir packages/core exec tsc --noEmit` passed.
 ---
