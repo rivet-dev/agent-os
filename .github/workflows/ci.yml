@@ -81,6 +81,11 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
+      - name: Install just for dev-shell CLI tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y just
+
       - name: Cache node_modules
         uses: actions/cache@v4
         with:
