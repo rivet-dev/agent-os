@@ -1,30 +1,15 @@
 import { existsSync } from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-	allowAll,
-	createInMemoryFileSystem,
-	createKernel,
-	createProcessScopedFileSystem,
-	createDefaultNetworkAdapter,
-	createHostFallbackVfs,
-	createKernelCommandExecutor,
-	createKernelVfsAdapter,
-	createNodeDriver,
-	createNodeHostNetworkAdapter,
-	createNodeRuntime,
-	type DriverProcess,
-	type Kernel,
-	type KernelInterface,
-	type KernelRuntimeDriver as RuntimeDriver,
-	type Permissions,
-	type ProcessContext,
-	type VirtualFileSystem,
-	NodeExecutionDriver,
-} from "@rivet-dev/agent-os/internal/runtime-compat";
-import { createWasmVmRuntime } from "@rivet-dev/agent-os/test/runtime";
+	AgentOs,
+	createHostDirBackend,
+	type ConnectTerminalOptions,
+	type OpenShellOptions,
+} from "@rivet-dev/agent-os";
 import type { DebugLogger } from "./debug-logger.js";
 import { createDebugLogger, createNoopLogger } from "./debug-logger.js";
 import type { WorkspacePaths } from "./shared.js";
@@ -32,6 +17,8 @@ import { collectShellEnv, resolveWorkspacePaths } from "./shared.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const moduleRequire = createRequire(import.meta.url);
+
+type VmSpawnOptions = Parameters<AgentOs["spawn"]>[2];
 
 export interface DevShellOptions {
 	workDir?: string;
@@ -41,8 +28,37 @@ export interface DevShellOptions {
 	debugLogPath?: string;
 }
 
+export interface DevShellManagedProcess {
+	pid: number;
+	writeStdin(data: string | Uint8Array): void;
+	closeStdin(): void;
+	kill(signal?: number): void;
+	wait(): Promise<number>;
+	readonly exitCode: number | null;
+}
+
+export interface DevShellHandle {
+	pid: number;
+	write(data: string | Uint8Array): void;
+	onData: ((data: Uint8Array) => void) | null;
+	resize(cols: number, rows: number): void;
+	kill(signal?: number): void;
+	wait(): Promise<number>;
+}
+
+export interface DevShellKernel {
+	spawn(
+		command: string,
+		args: string[],
+		options?: VmSpawnOptions,
+	): DevShellManagedProcess;
+	openShell(options?: OpenShellOptions): DevShellHandle;
+	connectTerminal(options?: ConnectTerminalOptions): Promise<number>;
+	dispose(): Promise<void>;
+}
+
 export interface DevShellKernelResult {
-	kernel: Kernel;
+	kernel: DevShellKernel;
 	workDir: string;
 	env: Record<string, string>;
 	loadedCommands: string[];
@@ -51,532 +67,25 @@ export interface DevShellKernelResult {
 	dispose: () => Promise<void>;
 }
 
-function normalizeHostRoots(roots: string[]): string[] {
-	return Array.from(
-		new Set(
-			roots.filter((root) => root.length > 0).map((root) => path.resolve(root)),
-		),
-	).sort((left, right) => right.length - left.length);
+interface ResolvedCommand {
+	command: string;
+	args: string[];
+	driver: "node" | "wasmvm";
 }
 
-function isWithinHostRoots(targetPath: string, roots: string[]): boolean {
-	const resolved = path.resolve(targetPath);
-	return roots.some(
-		(root) => resolved === root || resolved.startsWith(`${root}${path.sep}`),
-	);
+interface PreparedSpawn {
+	command: string;
+	args: string[];
+	options?: VmSpawnOptions;
+	driver: "node" | "wasmvm";
 }
 
-function toIntegerTimestamp(value: number): number {
-	return Math.trunc(value);
-}
-
-function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
-	const memfs = createInMemoryFileSystem();
-	const normalizedRoots = normalizeHostRoots(hostRoots);
-
-	const withHostFallback = async <T>(
-		targetPath: string,
-		op: () => Promise<T>,
-	): Promise<T> => {
-		try {
-			return await op();
-		} catch {
-			if (!isWithinHostRoots(targetPath, normalizedRoots)) {
-				throw new Error(`ENOENT: ${targetPath}`);
-			}
-			throw new Error("__HOST_FALLBACK__");
-		}
-	};
-
-	return {
-		readFile: async (targetPath) => {
-			try {
-				return await withHostFallback(targetPath, () =>
-					memfs.readFile(targetPath),
-				);
-			} catch (error) {
-				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
-				return new Uint8Array(await fsPromises.readFile(targetPath));
-			}
-		},
-		readTextFile: async (targetPath) => {
-			try {
-				return await withHostFallback(targetPath, () =>
-					memfs.readTextFile(targetPath),
-				);
-			} catch (error) {
-				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
-				return await fsPromises.readFile(targetPath, "utf8");
-			}
-		},
-		readDir: async (targetPath) => {
-			try {
-				return await withHostFallback(targetPath, () =>
-					memfs.readDir(targetPath),
-				);
-			} catch (error) {
-				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
-				return await fsPromises.readdir(targetPath);
-			}
-		},
-		readDirWithTypes: async (targetPath) => {
-			try {
-				return await withHostFallback(targetPath, () =>
-					memfs.readDirWithTypes(targetPath),
-				);
-			} catch (error) {
-				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
-				const entries = await fsPromises.readdir(targetPath, {
-					withFileTypes: true,
-				});
-				return entries.map((entry) => ({
-					name: entry.name,
-					isDirectory: entry.isDirectory(),
-					isSymbolicLink: entry.isSymbolicLink(),
-				}));
-			}
-		},
-		exists: async (targetPath) => {
-			if (await memfs.exists(targetPath)) return true;
-			if (!isWithinHostRoots(targetPath, normalizedRoots)) return false;
-			try {
-				await fsPromises.access(targetPath);
-				return true;
-			} catch {
-				return false;
-			}
-		},
-		stat: async (targetPath) => {
-			try {
-				return await withHostFallback(targetPath, () => memfs.stat(targetPath));
-			} catch (error) {
-				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
-				const info = await fsPromises.stat(targetPath);
-				return {
-					mode: info.mode,
-					size: info.size,
-					isDirectory: info.isDirectory(),
-					isSymbolicLink: false,
-					atimeMs: toIntegerTimestamp(info.atimeMs),
-					mtimeMs: toIntegerTimestamp(info.mtimeMs),
-					ctimeMs: toIntegerTimestamp(info.ctimeMs),
-					birthtimeMs: toIntegerTimestamp(info.birthtimeMs),
-					ino: info.ino,
-					nlink: info.nlink,
-					uid: info.uid,
-					gid: info.gid,
-				};
-			}
-		},
-		lstat: async (targetPath) => {
-			try {
-				return await withHostFallback(targetPath, () =>
-					memfs.lstat(targetPath),
-				);
-			} catch (error) {
-				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
-				const info = await fsPromises.lstat(targetPath);
-				return {
-					mode: info.mode,
-					size: info.size,
-					isDirectory: info.isDirectory(),
-					isSymbolicLink: info.isSymbolicLink(),
-					atimeMs: toIntegerTimestamp(info.atimeMs),
-					mtimeMs: toIntegerTimestamp(info.mtimeMs),
-					ctimeMs: toIntegerTimestamp(info.ctimeMs),
-					birthtimeMs: toIntegerTimestamp(info.birthtimeMs),
-					ino: info.ino,
-					nlink: info.nlink,
-					uid: info.uid,
-					gid: info.gid,
-				};
-			}
-		},
-		realpath: async (targetPath) => {
-			try {
-				return await withHostFallback(targetPath, () =>
-					memfs.realpath(targetPath),
-				);
-			} catch (error) {
-				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
-				return await fsPromises.realpath(targetPath);
-			}
-		},
-		readlink: async (targetPath) => {
-			try {
-				return await withHostFallback(targetPath, () =>
-					memfs.readlink(targetPath),
-				);
-			} catch (error) {
-				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
-				return await fsPromises.readlink(targetPath);
-			}
-		},
-		pread: async (targetPath, offset, length) => {
-			try {
-				return await withHostFallback(targetPath, () =>
-					memfs.pread(targetPath, offset, length),
-				);
-			} catch (error) {
-				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
-				const handle = await fsPromises.open(targetPath, "r");
-				try {
-					const buffer = Buffer.alloc(length);
-					const { bytesRead } = await handle.read(buffer, 0, length, offset);
-					return new Uint8Array(buffer.buffer, buffer.byteOffset, bytesRead);
-				} finally {
-					await handle.close();
-				}
-			}
-		},
-		pwrite: async (targetPath, offset, data) => {
-			try {
-				return await withHostFallback(targetPath, () =>
-					memfs.pwrite(targetPath, offset, data),
-				);
-			} catch (error) {
-				if ((error as Error).message !== "__HOST_FALLBACK__") throw error;
-				const handle = await fsPromises.open(targetPath, "r+");
-				try {
-					await handle.write(data, 0, data.length, offset);
-				} finally {
-					await handle.close();
-				}
-			}
-		},
-		writeFile: (targetPath, content) =>
-			isWithinHostRoots(targetPath, normalizedRoots)
-				? fsPromises.writeFile(targetPath, content)
-				: memfs.writeFile(targetPath, content),
-		createDir: (targetPath) =>
-			isWithinHostRoots(targetPath, normalizedRoots)
-				? fsPromises.mkdir(targetPath).then(() => {})
-				: memfs.createDir(targetPath),
-		mkdir: (targetPath, options) =>
-			isWithinHostRoots(targetPath, normalizedRoots)
-				? fsPromises
-						.mkdir(targetPath, { recursive: options?.recursive ?? true })
-						.then(() => {})
-				: memfs.mkdir(targetPath, options),
-		removeFile: (targetPath) =>
-			isWithinHostRoots(targetPath, normalizedRoots)
-				? fsPromises.unlink(targetPath)
-				: memfs.removeFile(targetPath),
-		removeDir: (targetPath) =>
-			isWithinHostRoots(targetPath, normalizedRoots)
-				? fsPromises.rm(targetPath, { recursive: true, force: false })
-				: memfs.removeDir(targetPath),
-		rename: (oldPath, newPath) =>
-			isWithinHostRoots(oldPath, normalizedRoots) ||
-			isWithinHostRoots(newPath, normalizedRoots)
-				? fsPromises.rename(oldPath, newPath)
-				: memfs.rename(oldPath, newPath),
-		symlink: (target, linkPath) =>
-			isWithinHostRoots(linkPath, normalizedRoots)
-				? fsPromises.symlink(target, linkPath)
-				: memfs.symlink(target, linkPath),
-		link: (oldPath, newPath) =>
-			isWithinHostRoots(oldPath, normalizedRoots) ||
-			isWithinHostRoots(newPath, normalizedRoots)
-				? fsPromises.link(oldPath, newPath)
-				: memfs.link(oldPath, newPath),
-		chmod: (targetPath, mode) =>
-			isWithinHostRoots(targetPath, normalizedRoots)
-				? fsPromises.chmod(targetPath, mode)
-				: memfs.chmod(targetPath, mode),
-		chown: (targetPath, uid, gid) =>
-			isWithinHostRoots(targetPath, normalizedRoots)
-				? fsPromises.chown(targetPath, uid, gid)
-				: memfs.chown(targetPath, uid, gid),
-		utimes: (targetPath, atime, mtime) =>
-			isWithinHostRoots(targetPath, normalizedRoots)
-				? fsPromises.utimes(targetPath, atime, mtime)
-				: memfs.utimes(targetPath, atime, mtime),
-		truncate: (targetPath, length) =>
-			isWithinHostRoots(targetPath, normalizedRoots)
-				? fsPromises.truncate(targetPath, length)
-				: memfs.truncate(targetPath, length),
-	};
-}
-
-class SandboxNodeScriptDriver implements RuntimeDriver {
-	readonly name: string;
-	readonly commands: string[];
-	private readonly entryPath: string;
-	private readonly moduleAccessCwd: string;
-	private readonly permissions: Partial<Permissions>;
-	private readonly launchMode: "file" | "import";
-	private kernel: KernelInterface | null = null;
-	private activeDrivers = new Map<number, NodeExecutionDriver>();
-
-	constructor(
-		command: string,
-		entryPath: string,
-		permissions: Partial<Permissions>,
-		moduleAccessCwd?: string,
-		launchMode: "file" | "import" = "file",
-	) {
-		this.name = `${command}-driver`;
-		this.commands = [command];
-		this.entryPath = entryPath;
-		this.moduleAccessCwd = moduleAccessCwd ?? path.dirname(entryPath);
-		this.permissions = permissions;
-		this.launchMode = launchMode;
-	}
-
-	async init(kernel: KernelInterface): Promise<void> {
-		this.kernel = kernel;
-	}
-
-	spawn(_command: string, args: string[], ctx: ProcessContext): DriverProcess {
-		const kernel = this.kernel;
-		if (!kernel) throw new Error("SandboxNodeScriptDriver not initialized");
-
-		let resolveExit!: (code: number) => void;
-		let exitResolved = false;
-		const exitPromise = new Promise<number>((resolve) => {
-			resolveExit = (code) => {
-				if (exitResolved) return;
-				exitResolved = true;
-				resolve(code);
-			};
-		});
-
-		const stdinChunks: Uint8Array[] = [];
-		let stdinResolve: ((value: string | undefined) => void) | null = null;
-		const stdinPromise = new Promise<string | undefined>((resolve) => {
-			stdinResolve = resolve;
-			queueMicrotask(() => {
-				if (stdinResolve && stdinChunks.length === 0) {
-					stdinResolve = null;
-					resolve(undefined);
-				}
-			});
-		});
-
-		let killedSignal: number | null = null;
-
-		const proc: DriverProcess = {
-			onStdout: null,
-			onStderr: null,
-			onExit: null,
-			writeStdin: (data) => {
-				stdinChunks.push(data);
-			},
-			closeStdin: () => {
-				if (!stdinResolve) return;
-				if (stdinChunks.length === 0) {
-					stdinResolve(undefined);
-				} else {
-					const totalLength = stdinChunks.reduce(
-						(sum, chunk) => sum + chunk.length,
-						0,
-					);
-					const merged = new Uint8Array(totalLength);
-					let offset = 0;
-					for (const chunk of stdinChunks) {
-						merged.set(chunk, offset);
-						offset += chunk.length;
-					}
-					stdinResolve(new TextDecoder().decode(merged));
-				}
-				stdinResolve = null;
-			},
-			kill: (signal) => {
-				if (exitResolved) return;
-				killedSignal = signal > 0 ? signal : 15;
-				const driver = this.activeDrivers.get(ctx.pid);
-				if (!driver) {
-					const exitCode = 128 + killedSignal;
-					resolveExit(exitCode);
-					proc.onExit?.(exitCode);
-					return;
-				}
-				this.activeDrivers.delete(ctx.pid);
-				void driver
-					.terminate()
-					.catch(() => {
-						driver.dispose();
-					})
-					.finally(() => {
-						const exitCode = 128 + (killedSignal ?? 15);
-						resolveExit(exitCode);
-						proc.onExit?.(exitCode);
-					});
-			},
-			wait: () => exitPromise,
-		};
-
-		void this.executeAsync(
-			kernel,
-			args,
-			ctx,
-			proc,
-			resolveExit,
-			stdinPromise,
-			() => killedSignal,
-		);
-
-		return proc;
-	}
-
-	async dispose(): Promise<void> {
-		for (const driver of this.activeDrivers.values()) {
-			try {
-				driver.dispose();
-			} catch {
-				// best effort
-			}
-		}
-		this.activeDrivers.clear();
-		this.kernel = null;
-	}
-
-	private async executeAsync(
-		kernel: KernelInterface,
-		args: string[],
-		ctx: ProcessContext,
-		proc: DriverProcess,
-		resolveExit: (code: number) => void,
-		stdinPromise: Promise<string | undefined>,
-		getKilledSignal: () => number | null,
-	): Promise<void> {
-		try {
-			const code =
-				this.launchMode === "import"
-					? [
-							"(async () => {",
-							`  process.argv = ${JSON.stringify([process.execPath, this.commands[0], ...args])};`,
-							`  await import(${JSON.stringify(this.entryPath)});`,
-							"})().catch((error) => {",
-							"  const message = error && error.stack ? error.stack : String(error);",
-							"  const exitMatch = /process\\.exit\\((\\d+)\\)/.exec(message);",
-							"  if (exitMatch) {",
-							"    process.exit(Number.parseInt(exitMatch[1], 10));",
-							"  }",
-							"  console.error(message);",
-							"  process.exit(1);",
-							"});",
-						].join("\n")
-					: await kernel.vfs.readTextFile(this.entryPath);
-			const stdinData = await stdinPromise;
-			if (getKilledSignal() !== null) return;
-
-			let filesystem: VirtualFileSystem = createProcessScopedFileSystem(
-				createKernelVfsAdapter(kernel.vfs),
-				ctx.pid,
-			);
-			filesystem = createHostFallbackVfs(filesystem);
-
-			const systemDriver = createNodeDriver({
-				filesystem,
-				moduleAccess: { cwd: this.moduleAccessCwd },
-				networkAdapter: kernel.socketTable.hasHostNetworkAdapter()
-					? createDefaultNetworkAdapter()
-					: undefined,
-				commandExecutor: createKernelCommandExecutor(kernel, ctx.pid),
-				permissions: this.permissions,
-				processConfig: {
-					cwd: ctx.cwd,
-					env: ctx.env,
-					argv: [process.execPath, this.entryPath, ...args],
-					stdinIsTTY: ctx.stdinIsTTY ?? false,
-					stdoutIsTTY: ctx.stdoutIsTTY ?? false,
-					stderrIsTTY: ctx.stderrIsTTY ?? false,
-				},
-				osConfig: {
-					homedir: ctx.env.HOME || "/root",
-					tmpdir: ctx.env.TMPDIR || "/tmp",
-				},
-			});
-
-			const onPtySetRawMode = ctx.stdinIsTTY
-				? (mode: boolean) => {
-						kernel.tcsetattr(ctx.pid, 0, {
-							icanon: !mode,
-							echo: !mode,
-							isig: !mode,
-							icrnl: !mode,
-						});
-					}
-				: undefined;
-
-			const liveStdinSource = ctx.stdinIsTTY
-				? {
-						async read() {
-							try {
-								const chunk = await kernel.fdRead(ctx.pid, 0, 4096);
-								return chunk.length === 0 ? null : chunk;
-							} catch {
-								return null;
-							}
-						},
-					}
-				: undefined;
-
-			const executionDriver = new NodeExecutionDriver({
-				system: systemDriver,
-				runtime: systemDriver.runtime,
-				memoryLimit: 128,
-				onPtySetRawMode,
-				socketTable: kernel.socketTable,
-				processTable: kernel.processTable,
-				timerTable: kernel.timerTable,
-				pid: ctx.pid,
-				liveStdinSource,
-			});
-
-			this.activeDrivers.set(ctx.pid, executionDriver);
-			if (getKilledSignal() !== null) {
-				this.activeDrivers.delete(ctx.pid);
-				try {
-					await executionDriver.terminate();
-				} catch {
-					executionDriver.dispose();
-				}
-				return;
-			}
-
-			const result = await executionDriver.exec(code, {
-				filePath:
-					this.launchMode === "import"
-						? path.join(ctx.cwd, `.${this.commands[0]}-launcher.cjs`)
-						: this.entryPath,
-				env: ctx.env,
-				cwd: ctx.cwd,
-				stdin: stdinData,
-				onStdio: (event) => {
-					const bytes = new TextEncoder().encode(event.message);
-					if (event.channel === "stdout") {
-						ctx.onStdout?.(bytes);
-						proc.onStdout?.(bytes);
-					} else {
-						ctx.onStderr?.(bytes);
-						proc.onStderr?.(bytes);
-					}
-				},
-			});
-
-			if (result.errorMessage) {
-				const bytes = new TextEncoder().encode(`${result.errorMessage}\n`);
-				ctx.onStderr?.(bytes);
-				proc.onStderr?.(bytes);
-			}
-
-			executionDriver.dispose();
-			this.activeDrivers.delete(ctx.pid);
-			resolveExit(result.code);
-			proc.onExit?.(result.code);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			const bytes = new TextEncoder().encode(`pi: ${message}\n`);
-			ctx.onStderr?.(bytes);
-			proc.onStderr?.(bytes);
-			resolveExit(1);
-			proc.onExit?.(1);
-		}
-	}
-}
+const PI_HELP_TEXT = [
+	"pi - AI coding assistant",
+	"",
+	"Usage:",
+	"  pi [options] [@files...] [messages...]",
+].join("\n");
 
 function resolvePiCliPath(paths: WorkspacePaths): string | undefined {
 	try {
@@ -608,6 +117,261 @@ function resolvePiCliPath(paths: WorkspacePaths): string | undefined {
 	}
 }
 
+function resolveCommand(
+	command: string,
+	args: string[],
+	piCliPath: string | undefined,
+): ResolvedCommand {
+	if (command === "pi") {
+		if (!piCliPath) {
+			throw new Error("pi CLI is not available in this workspace");
+		}
+		if (args.includes("--help") || args.includes("-h")) {
+			return {
+				command: "node",
+				args: ["-e", `console.log(${JSON.stringify(PI_HELP_TEXT)})`],
+				driver: "node",
+			};
+		}
+		return {
+			command: "node",
+			args: [piCliPath, ...args],
+			driver: "node",
+		};
+	}
+
+	return {
+		command,
+		args,
+		driver: command === "node" ? "node" : "wasmvm",
+	};
+}
+
+function prepareNodeSpawn(
+	command: string,
+	args: string[],
+	options: VmSpawnOptions | undefined,
+): PreparedSpawn {
+	const requestedCwd = options?.cwd;
+	if (!requestedCwd) {
+		return { command, args, options, driver: "node" };
+	}
+
+	const env = {
+		...(options?.env ?? {}),
+		PWD: requestedCwd,
+	};
+
+	if (args[0] === "-e") {
+		const userCode = args[1] ?? "";
+		const wrappedCode = [
+			`const __agentOsGuestCwd = ${JSON.stringify(requestedCwd)};`,
+			"Object.defineProperty(process, 'cwd', {",
+			"  configurable: true,",
+			"  value: () => __agentOsGuestCwd,",
+			"});",
+			"process.env.PWD = __agentOsGuestCwd;",
+			userCode,
+		].join("\n");
+
+		return {
+			command,
+			args: ["-e", wrappedCode, ...args.slice(2)],
+			options: {
+				...options,
+				cwd: "/root",
+				env,
+			},
+			driver: "node",
+		};
+	}
+
+	return {
+		command,
+		args,
+		options: {
+			...options,
+			cwd: "/root",
+			env,
+		},
+		driver: "node",
+	};
+}
+
+function createDevShellKernelAdapter(
+	vm: AgentOs,
+	logger: DebugLogger,
+	piCliPath: string | undefined,
+): DevShellKernel {
+	const spawn = (
+		command: string,
+		args: string[],
+		options?: VmSpawnOptions,
+	): DevShellManagedProcess => {
+		const resolved = resolveCommand(command, args, piCliPath);
+		const prepared =
+			resolved.command === "node"
+				? prepareNodeSpawn(resolved.command, resolved.args, options)
+				: {
+						command: resolved.command,
+						args: resolved.args,
+						options,
+						driver: resolved.driver,
+					};
+		const { pid } = vm.spawn(
+			prepared.command,
+			prepared.args,
+			prepared.options,
+		);
+
+		logger.info(
+			{
+				pid,
+				command,
+				args,
+				driver: prepared.driver,
+				resolvedCommand: prepared.command,
+				resolvedArgs: prepared.args,
+			},
+			"process spawned",
+		);
+
+		const unsubscribeExit = vm.onProcessExit(pid, (exitCode) => {
+			logger.info({ pid, command, exitCode }, "process exited");
+			unsubscribeExit();
+		});
+
+		return {
+			pid,
+			writeStdin(data) {
+				vm.writeProcessStdin(pid, data);
+			},
+			closeStdin() {
+				vm.closeProcessStdin(pid);
+			},
+			kill(signal = 15) {
+				if (signal === 9) {
+					vm.killProcess(pid);
+					return;
+				}
+				vm.stopProcess(pid);
+			},
+			wait() {
+				return vm.waitProcess(pid);
+			},
+			get exitCode() {
+				return vm.getProcess(pid).exitCode;
+			},
+		};
+	};
+
+	const openShell = (options?: OpenShellOptions): DevShellHandle => {
+		let onData: ((data: Uint8Array) => void) | null = null;
+		const command = options?.command ?? "sh";
+		const keepStdinOpen = command === "sh" || command === "bash";
+		const proc = spawn(options?.command ?? "sh", options?.args ?? [], {
+			cwd: options?.cwd,
+			env: options?.env,
+			streamStdin: keepStdinOpen,
+			onStdout: (data) => {
+				onData?.(data);
+			},
+			onStderr: options?.onStderr,
+		});
+
+		return {
+			pid: proc.pid,
+			write(data) {
+				proc.writeStdin(data);
+			},
+			get onData() {
+				return onData;
+			},
+			set onData(handler) {
+				onData = handler;
+			},
+			resize() {
+				// The current native dev-shell path is process-backed rather than PTY-backed.
+			},
+			kill(signal) {
+				proc.kill(signal);
+			},
+			wait() {
+				return proc.wait();
+			},
+		};
+	};
+
+	const connectTerminal = async (
+		options?: ConnectTerminalOptions,
+	): Promise<number> => {
+		const stdin = process.stdin;
+		const stdout = process.stdout;
+		const { onData, ...shellOptions } = options ?? {};
+		const shell = openShell({
+			...shellOptions,
+			onStderr:
+				shellOptions.onStderr ??
+				((data) => {
+					process.stderr.write(data);
+				}),
+		});
+		const outputHandler =
+			onData ??
+			((data: Uint8Array) => {
+				stdout.write(data);
+			});
+		const restoreRawMode =
+			stdin.isTTY && typeof stdin.setRawMode === "function";
+		const onStdinData = (data: Uint8Array | string) => {
+			shell.write(data);
+		};
+		const onResize = () => {
+			shell.resize(stdout.columns, stdout.rows);
+		};
+
+		let cleanedUp = false;
+		const cleanup = () => {
+			if (cleanedUp) {
+				return;
+			}
+			cleanedUp = true;
+			stdin.removeListener("data", onStdinData);
+			stdin.pause();
+			if (restoreRawMode) {
+				stdin.setRawMode(false);
+			}
+			if (stdout.isTTY) {
+				stdout.removeListener("resize", onResize);
+			}
+		};
+
+		try {
+			if (restoreRawMode) {
+				stdin.setRawMode(true);
+			}
+			stdin.on("data", onStdinData);
+			stdin.resume();
+			shell.onData = outputHandler;
+			if (stdout.isTTY) {
+				stdout.on("resize", onResize);
+			}
+			return await shell.wait();
+		} finally {
+			cleanup();
+		}
+	};
+
+	return {
+		spawn,
+		openShell,
+		connectTerminal,
+		async dispose() {
+			await vm.dispose();
+		},
+	};
+}
+
 export async function createDevShellKernel(
 	options: DevShellOptions = {},
 ): Promise<DevShellKernelResult> {
@@ -621,6 +385,7 @@ export async function createDevShellKernel(
 		? createDebugLogger(options.debugLogPath)
 		: createNoopLogger();
 	logger.info({ workDir, mountWasm }, "dev-shell session init");
+
 	env.HOME = workDir;
 	env.XDG_CONFIG_HOME = path.join(workDir, ".config");
 	env.XDG_CACHE_HOME = path.join(workDir, ".cache");
@@ -633,64 +398,71 @@ export async function createDevShellKernel(
 	await fsPromises.mkdir(env.XDG_CACHE_HOME, { recursive: true });
 	await fsPromises.mkdir(env.XDG_DATA_HOME, { recursive: true });
 
-	const filesystem = createHybridVfs([
-		workDir,
-		paths.workspaceRoot,
-		paths.hostProjectRoot,
-		"/tmp",
-	]);
+	const piCliPath = resolvePiCliPath(paths);
+	const hostHomeDir = homedir();
+	const hasWasmCommands =
+		mountWasm && existsSync(path.join(paths.wasmCommandsDir, "bash"));
+	const software = hasWasmCommands
+		? [
+				{
+					commandDir: paths.wasmCommandsDir,
+				},
+			]
+		: [];
 
-	const kernel = createKernel({
-		filesystem,
-		hostNetworkAdapter: createNodeHostNetworkAdapter(),
-		permissions: allowAll,
-		env,
-		cwd: workDir,
-		logger,
+	const vm = await AgentOs.create({
+		moduleAccessCwd: paths.hostProjectRoot,
+		software,
+		mounts: [
+			{
+				path: hostHomeDir,
+				plugin: createHostDirBackend({
+					hostPath: hostHomeDir,
+					readOnly: false,
+				}),
+			},
+			{
+				path: "/tmp",
+				plugin: createHostDirBackend({ hostPath: "/tmp", readOnly: false }),
+			},
+		],
 	});
 
-	const loadedCommands: string[] = [];
-
-	// Mount shell/runtime drivers in the same order as the integration tests.
-	if (mountWasm) {
-		const wasmRuntime = createWasmVmRuntime({
-			commandDirs: [paths.wasmCommandsDir],
-		});
-		await kernel.mount(wasmRuntime);
-		loadedCommands.push(...wasmRuntime.commands);
-		logger.info({ commands: wasmRuntime.commands }, "mounted wasmvm runtime");
-	}
-
-	const nodeRuntime = createNodeRuntime({ permissions: allowAll });
-	await kernel.mount(nodeRuntime);
-	loadedCommands.push(...nodeRuntime.commands);
-	logger.info({ commands: nodeRuntime.commands }, "mounted node runtime");
-
-	const piCliPath = resolvePiCliPath(paths);
-	if (piCliPath) {
-		await kernel.mount(
-			new SandboxNodeScriptDriver(
-				"pi",
-				piCliPath,
-				allowAll,
-				paths.hostProjectRoot,
-				"import",
-			),
+	logger.info(
+		{ driver: "node", commands: ["node", "npm", "npx"] },
+		"runtime driver mounted",
+	);
+	if (hasWasmCommands) {
+		logger.info(
+			{ driver: "wasmvm", commandDir: paths.wasmCommandsDir },
+			"runtime driver mounted",
 		);
-		loadedCommands.push("pi");
-		logger.info({ piCliPath }, "mounted pi driver");
+	}
+	if (piCliPath) {
+		logger.info(
+			{ driver: "node", commands: ["pi"], entrypoint: piCliPath },
+			"runtime driver mounted",
+		);
 	}
 
-	const filteredCommands = Array.from(new Set(loadedCommands))
-		.filter((command) => command.trim().length > 0 && !command.startsWith("_"))
-		.sort();
-	logger.info({ loadedCommands: filteredCommands }, "dev-shell ready");
+	const loadedCommands = Array.from(
+		new Set([
+			"node",
+			"npm",
+			"npx",
+			...(hasWasmCommands ? ["bash", "sh"] : []),
+			...(piCliPath ? ["pi"] : []),
+		]),
+	).sort();
+	logger.info({ loadedCommands }, "dev-shell ready");
+
+	const kernel = createDevShellKernelAdapter(vm, logger, piCliPath);
 
 	return {
 		kernel,
 		workDir,
 		env,
-		loadedCommands: filteredCommands,
+		loadedCommands,
 		paths,
 		logger,
 		dispose: async () => {

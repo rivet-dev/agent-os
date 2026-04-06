@@ -343,3 +343,5 @@ pnpm test         # turbo run test
 pnpm check-types  # turbo run check-types
 pnpm lint         # biome check
 ```
+
+- Keep the root `pnpm test` script on Turbo's streaming UI/log order (`--ui=stream --log-order=stream`). The long, quiet tail of `packages/core` agent-session tests can be killed when Turbo groups/buffers that task's output.

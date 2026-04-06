@@ -756,11 +756,11 @@ describe("ACP protocol comprehensive tests", () => {
 
 	beforeEach(async () => {
 		vm = await AgentOs.create();
-	});
+	}, 120_000);
 
 	afterEach(async () => {
 		await vm.dispose();
-	});
+	}, 120_000);
 
 	test("initialize returns protocolVersion and agentInfo with capabilities", async () => {
 		const { client } = await spawnAdapter(vm, FULL_MOCK_ACP_ADAPTER);

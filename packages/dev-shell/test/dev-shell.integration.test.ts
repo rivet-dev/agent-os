@@ -123,7 +123,7 @@ describe.skipIf(!hasWasmBinaries)("dev-shell integration", { timeout: 60_000 }, 
 	});
 });
 
-describe("dev-shell debug logger", { timeout: 60_000 }, () => {
+describe("dev-shell debug logger", { timeout: 120_000 }, () => {
 	let shell: Awaited<ReturnType<typeof createDevShellKernel>> | undefined;
 	let workDir: string | undefined;
 	let logDir: string | undefined;

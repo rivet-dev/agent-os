@@ -7685,6 +7685,12 @@ const VIRTUAL_PROCESS_VERSIONS = deepFreezeObject({
 });
 const VIRTUAL_PROCESS_START_TIME_MS = guestMonotonicNow();
 let guestProcess = process;
+const hostProcessOn =
+  typeof process.on === 'function' ? process.on.bind(process) : null;
+const hostProcessRemoveListener =
+  typeof process.removeListener === 'function'
+    ? process.removeListener.bind(process)
+    : null;
 
 function syncBuiltinModuleExports(hostModule, wrappedModule) {
   if (
@@ -7730,10 +7736,6 @@ function resolveVirtualPath(value, fallback) {
 }
 
 function resolveVirtualHomeDir(value, fallback) {
-  if (typeof process.env.HOME === 'string' && process.env.HOME.startsWith('/')) {
-    return path.posix.normalize(process.env.HOME);
-  }
-
   return resolveVirtualPath(value, fallback);
 }
 
@@ -7898,6 +7900,60 @@ const guestOs = createGuestOsModule(hostOs);
 const guestMemoryUsage = createGuestMemoryUsage();
 const guestProcessUptime = createGuestProcessUptime();
 const guestProcessSignalEmitter = new EventEmitter();
+const trackedHostSignalForwarders = new Map();
+
+function ensureTrackedHostSignalForwarder(signalName) {
+  if (trackedHostSignalForwarders.has(signalName)) {
+    return;
+  }
+
+  if (!hostProcessOn) {
+    return;
+  }
+  if (typeof hostOs.constants?.signals?.[signalName] !== 'number') {
+    return;
+  }
+
+  const forwarder = (...args) => {
+    if (guestProcessSignalEmitter.listenerCount(signalName) > 0) {
+      guestProcessSignalEmitter.emit(signalName, ...args);
+    }
+  };
+
+  try {
+    hostProcessOn(signalName, forwarder);
+    trackedHostSignalForwarders.set(signalName, forwarder);
+  } catch {
+    // Ignore runtimes that reject a specific host signal subscription.
+  }
+}
+
+function syncTrackedHostSignalForwarder(signalName) {
+  if (!isTrackedProcessSignalEventName(signalName)) {
+    return;
+  }
+
+  if (guestProcessSignalEmitter.listenerCount(signalName) > 0) {
+    ensureTrackedHostSignalForwarder(signalName);
+    return;
+  }
+
+  const forwarder = trackedHostSignalForwarders.get(signalName);
+  if (!forwarder) {
+    return;
+  }
+
+  if (!hostProcessRemoveListener) {
+    return;
+  }
+
+  try {
+    hostProcessRemoveListener(signalName, forwarder);
+  } catch {
+    // Ignore runtimes that reject a specific host signal unsubscription.
+  }
+  trackedHostSignalForwarders.delete(signalName);
+}
 
 function isProcessSignalEventName(eventName) {
   return typeof eventName === 'string' && SIGNAL_EVENTS.has(eventName);
@@ -7931,6 +7987,8 @@ function emitGuestProcessSignalState(eventName) {
   if (!isTrackedProcessSignalEventName(eventName)) {
     return;
   }
+
+  syncTrackedHostSignalForwarder(eventName);
 
   const signal = hostOs.constants?.signals?.[eventName];
   if (typeof signal !== 'number') {
@@ -8112,11 +8170,21 @@ function translateModuleResolutionParent(parent) {
     return parent;
   }
 
+  const canonicalizeModuleResolutionPath = (value) => {
+    if (typeof value !== 'string' || !path.isAbsolute(value)) {
+      return value;
+    }
+    return safeRealpath(value) ?? value;
+  };
+
   let nextParent = parent;
   let changed = false;
+  let canonicalFilename = null;
 
   if (typeof parent.id === 'string') {
-    const translatedId = translateModuleResolutionPath(parent.id);
+    const translatedId = canonicalizeModuleResolutionPath(
+      translateModuleResolutionPath(parent.id),
+    );
     if (translatedId !== parent.id) {
       nextParent = { ...nextParent, id: translatedId };
       changed = true;
@@ -8124,7 +8192,9 @@ function translateModuleResolutionParent(parent) {
   }
 
   if (typeof parent.path === 'string') {
-    const translatedPath = translateModuleResolutionPath(parent.path);
+    const translatedPath = canonicalizeModuleResolutionPath(
+      translateModuleResolutionPath(parent.path),
+    );
     if (translatedPath !== parent.path) {
       nextParent = { ...nextParent, path: translatedPath };
       changed = true;
@@ -8132,19 +8202,41 @@ function translateModuleResolutionParent(parent) {
   }
 
   if (typeof parent.filename === 'string') {
-    const translatedFilename = translateModuleResolutionPath(parent.filename);
+    const translatedFilename = canonicalizeModuleResolutionPath(
+      translateModuleResolutionPath(parent.filename),
+    );
     if (translatedFilename !== parent.filename) {
       nextParent = { ...nextParent, filename: translatedFilename };
       changed = true;
     }
+    canonicalFilename = translatedFilename;
   }
 
   if (Array.isArray(parent.paths)) {
     const translatedPaths = parent.paths.map((entry) =>
-      translateModuleResolutionPath(entry),
+      canonicalizeModuleResolutionPath(translateModuleResolutionPath(entry)),
     );
     if (translatedPaths.some((entry, index) => entry !== parent.paths[index])) {
       nextParent = { ...nextParent, paths: translatedPaths };
+      changed = true;
+    }
+  }
+
+  if (
+    typeof canonicalFilename === 'string' &&
+    typeof Module?._nodeModulePaths === 'function'
+  ) {
+    const recomputedPaths = Module._nodeModulePaths(path.dirname(canonicalFilename));
+    if (
+      !Array.isArray(nextParent.paths) ||
+      recomputedPaths.length !== nextParent.paths.length ||
+      recomputedPaths.some((entry, index) => entry !== nextParent.paths[index])
+    ) {
+      nextParent = {
+        ...nextParent,
+        path: path.dirname(canonicalFilename),
+        paths: recomputedPaths,
+      };
       changed = true;
     }
   }
@@ -8256,10 +8348,22 @@ function createGuestRequire(fromGuestDir) {
     hostRequireDir && path.basename(hostRequireDir) === 'node_modules'
       ? path.dirname(hostRequireDir)
       : hostRequireDir;
+  const canonicalHostRequireBaseDir = (() => {
+    if (!hostRequireBaseDir) {
+      return hostRequireBaseDir;
+    }
+    try {
+      return typeof hostFs.realpathSync?.native === 'function'
+        ? hostFs.realpathSync.native(hostRequireBaseDir)
+        : hostFs.realpathSync(hostRequireBaseDir);
+    } catch {
+      return hostRequireBaseDir;
+    }
+  })();
   const baseRequire = Module.createRequire(
     pathToFileURL(
-      hostRequireBaseDir
-        ? path.join(hostRequireBaseDir, '__agent_os_require__.cjs')
+      canonicalHostRequireBaseDir
+        ? path.join(canonicalHostRequireBaseDir, '__agent_os_require__.cjs')
         : path.posix.join(normalizedGuestDir, '__agent_os_require__.cjs'),
     ),
   );
@@ -8674,8 +8778,6 @@ function installGuestHardening() {
   defineMutableProperty(process, 'chdir', () => {
     throw accessDenied('process.chdir');
   });
-  syncBuiltinModuleExports(hostFs, guestFs);
-  syncBuiltinModuleExports(hostFsPromises, guestFs.promises);
   try {
     syncBuiltinESMExports();
   } catch {
@@ -9542,7 +9644,7 @@ function guestUser() {
   const username = process.env.AGENT_OS_VIRTUAL_OS_USER ?? 'user';
   const home = resolveVirtualHomeDir(
     process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR,
-    process.env.HOME ?? `/home/${username}`,
+    DEFAULT_VIRTUAL_OS_HOMEDIR ?? `/home/${username}`,
   );
   const shell = process.env.AGENT_OS_VIRTUAL_OS_SHELL ?? '/bin/sh';
   return { uid, gid, username, home, shell };
@@ -9729,8 +9831,6 @@ function resolveGuestPath(guestPath, cwd = process.cwd()) {
     const guestAnchor =
       typeof process.env.PWD === 'string' && process.env.PWD.startsWith('/')
         ? path.posix.normalize(process.env.PWD)
-        : typeof process.env.HOME === 'string' && process.env.HOME.startsWith('/')
-          ? path.posix.normalize(process.env.HOME)
         : typeof process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR === 'string' &&
             process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR.startsWith('/')
           ? path.posix.normalize(process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR)

@@ -1255,9 +1255,27 @@ export class NativeSidecarProcessClient {
 				},
 				timer: setTimeout(() => {
 					this.eventWaiters.delete(waiter);
+					const bufferedEventSummary =
+						this.bufferedEvents.length === 0
+							? "none"
+							: this.bufferedEvents
+									.map((event) => {
+										const payload = event.payload as {
+											type?: string;
+											process_id?: string;
+											state?: string;
+										};
+										return [
+											payload.type ?? "unknown",
+											payload.process_id ?? payload.state ?? "",
+										]
+											.filter(Boolean)
+											.join(":");
+									})
+									.join(", ");
 					reject(
 						new Error(
-							`timed out waiting for sidecar event\nstderr:\n${this.stderrText()}`,
+							`timed out waiting for sidecar event\nbuffered events: ${bufferedEventSummary}\nstderr:\n${this.stderrText()}`,
 						),
 					);
 				}, timeoutMs),

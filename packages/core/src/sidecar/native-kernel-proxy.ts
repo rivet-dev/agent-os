@@ -543,6 +543,7 @@ export class NativeSidecarKernelProxy {
 		const proc = this.spawn(options?.command ?? "sh", options?.args ?? [], {
 			env: options?.env,
 			cwd: options?.cwd,
+			streamStdin: true,
 			onStdout: (chunk) => {
 				for (const handler of stdoutHandlers) {
 					handler(chunk);
@@ -1085,7 +1086,7 @@ export class NativeSidecarKernelProxy {
 				const entrypoint = this.shadowPathForGuest(guestEntrypoint, false);
 				return {
 					runtime: "java_script",
-					entrypoint: guestEntrypoint,
+					entrypoint,
 					args: entry.args.slice(2),
 					cwd: this.resolveNodeCwd(entry.cwd),
 					env: this.buildNodeExecutionEnv(entry, guestEntrypoint),

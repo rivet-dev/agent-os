@@ -23,6 +23,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1167,13 +1168,27 @@ fn warmup_marker_contents(
         node_binary(),
         compile_cache_dir.display().to_string(),
         pyodide_dist_path.display().to_string(),
-        file_fingerprint(&pyodide_dist_path.join("pyodide.mjs")),
-        file_fingerprint(&pyodide_dist_path.join("pyodide-lock.json")),
-        file_fingerprint(&pyodide_dist_path.join("pyodide.asm.js")),
-        file_fingerprint(&pyodide_dist_path.join("pyodide.asm.wasm")),
-        file_fingerprint(&pyodide_dist_path.join("python_stdlib.zip")),
+        warmup_marker_file_stamp(&pyodide_dist_path.join("pyodide.mjs")),
+        warmup_marker_file_stamp(&pyodide_dist_path.join("pyodide-lock.json")),
+        warmup_marker_file_stamp(&pyodide_dist_path.join("pyodide.asm.js")),
+        warmup_marker_file_stamp(&pyodide_dist_path.join("pyodide.asm.wasm")),
+        warmup_marker_file_stamp(&pyodide_dist_path.join("python_stdlib.zip")),
     ]
     .join("\n")
+}
+
+fn warmup_marker_file_stamp(path: &Path) -> String {
+    match fs::metadata(path) {
+        Ok(metadata) => format!(
+            "{}:{}:{}:{}:{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+        ),
+        Err(_) => file_fingerprint(path),
+    }
 }
 
 fn python_warmup_metrics_enabled(request: &StartPythonExecutionRequest) -> bool {

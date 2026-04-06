@@ -3,13 +3,18 @@ use crate::{
     StartJavascriptExecutionRequest,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BENCHMARK_MARKER_PREFIX: &str = "__AGENT_OS_BENCH__:";
@@ -20,6 +25,7 @@ const BENCHMARK_RUN_STATE_FILE: &str = "run-state.json";
 const TRANSPORT_RTT_CHANNEL: &str = "execution-stdio-echo";
 const TRANSPORT_RTT_PAYLOAD_BYTES: [usize; 3] = [32, 4 * 1024, 64 * 1024];
 const TRANSPORT_POLL_TIMEOUT: Duration = Duration::from_secs(5);
+static NEXT_BENCHMARK_IMPORT_CACHE_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JavascriptBenchmarkConfig {
@@ -2276,7 +2282,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             compile_cache: CompileCacheStrategy::Disabled,
             engine_reuse: EngineReuseStrategy::FreshPerSample,
             expect_import_metric: true,
-            env: ScenarioEnvironment::None,
+            env: ScenarioEnvironment::ProjectedWorkspaceNodeModules,
         },
         ScenarioDefinition {
             id: "projected-package-import",
@@ -2304,7 +2310,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             compile_cache: CompileCacheStrategy::Disabled,
             engine_reuse: EngineReuseStrategy::FreshPerSample,
             expect_import_metric: true,
-            env: ScenarioEnvironment::None,
+            env: ScenarioEnvironment::ProjectedWorkspaceNodeModules,
         },
         ScenarioDefinition {
             id: "jszip-startup",
@@ -2318,7 +2324,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             compile_cache: CompileCacheStrategy::Disabled,
             engine_reuse: EngineReuseStrategy::FreshPerSample,
             expect_import_metric: true,
-            env: ScenarioEnvironment::None,
+            env: ScenarioEnvironment::ProjectedWorkspaceNodeModules,
         },
         ScenarioDefinition {
             id: "jszip-end-to-end",
@@ -2332,7 +2338,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             compile_cache: CompileCacheStrategy::Disabled,
             engine_reuse: EngineReuseStrategy::FreshPerSample,
             expect_import_metric: true,
-            env: ScenarioEnvironment::None,
+            env: ScenarioEnvironment::ProjectedWorkspaceNodeModules,
         },
         ScenarioDefinition {
             id: "jszip-repeated-session-compressed",
@@ -2346,7 +2352,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             compile_cache: CompileCacheStrategy::Primed,
             engine_reuse: EngineReuseStrategy::FreshPerSample,
             expect_import_metric: true,
-            env: ScenarioEnvironment::None,
+            env: ScenarioEnvironment::ProjectedWorkspaceNodeModules,
         },
     ]
 }
@@ -2363,9 +2369,11 @@ fn run_scenario(
     let mut shared_engine = match scenario.engine_reuse {
         EngineReuseStrategy::FreshPerSample => None,
         EngineReuseStrategy::SharedAcrossScenario
-        | EngineReuseStrategy::SharedContextAcrossScenario => {
-            Some(JavascriptExecutionEngine::default())
-        }
+        | EngineReuseStrategy::SharedContextAcrossScenario => Some({
+            let mut engine = JavascriptExecutionEngine::default();
+            configure_benchmark_import_cache(&mut engine, "vm-bench", scenario.id);
+            engine
+        }),
     };
     let mut shared_context = None;
 
@@ -2512,6 +2520,7 @@ fn run_native_sample(
     shared_context: &mut Option<crate::JavascriptContext>,
 ) -> Result<SampleMeasurement, JavascriptBenchmarkError> {
     let mut fresh_engine = JavascriptExecutionEngine::default();
+    configure_benchmark_import_cache(&mut fresh_engine, "vm-bench", scenario.id);
     let engine = shared_engine.unwrap_or(&mut fresh_engine);
     let context_started_at = Instant::now();
     let (context, context_setup_ms) = match scenario.engine_reuse {
@@ -2541,7 +2550,7 @@ fn run_native_sample(
     };
 
     let startup_started_at = Instant::now();
-    let execution = engine.start_execution(StartJavascriptExecutionRequest {
+    let mut execution = engine.start_execution(StartJavascriptExecutionRequest {
         vm_id: String::from("vm-bench"),
         context_id: context.context_id,
         argv: vec![String::from(scenario.entrypoint)],
@@ -2551,15 +2560,35 @@ fn run_native_sample(
     let startup_ms = startup_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let completion_started_at = Instant::now();
-    let result = execution.wait()?;
+    let mut sync_rpc_host = BenchmarkSyncRpcHost::new(workspace, scenario);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let exit_code = loop {
+        match execution.poll_event(Duration::from_secs(30))? {
+            Some(crate::JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(crate::JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(crate::JavascriptExecutionEvent::SignalState { .. }) => {}
+            Some(crate::JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                sync_rpc_host.respond(&mut execution, request)?;
+            }
+            Some(crate::JavascriptExecutionEvent::Exited(code)) => break code,
+            None => {
+                return Err(JavascriptBenchmarkError::Execution(
+                    JavascriptExecutionError::RpcResponse(String::from(
+                        "timed out waiting for benchmark execution event",
+                    )),
+                ));
+            }
+        }
+    };
     let completion_total_ms = completion_started_at.elapsed().as_secs_f64() * 1000.0;
-    let stdout = String::from_utf8(result.stdout)?;
-    let stderr = String::from_utf8(result.stderr)?;
+    let stdout = String::from_utf8(stdout)?;
+    let stderr = String::from_utf8(stderr)?;
 
-    if result.exit_code != 0 {
+    if exit_code != 0 {
         return Err(JavascriptBenchmarkError::NonZeroExit {
             scenario: scenario.id,
-            exit_code: result.exit_code,
+            exit_code,
             stderr,
         });
     }
@@ -2629,14 +2658,40 @@ fn scenario_env(
         ScenarioEnvironment::None => BTreeMap::new(),
         ScenarioEnvironment::ProjectedWorkspaceNodeModules => {
             let projected_node_modules = workspace.repo_root.join("node_modules");
-            let projected_node_modules_json =
-                serde_json::to_string(&vec![projected_node_modules.display().to_string()])
-                    .expect("serialize projected node_modules read path");
-            let guest_path_mappings = serde_json::json!([{
-                "guestPath": "/root/node_modules",
-                "hostPath": projected_node_modules.display().to_string(),
-            }])
-            .to_string();
+            let projected_pnpm_store = projected_node_modules.join(".pnpm");
+            let mut extra_read_paths = vec![
+                projected_node_modules.display().to_string(),
+                projected_pnpm_store.display().to_string(),
+            ];
+            let mut guest_path_mappings = vec![
+                json!({
+                    "guestPath": "/root/node_modules",
+                    "hostPath": projected_node_modules.display().to_string(),
+                }),
+                json!({
+                    "guestPath": "/root/node_modules/.pnpm",
+                    "hostPath": projected_pnpm_store.display().to_string(),
+                }),
+            ];
+
+            for package_name in ["typescript", "pdf-lib", "jszip"] {
+                let package_path = projected_node_modules.join(package_name);
+                if let Ok(canonical_package_path) = fs::canonicalize(&package_path) {
+                    if let Some(package_local_node_modules) = canonical_package_path.parent() {
+                        extra_read_paths
+                            .push(package_local_node_modules.display().to_string());
+                        guest_path_mappings.push(serde_json::json!({
+                            "guestPath": format!("/root/node_modules/{package_name}/node_modules"),
+                            "hostPath": package_local_node_modules.display().to_string(),
+                        }));
+                    }
+                }
+            }
+
+            let projected_node_modules_json = serde_json::to_string(&extra_read_paths)
+                .expect("serialize projected node_modules read path");
+            let guest_path_mappings =
+                serde_json::Value::Array(guest_path_mappings).to_string();
 
             BTreeMap::from([
                 (
@@ -2652,11 +2707,344 @@ fn scenario_env(
     }
 }
 
+fn configure_benchmark_import_cache(
+    engine: &mut JavascriptExecutionEngine,
+    vm_id: &str,
+    prefix: &str,
+) {
+    let cache_id = NEXT_BENCHMARK_IMPORT_CACHE_ID.fetch_add(1, Ordering::Relaxed);
+    let base_dir = env::temp_dir().join(format!(
+        "agent-os-node-import-cache-bench-{prefix}-{}-{cache_id}",
+        std::process::id()
+    ));
+    engine.set_import_cache_base_dir(vm_id, base_dir);
+}
+
+struct BenchmarkSyncRpcHost {
+    guest_path_mappings: Vec<(String, PathBuf)>,
+    next_fd: u64,
+    open_files: BTreeMap<u64, fs::File>,
+}
+
+impl BenchmarkSyncRpcHost {
+    fn new(workspace: &BenchmarkWorkspace, scenario: &ScenarioDefinition) -> Self {
+        let mut guest_path_mappings = vec![(String::from("/root"), workspace.root.clone())];
+
+        if matches!(scenario.env, ScenarioEnvironment::ProjectedWorkspaceNodeModules) {
+            let projected_node_modules = workspace.repo_root.join("node_modules");
+            guest_path_mappings.push((
+                String::from("/root/node_modules"),
+                projected_node_modules.clone(),
+            ));
+            guest_path_mappings.push((
+                String::from("/root/node_modules/.pnpm"),
+                projected_node_modules.join(".pnpm"),
+            ));
+
+            for package_name in ["typescript", "pdf-lib", "jszip"] {
+                let package_path = projected_node_modules.join(package_name);
+                if let Ok(canonical_package_path) = fs::canonicalize(&package_path) {
+                    if let Some(package_local_node_modules) = canonical_package_path.parent() {
+                        guest_path_mappings.push((
+                            format!("/root/node_modules/{package_name}/node_modules"),
+                            package_local_node_modules.to_path_buf(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        guest_path_mappings.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+
+        Self {
+            guest_path_mappings,
+            next_fd: 40,
+            open_files: BTreeMap::new(),
+        }
+    }
+
+    fn respond(
+        &mut self,
+        execution: &mut crate::JavascriptExecution,
+        request: crate::JavascriptSyncRpcRequest,
+    ) -> Result<(), JavascriptBenchmarkError> {
+        match self.handle_request(&request) {
+            Ok(payload) => execution.respond_sync_rpc_success(request.id, payload)?,
+            Err(err) => {
+                execution.respond_sync_rpc_error(request.id, "ERR_BENCHMARK_SYNC_RPC", err.to_string())?
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_request(
+        &mut self,
+        request: &crate::JavascriptSyncRpcRequest,
+    ) -> Result<Value, std::io::Error> {
+        match request.method.as_str() {
+            "fs.existsSync" => Ok(json!(self.resolve_guest_path(request.path_arg(0)?)?.exists())),
+            "fs.accessSync" | "fs.promises.access" => {
+                let _ = fs::metadata(self.resolve_guest_path(request.path_arg(0)?)?)?;
+                Ok(Value::Null)
+            }
+            "fs.statSync" | "fs.promises.stat" => {
+                Ok(file_stat_payload(fs::metadata(self.resolve_guest_path(request.path_arg(0)?)?)?))
+            }
+            "fs.lstatSync" | "fs.promises.lstat" => Ok(file_stat_payload(
+                fs::symlink_metadata(self.resolve_guest_path(request.path_arg(0)?)?)?,
+            )),
+            "fs.readFileSync" | "fs.promises.readFile" => self.read_file(request),
+            "fs.readdirSync" | "fs.promises.readdir" => {
+                let guest_path = request.path_arg(0)?;
+                let host_path = self.resolve_guest_path(guest_path)?;
+                let mut entries = fs::read_dir(&host_path)?
+                    .map(|entry| {
+                        entry.map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if guest_path == "/root"
+                    && self
+                        .guest_path_mappings
+                        .iter()
+                        .any(|(guest_prefix, _)| guest_prefix == "/root/node_modules")
+                    && !entries.iter().any(|entry| entry == "node_modules")
+                {
+                    entries.push(String::from("node_modules"));
+                }
+                entries.sort();
+                Ok(json!(entries))
+            }
+            "fs.realpathSync" => {
+                let host_path = fs::canonicalize(self.resolve_guest_path(request.path_arg(0)?)?)?;
+                Ok(json!(self.host_to_guest_path(&host_path)))
+            }
+            "fs.readlinkSync" => {
+                let host_path = self.resolve_guest_path(request.path_arg(0)?)?;
+                let target = fs::read_link(host_path)?;
+                Ok(json!(self.host_to_guest_path(&target)))
+            }
+            "fs.mkdirSync" | "fs.promises.mkdir" => {
+                let path = self.resolve_guest_path(request.path_arg(0)?)?;
+                let recursive = request
+                    .args
+                    .get(1)
+                    .and_then(Value::as_object)
+                    .and_then(|options| options.get("recursive"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if recursive {
+                    fs::create_dir_all(path)?;
+                } else {
+                    fs::create_dir(path)?;
+                }
+                Ok(Value::Null)
+            }
+            "fs.openSync" | "fs.open" => self.open_file(request),
+            "fs.fstatSync" | "fs.fstat" => {
+                let file = self.open_file_entry(request.fd_arg(0)?)?;
+                Ok(file_stat_payload(file.metadata()?))
+            }
+            "fs.readSync" | "fs.read" => self.read_from_file(request),
+            "fs.closeSync" | "fs.close" => {
+                let fd = request.fd_arg(0)?;
+                self.open_files.remove(&fd);
+                Ok(Value::Null)
+            }
+            other => Err(std::io::Error::other(format!(
+                "unsupported benchmark sync RPC method: {other}"
+            ))),
+        }
+    }
+
+    fn resolve_guest_path(&self, guest_path: &str) -> Result<PathBuf, std::io::Error> {
+        for (guest_prefix, host_prefix) in &self.guest_path_mappings {
+            if guest_path == guest_prefix {
+                return Ok(host_prefix.clone());
+            }
+            if let Some(stripped) = guest_path.strip_prefix(&format!("{guest_prefix}/")) {
+                return Ok(host_prefix.join(stripped));
+            }
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unsupported benchmark guest path: {guest_path}"),
+        ))
+    }
+
+    fn host_to_guest_path(&self, host_path: &Path) -> String {
+        for (guest_prefix, host_prefix) in &self.guest_path_mappings {
+            if let Ok(stripped) = host_path.strip_prefix(host_prefix) {
+                if stripped.as_os_str().is_empty() {
+                    return guest_prefix.clone();
+                }
+                return format!(
+                    "{}/{}",
+                    guest_prefix.trim_end_matches('/'),
+                    stripped.to_string_lossy().replace('\\', "/")
+                );
+            }
+        }
+
+        host_path.display().to_string()
+    }
+
+    fn read_file(&self, request: &crate::JavascriptSyncRpcRequest) -> Result<Value, std::io::Error> {
+        let bytes = fs::read(self.resolve_guest_path(request.path_arg(0)?)?)?;
+        let encoding = request.args.get(1).and_then(fs_encoding_arg);
+        if encoding == Some("utf8") || encoding == Some("utf-8") {
+            Ok(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+        } else {
+            Ok(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+        }
+    }
+
+    fn open_file(
+        &mut self,
+        request: &crate::JavascriptSyncRpcRequest,
+    ) -> Result<Value, std::io::Error> {
+        let path = self.resolve_guest_path(request.path_arg(0)?)?;
+        let flags = request.args.get(1).and_then(Value::as_str).unwrap_or("r");
+        let mut options = fs::OpenOptions::new();
+        match flags {
+            "r" => {
+                options.read(true);
+            }
+            "w" => {
+                options.write(true).create(true).truncate(true);
+            }
+            "a" => {
+                options.append(true).create(true);
+            }
+            "r+" => {
+                options.read(true).write(true);
+            }
+            "w+" => {
+                options.read(true).write(true).create(true).truncate(true);
+            }
+            "a+" => {
+                options.read(true).append(true).create(true);
+            }
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unsupported benchmark open flags: {other}"),
+                ));
+            }
+        }
+        let file = options.open(path)?;
+        let fd = self.next_fd;
+        self.next_fd += 1;
+        self.open_files.insert(fd, file);
+        Ok(json!(fd))
+    }
+
+    fn read_from_file(
+        &mut self,
+        request: &crate::JavascriptSyncRpcRequest,
+    ) -> Result<Value, std::io::Error> {
+        let fd = request.fd_arg(0)?;
+        let length = request
+            .args
+            .get(1)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing read length"))?
+            as usize;
+        let position = request
+            .args
+            .get(2)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing read position"))?;
+        let file = self.open_file_entry_mut(fd)?;
+        file.seek(SeekFrom::Start(position))?;
+        let mut buffer = vec![0_u8; length];
+        let bytes_read = file.read(&mut buffer)?;
+        buffer.truncate(bytes_read);
+        Ok(Value::String(String::from_utf8_lossy(&buffer).into_owned()))
+    }
+
+    fn open_file_entry(&self, fd: u64) -> Result<&fs::File, std::io::Error> {
+        self.open_files.get(&fd).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("unknown benchmark file descriptor: {fd}"),
+            )
+        })
+    }
+
+    fn open_file_entry_mut(&mut self, fd: u64) -> Result<&mut fs::File, std::io::Error> {
+        self.open_files.get_mut(&fd).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("unknown benchmark file descriptor: {fd}"),
+            )
+        })
+    }
+}
+
+trait BenchmarkSyncRpcRequestExt {
+    fn path_arg(&self, index: usize) -> Result<&str, std::io::Error>;
+    fn fd_arg(&self, index: usize) -> Result<u64, std::io::Error>;
+}
+
+impl BenchmarkSyncRpcRequestExt for crate::JavascriptSyncRpcRequest {
+    fn path_arg(&self, index: usize) -> Result<&str, std::io::Error> {
+        self.args
+            .get(index)
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("missing path argument {index} for {}", self.method),
+                )
+            })
+    }
+
+    fn fd_arg(&self, index: usize) -> Result<u64, std::io::Error> {
+        self.args
+            .get(index)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("missing fd argument {index} for {}", self.method),
+                )
+            })
+    }
+}
+
+fn fs_encoding_arg(value: &Value) -> Option<&str> {
+    if let Some(encoding) = value.as_str() {
+        return Some(encoding);
+    }
+
+    value
+        .as_object()
+        .and_then(|options| options.get("encoding"))
+        .and_then(Value::as_str)
+}
+
+fn file_stat_payload(metadata: fs::Metadata) -> Value {
+    #[cfg(unix)]
+    let mode = metadata.permissions().mode();
+    #[cfg(not(unix))]
+    let mode = 0;
+
+    json!({
+        "mode": mode,
+        "size": metadata.len(),
+        "isDirectory": metadata.is_dir(),
+        "isSymbolicLink": metadata.file_type().is_symlink(),
+    })
+}
+
 fn measure_transport_rtt(
     workspace: &BenchmarkWorkspace,
     config: &JavascriptBenchmarkConfig,
 ) -> Result<Vec<BenchmarkTransportRttReport>, JavascriptBenchmarkError> {
     let mut engine = JavascriptExecutionEngine::default();
+    configure_benchmark_import_cache(&mut engine, "vm-transport", "transport");
     let context = engine.create_context(CreateJavascriptContextRequest {
         vm_id: String::from("vm-transport"),
         bootstrap_module: None,

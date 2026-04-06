@@ -1,9 +1,15 @@
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import ts from "typescript";
 import {
 	type createNodeDriver,
-	NodeRuntime,
 	type NodeRuntimeDriverFactory,
 } from "secure-exec";
+
+const require = createRequire(import.meta.url);
 
 export interface TypeScriptDiagnostic {
 	code: number;
@@ -86,10 +92,9 @@ type CompilerResponse =
 	| ProjectCompileResult
 	| SourceCompileResult;
 
-const DEFAULT_COMPILER_RUNTIME_MEMORY_LIMIT = 512;
+type TsModule = typeof ts;
+
 const DEFAULT_COMPILER_SPECIFIER = "typescript";
-const COMPILER_RUNTIME_FILE_PATH =
-	"/tmp/__secure_exec_typescript_compiler__.js";
 
 export function createTypeScriptTools(
 	options: TypeScriptToolsOptions,
@@ -138,37 +143,193 @@ async function runCompilerRequest<TResult extends CompilerResponse>(
 		);
 	}
 
-	const compilerModulePath = resolveCompilerModulePath(
-		request.compilerSpecifier,
-	);
-	const runtime = new NodeRuntime({
-		systemDriver: options.systemDriver,
-		runtimeDriverFactory: options.runtimeDriverFactory,
-		memoryLimit: options.memoryLimit ?? DEFAULT_COMPILER_RUNTIME_MEMORY_LIMIT,
-		cpuTimeLimitMs: options.cpuTimeLimitMs,
-	});
+	const compiler = loadCompilerModule(request.compilerSpecifier);
+	if (!compiler.ok) {
+		return createFailureResult<TResult>(request.kind, compiler.error);
+	}
 
 	try {
-		const compilerModuleSource =
-			await filesystem.readTextFile(compilerModulePath);
-		const result = await runtime.run<TResult>(
-			buildCompilerRuntimeSource(
-				request,
-				compilerModulePath,
-				compilerModuleSource,
-			),
-			COMPILER_RUNTIME_FILE_PATH,
-		);
-		if (result.code === 0 && result.exports) {
-			return result.exports;
+		if (request.kind === "typecheckProject") {
+			return (await typecheckProject(
+				compiler.module,
+				filesystem,
+				request.options,
+			)) as TResult;
 		}
-		return createFailureResult<TResult>(request.kind, result.errorMessage);
+		if (request.kind === "compileProject") {
+			return (await compileProject(
+				compiler.module,
+				filesystem,
+				request.options,
+			)) as TResult;
+		}
+		if (request.kind === "typecheckSource") {
+			return (await typecheckSource(
+				compiler.module,
+				request.options,
+			)) as TResult;
+		}
+		return (await compileSource(compiler.module, request.options)) as TResult;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return createFailureResult<TResult>(request.kind, message);
-	} finally {
-		runtime.dispose();
 	}
+}
+
+function loadCompilerModule(
+	compilerSpecifier: string,
+): { ok: true; module: TsModule } | { ok: false; error: string } {
+	try {
+		if (compilerSpecifier === "typescript") {
+			return { ok: true, module: ts };
+		}
+
+		const resolved = resolveCompilerModuleSpecifier(compilerSpecifier);
+		return {
+			ok: true,
+			module: require(resolved) as TsModule,
+		};
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return {
+			ok: false,
+			error: message.includes(compilerSpecifier)
+				? message
+				: `Unable to load ${compilerSpecifier}: ${message}`,
+		};
+	}
+}
+
+function resolveCompilerModuleSpecifier(compilerSpecifier: string): string {
+	if (compilerSpecifier.startsWith("/")) {
+		return compilerSpecifier;
+	}
+	if (
+		compilerSpecifier.startsWith("./") ||
+		compilerSpecifier.startsWith("../")
+	) {
+		return path.resolve(compilerSpecifier);
+	}
+	return require.resolve(compilerSpecifier);
+}
+
+function resolveHostNodeModulesRoot(): string {
+	return path.resolve(
+		path.dirname(require.resolve("typescript/package.json")),
+		"..",
+	);
+}
+
+function toDiagnosticCategory(
+	category: ts.DiagnosticCategory,
+): TypeScriptDiagnostic["category"] {
+	switch (category) {
+		case ts.DiagnosticCategory.Warning:
+			return "warning";
+		case ts.DiagnosticCategory.Suggestion:
+			return "suggestion";
+		case ts.DiagnosticCategory.Message:
+			return "message";
+		default:
+			return "error";
+	}
+}
+
+function toVirtualPath(
+	hostRoot: string,
+	virtualRoot: string,
+	hostPath: string,
+): string {
+	const relativePath = path.relative(hostRoot, hostPath);
+	return path.posix.join(
+		virtualRoot,
+		...relativePath.split(path.sep).filter(Boolean),
+	);
+}
+
+function toHostPath(
+	hostRoot: string,
+	virtualRoot: string,
+	virtualPath: string,
+): string {
+	const relativePath = path.posix.relative(virtualRoot, virtualPath);
+	return path.join(hostRoot, ...relativePath.split("/").filter(Boolean));
+}
+
+function mapDiagnostic(
+	compiler: TsModule,
+	diagnostic: ts.Diagnostic,
+	hostRoot: string | null,
+	virtualRoot: string | null,
+): TypeScriptDiagnostic {
+	const result: TypeScriptDiagnostic = {
+		code: diagnostic.code,
+		category: toDiagnosticCategory(diagnostic.category),
+		message: compiler.flattenDiagnosticMessageText(
+			diagnostic.messageText,
+			"\n",
+		),
+	};
+
+	if (diagnostic.file && typeof diagnostic.start === "number") {
+		const location = diagnostic.file.getLineAndCharacterOfPosition(
+			diagnostic.start,
+		);
+		result.filePath =
+			hostRoot && virtualRoot
+				? toVirtualPath(hostRoot, virtualRoot, diagnostic.file.fileName)
+				: diagnostic.file.fileName;
+		result.line = location.line + 1;
+		result.column = location.character + 1;
+	}
+
+	return result;
+}
+
+function remapCompilerOptionPath(
+	value: string | undefined,
+	hostRoot: string,
+	virtualRoot: string,
+): string | undefined {
+	if (!value || !path.posix.isAbsolute(value)) {
+		return value;
+	}
+	return toHostPath(hostRoot, virtualRoot, value);
+}
+
+function remapCompilerOptionPaths(
+	options: ts.CompilerOptions,
+	hostRoot: string,
+	virtualRoot: string,
+): ts.CompilerOptions {
+	return {
+		...options,
+		outDir: remapCompilerOptionPath(options.outDir, hostRoot, virtualRoot),
+		outFile: remapCompilerOptionPath(options.outFile, hostRoot, virtualRoot),
+		rootDir: remapCompilerOptionPath(options.rootDir, hostRoot, virtualRoot),
+		baseUrl: remapCompilerOptionPath(options.baseUrl, hostRoot, virtualRoot),
+		declarationDir: remapCompilerOptionPath(
+			options.declarationDir,
+			hostRoot,
+			virtualRoot,
+		),
+		tsBuildInfoFile: remapCompilerOptionPath(
+			options.tsBuildInfoFile,
+			hostRoot,
+			virtualRoot,
+		),
+	};
+}
+
+function normalizeCompilerFailureMessage(errorMessage?: string): string {
+	const message = (errorMessage ?? "TypeScript compiler failed").trim();
+	if (/memory limit/i.test(message)) {
+		return "TypeScript compiler exceeded sandbox memory limit";
+	}
+	if (/cpu time limit exceeded|timed out/i.test(message)) {
+		return "TypeScript compiler exceeded sandbox CPU time limit";
+	}
+	return message;
 }
 
 function createFailureResult<TResult extends CompilerResponse>(
@@ -203,391 +364,257 @@ function createFailureResult<TResult extends CompilerResponse>(
 	} as unknown as TResult;
 }
 
-function normalizeCompilerFailureMessage(errorMessage?: string): string {
-	const message = (errorMessage ?? "TypeScript compiler failed").trim();
-	if (/memory limit/i.test(message)) {
-		return "TypeScript compiler exceeded sandbox memory limit";
+async function materializeVirtualTree(
+	filesystem: NonNullable<ReturnType<typeof createNodeDriver>["filesystem"]>,
+	virtualRoot: string,
+	hostRoot: string,
+): Promise<void> {
+	mkdirSync(hostRoot, { recursive: true });
+	const entries = await filesystem.readDirWithTypes(virtualRoot);
+	for (const entry of entries) {
+		if (entry.name === "." || entry.name === "..") {
+			continue;
+		}
+		const virtualPath = path.posix.join(virtualRoot, entry.name);
+		const hostPath = path.join(hostRoot, entry.name);
+		if (entry.isDirectory) {
+			await materializeVirtualTree(filesystem, virtualPath, hostPath);
+			continue;
+		}
+		const contents = await filesystem.readFile(virtualPath);
+		mkdirSync(path.dirname(hostPath), { recursive: true });
+		writeFileSync(hostPath, contents);
 	}
-	if (/cpu time limit exceeded|timed out/i.test(message)) {
-		return "TypeScript compiler exceeded sandbox CPU time limit";
-	}
-	return message;
 }
 
-function resolveCompilerModulePath(compilerSpecifier: string): string {
-	if (compilerSpecifier === "typescript") {
-		return "/root/node_modules/typescript/lib/typescript.js";
+async function withProjectWorkspace<T>(
+	filesystem: NonNullable<ReturnType<typeof createNodeDriver>["filesystem"]>,
+	virtualRoot: string,
+	fn: (hostRoot: string) => Promise<T>,
+): Promise<T> {
+	const hostRoot = await mkdtemp(path.join(tmpdir(), "secure-exec-ts-"));
+	try {
+		await materializeVirtualTree(filesystem, virtualRoot, hostRoot);
+		const nodeModulesLink = path.join(hostRoot, "node_modules");
+		const hostNodeModulesRoot = resolveHostNodeModulesRoot();
+		if (!pathExists(nodeModulesLink)) {
+			symlinkSync(hostNodeModulesRoot, nodeModulesLink, "dir");
+		}
+		return await fn(hostRoot);
+	} finally {
+		await rm(hostRoot, { recursive: true, force: true });
 	}
-	if (compilerSpecifier.startsWith("/")) {
-		return compilerSpecifier;
-	}
-	if (
-		compilerSpecifier.startsWith("./") ||
-		compilerSpecifier.startsWith("../")
-	) {
-		return path.posix.resolve("/root", compilerSpecifier);
-	}
-	return `/root/node_modules/${compilerSpecifier}/lib/typescript.js`;
 }
 
-function buildCompilerRuntimeSource(
-	request: CompilerRequest,
-	compilerModulePath: string,
-	compilerModuleSource: string,
-): string {
-	return `
-const path = require("node:path");
-const request = ${JSON.stringify(request)};
-const compilerModulePath = ${JSON.stringify(compilerModulePath)};
-const compilerModuleSource = ${JSON.stringify(compilerModuleSource)};
-const compilerModule = { exports: {} };
-const compilerFactory = new Function(
-	"exports",
-	"require",
-	"module",
-	"__filename",
-	"__dirname",
-	compilerModuleSource,
-);
-compilerFactory(
-	compilerModule.exports,
-	require,
-	compilerModule,
-	compilerModulePath,
-	path.dirname(compilerModulePath),
-);
-module.exports = (${compilerRuntimeMain.toString()})(request, compilerModule.exports);
-`;
+function pathExists(targetPath: string): boolean {
+	try {
+		readFileSync(targetPath);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
-function compilerRuntimeMain(
-	request: CompilerRequest,
-	ts: typeof import("typescript"),
-): CompilerResponse {
-	const fs = require("node:fs") as typeof import("node:fs");
-	const path = require("node:path") as typeof import("node:path");
+function collectProgramDiagnostics(
+	compiler: TsModule,
+	program: ts.Program,
+	emitDiagnostics: readonly ts.Diagnostic[] = [],
+	hostRoot: string,
+	virtualRoot: string,
+): TypeScriptDiagnostic[] {
+	return [...compiler.getPreEmitDiagnostics(program), ...emitDiagnostics].map(
+		(diagnostic) => mapDiagnostic(compiler, diagnostic, hostRoot, virtualRoot),
+	);
+}
 
-	function toDiagnostic(
-		diagnostic: import("typescript").Diagnostic,
-	): TypeScriptDiagnostic {
-		const message = ts
-			.flattenDiagnosticMessageText(diagnostic.messageText, "\n")
-			.trim();
-		const result: TypeScriptDiagnostic = {
-			code: diagnostic.code,
-			category: toDiagnosticCategory(diagnostic.category),
-			message,
-		};
+async function typecheckProject(
+	compiler: TsModule,
+	filesystem: NonNullable<ReturnType<typeof createNodeDriver>["filesystem"]>,
+	options: ProjectCompilerOptions,
+): Promise<TypeCheckResult> {
+	const virtualCwd = options.cwd ?? "/root";
+	const virtualConfigPath =
+		options.configFilePath ?? path.posix.join(virtualCwd, "tsconfig.json");
+	const virtualRoot = path.posix.dirname(virtualConfigPath);
 
-		if (!diagnostic.file || diagnostic.start === undefined) {
-			return result;
-		}
-
-		const { line, character } = diagnostic.file.getLineAndCharacterOfPosition(
-			diagnostic.start,
-		);
-		result.filePath = diagnostic.file.fileName.replace(/\\/g, "/");
-		result.line = line + 1;
-		result.column = character + 1;
-		return result;
-	}
-
-	function toDiagnosticCategory(
-		category: import("typescript").DiagnosticCategory,
-	): TypeScriptDiagnostic["category"] {
-		switch (category) {
-			case ts.DiagnosticCategory.Warning:
-				return "warning";
-			case ts.DiagnosticCategory.Suggestion:
-				return "suggestion";
-			case ts.DiagnosticCategory.Message:
-				return "message";
-			default:
-				return "error";
-		}
-	}
-
-	function hasErrors(diagnostics: TypeScriptDiagnostic[]): boolean {
-		return diagnostics.some((diagnostic) => diagnostic.category === "error");
-	}
-
-	function convertCompilerOptions(
-		compilerOptions: Record<string, unknown> | undefined,
-		basePath: string,
-	): import("typescript").CompilerOptions {
-		if (!compilerOptions) {
-			return {};
-		}
-
-		const converted = ts.convertCompilerOptionsFromJson(
-			compilerOptions,
-			basePath,
-		);
-		if (converted.errors.length > 0) {
-			throw new Error(
-				converted.errors
-					.map((diagnostic) => toDiagnostic(diagnostic).message)
-					.join("\n"),
-			);
-		}
-
-		return converted.options;
-	}
-
-	function resolveProjectConfig(
-		options: ProjectCompilerOptions,
-		overrideCompilerOptions: import("typescript").CompilerOptions = {},
-	) {
-		const cwd = path.resolve(options.cwd ?? "/root");
-		const configFilePath = options.configFilePath
-			? path.resolve(cwd, options.configFilePath)
-			: ts.findConfigFile(cwd, ts.sys.fileExists, "tsconfig.json");
-
-		if (!configFilePath) {
-			throw new Error(`Unable to find tsconfig.json from '${cwd}'`);
-		}
-
-		const configFile = ts.readConfigFile(configFilePath, ts.sys.readFile);
-		if (configFile.error) {
+	return withProjectWorkspace(filesystem, virtualRoot, async (hostRoot) => {
+		const hostConfigPath = toHostPath(hostRoot, virtualRoot, virtualConfigPath);
+		const config = compiler.readConfigFile(hostConfigPath, compiler.sys.readFile);
+		if (config.error) {
 			return {
-				parsed: null,
-				diagnostics: [toDiagnostic(configFile.error)],
+				success: false,
+				diagnostics: [
+					mapDiagnostic(compiler, config.error, hostRoot, virtualRoot),
+				],
 			};
 		}
 
-		const parsed = ts.parseJsonConfigFileContent(
-			configFile.config,
-			ts.sys,
-			path.dirname(configFilePath),
-			overrideCompilerOptions,
-			configFilePath,
+		const parsed = compiler.parseJsonConfigFileContent(
+			config.config,
+			compiler.sys,
+			path.dirname(hostConfigPath),
+		);
+		parsed.options = remapCompilerOptionPaths(
+			parsed.options,
+			hostRoot,
+			virtualRoot,
+		);
+		const program = compiler.createProgram({
+			rootNames: parsed.fileNames,
+			options: parsed.options,
+		});
+		const diagnostics = collectProgramDiagnostics(
+			compiler,
+			program,
+			[],
+			hostRoot,
+			virtualRoot,
 		);
 
 		return {
-			parsed,
-			diagnostics: parsed.errors.map(toDiagnostic),
+			success: diagnostics.every((diagnostic) => diagnostic.category !== "error"),
+			diagnostics,
 		};
-	}
+	});
+}
 
-	function createSourceProgram(
-		options: SourceCompilerOptions,
-		overrideCompilerOptions: import("typescript").CompilerOptions = {},
-	) {
-		const cwd = path.resolve(options.cwd ?? "/root");
-		const filePath = path.resolve(
-			cwd,
-			options.filePath ?? "__secure_exec_typescript_input__.ts",
-		);
-		const projectCompilerOptions = options.configFilePath
-			? resolveProjectConfig(
-					{ cwd, configFilePath: options.configFilePath },
-					overrideCompilerOptions,
-				)
-			: { parsed: null, diagnostics: [] as TypeScriptDiagnostic[] };
+async function compileProject(
+	compiler: TsModule,
+	filesystem: NonNullable<ReturnType<typeof createNodeDriver>["filesystem"]>,
+	options: ProjectCompilerOptions,
+): Promise<ProjectCompileResult> {
+	const virtualCwd = options.cwd ?? "/root";
+	const virtualConfigPath =
+		options.configFilePath ?? path.posix.join(virtualCwd, "tsconfig.json");
+	const virtualRoot = path.posix.dirname(virtualConfigPath);
 
-		if (projectCompilerOptions.diagnostics.length > 0) {
+	return withProjectWorkspace(filesystem, virtualRoot, async (hostRoot) => {
+		const hostConfigPath = toHostPath(hostRoot, virtualRoot, virtualConfigPath);
+		const config = compiler.readConfigFile(hostConfigPath, compiler.sys.readFile);
+		if (config.error) {
 			return {
-				filePath,
-				program: null,
-				host: null,
-				diagnostics: projectCompilerOptions.diagnostics,
+				success: false,
+				diagnostics: [
+					mapDiagnostic(compiler, config.error, hostRoot, virtualRoot),
+				],
+				emitSkipped: true,
+				emittedFiles: [],
 			};
 		}
 
-		const compilerOptions = {
-			target: ts.ScriptTarget.ES2022,
+		const parsed = compiler.parseJsonConfigFileContent(
+			config.config,
+			compiler.sys,
+			path.dirname(hostConfigPath),
+		);
+		parsed.options = remapCompilerOptionPaths(
+			parsed.options,
+			hostRoot,
+			virtualRoot,
+		);
+		const emittedHostFiles: string[] = [];
+		const program = compiler.createProgram({
+			rootNames: parsed.fileNames,
+			options: parsed.options,
+		});
+		const emitResult = program.emit(
+			undefined,
+			(fileName, data) => {
+				mkdirSync(path.dirname(fileName), { recursive: true });
+				writeFileSync(fileName, data);
+				emittedHostFiles.push(fileName);
+			},
+		);
+		const diagnostics = collectProgramDiagnostics(
+			compiler,
+			program,
+			emitResult.diagnostics,
+			hostRoot,
+			virtualRoot,
+		);
+
+		const emittedFiles: string[] = [];
+		for (const hostFile of emittedHostFiles) {
+			const virtualPath = toVirtualPath(hostRoot, virtualRoot, hostFile);
+			const contents = readFileSync(hostFile);
+			const parentDir = path.posix.dirname(virtualPath);
+			await filesystem.mkdir(parentDir, { recursive: true });
+			await filesystem.writeFile(virtualPath, contents);
+			emittedFiles.push(virtualPath);
+		}
+
+		return {
+			success:
+				!emitResult.emitSkipped &&
+				diagnostics.every((diagnostic) => diagnostic.category !== "error"),
+			diagnostics,
+			emitSkipped: emitResult.emitSkipped,
+			emittedFiles,
+		};
+	});
+}
+
+async function typecheckSource(
+	compiler: TsModule,
+	options: SourceCompilerOptions,
+): Promise<TypeCheckResult> {
+	const sourcePath = options.filePath ?? "/root/input.ts";
+	const hostRoot = await mkdtemp(path.join(tmpdir(), "secure-exec-ts-src-"));
+	try {
+		const hostSourcePath = toHostPath(hostRoot, "/root", sourcePath);
+		mkdirSync(path.dirname(hostSourcePath), { recursive: true });
+		writeFileSync(hostSourcePath, options.sourceText);
+		const nodeModulesLink = path.join(hostRoot, "node_modules");
+		symlinkSync(resolveHostNodeModulesRoot(), nodeModulesLink, "dir");
+
+		const compilerOptions: ts.CompilerOptions = {
 			module: ts.ModuleKind.CommonJS,
-			...projectCompilerOptions.parsed?.options,
-			...convertCompilerOptions(options.compilerOptions, cwd),
-			...overrideCompilerOptions,
+			target: ts.ScriptTarget.ES2022,
+			skipLibCheck: true,
+			...(options.compilerOptions as ts.CompilerOptions | undefined),
 		};
-		const host = ts.createCompilerHost(compilerOptions);
-		const normalizedFilePath = ts.sys.useCaseSensitiveFileNames
-			? filePath
-			: filePath.toLowerCase();
-		const defaultGetSourceFile = host.getSourceFile.bind(host);
-		const defaultReadFile = host.readFile.bind(host);
-		const defaultFileExists = host.fileExists.bind(host);
-
-		host.fileExists = (candidatePath) => {
-			const normalizedCandidate = ts.sys.useCaseSensitiveFileNames
-				? candidatePath
-				: candidatePath.toLowerCase();
-			return (
-				normalizedCandidate === normalizedFilePath ||
-				defaultFileExists(candidatePath)
-			);
-		};
-
-		host.readFile = (candidatePath) => {
-			const normalizedCandidate = ts.sys.useCaseSensitiveFileNames
-				? candidatePath
-				: candidatePath.toLowerCase();
-			if (normalizedCandidate === normalizedFilePath) {
-				return options.sourceText;
-			}
-			return defaultReadFile(candidatePath);
-		};
-
-		host.getSourceFile = (
-			candidatePath,
-			languageVersion,
-			onError,
-			shouldCreateNewSourceFile,
-		) => {
-			const normalizedCandidate = ts.sys.useCaseSensitiveFileNames
-				? candidatePath
-				: candidatePath.toLowerCase();
-			if (normalizedCandidate === normalizedFilePath) {
-				return ts.createSourceFile(
-					candidatePath,
-					options.sourceText,
-					languageVersion,
-					true,
-				);
-			}
-			return defaultGetSourceFile(
-				candidatePath,
-				languageVersion,
-				onError,
-				shouldCreateNewSourceFile,
-			);
-		};
+		const program = compiler.createProgram({
+			rootNames: [hostSourcePath],
+			options: compilerOptions,
+		});
+		const diagnostics = collectProgramDiagnostics(
+			compiler,
+			program,
+			[],
+			hostRoot,
+			"/root",
+		);
 
 		return {
-			filePath,
-			host,
-			program: ts.createProgram([filePath], compilerOptions, host),
-			diagnostics: [] as TypeScriptDiagnostic[],
+			success: diagnostics.every((diagnostic) => diagnostic.category !== "error"),
+			diagnostics,
 		};
+	} finally {
+		await rm(hostRoot, { recursive: true, force: true });
 	}
+}
 
-	switch (request.kind) {
-		case "typecheckProject": {
-			const { parsed, diagnostics } = resolveProjectConfig(request.options, {
-				noEmit: true,
-			});
-			if (!parsed) {
-				return {
-					success: false,
-					diagnostics,
-				};
-			}
+async function compileSource(
+	compiler: TsModule,
+	options: SourceCompilerOptions,
+): Promise<SourceCompileResult> {
+	const result = compiler.transpileModule(options.sourceText, {
+		fileName: options.filePath ?? "/root/input.ts",
+		compilerOptions: {
+			module: ts.ModuleKind.CommonJS,
+			target: ts.ScriptTarget.ES2022,
+			...(options.compilerOptions as ts.CompilerOptions | undefined),
+		},
+		reportDiagnostics: true,
+	});
+	const diagnostics = (result.diagnostics ?? []).map((diagnostic) =>
+		mapDiagnostic(compiler, diagnostic, null, null),
+	);
 
-			const program = ts.createProgram({
-				rootNames: parsed.fileNames,
-				options: parsed.options,
-				projectReferences: parsed.projectReferences,
-			});
-			const combinedDiagnostics = ts
-				.sortAndDeduplicateDiagnostics([
-					...parsed.errors,
-					...ts.getPreEmitDiagnostics(program),
-				])
-				.map(toDiagnostic);
-
-			return {
-				success: !hasErrors(combinedDiagnostics),
-				diagnostics: combinedDiagnostics,
-			};
-		}
-
-		case "compileProject": {
-			const { parsed, diagnostics } = resolveProjectConfig(request.options);
-			if (!parsed) {
-				return {
-					success: false,
-					diagnostics,
-					emitSkipped: true,
-					emittedFiles: [],
-				};
-			}
-
-			const program = ts.createProgram({
-				rootNames: parsed.fileNames,
-				options: parsed.options,
-				projectReferences: parsed.projectReferences,
-			});
-			const emittedFiles: string[] = [];
-			const emitResult = program.emit(undefined, (fileName, text) => {
-				fs.mkdirSync(path.dirname(fileName), { recursive: true });
-				fs.writeFileSync(fileName, text, "utf8");
-				emittedFiles.push(fileName.replace(/\\/g, "/"));
-			});
-			const combinedDiagnostics = ts
-				.sortAndDeduplicateDiagnostics([
-					...parsed.errors,
-					...ts.getPreEmitDiagnostics(program),
-					...emitResult.diagnostics,
-				])
-				.map(toDiagnostic);
-
-			return {
-				success: !hasErrors(combinedDiagnostics),
-				diagnostics: combinedDiagnostics,
-				emitSkipped: emitResult.emitSkipped,
-				emittedFiles,
-			};
-		}
-
-		case "typecheckSource": {
-			const { program, diagnostics } = createSourceProgram(request.options, {
-				noEmit: true,
-			});
-			if (!program) {
-				return {
-					success: false,
-					diagnostics,
-				};
-			}
-
-			const combinedDiagnostics = ts
-				.sortAndDeduplicateDiagnostics(ts.getPreEmitDiagnostics(program))
-				.map(toDiagnostic);
-
-			return {
-				success: !hasErrors(combinedDiagnostics),
-				diagnostics: combinedDiagnostics,
-			};
-		}
-
-		case "compileSource": {
-			const { program, diagnostics } = createSourceProgram(request.options);
-			if (!program) {
-				return {
-					success: false,
-					diagnostics,
-				};
-			}
-
-			let outputText: string | undefined;
-			let sourceMapText: string | undefined;
-			const emitResult = program.emit(undefined, (fileName, text) => {
-				if (
-					fileName.endsWith(".js") ||
-					fileName.endsWith(".mjs") ||
-					fileName.endsWith(".cjs")
-				) {
-					outputText = text;
-					return;
-				}
-				if (fileName.endsWith(".map")) {
-					sourceMapText = text;
-				}
-			});
-			const combinedDiagnostics = ts
-				.sortAndDeduplicateDiagnostics([
-					...ts.getPreEmitDiagnostics(program),
-					...emitResult.diagnostics,
-				])
-				.map(toDiagnostic);
-
-			return {
-				success: !hasErrors(combinedDiagnostics),
-				diagnostics: combinedDiagnostics,
-				outputText,
-				sourceMapText,
-			};
-		}
-	}
+	return {
+		success: diagnostics.every((diagnostic) => diagnostic.category !== "error"),
+		diagnostics,
+		outputText: result.outputText,
+		sourceMapText: result.sourceMapText,
+	};
 }

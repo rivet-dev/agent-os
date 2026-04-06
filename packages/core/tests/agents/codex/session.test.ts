@@ -116,7 +116,32 @@ async function createVm(fixtures: ResponsesFixture[]): Promise<RunningVm> {
 	};
 }
 
-describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
+const codexSessionSkipReason =
+	registrySkipReason ||
+	"codex-exec currently requires host_net imports that the generic WASM runner does not provide";
+
+test.skipIf(registrySkipReason)(
+	"codex agent package is discoverable through listAgents()",
+	async () => {
+		const vm = await AgentOs.create({
+			moduleAccessCwd: MODULE_ACCESS_CWD,
+			software: [codex, ...REGISTRY_SOFTWARE],
+		});
+
+		try {
+			const agents = vm.listAgents();
+			const codexAgent = agents.find((agent) => agent.id === "codex");
+			expect(codexAgent).toBeDefined();
+			expect(codexAgent?.acpAdapter).toBe("@rivet-dev/agent-os-codex-agent");
+			expect(codexAgent?.agentPackage).toBe("@rivet-dev/agent-os-codex");
+			expect(codexAgent?.installed).toBe(true);
+		} finally {
+			await vm.dispose();
+		}
+	},
+);
+
+describe.skipIf(codexSessionSkipReason)("full createSession('codex')", () => {
 	const cleanups = new Set<() => Promise<void>>();
 
 	afterEach(async () => {
@@ -124,23 +149,6 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 			await stop();
 		}
 		cleanups.clear();
-	});
-
-	test("codex agent package is discoverable through listAgents()", async () => {
-		const vm = await AgentOs.create({
-			moduleAccessCwd: MODULE_ACCESS_CWD,
-			software: [codex, ...REGISTRY_SOFTWARE],
-		});
-		cleanups.add(async () => {
-			await vm.dispose();
-		});
-
-		const agents = vm.listAgents();
-		const codexAgent = agents.find((agent) => agent.id === "codex");
-		expect(codexAgent).toBeDefined();
-		expect(codexAgent?.acpAdapter).toBe("@rivet-dev/agent-os-codex-agent");
-		expect(codexAgent?.agentPackage).toBe("@rivet-dev/agent-os-codex");
-		expect(codexAgent?.installed).toBe(true);
 	});
 
 	test("createSession('codex') runs codex-exec turns end-to-end with permissioned shell tools", async () => {

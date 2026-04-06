@@ -441,7 +441,7 @@ export async function loadFile(
 
 export async function resolveModule(
 	specifier: string,
-	fromPath: string,
+	fromDir: string,
 	filesystem: VirtualFileSystem,
 	_mode: "require" | "import" = "require",
 ): Promise<string | null> {
@@ -451,7 +451,9 @@ export async function resolveModule(
 	if (specifier.startsWith("node:")) {
 		return specifier;
 	}
-	const base = specifier.startsWith("/") ? specifier : `${dirname(fromPath)}/${specifier}`;
+	const base = specifier.startsWith("/")
+		? specifier
+		: `${normalizePath(fromDir)}/${specifier}`;
 	const candidates = [
 		normalizePath(base),
 		`${normalizePath(base)}.js`,
@@ -502,6 +504,22 @@ export function getIsolateRuntimeSource(id: string): string {
 export function getRequireSetupCode(): string {
 	return `
 		(function () {
+			const invokeBridge = (target, args) => {
+				if (typeof target === "function") {
+					return target(...args);
+				}
+				if (target && typeof target.apply === "function") {
+					return target.apply(undefined, args);
+				}
+				if (target && typeof target.applySync === "function") {
+					return target.applySync(undefined, args);
+				}
+				if (target && typeof target.applySyncPromise === "function") {
+					return target.applySyncPromise(undefined, args);
+				}
+				return undefined;
+			};
+
 			const pathDirname = (value) => {
 				const normalized = String(value || "/").replace(/\\\\/g, "/");
 				if (normalized === "/") return "/";
@@ -510,7 +528,9 @@ export function getRequireSetupCode(): string {
 			};
 
 			globalThis.require = function require(specifier) {
-				const polyfillSource = globalThis._loadPolyfill?.(specifier.replace(/^node:/, ""));
+				const polyfillSource = invokeBridge(globalThis._loadPolyfill, [
+					specifier.replace(/^node:/, ""),
+				]);
 				if (polyfillSource) {
 					const module = { exports: {} };
 					const fn = new Function("module", "exports", polyfillSource);
@@ -519,11 +539,11 @@ export function getRequireSetupCode(): string {
 				}
 
 				const currentModule = globalThis._currentModule || { dirname: "/" };
-				const resolved = globalThis._resolveModuleSync?.(
+				const resolved = invokeBridge(globalThis._resolveModuleSync, [
 					specifier,
 					currentModule.dirname || "/",
 					"require",
-				);
+				]);
 				if (!resolved) {
 					throw new Error("Cannot resolve module '" + specifier + "'");
 				}
@@ -533,7 +553,10 @@ export function getRequireSetupCode(): string {
 					return cache[resolved].exports;
 				}
 
-				const source = globalThis._loadFileSync?.(resolved, "require");
+				const source = invokeBridge(globalThis._loadFileSync, [
+					resolved,
+					"require",
+				]);
 				if (source == null) {
 					throw new Error("Cannot load module '" + resolved + "'");
 				}

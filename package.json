@@ -8,7 +8,7 @@
 	"scripts": {
 		"start": "npx turbo watch build",
 		"build": "npx turbo build",
-		"test": "npx turbo test",
+		"test": "npx turbo test --concurrency=3 --ui=stream --log-order=stream",
 		"test:post-python-parity": "pnpm --dir packages/core exec vitest run tests/filesystem/base-filesystem.test.ts && pnpm --dir packages/dev-shell exec vitest run test/dev-shell.integration.test.ts && node ./node_modules/.pnpm/vitest@*/node_modules/vitest/vitest.mjs run --testTimeout=55000 --hookTimeout=30000 registry/tests/e2e/cross-runtime/terminal.test.ts registry/tests/e2e/ctrl-c-shell-behavior.test.ts registry/tests/e2e/node-binary-behavior.test.ts registry/tests/e2e/npm/project-matrix.test.ts",
 		"test:watch": "npx turbo watch test",
 		"check-types": "npx turbo check-types",

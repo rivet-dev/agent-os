@@ -644,6 +644,16 @@ describe("native sidecar process client", () => {
 
 			try {
 				await kernel.mount(createNodeRuntime());
+				await kernel.writeFile(
+					"/tmp/connect-terminal-echo.mjs",
+					[
+						"process.stdin.setEncoding('utf8');",
+						"process.stdin.once('data', (chunk) => {",
+						"  process.stdout.write(`CONNECT:${chunk}`);",
+						"  process.exit(0);",
+						"});",
+					].join("\n"),
+				);
 
 				let stdout = "";
 				let stdinListener:
@@ -688,16 +698,7 @@ describe("native sidecar process client", () => {
 
 				const pid = await kernel.connectTerminal({
 					command: "node",
-					args: [
-						"-e",
-						[
-							"process.stdin.setEncoding('utf8');",
-							"process.stdin.once('data', (chunk) => {",
-							"  process.stdout.write(`CONNECT:${chunk}`);",
-							"  process.exit(0);",
-							"});",
-						].join("\n"),
-					],
+					args: ["/tmp/connect-terminal-echo.mjs"],
 					onData: (chunk) => {
 						stdout += decoder.decode(chunk);
 					},
@@ -745,23 +746,24 @@ describe("native sidecar process client", () => {
 
 			try {
 				await kernel.mount(createNodeRuntime());
+				await kernel.writeFile(
+					"/tmp/open-shell-echo.mjs",
+					[
+						"process.stdin.setEncoding('utf8');",
+						"process.stdin.once('data', (chunk) => {",
+						"  process.stdout.write(`OUT:${chunk}`);",
+						"  process.stderr.write(`ERR:${chunk}`);",
+						"  process.exit(0);",
+						"});",
+					].join("\n"),
+				);
 
 				let stdout = "";
 				let stderr = "";
 				const decoder = new TextDecoder();
 				const shell = kernel.openShell({
 					command: "node",
-					args: [
-						"-e",
-						[
-							"process.stdin.setEncoding('utf8');",
-							"process.stdin.once('data', (chunk) => {",
-							"  process.stdout.write(`OUT:${chunk}`);",
-							"  process.stderr.write(`ERR:${chunk}`);",
-							"  process.exit(0);",
-							"});",
-						].join("\n"),
-					],
+					args: ["/tmp/open-shell-echo.mjs"],
 					onStderr: (chunk) => {
 						stderr += decoder.decode(chunk);
 					},
