@@ -8920,8 +8920,12 @@ fn ignore_stale_javascript_sync_rpc_response(error: SidecarError) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    #[path = "/home/nathan/a5/crates/bridge/tests/support.rs"]
-    mod bridge_support;
+    mod bridge_support {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bridge/tests/support.rs"
+        ));
+    }
 
     use super::*;
     use crate::protocol::{

@@ -96,6 +96,9 @@ jobs:
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build TypeScript workspace dependencies
+        run: pnpm build
+
       - name: Build Rust sidecar binary for TS integration tests
         run: cargo build --package agent-os-sidecar
 
