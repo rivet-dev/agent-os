@@ -18,6 +18,8 @@
 - Native-sidecar WASM executions read and write against the host `shadowRoot`, so the shadow root must include the standard POSIX bootstrap directories up front; missing `/tmp` breaks shell redirection and file-based command tests even when the guest root filesystem contains `/tmp`.
 - If the WASM runner virtualizes `path_open`, it also needs matching virtual-FD handlers for follow-on syscalls such as `fd_read`, `fd_write`, `fd_seek`, `fd_tell`, `fd_pread`, `fd_pwrite`, and `fd_filestat_get`; shell redirection and coreutils file commands assume the full open-file-description lifecycle works after `dup`/`dup2`.
 - The grouped test layout is now part of the contract: `packages/core/tests/` is organized by domain and `registry/tests/e2e/` by integration family, so any future moves must rebase relative `src`/`helpers` imports and `moduleAccessCwd` or fixture-root path math to match the new directory depth.
+- In `crates/execution/src/node_import_cache.rs`, `guestVisiblePathFromHostPath(...)` returning `/unknown` is only safe for redaction; using it as a truthy visibility check lets hidden host-only modules slip past `MODULE_NOT_FOUND` guards.
+- On newer Node builds, top-level `await import(...)` parse failures ignore a mutated `error.stack` when rethrown, so guest-path-safe stderr needs an explicit formatter in the generated runner.
 
 Started: Sat Apr  5 2026
 ---
@@ -124,4 +126,13 @@ Started: Sat Apr  5 2026
   - VM filesystem writes can look healthy in pure VFS tests while sidecar-managed Node launches still fail; if a VM-written script exits with `ENOENT`, inspect the generated runner's guest/host path translation before debugging the write RPC itself.
   - `AGENT_OS_GUEST_ENTRYPOINT` keeps guest-visible `process.argv[1]`, but the runner still has to detect already-host-resolved entrypoints separately or it will translate them a second time.
   - For this area, one direct `AgentOs.create() -> vm.writeFile() -> vm.spawn("node", [guestPath])` reproduction is faster than starting in the ACP/session layer because it surfaces raw Node stderr immediately.
+---
+## 2026-04-05 20:05:33 PDT - US-301
+- Fixed the last two `agent-os-execution` JavaScript suite regressions in the generated Node runner: hidden parent `node_modules` resolutions now fail as `MODULE_NOT_FOUND` instead of treating `/unknown` as guest-visible, and top-level `await import(...)` failures now render guest-path-safe stderr directly instead of leaking host file URLs through Node's uncaught formatter.
+- Quality checks: `cargo test -p agent-os-execution --test javascript javascript::module_resolution::javascript_execution_blocks_cjs_require_from_hidden_parent_node_modules -- --test-threads=1`, `cargo test -p agent-os-execution --test javascript javascript::module_resolution::javascript_execution_translates_top_level_loader_stacks_to_guest_paths -- --test-threads=1`, and `cargo test -p agent-os-execution --test javascript -- --test-threads=1` all pass.
+- Files changed: `AGENTS.md`, `crates/execution/src/node_import_cache.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `guestVisiblePathFromHostPath(...)` is appropriate for redacting host paths into guest-visible text, but guards that decide whether a resolved module is allowed must treat the `/unknown` sentinel as blocked rather than visible.
+  - For ESM parse failures on modern Node, catching an error, mutating `error.stack`, and rethrowing is not enough to scrub host file URLs; the runner has to format stderr explicitly if the top-level import surface must stay guest-only.
+  - One focused `cargo test -p agent-os-execution --test javascript` run is enough to validate both the CJS hidden-parent guard and the top-level loader-path translation path because they live entirely in `crates/execution/src/node_import_cache.rs`.
 ---

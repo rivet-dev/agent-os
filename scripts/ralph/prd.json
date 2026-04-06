@@ -47,7 +47,7 @@
         "Do not delete or disable tests."
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "22 pass, 21 fail. Broad failures across many categories — likely multiple root causes from the runtime-isolation-hardening changes."
     },
     {

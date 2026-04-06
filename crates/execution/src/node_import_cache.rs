@@ -6849,8 +6849,9 @@ function ensureGuestVisibleModuleResolution(specifier, resolved, parent) {
     return resolved;
   }
 
+  const guestVisiblePath = guestVisiblePathFromHostPath(resolved);
   if (
-    guestVisiblePathFromHostPath(resolved) ||
+    (guestVisiblePath && guestVisiblePath !== UNMAPPED_GUEST_PATH) ||
     isPathWithinRoot(resolved, HOST_CWD)
   ) {
     return resolved;
@@ -7547,6 +7548,29 @@ hardenProperty(
   createGuestRequire(path.posix.dirname(guestEntryPoint ?? entrypoint)),
 );
 
+function renderTopLevelImportError(error, specifier) {
+  const translated = translateErrorToGuest(error);
+  let rendered;
+
+  if (translated instanceof Error) {
+    rendered = translated.stack || translated.message || String(translated);
+  } else {
+    rendered = String(translated);
+  }
+
+  const translatedSpecifier = translatePathStringToGuest(toImportSpecifier(specifier));
+  if (
+    typeof translatedSpecifier === 'string' &&
+    translatedSpecifier.length > 0 &&
+    typeof rendered === 'string' &&
+    !rendered.includes(translatedSpecifier)
+  ) {
+    rendered = `${translatedSpecifier}\n${rendered}`;
+  }
+
+  return rendered.endsWith('\n') ? rendered : `${rendered}\n`;
+}
+
 if (HOST_PROCESS_ENV.AGENT_OS_KEEP_STDIN_OPEN === '1') {
   let stdinKeepalive = setInterval(() => {}, 1_000_000);
   const releaseStdinKeepalive = () => {
@@ -7576,14 +7600,18 @@ process.once('exit', () => {
   guestSyncRpc?.dispose?.();
 });
 
+let activeImportSpecifier = entrypoint;
 try {
   if (bootstrapModule) {
+    activeImportSpecifier = bootstrapModule;
     await import(toImportSpecifier(bootstrapModule));
   }
 
+  activeImportSpecifier = entrypoint;
   await import(toImportSpecifier(entrypoint));
 } catch (error) {
-  throw translateErrorToGuest(error);
+  process.stderr.write(renderTopLevelImportError(error, activeImportSpecifier));
+  process.exitCode = 1;
 }
 "#;
 
