@@ -585,6 +585,21 @@
       "notes": "Step 7 final. See spec 'Target TypeScript Architecture' for exact file layout. Also update downstream packages within this repo (secure-exec re-exports, registry test helpers, dev-shell). Actor layer in Rivet repo (~/r-aos) needs separate update — ask user for guidance."
     },
     {
+      "id": "US-028a",
+      "title": "Fix V8 bridge dgram/UDP wiring so guest UDP packets reach the host",
+      "description": "As a developer, I want the V8 polyfill's dgram bridge to correctly send and receive UDP packets through the kernel socket table so the javascript_dgram_rpc_sends_and_receives_host_udp_packets test passes",
+      "acceptanceCriteria": [
+        "Guest code calling dgram.createSocket/bind/send via V8 polyfill successfully sends packets to host UDP listeners",
+        "The _dgramSocketSendRaw bridge call correctly maps through v8_runtime.rs map_bridge_method to the sidecar dgram.send handler",
+        "The sidecar dgram handler receives the bridge call, sends the packet via the kernel socket table, and returns the result to the V8 isolate",
+        "cargo test -p agent-os-sidecar --test service javascript_dgram_rpc_sends_and_receives_host_udp_packets -- --test-threads=1 passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes (no dgram-related regressions)"
+      ],
+      "priority": 28.5,
+      "passes": false,
+      "notes": "Known blocker from US-009a work. The V8 polyfill sends _dgramSocketSendRaw which maps to dgram.send via map_bridge_method. The sidecar has full dgram handlers in execution.rs (lines 516-584). The bug is in the wiring — either the sync RPC response isn't reaching the V8 isolate correctly, or the guest-to-host port mapping is broken. Debug the full chain: V8 polyfill → _dgramSocketSendRaw → v8_ipc → v8_host event bridge → JavascriptSyncRpcRequest → sidecar execution.rs dgram handler → UdpSocket::send_to → response back to V8. Check crates/execution/assets/v8-bridge.js dgram section, crates/execution/src/v8_runtime.rs map_bridge_method, and crates/sidecar/src/execution.rs dgram handlers."
+    },
+    {
       "id": "US-029",
       "title": "Fix all remaining test failures and get full pnpm test green",
       "description": "As a developer, I want the full workspace test suite passing end-to-end after the migration",
