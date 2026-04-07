@@ -2,11 +2,15 @@
 
 Runtime execution for Node.js (JavaScript/TypeScript) and Python (Pyodide) guest code.
 
+**⚠️ CRITICAL INVARIANT: ALL guest code MUST execute inside the kernel with ZERO host escapes.** Guest code must never spawn real host processes, touch real host filesystems, open real network sockets, or call real Node.js builtins. Every operation goes through kernel-backed polyfills. Any path where guest code reaches the real host is a critical security violation.
+
 ## Node.js Isolation Model
 
-**Current state (KNOWN DEFICIENT -- see `.agent/todo/node-isolation-gaps.md`):**
+**Desired state:** Guest JS/TS runs inside isolated V8 contexts managed by the execution engine. All Node.js builtins (`fs`, `net`, `child_process`, `dns`, `http`, `os`, etc.) are kernel-backed polyfills that route through the kernel VFS, socket table, and process table. Module loading is fully intercepted — guest code never touches real host APIs. The execution engine previously had this working via `@secure-exec/core` + `@secure-exec/nodejs` with full kernel-backed polyfills for all builtins.
 
-Guest Node.js code currently runs as **real host Node.js child processes** spawned via `std::process::Command::new("node")` in `javascript.rs`. The ESM loader hooks intercept `require()`/`import` but most builtins either fall through to the real host module or are thin wrappers that call real host APIs. This violates the virtualization invariants in `crates/CLAUDE.md`.
+**Current state (⚠️ COMPLETELY BROKEN -- see `.agent/todo/node-isolation-gaps.md`):**
+
+Guest Node.js code currently runs as **real host Node.js child processes** spawned via `std::process::Command::new("node")` in `javascript.rs`. The ESM loader hooks intercept `require()`/`import` but most builtins either fall through to the real host module or are thin wrappers that call real host APIs. **This fundamentally violates the isolation model.** The execution engine must be rebuilt to use V8 isolates with kernel-backed polyfills instead of spawning real `node` processes. This is being actively worked on.
 
 **Prior art -- the original JS kernel had full polyfills:**
 

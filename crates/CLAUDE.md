@@ -5,10 +5,10 @@ The Rust sidecar implements the kernel: virtual filesystem, process table, socke
 The kernel orchestrates three execution environments:
 
 - **WASM processes** -- POSIX utilities (coreutils, sh, grep, etc.) compiled to WebAssembly, running within the sidecar's managed runtime.
-- **Node.js** -- JS/TS runs in real host Node.js child processes with ESM loader hooks and CJS `Module._load` patches intercepting every `require()`/`import`. Intercepted builtins are replaced with kernel-backed polyfills that communicate with the sidecar via a synchronous RPC channel (SharedArrayBuffer + `Atomics.wait`). The loader template is generated at runtime by `crates/execution/src/node_import_cache.rs`. **Current state is deficient** -- many builtins still fall through to real host modules. See `crates/execution/CLAUDE.md` for the gap table and polyfill rules.
-- **Python (Pyodide)** -- CPython compiled to WASM via Pyodide, running in a Node.js worker thread with kernel-backed file/network I/O via the same sync RPC bridge.
+- **Node.js (V8 isolates)** -- JS/TS executes inside isolated V8 contexts managed by the sidecar's execution engine. All Node.js builtin modules (`fs`, `net`, `child_process`, `dns`, `http`, `os`, etc.) are kernel-backed polyfills that route through the kernel VFS, socket table, and process table via synchronous RPC. Module loading is intercepted so guest code never touches real host APIs. **⚠️ CURRENTLY BROKEN**: The execution engine currently spawns real host `node` child processes instead of V8 isolates, and most builtins fall through to real host modules. This is being actively fixed. See `crates/execution/CLAUDE.md` for the gap table.
+- **Python (Pyodide)** -- CPython compiled to WASM via Pyodide, with kernel-backed file/network I/O.
 
-All runtimes are managed by the sidecar's execution engines and kernel process table. Guest code must never escape the sidecar's isolation boundary to run on the host.
+**ALL guest code MUST execute inside the kernel with ZERO host escapes.** No runtime may spawn unsandboxed host processes, touch real host filesystems, open real network sockets, or call real Node.js builtins. Every syscall goes through the kernel. This is the single most important architectural invariant. Any path where guest code reaches the real host is a critical security violation.
 
 ## Virtualization Invariants
 

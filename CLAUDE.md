@@ -6,6 +6,8 @@ A high-level wrapper around the Agent OS runtime that provides a clean API for r
 
 Agent OS is a **fully virtualized operating system**. The kernel, written as a Rust sidecar, provides a complete POSIX-like environment -- virtual filesystem, process table, socket table, pipe/PTY management, and permission system. Guest code sees a self-contained OS and must never interact with the host directly. Every system call (file I/O, networking, process spawning, DNS resolution) must be mediated by the kernel. No guest operation may fall through to a real host syscall.
 
+**⚠️ CRITICAL: ALL guest code MUST execute inside the kernel with ZERO host escapes.** The three execution environments (WASM, Node.js/V8 isolates, Python/Pyodide) must all run within the kernel's isolation boundary. No runtime may spawn unsandboxed host processes, touch real host filesystems, open real network sockets, or call real Node.js builtins. **The Node.js execution engine is currently broken** — it spawns real host `node` processes instead of using V8 isolates with kernel-backed polyfills. This is being actively fixed. See `crates/execution/CLAUDE.md` for details.
+
 - **Virtualization invariants, key subsystems, and Rust architecture rules** -- see `crates/CLAUDE.md`
 - **Node.js isolation model, polyfill rules, Python execution** -- see `crates/execution/CLAUDE.md`
 - **Linux compatibility, VFS design, filesystem conventions** -- see `crates/kernel/CLAUDE.md`
