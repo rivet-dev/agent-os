@@ -5,7 +5,9 @@ use crate::service::{
     audit_fields, dirname, emit_security_audit_event, filesystem_permission_capability,
     normalize_path, plugin_error,
 };
-use crate::state::{BridgeError, SharedBridge, HOST_REALPATH_MAX_SYMLINK_DEPTH};
+use crate::state::{
+    BridgeError, SharedBridge, SharedSidecarRequestClient, HOST_REALPATH_MAX_SYMLINK_DEPTH,
+};
 use crate::{NativeSidecarBridge, SidecarError};
 
 use agent_os_bridge::{
@@ -990,7 +992,10 @@ where
 #[derive(Clone)]
 pub(crate) struct MountPluginContext<B> {
     pub(crate) bridge: SharedBridge<B>,
+    pub(crate) connection_id: String,
+    pub(crate) session_id: String,
     pub(crate) vm_id: String,
+    pub(crate) sidecar_requests: SharedSidecarRequestClient,
 }
 
 #[derive(Debug)]
@@ -1007,37 +1012,6 @@ impl<Context> FileSystemPluginFactory<Context> for MemoryMountPlugin {
     ) -> Result<Box<dyn agent_os_kernel::mount_table::MountedFileSystem>, PluginError> {
         Ok(Box::new(MountedVirtualFileSystem::new(
             MemoryFileSystem::new(),
-        )))
-    }
-}
-
-#[derive(Debug)]
-struct JsBridgeMountPlugin;
-
-impl<B> FileSystemPluginFactory<MountPluginContext<B>> for JsBridgeMountPlugin
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
-    fn plugin_id(&self) -> &'static str {
-        "js_bridge"
-    }
-
-    fn open(
-        &self,
-        request: OpenFileSystemPluginRequest<'_, MountPluginContext<B>>,
-    ) -> Result<Box<dyn agent_os_kernel::mount_table::MountedFileSystem>, PluginError> {
-        if !matches!(request.config, Value::Null | Value::Object(_)) {
-            return Err(PluginError::invalid_input(
-                "js_bridge mount config must be an object or null",
-            ));
-        }
-
-        Ok(Box::new(MountedVirtualFileSystem::new(
-            ScopedHostFilesystem::new(
-                HostFilesystem::new(request.context.bridge.clone(), &request.context.vm_id),
-                request.guest_path,
-            ),
         )))
     }
 }
@@ -1162,8 +1136,5 @@ where
     let mut registry = FileSystemPluginRegistry::new();
     registry.register(MemoryMountPlugin).map_err(plugin_error)?;
     register_native_mount_plugins(&mut registry).map_err(plugin_error)?;
-    registry
-        .register(JsBridgeMountPlugin)
-        .map_err(plugin_error)?;
     Ok(registry)
 }

@@ -37,7 +37,8 @@ mod service {
             MountDescriptor, MountPluginDescriptor, OpenSessionRequest, OwnershipScope,
             PatternPermissionRule, PatternPermissionRuleSet, PatternPermissionScope,
             PermissionMode, PermissionsPolicy, RequestFrame, RequestPayload, ResponsePayload,
-            RootFilesystemEntry, RootFilesystemEntryKind, SidecarPlacement, WriteStdinRequest,
+            RootFilesystemEntry, RootFilesystemEntryKind, SidecarPlacement, SidecarRequestFrame,
+            SidecarRequestPayload, SidecarResponsePayload, WriteStdinRequest,
         };
         use crate::state::VM_DNS_SERVERS_METADATA_KEY;
         use agent_os_bridge::{FileKind, SymlinkRequest};
@@ -46,16 +47,17 @@ mod service {
         use agent_os_kernel::kernel::{KernelVmConfig, SpawnOptions};
         use agent_os_kernel::mount_table::{MountEntry, MountTable};
         use agent_os_kernel::permissions::{FsAccessRequest, FsOperation, Permissions};
-        use agent_os_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
+        use agent_os_kernel::vfs::{MemoryFileSystem, VfsError, VirtualDirEntry, VirtualFileSystem, VirtualStat};
         use base64::Engine;
         use bridge_support::RecordingBridge;
-        use serde_json::json;
+        use serde_json::{json, Value};
         use std::collections::BTreeMap;
         use std::fs;
         use std::io::{Read, Write};
         use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
         use std::path::{Path, PathBuf};
         use std::process::Command;
+        use std::sync::{Arc, Mutex};
         use std::thread;
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -129,6 +131,288 @@ ykAheWCsAteSEWVc0w==\n\
                 },
             )
             .expect("create sidecar")
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct JsBridgeCallRecord {
+            ownership: OwnershipScope,
+            mount_id: String,
+            operation: String,
+            path: Option<String>,
+        }
+
+        fn js_bridge_result(
+            request: SidecarRequestFrame,
+            result: Option<Value>,
+            error: Option<&str>,
+        ) -> Result<SidecarResponsePayload, SidecarError> {
+            let SidecarRequestPayload::JsBridgeCall(call) = request.payload else {
+                return Err(SidecarError::InvalidState(String::from(
+                    "expected js_bridge_call payload",
+                )));
+            };
+            Ok(SidecarResponsePayload::JsBridgeResult(
+                crate::protocol::JsBridgeResultResponse {
+                    call_id: call.call_id,
+                    result,
+                    error: error.map(String::from),
+                },
+            ))
+        }
+
+        fn stat_json(stat: VirtualStat) -> Value {
+            json!({
+                "mode": stat.mode,
+                "size": stat.size,
+                "blocks": stat.blocks,
+                "dev": stat.dev,
+                "rdev": stat.rdev,
+                "isDirectory": stat.is_directory,
+                "isSymbolicLink": stat.is_symbolic_link,
+                "atimeMs": stat.atime_ms,
+                "mtimeMs": stat.mtime_ms,
+                "ctimeMs": stat.ctime_ms,
+                "birthtimeMs": stat.birthtime_ms,
+                "ino": stat.ino,
+                "nlink": stat.nlink,
+                "uid": stat.uid,
+                "gid": stat.gid,
+            })
+        }
+
+        fn dir_entry_json(entry: VirtualDirEntry) -> Value {
+            json!({
+                "name": entry.name,
+                "isDirectory": entry.is_directory,
+                "isSymbolicLink": entry.is_symbolic_link,
+            })
+        }
+
+        fn install_memory_js_bridge_handler(
+            sidecar: &mut NativeSidecar<RecordingBridge>,
+        ) -> (Arc<Mutex<MemoryFileSystem>>, Arc<Mutex<Vec<JsBridgeCallRecord>>>) {
+            let filesystem = Arc::new(Mutex::new(MemoryFileSystem::new()));
+            let calls = Arc::new(Mutex::new(Vec::<JsBridgeCallRecord>::new()));
+            let handler_filesystem = filesystem.clone();
+            let handler_calls = calls.clone();
+
+            sidecar.set_sidecar_request_handler(move |request| {
+                let ownership = request.ownership.clone();
+                let SidecarRequestPayload::JsBridgeCall(call) = &request.payload else {
+                    return Err(SidecarError::InvalidState(String::from(
+                        "expected js_bridge_call payload",
+                    )));
+                };
+                handler_calls
+                    .lock()
+                    .expect("lock js bridge calls")
+                    .push(JsBridgeCallRecord {
+                        ownership,
+                        mount_id: call.mount_id.clone(),
+                        operation: call.operation.clone(),
+                        path: call
+                            .args
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .map(String::from),
+                    });
+
+                let mut filesystem = handler_filesystem.lock().expect("lock js bridge fs");
+                let response: Result<Option<Value>, String> = match call.operation.as_str() {
+                    "readFile" => {
+                        let path = call.args["path"].as_str().expect("readFile path");
+                        filesystem
+                            .read_file(path)
+                            .map(|bytes| {
+                                Some(Value::String(
+                                    base64::engine::general_purpose::STANDARD.encode(bytes),
+                                ))
+                            })
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "readDir" => {
+                        let path = call.args["path"].as_str().expect("readDir path");
+                        filesystem
+                            .read_dir(path)
+                            .map(|entries| Some(json!(entries)))
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "readDirWithTypes" => {
+                        let path = call.args["path"].as_str().expect("readDirWithTypes path");
+                        filesystem
+                            .read_dir_with_types(path)
+                            .map(|entries| {
+                                Some(Value::Array(
+                                    entries.into_iter().map(dir_entry_json).collect(),
+                                ))
+                            })
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "writeFile" => {
+                        let path = call.args["path"].as_str().expect("writeFile path");
+                        let content = call.args["content"].as_str().expect("writeFile content");
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(content)
+                            .expect("decode js bridge write content");
+                        filesystem
+                            .write_file(path, bytes)
+                            .map(|()| None)
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "createDir" => {
+                        let path = call.args["path"].as_str().expect("createDir path");
+                        filesystem
+                            .create_dir(path)
+                            .map(|()| None)
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "mkdir" => {
+                        let path = call.args["path"].as_str().expect("mkdir path");
+                        let recursive = call.args["recursive"].as_bool().unwrap_or(false);
+                        filesystem
+                            .mkdir(path, recursive)
+                            .map(|()| None)
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "exists" => {
+                        let path = call.args["path"].as_str().expect("exists path");
+                        Ok(Some(Value::Bool(filesystem.exists(path))))
+                    }
+                    "stat" => {
+                        let path = call.args["path"].as_str().expect("stat path");
+                        filesystem
+                            .stat(path)
+                            .map(|stat| Some(stat_json(stat)))
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "removeFile" => {
+                        let path = call.args["path"].as_str().expect("removeFile path");
+                        filesystem
+                            .remove_file(path)
+                            .map(|()| None)
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "removeDir" => {
+                        let path = call.args["path"].as_str().expect("removeDir path");
+                        filesystem
+                            .remove_dir(path)
+                            .map(|()| None)
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "rename" => {
+                        let old_path = call.args["oldPath"].as_str().expect("rename oldPath");
+                        let new_path = call.args["newPath"].as_str().expect("rename newPath");
+                        filesystem
+                            .rename(old_path, new_path)
+                            .map(|()| None)
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "realpath" => {
+                        let path = call.args["path"].as_str().expect("realpath path");
+                        filesystem
+                            .realpath(path)
+                            .map(|resolved| Some(json!(resolved)))
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "symlink" => {
+                        let target = call.args["target"].as_str().expect("symlink target");
+                        let link_path = call.args["linkPath"].as_str().expect("symlink linkPath");
+                        filesystem
+                            .symlink(target, link_path)
+                            .map(|()| None)
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "readlink" => {
+                        let path = call.args["path"].as_str().expect("readlink path");
+                        filesystem
+                            .read_link(path)
+                            .map(|target| Some(json!(target)))
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "lstat" => {
+                        let path = call.args["path"].as_str().expect("lstat path");
+                        filesystem
+                            .lstat(path)
+                            .map(|stat| Some(stat_json(stat)))
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "link" => {
+                        let old_path = call.args["oldPath"].as_str().expect("link oldPath");
+                        let new_path = call.args["newPath"].as_str().expect("link newPath");
+                        filesystem
+                            .link(old_path, new_path)
+                            .map(|()| None)
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "chmod" => {
+                        let path = call.args["path"].as_str().expect("chmod path");
+                        let mode = call.args["mode"].as_u64().expect("chmod mode") as u32;
+                        filesystem
+                            .chmod(path, mode)
+                            .map(|()| None)
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "chown" => {
+                        let path = call.args["path"].as_str().expect("chown path");
+                        let uid = call.args["uid"].as_u64().expect("chown uid") as u32;
+                        let gid = call.args["gid"].as_u64().expect("chown gid") as u32;
+                        filesystem
+                            .chown(path, uid, gid)
+                            .map(|()| None)
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "utimes" => {
+                        let path = call.args["path"].as_str().expect("utimes path");
+                        let atime = call.args["atimeMs"].as_u64().expect("utimes atimeMs");
+                        let mtime = call.args["mtimeMs"].as_u64().expect("utimes mtimeMs");
+                        filesystem
+                            .utimes(path, atime, mtime)
+                            .map(|()| None)
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "truncate" => {
+                        let path = call.args["path"].as_str().expect("truncate path");
+                        let length = call.args["length"].as_u64().expect("truncate length");
+                        filesystem
+                            .truncate(path, length)
+                            .map(|()| None)
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "pread" => {
+                        let path = call.args["path"].as_str().expect("pread path");
+                        let offset = call.args["offset"].as_u64().expect("pread offset");
+                        let length = call.args["length"].as_u64().expect("pread length") as usize;
+                        filesystem
+                            .pread(path, offset, length)
+                            .map(|bytes| {
+                                Some(Value::String(
+                                    base64::engine::general_purpose::STANDARD.encode(bytes),
+                                ))
+                            })
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    "pwrite" => {
+                        let path = call.args["path"].as_str().expect("pwrite path");
+                        let offset = call.args["offset"].as_u64().expect("pwrite offset");
+                        let content = call.args["content"].as_str().expect("pwrite content");
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(content)
+                            .expect("decode js bridge pwrite content");
+                        filesystem
+                            .pwrite(path, bytes, offset)
+                            .map(|()| None)
+                            .map_err(|error| format!("{}: {error}", error.code()))
+                    }
+                    other => return Err(SidecarError::Unsupported(format!("unsupported op: {other}"))),
+                };
+
+                match response {
+                    Ok(result) => js_bridge_result(request, result, None),
+                    Err(error) => js_bridge_result(request, None, Some(&error)),
+                }
+            });
+
+            (filesystem, calls)
         }
 
         fn unexpected_response_error(expected: &str, other: ResponsePayload) -> SidecarError {
@@ -1240,21 +1524,14 @@ ykAheWCsAteSEWVc0w==\n\
         }
 
         #[test]
-        fn configure_vm_js_bridge_mount_preserves_hard_link_identity() {
+        fn configure_vm_js_bridge_mount_dispatches_filesystem_calls_via_sidecar_requests() {
             let mut sidecar = create_test_sidecar();
-            sidecar
-                .bridge
-                .inspect(|bridge| {
-                    bridge.seed_directory(
-                        "/workspace",
-                        vec![agent_os_bridge::DirectoryEntry {
-                            name: String::from("original.txt"),
-                            kind: FileKind::File,
-                        }],
-                    );
-                    bridge.seed_file("/workspace/original.txt", b"hello world".to_vec());
-                })
-                .expect("seed js bridge filesystem");
+            let (filesystem, calls) = install_memory_js_bridge_handler(&mut sidecar);
+            filesystem
+                .lock()
+                .expect("lock js bridge fs")
+                .write_file("/original.txt", b"hello world".to_vec())
+                .expect("seed js bridge fs");
 
             let (connection_id, session_id) =
                 authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
@@ -1276,7 +1553,7 @@ ykAheWCsAteSEWVc0w==\n\
                             read_only: false,
                             plugin: MountPluginDescriptor {
                                 id: String::from("js_bridge"),
-                                config: json!({}),
+                                config: json!({ "mountId": "mount-1" }),
                             },
                         }],
                         software: Vec::new(),
@@ -1294,6 +1571,22 @@ ykAheWCsAteSEWVc0w==\n\
                 .filesystem_mut()
                 .link("/workspace/original.txt", "/workspace/linked.txt")
                 .expect("create js bridge hard link");
+            vm.kernel
+                .filesystem_mut()
+                .write_file("/workspace/linked.txt", b"updated".to_vec())
+                .expect("write through linked file");
+            vm.kernel
+                .filesystem_mut()
+                .chown("/workspace/original.txt", 2000, 3000)
+                .expect("update ownership");
+            vm.kernel
+                .filesystem_mut()
+                .utimes(
+                    "/workspace/linked.txt",
+                    1_700_000_000_000,
+                    1_710_000_000_000,
+                )
+                .expect("update timestamps");
 
             let original = vm
                 .kernel
@@ -1308,61 +1601,94 @@ ykAheWCsAteSEWVc0w==\n\
             assert_eq!(original.ino, linked.ino);
             assert_eq!(original.nlink, 2);
             assert_eq!(linked.nlink, 2);
-
-            vm.kernel
-                .filesystem_mut()
-                .write_file("/workspace/linked.txt", b"updated".to_vec())
-                .expect("write through hard link");
+            assert_eq!(original.uid, 2000);
+            assert_eq!(original.gid, 3000);
+            assert_eq!(linked.uid, 2000);
+            assert_eq!(linked.gid, 3000);
+            assert_eq!(original.atime_ms, 1_700_000_000_000);
+            assert_eq!(original.mtime_ms, 1_710_000_000_000);
             assert_eq!(
                 vm.kernel
                     .filesystem_mut()
                     .read_file("/workspace/original.txt")
-                    .expect("read original through shared inode"),
+                    .expect("read original through js bridge"),
                 b"updated".to_vec()
             );
 
-            vm.kernel
-                .filesystem_mut()
-                .remove_file("/workspace/original.txt")
-                .expect("remove original hard link");
-            assert!(!vm
-                .kernel
-                .filesystem()
-                .exists("/workspace/original.txt")
-                .expect("check removed original"));
-            assert_eq!(
-                vm.kernel
-                    .filesystem_mut()
-                    .read_file("/workspace/linked.txt")
-                    .expect("read surviving hard link"),
-                b"updated".to_vec()
-            );
-            assert_eq!(
-                vm.kernel
-                    .filesystem_mut()
-                    .stat("/workspace/linked.txt")
-                    .expect("stat surviving hard link")
-                    .nlink,
-                1
-            );
+            let calls = calls.lock().expect("lock js bridge calls");
+            assert!(calls.iter().any(|call| {
+                call.mount_id == "mount-1"
+                    && call.operation == "link"
+                    && call.path.is_none()
+                    && call.ownership
+                        == OwnershipScope::vm(&connection_id, &session_id, &vm_id)
+            }));
+            assert!(calls.iter().any(|call| {
+                call.mount_id == "mount-1"
+                    && call.operation == "writeFile"
+                    && call.path.as_deref() == Some("/linked.txt")
+            }));
+            assert!(calls.iter().any(|call| {
+                call.mount_id == "mount-1"
+                    && call.operation == "stat"
+                    && call.path.as_deref() == Some("/original.txt")
+            }));
         }
 
         #[test]
-        fn configure_vm_js_bridge_mount_preserves_metadata_updates() {
+        fn configure_vm_js_bridge_mount_maps_callback_errors_to_errno_codes() {
             let mut sidecar = create_test_sidecar();
-            sidecar
-                .bridge
-                .inspect(|bridge| {
-                    bridge.seed_directory(
-                        "/workspace",
-                        vec![agent_os_bridge::DirectoryEntry {
-                            name: String::from("original.txt"),
-                            kind: FileKind::File,
-                        }],
-                    );
-                    bridge.seed_file("/workspace/original.txt", b"hello world".to_vec());
-                })
-                .expect("seed js bridge filesystem");
+            sidecar.set_sidecar_request_handler(|request| {
+                let SidecarRequestPayload::JsBridgeCall(call) = &request.payload else {
+                    return Err(SidecarError::InvalidState(String::from(
+                        "expected js_bridge_call payload",
+                    )));
+                };
+                let path = call.args.get("path").and_then(Value::as_str);
+                if path == Some("/") {
+                    return match call.operation.as_str() {
+                        "exists" => js_bridge_result(request, Some(Value::Bool(true)), None),
+                        "stat" | "lstat" => js_bridge_result(
+                            request,
+                            Some(stat_json(VirtualStat {
+                                mode: 0o755,
+                                size: 0,
+                                blocks: 0,
+                                dev: 1,
+                                rdev: 0,
+                                is_directory: true,
+                                is_symbolic_link: false,
+                                atime_ms: 0,
+                                mtime_ms: 0,
+                                ctime_ms: 0,
+                                birthtime_ms: 0,
+                                ino: 1,
+                                nlink: 1,
+                                uid: 0,
+                                gid: 0,
+                            })),
+                            None,
+                        ),
+                        "readDir" => js_bridge_result(request, Some(json!([])), None),
+                        "readDirWithTypes" => {
+                            js_bridge_result(request, Some(Value::Array(Vec::new())), None)
+                        }
+                        "realpath" => js_bridge_result(request, Some(json!("/")), None),
+                        _ => js_bridge_result(request, None, None),
+                    };
+                }
+
+                let error = match (call.operation.as_str(), path) {
+                    ("realpath", Some("/missing.txt")) | ("readFile", Some("/missing.txt")) => {
+                        "not found"
+                    }
+                    ("writeFile", Some("/output.txt")) => "permission denied",
+                    ("rename", _) => "already exists",
+                    ("stat", Some("/anything.txt")) => "unexpected js bridge failure",
+                    _ => return js_bridge_result(request, None, None),
+                };
+                js_bridge_result(request, None, Some(error))
+            });
 
             let (connection_id, session_id) =
                 authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
@@ -1384,7 +1710,7 @@ ykAheWCsAteSEWVc0w==\n\
                             read_only: false,
                             plugin: MountPluginDescriptor {
                                 id: String::from("js_bridge"),
-                                config: json!({}),
+                                config: json!({ "mountId": "mount-errors" }),
                             },
                         }],
                         software: Vec::new(),
@@ -1398,43 +1724,33 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("configure js_bridge mount");
 
             let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
-            vm.kernel
-                .filesystem_mut()
-                .link("/workspace/original.txt", "/workspace/linked.txt")
-                .expect("create js bridge hard link");
-
-            vm.kernel
-                .filesystem_mut()
-                .chown("/workspace/original.txt", 2000, 3000)
-                .expect("update js bridge ownership");
-            vm.kernel
-                .filesystem_mut()
-                .utimes(
-                    "/workspace/linked.txt",
-                    1_700_000_000_000,
-                    1_710_000_000_000,
-                )
-                .expect("update js bridge timestamps");
-
-            let original = vm
+            let read_error = vm
                 .kernel
                 .filesystem_mut()
-                .stat("/workspace/original.txt")
-                .expect("stat original");
-            let linked = vm
+                .read_file("/workspace/missing.txt")
+                .expect_err("read should fail");
+            assert_eq!(read_error.code(), "ENOENT");
+
+            let write_error = vm
                 .kernel
                 .filesystem_mut()
-                .stat("/workspace/linked.txt")
-                .expect("stat linked");
+                .write_file("/workspace/output.txt", b"blocked".to_vec())
+                .expect_err("write should fail");
+            assert_eq!(write_error.code(), "EACCES");
 
-            assert_eq!(original.uid, 2000);
-            assert_eq!(original.gid, 3000);
-            assert_eq!(linked.uid, 2000);
-            assert_eq!(linked.gid, 3000);
-            assert_eq!(original.atime_ms, 1_700_000_000_000);
-            assert_eq!(original.mtime_ms, 1_710_000_000_000);
-            assert_eq!(linked.atime_ms, 1_700_000_000_000);
-            assert_eq!(linked.mtime_ms, 1_710_000_000_000);
+            let rename_error = vm
+                .kernel
+                .filesystem_mut()
+                .rename("/workspace/a.txt", "/workspace/b.txt")
+                .expect_err("rename should fail");
+            assert_eq!(rename_error.code(), "EEXIST");
+
+            let stat_error = vm
+                .kernel
+                .filesystem_mut()
+                .stat("/workspace/anything.txt")
+                .expect_err("stat should fail");
+            assert_eq!(stat_error.code(), "EIO");
         }
 
         #[test]

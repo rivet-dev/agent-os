@@ -5,8 +5,10 @@ use agent_os_sidecar::protocol::{
     GuestFilesystemCallRequest, GuestFilesystemOperation, GuestRuntimeKind, MountDescriptor,
     MountPluginDescriptor, NativeFrameCodec, OpenSessionRequest, OwnershipScope, ProtocolFrame,
     RequestFrame, RequestId, RequestPayload, ResponseFrame, ResponsePayload, SidecarPlacement,
-    SnapshotRootFilesystemRequest, StreamChannel,
+    SidecarRequestFrame, SidecarResponseFrame, SidecarResponsePayload, SnapshotRootFilesystemRequest,
+    StreamChannel,
 };
+use base64::Engine;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
@@ -51,6 +53,109 @@ fn recv_response(
             ProtocolFrame::Event(event) => events.push(event.payload),
             other => panic!("unexpected frame while waiting for response {request_id}: {other:?}"),
         }
+    }
+}
+
+fn send_sidecar_response(
+    stdin: &mut ChildStdin,
+    codec: &NativeFrameCodec,
+    response: SidecarResponseFrame,
+) {
+    let encoded = codec
+        .encode(&ProtocolFrame::SidecarResponse(response))
+        .expect("encode sidecar response");
+    stdin
+        .write_all(&encoded)
+        .expect("write sidecar response frame");
+    stdin.flush().expect("flush sidecar response frame");
+}
+
+fn recv_response_with_sidecar_handler(
+    stdin: &mut ChildStdin,
+    stdout: &mut ChildStdout,
+    codec: &NativeFrameCodec,
+    request_id: RequestId,
+    events: &mut Vec<EventPayload>,
+    mut handle: impl FnMut(&SidecarRequestFrame) -> SidecarResponsePayload,
+) -> ResponseFrame {
+    loop {
+        match read_frame(stdout, codec) {
+            ProtocolFrame::Response(response) if response.request_id == request_id => {
+                return response;
+            }
+            ProtocolFrame::Event(event) => events.push(event.payload),
+            ProtocolFrame::SidecarRequest(request) => {
+                let payload = handle(&request);
+                send_sidecar_response(
+                    stdin,
+                    codec,
+                    SidecarResponseFrame::new(request.request_id, request.ownership.clone(), payload),
+                );
+            }
+            other => panic!("unexpected frame while waiting for response {request_id}: {other:?}"),
+        }
+    }
+}
+
+fn js_bridge_root_response(
+    call: &agent_os_sidecar::protocol::JsBridgeCallRequest,
+) -> Option<SidecarResponsePayload> {
+    if call.args["path"].as_str() != Some("/") {
+        return None;
+    }
+    match call.operation.as_str() {
+        "exists" => Some(SidecarResponsePayload::JsBridgeResult(
+            agent_os_sidecar::protocol::JsBridgeResultResponse {
+                call_id: call.call_id.clone(),
+                result: Some(serde_json::Value::Bool(true)),
+                error: None,
+            },
+        )),
+        "stat" | "lstat" => Some(SidecarResponsePayload::JsBridgeResult(
+            agent_os_sidecar::protocol::JsBridgeResultResponse {
+                call_id: call.call_id.clone(),
+                result: Some(json!({
+                    "mode": 0o755,
+                    "size": 0,
+                    "blocks": 0,
+                    "dev": 1,
+                    "rdev": 0,
+                    "isDirectory": true,
+                    "isSymbolicLink": false,
+                    "atimeMs": 0,
+                    "mtimeMs": 0,
+                    "ctimeMs": 0,
+                    "birthtimeMs": 0,
+                    "ino": 1,
+                    "nlink": 1,
+                    "uid": 0,
+                    "gid": 0,
+                })),
+                error: None,
+            },
+        )),
+        "readDir" => Some(SidecarResponsePayload::JsBridgeResult(
+            agent_os_sidecar::protocol::JsBridgeResultResponse {
+                call_id: call.call_id.clone(),
+                result: Some(json!([])),
+                error: None,
+            },
+        )),
+        "readDirWithTypes" => Some(SidecarResponsePayload::JsBridgeResult(
+            agent_os_sidecar::protocol::JsBridgeResultResponse {
+                call_id: call.call_id.clone(),
+                result: Some(json!([])),
+                error: None,
+            },
+        )),
+        "realpath" => Some(SidecarResponsePayload::JsBridgeResult(
+            agent_os_sidecar::protocol::JsBridgeResultResponse {
+                call_id: call.call_id.clone(),
+                result: Some(json!("/")),
+                error: None,
+            },
+        )),
+        _ => None,
     }
 }
 
@@ -653,11 +758,11 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::ConfigureVm(ConfigureVmRequest {
                 mounts: vec![MountDescriptor {
-                    guest_path: host_root.to_string_lossy().into_owned(),
+                    guest_path: String::from("/workspace"),
                     read_only: false,
                     plugin: MountPluginDescriptor {
                         id: String::from("js_bridge"),
-                        config: json!({}),
+                        config: json!({ "mountId": "mount-1" }),
                     },
                 }],
                 software: Vec::new(),
@@ -678,7 +783,6 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
         other => panic!("unexpected configure response: {other:?}"),
     }
 
-    let existing_path = format!("{}/existing.txt", host_root.to_string_lossy());
     send_request(
         &mut stdin,
         &codec,
@@ -687,7 +791,7 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::GuestFilesystemCall(GuestFilesystemCallRequest {
                 operation: GuestFilesystemOperation::ReadFile,
-                path: existing_path,
+                path: String::from("/workspace/existing.txt"),
                 destination_path: None,
                 target: None,
                 content: None,
@@ -702,7 +806,50 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
             }),
         ),
     );
-    let read = recv_response(&mut stdout, &codec, 5, &mut buffered_events);
+    let read = recv_response_with_sidecar_handler(
+        &mut stdin,
+        &mut stdout,
+        &codec,
+        5,
+        &mut buffered_events,
+        |request| {
+            assert_eq!(request.ownership, OwnershipScope::vm(&connection_id, &session_id, &vm_id));
+            let agent_os_sidecar::protocol::SidecarRequestPayload::JsBridgeCall(call) =
+                &request.payload
+            else {
+                panic!("expected js_bridge_call payload");
+            };
+            assert_eq!(call.mount_id, "mount-1");
+            if let Some(response) = js_bridge_root_response(call) {
+                return response;
+            }
+            match (
+                call.operation.as_str(),
+                call.args["path"].as_str().expect("read path"),
+            ) {
+                ("realpath", "/existing.txt") => SidecarResponsePayload::JsBridgeResult(
+                    agent_os_sidecar::protocol::JsBridgeResultResponse {
+                        call_id: call.call_id.clone(),
+                        result: Some(json!("/existing.txt")),
+                        error: None,
+                    },
+                ),
+                ("readFile", "/existing.txt") => SidecarResponsePayload::JsBridgeResult(
+                    agent_os_sidecar::protocol::JsBridgeResultResponse {
+                        call_id: call.call_id.clone(),
+                        result: Some(serde_json::Value::String(
+                            base64::engine::general_purpose::STANDARD.encode(
+                                fs::read(host_root.join("existing.txt"))
+                                    .expect("read host file"),
+                            ),
+                        )),
+                        error: None,
+                    },
+                ),
+                other => panic!("unexpected js bridge read callback: {other:?}"),
+            }
+        },
+    );
     match read.payload {
         ResponsePayload::GuestFilesystemResult(response) => {
             assert_eq!(response.content.as_deref(), Some("host-bridge-ok"));
@@ -710,7 +857,6 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
         other => panic!("unexpected read response: {other:?}"),
     }
 
-    let generated_path = format!("{}/generated.txt", host_root.to_string_lossy());
     send_request(
         &mut stdin,
         &codec,
@@ -719,7 +865,7 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::GuestFilesystemCall(GuestFilesystemCallRequest {
                 operation: GuestFilesystemOperation::WriteFile,
-                path: generated_path,
+                path: String::from("/workspace/generated.txt"),
                 destination_path: None,
                 target: None,
                 content: Some(String::from("from-js-bridge")),
@@ -734,7 +880,73 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
             }),
         ),
     );
-    let write = recv_response(&mut stdout, &codec, 6, &mut buffered_events);
+    let write = recv_response_with_sidecar_handler(
+        &mut stdin,
+        &mut stdout,
+        &codec,
+        6,
+        &mut buffered_events,
+        |request| {
+            let agent_os_sidecar::protocol::SidecarRequestPayload::JsBridgeCall(call) =
+                &request.payload
+            else {
+                panic!("expected js_bridge_call payload");
+            };
+            assert_eq!(call.mount_id, "mount-1");
+            if let Some(response) = js_bridge_root_response(call) {
+                return response;
+            }
+            if call.args["path"].as_str() == Some("/generated.txt") {
+                match call.operation.as_str() {
+                    "exists" => {
+                        return SidecarResponsePayload::JsBridgeResult(
+                            agent_os_sidecar::protocol::JsBridgeResultResponse {
+                                call_id: call.call_id.clone(),
+                                result: Some(serde_json::Value::Bool(false)),
+                                error: None,
+                            },
+                        );
+                    }
+                    "stat" | "lstat" | "realpath" => {
+                        return SidecarResponsePayload::JsBridgeResult(
+                            agent_os_sidecar::protocol::JsBridgeResultResponse {
+                                call_id: call.call_id.clone(),
+                                result: None,
+                                error: Some(String::from("not found")),
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            match (
+                call.operation.as_str(),
+                call.args["path"].as_str().expect("write path"),
+            ) {
+                ("realpath", "/generated.txt") => SidecarResponsePayload::JsBridgeResult(
+                    agent_os_sidecar::protocol::JsBridgeResultResponse {
+                        call_id: call.call_id.clone(),
+                        result: None,
+                        error: Some(String::from("not found")),
+                    },
+                ),
+                ("writeFile", "/generated.txt") => {
+                    let content = base64::engine::general_purpose::STANDARD
+                        .decode(call.args["content"].as_str().expect("write content"))
+                        .expect("decode js bridge write");
+                    fs::write(host_root.join("generated.txt"), content).expect("write host file");
+                    SidecarResponsePayload::JsBridgeResult(
+                        agent_os_sidecar::protocol::JsBridgeResultResponse {
+                            call_id: call.call_id.clone(),
+                            result: None,
+                            error: None,
+                        },
+                    )
+                }
+                other => panic!("unexpected js bridge write callback: {other:?}"),
+            }
+        },
+    );
     match write.payload {
         ResponsePayload::GuestFilesystemResult(response) => {
             assert_eq!(response.operation, GuestFilesystemOperation::WriteFile);

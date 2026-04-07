@@ -5,7 +5,8 @@
 
 use crate::protocol::{
     EventFrame, GuestRuntimeKind, MountDescriptor, PermissionsPolicy, ProjectedModuleDescriptor,
-    ResponseFrame, SignalHandlerRegistration, SoftwareDescriptor, WasmPermissionTier,
+    ResponseFrame, SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame,
+    SidecarResponsePayload, SignalHandlerRegistration, SoftwareDescriptor, WasmPermissionTier,
     DEFAULT_MAX_FRAME_BYTES,
 };
 use agent_os_bridge::{BridgeTypes, FilesystemSnapshot};
@@ -22,9 +23,10 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Type aliases
@@ -115,6 +117,70 @@ impl fmt::Display for SidecarError {
 }
 
 impl Error for SidecarError {}
+
+pub trait SidecarRequestTransport: Send + Sync {
+    fn send_request(
+        &self,
+        request: SidecarRequestFrame,
+        timeout: Duration,
+    ) -> Result<SidecarResponseFrame, SidecarError>;
+}
+
+#[derive(Clone)]
+pub(crate) struct SharedSidecarRequestClient {
+    transport: Option<Arc<dyn SidecarRequestTransport>>,
+    next_request_id: Arc<AtomicI64>,
+}
+
+impl Default for SharedSidecarRequestClient {
+    fn default() -> Self {
+        Self {
+            transport: None,
+            next_request_id: Arc::new(AtomicI64::new(-1)),
+        }
+    }
+}
+
+impl SharedSidecarRequestClient {
+    pub(crate) fn with_transport(transport: Arc<dyn SidecarRequestTransport>) -> Self {
+        Self {
+            transport: Some(transport),
+            next_request_id: Arc::new(AtomicI64::new(-1)),
+        }
+    }
+
+    pub(crate) fn set_transport(&mut self, transport: Arc<dyn SidecarRequestTransport>) {
+        self.transport = Some(transport);
+    }
+
+    pub(crate) fn invoke(
+        &self,
+        ownership: crate::protocol::OwnershipScope,
+        payload: SidecarRequestPayload,
+        timeout: Duration,
+    ) -> Result<SidecarResponsePayload, SidecarError> {
+        let transport = self.transport.as_ref().ok_or_else(|| {
+            SidecarError::Unsupported(String::from(
+                "sidecar request transport is not configured",
+            ))
+        })?;
+        let request_id = self.next_request_id.fetch_sub(1, Ordering::Relaxed);
+        let request = SidecarRequestFrame::new(request_id, ownership.clone(), payload);
+        let response = transport.send_request(request, timeout)?;
+        if response.request_id != request_id {
+            return Err(SidecarError::InvalidState(format!(
+                "sidecar response {} did not match request {request_id}",
+                response.request_id
+            )));
+        }
+        if response.ownership != ownership {
+            return Err(SidecarError::InvalidState(String::from(
+                "sidecar response ownership did not match request ownership",
+            )));
+        }
+        Ok(response.payload)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Bridge wrapper

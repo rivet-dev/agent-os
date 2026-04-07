@@ -12,21 +12,20 @@ use agent_os_bridge::{
     WriteFileRequest,
 };
 use agent_os_sidecar::protocol::{
-    AuthenticatedResponse, NativeFrameCodec, ProtocolCodecError, ProtocolFrame, ResponsePayload,
-    SessionOpenedResponse,
+    AuthenticatedResponse, NativeFrameCodec, ProtocolCodecError, ProtocolFrame, RequestId,
+    ResponsePayload, SessionOpenedResponse, SidecarRequestFrame, SidecarResponseFrame,
 };
-use agent_os_sidecar::{NativeSidecar, NativeSidecarConfig};
+use agent_os_sidecar::{NativeSidecar, NativeSidecarConfig, SidecarError, SidecarRequestTransport};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io;
-#[cfg(test)]
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{symlink as create_symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
-use tokio::io::{self as tokio_io, AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::time;
 
@@ -46,27 +45,52 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
     };
     let codec = NativeFrameCodec::new(config.max_frame_bytes);
     let mut sidecar = NativeSidecar::with_config(LocalBridge::default(), config)?;
-    let mut writer = SharedWriter::new(codec.clone(), BufWriter::new(tokio_io::stdout()));
     let mut active_sessions = BTreeSet::<SessionScope>::new();
     let mut active_connections = BTreeSet::<String>::new();
     let (stdin_tx, mut stdin_rx) = unbounded_channel::<Result<Option<ProtocolFrame>, String>>();
     let (event_ready_tx, mut event_ready_rx) = unbounded_channel::<()>();
+    let (write_tx, write_rx) = mpsc::channel::<ProtocolFrame>();
+    let (write_error_tx, mut write_error_rx) = unbounded_channel::<String>();
+    let callback_transport = Arc::new(FrameSidecarRequestTransport::new(write_tx.clone()));
+    sidecar.set_sidecar_request_transport(callback_transport.clone());
     let mut event_pump = time::interval(EVENT_PUMP_INTERVAL);
+    let writer_codec = codec.clone();
+    let reader_codec = codec.clone();
 
-    tokio::spawn(async move {
-        let mut stdin = tokio_io::stdin();
-        loop {
-            let frame = read_frame_async(&codec, &mut stdin)
-                .await
-                .map_err(|error| error.to_string());
-            let should_stop = matches!(frame, Ok(None) | Err(_));
-            if stdin_tx.send(frame).is_err() || should_stop {
+    thread::spawn(move || {
+        let mut writer = io::BufWriter::new(io::stdout());
+        while let Ok(frame) = write_rx.recv() {
+            if let Err(error) = write_frame(&writer_codec, &mut writer, &frame) {
+                let _ = write_error_tx.send(error.to_string());
                 break;
             }
         }
     });
 
-    flush_sidecar_requests(&mut sidecar, &mut writer).await?;
+    thread::spawn({
+        let callback_transport = callback_transport.clone();
+        move || {
+            let mut stdin = io::stdin();
+            loop {
+                let frame = match read_frame(&reader_codec, &mut stdin) {
+                    Ok(Some(ProtocolFrame::SidecarResponse(response))) => {
+                        if callback_transport.accept_response(response.clone()) {
+                            continue;
+                        }
+                        Ok(Some(ProtocolFrame::SidecarResponse(response)))
+                    }
+                    other => other,
+                }
+                .map_err(|error: Box<dyn Error>| error.to_string());
+                let should_stop = matches!(frame, Ok(None) | Err(_));
+                if stdin_tx.send(frame).is_err() || should_stop {
+                    break;
+                }
+            }
+        }
+    });
+
+    flush_sidecar_requests(&mut sidecar, &write_tx)?;
 
     loop {
         tokio::select! {
@@ -86,15 +110,19 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
                             &mut active_connections,
                         );
 
-                        writer.write_frame(&ProtocolFrame::Response(dispatch.response)).await?;
+                        write_tx.send(ProtocolFrame::Response(dispatch.response)).map_err(|error| {
+                            io::Error::new(io::ErrorKind::BrokenPipe, error.to_string())
+                        })?;
                         for event in dispatch.events {
-                            writer.write_frame(&ProtocolFrame::Event(event)).await?;
+                            write_tx.send(ProtocolFrame::Event(event)).map_err(|error| {
+                                io::Error::new(io::ErrorKind::BrokenPipe, error.to_string())
+                            })?;
                         }
-                        flush_sidecar_requests(&mut sidecar, &mut writer).await?;
+                        flush_sidecar_requests(&mut sidecar, &write_tx)?;
                     }
                     ProtocolFrame::SidecarResponse(response) => {
                         sidecar.accept_sidecar_response(response)?;
-                        flush_sidecar_requests(&mut sidecar, &mut writer).await?;
+                        flush_sidecar_requests(&mut sidecar, &write_tx)?;
                     }
                     other => {
                         return Err(format!(
@@ -115,7 +143,9 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
                             .poll_event(&session.ownership_scope(), Duration::ZERO)
                             .await?
                         {
-                            writer.write_frame(&ProtocolFrame::Event(frame)).await?;
+                            write_tx.send(ProtocolFrame::Event(frame)).map_err(|error| {
+                                io::Error::new(io::ErrorKind::BrokenPipe, error.to_string())
+                            })?;
                             emitted_frame = true;
                         }
                     }
@@ -124,7 +154,7 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
                         break;
                     }
                 }
-                flush_sidecar_requests(&mut sidecar, &mut writer).await?;
+                flush_sidecar_requests(&mut sidecar, &write_tx)?;
             }
             _ = event_pump.tick() => {
                 for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
@@ -132,7 +162,12 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
                         let _ = event_ready_tx.send(());
                     }
                 }
-                flush_sidecar_requests(&mut sidecar, &mut writer).await?;
+                flush_sidecar_requests(&mut sidecar, &write_tx)?;
+            }
+            maybe_write_error = write_error_rx.recv() => {
+                if let Some(error) = maybe_write_error {
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, error).into());
+                }
             }
         }
     }
@@ -172,7 +207,6 @@ fn track_session_state(
     }
 }
 
-#[cfg(test)]
 fn read_frame(
     codec: &NativeFrameCodec,
     reader: &mut impl Read,
@@ -202,33 +236,15 @@ fn read_frame(
     Ok(Some(codec.decode(&bytes)?))
 }
 
-async fn read_frame_async(
+fn write_frame(
     codec: &NativeFrameCodec,
-    reader: &mut (impl tokio_io::AsyncRead + Unpin),
-) -> Result<Option<ProtocolFrame>, Box<dyn Error>> {
-    let mut prefix = [0u8; 4];
-    match reader.read_exact(&mut prefix).await {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-            return Ok(None);
-        }
-        Err(error) => return Err(error.into()),
-    }
-
-    let declared_len = u32::from_be_bytes(prefix) as usize;
-    if declared_len > codec.max_frame_bytes() {
-        return Err(ProtocolCodecError::FrameTooLarge {
-            size: declared_len,
-            max: codec.max_frame_bytes(),
-        }
-        .into());
-    }
-    let total_len = prefix.len().saturating_add(declared_len);
-    let mut bytes = Vec::with_capacity(total_len);
-    bytes.extend_from_slice(&prefix);
-    bytes.resize(total_len, 0);
-    reader.read_exact(&mut bytes[prefix.len()..]).await?;
-    Ok(Some(codec.decode(&bytes)?))
+    writer: &mut impl Write,
+    frame: &ProtocolFrame,
+) -> Result<(), Box<dyn Error>> {
+    let bytes = codec.encode(frame)?;
+    writer.write_all(&bytes)?;
+    writer.flush()?;
+    Ok(())
 }
 
 fn frame_kind(frame: &ProtocolFrame) -> &'static str {
@@ -241,14 +257,14 @@ fn frame_kind(frame: &ProtocolFrame) -> &'static str {
     }
 }
 
-async fn flush_sidecar_requests(
+fn flush_sidecar_requests(
     sidecar: &mut NativeSidecar<LocalBridge>,
-    writer: &mut SharedWriter<BufWriter<tokio_io::Stdout>>,
+    writer: &mpsc::Sender<ProtocolFrame>,
 ) -> Result<(), Box<dyn Error>> {
     while let Some(request) = sidecar.pop_sidecar_request() {
-        writer
-            .write_frame(&ProtocolFrame::SidecarRequest(request))
-            .await?;
+        writer.send(ProtocolFrame::SidecarRequest(request)).map_err(|error| {
+            io::Error::new(io::ErrorKind::BrokenPipe, error.to_string())
+        })?;
     }
     Ok(())
 }
@@ -591,24 +607,73 @@ impl SessionScope {
     }
 }
 
-struct SharedWriter<W> {
-    codec: NativeFrameCodec,
-    writer: W,
+struct FrameSidecarRequestTransport {
+    writer: mpsc::Sender<ProtocolFrame>,
+    pending: Arc<Mutex<BTreeMap<RequestId, mpsc::SyncSender<SidecarResponseFrame>>>>,
 }
 
-impl<W> SharedWriter<W>
-where
-    W: tokio_io::AsyncWrite + Unpin,
-{
-    fn new(codec: NativeFrameCodec, writer: W) -> Self {
-        Self { codec, writer }
+impl FrameSidecarRequestTransport {
+    fn new(writer: mpsc::Sender<ProtocolFrame>) -> Self {
+        Self {
+            writer,
+            pending: Arc::new(Mutex::new(BTreeMap::new())),
+        }
     }
 
-    async fn write_frame(&mut self, frame: &ProtocolFrame) -> Result<(), Box<dyn Error>> {
-        let bytes = self.codec.encode(frame)?;
-        self.writer.write_all(&bytes).await?;
-        self.writer.flush().await?;
-        Ok(())
+    fn accept_response(&self, response: SidecarResponseFrame) -> bool {
+        let sender = {
+            let mut pending = match self.pending.lock() {
+                Ok(pending) => pending,
+                Err(_) => return false,
+            };
+            pending.remove(&response.request_id)
+        };
+        let Some(sender) = sender else {
+            return false;
+        };
+        let _ = sender.send(response);
+        true
+    }
+}
+
+impl SidecarRequestTransport for FrameSidecarRequestTransport {
+    fn send_request(
+        &self,
+        request: SidecarRequestFrame,
+        timeout: Duration,
+    ) -> Result<SidecarResponseFrame, SidecarError> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.pending
+            .lock()
+            .map_err(|_| {
+                SidecarError::Bridge(String::from("sidecar callback waiter map lock poisoned"))
+            })?
+            .insert(request.request_id, sender);
+        if let Err(error) = self.writer.send(ProtocolFrame::SidecarRequest(request.clone())) {
+            let _ = self
+                .pending
+                .lock()
+                .map(|mut pending| pending.remove(&request.request_id));
+            return Err(SidecarError::Io(format!(
+                "failed to write sidecar request frame: {error}"
+            )));
+        }
+        match receiver.recv_timeout(timeout) {
+            Ok(response) => Ok(response),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = self
+                    .pending
+                    .lock()
+                    .map(|mut pending| pending.remove(&request.request_id));
+                Err(SidecarError::Io(format!(
+                    "timed out waiting for sidecar response after {}s",
+                    timeout.as_secs()
+                )))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(SidecarError::Io(
+                String::from("sidecar response waiter disconnected"),
+            )),
+        }
     }
 }
 

@@ -258,7 +258,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 23,
-      "passes": false,
+      "passes": true,
       "notes": "Step 2 (Rust side, part 2). Depends on US-009 (bidirectional frames). See spec 'JS-Bridge Mounts' section. This is the same async callback pattern used by tool invocations \u2014 sidecar pushes request, holds, TypeScript runs callback, returns result."
     },
     {
@@ -800,6 +800,120 @@
       "priority": 20,
       "passes": false,
       "notes": "The ~40 failures fall into patterns: (1) ~15 test loader mechanics (node_import_cache.rs template generation, ESM hook injection, runner.mjs materialization) \u2014 these are dead code for V8 and should be deleted, (2) ~25 test real behavior (fs, child_process, env hardening) but assert on node process artifacts (exit codes, stderr formats, env vars) that differ under V8 bridge \u2014 fix assertions. NEVER restore Command::new('node') to make tests pass."
+    },
+    {
+      "id": "US-041",
+      "title": "Run Pi agent end-to-end in V8 isolates",
+      "description": "As a developer, I want to boot a Pi agent session inside V8 isolates and verify it completes a real task end-to-end. None of the current stories test the full agent lifecycle.",
+      "acceptanceCriteria": [
+        "Pi agent boots via createSession('pi') with the V8 execution engine (not host node)",
+        "Agent receives a prompt, makes tool calls (filesystem, child_process), and returns a response",
+        "ACP JSON-RPC session lifecycle works: session/start → task/start → events → task/finish",
+        "All bridge calls (fs, child_process, crypto, timers, stdin) exercised during the session",
+        "Test uses @copilotkit/llmock with ANTHROPIC_API_KEY='mock-key' — no real API tokens",
+        "pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts passes"
+      ],
+      "priority": 42,
+      "passes": false,
+      "notes": "End-to-end agent validation. This is the real integration test — everything else tests subsystems in isolation. Depends on bridge gap stories (US-030-040) being complete. Use the existing pi-headless.test.ts as the starting point. The test should verify the agent sees kernel VFS (not host fs), kernel PIDs (not host PIDs), and kernel env (not host env)."
+    },
+    {
+      "id": "US-042",
+      "title": "V8 isolate startup time benchmark",
+      "description": "As a developer, I want to measure cold and warm V8 session creation latency to ensure it meets performance targets.",
+      "acceptanceCriteria": [
+        "Benchmark script measures cold V8 session creation (first session after v8-runtime binary starts)",
+        "Benchmark script measures warm V8 session creation (subsequent sessions reusing the running v8-runtime)",
+        "Benchmark measures time from CreateSession IPC to first BridgeCall received",
+        "Results logged with p50/p95/p99 over 10+ iterations",
+        "If cold start >500ms, investigate V8 startup snapshot prewarming",
+        "Benchmark added to scripts/benchmarks/ and runnable via a simple command"
+      ],
+      "priority": 43,
+      "passes": false,
+      "notes": "Performance validation. The V8 runtime (crates/v8-runtime/) supports snapshot-based session creation via snapshot.rs. Cold start includes V8 isolate creation + v8-bridge.js evaluation. Warm start reuses the snapshot. Measure both. Compare against the old Command::new('node') path baseline if available."
+    },
+    {
+      "id": "US-043",
+      "title": "Memory baseline for V8 vs old node process",
+      "description": "As a developer, I want to compare RSS per agent session between V8 isolates and the old host node process to validate the memory improvement.",
+      "acceptanceCriteria": [
+        "Benchmark measures RSS of the v8-runtime binary with 0, 1, 5, and 10 concurrent sessions",
+        "Marginal RSS per session calculated (delta between N and N+1 sessions)",
+        "Results compared against baseline of old node process path (if available, otherwise document V8-only numbers)",
+        "Benchmark added to scripts/benchmarks/ and runnable via a simple command",
+        "Results include breakdown: v8-runtime base RSS, per-session delta, v8-bridge.js evaluation overhead"
+      ],
+      "priority": 44,
+      "passes": false,
+      "notes": "Performance validation. The whole point of V8 isolates was lower memory per session vs spawning full node processes. Use process RSS from /proc/[pid]/status or similar. The existing scripts/benchmarks/pi-entrypoint-memory.bench.ts may be a useful reference for measurement patterns."
+    },
+    {
+      "id": "US-044",
+      "title": "Guest escape audit — automated isolation invariant tests",
+      "description": "As a developer, I want an automated test suite that verifies no guest code can reach host APIs, leak host state, or escape the kernel isolation boundary.",
+      "acceptanceCriteria": [
+        "Test suite in crates/sidecar/tests/isolation_audit.rs or crates/execution/tests/isolation_audit.rs",
+        "Tests verify: guest process.env does not contain AGENT_OS_* vars or host env",
+        "Tests verify: guest process.pid returns kernel PID, not host PID",
+        "Tests verify: guest fs.readdirSync('/') shows kernel VFS root, not host root",
+        "Tests verify: guest process.cwd() returns kernel CWD, not host path",
+        "Tests verify: guest require('fs') returns kernel-backed polyfill, not real node:fs",
+        "Tests verify: guest cannot access real host network (no real TCP connections)",
+        "Tests verify: guest error stack traces do not reveal host filesystem paths",
+        "Tests verify: guest require.resolve() returns guest-visible paths",
+        "cargo test -p agent-os-sidecar --test isolation_audit -- --test-threads=1 passes"
+      ],
+      "priority": 45,
+      "passes": false,
+      "notes": "Security hardening. The CLAUDE.md rules (crates/CLAUDE.md invariants 1-8) are clear but there's no automated test suite that systematically checks them. Each test should run guest JS code via the V8 engine and assert on the output. Reference: crates/execution/CLAUDE.md 'Virtualization Invariants' section."
+    },
+    {
+      "id": "US-045",
+      "title": "Port process.env virtualization to V8 bridge",
+      "description": "As a developer, I want guest process.env to show only kernel-provided environment variables, not host env. The old bridge/process.ts had full env virtualization.",
+      "acceptanceCriteria": [
+        "Guest process.env returns only the env vars configured via the kernel, not host process.env",
+        "AGENT_OS_* internal control variables are stripped from guest process.env",
+        "NODE_OPTIONS, LD_PRELOAD, DYLD_INSERT_LIBRARIES stripped from guest env",
+        "Guest process.env modifications are isolated per-process (don't affect other guests or host)",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 env passes",
+        "cargo test -p agent-os-execution -- --test-threads=1 env passes"
+      ],
+      "priority": 46,
+      "passes": false,
+      "notes": "The old secure-exec had full env virtualization in bridge/process.ts (2,251 lines). The V8 bridge (v8-bridge.js) may already partially handle this via the process polyfill, but it needs verification. Check what guest_env filtering the sidecar does in service.rs and whether the V8 runtime exposes host env to guest code. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/process.ts."
+    },
+    {
+      "id": "US-046",
+      "title": "Port signal handling to V8 bridge",
+      "description": "As a developer, I want guest process.on('SIGTERM', ...) to route through the kernel signal table so signal delivery works correctly in V8 isolates.",
+      "acceptanceCriteria": [
+        "Guest process.on('SIGTERM', handler) registers with the kernel signal table, not host signal handlers",
+        "Kernel signal delivery (from kill() syscall or parent process) triggers guest signal handlers",
+        "SIGINT, SIGTERM, SIGHUP, SIGWINCH supported at minimum",
+        "Guest process.kill(pid, signal) routes through kernel process table",
+        "Signal state tracked per-process in kernel process table (not per-V8-isolate)",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 signal passes"
+      ],
+      "priority": 47,
+      "passes": false,
+      "notes": "The kernel already has full signal support in process_table.rs (SIGCHLD, SIGTERM, SIGWINCH, etc.). The gap is wiring guest process.on('SIGTERM') through the V8 bridge to the kernel signal table. The old secure-exec bridge/process.ts had this. The V8 bridge needs a signal registration bridge call and the sidecar needs to deliver signal events to the V8 session."
+    },
+    {
+      "id": "US-047",
+      "title": "CI pipeline for V8 runtime binary",
+      "description": "As a developer, I want crates/v8-runtime/ built and tested in CI so regressions are caught automatically.",
+      "acceptanceCriteria": [
+        "CI workflow builds crates/v8-runtime/ (cargo build -p agent-os-v8-runtime)",
+        "CI workflow runs crates/v8-runtime/ tests (cargo test -p agent-os-v8-runtime -- --test-threads=1)",
+        "CI workflow runs crates/execution/ tests that exercise V8 (cargo test -p agent-os-execution -- --test-threads=1)",
+        "V8 binary artifact is cached between CI runs to avoid rebuilding rusty_v8 from source",
+        "CI passes on the current branch"
+      ],
+      "priority": 48,
+      "passes": false,
+      "notes": "Operational. crates/v8-runtime/ uses v8 = '130' (rusty_v8) which takes ~5 minutes to build from source. CI should cache the built binary and the rusty_v8 build artifacts. Check if there's an existing CI workflow (.github/workflows/) to extend rather than creating a new one."
     }
   ]
 }

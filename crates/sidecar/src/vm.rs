@@ -221,7 +221,10 @@ where
             &effective_mounts,
             MountPluginContext {
                 bridge: self.bridge.clone(),
+                connection_id: connection_id.clone(),
+                session_id: session_id.clone(),
                 vm_id: vm_id.clone(),
+                sidecar_requests: self.sidecar_requests.clone(),
             },
         )?;
         vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);

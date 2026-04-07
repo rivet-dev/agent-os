@@ -13,6 +13,7 @@ pub(crate) mod state;
 pub(crate) mod vm;
 
 pub use service::{DispatchResult, NativeSidecar, NativeSidecarConfig, SidecarError};
+pub use state::SidecarRequestTransport;
 
 use protocol::{DEFAULT_MAX_FRAME_BYTES, PROTOCOL_NAME, PROTOCOL_VERSION};
 

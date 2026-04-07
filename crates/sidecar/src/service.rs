@@ -27,7 +27,7 @@ use crate::protocol::{
     PermissionsPolicy, ProcessExitedEvent, ProcessKilledResponse, ProcessOutputEvent,
     ProcessStartedResponse, ProtocolSchema, RejectedResponse, RequestFrame, RequestId,
     RequestPayload, ResponseFrame, ResponsePayload, SessionOpenedResponse, SidecarRequestFrame,
-    SidecarRequestPayload, SidecarResponseFrame, SidecarResponseTracker,
+    SidecarRequestPayload, SidecarResponseFrame, SidecarResponsePayload, SidecarResponseTracker,
     SidecarResponseTrackerError, SignalDispositionAction, SignalHandlerRegistration,
     SignalStateResponse, SocketStateEntry, StdinClosedResponse, StdinWrittenResponse,
     StreamChannel, VmLifecycleEvent, VmLifecycleState, WasmPermissionTier, WriteStdinRequest,
@@ -40,9 +40,10 @@ use crate::state::{
     JavascriptTcpListenerEvent, JavascriptTcpSocketEvent, JavascriptUdpFamily,
     JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket,
     PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution,
-    ResolvedTcpConnectAddr, SessionState, SharedBridge, SidecarKernel, SocketQueryKind,
-    VmDnsConfig, VmListenPolicy, VmState, DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME,
-    EXECUTION_SANDBOX_ROOT_ENV, JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND,
+    ResolvedTcpConnectAddr, SessionState, SharedBridge, SharedSidecarRequestClient,
+    SidecarRequestTransport, SidecarKernel, SocketQueryKind, VmDnsConfig, VmListenPolicy, VmState,
+    DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
+    JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND,
     VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
     VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
 };
@@ -710,6 +711,7 @@ pub struct NativeSidecar<B> {
     pub(crate) pending_sidecar_responses: SidecarResponseTracker,
     pub(crate) outbound_sidecar_requests: VecDeque<SidecarRequestFrame>,
     pub(crate) completed_sidecar_responses: BTreeMap<RequestId, SidecarResponseFrame>,
+    pub(crate) sidecar_requests: SharedSidecarRequestClient,
 }
 
 impl<B> fmt::Debug for NativeSidecar<B> {
@@ -782,6 +784,7 @@ where
             pending_sidecar_responses: SidecarResponseTracker::default(),
             outbound_sidecar_requests: VecDeque::new(),
             completed_sidecar_responses: BTreeMap::new(),
+            sidecar_requests: SharedSidecarRequestClient::default(),
         })
     }
 
@@ -794,6 +797,46 @@ where
         operation: impl FnOnce(&mut B) -> T,
     ) -> Result<T, SidecarError> {
         self.bridge.inspect(operation)
+    }
+
+    pub fn set_sidecar_request_transport(
+        &mut self,
+        transport: Arc<dyn SidecarRequestTransport>,
+    ) {
+        self.sidecar_requests.set_transport(transport);
+    }
+
+    pub fn set_sidecar_request_handler<F>(&mut self, handler: F)
+    where
+        F: Fn(SidecarRequestFrame) -> Result<SidecarResponsePayload, SidecarError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        struct HandlerTransport<F>(F);
+
+        impl<F> SidecarRequestTransport for HandlerTransport<F>
+        where
+            F: Fn(SidecarRequestFrame) -> Result<SidecarResponsePayload, SidecarError>
+                + Send
+                + Sync
+                + 'static,
+        {
+            fn send_request(
+                &self,
+                request: SidecarRequestFrame,
+                _timeout: Duration,
+            ) -> Result<SidecarResponseFrame, SidecarError> {
+                let payload = (self.0)(request.clone())?;
+                Ok(SidecarResponseFrame::new(
+                    request.request_id,
+                    request.ownership,
+                    payload,
+                ))
+            }
+        }
+
+        self.set_sidecar_request_transport(Arc::new(HandlerTransport(handler)));
     }
 
     pub fn dispatch_blocking(
