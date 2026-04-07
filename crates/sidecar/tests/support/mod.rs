@@ -88,7 +88,7 @@ pub fn authenticate_with_token(
     auth_token: &str,
 ) -> DispatchResult {
     sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             request_id,
             OwnershipScope::connection(connection_hint),
             RequestPayload::Authenticate(AuthenticateRequest {
@@ -105,7 +105,7 @@ pub fn open_session(
     connection_id: &str,
 ) -> String {
     let result = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             request_id,
             OwnershipScope::connection(connection_id),
             RequestPayload::OpenSession(OpenSessionRequest {
@@ -154,7 +154,7 @@ pub fn create_vm_with_metadata(
         .or_insert_with(|| cwd.to_string_lossy().into_owned());
 
     let result = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             request_id,
             OwnershipScope::session(connection_id, session_id),
             RequestPayload::CreateVm(CreateVmRequest {
@@ -185,7 +185,7 @@ pub fn execute(
     args: Vec<String>,
 ) {
     let result = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             request_id,
             OwnershipScope::vm(connection_id, session_id, vm_id),
             RequestPayload::Execute(ExecuteRequest {
@@ -240,7 +240,7 @@ pub fn collect_process_output_with_timeout(
 
     loop {
         let event = sidecar
-            .poll_event(&ownership, Duration::from_millis(100))
+            .poll_event_blocking(&ownership, Duration::from_millis(100))
             .expect("poll sidecar event");
         let Some(event) = event else {
             assert!(

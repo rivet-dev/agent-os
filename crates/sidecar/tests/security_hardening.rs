@@ -123,7 +123,7 @@ fn sidecar_rejects_oversized_request_frames_before_dispatch() {
     );
 
     let result = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             4,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::WriteStdin(WriteStdinRequest {
@@ -316,7 +316,7 @@ console.log("slow");
     );
 
     let second = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             5,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::Execute(agent_os_sidecar::protocol::ExecuteRequest {
@@ -391,7 +391,7 @@ fn execute_rejects_cwd_outside_vm_sandbox_root() {
     );
 
     let result = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             4,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::Execute(agent_os_sidecar::protocol::ExecuteRequest {
@@ -443,7 +443,7 @@ fn execute_scopes_node_permission_flags_to_vm_sandbox_root() {
     );
 
     let result = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             4,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::Execute(agent_os_sidecar::protocol::ExecuteRequest {

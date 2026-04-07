@@ -477,6 +477,15 @@ pub(crate) enum ActiveExecutionEvent {
     Exited(i32),
 }
 
+#[derive(Debug)]
+pub(crate) struct ProcessEventEnvelope {
+    pub(crate) connection_id: String,
+    pub(crate) session_id: String,
+    pub(crate) vm_id: String,
+    pub(crate) process_id: String,
+    pub(crate) event: ActiveExecutionEvent,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SocketQueryKind {
     TcpListener,

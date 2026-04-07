@@ -30,7 +30,7 @@ fn authenticate_ignores_client_connection_hints_and_preserves_existing_owners() 
 
     let cwd = temp_dir("connection-auth-cwd");
     let create_vm = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             4,
             OwnershipScope::session(&connection_b, &session_a),
             RequestPayload::CreateVm(CreateVmRequest {

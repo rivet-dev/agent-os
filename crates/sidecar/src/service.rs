@@ -1,4 +1,5 @@
-use crate::bridge::{build_mount_plugin_registry, MountPluginContext};
+use crate::NativeSidecarBridge;
+use crate::bridge::{MountPluginContext, build_mount_plugin_registry};
 pub(crate) use crate::execution::{
     build_javascript_socket_path_context, error_code, format_dns_resource, format_tcp_resource,
     ignore_stale_javascript_sync_rpc_response, javascript_sync_rpc_arg_str,
@@ -35,14 +36,13 @@ use crate::state::{
     DnsResolutionSource, JavascriptSocketFamily, JavascriptSocketPathContext,
     JavascriptTcpListenerEvent, JavascriptTcpSocketEvent, JavascriptUdpFamily,
     JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket,
-    PendingUnixSocket, ProcNetEntry, ResolvedChildProcessExecution, ResolvedTcpConnectAddr,
-    SessionState, SharedBridge, SidecarKernel, SocketQueryKind, VmDnsConfig, VmListenPolicy,
-    VmState, DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
-    JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND,
+    PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution,
+    ResolvedTcpConnectAddr, SessionState, SharedBridge, SidecarKernel, SocketQueryKind,
+    VmDnsConfig, VmListenPolicy, VmState, DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME,
+    EXECUTION_SANDBOX_ROOT_ENV, JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND,
     VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
     VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
 };
-use crate::NativeSidecarBridge;
 use agent_os_bridge::{
     CommandPermissionRequest, EnvironmentAccess, EnvironmentPermissionRequest, FilesystemAccess,
     FilesystemPermissionRequest, LifecycleEventRecord, LifecycleState, LogLevel, LogRecord,
@@ -71,17 +71,17 @@ use agent_os_kernel::resource_accounting::ResourceLimits;
 // root_fs types moved to crate::vm
 use agent_os_kernel::vfs::VfsError;
 use base64::Engine;
+use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::TokioResolver;
 use nix::libc;
-use nix::sys::signal::{kill as send_signal, Signal};
-use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
+use nix::sys::signal::{Signal, kill as send_signal};
+use nix::sys::wait::{Id as WaitId, WaitPidFlag, WaitStatus, waitid as wait_on_child};
 use nix::unistd::Pid;
 use serde::Deserialize;
-use serde_json::json;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
@@ -94,8 +94,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::time;
 
 // Constants and type aliases moved to crate::state
 
@@ -413,6 +415,47 @@ fn environment_permission_capability(operation: EnvironmentOperation) -> &'stati
     }
 }
 
+fn ownership_matches_process_event(
+    ownership: &OwnershipScope,
+    event: &ProcessEventEnvelope,
+) -> bool {
+    match ownership {
+        OwnershipScope::Connection { connection_id } => connection_id == &event.connection_id,
+        OwnershipScope::Session {
+            connection_id,
+            session_id,
+        } => connection_id == &event.connection_id && session_id == &event.session_id,
+        OwnershipScope::Vm {
+            connection_id,
+            session_id,
+            vm_id,
+        } => {
+            connection_id == &event.connection_id
+                && session_id == &event.session_id
+                && vm_id == &event.vm_id
+        }
+    }
+}
+
+fn poll_future_once<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> Option<F::Output> {
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    match future.poll(&mut context) {
+        Poll::Ready(output) => Some(output),
+        Poll::Pending => None,
+    }
+}
+
+fn noop_waker() -> Waker {
+    Waker::from(Arc::new(NoopWake))
+}
+
+struct NoopWake;
+
+impl Wake for NoopWake {
+    fn wake(self: Arc<Self>) {}
+}
+
 // ConnectionState, SessionState, VmConfiguration, VmState moved to crate::state
 
 // JavascriptSocketPathContext, JavascriptSocketFamily, VmListenPolicy moved to crate::state
@@ -473,6 +516,9 @@ pub struct NativeSidecar<B> {
     pub(crate) connections: BTreeMap<String, ConnectionState>,
     pub(crate) sessions: BTreeMap<String, SessionState>,
     pub(crate) vms: BTreeMap<String, VmState>,
+    pub(crate) process_event_sender: UnboundedSender<ProcessEventEnvelope>,
+    pub(crate) process_event_receiver: Option<UnboundedReceiver<ProcessEventEnvelope>>,
+    pub(crate) pending_process_events: VecDeque<ProcessEventEnvelope>,
 }
 
 impl<B> fmt::Debug for NativeSidecar<B> {
@@ -522,6 +568,7 @@ where
 
         let bridge = SharedBridge::new(bridge);
         let mount_plugins = build_mount_plugin_registry::<B>()?;
+        let (process_event_sender, process_event_receiver) = unbounded_channel();
 
         Ok(Self {
             config,
@@ -537,6 +584,9 @@ where
             connections: BTreeMap::new(),
             sessions: BTreeMap::new(),
             vms: BTreeMap::new(),
+            process_event_sender,
+            process_event_receiver: Some(process_event_receiver),
+            pending_process_events: VecDeque::new(),
         })
     }
 
@@ -551,7 +601,82 @@ where
         self.bridge.inspect(operation)
     }
 
-    pub fn dispatch(&mut self, request: RequestFrame) -> Result<DispatchResult, SidecarError> {
+    pub fn dispatch_blocking(
+        &mut self,
+        request: RequestFrame,
+    ) -> Result<DispatchResult, SidecarError> {
+        if matches!(request.payload, RequestPayload::DisposeVm(_)) {
+            return tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("sidecar dispatch runtime")
+                .block_on(self.dispatch(request));
+        }
+
+        let mut future = std::pin::pin!(self.dispatch(request));
+        match poll_future_once(future.as_mut()) {
+            Some(result) => result,
+            None => tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("sidecar dispatch runtime")
+                .block_on(future),
+        }
+    }
+
+    pub fn poll_event_blocking(
+        &mut self,
+        ownership: &OwnershipScope,
+        timeout: Duration,
+    ) -> Result<Option<EventFrame>, SidecarError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("sidecar poll runtime")
+            .block_on(self.poll_event(ownership, timeout))
+    }
+
+    pub fn close_session_blocking(
+        &mut self,
+        connection_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<EventFrame>, SidecarError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("sidecar close-session runtime")
+            .block_on(self.close_session(connection_id, session_id))
+    }
+
+    pub fn remove_connection_blocking(
+        &mut self,
+        connection_id: &str,
+    ) -> Result<Vec<EventFrame>, SidecarError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("sidecar remove-connection runtime")
+            .block_on(self.remove_connection(connection_id))
+    }
+
+    pub fn dispose_vm_internal_blocking(
+        &mut self,
+        connection_id: &str,
+        session_id: &str,
+        vm_id: &str,
+        reason: DisposeReason,
+    ) -> Result<Vec<EventFrame>, SidecarError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("sidecar dispose-vm runtime")
+            .block_on(self.dispose_vm_internal(connection_id, session_id, vm_id, reason))
+    }
+
+    pub async fn dispatch(
+        &mut self,
+        request: RequestFrame,
+    ) -> Result<DispatchResult, SidecarError> {
         if let Err(error) = self.ensure_request_within_frame_limit(&request) {
             return Ok(DispatchResult {
                 response: self.reject(&request, error_code(&error), &error.to_string()),
@@ -561,30 +686,33 @@ where
 
         let result = match request.payload.clone() {
             RequestPayload::Authenticate(payload) => {
-                self.authenticate_connection(&request, payload)
+                self.authenticate_connection(&request, payload).await
             }
-            RequestPayload::OpenSession(payload) => self.open_session(&request, payload),
-            RequestPayload::CreateVm(payload) => self.create_vm(&request, payload),
-            RequestPayload::DisposeVm(payload) => self.dispose_vm(&request, payload),
+            RequestPayload::OpenSession(payload) => self.open_session(&request, payload).await,
+            RequestPayload::CreateVm(payload) => self.create_vm(&request, payload).await,
+            RequestPayload::DisposeVm(payload) => self.dispose_vm(&request, payload).await,
             RequestPayload::BootstrapRootFilesystem(payload) => {
                 self.bootstrap_root_filesystem(&request, payload.entries)
+                    .await
             }
-            RequestPayload::ConfigureVm(payload) => self.configure_vm(&request, payload),
+            RequestPayload::ConfigureVm(payload) => self.configure_vm(&request, payload).await,
             RequestPayload::GuestFilesystemCall(payload) => {
-                self.guest_filesystem_call(&request, payload)
+                self.guest_filesystem_call(&request, payload).await
             }
             RequestPayload::SnapshotRootFilesystem(payload) => {
-                self.snapshot_root_filesystem(&request, payload)
+                self.snapshot_root_filesystem(&request, payload).await
             }
-            RequestPayload::Execute(payload) => self.execute(&request, payload),
-            RequestPayload::WriteStdin(payload) => self.write_stdin(&request, payload),
-            RequestPayload::CloseStdin(payload) => self.close_stdin(&request, payload),
-            RequestPayload::KillProcess(payload) => self.kill_process(&request, payload),
-            RequestPayload::FindListener(payload) => self.find_listener(&request, payload),
-            RequestPayload::FindBoundUdp(payload) => self.find_bound_udp(&request, payload),
-            RequestPayload::GetSignalState(payload) => self.get_signal_state(&request, payload),
+            RequestPayload::Execute(payload) => self.execute(&request, payload).await,
+            RequestPayload::WriteStdin(payload) => self.write_stdin(&request, payload).await,
+            RequestPayload::CloseStdin(payload) => self.close_stdin(&request, payload).await,
+            RequestPayload::KillProcess(payload) => self.kill_process(&request, payload).await,
+            RequestPayload::FindListener(payload) => self.find_listener(&request, payload).await,
+            RequestPayload::FindBoundUdp(payload) => self.find_bound_udp(&request, payload).await,
+            RequestPayload::GetSignalState(payload) => {
+                self.get_signal_state(&request, payload).await
+            }
             RequestPayload::GetZombieTimerCount(payload) => {
-                self.get_zombie_timer_count(&request, payload)
+                self.get_zombie_timer_count(&request, payload).await
             }
             RequestPayload::HostFilesystemCall(_)
             | RequestPayload::PermissionRequest(_)
@@ -609,15 +737,52 @@ where
         }
     }
 
-    pub fn poll_event(
+    pub async fn poll_event(
         &mut self,
         ownership: &OwnershipScope,
         timeout: Duration,
     ) -> Result<Option<EventFrame>, SidecarError> {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(event) = self.try_poll_event(ownership)? {
-                return Ok(Some(event));
+            if let Some(index) = self
+                .pending_process_events
+                .iter()
+                .position(|event| ownership_matches_process_event(ownership, event))
+            {
+                let envelope = self
+                    .pending_process_events
+                    .remove(index)
+                    .expect("pending process event index should exist");
+                if let Some(frame) = self.handle_process_event_envelope(envelope)? {
+                    return Ok(Some(frame));
+                }
+                continue;
+            }
+
+            if !timeout.is_zero() {
+                let _ = self.pump_process_events(ownership).await?;
+            }
+
+            let matching_envelope = {
+                let receiver = self.process_event_receiver.as_mut().ok_or_else(|| {
+                    SidecarError::InvalidState(String::from("process event receiver unavailable"))
+                })?;
+                let mut matching_envelope = None;
+                while let Ok(envelope) = receiver.try_recv() {
+                    if ownership_matches_process_event(ownership, &envelope) {
+                        matching_envelope = Some(envelope);
+                        break;
+                    }
+                    self.pending_process_events.push_back(envelope);
+                }
+                matching_envelope
+            };
+
+            if let Some(envelope) = matching_envelope {
+                if let Some(frame) = self.handle_process_event_envelope(envelope)? {
+                    return Ok(Some(frame));
+                }
+                continue;
             }
 
             if Instant::now() >= deadline {
@@ -625,21 +790,29 @@ where
             }
 
             let remaining = deadline.saturating_duration_since(Instant::now());
-            thread::sleep(remaining.min(Duration::from_millis(10)));
+            time::sleep(remaining.min(Duration::from_millis(10))).await;
         }
+    }
+
+    pub(crate) fn handle_process_event_envelope(
+        &mut self,
+        envelope: ProcessEventEnvelope,
+    ) -> Result<Option<EventFrame>, SidecarError> {
+        self.handle_execution_event(&envelope.vm_id, &envelope.process_id, envelope.event)
     }
 
     // try_poll_event moved to crate::execution
 
-    pub fn close_session(
+    pub async fn close_session(
         &mut self,
         connection_id: &str,
         session_id: &str,
     ) -> Result<Vec<EventFrame>, SidecarError> {
         self.dispose_session(connection_id, session_id, DisposeReason::Requested)
+            .await
     }
 
-    pub fn remove_connection(
+    pub async fn remove_connection(
         &mut self,
         connection_id: &str,
     ) -> Result<Vec<EventFrame>, SidecarError> {
@@ -656,18 +829,17 @@ where
 
         let mut events = Vec::new();
         for session_id in session_ids {
-            events.extend(self.dispose_session(
-                connection_id,
-                &session_id,
-                DisposeReason::ConnectionClosed,
-            )?);
+            events.extend(
+                self.dispose_session(connection_id, &session_id, DisposeReason::ConnectionClosed)
+                    .await?,
+            );
         }
 
         self.connections.remove(connection_id);
         Ok(events)
     }
 
-    fn authenticate_connection(
+    async fn authenticate_connection(
         &mut self,
         request: &RequestFrame,
         payload: crate::protocol::AuthenticateRequest,
@@ -714,7 +886,7 @@ where
         })
     }
 
-    fn open_session(
+    async fn open_session(
         &mut self,
         request: &RequestFrame,
         payload: OpenSessionRequest,
@@ -753,12 +925,12 @@ where
 
     // create_vm, dispose_vm, bootstrap_root_filesystem, configure_vm moved to crate::vm
 
-    fn guest_filesystem_call(
+    async fn guest_filesystem_call(
         &mut self,
         request: &RequestFrame,
         payload: GuestFilesystemCallRequest,
     ) -> Result<DispatchResult, SidecarError> {
-        filesystem_guest_filesystem_call(self, request, payload)
+        filesystem_guest_filesystem_call(self, request, payload).await
     }
 
     // snapshot_root_filesystem moved to crate::vm
@@ -766,7 +938,7 @@ where
     // execute, write_stdin, close_stdin, kill_process, find_listener, find_bound_udp,
     // get_signal_state, get_zombie_timer_count moved to crate::execution
 
-    fn dispose_session(
+    async fn dispose_session(
         &mut self,
         connection_id: &str,
         session_id: &str,
@@ -785,12 +957,10 @@ where
 
         let mut events = Vec::new();
         for vm_id in vm_ids {
-            events.extend(self.dispose_vm_internal(
-                connection_id,
-                session_id,
-                &vm_id,
-                reason.clone(),
-            )?);
+            events.extend(
+                self.dispose_vm_internal(connection_id, session_id, &vm_id, reason.clone())
+                    .await?,
+            );
         }
 
         self.sessions.remove(session_id);

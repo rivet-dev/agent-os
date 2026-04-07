@@ -96,3 +96,16 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - The service test harness also needs crate-root re-exports for `DispatchResult`, `NativeSidecar`, and `SidecarError`, because sibling modules included alongside `service.rs` still import those through `crate::{...}`
   - `cargo test -p agent-os-sidecar --test service -- --test-threads=1` is a good first validation pass for this harness, then `cargo test -p agent-os-sidecar --lib --test host_dir --test google_drive --test s3 --test sandbox_agent -- --test-threads=1` covers the extracted plugin suites
 ---
+## 2026-04-06 - US-008
+- Converted sidecar main loop from sync nix::poll to async tokio::select! across all Rust crates
+- stdio.rs: replaced nix::poll loop with tokio::select! over async stdin reader, event pump timer, and event-ready channel; sync read_frame gated behind #[cfg(test)]
+- service.rs: added async dispatch(), poll_event(), close_session(), remove_connection() with _blocking() wrappers for test/sync callers; added ProcessEventEnvelope channel for async event delivery; added poll_future_once() and noop_waker() for sync-dispatch fast path
+- execution.rs: converted pump_process_events to async; added graceful handling of closed event channels in pump loop (treat as "no more events" instead of hard error, since process removal is deferred in async flow)
+- All domain modules (vm.rs, filesystem.rs, execution.rs, plugins/sandbox_agent.rs, state.rs) converted to async fn handlers
+- execution crate: JavascriptExecution, PythonExecution, WasmExecution all converted to async poll_event with tokio channels; added spawn_javascript_event_bridge thread for JavascriptProcessEvent→JavascriptExecutionEvent conversion
+- Reverted ralph's bad loader/path-mapping hacks to TypeScript files (node_import_cache.rs, packages/core/*, packages/browser/*, etc.)
+- All sidecar Rust tests pass (cargo test -p agent-os-sidecar -- --test-threads=1): 115 tests, 0 failures
+- All execution Rust tests pass except pre-existing benchmark failure (PendingSyncRpcRequest — same failure on HEAD)
+- TypeScript integration tests: 5 pass / 4 fail, matching HEAD exactly (pre-existing failures)
+- Files changed: crates/sidecar/src/{stdio,service,execution,filesystem,vm,state,plugins/sandbox_agent}.rs, crates/sidecar/Cargo.toml, crates/sidecar/tests/*.rs, crates/execution/src/{javascript,python,wasm,benchmark}.rs, crates/execution/Cargo.toml, crates/execution/tests/*.rs, Cargo.lock
+---

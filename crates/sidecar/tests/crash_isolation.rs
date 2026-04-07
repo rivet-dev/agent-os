@@ -78,7 +78,7 @@ fn guest_failure_in_one_vm_does_not_break_peer_vm_execution() {
 
     while results.values().any(|result| result.exit_code.is_none()) {
         let event = sidecar
-            .poll_event(&ownership, Duration::from_millis(100))
+            .poll_event_blocking(&ownership, Duration::from_millis(100))
             .expect("poll crash-isolation event");
         let Some(event) = event else {
             assert!(

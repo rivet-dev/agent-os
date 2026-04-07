@@ -12,6 +12,7 @@ use crate::runtime_support::{
     warmup_marker_path, NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV,
     NODE_FROZEN_TIME_ENV, NODE_SANDBOX_ROOT_ENV,
 };
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -19,11 +20,15 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{
-    mpsc::{self, Receiver, RecvTimeoutError},
+    mpsc::{self, Receiver},
     Arc, Mutex,
 };
 use std::thread::JoinHandle;
 use std::time::Duration;
+use tokio::sync::mpsc::{
+    error::TryRecvError as TokioTryRecvError, unbounded_channel, UnboundedReceiver,
+};
+use tokio::time;
 
 const WASM_MODULE_PATH_ENV: &str = "AGENT_OS_WASM_MODULE_PATH";
 const WASM_GUEST_ARGV_ENV: &str = "AGENT_OS_GUEST_ARGV";
@@ -238,8 +243,7 @@ pub struct WasmExecution {
     execution_id: String,
     child_pid: u32,
     stdin: Option<ChildStdin>,
-    events: Receiver<WasmProcessEvent>,
-    stderr_filter: Arc<Mutex<LinePrefixFilter>>,
+    events: RefCell<UnboundedReceiver<WasmExecutionEvent>>,
     _import_cache_guard: Arc<NodeImportCacheCleanup>,
 }
 
@@ -267,55 +271,60 @@ impl WasmExecution {
         Ok(())
     }
 
-    pub fn poll_event(
+    pub async fn poll_event(
         &self,
         timeout: Duration,
     ) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
-        match self.events.recv_timeout(timeout) {
-            Ok(WasmProcessEvent::Stdout(chunk)) => Ok(Some(WasmExecutionEvent::Stdout(chunk))),
-            Ok(WasmProcessEvent::RawStderr(chunk)) => {
-                let mut filter = self
-                    .stderr_filter
-                    .lock()
-                    .map_err(|_| WasmExecutionError::EventChannelClosed)?;
-                let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
-                if filtered.is_empty() {
-                    return Ok(None);
+        if timeout.is_zero() {
+            return match self.events.borrow_mut().try_recv() {
+                Ok(event) => Ok(Some(event)),
+                Err(TokioTryRecvError::Empty) => Ok(None),
+                Err(TokioTryRecvError::Disconnected) => Err(WasmExecutionError::EventChannelClosed),
+            };
+        }
+
+        let mut events = self.events.borrow_mut();
+        match time::timeout(timeout, events.recv()).await {
+            Ok(Some(event)) => Ok(Some(event)),
+            Ok(None) => Err(WasmExecutionError::EventChannelClosed),
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub fn poll_event_blocking(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match self.events.borrow_mut().try_recv() {
+                Ok(event) => return Ok(Some(event)),
+                Err(TokioTryRecvError::Disconnected) => {
+                    return Err(WasmExecutionError::EventChannelClosed)
                 }
-                Ok(Some(WasmExecutionEvent::Stderr(filtered)))
+                Err(TokioTryRecvError::Empty) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
             }
-            Ok(WasmProcessEvent::Control(NodeControlMessage::SignalState {
-                signal,
-                registration,
-            })) => Ok(Some(WasmExecutionEvent::SignalState {
-                signal,
-                registration: registration.into(),
-            })),
-            Ok(WasmProcessEvent::Control(_)) => Ok(None),
-            Ok(WasmProcessEvent::Exited(code)) => Ok(Some(WasmExecutionEvent::Exited(code))),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => Err(WasmExecutionError::EventChannelClosed),
         }
     }
 
     pub fn wait(mut self) -> Result<WasmExecutionResult, WasmExecutionError> {
         self.close_stdin()?;
+        let mut events = self.events.into_inner();
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
         loop {
-            match self.events.recv() {
-                Ok(WasmProcessEvent::Stdout(chunk)) => stdout.extend(chunk),
-                Ok(WasmProcessEvent::RawStderr(chunk)) => {
-                    let mut filter = self
-                        .stderr_filter
-                        .lock()
-                        .map_err(|_| WasmExecutionError::EventChannelClosed)?;
-                    stderr.extend(filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES));
-                }
-                Ok(WasmProcessEvent::Control(_)) => {}
-                Ok(WasmProcessEvent::Exited(exit_code)) => {
+            match events.blocking_recv() {
+                Some(WasmExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+                Some(WasmExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+                Some(WasmExecutionEvent::SignalState { .. }) => {}
+                Some(WasmExecutionEvent::Exited(exit_code)) => {
                     return Ok(WasmExecutionResult {
                         execution_id: self.execution_id,
                         exit_code,
@@ -323,7 +332,7 @@ impl WasmExecution {
                         stderr,
                     });
                 }
-                Err(_) => return Err(WasmExecutionError::EventChannelClosed),
+                None => return Err(WasmExecutionError::EventChannelClosed),
             }
         }
     }
@@ -439,12 +448,14 @@ impl WasmExecutionEngine {
             sender,
         );
 
+        let events =
+            spawn_wasm_event_bridge(receiver, Arc::new(Mutex::new(LinePrefixFilter::default())));
+
         Ok(WasmExecution {
             execution_id,
             child_pid,
             stdin,
-            events: receiver,
-            stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
+            events: RefCell::new(events),
             _import_cache_guard: import_cache_guard,
         })
     }
@@ -453,6 +464,48 @@ impl WasmExecutionEngine {
         self.contexts.retain(|_, context| context.vm_id != vm_id);
         self.import_caches.remove(vm_id);
     }
+}
+
+fn spawn_wasm_event_bridge(
+    receiver: Receiver<WasmProcessEvent>,
+    stderr_filter: Arc<Mutex<LinePrefixFilter>>,
+) -> UnboundedReceiver<WasmExecutionEvent> {
+    let (sender, forwarded) = unbounded_channel();
+    std::thread::spawn(move || {
+        while let Ok(event) = receiver.recv() {
+            let forwarded_event = match event {
+                WasmProcessEvent::Stdout(chunk) => Some(WasmExecutionEvent::Stdout(chunk)),
+                WasmProcessEvent::RawStderr(chunk) => {
+                    let mut filter = match stderr_filter.lock() {
+                        Ok(filter) => filter,
+                        Err(_) => break,
+                    };
+                    let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
+                    if filtered.is_empty() {
+                        None
+                    } else {
+                        Some(WasmExecutionEvent::Stderr(filtered))
+                    }
+                }
+                WasmProcessEvent::Control(NodeControlMessage::SignalState {
+                    signal,
+                    registration,
+                }) => Some(WasmExecutionEvent::SignalState {
+                    signal,
+                    registration: registration.into(),
+                }),
+                WasmProcessEvent::Control(_) => None,
+                WasmProcessEvent::Exited(code) => Some(WasmExecutionEvent::Exited(code)),
+            };
+
+            if let Some(event) = forwarded_event {
+                if sender.send(event).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    forwarded
 }
 
 fn guest_argv(

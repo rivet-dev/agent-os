@@ -27,7 +27,7 @@ fn wait_for_process_output(
 
     loop {
         let event = sidecar
-            .poll_event(&ownership, Duration::from_millis(100))
+            .poll_event_blocking(&ownership, Duration::from_millis(100))
             .expect("poll sidecar process output");
         let Some(event) = event else {
             assert!(
@@ -130,7 +130,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
     let listener_deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let listener = sidecar
-            .dispatch(request(
+            .dispatch_blocking(request(
                 7,
                 OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                 RequestPayload::FindListener(FindListenerRequest {
@@ -159,7 +159,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
     }
 
     let kill_listener = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             70,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::KillProcess(KillProcessRequest {
@@ -214,7 +214,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
     );
 
     let bound_udp = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             8,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::FindBoundUdp(FindBoundUdpRequest {
@@ -237,10 +237,10 @@ fn sidecar_queries_listener_udp_and_signal_state() {
     let wasm_ownership = OwnershipScope::vm(&connection_id, &session_id, &wasm_vm_id);
     loop {
         let _ = sidecar
-            .poll_event(&wasm_ownership, Duration::from_millis(25))
+            .poll_event_blocking(&wasm_ownership, Duration::from_millis(25))
             .expect("pump wasm signal-state events");
         let signal_state = sidecar
-            .dispatch(request(
+            .dispatch_blocking(request(
                 9,
                 wasm_ownership.clone(),
                 RequestPayload::GetSignalState(GetSignalStateRequest {
@@ -271,7 +271,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
     }
 
     let dispose = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             10,
             OwnershipScope::vm(&connection_id, &session_id, &wasm_vm_id),
             RequestPayload::DisposeVm(DisposeVmRequest {
@@ -392,7 +392,7 @@ fn sidecar_tracks_javascript_sigchld_and_delivers_it_on_child_exit() {
 
     while exit_code.is_none() || !signal_registered {
         let signal_state = sidecar
-            .dispatch(request(
+            .dispatch_blocking(request(
                 5,
                 ownership.clone(),
                 RequestPayload::GetSignalState(GetSignalStateRequest {
@@ -416,7 +416,7 @@ fn sidecar_tracks_javascript_sigchld_and_delivers_it_on_child_exit() {
         }
 
         let event = sidecar
-            .poll_event(&ownership, Duration::from_millis(100))
+            .poll_event_blocking(&ownership, Duration::from_millis(100))
             .expect("poll SIGCHLD process");
         if let Some(event) = event {
             match event.payload {

@@ -16,97 +16,128 @@ use agent_os_sidecar::protocol::{
     SessionOpenedResponse,
 };
 use agent_os_sidecar::{NativeSidecar, NativeSidecarConfig};
-use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufWriter, Read, Write};
-use std::os::fd::AsFd;
+use std::io;
+#[cfg(test)]
+use std::io::Read;
 use std::os::unix::fs::{symlink as create_symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
+use tokio::io::{self as tokio_io, AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::sync::mpsc::unbounded_channel;
+use tokio::time;
 
-const IDLE_POLL_SLEEP: Duration = Duration::from_millis(5);
+const EVENT_PUMP_INTERVAL: Duration = Duration::from_millis(5);
 
 pub fn run() -> Result<(), Box<dyn Error>> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(run_async())
+}
+
+async fn run_async() -> Result<(), Box<dyn Error>> {
     let config = NativeSidecarConfig {
         compile_cache_root: Some(default_compile_cache_root()),
         ..NativeSidecarConfig::default()
     };
     let codec = NativeFrameCodec::new(config.max_frame_bytes);
     let mut sidecar = NativeSidecar::with_config(LocalBridge::default(), config)?;
-    let mut writer = SharedWriter::new(codec.clone(), BufWriter::new(io::stdout()));
+    let mut writer = SharedWriter::new(codec.clone(), BufWriter::new(tokio_io::stdout()));
     let mut active_sessions = BTreeSet::<SessionScope>::new();
     let mut active_connections = BTreeSet::<String>::new();
+    let (stdin_tx, mut stdin_rx) = unbounded_channel::<Result<Option<ProtocolFrame>, String>>();
+    let (event_ready_tx, mut event_ready_rx) = unbounded_channel::<()>();
+    let mut event_pump = time::interval(EVENT_PUMP_INTERVAL);
 
-    let stdin = io::stdin();
-    let mut stdin = stdin.lock();
-    let poll_timeout = PollTimeout::try_from(IDLE_POLL_SLEEP).unwrap_or(PollTimeout::NONE);
-
-    loop {
-        let mut stdin_poll = [PollFd::new(
-            stdin.as_fd(),
-            PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
-        )];
-        let ready = poll(&mut stdin_poll, poll_timeout)?;
-        let mut handled_request = false;
-
-        if ready > 0 {
-            if let Some(revents) = stdin_poll[0].revents() {
-                if revents.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) {
-                    let Some(frame) = read_frame(&codec, &mut stdin)? else {
-                        break;
-                    };
-                    let request = match frame {
-                        ProtocolFrame::Request(request) => request,
-                        other => {
-                            return Err(format!(
-                                "expected request frame on stdin, received {}",
-                                frame_kind(&other)
-                            )
-                            .into());
-                        }
-                    };
-
-                    let dispatch = sidecar.dispatch(request.clone())?;
-                    track_session_state(
-                        &dispatch.response.payload,
-                        &mut active_sessions,
-                        &mut active_connections,
-                    );
-
-                    writer.write_frame(&ProtocolFrame::Response(dispatch.response))?;
-                    for event in dispatch.events {
-                        writer.write_frame(&ProtocolFrame::Event(event))?;
-                    }
-                    handled_request = true;
-                }
+    tokio::spawn(async move {
+        let mut stdin = tokio_io::stdin();
+        loop {
+            let frame = read_frame_async(&codec, &mut stdin)
+                .await
+                .map_err(|error| error.to_string());
+            let should_stop = matches!(frame, Ok(None) | Err(_));
+            if stdin_tx.send(frame).is_err() || should_stop {
+                break;
             }
         }
+    });
 
-        if handled_request {
-            continue;
-        }
+    loop {
+        tokio::select! {
+            maybe_frame = stdin_rx.recv() => {
+                let Some(frame) = maybe_frame else {
+                    break;
+                };
+                let Some(frame) = frame.map_err(io::Error::other)? else {
+                    break;
+                };
+                match frame {
+                    ProtocolFrame::Request(request) => {
+                        let dispatch = sidecar.dispatch(request.clone()).await?;
+                        track_session_state(
+                            &dispatch.response.payload,
+                            &mut active_sessions,
+                            &mut active_connections,
+                        );
 
-        for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
-            if let Some(event) = sidecar.poll_event(&session.ownership_scope(), Duration::ZERO)? {
-                writer.write_frame(&ProtocolFrame::Event(event))?;
-                break;
+                        writer.write_frame(&ProtocolFrame::Response(dispatch.response)).await?;
+                        for event in dispatch.events {
+                            writer.write_frame(&ProtocolFrame::Event(event)).await?;
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "expected request frame on stdin, received {}",
+                            frame_kind(&other)
+                        ).into());
+                    }
+                }
+            }
+            maybe_ready = event_ready_rx.recv() => {
+                let Some(()) = maybe_ready else {
+                    break;
+                };
+                loop {
+                    let mut emitted_frame = false;
+                    for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
+                        if let Some(frame) = sidecar
+                            .poll_event(&session.ownership_scope(), Duration::ZERO)
+                            .await?
+                        {
+                            writer.write_frame(&ProtocolFrame::Event(frame)).await?;
+                            emitted_frame = true;
+                        }
+                    }
+
+                    if !emitted_frame {
+                        break;
+                    }
+                }
+            }
+            _ = event_pump.tick() => {
+                for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
+                    if sidecar.pump_process_events(&session.ownership_scope()).await? {
+                        let _ = event_ready_tx.send(());
+                    }
+                }
             }
         }
     }
 
-    cleanup_connections(&mut sidecar, &active_connections);
+    cleanup_connections(&mut sidecar, &active_connections).await;
     Ok(())
 }
 
-fn cleanup_connections(
+async fn cleanup_connections(
     sidecar: &mut NativeSidecar<LocalBridge>,
     active_connections: &BTreeSet<String>,
 ) {
     for connection_id in active_connections {
-        let _ = sidecar.remove_connection(connection_id);
+        let _ = sidecar.remove_connection(connection_id).await;
     }
 }
 
@@ -132,6 +163,7 @@ fn track_session_state(
     }
 }
 
+#[cfg(test)]
 fn read_frame(
     codec: &NativeFrameCodec,
     reader: &mut impl Read,
@@ -158,6 +190,35 @@ fn read_frame(
     bytes.extend_from_slice(&prefix);
     bytes.resize(total_len, 0);
     reader.read_exact(&mut bytes[prefix.len()..])?;
+    Ok(Some(codec.decode(&bytes)?))
+}
+
+async fn read_frame_async(
+    codec: &NativeFrameCodec,
+    reader: &mut (impl tokio_io::AsyncRead + Unpin),
+) -> Result<Option<ProtocolFrame>, Box<dyn Error>> {
+    let mut prefix = [0u8; 4];
+    match reader.read_exact(&mut prefix).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let declared_len = u32::from_be_bytes(prefix) as usize;
+    if declared_len > codec.max_frame_bytes() {
+        return Err(ProtocolCodecError::FrameTooLarge {
+            size: declared_len,
+            max: codec.max_frame_bytes(),
+        }
+        .into());
+    }
+    let total_len = prefix.len().saturating_add(declared_len);
+    let mut bytes = Vec::with_capacity(total_len);
+    bytes.extend_from_slice(&prefix);
+    bytes.resize(total_len, 0);
+    reader.read_exact(&mut bytes[prefix.len()..]).await?;
     Ok(Some(codec.decode(&bytes)?))
 }
 
@@ -514,16 +575,16 @@ struct SharedWriter<W> {
 
 impl<W> SharedWriter<W>
 where
-    W: Write,
+    W: tokio_io::AsyncWrite + Unpin,
 {
     fn new(codec: NativeFrameCodec, writer: W) -> Self {
         Self { codec, writer }
     }
 
-    fn write_frame(&mut self, frame: &ProtocolFrame) -> Result<(), Box<dyn Error>> {
+    async fn write_frame(&mut self, frame: &ProtocolFrame) -> Result<(), Box<dyn Error>> {
         let bytes = self.codec.encode(frame)?;
-        self.writer.write_all(&bytes)?;
-        self.writer.flush()?;
+        self.writer.write_all(&bytes).await?;
+        self.writer.flush().await?;
         Ok(())
     }
 }

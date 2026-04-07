@@ -262,7 +262,7 @@ console.error(`stderr:${process.argv.slice(2).join(",")}`);
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -324,7 +324,7 @@ process.stdin.on("end", () => {
 
     assert!(
         execution
-            .poll_event(Duration::from_millis(200))
+            .poll_event_blocking(Duration::from_millis(200))
             .expect("poll execution event before stdin write")
             .is_none(),
         "streaming-stdin execution should stay alive until stdin closes"
@@ -339,7 +339,7 @@ process.stdin.on("end", () => {
     let mut exit_code = None;
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -415,7 +415,7 @@ console.log(JSON.stringify({ stat, lstat, contents, raw, entries, missing, linkT
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -625,7 +625,7 @@ console.log(
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -920,7 +920,7 @@ console.log(
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -2070,7 +2070,7 @@ console.log(`missing:${missing}`);
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -3007,7 +3007,7 @@ console.log(JSON.stringify({
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -3166,7 +3166,7 @@ spawnSync('node', ['./child.mjs'], {
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(_chunk)) => {}
@@ -3296,7 +3296,7 @@ console.log(JSON.stringify(summary));
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -3477,7 +3477,7 @@ console.log(JSON.stringify(summary));
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -3680,7 +3680,7 @@ console.log(JSON.stringify(summary));
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -3822,7 +3822,7 @@ console.log(JSON.stringify(summary));
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -4004,7 +4004,7 @@ console.log(JSON.stringify(summary));
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -4197,7 +4197,7 @@ console.log(JSON.stringify({
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -4321,7 +4321,7 @@ console.log(JSON.stringify({
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -4424,7 +4424,7 @@ console.log(JSON.stringify({
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll execution event")
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),

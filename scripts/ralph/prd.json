@@ -138,7 +138,7 @@
         "pnpm test passes (existing TypeScript integration tests still work)"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Step 0b. See spec 'Step 0b: Async migration'. The async fn conversion across modules is mechanical (add async keyword + .await). The creative work is rewriting stdio.rs's run() function from sync poll to tokio::select!. Concurrency model stays single-task. IMPORTANT: Do NOT introduce Arc<Mutex> — the select! loop runs one branch at a time."
     },
     {

@@ -44,7 +44,7 @@ console.log(`js:${process.argv.slice(2).join(",")}`);
     assert_eq!(js_create.events.len(), 2);
 
     let bootstrap = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             4,
             OwnershipScope::vm(&connection_id, &session_id, &js_vm_id),
             RequestPayload::BootstrapRootFilesystem(BootstrapRootFilesystemRequest {
@@ -125,7 +125,7 @@ console.log(`js:${process.argv.slice(2).join(",")}`);
     assert_eq!(wasm_exit, 0);
 
     sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             8,
             OwnershipScope::vm(&connection_id, &session_id, &js_vm_id),
             RequestPayload::DisposeVm(agent_os_sidecar::protocol::DisposeVmRequest {
@@ -134,7 +134,7 @@ console.log(`js:${process.argv.slice(2).join(",")}`);
         ))
         .expect("dispose js vm");
     sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             9,
             OwnershipScope::vm(&connection_id, &session_id, &wasm_vm_id),
             RequestPayload::DisposeVm(agent_os_sidecar::protocol::DisposeVmRequest {

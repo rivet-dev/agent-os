@@ -586,7 +586,7 @@ fn wasm_execution_streams_exit_event() {
 
     while !saw_exit {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll wasm event")
         {
             Some(WasmExecutionEvent::Stdout(chunk)) => {
@@ -639,7 +639,7 @@ fn wasm_execution_emits_signal_state_from_control_channel() {
 
     while !saw_exit {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll wasm event")
         {
             Some(WasmExecutionEvent::Stdout(chunk)) => {

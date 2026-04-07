@@ -441,7 +441,7 @@ export async function loadPyodide(options) {
 
     while !saw_exit {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll Python event")
         {
             Some(PythonExecutionEvent::Stdout(chunk)) => {
@@ -606,7 +606,7 @@ export async function loadPyodide(options) {
 
     assert!(
         execution
-            .poll_event(Duration::from_millis(200))
+            .poll_event_blocking(Duration::from_millis(200))
             .expect("poll Python event before stdin write")
             .is_none(),
         "streaming-stdin execution should stay alive until stdin closes"
@@ -622,7 +622,7 @@ export async function loadPyodide(options) {
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll Python event")
         {
             Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -706,7 +706,7 @@ export async function loadPyodide(options) {
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll Python event")
         {
             Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -882,7 +882,7 @@ export async function loadPyodide(options) {
 
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll Python event")
         {
             Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -1098,7 +1098,7 @@ export async function loadPyodide() {
 
     for _ in 0..40 {
         match execution
-            .poll_event(Duration::from_millis(250))
+            .poll_event_blocking(Duration::from_millis(250))
             .expect("poll Python event")
         {
             Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
@@ -1242,7 +1242,7 @@ export async function loadPyodide(options) {
     let mut saw_ready = false;
     while !saw_ready {
         match execution
-            .poll_event(Duration::from_secs(5))
+            .poll_event_blocking(Duration::from_secs(5))
             .expect("poll Python event before kill")
         {
             Some(PythonExecutionEvent::Stdout(chunk)) => {
@@ -1268,7 +1268,7 @@ export async function loadPyodide(options) {
     let mut exit_code = None;
     while exit_code.is_none() {
         match execution
-            .poll_event(Duration::from_millis(100))
+            .poll_event_blocking(Duration::from_millis(100))
             .expect("poll Python event after kill")
         {
             Some(PythonExecutionEvent::Exited(code)) => exit_code = Some(code),

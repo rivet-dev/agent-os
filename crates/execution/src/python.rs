@@ -17,6 +17,7 @@ use nix::fcntl::OFlag;
 use nix::unistd::pipe2;
 use serde::Deserialize;
 use serde_json::json;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -26,10 +27,14 @@ use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::{
+    error::TryRecvError as TokioTryRecvError, unbounded_channel, UnboundedReceiver,
+};
+use tokio::time;
 const NODE_ALLOWED_BUILTINS_ENV: &str = "AGENT_OS_ALLOWED_NODE_BUILTINS";
 const NODE_ALLOW_PROCESS_BINDINGS_ENV: &str = "AGENT_OS_ALLOW_PROCESS_BINDINGS";
 const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
@@ -288,15 +293,13 @@ pub struct PythonExecution {
     child_pid: u32,
     child: Arc<Mutex<Option<Child>>>,
     stdin: Option<ChildStdin>,
-    events: Receiver<PythonProcessEvent>,
+    events: RefCell<UnboundedReceiver<PythonExecutionEvent>>,
     pending_exit_code: Arc<Mutex<Option<i32>>>,
     pending_vfs_rpc: Arc<Mutex<Option<PendingVfsRpcState>>>,
     pending_vfs_rpc_count: Arc<AtomicUsize>,
     vfs_rpc_responses: Arc<Mutex<BufWriter<File>>>,
-    stderr_filter: Arc<Mutex<LinePrefixFilter>>,
     output_buffer_max_bytes: usize,
     execution_timeout: Option<Duration>,
-    vfs_rpc_timeout: Duration,
     _import_cache_guard: Arc<NodeImportCacheCleanup>,
 }
 
@@ -428,68 +431,72 @@ impl PythonExecution {
         )
     }
 
-    pub fn poll_event(
+    pub async fn poll_event(
         &self,
         timeout: Duration,
     ) -> Result<Option<PythonExecutionEvent>, PythonExecutionError> {
-        let started = Instant::now();
-
-        loop {
-            let remaining = timeout.saturating_sub(started.elapsed());
-            match self.events.recv_timeout(remaining) {
-                Ok(PythonProcessEvent::Stdout(chunk)) => {
-                    return Ok(Some(PythonExecutionEvent::Stdout(chunk)));
-                }
-                Ok(PythonProcessEvent::RawStderr(chunk)) => {
-                    let mut filter = self
-                        .stderr_filter
-                        .lock()
-                        .map_err(|_| PythonExecutionError::EventChannelClosed)?;
-                    let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
-                    if filtered.is_empty() {
-                        if started.elapsed() >= timeout {
-                            if let Some(exit_code) = self.take_pending_exit_code()? {
-                                return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
-                            }
-                            return Ok(None);
-                        }
-                        continue;
-                    }
-                    return Ok(Some(PythonExecutionEvent::Stderr(filtered)));
-                }
-                Ok(PythonProcessEvent::VfsRpcRequest(request)) => {
-                    self.set_pending_vfs_rpc(request.id)?;
-                    spawn_python_vfs_rpc_timeout(
-                        request.id,
-                        self.vfs_rpc_timeout,
-                        self.pending_vfs_rpc.clone(),
-                        self.pending_vfs_rpc_count.clone(),
-                        self.vfs_rpc_responses.clone(),
-                    );
-                    return Ok(Some(PythonExecutionEvent::VfsRpcRequest(request)));
-                }
-                Ok(PythonProcessEvent::Exited(exit_code)) => {
-                    return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
-                }
-                Ok(PythonProcessEvent::Control(_)) => {
-                    if started.elapsed() >= timeout {
-                        if let Some(exit_code) = self.take_pending_exit_code()? {
-                            return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
-                        }
-                        return Ok(None);
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {
+        if timeout.is_zero() {
+            return match self.events.borrow_mut().try_recv() {
+                Ok(event) => Ok(Some(event)),
+                Err(TokioTryRecvError::Empty) => {
                     if let Some(exit_code) = self.take_pending_exit_code()? {
-                        return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
+                        Ok(Some(PythonExecutionEvent::Exited(exit_code)))
+                    } else {
+                        Ok(None)
                     }
-                    return Ok(None);
                 }
-                Err(RecvTimeoutError::Disconnected) => {
+                Err(TokioTryRecvError::Disconnected) => {
+                    if let Some(exit_code) = self.take_pending_exit_code()? {
+                        Ok(Some(PythonExecutionEvent::Exited(exit_code)))
+                    } else {
+                        Err(PythonExecutionError::EventChannelClosed)
+                    }
+                }
+            };
+        }
+
+        let mut events = self.events.borrow_mut();
+        match time::timeout(timeout, events.recv()).await {
+            Ok(Some(event)) => Ok(Some(event)),
+            Ok(None) => {
+                if let Some(exit_code) = self.take_pending_exit_code()? {
+                    Ok(Some(PythonExecutionEvent::Exited(exit_code)))
+                } else {
+                    Err(PythonExecutionError::EventChannelClosed)
+                }
+            }
+            Err(_) => {
+                if let Some(exit_code) = self.take_pending_exit_code()? {
+                    Ok(Some(PythonExecutionEvent::Exited(exit_code)))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    pub fn poll_event_blocking(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<PythonExecutionEvent>, PythonExecutionError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.events.borrow_mut().try_recv() {
+                Ok(event) => return Ok(Some(event)),
+                Err(TokioTryRecvError::Disconnected) => {
                     if let Some(exit_code) = self.take_pending_exit_code()? {
                         return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
                     }
                     return Err(PythonExecutionError::EventChannelClosed);
+                }
+                Err(TokioTryRecvError::Empty) => {
+                    if let Some(exit_code) = self.take_pending_exit_code()? {
+                        return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
+                    }
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    thread::sleep(Duration::from_millis(1));
                 }
             }
         }
@@ -523,7 +530,13 @@ impl PythonExecution {
                 })
                 .unwrap_or_else(|| Duration::from_millis(50));
 
-            match self.poll_event(poll_timeout)? {
+            let event = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("python wait runtime")
+                .block_on(self.poll_event(poll_timeout))?;
+
+            match event {
                 Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(&chunk),
                 Some(PythonExecutionEvent::Stderr(chunk)) => stderr.extend(&chunk),
                 Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
@@ -589,15 +602,6 @@ impl PythonExecution {
             .lock()
             .map_err(|_| PythonExecutionError::EventChannelClosed)?;
         Ok(pending.take())
-    }
-
-    fn set_pending_vfs_rpc(&self, id: u64) -> Result<(), PythonExecutionError> {
-        let mut pending = self
-            .pending_vfs_rpc
-            .lock()
-            .map_err(|_| PythonExecutionError::EventChannelClosed)?;
-        *pending = Some(PendingVfsRpcState::Pending(id));
-        Ok(())
     }
 
     fn clear_pending_vfs_rpc(
@@ -748,20 +752,31 @@ impl PythonExecutionEngine {
             |message| PythonProcessEvent::RawStderr(message.into_bytes()),
         );
 
+        let pending_exit_code = Arc::new(Mutex::new(None));
+        let pending_vfs_rpc = Arc::new(Mutex::new(None));
+        let stderr_filter = Arc::new(Mutex::new(LinePrefixFilter::default()));
+        let vfs_rpc_timeout = python_vfs_rpc_timeout(&request);
+        let events = spawn_python_event_bridge(
+            receiver,
+            pending_vfs_rpc.clone(),
+            pending_vfs_rpc_count.clone(),
+            rpc_response_writer.clone(),
+            stderr_filter,
+            vfs_rpc_timeout,
+        );
+
         Ok(PythonExecution {
             execution_id,
             child_pid,
             child,
             stdin,
-            events: receiver,
-            pending_exit_code: Arc::new(Mutex::new(None)),
-            pending_vfs_rpc: Arc::new(Mutex::new(None)),
+            events: RefCell::new(events),
+            pending_exit_code,
+            pending_vfs_rpc,
             pending_vfs_rpc_count,
             vfs_rpc_responses: rpc_response_writer,
-            stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
             output_buffer_max_bytes: python_output_buffer_max_bytes(&request),
             execution_timeout: python_execution_timeout(&request),
-            vfs_rpc_timeout: python_vfs_rpc_timeout(&request),
             _import_cache_guard: import_cache_guard,
         })
     }
@@ -770,6 +785,71 @@ impl PythonExecutionEngine {
         self.contexts.retain(|_, context| context.vm_id != vm_id);
         self.import_caches.remove(vm_id);
     }
+}
+
+fn spawn_python_event_bridge(
+    receiver: Receiver<PythonProcessEvent>,
+    pending_vfs_rpc: Arc<Mutex<Option<PendingVfsRpcState>>>,
+    pending_vfs_rpc_count: Arc<AtomicUsize>,
+    vfs_rpc_responses: Arc<Mutex<BufWriter<File>>>,
+    stderr_filter: Arc<Mutex<LinePrefixFilter>>,
+    vfs_rpc_timeout: Duration,
+) -> UnboundedReceiver<PythonExecutionEvent> {
+    let (sender, forwarded) = unbounded_channel();
+    thread::spawn(move || {
+        while let Ok(event) = receiver.recv() {
+            let forwarded_event = match event {
+                PythonProcessEvent::Stdout(chunk) => Some(PythonExecutionEvent::Stdout(chunk)),
+                PythonProcessEvent::RawStderr(chunk) => {
+                    let mut filter = match stderr_filter.lock() {
+                        Ok(filter) => filter,
+                        Err(_) => break,
+                    };
+                    let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
+                    if filtered.is_empty() {
+                        None
+                    } else {
+                        Some(PythonExecutionEvent::Stderr(filtered))
+                    }
+                }
+                PythonProcessEvent::VfsRpcRequest(request) => {
+                    if set_pending_vfs_rpc_state(&pending_vfs_rpc, request.id).is_err() {
+                        break;
+                    }
+                    spawn_python_vfs_rpc_timeout(
+                        request.id,
+                        vfs_rpc_timeout,
+                        pending_vfs_rpc.clone(),
+                        pending_vfs_rpc_count.clone(),
+                        vfs_rpc_responses.clone(),
+                    );
+                    Some(PythonExecutionEvent::VfsRpcRequest(request))
+                }
+                PythonProcessEvent::Exited(exit_code) => {
+                    Some(PythonExecutionEvent::Exited(exit_code))
+                }
+                PythonProcessEvent::Control(_) => None,
+            };
+
+            if let Some(event) = forwarded_event {
+                if sender.send(event).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    forwarded
+}
+
+fn set_pending_vfs_rpc_state(
+    pending_vfs_rpc: &Arc<Mutex<Option<PendingVfsRpcState>>>,
+    id: u64,
+) -> Result<(), PythonExecutionError> {
+    let mut pending = pending_vfs_rpc
+        .lock()
+        .map_err(|_| PythonExecutionError::EventChannelClosed)?;
+    *pending = Some(PendingVfsRpcState::Pending(id));
+    Ok(())
 }
 
 #[derive(Debug)]

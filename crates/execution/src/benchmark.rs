@@ -2743,7 +2743,7 @@ fn measure_transport_roundtrip(
             });
         }
 
-        match execution.poll_event(TRANSPORT_POLL_TIMEOUT)? {
+        match execution.poll_event_blocking(TRANSPORT_POLL_TIMEOUT)? {
             Some(crate::JavascriptExecutionEvent::Stdout(chunk)) => {
                 stdout_buffer.push_str(&String::from_utf8(chunk)?);
             }

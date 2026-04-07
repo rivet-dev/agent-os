@@ -100,7 +100,7 @@ fn execute_python_entrypoint_with_env(
     env: BTreeMap<String, String>,
 ) {
     let result = sidecar
-        .dispatch(support::request(
+        .dispatch_blocking(support::request(
             request_id,
             OwnershipScope::vm(connection_id, session_id, vm_id),
             RequestPayload::Execute(ExecuteRequest {
@@ -135,7 +135,7 @@ fn execute_javascript_with_env(
     env: BTreeMap<String, String>,
 ) {
     let result = sidecar
-        .dispatch(support::request(
+        .dispatch_blocking(support::request(
             request_id,
             OwnershipScope::vm(connection_id, session_id, vm_id),
             RequestPayload::Execute(ExecuteRequest {
@@ -168,7 +168,7 @@ fn create_vm_with_root_filesystem(
     root_filesystem: RootFilesystemDescriptor,
 ) -> String {
     let result = sidecar
-        .dispatch(support::request(
+        .dispatch_blocking(support::request(
             request_id,
             OwnershipScope::session(connection_id, session_id),
             RequestPayload::CreateVm(CreateVmRequest {
@@ -198,7 +198,7 @@ fn bootstrap_root_filesystem(
     entries: Vec<RootFilesystemEntry>,
 ) {
     let result = sidecar
-        .dispatch(support::request(
+        .dispatch_blocking(support::request(
             request_id,
             OwnershipScope::vm(connection_id, session_id, vm_id),
             RequestPayload::BootstrapRootFilesystem(BootstrapRootFilesystemRequest { entries }),
@@ -222,7 +222,7 @@ fn guest_filesystem_call(
     payload: GuestFilesystemCallRequest,
 ) -> agent_os_sidecar::protocol::GuestFilesystemResultResponse {
     let result = sidecar
-        .dispatch(support::request(
+        .dispatch_blocking(support::request(
             request_id,
             OwnershipScope::vm(connection_id, session_id, vm_id),
             RequestPayload::GuestFilesystemCall(payload),
@@ -318,7 +318,7 @@ fn write_process_stdin(
     chunk: &str,
 ) {
     let result = sidecar
-        .dispatch(support::request(
+        .dispatch_blocking(support::request(
             request_id,
             OwnershipScope::vm(connection_id, session_id, vm_id),
             RequestPayload::WriteStdin(WriteStdinRequest {
@@ -346,7 +346,7 @@ fn close_process_stdin(
     process_id: &str,
 ) {
     let result = sidecar
-        .dispatch(support::request(
+        .dispatch_blocking(support::request(
             request_id,
             OwnershipScope::vm(connection_id, session_id, vm_id),
             RequestPayload::CloseStdin(CloseStdinRequest {
@@ -372,7 +372,7 @@ fn kill_process(
     process_id: &str,
 ) {
     let result = sidecar
-        .dispatch(support::request(
+        .dispatch_blocking(support::request(
             request_id,
             OwnershipScope::vm(connection_id, session_id, vm_id),
             RequestPayload::KillProcess(KillProcessRequest {
@@ -403,7 +403,7 @@ fn wait_for_stdout_chunk(
 
     loop {
         let event = sidecar
-            .poll_event(&ownership, Duration::from_millis(100))
+            .poll_event_blocking(&ownership, Duration::from_millis(100))
             .expect("poll python stdout");
         let Some(event) = event else {
             assert!(
@@ -733,7 +733,7 @@ fn concurrent_python_processes_stay_isolated_across_vms() {
 
     while results.values().any(|result| result.exit_code.is_none()) {
         let event = sidecar
-            .poll_event(&ownership, Duration::from_millis(100))
+            .poll_event_blocking(&ownership, Duration::from_millis(100))
             .expect("poll python process event");
         let Some(event) = event else {
             assert!(
@@ -934,7 +934,7 @@ if (mode === 'write') {
         }],
     );
     let configure = sidecar
-        .dispatch(support::request(
+        .dispatch_blocking(support::request(
             5,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -1227,7 +1227,7 @@ print(f"read:{sys.stdin.read()!r}")
     );
     assert!(
         sidecar
-            .poll_event(
+            .poll_event_blocking(
                 &OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                 Duration::from_millis(200)
             )
@@ -1314,7 +1314,7 @@ print(f"tail:{sys.stdin.read()!r}")
 
     assert!(
         sidecar
-            .poll_event(
+            .poll_event_blocking(
                 &OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                 Duration::from_millis(200)
             )
@@ -1344,7 +1344,7 @@ print(f"tail:{sys.stdin.read()!r}")
 
     assert!(
         sidecar
-            .poll_event(
+            .poll_event_blocking(
                 &OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                 Duration::from_millis(200)
             )

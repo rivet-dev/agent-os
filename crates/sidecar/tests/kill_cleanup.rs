@@ -25,7 +25,7 @@ fn wait_for_process_exit(
 
     loop {
         let event = sidecar
-            .poll_event(&ownership, Duration::from_millis(100))
+            .poll_event_blocking(&ownership, Duration::from_millis(100))
             .expect("poll sidecar process exit");
         let Some(event) = event else {
             assert!(
@@ -77,7 +77,7 @@ fn kill_process_terminates_running_guest_execution() {
     );
 
     let kill = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             5,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::KillProcess(KillProcessRequest {
@@ -161,7 +161,7 @@ fn dispose_vm_succeeds_even_when_a_guest_process_is_running() {
     );
 
     let dispose = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             5,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::DisposeVm(DisposeVmRequest {
@@ -182,7 +182,7 @@ fn dispose_vm_succeeds_even_when_a_guest_process_is_running() {
         .any(|event| matches!(event.payload, EventPayload::ProcessExited(_))));
 
     let replacement_vm = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             6,
             OwnershipScope::session(&connection_id, &session_id),
             RequestPayload::CreateVm(CreateVmRequest {
@@ -232,7 +232,7 @@ fn close_session_removes_the_session_and_disposes_owned_vms() {
     );
 
     let events = sidecar
-        .close_session(&connection_id, &session_id)
+        .close_session_blocking(&connection_id, &session_id)
         .expect("close owned session");
     assert!(events.iter().any(|event| {
         matches!(
@@ -244,7 +244,7 @@ fn close_session_removes_the_session_and_disposes_owned_vms() {
     }));
 
     let create_after_close = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             4,
             OwnershipScope::session(&connection_id, &session_id),
             RequestPayload::CreateVm(CreateVmRequest {
@@ -267,7 +267,7 @@ fn close_session_removes_the_session_and_disposes_owned_vms() {
     }
 
     let reopened = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             5,
             OwnershipScope::connection(&connection_id),
             RequestPayload::OpenSession(OpenSessionRequest {
@@ -312,7 +312,7 @@ fn remove_connection_disposes_owned_sessions_and_vms() {
     );
 
     let events = sidecar
-        .remove_connection(&connection_id)
+        .remove_connection_blocking(&connection_id)
         .expect("remove authenticated connection");
     assert!(events.iter().any(|event| {
         matches!(
@@ -324,7 +324,7 @@ fn remove_connection_disposes_owned_sessions_and_vms() {
     }));
 
     let reopened = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             5,
             OwnershipScope::connection(&connection_id),
             RequestPayload::OpenSession(OpenSessionRequest {

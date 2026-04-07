@@ -163,7 +163,7 @@ ykAheWCsAteSEWVc0w==\n\
             sidecar: &mut NativeSidecar<RecordingBridge>,
         ) -> Result<(String, String), SidecarError> {
             let auth = sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     1,
                     OwnershipScope::connection("conn-1"),
                     RequestPayload::Authenticate(AuthenticateRequest {
@@ -175,7 +175,7 @@ ykAheWCsAteSEWVc0w==\n\
             let connection_id = authenticated_connection_id(auth)?;
 
             let session = sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     2,
                     OwnershipScope::connection(&connection_id),
                     RequestPayload::OpenSession(OpenSessionRequest {
@@ -211,7 +211,7 @@ ykAheWCsAteSEWVc0w==\n\
             metadata: BTreeMap<String, String>,
         ) -> Result<String, SidecarError> {
             let response = sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     3,
                     OwnershipScope::session(connection_id, session_id),
                     RequestPayload::CreateVm(CreateVmRequest {
@@ -320,7 +320,7 @@ ykAheWCsAteSEWVc0w==\n\
                         .map(|process| {
                             process
                                 .execution
-                                .poll_event(Duration::from_secs(5))
+                                .poll_event_blocking(Duration::from_secs(5))
                                 .expect("poll javascript event")
                         })
                         .flatten()
@@ -482,7 +482,12 @@ ykAheWCsAteSEWVc0w==\n\
             assert!(cache_root_b.exists(), "vm b cache root should exist");
 
             sidecar
-                .dispose_vm_internal(&connection_id, &session_id, &vm_a, DisposeReason::Requested)
+                .dispose_vm_internal_blocking(
+                    &connection_id,
+                    &session_id,
+                    &vm_a,
+                    DisposeReason::Requested,
+                )
                 .expect("dispose vm a");
 
             assert!(
@@ -506,7 +511,12 @@ ykAheWCsAteSEWVc0w==\n\
             );
 
             sidecar
-                .dispose_vm_internal(&connection_id, &session_id, &vm_b, DisposeReason::Requested)
+                .dispose_vm_internal_blocking(
+                    &connection_id,
+                    &session_id,
+                    &vm_b,
+                    DisposeReason::Requested,
+                )
                 .expect("dispose vm b");
             assert!(
                 !cache_root_b.exists(),
@@ -544,7 +554,7 @@ ykAheWCsAteSEWVc0w==\n\
             };
 
             let zombie_count = sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     4,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::GetZombieTimerCount(GetZombieTimerCountRequest::default()),
@@ -564,7 +574,7 @@ ykAheWCsAteSEWVc0w==\n\
             }
 
             let reaped_count = sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     5,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::GetZombieTimerCount(GetZombieTimerCountRequest::default()),
@@ -702,7 +712,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("create vm");
 
             sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     4,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::BootstrapRootFilesystem(BootstrapRootFilesystemRequest {
@@ -724,7 +734,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("bootstrap root workspace");
 
             sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     5,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -790,7 +800,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("create vm");
 
             sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     4,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -832,7 +842,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("create vm");
 
             sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     4,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::BootstrapRootFilesystem(BootstrapRootFilesystemRequest {
@@ -854,7 +864,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("bootstrap root workspace");
 
             sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     5,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -928,7 +938,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("create vm");
 
             sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     4,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -1030,7 +1040,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("create vm");
 
             sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     4,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -1104,7 +1114,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("create vm");
 
             sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     4,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::BootstrapRootFilesystem(BootstrapRootFilesystemRequest {
@@ -1126,7 +1136,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("bootstrap root sandbox dir");
 
             sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     5,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -1185,7 +1195,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("create vm");
 
             sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     4,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::BootstrapRootFilesystem(BootstrapRootFilesystemRequest {
@@ -1207,7 +1217,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("bootstrap root s3 dir");
 
             sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     5,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -1422,7 +1432,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("set vm permissions");
 
             let result = sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     4,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -1481,7 +1491,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("set vm permissions");
 
             let result = sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     4,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -1610,7 +1620,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("create vm");
 
             sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     4,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -1667,7 +1677,7 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("create vm");
 
             let result = sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     4,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::Execute(crate::protocol::ExecuteRequest {
@@ -1918,7 +1928,7 @@ await new Promise(() => {});
                         .expect("javascript process should be tracked");
                     process
                         .execution
-                        .poll_event(Duration::from_secs(5))
+                        .poll_event_blocking(Duration::from_secs(5))
                         .expect("poll javascript sync rpc event")
                         .expect("javascript sync rpc event")
                 };
@@ -2253,7 +2263,7 @@ console.log(
                         .map(|process| {
                             process
                                 .execution
-                                .poll_event(Duration::from_secs(5))
+                                .poll_event_blocking(Duration::from_secs(5))
                                 .expect("poll javascript fd rpc event")
                         })
                         .flatten()
@@ -2419,7 +2429,7 @@ await new Promise(() => {});
                         .expect("javascript process should be tracked");
                     process
                         .execution
-                        .poll_event(Duration::from_secs(5))
+                        .poll_event_blocking(Duration::from_secs(5))
                         .expect("poll javascript promises rpc event")
                         .expect("javascript promises rpc event")
                 };
@@ -2668,7 +2678,7 @@ console.log(JSON.stringify(summary));
                         .map(|process| {
                             process
                                 .execution
-                                .poll_event(Duration::from_secs(5))
+                                .poll_event_blocking(Duration::from_secs(5))
                                 .expect("poll javascript dgram rpc event")
                         })
                         .flatten()
@@ -2796,7 +2806,7 @@ console.log(JSON.stringify({ lookup, resolve4 }));
                         .map(|process| {
                             process
                                 .execution
-                                .poll_event(Duration::from_secs(5))
+                                .poll_event_blocking(Duration::from_secs(5))
                                 .expect("poll javascript dns rpc event")
                         })
                         .flatten()
@@ -2975,7 +2985,7 @@ process.exit(0);
                         .map(|process| {
                             process
                                 .execution
-                                .poll_event(Duration::from_secs(5))
+                                .poll_event_blocking(Duration::from_secs(5))
                                 .expect("poll javascript ssrf event")
                         })
                         .flatten()
@@ -3181,7 +3191,7 @@ console.log(JSON.stringify({{ lookup, resolved, socketSummary }}));
                         .map(|process| {
                             process
                                 .execution
-                                .poll_event(Duration::from_secs(5))
+                                .poll_event_blocking(Duration::from_secs(5))
                                 .expect("poll javascript dns override rpc event")
                         })
                         .flatten()
@@ -3621,7 +3631,7 @@ console.log(JSON.stringify(summary));
                         .map(|process| {
                             process
                                 .execution
-                                .poll_event(Duration::from_secs(5))
+                                .poll_event_blocking(Duration::from_secs(5))
                                 .expect("poll javascript tls rpc event")
                         })
                         .flatten()
@@ -3814,7 +3824,7 @@ console.log(JSON.stringify(summary));
                         .map(|process| {
                             process
                                 .execution
-                                .poll_event(Duration::from_secs(5))
+                                .poll_event_blocking(Duration::from_secs(5))
                                 .expect("poll javascript http rpc event")
                         })
                         .flatten()
@@ -3998,7 +4008,7 @@ console.log(JSON.stringify(summary));
                         .map(|process| {
                             process
                                 .execution
-                                .poll_event(Duration::from_secs(5))
+                                .poll_event_blocking(Duration::from_secs(5))
                                 .expect("poll javascript https rpc event")
                         })
                         .flatten()
@@ -4091,7 +4101,7 @@ console.log(JSON.stringify(summary));
             };
 
             let response = sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     1,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::FindListener(FindListenerRequest {
@@ -4548,7 +4558,7 @@ console.log(JSON.stringify(summary));
             }
 
             sidecar
-                .dispose_vm_internal(
+                .dispose_vm_internal_blocking(
                     &connection_id,
                     &session_id,
                     &vm_id,
@@ -4884,7 +4894,7 @@ console.log(JSON.stringify(summary));
             assert_eq!(accepted_b["localPort"], Value::from(43111));
 
             let query_a = sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     50,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_a),
                     RequestPayload::FindListener(FindListenerRequest {
@@ -4895,7 +4905,7 @@ console.log(JSON.stringify(summary));
                 ))
                 .expect("query vm a listener");
             let query_b = sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     51,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_b),
                     RequestPayload::FindListener(FindListenerRequest {
@@ -5052,7 +5062,7 @@ console.log(JSON.stringify(summary));
             assert!(host_socket_path.exists(), "host unix socket path missing");
 
             let listener_lookup = sidecar
-                .dispatch(request(
+                .dispatch_blocking(request(
                     2,
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::FindListener(FindListenerRequest {
@@ -5503,7 +5513,7 @@ console.log(JSON.stringify(summary));
             }
 
             sidecar
-                .dispose_vm_internal(
+                .dispose_vm_internal_blocking(
                     &connection_id,
                     &session_id,
                     &vm_id,
@@ -5639,7 +5649,7 @@ console.log(JSON.stringify({
                         .map(|process| {
                             process
                                 .execution
-                                .poll_event(Duration::from_secs(5))
+                                .poll_event_blocking(Duration::from_secs(5))
                                 .expect("poll javascript child_process event")
                         })
                         .flatten()

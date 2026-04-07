@@ -22,7 +22,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use std::fmt;
 
-pub(crate) fn guest_filesystem_call<B>(
+pub(crate) async fn guest_filesystem_call<B>(
     sidecar: &mut NativeSidecar<B>,
     request: &RequestFrame,
     payload: GuestFilesystemCallRequest,

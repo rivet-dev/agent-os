@@ -18,6 +18,7 @@ use nix::fcntl::OFlag;
 use nix::unistd::pipe2;
 use serde::Deserialize;
 use serde_json::{from_str, json, Value};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File};
@@ -26,11 +27,15 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{
-    mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
+    mpsc::{self, Receiver, SyncSender, TrySendError},
     Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::{
+    error::TryRecvError as TokioTryRecvError, unbounded_channel, UnboundedReceiver,
+};
+use tokio::time;
 
 const NODE_ENTRYPOINT_ENV: &str = "AGENT_OS_ENTRYPOINT";
 const NODE_BOOTSTRAP_ENV: &str = "AGENT_OS_BOOTSTRAP_MODULE";
@@ -335,11 +340,9 @@ pub struct JavascriptExecution {
     execution_id: String,
     child_pid: u32,
     stdin: Option<ChildStdin>,
-    events: Receiver<JavascriptProcessEvent>,
-    stderr_filter: Arc<Mutex<LinePrefixFilter>>,
+    events: RefCell<UnboundedReceiver<JavascriptExecutionEvent>>,
     pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
     sync_rpc_responses: Option<JavascriptSyncRpcResponseWriter>,
-    sync_rpc_timeout: Duration,
     _import_cache_guard: Arc<NodeImportCacheCleanup>,
 }
 
@@ -432,95 +435,65 @@ impl JavascriptExecution {
         )
     }
 
-    pub fn poll_event(
+    pub async fn poll_event(
         &self,
         timeout: Duration,
     ) -> Result<Option<JavascriptExecutionEvent>, JavascriptExecutionError> {
-        match self.events.recv_timeout(timeout) {
-            Ok(JavascriptProcessEvent::Stdout(chunk)) => {
-                Ok(Some(JavascriptExecutionEvent::Stdout(chunk)))
-            }
-            Ok(JavascriptProcessEvent::RawStderr(chunk)) => {
-                let mut filter = self
-                    .stderr_filter
-                    .lock()
-                    .map_err(|_| JavascriptExecutionError::EventChannelClosed)?;
-                let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
-                if filtered.is_empty() {
-                    return Ok(None);
+        if timeout.is_zero() {
+            return match self.events.borrow_mut().try_recv() {
+                Ok(event) => Ok(Some(event)),
+                Err(TokioTryRecvError::Empty) => Ok(None),
+                Err(TokioTryRecvError::Disconnected) => {
+                    Err(JavascriptExecutionError::EventChannelClosed)
                 }
-                Ok(Some(JavascriptExecutionEvent::Stderr(filtered)))
-            }
-            Ok(JavascriptProcessEvent::SyncRpcRequest(request)) => {
-                self.set_pending_sync_rpc(request.id)?;
-                spawn_javascript_sync_rpc_timeout(
-                    request.id,
-                    self.sync_rpc_timeout,
-                    self.pending_sync_rpc.clone(),
-                    self.sync_rpc_responses.clone(),
-                );
-                Ok(Some(JavascriptExecutionEvent::SyncRpcRequest(request)))
-            }
-            Ok(JavascriptProcessEvent::Control(NodeControlMessage::NodeImportCacheMetrics {
-                metrics,
-            })) => Ok(Some(JavascriptExecutionEvent::Stderr(
-                format!(
-                    "{}{}\n",
-                    crate::node_import_cache::NODE_IMPORT_CACHE_METRICS_PREFIX,
-                    serde_json::to_string(&metrics).unwrap_or_else(|_| String::from("{}"))
-                )
-                .into_bytes(),
-            ))),
-            Ok(JavascriptProcessEvent::Control(NodeControlMessage::SignalState {
-                signal,
-                registration,
-            })) => Ok(Some(JavascriptExecutionEvent::SignalState {
-                signal,
-                registration,
-            })),
-            Ok(JavascriptProcessEvent::Control(_)) => Ok(None),
-            Ok(JavascriptProcessEvent::Exited(code)) => {
-                Ok(Some(JavascriptExecutionEvent::Exited(code)))
-            }
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(JavascriptExecutionError::EventChannelClosed)
+            };
+        }
+
+        let mut events = self.events.borrow_mut();
+        match time::timeout(timeout, events.recv()).await {
+            Ok(Some(event)) => Ok(Some(event)),
+            Ok(None) => Err(JavascriptExecutionError::EventChannelClosed),
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub fn poll_event_blocking(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<JavascriptExecutionEvent>, JavascriptExecutionError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.events.borrow_mut().try_recv() {
+                Ok(event) => return Ok(Some(event)),
+                Err(TokioTryRecvError::Disconnected) => {
+                    return Err(JavascriptExecutionError::EventChannelClosed)
+                }
+                Err(TokioTryRecvError::Empty) => {
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
             }
         }
     }
 
     pub fn wait(mut self) -> Result<JavascriptExecutionResult, JavascriptExecutionError> {
         self.close_stdin()?;
+        let mut events = self.events.into_inner();
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
         loop {
-            match self.events.recv() {
-                Ok(JavascriptProcessEvent::Stdout(chunk)) => stdout.extend(chunk),
-                Ok(JavascriptProcessEvent::RawStderr(chunk)) => {
-                    let mut filter = self
-                        .stderr_filter
-                        .lock()
-                        .map_err(|_| JavascriptExecutionError::EventChannelClosed)?;
-                    stderr.extend(filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES));
-                }
-                Ok(JavascriptProcessEvent::SyncRpcRequest(request)) => {
+            match events.blocking_recv() {
+                Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+                Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+                Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
                     return Err(JavascriptExecutionError::PendingSyncRpcRequest(request.id));
                 }
-                Ok(JavascriptProcessEvent::Control(
-                    NodeControlMessage::NodeImportCacheMetrics { metrics },
-                )) => stderr.extend(
-                    format!(
-                        "{}{}\n",
-                        crate::node_import_cache::NODE_IMPORT_CACHE_METRICS_PREFIX,
-                        serde_json::to_string(&metrics).unwrap_or_else(|_| String::from("{}"))
-                    )
-                    .into_bytes(),
-                ),
-                Ok(JavascriptProcessEvent::Control(NodeControlMessage::SignalState { .. })) => {}
-                Ok(JavascriptProcessEvent::Control(_)) => {}
-                Ok(JavascriptProcessEvent::Exited(exit_code)) => {
+                Some(JavascriptExecutionEvent::SignalState { .. }) => {}
+                Some(JavascriptExecutionEvent::Exited(exit_code)) => {
                     return Ok(JavascriptExecutionResult {
                         execution_id: self.execution_id,
                         exit_code,
@@ -528,19 +501,9 @@ impl JavascriptExecution {
                         stderr,
                     });
                 }
-                Err(_) => return Err(JavascriptExecutionError::EventChannelClosed),
+                None => return Err(JavascriptExecutionError::EventChannelClosed),
             }
         }
-    }
-
-    fn set_pending_sync_rpc(&self, id: u64) -> Result<(), JavascriptExecutionError> {
-        let mut pending = self.pending_sync_rpc.lock().map_err(|_| {
-            JavascriptExecutionError::RpcResponse(String::from(
-                "sync RPC pending-request state lock poisoned",
-            ))
-        })?;
-        *pending = Some(PendingSyncRpcState::Pending(id));
-        Ok(())
     }
 
     fn clear_pending_sync_rpc(
@@ -686,15 +649,23 @@ impl JavascriptExecutionEngine {
             |message| JavascriptProcessEvent::RawStderr(message.into_bytes()),
         );
 
+        let stderr_filter = Arc::new(Mutex::new(LinePrefixFilter::default()));
+        let pending_sync_rpc = Arc::new(Mutex::new(None));
+        let events = spawn_javascript_event_bridge(
+            receiver,
+            stderr_filter,
+            pending_sync_rpc.clone(),
+            sync_rpc_response_writer.clone(),
+            sync_rpc_timeout,
+        );
+
         Ok(JavascriptExecution {
             execution_id,
             child_pid,
             stdin,
-            events: receiver,
-            stderr_filter: Arc::new(Mutex::new(LinePrefixFilter::default())),
-            pending_sync_rpc: Arc::new(Mutex::new(None)),
+            events: RefCell::new(events),
+            pending_sync_rpc,
             sync_rpc_responses: sync_rpc_response_writer,
-            sync_rpc_timeout,
             _import_cache_guard: import_cache_guard,
         })
     }
@@ -722,6 +693,90 @@ impl JavascriptExecutionEngine {
             .get(vm_id)
             .map(NodeImportCache::cache_path)
     }
+}
+
+fn spawn_javascript_event_bridge(
+    receiver: Receiver<JavascriptProcessEvent>,
+    stderr_filter: Arc<Mutex<LinePrefixFilter>>,
+    pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
+    sync_rpc_responses: Option<JavascriptSyncRpcResponseWriter>,
+    sync_rpc_timeout: Duration,
+) -> UnboundedReceiver<JavascriptExecutionEvent> {
+    let (sender, forwarded) = unbounded_channel();
+    thread::spawn(move || {
+        while let Ok(event) = receiver.recv() {
+            let forwarded_event = match event {
+                JavascriptProcessEvent::Stdout(chunk) => {
+                    Some(JavascriptExecutionEvent::Stdout(chunk))
+                }
+                JavascriptProcessEvent::RawStderr(chunk) => {
+                    let mut filter = match stderr_filter.lock() {
+                        Ok(filter) => filter,
+                        Err(_) => break,
+                    };
+                    let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
+                    if filtered.is_empty() {
+                        None
+                    } else {
+                        Some(JavascriptExecutionEvent::Stderr(filtered))
+                    }
+                }
+                JavascriptProcessEvent::SyncRpcRequest(request) => {
+                    if set_pending_sync_rpc_state(&pending_sync_rpc, request.id).is_err() {
+                        break;
+                    }
+                    spawn_javascript_sync_rpc_timeout(
+                        request.id,
+                        sync_rpc_timeout,
+                        pending_sync_rpc.clone(),
+                        sync_rpc_responses.clone(),
+                    );
+                    Some(JavascriptExecutionEvent::SyncRpcRequest(request))
+                }
+                JavascriptProcessEvent::Control(NodeControlMessage::NodeImportCacheMetrics {
+                    metrics,
+                }) => Some(JavascriptExecutionEvent::Stderr(
+                    format!(
+                        "{}{}\n",
+                        crate::node_import_cache::NODE_IMPORT_CACHE_METRICS_PREFIX,
+                        serde_json::to_string(&metrics).unwrap_or_else(|_| String::from("{}"))
+                    )
+                    .into_bytes(),
+                )),
+                JavascriptProcessEvent::Control(NodeControlMessage::SignalState {
+                    signal,
+                    registration,
+                }) => Some(JavascriptExecutionEvent::SignalState {
+                    signal,
+                    registration,
+                }),
+                JavascriptProcessEvent::Control(_) => None,
+                JavascriptProcessEvent::Exited(code) => {
+                    Some(JavascriptExecutionEvent::Exited(code))
+                }
+            };
+
+            if let Some(event) = forwarded_event {
+                if sender.send(event).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    forwarded
+}
+
+fn set_pending_sync_rpc_state(
+    pending_sync_rpc: &Arc<Mutex<Option<PendingSyncRpcState>>>,
+    id: u64,
+) -> Result<(), JavascriptExecutionError> {
+    let mut pending = pending_sync_rpc.lock().map_err(|_| {
+        JavascriptExecutionError::RpcResponse(String::from(
+            "sync RPC pending-request state lock poisoned",
+        ))
+    })?;
+    *pending = Some(PendingSyncRpcState::Pending(id));
+    Ok(())
 }
 
 fn prewarm_node_import_path(

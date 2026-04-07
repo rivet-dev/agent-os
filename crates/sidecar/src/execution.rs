@@ -23,16 +23,16 @@ use crate::service::{
 };
 use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
-    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError, DnsResolutionSource,
-    JavascriptSocketFamily, JavascriptSocketPathContext, JavascriptTcpListenerEvent,
-    JavascriptTcpSocketEvent, JavascriptUdpFamily, JavascriptUdpSocketEvent,
-    JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket, PendingUnixSocket,
-    ProcNetEntry, ResolvedChildProcessExecution, ResolvedTcpConnectAddr, SharedBridge,
-    SidecarKernel, SocketQueryKind, VmDnsConfig, VmListenPolicy, VmState,
-    DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
-    JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND,
+    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError,
+    DEFAULT_JAVASCRIPT_NET_BACKLOG, DnsResolutionSource, EXECUTION_DRIVER_NAME,
+    EXECUTION_SANDBOX_ROOT_ENV, JAVASCRIPT_COMMAND, JavascriptSocketFamily,
+    JavascriptSocketPathContext, JavascriptTcpListenerEvent, JavascriptTcpSocketEvent,
+    JavascriptUdpFamily, JavascriptUdpSocketEvent, JavascriptUnixListenerEvent,
+    LOOPBACK_EXEMPT_PORTS_ENV, NetworkResourceCounts, PYTHON_COMMAND, PendingTcpSocket,
+    PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution,
+    ResolvedTcpConnectAddr, SharedBridge, SidecarKernel, SocketQueryKind,
     VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
-    VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
+    VM_LISTEN_PORT_MIN_METADATA_KEY, VmDnsConfig, VmListenPolicy, VmState, WASM_COMMAND,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -41,27 +41,25 @@ use agent_os_execution::wasm::{
     WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV,
 };
 use agent_os_execution::{
-    CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
-    JavascriptExecutionError, JavascriptExecutionEvent, JavascriptSyncRpcRequest,
-    NodeSignalDispositionAction, NodeSignalHandlerRegistration, PythonExecutionError,
+    CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest, JavascriptExecutionEvent, JavascriptSyncRpcRequest,
+    NodeSignalDispositionAction, NodeSignalHandlerRegistration,
     PythonExecutionEvent, PythonVfsRpcRequest, PythonVfsRpcResponsePayload,
-    StartJavascriptExecutionRequest, StartPythonExecutionRequest, StartWasmExecutionRequest,
-    WasmExecutionError, WasmExecutionEvent, WasmPermissionTier as ExecutionWasmPermissionTier,
+    StartJavascriptExecutionRequest, StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecutionEvent, WasmPermissionTier as ExecutionWasmPermissionTier,
 };
-use agent_os_kernel::kernel::{KernelError, KernelProcessHandle, SpawnOptions};
+use agent_os_kernel::kernel::{KernelProcessHandle, SpawnOptions};
 use agent_os_kernel::permissions::NetworkOperation;
 use agent_os_kernel::process_table::{SIGKILL, SIGTERM};
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use base64::Engine;
+use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::TokioResolver;
 use nix::libc;
-use nix::sys::signal::{kill as send_signal, Signal};
-use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
+use nix::sys::signal::{Signal, kill as send_signal};
+use nix::sys::wait::{Id as WaitId, WaitPidFlag, WaitStatus, waitid as wait_on_child};
 use nix::unistd::Pid;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
@@ -605,7 +603,7 @@ impl ActiveUdpSocket {
                     return Ok(Some(JavascriptUdpSocketEvent::Message {
                         data: buffer[..bytes_read].to_vec(),
                         remote_addr,
-                    }))
+                    }));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if wait.is_zero() || Instant::now() >= deadline {
@@ -617,7 +615,7 @@ impl ActiveUdpSocket {
                     return Ok(Some(JavascriptUdpSocketEvent::Error {
                         code: io_error_code(&error),
                         message: error.to_string(),
-                    }))
+                    }));
                 }
             }
         }
@@ -730,13 +728,14 @@ impl ActiveExecution {
         }
     }
 
-    pub(crate) fn poll_event(
+    pub(crate) async fn poll_event(
         &self,
         timeout: Duration,
     ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
         match self {
             Self::Javascript(execution) => execution
                 .poll_event(timeout)
+                .await
                 .map(|event| {
                     event.map(|event| match event {
                         JavascriptExecutionEvent::Stdout(chunk) => {
@@ -763,6 +762,7 @@ impl ActiveExecution {
                 .map_err(|error| SidecarError::Execution(error.to_string())),
             Self::Python(execution) => execution
                 .poll_event(timeout)
+                .await
                 .map(|event| {
                     event.map(|event| match event {
                         PythonExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
@@ -776,6 +776,71 @@ impl ActiveExecution {
                 .map_err(|error| SidecarError::Execution(error.to_string())),
             Self::Wasm(execution) => execution
                 .poll_event(timeout)
+                .await
+                .map(|event| {
+                    event.map(|event| match event {
+                        WasmExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
+                        WasmExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
+                        WasmExecutionEvent::SignalState {
+                            signal,
+                            registration,
+                        } => ActiveExecutionEvent::SignalState {
+                            signal,
+                            registration: map_wasm_signal_registration(registration),
+                        },
+                        WasmExecutionEvent::Exited(code) => ActiveExecutionEvent::Exited(code),
+                    })
+                })
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+        }
+    }
+
+    pub(crate) fn poll_event_blocking(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+        match self {
+            Self::Javascript(execution) => execution
+                .poll_event_blocking(timeout)
+                .map(|event| {
+                    event.map(|event| match event {
+                        JavascriptExecutionEvent::Stdout(chunk) => {
+                            ActiveExecutionEvent::Stdout(chunk)
+                        }
+                        JavascriptExecutionEvent::Stderr(chunk) => {
+                            ActiveExecutionEvent::Stderr(chunk)
+                        }
+                        JavascriptExecutionEvent::SyncRpcRequest(request) => {
+                            ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
+                        }
+                        JavascriptExecutionEvent::SignalState {
+                            signal,
+                            registration,
+                        } => ActiveExecutionEvent::SignalState {
+                            signal,
+                            registration: map_node_signal_registration(registration),
+                        },
+                        JavascriptExecutionEvent::Exited(code) => {
+                            ActiveExecutionEvent::Exited(code)
+                        }
+                    })
+                })
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Python(execution) => execution
+                .poll_event_blocking(timeout)
+                .map(|event| {
+                    event.map(|event| match event {
+                        PythonExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
+                        PythonExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
+                        PythonExecutionEvent::VfsRpcRequest(request) => {
+                            ActiveExecutionEvent::PythonVfsRpcRequest(request)
+                        }
+                        PythonExecutionEvent::Exited(code) => ActiveExecutionEvent::Exited(code),
+                    })
+                })
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Wasm(execution) => execution
+                .poll_event_blocking(timeout)
                 .map(|event| {
                     event.map(|event| match event {
                         WasmExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
@@ -800,7 +865,7 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    pub(crate) fn execute(
+    pub(crate) async fn execute(
         &mut self,
         request: &RequestFrame,
         payload: ExecuteRequest,
@@ -826,10 +891,14 @@ where
         let sandbox_root = normalize_host_path(&vm.cwd);
         let cwd = resolve_execution_cwd(vm, payload.cwd.as_deref())?;
         if payload.runtime == GuestRuntimeKind::JavaScript {
-            if let Some(guest_entrypoint) =
+            let guest_entrypoint = if payload.entrypoint.starts_with('/') {
+                Some(normalize_path(&payload.entrypoint))
+            } else {
                 guest_runtime_path_for_host_path(&env, &cwd, &payload.entrypoint)
-            {
-                env.insert(String::from("AGENT_OS_GUEST_ENTRYPOINT"), guest_entrypoint);
+            };
+            if let Some(guest_entrypoint) = guest_entrypoint {
+                env.entry(String::from("AGENT_OS_GUEST_ENTRYPOINT"))
+                    .or_insert(guest_entrypoint);
             }
         }
         env.insert(
@@ -927,7 +996,6 @@ where
             }
         };
         let child_pid = execution.child_pid();
-
         vm.active_processes.insert(
             payload.process_id.clone(),
             ActiveProcess::new(
@@ -952,7 +1020,7 @@ where
         })
     }
 
-    pub(crate) fn write_stdin(
+    pub(crate) async fn write_stdin(
         &mut self,
         request: &RequestFrame,
         payload: WriteStdinRequest,
@@ -984,7 +1052,7 @@ where
         })
     }
 
-    pub(crate) fn close_stdin(
+    pub(crate) async fn close_stdin(
         &mut self,
         request: &RequestFrame,
         payload: CloseStdinRequest,
@@ -1015,7 +1083,7 @@ where
         })
     }
 
-    pub(crate) fn kill_process(
+    pub(crate) async fn kill_process(
         &mut self,
         request: &RequestFrame,
         payload: KillProcessRequest,
@@ -1035,7 +1103,7 @@ where
         })
     }
 
-    pub(crate) fn find_listener(
+    pub(crate) async fn find_listener(
         &mut self,
         request: &RequestFrame,
         payload: FindListenerRequest,
@@ -1055,7 +1123,7 @@ where
         })
     }
 
-    pub(crate) fn find_bound_udp(
+    pub(crate) async fn find_bound_udp(
         &mut self,
         request: &RequestFrame,
         payload: FindBoundUdpRequest,
@@ -1083,7 +1151,7 @@ where
         })
     }
 
-    pub(crate) fn get_signal_state(
+    pub(crate) async fn get_signal_state(
         &mut self,
         request: &RequestFrame,
         payload: GetSignalStateRequest,
@@ -1110,7 +1178,7 @@ where
         })
     }
 
-    pub(crate) fn get_zombie_timer_count(
+    pub(crate) async fn get_zombie_timer_count(
         &mut self,
         request: &RequestFrame,
         _payload: GetZombieTimerCountRequest,
@@ -1169,37 +1237,66 @@ where
         Ok(())
     }
 
-    pub(crate) fn try_poll_event(
+    pub async fn pump_process_events(
         &mut self,
         ownership: &OwnershipScope,
-    ) -> Result<Option<EventFrame>, SidecarError> {
+    ) -> Result<bool, SidecarError> {
+        let mut emitted_any = false;
         let vm_ids = self.vm_ids_for_scope(ownership)?;
         for vm_id in vm_ids {
-            let process_ids = self
-                .vms
-                .get(&vm_id)
-                .map(|vm| vm.active_processes.keys().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-
-            for process_id in process_ids {
-                let event = {
-                    let vm = self.vms.get_mut(&vm_id).expect("VM should still exist");
-                    let process = vm
-                        .active_processes
-                        .get_mut(&process_id)
-                        .expect("process should still exist");
-                    process.execution.poll_event(Duration::ZERO)?
+            loop {
+                let Some(vm) = self.vms.get(&vm_id) else {
+                    break;
                 };
+                let connection_id = vm.connection_id.clone();
+                let session_id = vm.session_id.clone();
+                let process_ids = self
+                    .vms
+                    .get(&vm_id)
+                    .map(|vm| vm.active_processes.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let mut emitted_this_pass = false;
 
-                let Some(event) = event else {
-                    continue;
-                };
+                for process_id in process_ids {
+                    let event = {
+                        let vm = self.vms.get_mut(&vm_id).expect("VM should still exist");
+                        let process = vm
+                            .active_processes
+                            .get_mut(&process_id)
+                            .expect("process should still exist");
+                        // Treat a closed event channel as "no more events" rather than
+                        // a hard error. The channel closes after the Exited event is
+                        // sent, but the process isn't removed from active_processes
+                        // until the envelope is dequeued and handled later.
+                        match process.execution.poll_event(Duration::ZERO).await {
+                            Ok(event) => event,
+                            Err(SidecarError::Execution(_)) => None,
+                            Err(other) => return Err(other),
+                        }
+                    };
 
-                return self.handle_execution_event(&vm_id, &process_id, event);
+                    let Some(event) = event else {
+                        continue;
+                    };
+
+                    let _ = self.process_event_sender.send(ProcessEventEnvelope {
+                        connection_id: connection_id.clone(),
+                        session_id: session_id.clone(),
+                        vm_id: vm_id.clone(),
+                        process_id: process_id.clone(),
+                        event,
+                    });
+                    emitted_any = true;
+                    emitted_this_pass = true;
+                }
+
+                if !emitted_this_pass {
+                    break;
+                }
             }
         }
 
-        Ok(None)
+        Ok(emitted_any)
     }
 
     pub(crate) fn handle_execution_event(
@@ -1208,10 +1305,13 @@ where
         process_id: &str,
         event: ActiveExecutionEvent,
     ) -> Result<Option<EventFrame>, SidecarError> {
-        let (connection_id, session_id) = {
-            let vm = self.vms.get(vm_id).expect("VM should exist");
-            (vm.connection_id.clone(), vm.session_id.clone())
+        let Some(vm) = self.vms.get(vm_id) else {
+            return Ok(None);
         };
+        if !vm.active_processes.contains_key(process_id) {
+            return Ok(None);
+        }
+        let (connection_id, session_id) = { (vm.connection_id.clone(), vm.session_id.clone()) };
         let ownership = OwnershipScope::vm(&connection_id, &session_id, vm_id);
 
         match event {
@@ -1367,7 +1467,8 @@ where
                         }
                     })
                 };
-                env.insert(String::from("AGENT_OS_GUEST_ENTRYPOINT"), guest_entrypoint);
+                env.entry(String::from("AGENT_OS_GUEST_ENTRYPOINT"))
+                    .or_insert(guest_entrypoint);
                 host_entrypoint.to_string_lossy().into_owned()
             } else {
                 entrypoint_specifier.clone()
@@ -1568,8 +1669,7 @@ where
                     })?;
                 child
                     .execution
-                    .poll_event(Duration::from_millis(wait_ms))
-                    .map_err(|error| SidecarError::Execution(error.to_string()))?
+                    .poll_event_blocking(Duration::from_millis(wait_ms))?
             };
 
             let Some(event) = event else {
@@ -1926,7 +2026,7 @@ fn parse_loopback_exempt_ports(
             other => {
                 return Err(SidecarError::InvalidState(format!(
                     "invalid {LOOPBACK_EXEMPT_PORTS_ENV} entry {other:?}"
-                )))
+                )));
             }
         };
         ports.insert(port);
@@ -2205,7 +2305,7 @@ fn socket_inodes_for_pid(pid: u32) -> Result<BTreeSet<u64>, SidecarError> {
         Err(error) => {
             return Err(SidecarError::Io(format!(
                 "failed to read socket descriptors for process {pid}: {error}"
-            )))
+            )));
         }
     };
 
@@ -2252,7 +2352,7 @@ fn find_unix_socket_for_pid(
         Err(error) => {
             return Err(SidecarError::Io(format!(
                 "failed to inspect unix sockets for process {pid}: {error}"
-            )))
+            )));
         }
     };
 
@@ -2547,7 +2647,7 @@ fn parse_proc_net_entries(table_path: &str) -> Result<Vec<ProcNetEntry>, Sidecar
         Err(error) => {
             return Err(SidecarError::Io(format!(
                 "failed to inspect socket table {table_path}: {error}"
-            )))
+            )));
         }
     };
 
@@ -3236,7 +3336,7 @@ fn filter_dns_ip_addrs(
         other => {
             return Err(SidecarError::InvalidState(format!(
                 "unsupported dns family {other}"
-            )))
+            )));
         }
     };
 
@@ -3777,7 +3877,7 @@ where
                     other => {
                         return Err(SidecarError::InvalidState(format!(
                             "unsupported dns rrtype {other}"
-                        )))
+                        )));
                     }
                 },
             };

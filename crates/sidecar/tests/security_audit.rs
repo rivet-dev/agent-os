@@ -74,7 +74,7 @@ fn filesystem_permission_denials_emit_security_audit_events() {
     let denied_vm_id = vm_id.clone();
     let sidecar = &mut sidecar;
     let _ = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             4,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -98,7 +98,7 @@ fn filesystem_permission_denials_emit_security_audit_events() {
         .expect("configure vm permissions");
 
     let write = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             5,
             OwnershipScope::vm(&connection_id, &session_id, &denied_vm_id),
             RequestPayload::GuestFilesystemCall(GuestFilesystemCallRequest {
@@ -124,7 +124,7 @@ fn filesystem_permission_denials_emit_security_audit_events() {
     }
 
     let read = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             6,
             OwnershipScope::vm(&connection_id, &session_id, &denied_vm_id),
             RequestPayload::GuestFilesystemCall(GuestFilesystemCallRequest {
@@ -179,7 +179,7 @@ fn mount_operations_emit_security_audit_events() {
     );
 
     sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             4,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::BootstrapRootFilesystem(BootstrapRootFilesystemRequest {
@@ -193,7 +193,7 @@ fn mount_operations_emit_security_audit_events() {
         .expect("bootstrap workspace");
 
     sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             5,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -215,7 +215,7 @@ fn mount_operations_emit_security_audit_events() {
         .expect("mount workspace");
 
     sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             6,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::ConfigureVm(ConfigureVmRequest {
@@ -272,7 +272,7 @@ fn kill_requests_emit_security_audit_events() {
     );
 
     let result = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             4,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::Execute(ExecuteRequest {
@@ -292,7 +292,7 @@ fn kill_requests_emit_security_audit_events() {
     }
 
     let result = sidecar
-        .dispatch(request(
+        .dispatch_blocking(request(
             5,
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::KillProcess(KillProcessRequest {

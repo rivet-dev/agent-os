@@ -139,6 +139,31 @@ impl SandboxAgentFilesystem {
         }
     }
 
+    fn is_virtual_mount_root(&self, path: &str) -> bool {
+        self.base_path != "/" && normalize_path(path) == "/"
+    }
+
+    fn virtual_mount_root_stat(&self) -> VirtualStat {
+        let modified_ms = now_ms();
+        VirtualStat {
+            mode: S_IFDIR | 0o755,
+            size: 0,
+            blocks: 0,
+            dev: 1,
+            rdev: 0,
+            is_directory: true,
+            is_symbolic_link: false,
+            atime_ms: modified_ms,
+            mtime_ms: modified_ms,
+            ctime_ms: modified_ms,
+            birthtime_ms: modified_ms,
+            ino: 0,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+        }
+    }
+
     fn ensure_buffered_full_read_allowed(
         &self,
         path: &str,
@@ -331,7 +356,13 @@ impl VirtualFileSystem for SandboxAgentFilesystem {
         let mut entries = self
             .client
             .list_fs_entries(&remote_path)
-            .map_err(|error| sandbox_client_error_to_vfs("readdir", path, error))?
+            .or_else(|error| {
+                if self.is_virtual_mount_root(path) && is_missing_path_error(&error) {
+                    Ok(Vec::new())
+                } else {
+                    Err(sandbox_client_error_to_vfs("readdir", path, error))
+                }
+            })?
             .into_iter()
             .map(|entry| entry.name)
             .filter(|name| name != "." && name != "..")
@@ -345,7 +376,13 @@ impl VirtualFileSystem for SandboxAgentFilesystem {
         let mut entries = self
             .client
             .list_fs_entries(&remote_path)
-            .map_err(|error| sandbox_client_error_to_vfs("readdir", path, error))?
+            .or_else(|error| {
+                if self.is_virtual_mount_root(path) && is_missing_path_error(&error) {
+                    Ok(Vec::new())
+                } else {
+                    Err(sandbox_client_error_to_vfs("readdir", path, error))
+                }
+            })?
             .into_iter()
             .filter(|entry| entry.name != "." && entry.name != "..")
             .map(|entry| VirtualDirEntry {
@@ -395,16 +432,21 @@ impl VirtualFileSystem for SandboxAgentFilesystem {
 
     fn exists(&self, path: &str) -> bool {
         let remote_path = self.scoped_path(path);
-        self.client.stat_fs(&remote_path).is_ok()
+        match self.client.stat_fs(&remote_path) {
+            Ok(_) => true,
+            Err(error) => self.is_virtual_mount_root(path) && is_missing_path_error(&error),
+        }
     }
 
     fn stat(&mut self, path: &str) -> VfsResult<VirtualStat> {
         let remote_path = self.scoped_path(path);
-        let stat = self
-            .client
-            .stat_fs(&remote_path)
-            .map_err(|error| sandbox_client_error_to_vfs("stat", path, error))?;
-        Ok(Self::stat_from_remote(&stat))
+        match self.client.stat_fs(&remote_path) {
+            Ok(stat) => Ok(Self::stat_from_remote(&stat)),
+            Err(error) if self.is_virtual_mount_root(path) && is_missing_path_error(&error) => {
+                Ok(self.virtual_mount_root_stat())
+            }
+            Err(error) => Err(sandbox_client_error_to_vfs("stat", path, error)),
+        }
     }
 
     fn remove_file(&mut self, path: &str) -> VfsResult<()> {
@@ -487,11 +529,13 @@ impl VirtualFileSystem for SandboxAgentFilesystem {
 
     fn lstat(&self, path: &str) -> VfsResult<VirtualStat> {
         let remote_path = self.scoped_path(path);
-        let stat = self
-            .client
-            .stat_fs(&remote_path)
-            .map_err(|error| sandbox_client_error_to_vfs("lstat", path, error))?;
-        Ok(Self::stat_from_remote(&stat))
+        match self.client.stat_fs(&remote_path) {
+            Ok(stat) => Ok(Self::stat_from_remote(&stat)),
+            Err(error) if self.is_virtual_mount_root(path) && is_missing_path_error(&error) => {
+                Ok(self.virtual_mount_root_stat())
+            }
+            Err(error) => Err(sandbox_client_error_to_vfs("lstat", path, error)),
+        }
     }
 
     fn link(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
@@ -911,9 +955,13 @@ struct SandboxAgentProcessRunRequest {
     command: String,
     #[serde(default)]
     args: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     env: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_output_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     timeout_ms: Option<u64>,
 }
 
@@ -1006,6 +1054,20 @@ fn sandbox_client_error_to_vfs(
         SandboxAgentClientError::Transport(message) | SandboxAgentClientError::Decode(message) => {
             VfsError::io(format!("{op} '{path}': {message}"))
         }
+    }
+}
+
+fn is_missing_path_error(error: &SandboxAgentClientError) -> bool {
+    match error {
+        SandboxAgentClientError::Status { status, problem } => {
+            let detail = problem
+                .detail
+                .as_deref()
+                .or(problem.title.as_deref())
+                .unwrap_or_default();
+            *status == 404 || detail.contains("path not found")
+        }
+        SandboxAgentClientError::Transport(_) | SandboxAgentClientError::Decode(_) => false,
     }
 }
 

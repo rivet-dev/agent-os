@@ -50,7 +50,7 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    pub(crate) fn create_vm(
+    pub(crate) async fn create_vm(
         &mut self,
         request: &crate::protocol::RequestFrame,
         payload: crate::protocol::CreateVmRequest,
@@ -147,14 +147,15 @@ where
         })
     }
 
-    pub(crate) fn dispose_vm(
+    pub(crate) async fn dispose_vm(
         &mut self,
         request: &crate::protocol::RequestFrame,
         payload: crate::protocol::DisposeVmRequest,
     ) -> Result<DispatchResult, SidecarError> {
         let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        let events =
-            self.dispose_vm_internal(&connection_id, &session_id, &vm_id, payload.reason)?;
+        let events = self
+            .dispose_vm_internal(&connection_id, &session_id, &vm_id, payload.reason)
+            .await?;
 
         Ok(DispatchResult {
             response: self.respond(
@@ -165,7 +166,7 @@ where
         })
     }
 
-    pub(crate) fn bootstrap_root_filesystem(
+    pub(crate) async fn bootstrap_root_filesystem(
         &mut self,
         request: &crate::protocol::RequestFrame,
         entries: Vec<RootFilesystemEntry>,
@@ -194,7 +195,7 @@ where
         })
     }
 
-    pub(crate) fn configure_vm(
+    pub(crate) async fn configure_vm(
         &mut self,
         request: &crate::protocol::RequestFrame,
         payload: ConfigureVmRequest,
@@ -252,7 +253,7 @@ where
         })
     }
 
-    pub(crate) fn snapshot_root_filesystem(
+    pub(crate) async fn snapshot_root_filesystem(
         &mut self,
         request: &crate::protocol::RequestFrame,
         _payload: SnapshotRootFilesystemRequest,
@@ -274,7 +275,7 @@ where
         })
     }
 
-    pub(crate) fn dispose_vm_internal(
+    pub(crate) async fn dispose_vm_internal(
         &mut self,
         connection_id: &str,
         session_id: &str,
@@ -289,7 +290,7 @@ where
             vm_id,
             VmLifecycleState::Disposing,
         )];
-        self.terminate_vm_processes(vm_id, &mut events)?;
+        self.terminate_vm_processes(vm_id, &mut events).await?;
 
         let mut vm = self
             .vms
@@ -330,7 +331,7 @@ where
         Ok(events)
     }
 
-    pub(crate) fn terminate_vm_processes(
+    pub(crate) async fn terminate_vm_processes(
         &mut self,
         vm_id: &str,
         events: &mut Vec<EventFrame>,
@@ -353,7 +354,8 @@ where
                 self.kill_process_internal(vm_id, &process_id, "SIGTERM")?;
             }
         }
-        self.wait_for_vm_processes_to_exit(vm_id, DISPOSE_VM_SIGTERM_GRACE, events)?;
+        self.wait_for_vm_processes_to_exit(vm_id, DISPOSE_VM_SIGTERM_GRACE, events)
+            .await?;
 
         if !self.vm_has_active_processes(vm_id) {
             return Ok(());
@@ -373,7 +375,8 @@ where
                 self.kill_process_internal(vm_id, &process_id, "SIGKILL")?;
             }
         }
-        self.wait_for_vm_processes_to_exit(vm_id, DISPOSE_VM_SIGKILL_GRACE, events)?;
+        self.wait_for_vm_processes_to_exit(vm_id, DISPOSE_VM_SIGKILL_GRACE, events)
+            .await?;
 
         if self.vm_has_active_processes(vm_id) {
             return Err(SidecarError::Execution(format!(
@@ -384,7 +387,7 @@ where
         Ok(())
     }
 
-    pub(crate) fn wait_for_vm_processes_to_exit(
+    pub(crate) async fn wait_for_vm_processes_to_exit(
         &mut self,
         vm_id: &str,
         timeout: Duration,
@@ -395,8 +398,9 @@ where
 
         while self.vm_has_active_processes(vm_id) && Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if let Some(event) =
-                self.poll_event(&ownership, remaining.min(Duration::from_millis(10)))?
+            if let Some(event) = self
+                .poll_event(&ownership, remaining.min(Duration::from_millis(10)))
+                .await?
             {
                 events.push(event);
             }
