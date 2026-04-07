@@ -470,6 +470,29 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
         "_dgramSocketSetBufferSizeRaw" => ("dgram.setBufferSize", false),
         "_dgramSocketGetBufferSizeRaw" => ("dgram.getBufferSize", false),
 
+        // SQLite operations
+        "_sqliteConstantsRaw" => ("sqlite.constants", false),
+        "_sqliteDatabaseOpenRaw" => ("sqlite.open", false),
+        "_sqliteDatabaseCloseRaw" => ("sqlite.close", false),
+        "_sqliteDatabaseExecRaw" => ("sqlite.exec", false),
+        "_sqliteDatabaseQueryRaw" => ("sqlite.query", false),
+        "_sqliteDatabasePrepareRaw" => ("sqlite.prepare", false),
+        "_sqliteDatabaseLocationRaw" => ("sqlite.location", false),
+        "_sqliteDatabaseCheckpointRaw" => ("sqlite.checkpoint", false),
+        "_sqliteStatementRunRaw" => ("sqlite.statement.run", false),
+        "_sqliteStatementGetRaw" => ("sqlite.statement.get", false),
+        "_sqliteStatementAllRaw" => ("sqlite.statement.all", false),
+        "_sqliteStatementColumnsRaw" => ("sqlite.statement.columns", false),
+        "_sqliteStatementSetReturnArraysRaw" => ("sqlite.statement.setReturnArrays", false),
+        "_sqliteStatementSetReadBigIntsRaw" => ("sqlite.statement.setReadBigInts", false),
+        "_sqliteStatementSetAllowBareNamedParametersRaw" => {
+            ("sqlite.statement.setAllowBareNamedParameters", false)
+        }
+        "_sqliteStatementSetAllowUnknownNamedParametersRaw" => {
+            ("sqlite.statement.setAllowUnknownNamedParameters", false)
+        }
+        "_sqliteStatementFinalizeRaw" => ("sqlite.statement.finalize", false),
+
         // PTY
         "_ptySetRawMode" => ("__pty_set_raw_mode", false),
 

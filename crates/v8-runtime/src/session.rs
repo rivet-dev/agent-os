@@ -591,11 +591,11 @@ fn session_thread(
                             }
                         }
 
-                        // For ESM modules: call _waitForActiveHandles() to keep
-                        // the session alive while handles (timers, child processes,
-                        // stdin listeners) are active. This creates a pending promise
-                        // that the event loop pumps until all handles resolve.
-                        if !terminated && mode != 0 && error.is_none() {
+                        // Keep the session alive while handles (timers, child
+                        // processes, stdin listeners) are active. Long-lived
+                        // ACP adapters often run as plain scripts, so this
+                        // cannot be limited to ESM entrypoints.
+                        if !terminated && error.is_none() {
                             // Phase 1: call _waitForActiveHandles() to register a pending promise
                             {
                                 let scope = &mut v8::HandleScope::new(iso);
@@ -855,6 +855,23 @@ pub(crate) const SYNC_BRIDGE_FNS: &[&str] = &[
     "_dgramSocketAddressRaw",
     "_dgramSocketSetBufferSizeRaw",
     "_dgramSocketGetBufferSizeRaw",
+    "_sqliteConstantsRaw",
+    "_sqliteDatabaseOpenRaw",
+    "_sqliteDatabaseCloseRaw",
+    "_sqliteDatabaseExecRaw",
+    "_sqliteDatabaseQueryRaw",
+    "_sqliteDatabasePrepareRaw",
+    "_sqliteDatabaseLocationRaw",
+    "_sqliteDatabaseCheckpointRaw",
+    "_sqliteStatementRunRaw",
+    "_sqliteStatementGetRaw",
+    "_sqliteStatementAllRaw",
+    "_sqliteStatementColumnsRaw",
+    "_sqliteStatementSetReturnArraysRaw",
+    "_sqliteStatementSetReadBigIntsRaw",
+    "_sqliteStatementSetAllowBareNamedParametersRaw",
+    "_sqliteStatementSetAllowUnknownNamedParametersRaw",
+    "_sqliteStatementFinalizeRaw",
     "_ptySetRawMode",
 ];
 

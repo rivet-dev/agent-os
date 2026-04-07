@@ -24,25 +24,23 @@ use crate::service::{
 use crate::state::{
     ActiveCipherSession, ActiveDhSession, ActiveDiffieHellmanSession, ActiveEcdhSession,
     ActiveExecution, ActiveExecutionEvent, ActiveHttp2Server, ActiveHttp2Session,
-    ActiveHttp2Stream, ActiveHttpServer, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
-    ActiveTlsState, ActiveTlsStream, ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket,
-    BridgeError, DnsResolutionSource, Http2BridgeEvent, Http2RuntimeSnapshot,
-    Http2SessionCommand, Http2SessionSnapshot, Http2SocketSnapshot, Http2StreamDirection,
+    ActiveHttp2Stream, ActiveHttpServer, ActiveProcess, ActiveSqliteDatabase,
+    ActiveSqliteStatement, ActiveTcpListener, ActiveTcpSocket, ActiveTlsState, ActiveTlsStream,
+    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError,
+    DEFAULT_JAVASCRIPT_NET_BACKLOG, DnsResolutionSource, EXECUTION_DRIVER_NAME,
+    EXECUTION_SANDBOX_ROOT_ENV, Http2BridgeEvent, Http2RuntimeSnapshot, Http2SessionCommand,
+    Http2SessionSnapshot, Http2SocketSnapshot, Http2StreamDirection, JAVASCRIPT_COMMAND,
     JavascriptSocketFamily, JavascriptSocketPathContext, JavascriptTcpListenerEvent,
     JavascriptTcpSocketEvent, JavascriptTlsBridgeOptions, JavascriptTlsClientHello,
-    JavascriptTlsDataValue, JavascriptTlsMaterial, JavascriptUdpFamily,
-    JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts,
+    JavascriptTlsDataValue, JavascriptTlsMaterial, JavascriptUdpFamily, JavascriptUdpSocketEvent,
+    JavascriptUnixListenerEvent, LOOPBACK_EXEMPT_PORTS_ENV, NetworkResourceCounts, PYTHON_COMMAND,
     PendingTcpSocket, PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope,
     ResolvedChildProcessExecution, ResolvedTcpConnectAddr, SharedBridge, SidecarKernel,
-    SocketQueryKind, ToolExecution, VmDnsConfig, VmListenPolicy, VmState,
-    DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
-    JAVASCRIPT_COMMAND, TOOL_DRIVER_NAME,
-    LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND, VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY,
-    VM_LISTEN_PORT_MAX_METADATA_KEY, VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
+    SocketQueryKind, TOOL_DRIVER_NAME, ToolExecution, VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY,
+    VM_LISTEN_PORT_MAX_METADATA_KEY, VM_LISTEN_PORT_MIN_METADATA_KEY, VmDnsConfig, VmListenPolicy,
+    VmState, WASM_COMMAND,
 };
-use crate::tools::{
-    format_tool_failure_output, resolve_tool_command, ToolCommandResolution,
-};
+use crate::tools::{ToolCommandResolution, format_tool_failure_output, resolve_tool_command};
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
 use agent_os_bridge::LifecycleState;
@@ -64,16 +62,16 @@ use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use base64::Engine;
 use bytes::Bytes;
-use h2::{client, server, Reason};
+use h2::{Reason, client, server};
+use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::TokioResolver;
-use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri};
 use hmac::{Hmac, Mac};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri};
 use md5::Md5;
 use nix::libc;
-use nix::sys::signal::{kill as send_signal, Signal};
-use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
+use nix::sys::signal::{Signal, kill as send_signal};
+use nix::sys::wait::{Id as WaitId, WaitPidFlag, WaitStatus, waitid as wait_on_child};
 use nix::unistd::Pid;
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::derive::Deriver;
@@ -89,6 +87,10 @@ use openssl::rsa::{Padding, Rsa};
 use openssl::sign::{Signer, Verifier};
 use openssl::symm::{Cipher, Crypter, Mode};
 use pbkdf2::pbkdf2_hmac;
+use rusqlite::types::ValueRef as SqliteValueRef;
+use rusqlite::{
+    Connection as SqliteConnection, OpenFlags as SqliteOpenFlags, Statement as SqliteStatement,
+};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::aws_lc_rs;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -96,14 +98,14 @@ use rustls::{
     ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, ServerConfig,
     ServerConnection, SignatureScheme,
 };
-use scrypt::{scrypt, Params as ScryptParams};
+use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha1::Sha1;
-use sha2::{digest::Digest, Sha256, Sha512};
+use sha2::{Sha256, Sha512, digest::Digest};
 use socket2::{SockRef, TcpKeepalive};
-use std::collections::{BTreeMap, BTreeSet};
 use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -119,7 +121,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use url::Url;
 
 const DEFAULT_KERNEL_STDIN_READ_MAX_BYTES: usize = 64 * 1024;
@@ -131,6 +133,7 @@ const HTTP_LOOPBACK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_SCRYPT_COST: u64 = 16_384;
 const DEFAULT_SCRYPT_BLOCK_SIZE: u32 = 8;
 const DEFAULT_SCRYPT_PARALLELIZATION: u32 = 1;
+const SQLITE_JS_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
 const DEFAULT_ALLOWED_NODE_BUILTINS: &[&str] = &[
     "assert",
     "buffer",
@@ -146,6 +149,7 @@ const DEFAULT_ALLOWED_NODE_BUILTINS: &[&str] = &[
     "os",
     "path",
     "querystring",
+    "sqlite",
     "stream",
     "string_decoder",
     "timers",
@@ -307,6 +311,10 @@ impl ActiveProcess {
             next_cipher_session_id: 0,
             diffie_hellman_sessions: BTreeMap::new(),
             next_diffie_hellman_session_id: 0,
+            sqlite_databases: BTreeMap::new(),
+            next_sqlite_database_id: 0,
+            sqlite_statements: BTreeMap::new(),
+            next_sqlite_statement_id: 0,
         }
     }
 
@@ -1661,9 +1669,11 @@ where
                                     session_id: session_id_for_thread.clone(),
                                     vm_id: vm_id_for_thread.clone(),
                                     process_id: process_id_for_thread.clone(),
-                                    event: ActiveExecutionEvent::Stderr(format_tool_failure_output(
-                                        "unexpected sidecar tool response",
-                                    )),
+                                    event: ActiveExecutionEvent::Stderr(
+                                        format_tool_failure_output(
+                                            "unexpected sidecar tool response",
+                                        ),
+                                    ),
                                 });
                                 let _ = sender.send(ProcessEventEnvelope {
                                     connection_id: connection_id_for_thread,
@@ -1734,12 +1744,6 @@ where
         let execution = match resolved.runtime {
             GuestRuntimeKind::JavaScript => {
                 prepare_javascript_shadow(vm, &resolved)?;
-                let inline_code = load_javascript_entrypoint_source(
-                    vm,
-                    &resolved.host_cwd,
-                    &resolved.entrypoint,
-                    &env,
-                );
 
                 let context =
                     self.javascript_engine
@@ -1758,7 +1762,7 @@ where
                             .collect(),
                         env: env.clone(),
                         cwd: resolved.host_cwd.clone(),
-                        inline_code,
+                        inline_code: None,
                     })
                     .map_err(javascript_error)?;
                 ActiveExecution::Javascript(execution)
@@ -2365,6 +2369,53 @@ where
         } else {
             (request.command.clone(), request.args.clone())
         };
+        if is_path_like_specifier(&command)
+            && matches!(
+                Path::new(&command).extension().and_then(|ext| ext.to_str()),
+                Some("js" | "mjs" | "cjs" | "ts" | "mts" | "cts")
+            )
+        {
+            let guest_entrypoint = if command.starts_with('/') {
+                normalize_path(&command)
+            } else if command.starts_with("file:") {
+                normalize_path(command.trim_start_matches("file:"))
+            } else {
+                normalize_path(&format!("{guest_cwd}/{command}"))
+            };
+            let host_entrypoint = if command.starts_with("./") || command.starts_with("../") {
+                host_cwd.join(&command)
+            } else {
+                host_runtime_path_for_guest_path_with_env(
+                    vm,
+                    &runtime_env,
+                    &guest_entrypoint,
+                    parent_host_cwd,
+                )
+                .unwrap_or_else(|| {
+                    let candidate = PathBuf::from(&guest_entrypoint);
+                    if candidate.is_absolute() {
+                        candidate
+                    } else {
+                        host_cwd.join(&guest_entrypoint)
+                    }
+                })
+            };
+            env.entry(String::from("AGENT_OS_GUEST_ENTRYPOINT"))
+                .or_insert(guest_entrypoint);
+
+            return Ok(ResolvedChildProcessExecution {
+                command,
+                process_args: process_args.clone(),
+                runtime: GuestRuntimeKind::JavaScript,
+                entrypoint: host_entrypoint.to_string_lossy().into_owned(),
+                execution_args: process_args,
+                env,
+                guest_cwd,
+                host_cwd,
+                wasm_permission_tier: None,
+            });
+        }
+
         if matches!(command.as_str(), "node" | "npm" | "npx") {
             let Some(entrypoint_specifier) = process_args.first() else {
                 return Err(SidecarError::InvalidState(format!(
@@ -2505,6 +2556,7 @@ where
                 execution_env.extend(sanitize_javascript_child_process_internal_bootstrap_env(
                     &request.options.internal_bootstrap_env,
                 ));
+                execution_env.insert(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"));
                 execution_env.insert(
                     String::from("AGENT_OS_VIRTUAL_PROCESS_PID"),
                     kernel_pid.to_string(),
@@ -2695,9 +2747,15 @@ where
                     .get_mut(child_process_id)
                     .ok_or_else(|| {
                         SidecarError::InvalidState(format!(
-                            "unknown child process {child_process_id}"
+                            "unknown child process {child_process_id} during poll"
                         ))
-                    })?;
+                    });
+                let Ok(child) = child else {
+                    return Ok(json!({
+                        "type": "exit",
+                        "exitCode": 1,
+                    }));
+                };
                 child
                     .execution
                     .poll_event_blocking(Duration::from_millis(wait_ms))?
@@ -2825,15 +2883,15 @@ where
         chunk: &[u8],
     ) -> Result<(), SidecarError> {
         let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-        let child = vm
+        let Some(child) = vm
             .active_processes
             .get_mut(process_id)
             .expect("process should still exist")
             .child_processes
             .get_mut(child_process_id)
-            .ok_or_else(|| {
-                SidecarError::InvalidState(format!("unknown child process {child_process_id}"))
-            })?;
+        else {
+            return Ok(());
+        };
         child.execution.write_stdin(chunk)?;
         write_kernel_process_stdin(&mut vm.kernel, child, chunk)
     }
@@ -2845,15 +2903,15 @@ where
         child_process_id: &str,
     ) -> Result<(), SidecarError> {
         let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-        let child = vm
+        let Some(child) = vm
             .active_processes
             .get_mut(process_id)
             .expect("process should still exist")
             .child_processes
             .get_mut(child_process_id)
-            .ok_or_else(|| {
-                SidecarError::InvalidState(format!("unknown child process {child_process_id}"))
-            })?;
+        else {
+            return Ok(());
+        };
         child.execution.close_stdin()?;
         close_kernel_process_stdin(&mut vm.kernel, child)
     }
@@ -2877,7 +2935,9 @@ where
             .child_processes
             .get_mut(child_process_id)
             .ok_or_else(|| {
-                SidecarError::InvalidState(format!("unknown child process {child_process_id}"))
+                SidecarError::InvalidState(format!(
+                    "unknown child process {child_process_id} during kill"
+                ))
             })?;
         vm.kernel
             .kill_process(EXECUTION_DRIVER_NAME, child.kernel_pid, signal)
@@ -2956,9 +3016,7 @@ fn resolve_execute_request(
     }
 
     let runtime = payload.runtime.clone().ok_or_else(|| {
-        SidecarError::InvalidState(String::from(
-            "execute requires either command or runtime",
-        ))
+        SidecarError::InvalidState(String::from("execute requires either command or runtime"))
     })?;
     let entrypoint = payload.entrypoint.clone().ok_or_else(|| {
         SidecarError::InvalidState(String::from(
@@ -3019,8 +3077,7 @@ fn resolve_command_execution(
     cwd: Option<&str>,
     explicit_wasm_permission_tier: Option<WasmPermissionTier>,
 ) -> Result<ResolvedChildProcessExecution, SidecarError> {
-    let (guest_cwd, host_cwd, allow_host_path_overrides) =
-        resolve_execution_cwds(vm, cwd);
+    let (guest_cwd, host_cwd, allow_host_path_overrides) = resolve_execution_cwds(vm, cwd);
     let mut env = vm.guest_env.clone();
     env.extend(extra_env.clone());
 
@@ -3072,7 +3129,11 @@ fn resolve_command_execution(
                     },
                     |(_, host_entrypoint)| host_entrypoint,
                 );
-                (entrypoint, args.iter().skip(1).cloned().collect(), guest_entrypoint)
+                (
+                    entrypoint,
+                    args.iter().skip(1).cloned().collect(),
+                    guest_entrypoint,
+                )
             };
 
         prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
@@ -3144,7 +3205,9 @@ fn resolve_command_execution(
         vm.command_guest_paths.get(command).cloned()
     }
     .ok_or_else(|| {
-        SidecarError::InvalidState(format!("command not found on native sidecar path: {command}"))
+        SidecarError::InvalidState(format!(
+            "command not found on native sidecar path: {command}"
+        ))
     })?;
     let wasm_permission_tier = explicit_wasm_permission_tier
         .or_else(|| vm.command_permissions.get(command).copied())
@@ -3173,7 +3236,9 @@ fn resolve_command_execution(
 }
 
 fn resolve_guest_execution_cwd(vm: &VmState, value: Option<&str>) -> String {
-    value.map(normalize_path).unwrap_or_else(|| vm.guest_cwd.clone())
+    value
+        .map(normalize_path)
+        .unwrap_or_else(|| vm.guest_cwd.clone())
 }
 
 fn resolve_execution_cwds(vm: &VmState, value: Option<&str>) -> (String, PathBuf, bool) {
@@ -3274,7 +3339,11 @@ fn prepare_javascript_runtime_env(
     let path_mappings = runtime_guest_path_mappings(vm);
     let read_paths = expand_host_access_paths(
         std::iter::once(vm.cwd.clone())
-            .chain(path_mappings.iter().map(|mapping| PathBuf::from(&mapping.host_path)))
+            .chain(
+                path_mappings
+                    .iter()
+                    .map(|mapping| PathBuf::from(&mapping.host_path)),
+            )
             .chain(std::iter::once(host_cwd.to_path_buf()))
             .collect::<Vec<_>>()
             .as_slice(),
@@ -3285,8 +3354,9 @@ fn prepare_javascript_runtime_env(
 
     env.insert(
         String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
-        serde_json::to_string(&path_mappings)
-            .map_err(|error| SidecarError::InvalidState(format!("failed to encode guest path mappings: {error}")))?,
+        serde_json::to_string(&path_mappings).map_err(|error| {
+            SidecarError::InvalidState(format!("failed to encode guest path mappings: {error}"))
+        })?,
     );
     env.insert(
         String::from("AGENT_OS_EXTRA_FS_READ_PATHS"),
@@ -3296,7 +3366,9 @@ fn prepare_javascript_runtime_env(
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
         )
-        .map_err(|error| SidecarError::InvalidState(format!("failed to encode read paths: {error}")))?,
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("failed to encode read paths: {error}"))
+        })?,
     );
     env.insert(
         String::from("AGENT_OS_EXTRA_FS_WRITE_PATHS"),
@@ -3306,7 +3378,9 @@ fn prepare_javascript_runtime_env(
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
         )
-        .map_err(|error| SidecarError::InvalidState(format!("failed to encode write paths: {error}")))?,
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("failed to encode write paths: {error}"))
+        })?,
     );
     env.insert(
         String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
@@ -3318,8 +3392,9 @@ fn prepare_javascript_runtime_env(
     if !loopback_exempt_ports.is_empty() {
         env.insert(
             String::from(LOOPBACK_EXEMPT_PORTS_ENV),
-            serde_json::to_string(&loopback_exempt_ports)
-                .map_err(|error| SidecarError::InvalidState(format!("failed to encode loopback exemptions: {error}")))?,
+            serde_json::to_string(&loopback_exempt_ports).map_err(|error| {
+                SidecarError::InvalidState(format!("failed to encode loopback exemptions: {error}"))
+            })?,
         );
     }
     if let Some(guest_entrypoint) = guest_entrypoint {
@@ -3369,7 +3444,7 @@ fn runtime_guest_path_mappings(vm: &VmState) -> Vec<RuntimeGuestPathMapping> {
         .mounts
         .iter()
         .filter_map(|mount| {
-            (mount.plugin.id == "host_dir")
+            ((mount.plugin.id == "host_dir") || (mount.plugin.id == "module_access"))
                 .then(|| {
                     mount
                         .plugin
@@ -3384,12 +3459,70 @@ fn runtime_guest_path_mappings(vm: &VmState) -> Vec<RuntimeGuestPathMapping> {
                 .flatten()
         })
         .collect::<Vec<_>>();
+    let mut extra_node_modules_roots = mappings
+        .iter()
+        .filter(|mapping| mapping.guest_path.starts_with("/root/node_modules/"))
+        .filter_map(|mapping| {
+            host_node_modules_root(Path::new(&mapping.host_path)).map(|host_root| {
+                RuntimeGuestPathMapping {
+                    guest_path: String::from("/root/node_modules"),
+                    host_path: host_root.to_string_lossy().into_owned(),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    mappings.append(&mut extra_node_modules_roots);
     mappings.push(RuntimeGuestPathMapping {
         guest_path: String::from("/"),
         host_path: vm.cwd.to_string_lossy().into_owned(),
     });
     mappings.sort_by(|left, right| right.guest_path.len().cmp(&left.guest_path.len()));
+    mappings.dedup_by(|left, right| {
+        left.guest_path == right.guest_path && left.host_path == right.host_path
+    });
     mappings
+}
+
+fn host_node_modules_root(path: &Path) -> Option<PathBuf> {
+    let canonical = fs::canonicalize(path).ok()?;
+    canonical
+        .ancestors()
+        .filter(|candidate| {
+            candidate.file_name().and_then(|name| name.to_str()) == Some("node_modules")
+        })
+        .last()
+        .map(Path::to_path_buf)
+}
+
+#[cfg(test)]
+mod runtime_guest_path_mapping_tests {
+    use super::host_node_modules_root;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn host_node_modules_root_prefers_workspace_root_over_pnpm_package_node_modules() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let temp = std::env::temp_dir().join(format!("agent-os-sidecar-node-modules-{unique}"));
+        let workspace_node_modules = temp.join("node_modules");
+        let package_root = workspace_node_modules
+            .join(".pnpm")
+            .join("example@1.0.0")
+            .join("node_modules")
+            .join("@scope")
+            .join("pkg");
+        fs::create_dir_all(&package_root).expect("package root should be created");
+
+        let resolved =
+            host_node_modules_root(&package_root).expect("node_modules root should resolve");
+
+        assert_eq!(resolved, workspace_node_modules);
+
+        fs::remove_dir_all(&temp).expect("temp tree should be removed");
+    }
 }
 
 fn dedupe_strings(values: &[String]) -> Vec<String> {
@@ -3462,17 +3595,25 @@ fn prepare_javascript_shadow(
         .env
         .get("AGENT_OS_GUEST_ENTRYPOINT")
         .cloned()
-        .or_else(|| resolved.entrypoint.starts_with('/').then(|| normalize_path(&resolved.entrypoint)));
+        .or_else(|| {
+            resolved
+                .entrypoint
+                .starts_with('/')
+                .then(|| normalize_path(&resolved.entrypoint))
+        });
     let Some(guest_entrypoint) = guest_entrypoint else {
         return Ok(());
     };
     if host_mount_path_for_guest_path(vm, &guest_entrypoint).is_some() {
         return Ok(());
     }
-    materialize_guest_tree_to_shadow(vm, &dirname(&guest_entrypoint))
+    materialize_guest_path_to_shadow(vm, &guest_entrypoint)
 }
 
-fn materialize_guest_tree_to_shadow(vm: &mut VmState, guest_path: &str) -> Result<(), SidecarError> {
+fn materialize_guest_path_to_shadow(
+    vm: &mut VmState,
+    guest_path: &str,
+) -> Result<(), SidecarError> {
     let stat = vm.kernel.lstat(guest_path).map_err(kernel_error)?;
     let shadow_path = shadow_path_for_guest(vm, guest_path);
 
@@ -3491,21 +3632,23 @@ fn materialize_guest_tree_to_shadow(vm: &mut VmState, guest_path: &str) -> Resul
     }
 
     if stat.is_directory {
-        fs::create_dir_all(&shadow_path)
-            .map_err(|error| SidecarError::Io(format!("failed to create shadow directory: {error}")))?;
-        for entry in vm.kernel.read_dir(guest_path).map_err(kernel_error)? {
-            materialize_guest_tree_to_shadow(vm, &normalize_path(&format!("{guest_path}/{entry}")))?;
-        }
+        fs::create_dir_all(&shadow_path).map_err(|error| {
+            SidecarError::Io(format!("failed to create shadow directory: {error}"))
+        })?;
         return Ok(());
     }
 
     if let Some(parent) = shadow_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| SidecarError::Io(format!("failed to create shadow parent: {error}")))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            SidecarError::Io(format!("failed to create shadow parent: {error}"))
+        })?;
     }
     let bytes = vm.kernel.read_file(guest_path).map_err(kernel_error)?;
-    fs::write(&shadow_path, bytes)
-        .map_err(|error| SidecarError::Io(format!("failed to mirror guest file into shadow root: {error}")))?;
+    fs::write(&shadow_path, bytes).map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to mirror guest file into shadow root: {error}"
+        ))
+    })?;
     Ok(())
 }
 
@@ -4399,7 +4542,7 @@ fn host_mount_path_for_guest_path(vm: &VmState, guest_path: &str) -> Option<Path
         .mounts
         .iter()
         .filter_map(|mount| {
-            (mount.plugin.id == "host_dir")
+            ((mount.plugin.id == "host_dir") || (mount.plugin.id == "module_access"))
                 .then(|| {
                     mount
                         .plugin
@@ -5572,6 +5715,11 @@ fn spawn_unix_socket_reader(
 }
 
 fn terminate_child_process_tree(kernel: &mut SidecarKernel, process: &mut ActiveProcess) {
+    let sqlite_database_ids = process.sqlite_databases.keys().copied().collect::<Vec<_>>();
+    for database_id in sqlite_database_ids {
+        let _ = close_sqlite_database(kernel, process, database_id);
+    }
+    process.sqlite_statements.clear();
     process.http_servers.clear();
     process.pending_http_requests.clear();
     if let Ok(mut http2) = process.http2.shared.lock() {
@@ -5637,6 +5785,828 @@ fn terminate_child_process_tree(kernel: &mut SidecarKernel, process: &mut Active
         child.kernel_handle.finish(0);
         let _ = kernel.wait_and_reap(child.kernel_pid);
     }
+}
+
+fn service_javascript_sqlite_sync_rpc(
+    kernel: &mut SidecarKernel,
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    match request.method.as_str() {
+        "sqlite.constants" => Ok(json!({})),
+        "sqlite.open" => sqlite_open_database(kernel, process, request),
+        "sqlite.close" => {
+            let database_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.close database id")?;
+            close_sqlite_database(kernel, process, database_id)?;
+            Ok(Value::Null)
+        }
+        "sqlite.exec" => sqlite_exec_database(kernel, process, request),
+        "sqlite.query" => sqlite_query_database(process, request),
+        "sqlite.prepare" => sqlite_prepare_statement(process, request),
+        "sqlite.location" => {
+            let database_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.location database id")?;
+            let database = sqlite_database(process, database_id)?;
+            Ok(database
+                .vm_path
+                .as_ref()
+                .map(|path| Value::String(path.clone()))
+                .unwrap_or(Value::Null))
+        }
+        "sqlite.checkpoint" => {
+            let database_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.checkpoint database id")?;
+            let kernel_pid = process.kernel_pid;
+            let database = sqlite_database_mut(process, database_id)?;
+            sqlite_sync_database(kernel, kernel_pid, database)?;
+            Ok(Value::Null)
+        }
+        "sqlite.statement.run" => sqlite_run_statement(kernel, process, request),
+        "sqlite.statement.get" => sqlite_get_statement(process, request),
+        "sqlite.statement.all" | "sqlite.statement.iterate" => {
+            sqlite_all_statement(process, request)
+        }
+        "sqlite.statement.columns" => sqlite_statement_columns(process, request),
+        "sqlite.statement.setReturnArrays" => {
+            let statement_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "sqlite.statement.setReturnArrays statement id",
+            )?;
+            let enabled = javascript_sync_rpc_arg_bool(
+                &request.args,
+                1,
+                "sqlite.statement.setReturnArrays enabled",
+            )?;
+            sqlite_statement_mut(process, statement_id)?.return_arrays = enabled;
+            Ok(Value::Null)
+        }
+        "sqlite.statement.setReadBigInts" => {
+            let statement_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "sqlite.statement.setReadBigInts statement id",
+            )?;
+            let enabled = javascript_sync_rpc_arg_bool(
+                &request.args,
+                1,
+                "sqlite.statement.setReadBigInts enabled",
+            )?;
+            sqlite_statement_mut(process, statement_id)?.read_bigints = enabled;
+            Ok(Value::Null)
+        }
+        "sqlite.statement.setAllowBareNamedParameters" => {
+            let statement_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "sqlite.statement.setAllowBareNamedParameters statement id",
+            )?;
+            let enabled = javascript_sync_rpc_arg_bool(
+                &request.args,
+                1,
+                "sqlite.statement.setAllowBareNamedParameters enabled",
+            )?;
+            sqlite_statement_mut(process, statement_id)?.allow_bare_named_parameters = enabled;
+            Ok(Value::Null)
+        }
+        "sqlite.statement.setAllowUnknownNamedParameters" => {
+            let statement_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "sqlite.statement.setAllowUnknownNamedParameters statement id",
+            )?;
+            let enabled = javascript_sync_rpc_arg_bool(
+                &request.args,
+                1,
+                "sqlite.statement.setAllowUnknownNamedParameters enabled",
+            )?;
+            sqlite_statement_mut(process, statement_id)?.allow_unknown_named_parameters = enabled;
+            Ok(Value::Null)
+        }
+        "sqlite.statement.finalize" => {
+            let statement_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "sqlite.statement.finalize statement id",
+            )?;
+            process
+                .sqlite_statements
+                .remove(&statement_id)
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(format!(
+                        "sqlite statement handle not found: {statement_id}"
+                    ))
+                })?;
+            Ok(Value::Null)
+        }
+        other => Err(SidecarError::InvalidState(format!(
+            "unsupported JavaScript sqlite sync RPC method {other}"
+        ))),
+    }
+}
+
+fn sqlite_open_database(
+    kernel: &mut SidecarKernel,
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let path = request.args.first().and_then(Value::as_str);
+    let vm_path = path.filter(|value| !value.is_empty() && *value != ":memory:");
+    let options = request.args.get(1);
+    let read_only = sqlite_option_bool(options, "readOnly").unwrap_or(false);
+    let create = sqlite_option_bool(options, "create").unwrap_or(!read_only);
+    let timeout_ms = sqlite_option_u64(options, "timeout");
+
+    process.next_sqlite_database_id += 1;
+    let database_id = process.next_sqlite_database_id;
+
+    let host_path = if vm_path.is_some() {
+        Some(
+            std::env::temp_dir()
+                .join(format!(
+                    "agent-os-sidecar-sqlite-{}-{database_id}",
+                    process.kernel_pid
+                ))
+                .join("database.sqlite"),
+        )
+    } else {
+        None
+    };
+
+    if let Some(host_path) = host_path.as_ref() {
+        if let Some(parent) = host_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                SidecarError::Io(format!(
+                    "failed to prepare sqlite temp directory {}: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+    }
+
+    if let (Some(vm_path), Some(host_path)) = (vm_path, host_path.as_ref()) {
+        if kernel
+            .exists_for_process(EXECUTION_DRIVER_NAME, process.kernel_pid, vm_path)
+            .map_err(kernel_error)?
+        {
+            let contents = kernel
+                .read_file_for_process(EXECUTION_DRIVER_NAME, process.kernel_pid, vm_path)
+                .map_err(kernel_error)?;
+            fs::write(host_path, contents).map_err(|error| {
+                SidecarError::Io(format!(
+                    "failed to materialize sqlite database {}: {error}",
+                    host_path.display()
+                ))
+            })?;
+        } else if read_only && !create {
+            return Err(SidecarError::InvalidState(format!(
+                "sqlite database does not exist: {vm_path}"
+            )));
+        }
+    }
+
+    let target = host_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from(":memory:"));
+    let mut flags = if read_only {
+        SqliteOpenFlags::SQLITE_OPEN_READ_ONLY
+    } else {
+        SqliteOpenFlags::SQLITE_OPEN_READ_WRITE
+    };
+    if create && !read_only {
+        flags |= SqliteOpenFlags::SQLITE_OPEN_CREATE;
+    }
+
+    let connection = SqliteConnection::open_with_flags(&target, flags).map_err(|error| {
+        SidecarError::InvalidState(format!(
+            "sqlite database open failed for {}: {error}",
+            vm_path.unwrap_or(":memory:")
+        ))
+    })?;
+    if let Some(timeout_ms) = timeout_ms {
+        connection
+            .busy_timeout(Duration::from_millis(timeout_ms))
+            .map_err(sqlite_error)?;
+    }
+    if host_path.is_some() && !read_only {
+        let _ = connection.pragma_update(None, "journal_mode", "WAL");
+    }
+
+    process.sqlite_databases.insert(
+        database_id,
+        ActiveSqliteDatabase {
+            connection,
+            host_path,
+            vm_path: vm_path.map(String::from),
+            dirty: false,
+            transaction_depth: 0,
+            read_only,
+        },
+    );
+
+    Ok(json!(database_id))
+}
+
+fn sqlite_exec_database(
+    kernel: &mut SidecarKernel,
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let database_id = javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.exec database id")?;
+    let sql = javascript_sync_rpc_arg_str(&request.args, 1, "sqlite.exec sql")?;
+    let kernel_pid = process.kernel_pid;
+    let database = sqlite_database_mut(process, database_id)?;
+    let before = database.connection.total_changes();
+    database
+        .connection
+        .execute_batch(sql)
+        .map_err(sqlite_error)?;
+    mark_sqlite_mutation(database, sql);
+    sqlite_sync_database(kernel, kernel_pid, database)?;
+    Ok(json!(
+        database.connection.total_changes().saturating_sub(before)
+    ))
+}
+
+fn sqlite_query_database(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let database_id = javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.query database id")?;
+    let sql = javascript_sync_rpc_arg_str(&request.args, 1, "sqlite.query sql")?;
+    let params = request.args.get(2);
+    let options = request.args.get(3);
+    let return_arrays = sqlite_option_bool(options, "returnArrays").unwrap_or(false);
+    let read_bigints = sqlite_option_bool(options, "readBigInts").unwrap_or(false);
+    let database = sqlite_database_mut(process, database_id)?;
+    sqlite_query_rows(
+        &mut database.connection,
+        sql,
+        params,
+        return_arrays,
+        read_bigints,
+        true,
+        false,
+    )
+}
+
+fn sqlite_prepare_statement(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let database_id = javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.prepare database id")?;
+    let sql = javascript_sync_rpc_arg_str(&request.args, 1, "sqlite.prepare sql")?;
+    let _ = sqlite_database(process, database_id)?;
+    process.next_sqlite_statement_id += 1;
+    let statement_id = process.next_sqlite_statement_id;
+    process.sqlite_statements.insert(
+        statement_id,
+        ActiveSqliteStatement {
+            database_id,
+            sql: sql.to_owned(),
+            return_arrays: false,
+            read_bigints: false,
+            allow_bare_named_parameters: false,
+            allow_unknown_named_parameters: false,
+        },
+    );
+    Ok(json!(statement_id))
+}
+
+fn sqlite_run_statement(
+    kernel: &mut SidecarKernel,
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let statement_id =
+        javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.statement.run statement id")?;
+    let params = request.args.get(1);
+    let statement_state = sqlite_statement(process, statement_id)?.clone();
+    let kernel_pid = process.kernel_pid;
+    let database = sqlite_database_mut(process, statement_state.database_id)?;
+    let before = database.connection.total_changes();
+    {
+        let mut statement = database
+            .connection
+            .prepare(&statement_state.sql)
+            .map_err(sqlite_error)?;
+        bind_sqlite_parameters(
+            &mut statement,
+            params,
+            statement_state.allow_bare_named_parameters,
+            statement_state.allow_unknown_named_parameters,
+        )?;
+        statement.raw_execute().map_err(sqlite_error)?;
+    }
+    let changes = database.connection.total_changes().saturating_sub(before);
+    let last_insert_rowid = database.connection.last_insert_rowid();
+    mark_sqlite_mutation(database, &statement_state.sql);
+    sqlite_sync_database(kernel, kernel_pid, database)?;
+    let result = json!({
+        "changes": changes,
+        "lastInsertRowid": encode_sqlite_integer(last_insert_rowid, true),
+    });
+    Ok(result)
+}
+
+fn sqlite_get_statement(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let statement_id =
+        javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.statement.get statement id")?;
+    let params = request.args.get(1);
+    let statement_state = sqlite_statement(process, statement_id)?.clone();
+    let database = sqlite_database_mut(process, statement_state.database_id)?;
+    let rows = sqlite_query_rows(
+        &mut database.connection,
+        &statement_state.sql,
+        params,
+        statement_state.return_arrays,
+        statement_state.read_bigints,
+        statement_state.allow_bare_named_parameters,
+        statement_state.allow_unknown_named_parameters,
+    )?;
+    Ok(rows
+        .as_array()
+        .and_then(|rows| rows.first().cloned())
+        .unwrap_or(Value::Null))
+}
+
+fn sqlite_all_statement(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let statement_id =
+        javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.statement.all statement id")?;
+    let params = request.args.get(1);
+    let statement_state = sqlite_statement(process, statement_id)?.clone();
+    let database = sqlite_database_mut(process, statement_state.database_id)?;
+    sqlite_query_rows(
+        &mut database.connection,
+        &statement_state.sql,
+        params,
+        statement_state.return_arrays,
+        statement_state.read_bigints,
+        statement_state.allow_bare_named_parameters,
+        statement_state.allow_unknown_named_parameters,
+    )
+}
+
+fn sqlite_statement_columns(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let statement_id =
+        javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.statement.columns statement id")?;
+    let statement_state = sqlite_statement(process, statement_id)?.clone();
+    let database = sqlite_database_mut(process, statement_state.database_id)?;
+    let statement = database
+        .connection
+        .prepare(&statement_state.sql)
+        .map_err(sqlite_error)?;
+    Ok(Value::Array(
+        statement
+            .column_names()
+            .iter()
+            .map(|name| json!({ "name": name }))
+            .collect(),
+    ))
+}
+
+fn sqlite_query_rows(
+    connection: &mut SqliteConnection,
+    sql: &str,
+    params: Option<&Value>,
+    return_arrays: bool,
+    read_bigints: bool,
+    allow_bare_named_parameters: bool,
+    allow_unknown_named_parameters: bool,
+) -> Result<Value, SidecarError> {
+    let mut statement = connection.prepare(sql).map_err(sqlite_error)?;
+    let column_names = statement
+        .column_names()
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    let column_count = statement.column_count();
+    bind_sqlite_parameters(
+        &mut statement,
+        params,
+        allow_bare_named_parameters,
+        allow_unknown_named_parameters,
+    )?;
+    let mut rows = statement.raw_query();
+    let mut encoded_rows = Vec::new();
+    while let Some(row) = rows.next().map_err(sqlite_error)? {
+        encoded_rows.push(encode_sqlite_row(
+            row,
+            &column_names,
+            column_count,
+            return_arrays,
+            read_bigints,
+        )?);
+    }
+    Ok(Value::Array(encoded_rows))
+}
+
+fn encode_sqlite_row(
+    row: &rusqlite::Row<'_>,
+    column_names: &[String],
+    column_count: usize,
+    return_arrays: bool,
+    read_bigints: bool,
+) -> Result<Value, SidecarError> {
+    if return_arrays {
+        let mut values = Vec::with_capacity(column_count);
+        for index in 0..column_count {
+            values.push(encode_sqlite_value_ref(
+                row.get_ref(index).map_err(sqlite_error)?,
+                read_bigints,
+            )?);
+        }
+        return Ok(Value::Array(values));
+    }
+
+    let mut object = Map::with_capacity(column_count);
+    for (index, name) in column_names.iter().enumerate() {
+        object.insert(
+            name.clone(),
+            encode_sqlite_value_ref(row.get_ref(index).map_err(sqlite_error)?, read_bigints)?,
+        );
+    }
+    Ok(Value::Object(object))
+}
+
+fn encode_sqlite_value_ref(
+    value: SqliteValueRef<'_>,
+    read_bigints: bool,
+) -> Result<Value, SidecarError> {
+    Ok(match value {
+        SqliteValueRef::Null => Value::Null,
+        SqliteValueRef::Integer(number) => encode_sqlite_integer(number, read_bigints),
+        SqliteValueRef::Real(number) => json!(number),
+        SqliteValueRef::Text(text) => Value::String(String::from_utf8_lossy(text).into_owned()),
+        SqliteValueRef::Blob(bytes) => json!({
+            "__agentosSqliteType": "uint8array",
+            "value": base64::engine::general_purpose::STANDARD.encode(bytes),
+        }),
+    })
+}
+
+fn encode_sqlite_integer(number: i64, read_bigints: bool) -> Value {
+    if read_bigints || number.abs() > SQLITE_JS_SAFE_INTEGER_MAX {
+        json!({
+            "__agentosSqliteType": "bigint",
+            "value": number.to_string(),
+        })
+    } else {
+        json!(number)
+    }
+}
+
+fn bind_sqlite_parameters(
+    statement: &mut SqliteStatement<'_>,
+    params: Option<&Value>,
+    allow_bare_named_parameters: bool,
+    allow_unknown_named_parameters: bool,
+) -> Result<(), SidecarError> {
+    let Some(params) = params else {
+        return Ok(());
+    };
+    match params {
+        Value::Null => Ok(()),
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                statement
+                    .raw_bind_parameter(index + 1, decode_sqlite_parameter(value)?)
+                    .map_err(sqlite_error)?;
+            }
+            Ok(())
+        }
+        Value::Object(map)
+            if map
+                .get("__agentosSqliteType")
+                .and_then(Value::as_str)
+                .is_none() =>
+        {
+            for (key, value) in map {
+                let index =
+                    resolve_sqlite_parameter_index(statement, key, allow_bare_named_parameters)?;
+                let Some(index) = index else {
+                    if allow_unknown_named_parameters {
+                        continue;
+                    }
+                    return Err(SidecarError::InvalidState(format!(
+                        "sqlite named parameter not found: {key}"
+                    )));
+                };
+                statement
+                    .raw_bind_parameter(index, decode_sqlite_parameter(value)?)
+                    .map_err(sqlite_error)?;
+            }
+            Ok(())
+        }
+        other => statement
+            .raw_bind_parameter(1, decode_sqlite_parameter(other)?)
+            .map_err(sqlite_error),
+    }
+}
+
+fn resolve_sqlite_parameter_index(
+    statement: &mut SqliteStatement<'_>,
+    key: &str,
+    allow_bare_named_parameters: bool,
+) -> Result<Option<usize>, SidecarError> {
+    let mut candidates = vec![key.to_owned()];
+    if allow_bare_named_parameters
+        && !key.starts_with(':')
+        && !key.starts_with('@')
+        && !key.starts_with('$')
+    {
+        candidates.push(format!(":{key}"));
+        candidates.push(format!("@{key}"));
+        candidates.push(format!("${key}"));
+    }
+    for candidate in candidates {
+        if let Some(index) = statement
+            .parameter_index(&candidate)
+            .map_err(sqlite_error)?
+        {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+fn decode_sqlite_parameter(value: &Value) -> Result<rusqlite::types::Value, SidecarError> {
+    Ok(match value {
+        Value::Null => rusqlite::types::Value::Null,
+        Value::Bool(value) => rusqlite::types::Value::Integer(i64::from(*value)),
+        Value::Number(value) => match (value.as_i64(), value.as_f64()) {
+            (Some(integer), _) => rusqlite::types::Value::Integer(integer),
+            (_, Some(real)) => rusqlite::types::Value::Real(real),
+            _ => {
+                return Err(SidecarError::InvalidState(String::from(
+                    "sqlite parameter number is not representable",
+                )));
+            }
+        },
+        Value::String(value) => rusqlite::types::Value::Text(value.clone()),
+        Value::Array(_) => {
+            return Err(SidecarError::InvalidState(String::from(
+                "sqlite parameters do not support nested arrays",
+            )));
+        }
+        Value::Object(map) => match map.get("__agentosSqliteType").and_then(Value::as_str) {
+            Some("bigint") => rusqlite::types::Value::Integer(
+                map.get("value")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        SidecarError::InvalidState(String::from(
+                            "sqlite bigint parameter missing string value",
+                        ))
+                    })?
+                    .parse::<i64>()
+                    .map_err(|error| {
+                        SidecarError::InvalidState(format!(
+                            "sqlite bigint parameter is not a signed 64-bit integer: {error}"
+                        ))
+                    })?,
+            ),
+            Some("uint8array") => rusqlite::types::Value::Blob(
+                base64::engine::general_purpose::STANDARD
+                    .decode(map.get("value").and_then(Value::as_str).ok_or_else(|| {
+                        SidecarError::InvalidState(String::from(
+                            "sqlite blob parameter missing base64 value",
+                        ))
+                    })?)
+                    .map_err(|error| {
+                        SidecarError::InvalidState(format!(
+                            "sqlite blob parameter contains invalid base64: {error}"
+                        ))
+                    })?,
+            ),
+            Some(other) => {
+                return Err(SidecarError::InvalidState(format!(
+                    "unsupported sqlite tagged parameter type {other}"
+                )));
+            }
+            None => {
+                return Err(SidecarError::InvalidState(String::from(
+                    "sqlite named parameter objects must be passed as the top-level params object",
+                )));
+            }
+        },
+    })
+}
+
+fn close_sqlite_database(
+    kernel: &mut SidecarKernel,
+    process: &mut ActiveProcess,
+    database_id: u64,
+) -> Result<(), SidecarError> {
+    let mut database = process
+        .sqlite_databases
+        .remove(&database_id)
+        .ok_or_else(|| {
+            SidecarError::InvalidState(format!("sqlite database handle not found: {database_id}"))
+        })?;
+    process
+        .sqlite_statements
+        .retain(|_, statement| statement.database_id != database_id);
+    sqlite_sync_database(kernel, process.kernel_pid, &mut database)?;
+    let host_path = database.host_path.clone();
+    drop(database);
+    cleanup_sqlite_host_artifacts(host_path.as_deref())?;
+    Ok(())
+}
+
+fn sqlite_sync_database(
+    kernel: &mut SidecarKernel,
+    kernel_pid: u32,
+    database: &mut ActiveSqliteDatabase,
+) -> Result<(), SidecarError> {
+    if !database.dirty
+        || database.transaction_depth > 0
+        || database.read_only
+        || database.host_path.is_none()
+        || database.vm_path.is_none()
+    {
+        return Ok(());
+    }
+
+    let _ = database
+        .connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+    let host_path = database.host_path.as_ref().expect("sqlite host path");
+    if !host_path.exists() {
+        return Ok(());
+    }
+    ensure_vm_parent_dir(
+        kernel,
+        kernel_pid,
+        database.vm_path.as_deref().expect("sqlite vm path"),
+    )?;
+    let contents = fs::read(host_path).map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to read sqlite temp database {}: {error}",
+            host_path.display()
+        ))
+    })?;
+    kernel
+        .write_file_for_process(
+            EXECUTION_DRIVER_NAME,
+            kernel_pid,
+            database.vm_path.as_deref().expect("sqlite vm path"),
+            contents,
+            None,
+        )
+        .map_err(kernel_error)?;
+    database.dirty = false;
+    Ok(())
+}
+
+fn cleanup_sqlite_host_artifacts(host_path: Option<&Path>) -> Result<(), SidecarError> {
+    let Some(host_path) = host_path else {
+        return Ok(());
+    };
+    let parent = host_path.parent().map(PathBuf::from);
+    for suffix in ["", "-wal", "-shm"] {
+        let path = PathBuf::from(format!("{}{}", host_path.display(), suffix));
+        if path.exists() {
+            fs::remove_file(&path).map_err(|error| {
+                SidecarError::Io(format!(
+                    "failed to remove sqlite temp artifact {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+    if let Some(parent) = parent {
+        let _ = fs::remove_dir_all(parent);
+    }
+    Ok(())
+}
+
+fn ensure_vm_parent_dir(
+    kernel: &mut SidecarKernel,
+    kernel_pid: u32,
+    path: &str,
+) -> Result<(), SidecarError> {
+    let parent = dirname(path);
+    if parent == "/" || parent == "." {
+        return Ok(());
+    }
+    let mut current = String::new();
+    for segment in parent.split('/').filter(|segment| !segment.is_empty()) {
+        current.push('/');
+        current.push_str(segment);
+        if !kernel
+            .exists_for_process(EXECUTION_DRIVER_NAME, kernel_pid, &current)
+            .map_err(kernel_error)?
+        {
+            kernel
+                .mkdir_for_process(EXECUTION_DRIVER_NAME, kernel_pid, &current, false, None)
+                .map_err(kernel_error)?;
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_database(
+    process: &ActiveProcess,
+    database_id: u64,
+) -> Result<&ActiveSqliteDatabase, SidecarError> {
+    process.sqlite_databases.get(&database_id).ok_or_else(|| {
+        SidecarError::InvalidState(format!("sqlite database handle not found: {database_id}"))
+    })
+}
+
+fn sqlite_database_mut(
+    process: &mut ActiveProcess,
+    database_id: u64,
+) -> Result<&mut ActiveSqliteDatabase, SidecarError> {
+    process
+        .sqlite_databases
+        .get_mut(&database_id)
+        .ok_or_else(|| {
+            SidecarError::InvalidState(format!("sqlite database handle not found: {database_id}"))
+        })
+}
+
+fn sqlite_statement(
+    process: &ActiveProcess,
+    statement_id: u64,
+) -> Result<&ActiveSqliteStatement, SidecarError> {
+    process.sqlite_statements.get(&statement_id).ok_or_else(|| {
+        SidecarError::InvalidState(format!("sqlite statement handle not found: {statement_id}"))
+    })
+}
+
+fn sqlite_statement_mut(
+    process: &mut ActiveProcess,
+    statement_id: u64,
+) -> Result<&mut ActiveSqliteStatement, SidecarError> {
+    process
+        .sqlite_statements
+        .get_mut(&statement_id)
+        .ok_or_else(|| {
+            SidecarError::InvalidState(format!("sqlite statement handle not found: {statement_id}"))
+        })
+}
+
+fn mark_sqlite_mutation(database: &mut ActiveSqliteDatabase, sql: &str) {
+    let normalized = sql.trim_start().to_ascii_lowercase();
+    if normalized.starts_with("begin") || normalized.starts_with("savepoint") {
+        database.dirty = true;
+        database.transaction_depth += 1;
+        return;
+    }
+    if normalized.starts_with("commit") || normalized.starts_with("release savepoint") {
+        database.dirty = true;
+        database.transaction_depth = database.transaction_depth.saturating_sub(1);
+        return;
+    }
+    if normalized.starts_with("rollback") && !normalized.starts_with("rollback to") {
+        database.dirty = true;
+        database.transaction_depth = database.transaction_depth.saturating_sub(1);
+        return;
+    }
+    if normalized.starts_with("insert")
+        || normalized.starts_with("update")
+        || normalized.starts_with("delete")
+        || normalized.starts_with("replace")
+        || normalized.starts_with("create")
+        || normalized.starts_with("alter")
+        || normalized.starts_with("drop")
+        || normalized.starts_with("vacuum")
+        || normalized.starts_with("reindex")
+        || normalized.starts_with("analyze")
+        || normalized.starts_with("attach")
+        || normalized.starts_with("detach")
+        || normalized.starts_with("pragma")
+    {
+        database.dirty = true;
+    }
+}
+
+fn sqlite_option_bool(options: Option<&Value>, key: &str) -> Option<bool> {
+    options
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_bool)
+}
+
+fn sqlite_option_u64(options: Option<&Value>, key: &str) -> Option<u64> {
+    options
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_u64)
+}
+
+fn sqlite_error(error: rusqlite::Error) -> SidecarError {
+    SidecarError::InvalidState(format!("sqlite error: {error}"))
 }
 
 pub(crate) fn javascript_sync_rpc_arg_str<'a>(
@@ -5960,6 +6930,26 @@ where
             resource_limits,
             network_counts,
         ),
+        "sqlite.constants"
+        | "sqlite.open"
+        | "sqlite.close"
+        | "sqlite.exec"
+        | "sqlite.query"
+        | "sqlite.prepare"
+        | "sqlite.location"
+        | "sqlite.checkpoint"
+        | "sqlite.statement.run"
+        | "sqlite.statement.get"
+        | "sqlite.statement.all"
+        | "sqlite.statement.iterate"
+        | "sqlite.statement.columns"
+        | "sqlite.statement.setReturnArrays"
+        | "sqlite.statement.setReadBigInts"
+        | "sqlite.statement.setAllowBareNamedParameters"
+        | "sqlite.statement.setAllowUnknownNamedParameters"
+        | "sqlite.statement.finalize" => {
+            service_javascript_sqlite_sync_rpc(kernel, process, request)
+        }
         "process.umask" => {
             let new_mask = javascript_sync_rpc_arg_u32_optional(&request.args, 0, "process umask")?;
             kernel
@@ -6364,9 +7354,11 @@ fn service_javascript_crypto_verify_sync_rpc(
     verifier
         .update(&data)
         .map_err(javascript_crypto_openssl_error)?;
-    Ok(json!(verifier
-        .verify(&signature)
-        .map_err(javascript_crypto_openssl_error)?))
+    Ok(json!(
+        verifier
+            .verify(&signature)
+            .map_err(javascript_crypto_openssl_error)?
+    ))
 }
 
 fn service_javascript_crypto_asymmetric_op_sync_rpc(
@@ -8598,7 +9590,11 @@ fn push_http2_server_event(
     event: Http2BridgeEvent,
 ) {
     if let Ok(mut state) = shared.lock() {
-        state.server_events.entry(server_id).or_default().push_back(event);
+        state
+            .server_events
+            .entry(server_id)
+            .or_default()
+            .push_back(event);
     }
 }
 
@@ -8668,7 +9664,11 @@ fn http2_error_payload(message: impl Into<String>) -> String {
         "code": "ERR_HTTP2_ERROR",
         "message": message.into(),
     }))
-    .unwrap_or_else(|_| String::from("{\"name\":\"Error\",\"code\":\"ERR_HTTP2_ERROR\",\"message\":\"HTTP/2 bridge error\"}"))
+    .unwrap_or_else(|_| {
+        String::from(
+            "{\"name\":\"Error\",\"code\":\"ERR_HTTP2_ERROR\",\"message\":\"HTTP/2 bridge error\"}",
+        )
+    })
 }
 
 fn http2_socket_snapshot(local_addr: SocketAddr, remote_addr: SocketAddr) -> Http2SocketSnapshot {
@@ -8694,9 +9694,8 @@ fn parse_http2_headers_json(
     headers_json: &str,
     label: &str,
 ) -> Result<BTreeMap<String, Value>, SidecarError> {
-    serde_json::from_str::<BTreeMap<String, Value>>(headers_json).map_err(|error| {
-        SidecarError::InvalidState(format!("{label} must be valid JSON: {error}"))
-    })
+    serde_json::from_str::<BTreeMap<String, Value>>(headers_json)
+        .map_err(|error| SidecarError::InvalidState(format!("{label} must be valid JSON: {error}")))
 }
 
 fn apply_http2_header_values(
@@ -8715,13 +9714,17 @@ fn apply_http2_header_values(
         }
         Value::String(text) => {
             let value = HeaderValue::from_str(text).map_err(|error| {
-                SidecarError::InvalidState(format!("invalid HTTP/2 header value for {name}: {error}"))
+                SidecarError::InvalidState(format!(
+                    "invalid HTTP/2 header value for {name}: {error}"
+                ))
             })?;
             header_map.append(header_name.clone(), value);
         }
         Value::Number(number) => {
             let value = HeaderValue::from_str(&number.to_string()).map_err(|error| {
-                SidecarError::InvalidState(format!("invalid HTTP/2 numeric header value for {name}: {error}"))
+                SidecarError::InvalidState(format!(
+                    "invalid HTTP/2 numeric header value for {name}: {error}"
+                ))
             })?;
             header_map.append(header_name.clone(), value);
         }
@@ -8751,18 +9754,14 @@ fn build_http2_request(headers_json: &str) -> Result<Request<()>, SidecarError> 
         .get(":method")
         .and_then(Value::as_str)
         .unwrap_or("GET");
-    let path = headers
-        .get(":path")
-        .and_then(Value::as_str)
-        .unwrap_or("/");
+    let path = headers.get(":path").and_then(Value::as_str).unwrap_or("/");
     let mut builder = Request::builder()
         .method(Method::from_bytes(method.as_bytes()).map_err(|error| {
             SidecarError::InvalidState(format!("invalid HTTP/2 method {method:?}: {error}"))
         })?)
-        .uri(
-            path.parse::<Uri>()
-                .map_err(|error| SidecarError::InvalidState(format!("invalid HTTP/2 path {path:?}: {error}")))?,
-        );
+        .uri(path.parse::<Uri>().map_err(|error| {
+            SidecarError::InvalidState(format!("invalid HTTP/2 path {path:?}: {error}"))
+        })?);
     {
         let header_map = builder.headers_mut().expect("request header map");
         for (name, value) in &headers {
@@ -8834,7 +9833,9 @@ fn serialize_http2_headers_map(
         .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
 }
 
-fn serialize_http2_request_headers(request: &Request<h2::RecvStream>) -> Result<String, SidecarError> {
+fn serialize_http2_request_headers(
+    request: &Request<h2::RecvStream>,
+) -> Result<String, SidecarError> {
     let mut pseudo = BTreeMap::new();
     pseudo.insert(
         String::from(":method"),
@@ -8853,7 +9854,9 @@ fn serialize_http2_request_headers(request: &Request<h2::RecvStream>) -> Result<
     serialize_http2_headers_map(pseudo, request.headers())
 }
 
-fn serialize_http2_response_headers(response: &Response<h2::RecvStream>) -> Result<String, SidecarError> {
+fn serialize_http2_response_headers(
+    response: &Response<h2::RecvStream>,
+) -> Result<String, SidecarError> {
     let mut pseudo = BTreeMap::new();
     pseudo.insert(
         String::from(":status"),
@@ -8872,7 +9875,9 @@ fn remove_http2_session_resources(
         let stream_ids = state
             .streams
             .iter()
-            .filter_map(|(stream_id, stream)| (stream.session_id == session_id).then_some(*stream_id))
+            .filter_map(|(stream_id, stream)| {
+                (stream.session_id == session_id).then_some(*stream_id)
+            })
             .collect::<Vec<_>>();
         for stream_id in stream_ids {
             state.streams.remove(&stream_id);
@@ -8888,7 +9893,10 @@ fn spawn_http2_client_session(
     mut command_rx: UnboundedReceiver<Http2SessionCommand>,
 ) {
     thread::spawn(move || {
-        let runtime = match TokioRuntimeBuilder::new_current_thread().enable_all().build() {
+        let runtime = match TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(runtime) => runtime,
             Err(error) => {
                 push_http2_session_event(
@@ -9313,7 +10321,10 @@ fn spawn_http2_server_session(
     mut command_rx: UnboundedReceiver<Http2SessionCommand>,
 ) {
     thread::spawn(move || {
-        let runtime = match TokioRuntimeBuilder::new_current_thread().enable_all().build() {
+        let runtime = match TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(runtime) => runtime,
             Err(error) => {
                 push_http2_server_event(
@@ -9930,7 +10941,12 @@ fn spawn_http2_server_accept_loop(
             let closed = shared
                 .lock()
                 .ok()
-                .and_then(|state| state.servers.get(&server_id).map(|server| server.closed.load(Ordering::SeqCst)))
+                .and_then(|state| {
+                    state
+                        .servers
+                        .get(&server_id)
+                        .map(|server| server.closed.load(Ordering::SeqCst))
+                })
                 .unwrap_or(true);
             if closed {
                 break;
@@ -9943,13 +10959,18 @@ fn spawn_http2_server_accept_loop(
                         let server = state.servers.get(&server_id).expect("http2 server state");
                         (server.guest_local_addr, server.secure)
                     };
-                    let (local_addr, remote_addr) = match (stream.local_addr(), stream.peer_addr()) {
+                    let (local_addr, remote_addr) = match (stream.local_addr(), stream.peer_addr())
+                    {
                         (Ok(local_addr), Ok(remote_addr)) => (local_addr, remote_addr),
                         _ => continue,
                     };
                     let session_snapshot = Arc::new(Mutex::new(Http2SessionSnapshot {
                         encrypted: secure,
-                        alpn_protocol: Some(if secure { String::from("h2") } else { String::from("h2c") }),
+                        alpn_protocol: Some(if secure {
+                            String::from("h2")
+                        } else {
+                            String::from("h2c")
+                        }),
                         local_settings: BTreeMap::new(),
                         remote_settings: BTreeMap::new(),
                         state: http2_runtime_snapshot(),
@@ -10013,13 +11034,14 @@ fn send_http2_command(
     command: impl FnOnce(Sender<Result<Value, String>>) -> Http2SessionCommand,
 ) -> Result<Value, SidecarError> {
     let (respond_to, response_rx) = mpsc::channel();
-    session
-        .command_tx
-        .send(command(respond_to))
-        .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 session command channel closed")))?;
+    session.command_tx.send(command(respond_to)).map_err(|_| {
+        SidecarError::InvalidState(String::from("HTTP/2 session command channel closed"))
+    })?;
     response_rx
         .recv_timeout(Duration::from_secs(30))
-        .map_err(|_| SidecarError::Execution(String::from("timed out waiting for HTTP/2 session command")))?
+        .map_err(|_| {
+            SidecarError::Execution(String::from("timed out waiting for HTTP/2 session command"))
+        })?
         .map_err(SidecarError::Execution)
 }
 
@@ -10124,11 +11146,9 @@ where
             let guest_local_addr = listener.guest_local_addr();
             let closed = Arc::new(AtomicBool::new(false));
             {
-                let mut state = process
-                    .http2
-                    .shared
-                    .lock()
-                    .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned")))?;
+                let mut state = process.http2.shared.lock().map_err(|_| {
+                    SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned"))
+                })?;
                 state.servers.insert(
                     payload.server_id,
                     ActiveHttp2Server {
@@ -10159,9 +11179,12 @@ where
         "net.http2_server_poll" => {
             let server_id =
                 javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_server_poll server id")?;
-            let wait_ms =
-                javascript_sync_rpc_arg_u64_optional(&request.args, 1, "net.http2_server_poll wait ms")?
-                    .unwrap_or_default();
+            let wait_ms = javascript_sync_rpc_arg_u64_optional(
+                &request.args,
+                1,
+                "net.http2_server_poll wait ms",
+            )?
+            .unwrap_or_default();
             match wait_for_http2_event(&process.http2.shared, server_id, true, wait_ms) {
                 Some(event) => http2_event_value(&event),
                 None => Ok(Value::Null),
@@ -10172,14 +11195,14 @@ where
             let server_id =
                 javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_server_close server id")?;
             let server = {
-                let mut state = process
-                    .http2
-                    .shared
-                    .lock()
-                    .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned")))?;
+                let mut state = process.http2.shared.lock().map_err(|_| {
+                    SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned"))
+                })?;
                 state.servers.remove(&server_id)
             }
-            .ok_or_else(|| SidecarError::InvalidState(format!("unknown HTTP/2 server {server_id}")))?;
+            .ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown HTTP/2 server {server_id}"))
+            })?;
             server.closed.store(true, Ordering::SeqCst);
             push_http2_server_event(
                 &process.http2.shared,
@@ -10207,12 +11230,18 @@ where
                 "connection",
             )?;
             let payload = parse_http2_connect_payload(request)?;
-            let authority = payload
-                .authority
-                .clone()
-                .unwrap_or_else(|| format!("{}://{}:{}", payload.protocol.as_deref().unwrap_or("http"), payload.host.as_deref().unwrap_or("localhost"), payload.port.unwrap_or(80)));
+            let authority = payload.authority.clone().unwrap_or_else(|| {
+                format!(
+                    "{}://{}:{}",
+                    payload.protocol.as_deref().unwrap_or("http"),
+                    payload.host.as_deref().unwrap_or("localhost"),
+                    payload.port.unwrap_or(80)
+                )
+            });
             let url = Url::parse(&authority).map_err(|error| {
-                SidecarError::InvalidState(format!("invalid HTTP/2 authority {authority:?}: {error}"))
+                SidecarError::InvalidState(format!(
+                    "invalid HTTP/2 authority {authority:?}: {error}"
+                ))
             })?;
             if url.scheme() == "https" || payload.protocol.as_deref() == Some("https:") {
                 return Err(SidecarError::Unsupported(String::from(
@@ -10231,11 +11260,9 @@ where
                 format_tcp_resource(host, port),
             )?;
             let resolved = {
-                let shared = process
-                    .http2
-                    .shared
-                    .lock()
-                    .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned")))?;
+                let shared = process.http2.shared.lock().map_err(|_| {
+                    SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned"))
+                })?;
                 shared
                     .servers
                     .values()
@@ -10261,17 +11288,17 @@ where
                 socket: Http2SocketSnapshot {
                     remote_address: Some(resolved.guest_remote_addr.ip().to_string()),
                     remote_port: Some(resolved.guest_remote_addr.port()),
-                    remote_family: Some(socket_addr_family(&resolved.guest_remote_addr).to_string()),
+                    remote_family: Some(
+                        socket_addr_family(&resolved.guest_remote_addr).to_string(),
+                    ),
                     ..Http2SocketSnapshot::default()
                 },
                 ..Http2SessionSnapshot::default()
             }));
             let session_id = {
-                let mut state = process
-                    .http2
-                    .shared
-                    .lock()
-                    .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned")))?;
+                let mut state = process.http2.shared.lock().map_err(|_| {
+                    SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned"))
+                })?;
                 let session_id = next_http2_session_id(&mut state);
                 state.sessions.insert(
                     session_id,
@@ -10303,8 +11330,11 @@ where
             )
         }
         "net.http2_session_request" => {
-            let session_id =
-                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_session_request session id")?;
+            let session_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "net.http2_session_request session id",
+            )?;
             let headers_json =
                 javascript_sync_rpc_arg_str(&request.args, 1, "net.http2_session_request headers")?;
             let options_json =
@@ -10317,10 +11347,16 @@ where
             })
         }
         "net.http2_session_settings" => {
-            let session_id =
-                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_session_settings session id")?;
-            let settings_json =
-                javascript_sync_rpc_arg_str(&request.args, 1, "net.http2_session_settings settings")?;
+            let session_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "net.http2_session_settings session id",
+            )?;
+            let settings_json = javascript_sync_rpc_arg_str(
+                &request.args,
+                1,
+                "net.http2_session_settings settings",
+            )?;
             let session = http2_session_for_id(process, session_id)?;
             send_http2_command(&session, |respond_to| Http2SessionCommand::Settings {
                 settings_json: settings_json.to_owned(),
@@ -10339,16 +11375,24 @@ where
                 "net.http2_session_set_local_window_size window size",
             )?;
             let session = http2_session_for_id(process, session_id)?;
-            send_http2_command(&session, |respond_to| Http2SessionCommand::SetLocalWindowSize {
-                size: window_size as u32,
-                respond_to,
+            send_http2_command(&session, |respond_to| {
+                Http2SessionCommand::SetLocalWindowSize {
+                    size: window_size as u32,
+                    respond_to,
+                }
             })
         }
         "net.http2_session_goaway" => {
-            let session_id =
-                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_session_goaway session id")?;
-            let error_code =
-                javascript_sync_rpc_arg_u64(&request.args, 1, "net.http2_session_goaway error code")?;
+            let session_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "net.http2_session_goaway session id",
+            )?;
+            let error_code = javascript_sync_rpc_arg_u64(
+                &request.args,
+                1,
+                "net.http2_session_goaway error code",
+            )?;
             let last_stream_id = javascript_sync_rpc_arg_u64(
                 &request.args,
                 2,
@@ -10361,7 +11405,9 @@ where
                 .map(|value| {
                     base64::engine::general_purpose::STANDARD
                         .decode(value)
-                        .map_err(|error| SidecarError::InvalidState(format!("invalid GOAWAY payload: {error}")))
+                        .map_err(|error| {
+                            SidecarError::InvalidState(format!("invalid GOAWAY payload: {error}"))
+                        })
                 })
                 .transpose()?;
             let session = http2_session_for_id(process, session_id)?;
@@ -10373,8 +11419,11 @@ where
             })
         }
         "net.http2_session_close" | "net.http2_session_destroy" => {
-            let session_id =
-                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_session_close session id")?;
+            let session_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "net.http2_session_close session id",
+            )?;
             let session = http2_session_for_id(process, session_id)?;
             send_http2_command(&session, |respond_to| Http2SessionCommand::Close {
                 abrupt: request.method == "net.http2_session_destroy",
@@ -10384,9 +11433,12 @@ where
         "net.http2_session_poll" => {
             let session_id =
                 javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_session_poll session id")?;
-            let wait_ms =
-                javascript_sync_rpc_arg_u64_optional(&request.args, 1, "net.http2_session_poll wait ms")?
-                    .unwrap_or_default();
+            let wait_ms = javascript_sync_rpc_arg_u64_optional(
+                &request.args,
+                1,
+                "net.http2_session_poll wait ms",
+            )?
+            .unwrap_or_default();
             match wait_for_http2_event(&process.http2.shared, session_id, false, wait_ms) {
                 Some(event) => http2_event_value(&event),
                 None => Ok(Value::Null),
@@ -10394,8 +11446,11 @@ where
         }
         "net.http2_session_wait" => Ok(Value::Null),
         "net.http2_stream_respond" => {
-            let stream_id =
-                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_stream_respond stream id")?;
+            let stream_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "net.http2_stream_respond stream id",
+            )?;
             let headers_json =
                 javascript_sync_rpc_arg_str(&request.args, 1, "net.http2_stream_respond headers")?;
             let stream = http2_stream_for_id(process, stream_id)?;
@@ -10455,7 +11510,11 @@ where
                 .map(|value| {
                     base64::engine::general_purpose::STANDARD
                         .decode(value)
-                        .map_err(|error| SidecarError::InvalidState(format!("invalid HTTP/2 stream payload: {error}")))
+                        .map_err(|error| {
+                            SidecarError::InvalidState(format!(
+                                "invalid HTTP/2 stream payload: {error}"
+                            ))
+                        })
                 })
                 .transpose()?
                 .unwrap_or_default();
@@ -10522,16 +11581,15 @@ where
             )?;
             let stream = http2_stream_for_id(process, stream_id)?;
             let session = http2_session_for_id(process, stream.session_id)?;
-            send_http2_command(
-                &session,
-                |respond_to| Http2SessionCommand::StreamRespondWithFile {
+            send_http2_command(&session, |respond_to| {
+                Http2SessionCommand::StreamRespondWithFile {
                     stream_id,
                     path: path.to_owned(),
                     headers_json: headers_json.to_owned(),
                     options_json: options_json.to_owned(),
                     respond_to,
-                },
-            )
+                }
+            })
         }
         other => Err(SidecarError::InvalidState(format!(
             "unsupported JavaScript HTTP/2 sync RPC method {other}"

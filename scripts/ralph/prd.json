@@ -543,7 +543,7 @@
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
       "priority": 37,
-      "passes": false,
+      "passes": true,
       "notes": "Step 7 part 1. Combines Rust addition and TypeScript deletion since they're tightly coupled."
     },
     {

@@ -78,3 +78,5 @@ pnpm test         # turbo run test
 pnpm check-types  # turbo run check-types
 pnpm lint         # biome check
 ```
+
+- When changing V8 bridge registration or snapshot bootstrap code under `crates/v8-runtime/`, rebuild `agent-os-v8` before rerunning sidecar V8 integration tests. `cargo test -p agent-os-sidecar` can reuse an older `target/debug/agent-os-v8` binary.

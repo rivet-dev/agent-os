@@ -17,6 +17,7 @@ use agent_os_execution::{
 use agent_os_kernel::kernel::{KernelProcessHandle, KernelVm};
 use agent_os_kernel::mount_table::MountTable;
 use agent_os_kernel::root_fs::{RootFileSystem, RootFilesystemMode, RootFilesystemSnapshot};
+use rusqlite::Connection;
 use rustls::{ClientConnection, ServerConnection, StreamOwned};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -407,12 +408,35 @@ pub(crate) struct ActiveProcess {
     pub(crate) next_cipher_session_id: u64,
     pub(crate) diffie_hellman_sessions: BTreeMap<u64, ActiveDiffieHellmanSession>,
     pub(crate) next_diffie_hellman_session_id: u64,
+    pub(crate) sqlite_databases: BTreeMap<u64, ActiveSqliteDatabase>,
+    pub(crate) next_sqlite_database_id: u64,
+    pub(crate) sqlite_statements: BTreeMap<u64, ActiveSqliteStatement>,
+    pub(crate) next_sqlite_statement_id: u64,
 }
 
 pub(crate) struct ActiveCipherSession {
     pub(crate) algorithm: String,
     pub(crate) auth_tag_len: usize,
     pub(crate) context: openssl::symm::Crypter,
+}
+
+pub(crate) struct ActiveSqliteDatabase {
+    pub(crate) connection: Connection,
+    pub(crate) host_path: Option<PathBuf>,
+    pub(crate) vm_path: Option<String>,
+    pub(crate) dirty: bool,
+    pub(crate) transaction_depth: usize,
+    pub(crate) read_only: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct ActiveSqliteStatement {
+    pub(crate) database_id: u64,
+    pub(crate) sql: String,
+    pub(crate) return_arrays: bool,
+    pub(crate) read_bigints: bool,
+    pub(crate) allow_bare_named_parameters: bool,
+    pub(crate) allow_unknown_named_parameters: bool,
 }
 
 pub(crate) enum ActiveDiffieHellmanSession {

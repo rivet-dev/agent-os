@@ -2510,11 +2510,125 @@ var __bridge = (() => {
   var Event = PatchedEvent;
   var CustomEvent = PatchedCustomEvent;
   var EventTarget = PatchedEventTarget;
+  var AbortSignal = class extends EventTarget {
+    constructor() {
+      super();
+      this.aborted = false;
+      this.reason = void 0;
+    }
+    throwIfAborted() {
+      if (this.aborted) {
+        throw this.reason instanceof Error ? this.reason : new Error(String(this.reason ?? "AbortError"));
+      }
+    }
+  };
+  var AbortController = class {
+    constructor() {
+      this.signal = new AbortSignal();
+    }
+    abort(reason) {
+      if (this.signal.aborted) {
+        return;
+      }
+      this.signal.aborted = true;
+      this.signal.reason = reason;
+      this.signal.dispatchEvent(new Event("abort"));
+    }
+  };
+  var WritableStream = class {
+    constructor(sink = {}) {
+      this._sink = sink;
+    }
+    getWriter() {
+      const sink = this._sink;
+      return {
+        write(chunk) {
+          return Promise.resolve(typeof sink.write === "function" ? sink.write(chunk) : void 0);
+        },
+        close() {
+          return Promise.resolve(typeof sink.close === "function" ? sink.close() : void 0);
+        },
+        releaseLock() {
+        }
+      };
+    }
+  };
+  var ReadableStream = class {
+    constructor(source = {}) {
+      this._queue = [];
+      this._pending = [];
+      this._closed = false;
+      this._error = null;
+      const flushPending = () => {
+        while (this._pending.length > 0) {
+          const waiter = this._pending.shift();
+          if (this._error) {
+            waiter.reject(this._error);
+            continue;
+          }
+          if (this._queue.length > 0) {
+            waiter.resolve({ value: this._queue.shift(), done: false });
+            continue;
+          }
+          if (this._closed) {
+            waiter.resolve({ value: void 0, done: true });
+            continue;
+          }
+          this._pending.unshift(waiter);
+          break;
+        }
+      };
+      const controller = {
+        enqueue: (value) => {
+          if (this._closed || this._error) return;
+          this._queue.push(value);
+          flushPending();
+        },
+        close: () => {
+          if (this._closed || this._error) return;
+          this._closed = true;
+          flushPending();
+        },
+        error: (error) => {
+          if (this._closed || this._error) return;
+          this._error = error instanceof Error ? error : new Error(String(error));
+          flushPending();
+        }
+      };
+      if (typeof source.start === "function") {
+        Promise.resolve().then(() => source.start(controller)).catch((error) => controller.error(error));
+      }
+    }
+    getReader() {
+      return {
+        read: () => {
+          if (this._error) {
+            return Promise.reject(this._error);
+          }
+          if (this._queue.length > 0) {
+            return Promise.resolve({ value: this._queue.shift(), done: false });
+          }
+          if (this._closed) {
+            return Promise.resolve({ value: void 0, done: true });
+          }
+          return new Promise((resolve, reject) => {
+            this._pending.push({ resolve, reject });
+          });
+        },
+        releaseLock() {
+        }
+      };
+    }
+  };
   defineGlobal("TextEncoder", TextEncoder2);
   defineGlobal("TextDecoder", TextDecoder);
   defineGlobal("Event", Event);
   defineGlobal("CustomEvent", CustomEvent);
   defineGlobal("EventTarget", EventTarget);
+  defineGlobal("AbortSignal", AbortSignal);
+  defineGlobal("AbortController", AbortController);
+  defineGlobal("ReadableStream", ReadableStream);
+  defineGlobal("WritableStream", WritableStream);
 
   // .agent/recovery/secure-exec/shared/global-exposure.ts
   var NODE_CUSTOM_GLOBAL_INVENTORY = [
@@ -3212,6 +3326,91 @@ var __bridge = (() => {
       name: "_dgramSocketGetBufferSizeRaw",
       classification: "hardened",
       rationale: "Host dgram socket buffer-size getter bridge reference."
+    },
+    {
+      name: "_sqliteConstantsRaw",
+      classification: "hardened",
+      rationale: "Host sqlite constants bridge reference."
+    },
+    {
+      name: "_sqliteDatabaseOpenRaw",
+      classification: "hardened",
+      rationale: "Host sqlite database-open bridge reference."
+    },
+    {
+      name: "_sqliteDatabaseCloseRaw",
+      classification: "hardened",
+      rationale: "Host sqlite database-close bridge reference."
+    },
+    {
+      name: "_sqliteDatabaseExecRaw",
+      classification: "hardened",
+      rationale: "Host sqlite exec bridge reference."
+    },
+    {
+      name: "_sqliteDatabaseQueryRaw",
+      classification: "hardened",
+      rationale: "Host sqlite query bridge reference."
+    },
+    {
+      name: "_sqliteDatabasePrepareRaw",
+      classification: "hardened",
+      rationale: "Host sqlite prepare bridge reference."
+    },
+    {
+      name: "_sqliteDatabaseLocationRaw",
+      classification: "hardened",
+      rationale: "Host sqlite location bridge reference."
+    },
+    {
+      name: "_sqliteDatabaseCheckpointRaw",
+      classification: "hardened",
+      rationale: "Host sqlite checkpoint bridge reference."
+    },
+    {
+      name: "_sqliteStatementRunRaw",
+      classification: "hardened",
+      rationale: "Host sqlite statement-run bridge reference."
+    },
+    {
+      name: "_sqliteStatementGetRaw",
+      classification: "hardened",
+      rationale: "Host sqlite statement-get bridge reference."
+    },
+    {
+      name: "_sqliteStatementAllRaw",
+      classification: "hardened",
+      rationale: "Host sqlite statement-all bridge reference."
+    },
+    {
+      name: "_sqliteStatementColumnsRaw",
+      classification: "hardened",
+      rationale: "Host sqlite statement-columns bridge reference."
+    },
+    {
+      name: "_sqliteStatementSetReturnArraysRaw",
+      classification: "hardened",
+      rationale: "Host sqlite statement return-arrays bridge reference."
+    },
+    {
+      name: "_sqliteStatementSetReadBigIntsRaw",
+      classification: "hardened",
+      rationale: "Host sqlite statement read-bigints bridge reference."
+    },
+    {
+      name: "_sqliteStatementSetAllowBareNamedParametersRaw",
+      classification: "hardened",
+      rationale: "Host sqlite bare-named-parameter bridge reference."
+    },
+    {
+      name: "_sqliteStatementSetAllowUnknownNamedParametersRaw",
+      classification: "hardened",
+      rationale: "Host sqlite unknown-named-parameter bridge reference."
+    },
+    {
+      name: "_sqliteStatementFinalizeRaw",
+      classification: "hardened",
+      rationale: "Host sqlite statement-finalize bridge reference."
     },
     {
       name: "_batchResolveModules",
@@ -16301,9 +16500,288 @@ ${headerLines}\r
       return new DgramSocket(optionsOrType, callback);
     }
   };
+  function isSqlitePlainObject(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return false;
+    }
+    if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+      return false;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+  }
+  function encodeSqliteValue(value) {
+    if (value === null || value === void 0 || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+      return value ?? null;
+    }
+    if (typeof value === "bigint") {
+      return {
+        __agentosSqliteType: "bigint",
+        value: value.toString()
+      };
+    }
+    if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+      return {
+        __agentosSqliteType: "uint8array",
+        value: Buffer.from(value).toString("base64")
+      };
+    }
+    if (Array.isArray(value)) {
+      return value.map((entry) => encodeSqliteValue(entry));
+    }
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, entry]) => [key, encodeSqliteValue(entry)])
+      );
+    }
+    return null;
+  }
+  function decodeSqliteValue(value) {
+    if (value === null || value === void 0 || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+      return value ?? null;
+    }
+    if (Array.isArray(value)) {
+      return value.map((entry) => decodeSqliteValue(entry));
+    }
+    if (value && typeof value === "object") {
+      if (value.__agentosSqliteType === "bigint" && typeof value.value === "string") {
+        return BigInt(value.value);
+      }
+      if (value.__agentosSqliteType === "uint8array" && typeof value.value === "string") {
+        return Buffer.from(value.value, "base64");
+      }
+      return Object.fromEntries(
+        Object.entries(value).map(([key, entry]) => [key, decodeSqliteValue(entry)])
+      );
+    }
+    return value;
+  }
+  function normalizeSqliteParams(params) {
+    if (!Array.isArray(params) || params.length === 0) {
+      return null;
+    }
+    if (params.length === 1 && isSqlitePlainObject(params[0])) {
+      return encodeSqliteValue(params[0]);
+    }
+    return params.map((entry) => encodeSqliteValue(entry));
+  }
+  function sqliteBridgeCall(bridgeFn, args, label) {
+    if (typeof bridgeFn === "function") {
+      return decodeSqliteValue(bridgeFn(...args));
+    }
+    if (!bridgeFn) {
+      throw new Error(`sqlite bridge is not available for ${label}`);
+    }
+    if (typeof bridgeFn.applySync === "function") {
+      return decodeSqliteValue(bridgeFn.applySync(void 0, args));
+    }
+    if (typeof bridgeFn.applySyncPromise === "function") {
+      return decodeSqliteValue(bridgeFn.applySyncPromise(void 0, args));
+    }
+    throw new Error(`sqlite bridge is not available for ${label}`);
+  }
+  var _sqliteConstants = createBridgeSyncFacade("_sqliteConstantsRaw");
+  var _sqliteDatabaseOpen = createBridgeSyncFacade("_sqliteDatabaseOpenRaw");
+  var _sqliteDatabaseClose = createBridgeSyncFacade("_sqliteDatabaseCloseRaw");
+  var _sqliteDatabaseExec = createBridgeSyncFacade("_sqliteDatabaseExecRaw");
+  var _sqliteDatabaseQuery = createBridgeSyncFacade("_sqliteDatabaseQueryRaw");
+  var _sqliteDatabasePrepare = createBridgeSyncFacade("_sqliteDatabasePrepareRaw");
+  var _sqliteDatabaseLocation = createBridgeSyncFacade("_sqliteDatabaseLocationRaw");
+  var _sqliteDatabaseCheckpoint = createBridgeSyncFacade("_sqliteDatabaseCheckpointRaw");
+  var _sqliteStatementRun = createBridgeSyncFacade("_sqliteStatementRunRaw");
+  var _sqliteStatementGet = createBridgeSyncFacade("_sqliteStatementGetRaw");
+  var _sqliteStatementAll = createBridgeSyncFacade("_sqliteStatementAllRaw");
+  var _sqliteStatementColumns = createBridgeSyncFacade("_sqliteStatementColumnsRaw");
+  var _sqliteStatementSetReturnArrays = createBridgeSyncFacade("_sqliteStatementSetReturnArraysRaw");
+  var _sqliteStatementSetReadBigInts = createBridgeSyncFacade("_sqliteStatementSetReadBigIntsRaw");
+  var _sqliteStatementSetAllowBareNamedParameters = createBridgeSyncFacade("_sqliteStatementSetAllowBareNamedParametersRaw");
+  var _sqliteStatementSetAllowUnknownNamedParameters = createBridgeSyncFacade("_sqliteStatementSetAllowUnknownNamedParametersRaw");
+  var _sqliteStatementFinalize = createBridgeSyncFacade("_sqliteStatementFinalizeRaw");
+  var StatementSync = class {
+    constructor(database, statementId) {
+      this._database = database;
+      this._statementId = statementId;
+      this._finalized = false;
+    }
+    _assertOpen() {
+      this._database._assertOpen();
+      if (this._finalized) {
+        throw new Error("SQLite statement is already finalized");
+      }
+    }
+    run(...params) {
+      this._assertOpen();
+      return sqliteBridgeCall(
+        _sqliteStatementRun,
+        [this._statementId, normalizeSqliteParams(params)],
+        "statement.run"
+      );
+    }
+    get(...params) {
+      this._assertOpen();
+      return sqliteBridgeCall(
+        _sqliteStatementGet,
+        [this._statementId, normalizeSqliteParams(params)],
+        "statement.get"
+      );
+    }
+    all(...params) {
+      this._assertOpen();
+      return sqliteBridgeCall(
+        _sqliteStatementAll,
+        [this._statementId, normalizeSqliteParams(params)],
+        "statement.all"
+      );
+    }
+    iterate(...params) {
+      const rows = this.all(...params);
+      return rows[Symbol.iterator]();
+    }
+    columns() {
+      this._assertOpen();
+      return sqliteBridgeCall(
+        _sqliteStatementColumns,
+        [this._statementId],
+        "statement.columns"
+      );
+    }
+    setReturnArrays(enabled) {
+      this._assertOpen();
+      sqliteBridgeCall(
+        _sqliteStatementSetReturnArrays,
+        [this._statementId, Boolean(enabled)],
+        "statement.setReturnArrays"
+      );
+    }
+    setReadBigInts(enabled) {
+      this._assertOpen();
+      sqliteBridgeCall(
+        _sqliteStatementSetReadBigInts,
+        [this._statementId, Boolean(enabled)],
+        "statement.setReadBigInts"
+      );
+    }
+    setAllowBareNamedParameters(enabled) {
+      this._assertOpen();
+      sqliteBridgeCall(
+        _sqliteStatementSetAllowBareNamedParameters,
+        [this._statementId, Boolean(enabled)],
+        "statement.setAllowBareNamedParameters"
+      );
+    }
+    setAllowUnknownNamedParameters(enabled) {
+      this._assertOpen();
+      sqliteBridgeCall(
+        _sqliteStatementSetAllowUnknownNamedParameters,
+        [this._statementId, Boolean(enabled)],
+        "statement.setAllowUnknownNamedParameters"
+      );
+    }
+    finalize() {
+      if (this._finalized) {
+        return null;
+      }
+      this._database._assertOpen();
+      sqliteBridgeCall(
+        _sqliteStatementFinalize,
+        [this._statementId],
+        "statement.finalize"
+      );
+      this._finalized = true;
+      return null;
+    }
+  };
+  var DatabaseSync = class {
+    constructor(location = ":memory:", options = void 0) {
+      this._closed = false;
+      this._databaseId = sqliteBridgeCall(
+        _sqliteDatabaseOpen,
+        [typeof location === "string" ? location : ":memory:", options ?? null],
+        "database.open"
+      );
+    }
+    _assertOpen() {
+      if (this._closed) {
+        throw new Error("SQLite database is already closed");
+      }
+    }
+    close() {
+      if (this._closed) {
+        return null;
+      }
+      sqliteBridgeCall(
+        _sqliteDatabaseClose,
+        [this._databaseId],
+        "database.close"
+      );
+      this._closed = true;
+      return null;
+    }
+    exec(sql) {
+      this._assertOpen();
+      return sqliteBridgeCall(
+        _sqliteDatabaseExec,
+        [this._databaseId, String(sql ?? "")],
+        "database.exec"
+      );
+    }
+    query(sql, params = null, options = null) {
+      this._assertOpen();
+      const normalized = params === null ? null : normalizeSqliteParams(Array.isArray(params) ? params : [params]);
+      return sqliteBridgeCall(
+        _sqliteDatabaseQuery,
+        [this._databaseId, String(sql ?? ""), normalized, options ?? null],
+        "database.query"
+      );
+    }
+    prepare(sql) {
+      this._assertOpen();
+      const statementId = sqliteBridgeCall(
+        _sqliteDatabasePrepare,
+        [this._databaseId, String(sql ?? "")],
+        "database.prepare"
+      );
+      return new StatementSync(this, statementId);
+    }
+    location() {
+      this._assertOpen();
+      return sqliteBridgeCall(
+        _sqliteDatabaseLocation,
+        [this._databaseId],
+        "database.location"
+      );
+    }
+    checkpoint() {
+      this._assertOpen();
+      return sqliteBridgeCall(
+        _sqliteDatabaseCheckpoint,
+        [this._databaseId],
+        "database.checkpoint"
+      );
+    }
+  };
+  DatabaseSync.prototype[Symbol.dispose] = DatabaseSync.prototype.close;
+  StatementSync.prototype[Symbol.dispose] = StatementSync.prototype.finalize;
+  var sqliteConstants;
+  function getSqliteConstants() {
+    if (sqliteConstants === void 0) {
+      sqliteConstants = Object.freeze(
+        sqliteBridgeCall(_sqliteConstants, [], "constants") ?? {}
+      );
+    }
+    return sqliteConstants;
+  }
+  var sqliteModule = {
+    DatabaseSync,
+    StatementSync,
+    get constants() {
+      return getSqliteConstants();
+    }
+  };
   exposeCustomGlobal("_netModule", netModule);
   exposeCustomGlobal("_tlsModule", tlsModule);
   exposeCustomGlobal("_dgramModule", dgramModule);
+  exposeCustomGlobal("_sqliteModule", sqliteModule);
   var network_default = {
     fetch,
     Headers,
@@ -18742,6 +19220,7 @@ ${headerLines}\r
       "url",
       "querystring",
       "crypto",
+      "sqlite",
       "zlib",
       "assert",
       "tty",
@@ -18843,7 +19322,7 @@ ${headerLines}\r
         content
       );
       const moduleRequire = (request) => {
-        rejectRestrictedBuiltin(request);
+        rejectRestrictedBuiltinRequest(request);
         return _requireFrom(request, this.path);
       };
       moduleRequire.resolve = (request) => {
@@ -18910,6 +19389,7 @@ ${headerLines}\r
       "os",
       "path",
       "querystring",
+      "sqlite",
       "stream",
       "string_decoder",
       "timers",
@@ -19012,6 +19492,8 @@ ${headerLines}\r
         return _tlsModule;
       case "dgram":
         return _dgramModule;
+      case "sqlite":
+        return _sqliteModule;
       case "https":
         return _httpsModule;
       case "module":
@@ -19026,7 +19508,13 @@ ${headerLines}\r
   function requireFrom(request, parentDir) {
     const parentPath = typeof parentDir === "string" ? parentDir : "/";
     if (Module.isBuiltin(request)) {
-      return loadBuiltinModule(request);
+      try {
+        return loadBuiltinModule(request);
+      } catch (error) {
+        if (error?.code !== "MODULE_NOT_FOUND") {
+          throw error;
+        }
+      }
     }
     const resolved = _resolveModule.applySyncPromise(void 0, [
       request,

@@ -19,8 +19,10 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Packages/core permissions should stay camelCase and JSON-serializable in TypeScript; only the native sidecar wire payload translates `childProcess` to `child_process`
 - Partial declarative permission objects must leave unspecified domains unset so Rust can apply deny-by-default per domain; only an omitted top-level permissions object should expand to allow-all
 - V8 binary discovery: `AGENT_OS_V8_RUNTIME_PATH` env var → alongside current exe (+ parent dirs for test deps/) → `target/{release,debug}/agent-os-v8`
+- When sidecar V8 tests add or rename bridge globals in `crates/v8-runtime/`, rebuild `agent-os-v8` before rerunning `cargo test -p agent-os-sidecar`; the sidecar harness can otherwise reuse a stale `target/debug/agent-os-v8` binary
 - V8 bridge calls use CBOR codec via `SECURE_EXEC_V8_CODEC=cbor` env var; `ciborium` crate handles CBOR↔JSON conversion in the execution crate
 - Internal V8 bridge calls (logging, module resolution, crypto, timers) are handled in the event bridge thread; only kernel operations (fs, net, child_process, dns) go to the sidecar
+- SQLite bridge payloads between guest JS and Rust should preserve bigint/blob values with `__agentosSqliteType` tagged objects so the CBOR/JSON bridge can round-trip 64-bit integers and binary buffers safely
 - Guest V8 timers split across two host paths in `crates/execution/src/javascript.rs`: `_scheduleTimer` must resolve its async bridge Promise later, while `kernelTimerCreate`/`kernelTimerArm`/`kernelTimerClear` must emit `"timer"` stream events so `setTimeout`/`setInterval` callbacks actually fire
 - The current V8 sync-RPC bridge only tolerates one in-flight request effectively, so long-lived waits like HTTP server close listeners need stream events plus follow-up RPCs instead of a permanently pending sync-bridge Promise
 - The sidecar reads entrypoint files from VFS and passes as `inline_code` to avoid V8 module loading bridge calls in synchronous dispatch
@@ -79,6 +81,15 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Keep the ACP compatibility workarounds as one bundle; removing any of the duplicate-ID handling, permission shims, option normalization, cancel fallback, timeout diagnostics, or exit-drain logic will break real agents that rely on legacy or noisy stdio behavior
   - `ExecuteRequest.cwd` can only map to a host path when the entrypoint itself resolves through a host-side runtime mapping; otherwise absolute host cwd values must still reject with `invalid_state` to preserve VM isolation
   - `cargo test -p agent-os-sidecar` is green for this story, but `tests/service.rs` can legitimately spend over 60 seconds in the TLS upgrade case before finishing cleanly
+---
+## 2026-04-07 15:24:39 PDT - US-026
+- Embedded `rusqlite` in the sidecar, added database/statement state plus sync RPC handlers for open/close/exec/query/prepare/run/get/all/columns/checkpoint, and wired the V8 `node:sqlite` builtin through the sync bridge with bigint and binary value tagging
+- Deleted the legacy TypeScript sqlite bindings file, added sqlite bridge coverage in the sidecar service tests, and refreshed the root `AGENTS.md` with the V8-binary rebuild gotcha for sidecar V8 integration work
+- Files changed: `AGENTS.md`, `Cargo.lock`, `crates/execution/assets/v8-bridge.js`, `crates/execution/src/{javascript.rs,v8_runtime.rs}`, `crates/sidecar/Cargo.toml`, `crates/sidecar/src/{execution.rs,state.rs}`, `crates/sidecar/tests/service.rs`, `crates/v8-runtime/src/session.rs`, `packages/core/src/sqlite-bindings.ts` (deleted), `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - If a V8-side guest builtin only starts returning `null`, check whether the spawned `agent-os-v8` binary was rebuilt after bridge-global changes before debugging the sidecar RPC handlers
+  - Sidecar sqlite persistence is best validated in service tests via exit status plus the VM file contents; the final `console.log()` line can arrive too late to be a stable success signal in this harness
+  - Prepared-statement result payloads should keep bigint/blob tagging all the way through the JS bridge so guest `node:sqlite` consumers can recover `BigInt` and `Buffer` values without a TypeScript shim
 ---
 
 ## 2026-04-06 - US-002

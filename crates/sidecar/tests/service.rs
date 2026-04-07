@@ -1,10 +1,10 @@
 pub trait NativeSidecarBridge: agent_os_bridge::HostBridge {}
 impl<T> NativeSidecarBridge for T where T: agent_os_bridge::HostBridge {}
 
-#[path = "../src/bootstrap.rs"]
-mod bootstrap;
 #[path = "../src/acp/mod.rs"]
 mod acp;
+#[path = "../src/bootstrap.rs"]
+mod bootstrap;
 #[path = "../src/bridge.rs"]
 mod bridge;
 #[path = "../src/execution.rs"]
@@ -1134,7 +1134,9 @@ ykAheWCsAteSEWVc0w==\n\
                 )
                 .expect("terminal output")
                 .expect("terminal output result");
-            let output = output_result["output"].as_str().expect("terminal output string");
+            let output = output_result["output"]
+                .as_str()
+                .expect("terminal output string");
             assert!(output.contains("hello"));
             assert!(output.contains("oops"));
             assert_eq!(output_result["truncated"], Value::Bool(false));
@@ -1243,7 +1245,10 @@ ykAheWCsAteSEWVc0w==\n\
                     Duration::from_millis(25),
                 )
                 .expect("poll session events");
-            assert!(event.is_none(), "ACP terminal processes should stay internal");
+            assert!(
+                event.is_none(),
+                "ACP terminal processes should stay internal"
+            );
         }
 
         fn poll_http2_event(
@@ -5904,6 +5909,269 @@ await new Promise(() => {});
         }
 
         #[test]
+        fn javascript_sqlite_sync_rpcs_round_trip_and_persist_vm_files() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-sqlite-rpc-cwd");
+            let process_id = "proc-js-sqlite-rpc";
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("sqlite vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn sqlite kernel process")
+            };
+            let vm = sidecar.vms.get_mut(&vm_id).expect("sqlite vm");
+            vm.active_processes.insert(
+                String::from(process_id),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Tool(ToolExecution::default()),
+                )
+                .with_host_cwd(cwd.clone()),
+            );
+
+            let database_id = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                process_id,
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("sqlite.open"),
+                    args: vec![json!("/workspace/app.db"), json!({})],
+                },
+            )
+            .expect("open sqlite database")
+            .as_u64()
+            .expect("database id");
+
+            let created = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                process_id,
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("sqlite.exec"),
+                    args: vec![
+                        json!(database_id),
+                        json!("CREATE TABLE items (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)"),
+                    ],
+                },
+            )
+            .expect("create sqlite table");
+            assert_eq!(created, json!(0));
+
+            let statement_id = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                process_id,
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("sqlite.prepare"),
+                    args: vec![
+                        json!(database_id),
+                        json!("INSERT INTO items(id, payload) VALUES (?, ?)"),
+                    ],
+                },
+            )
+            .expect("prepare sqlite insert")
+            .as_u64()
+            .expect("statement id");
+
+            let insert = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                process_id,
+                JavascriptSyncRpcRequest {
+                    id: 4,
+                    method: String::from("sqlite.statement.run"),
+                    args: vec![
+                        json!(statement_id),
+                        json!([
+                            {
+                                "__agentosSqliteType": "bigint",
+                                "value": "9007199254740993",
+                            },
+                            {
+                                "__agentosSqliteType": "uint8array",
+                                "value": base64::engine::general_purpose::STANDARD.encode([1_u8, 2, 3]),
+                            }
+                        ]),
+                    ],
+                },
+            )
+            .expect("run sqlite insert");
+            assert_eq!(insert["changes"], json!(1));
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                process_id,
+                JavascriptSyncRpcRequest {
+                    id: 5,
+                    method: String::from("sqlite.statement.finalize"),
+                    args: vec![json!(statement_id)],
+                },
+            )
+            .expect("finalize sqlite insert");
+
+            let query = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                process_id,
+                JavascriptSyncRpcRequest {
+                    id: 6,
+                    method: String::from("sqlite.query"),
+                    args: vec![
+                        json!(database_id),
+                        json!("SELECT id, payload FROM items"),
+                        Value::Null,
+                        json!({ "readBigInts": true }),
+                    ],
+                },
+            )
+            .expect("query sqlite row");
+            assert_eq!(query[0]["id"]["__agentosSqliteType"], json!("bigint"));
+            assert_eq!(query[0]["id"]["value"], json!("9007199254740993"));
+            assert_eq!(
+                query[0]["payload"]["value"],
+                json!(base64::engine::general_purpose::STANDARD.encode([1_u8, 2, 3]))
+            );
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                process_id,
+                JavascriptSyncRpcRequest {
+                    id: 7,
+                    method: String::from("sqlite.close"),
+                    args: vec![json!(database_id)],
+                },
+            )
+            .expect("close sqlite database");
+
+            let reopened_id = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                process_id,
+                JavascriptSyncRpcRequest {
+                    id: 8,
+                    method: String::from("sqlite.open"),
+                    args: vec![json!("/workspace/app.db"), json!({})],
+                },
+            )
+            .expect("reopen sqlite database")
+            .as_u64()
+            .expect("reopened database id");
+
+            let reopened = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                process_id,
+                JavascriptSyncRpcRequest {
+                    id: 9,
+                    method: String::from("sqlite.query"),
+                    args: vec![
+                        json!(reopened_id),
+                        json!("SELECT id, payload FROM items"),
+                        Value::Null,
+                        json!({ "readBigInts": true }),
+                    ],
+                },
+            )
+            .expect("query reopened sqlite row");
+            assert_eq!(reopened, query);
+        }
+
+        #[test]
+        fn javascript_sqlite_builtin_round_trips_through_sidecar_sync_rpc() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-sqlite-builtins-cwd");
+            write_fixture(
+                &cwd.join("entry.mjs"),
+                r#"
+import { DatabaseSync } from "node:sqlite";
+
+const db = new DatabaseSync("/workspace/sqlite-builtins.db");
+db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)");
+const insert = db.prepare("INSERT INTO items(id, payload) VALUES (?, ?)");
+const insertResult = insert.run(9007199254740993n, new Uint8Array([7, 8, 9]));
+if (insertResult.changes !== 1) {
+  throw new Error(`unexpected insert result: ${JSON.stringify(insertResult)}`);
+}
+
+const select = db.prepare("SELECT id, payload FROM items");
+select.setReadBigInts(true);
+const row = select.get();
+if (typeof row.id !== "bigint" || row.id !== 9007199254740993n) {
+  throw new Error(`unexpected bigint row id: ${String(row.id)}`);
+}
+if (!Buffer.isBuffer(row.payload) || row.payload.length !== 3 || row.payload[1] !== 8) {
+  throw new Error(`unexpected blob payload: ${JSON.stringify(row.payload)}`);
+}
+db.close();
+
+const reopened = new DatabaseSync("/workspace/sqlite-builtins.db");
+const verify = reopened.prepare("SELECT COUNT(*) AS count FROM items");
+const count = verify.get();
+if (count.count !== 1) {
+  throw new Error(`unexpected persisted count: ${JSON.stringify(count)}`);
+}
+reopened.close();
+console.log("sqlite-ok");
+"#,
+            );
+
+            let (_stdout, stderr, exit_code) = run_javascript_entry(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-sqlite-builtins",
+                "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"path\",\"querystring\",\"sqlite\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+            );
+
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            assert!(stderr.trim().is_empty(), "stderr: {stderr}");
+            let database_bytes = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .read_file("/workspace/sqlite-builtins.db")
+                    .expect("read sqlite builtins database file")
+            };
+            assert!(
+                !database_bytes.is_empty(),
+                "sqlite builtins database file should be persisted"
+            );
+        }
+
+        #[test]
         #[ignore = "V8 sidecar TCP integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_net_rpc_connects_to_host_tcp_server() {
             assert_node_available();
@@ -7605,7 +7873,10 @@ console.log(JSON.stringify(summary));
                 JavascriptSyncRpcRequest {
                     id: 12,
                     method: String::from("net.http2_session_settings"),
-                    args: vec![json!(session_id), Value::String(String::from("{\"initialWindowSize\":1234}"))],
+                    args: vec![
+                        json!(session_id),
+                        Value::String(String::from("{\"initialWindowSize\":1234}")),
+                    ],
                 },
             )
             .expect("update http2 settings");
@@ -7639,7 +7910,10 @@ console.log(JSON.stringify(summary));
             let local_window_payload: Value =
                 serde_json::from_str(local_window.as_str().expect("window payload"))
                     .expect("parse local window payload");
-            assert_eq!(local_window_payload["state"]["localWindowSize"], json!(4096));
+            assert_eq!(
+                local_window_payload["state"]["localWindowSize"],
+                json!(4096)
+            );
 
             let stream_id = call_javascript_sync_rpc(
                 &mut sidecar,
@@ -7706,9 +7980,7 @@ console.log(JSON.stringify(summary));
                     method: String::from("net.http2_stream_push_stream"),
                     args: vec![
                         json!(server_stream_id),
-                        Value::String(String::from(
-                            "{\":method\":\"GET\",\":path\":\"/pushed\"}",
-                        )),
+                        Value::String(String::from("{\":method\":\"GET\",\":path\":\"/pushed\"}")),
                         Value::String(String::from("{}")),
                     ],
                 },

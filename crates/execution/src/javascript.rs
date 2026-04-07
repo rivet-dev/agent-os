@@ -1,18 +1,18 @@
 use crate::common::{encode_json_string, frozen_time_ms, stable_hash64};
 use crate::node_import_cache::{
-    NodeImportCache, NodeImportCacheCleanup, NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
+    NODE_IMPORT_CACHE_ASSET_ROOT_ENV, NodeImportCache, NodeImportCacheCleanup,
 };
 use crate::node_process::{
+    ExportedChildFds, LinePrefixFilter, NodeControlMessage, NodeSignalHandlerRegistration,
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
     encode_json_string_array, env_builtin_enabled, harden_node_command, node_binary,
     node_resolution_read_paths, resolve_path_like_specifier, spawn_node_control_reader,
-    spawn_stream_reader, spawn_waiter, ExportedChildFds, LinePrefixFilter, NodeControlMessage,
-    NodeSignalHandlerRegistration,
+    spawn_stream_reader, spawn_waiter,
 };
 use crate::runtime_support::{
-    configure_compile_cache, env_flag_enabled, import_cache_root, sandbox_root, warmup_marker_path,
     NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
-    NODE_SANDBOX_ROOT_ENV,
+    NODE_SANDBOX_ROOT_ENV, configure_compile_cache, env_flag_enabled, import_cache_root,
+    sandbox_root, warmup_marker_path,
 };
 use crate::v8_host::{V8RuntimeHost, V8SessionHandle};
 use crate::v8_ipc::BinaryFrame;
@@ -21,7 +21,7 @@ use getrandom::getrandom;
 use nix::fcntl::OFlag;
 use nix::unistd::pipe2;
 use serde::Deserialize;
-use serde_json::{from_str, json, Value};
+use serde_json::{Value, from_str, json};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -31,13 +31,13 @@ use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{
-    mpsc::{self, Receiver, SyncSender, TrySendError},
     Arc, Mutex,
+    mpsc::{self, Receiver, SyncSender, TrySendError},
 };
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{
-    error::TryRecvError as TokioTryRecvError, unbounded_channel, UnboundedReceiver,
+    UnboundedReceiver, error::TryRecvError as TokioTryRecvError, unbounded_channel,
 };
 use tokio::time;
 
@@ -300,6 +300,7 @@ struct LocalBridgeState {
 struct GuestPathTranslator {
     implicit_guest_cwd: String,
     implicit_host_cwd: PathBuf,
+    sandbox_root: Option<PathBuf>,
     mappings: Vec<GuestPathMapping>,
 }
 
@@ -356,9 +357,10 @@ impl GuestPathTranslator {
             .filter(|mapping| mapping.guest_path.starts_with('/'))
             .collect::<Vec<_>>();
 
-        if !mappings.iter().any(|mapping| {
-            mapping.host_path == request.cwd && mapping.guest_path == implicit_guest_cwd
-        }) {
+        if !mappings
+            .iter()
+            .any(|mapping| mapping.guest_path == implicit_guest_cwd)
+        {
             mappings.push(GuestPathMapping {
                 guest_path: implicit_guest_cwd.clone(),
                 host_path: request.cwd.clone(),
@@ -367,16 +369,26 @@ impl GuestPathTranslator {
 
         mappings.sort_by(|left, right| {
             right
-                .host_path
-                .components()
-                .count()
-                .cmp(&left.host_path.components().count())
-                .then_with(|| right.guest_path.len().cmp(&left.guest_path.len()))
+                .guest_path
+                .len()
+                .cmp(&left.guest_path.len())
+                .then_with(|| {
+                    right
+                        .host_path
+                        .components()
+                        .count()
+                        .cmp(&left.host_path.components().count())
+                })
         });
 
         Self {
             implicit_guest_cwd,
             implicit_host_cwd: request.cwd.clone(),
+            sandbox_root: request
+                .env
+                .get(NODE_SANDBOX_ROOT_ENV)
+                .filter(|value| Path::new(value.as_str()).is_absolute())
+                .map(PathBuf::from),
             mappings,
         }
     }
@@ -411,6 +423,14 @@ impl GuestPathTranslator {
                     &stripped.to_string_lossy().replace('\\', "/"),
                 );
             }
+            if let Ok(real_mapping_path) = fs::canonicalize(&mapping.host_path) {
+                if let Ok(stripped) = host_path.strip_prefix(&real_mapping_path) {
+                    return join_guest_path(
+                        &mapping.guest_path,
+                        &stripped.to_string_lossy().replace('\\', "/"),
+                    );
+                }
+            }
         }
 
         if let Ok(stripped) = host_path.strip_prefix(&self.implicit_host_cwd) {
@@ -418,6 +438,12 @@ impl GuestPathTranslator {
                 &self.implicit_guest_cwd,
                 &stripped.to_string_lossy().replace('\\', "/"),
             );
+        }
+
+        if let Some(sandbox_root) = &self.sandbox_root {
+            if let Ok(stripped) = host_path.strip_prefix(sandbox_root) {
+                return join_guest_path("/", &stripped.to_string_lossy().replace('\\', "/"));
+            }
         }
 
         let basename = host_path
@@ -429,24 +455,89 @@ impl GuestPathTranslator {
 
     fn guest_to_host(&self, guest_path: &str) -> Option<PathBuf> {
         let normalized = normalize_guest_path(guest_path);
+        let mut fallback_candidate = None;
 
         for mapping in &self.mappings {
             if let Some(suffix) = strip_guest_prefix(&normalized, &mapping.guest_path) {
-                return Some(join_host_path(&mapping.host_path, suffix));
+                let candidate = join_host_path(&mapping.host_path, suffix);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+                if let Ok(real_mapping_path) = fs::canonicalize(&mapping.host_path) {
+                    let real_candidate = join_host_path(&real_mapping_path, suffix);
+                    if real_candidate.exists() {
+                        return Some(real_candidate);
+                    }
+                    if let Some(sibling_candidate) =
+                        resolve_pnpm_sibling_host_path(&real_mapping_path, suffix)
+                    {
+                        return Some(sibling_candidate);
+                    }
+                }
+                fallback_candidate.get_or_insert(candidate);
             }
+        }
+        if fallback_candidate.is_some() {
+            return fallback_candidate;
         }
 
         if let Some(suffix) = strip_guest_prefix(&normalized, &self.implicit_guest_cwd) {
             return Some(join_host_path(&self.implicit_host_cwd, suffix));
         }
 
-        let path = PathBuf::from(&normalized);
-        if path.is_absolute() {
-            Some(path)
-        } else {
-            None
+        if let Some(sandbox_root) = &self.sandbox_root {
+            return Some(join_host_path(
+                sandbox_root,
+                normalized.trim_start_matches('/'),
+            ));
         }
+
+        let path = PathBuf::from(&normalized);
+        if path.is_absolute() { Some(path) } else { None }
     }
+
+    fn canonical_guest_path(&self, guest_path: &str) -> Option<String> {
+        let host_path = self.guest_to_host(guest_path)?;
+        let canonical = fs::canonicalize(host_path).ok()?;
+        if let Some(node_modules_root) = self
+            .mappings
+            .iter()
+            .find(|mapping| mapping.guest_path == "/root/node_modules")
+        {
+            if let Ok(stripped) = canonical.strip_prefix(&node_modules_root.host_path) {
+                return Some(join_guest_path(
+                    &node_modules_root.guest_path,
+                    &stripped.to_string_lossy().replace('\\', "/"),
+                ));
+            }
+            if let Ok(real_root) = fs::canonicalize(&node_modules_root.host_path) {
+                if let Ok(stripped) = canonical.strip_prefix(&real_root) {
+                    return Some(join_guest_path(
+                        &node_modules_root.guest_path,
+                        &stripped.to_string_lossy().replace('\\', "/"),
+                    ));
+                }
+            }
+        }
+        let guest = self.host_to_guest_string(&canonical);
+        (!guest.starts_with("/unknown/")).then_some(normalize_guest_path(&guest))
+    }
+}
+
+fn resolve_pnpm_sibling_host_path(real_mapping_path: &Path, suffix: &str) -> Option<PathBuf> {
+    let trimmed = suffix.strip_prefix("node_modules/")?;
+    let mut current = Some(real_mapping_path);
+    while let Some(path) = current {
+        if path.file_name().and_then(|name| name.to_str()) == Some("node_modules") {
+            let candidate = join_host_path(path, trimmed);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            break;
+        }
+        current = path.parent();
+    }
+    None
 }
 
 fn parse_guest_path_mappings(request: &StartJavascriptExecutionRequest) -> Vec<GuestPathMapping> {
@@ -875,7 +966,7 @@ impl JavascriptExecution {
             match self.events.borrow_mut().try_recv() {
                 Ok(event) => return Ok(Some(event)),
                 Err(TokioTryRecvError::Disconnected) => {
-                    return Err(JavascriptExecutionError::EventChannelClosed)
+                    return Err(JavascriptExecutionError::EventChannelClosed);
                 }
                 Err(TokioTryRecvError::Empty) => {
                     if Instant::now() >= deadline {
@@ -1054,16 +1145,20 @@ impl JavascriptExecutionEngine {
             .chain(std::iter::once(guest_entrypoint.clone()))
             .chain(request.argv.iter().skip(1).cloned())
             .collect::<Vec<_>>();
-        let use_module_mode = request.inline_code.is_none()
-            && matches!(
-                host_entrypoint.extension().and_then(|ext| ext.to_str()),
-                Some("mjs" | "mts")
-            );
+        let use_module_mode =
+            request.inline_code.is_none() && host_entrypoint_uses_module_mode(&host_entrypoint);
         let user_code = if let Some(inline_code) = request.inline_code.clone() {
             inline_code
         } else if use_module_mode {
-            fs::read_to_string(&host_entrypoint)
-                .map_err(JavascriptExecutionError::PrepareImportCache)?
+            strip_javascript_hashbang(&fs::read_to_string(&host_entrypoint).map_err(|error| {
+                JavascriptExecutionError::PrepareImportCache(std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "failed to read JavaScript entrypoint {}: {error}",
+                        host_entrypoint.display()
+                    ),
+                ))
+            })?)
         } else {
             build_v8_user_code(&guest_entrypoint, &request.env)
         };
@@ -1595,8 +1690,8 @@ fn stable_compile_cache_namespace_hash() -> u64 {
     )
 }
 
-fn create_javascript_sync_rpc_channels(
-) -> Result<JavascriptSyncRpcChannels, JavascriptExecutionError> {
+fn create_javascript_sync_rpc_channels()
+-> Result<JavascriptSyncRpcChannels, JavascriptExecutionError> {
     let fd_reservations = (0..64)
         .map(|_| File::open("/dev/null"))
         .collect::<Result<Vec<_>, _>>()
@@ -1773,6 +1868,28 @@ fn build_v8_user_code(entrypoint: &str, env: &BTreeMap<String, String>) -> Strin
             serde_json::to_string(entrypoint).unwrap_or_else(|_| format!("\"{}\"", entrypoint))
         )
     }
+}
+
+fn host_entrypoint_uses_module_mode(entrypoint: &Path) -> bool {
+    match entrypoint.extension().and_then(|ext| ext.to_str()) {
+        Some("mjs" | "mts") => true,
+        Some("js") => nearest_package_json_type(entrypoint).as_deref() == Some("module"),
+        _ => false,
+    }
+}
+
+fn nearest_package_json_type(entrypoint: &Path) -> Option<String> {
+    let mut current = entrypoint.parent();
+    while let Some(dir) = current {
+        let package_json = dir.join("package.json");
+        if let Ok(contents) = fs::read_to_string(&package_json) {
+            if let Ok(pkg) = serde_json::from_str::<LocalPackageJson>(&contents) {
+                return pkg.package_type;
+            }
+        }
+        current = dir.parent();
+    }
+    None
 }
 
 fn resolve_v8_entrypoint(cwd: &Path, entrypoint: &str) -> String {
@@ -2258,7 +2375,11 @@ impl LocalBridgeState {
         from_dir: &str,
         mode: ModuleResolveMode,
     ) -> Option<String> {
-        let normalized_from = normalize_module_resolve_context(from_dir);
+        let normalized_from = self
+            .translator
+            .canonical_guest_path(from_dir)
+            .map(|path| normalize_module_resolve_context(&path))
+            .unwrap_or_else(|| normalize_module_resolve_context(from_dir));
         let cache_key = (specifier.to_owned(), normalized_from.clone(), mode);
         if let Some(cached) = self.resolution_cache.resolve_results.get(&cache_key) {
             return cached.clone();
@@ -2335,7 +2456,8 @@ impl LocalBridgeState {
         let (package_name, subpath) = split_package_request(request)?;
         let mut dir = normalize_guest_path(from_dir);
         loop {
-            for package_dir in node_modules_candidate_dirs(&dir, package_name) {
+            let candidate_dirs = node_modules_candidate_dirs(&dir, package_name);
+            for package_dir in candidate_dirs {
                 if let Some(entry) =
                     self.resolve_package_entry_from_dir(&package_dir, subpath, mode)
                 {
@@ -2503,6 +2625,17 @@ fn normalize_module_resolve_context(path: &str) -> String {
     }
 }
 
+fn strip_javascript_hashbang(source: &str) -> String {
+    if let Some(stripped) = source.strip_prefix("#!") {
+        match stripped.find('\n') {
+            Some(index) => format!("\n{}", &stripped[index + 1..]),
+            None => String::new(),
+        }
+    } else {
+        source.to_owned()
+    }
+}
+
 fn dirname_guest_path(path: &str) -> String {
     let normalized = normalize_guest_path(path);
     if normalized == "/" {
@@ -2523,9 +2656,12 @@ fn dirname_guest_path(path: &str) -> String {
 fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
     let bare = specifier.trim_start_matches("node:");
     match bare {
-        "child_process" | "crypto" | "dgram" | "dns" | "events" | "fs" | "fs/promises" | "http"
-        | "http2" | "https" | "module" | "net" | "os" | "path" | "process" | "stream" | "tls"
-        | "tty" | "url" | "util" | "zlib" => Some(format!("node:{bare}")),
+        "assert" | "child_process" | "crypto" | "dgram" | "dns" | "events" | "fs"
+        | "fs/promises" | "http" | "http2" | "https" | "module" | "net" | "os" | "path"
+        | "process" | "readline" | "sqlite" | "stream" | "stream/promises" | "stream/web"
+        | "string_decoder" | "tls" | "tty" | "url" | "util" | "zlib" => {
+            Some(format!("node:{bare}"))
+        }
         _ => None,
     }
 }
@@ -2535,6 +2671,783 @@ fn is_builtin_specifier(specifier: &str) -> bool {
 }
 
 fn build_builtin_module_wrapper(module_name: &str) -> String {
+    if module_name == "assert" {
+        return String::from(
+            r#"class AssertionError extends Error {
+  constructor(message = "Assertion failed") {
+    super(message);
+    this.name = "AssertionError";
+  }
+}
+
+function fail(message) {
+  throw new AssertionError(message);
+}
+
+function ok(value, message) {
+  if (!value) fail(message);
+}
+
+function equal(actual, expected, message) {
+  if (actual != expected) fail(message ?? `Expected ${actual} == ${expected}`);
+}
+
+function notEqual(actual, expected, message) {
+  if (actual == expected) fail(message ?? `Expected ${actual} != ${expected}`);
+}
+
+function strictEqual(actual, expected, message) {
+  if (actual !== expected) fail(message ?? `Expected ${actual} === ${expected}`);
+}
+
+function notStrictEqual(actual, expected, message) {
+  if (actual === expected) fail(message ?? `Expected ${actual} !== ${expected}`);
+}
+
+function serialize(value) {
+  return JSON.stringify(value);
+}
+
+function deepEqual(actual, expected, message) {
+  if (serialize(actual) !== serialize(expected)) {
+    fail(message ?? "Expected values to be deeply equal");
+  }
+}
+
+function deepStrictEqual(actual, expected, message) {
+  return deepEqual(actual, expected, message);
+}
+
+function match(actual, expected, message) {
+  if (!(expected instanceof RegExp) || !expected.test(String(actual))) {
+    fail(message ?? `Expected ${actual} to match ${expected}`);
+  }
+}
+
+function ifError(error) {
+  if (error != null) {
+    throw error;
+  }
+}
+
+function assert(value, message) {
+  ok(value, message);
+}
+
+Object.assign(assert, {
+  AssertionError,
+  deepEqual,
+  deepStrictEqual,
+  equal,
+  fail,
+  ifError,
+  match,
+  notEqual,
+  notStrictEqual,
+  ok,
+  strict: assert,
+  strictEqual,
+});
+
+export {
+  AssertionError,
+  assert as default,
+  deepEqual,
+  deepStrictEqual,
+  equal,
+  fail,
+  ifError,
+  match,
+  notEqual,
+  notStrictEqual,
+  ok,
+  assert as strict,
+  strictEqual,
+};
+"#,
+        );
+    }
+
+    if module_name == "path" {
+        return String::from(
+            r#"const sep = "/";
+const delimiter = ":";
+
+function normalizeSegments(parts) {
+  const output = [];
+  for (const part of parts) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (output.length > 0) output.pop();
+      continue;
+    }
+    output.push(part);
+  }
+  return output;
+}
+
+function isAbsolute(path) {
+  return String(path || "").startsWith(sep);
+}
+
+function join(...parts) {
+  const absolute = parts.some((part, index) => index === 0 && isAbsolute(part));
+  const normalized = normalizeSegments(parts.flatMap((part) => String(part || "").split(sep)));
+  const joined = normalized.join(sep);
+  if (!joined) return absolute ? sep : ".";
+  return absolute ? `${sep}${joined}` : joined;
+}
+
+function dirname(path) {
+  const normalized = String(path || "");
+  if (!normalized || normalized === sep) return sep;
+  const parts = normalizeSegments(normalized.split(sep));
+  if (parts.length <= 1) return isAbsolute(normalized) ? sep : ".";
+  const dir = parts.slice(0, -1).join(sep);
+  return isAbsolute(normalized) ? `${sep}${dir}` : dir;
+}
+
+function basename(path) {
+  const normalized = normalizeSegments(String(path || "").split(sep));
+  return normalized.length === 0 ? "" : normalized[normalized.length - 1];
+}
+
+function extname(path) {
+  const base = basename(path);
+  const index = base.lastIndexOf(".");
+  if (index <= 0) return "";
+  return base.slice(index);
+}
+
+function resolve(...parts) {
+  const absoluteParts = [];
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const part = String(parts[index] || "");
+    if (!part) continue;
+    absoluteParts.unshift(part);
+    if (isAbsolute(part)) break;
+  }
+  if (absoluteParts.length === 0 || !isAbsolute(absoluteParts[0])) {
+    absoluteParts.unshift(typeof process?.cwd === "function" ? process.cwd() : sep);
+  }
+  return join(...absoluteParts);
+}
+
+function relative(from, to) {
+  const fromResolved = resolve(from);
+  const toResolved = resolve(to);
+  if (fromResolved === toResolved) return "";
+
+  const fromParts = normalizeSegments(fromResolved.split(sep));
+  const toParts = normalizeSegments(toResolved.split(sep));
+  let shared = 0;
+  while (
+    shared < fromParts.length &&
+    shared < toParts.length &&
+    fromParts[shared] === toParts[shared]
+  ) {
+    shared += 1;
+  }
+
+  const up = new Array(fromParts.length - shared).fill("..");
+  const down = toParts.slice(shared);
+  const result = [...up, ...down].join(sep);
+  return result || ".";
+}
+
+function parse(path) {
+  const root = isAbsolute(path) ? sep : "";
+  const dir = dirname(path);
+  const base = basename(path);
+  const ext = extname(path);
+  const name = ext ? base.slice(0, -ext.length) : base;
+  return { root, dir, base, ext, name };
+}
+
+function format(pathObject = {}) {
+  const dir = pathObject.dir || pathObject.root || "";
+  const base =
+    pathObject.base ||
+    `${pathObject.name || ""}${pathObject.ext || ""}`;
+  if (!dir) return base;
+  if (!base) return dir;
+  return dir.endsWith(sep) ? `${dir}${base}` : `${dir}${sep}${base}`;
+}
+
+const pathModule = {
+  basename,
+  delimiter,
+  dirname,
+  extname,
+  format,
+  isAbsolute,
+  join,
+  parse,
+  relative,
+  resolve,
+  sep,
+};
+const posix = pathModule;
+const win32 = pathModule;
+
+export { basename, delimiter, dirname, extname, format, isAbsolute, join, parse, posix, relative, resolve, sep, win32 };
+export default pathModule;
+"#,
+        );
+    }
+
+    if module_name == "url" {
+        return String::from(
+            r#"const NativeURL = globalThis.URL;
+
+function fileURLToPath(value) {
+  const url = value instanceof NativeURL ? value : new NativeURL(String(value));
+  if (url.protocol !== "file:") {
+    throw new Error(`Expected file URL, received ${url.protocol}`);
+  }
+  return decodeURIComponent(url.pathname);
+}
+
+function pathToFileURL(path) {
+  const normalized = String(path || "");
+  const absolute = normalized.startsWith("/") ? normalized : `/${normalized}`;
+  return new NativeURL(`file://${absolute}`);
+}
+
+export { NativeURL as URL, fileURLToPath, pathToFileURL };
+export default { URL: NativeURL, fileURLToPath, pathToFileURL };
+"#,
+        );
+    }
+
+    if module_name == "readline" {
+        return String::from(
+            r#"class MiniEmitter {
+  constructor() {
+    this.listeners = new Map();
+  }
+
+  on(event, listener) {
+    const listeners = this.listeners.get(event) ?? [];
+    listeners.push(listener);
+    this.listeners.set(event, listeners);
+    return this;
+  }
+
+  off(event, listener) {
+    const listeners = this.listeners.get(event) ?? [];
+    this.listeners.set(
+      event,
+      listeners.filter((candidate) => candidate !== listener),
+    );
+    return this;
+  }
+
+  emit(event, ...args) {
+    const listeners = this.listeners.get(event) ?? [];
+    for (const listener of listeners) {
+      listener(...args);
+    }
+    return listeners.length > 0;
+  }
+}
+
+export function createInterface(options = {}) {
+  const input = options.input;
+  const emitter = new MiniEmitter();
+  let buffer = "";
+  let closed = false;
+
+  const flush = () => {
+    if (buffer.length > 0) {
+      emitter.emit("line", buffer);
+      buffer = "";
+    }
+  };
+
+  const onData = (chunk) => {
+    buffer += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    while (true) {
+      const index = buffer.indexOf("\n");
+      if (index < 0) break;
+      const line = buffer.slice(0, index).replace(/\r$/, "");
+      buffer = buffer.slice(index + 1);
+      emitter.emit("line", line);
+    }
+  };
+
+  const onEnd = () => {
+    if (closed) return;
+    flush();
+    emitter.emit("close");
+  };
+
+  if (input && typeof input.on === "function") {
+    input.on("data", onData);
+    input.on("end", onEnd);
+    input.on("close", onEnd);
+  }
+
+  emitter.close = () => {
+    if (closed) return;
+    closed = true;
+    if (input && typeof input.off === "function") {
+      input.off("data", onData);
+      input.off("end", onEnd);
+      input.off("close", onEnd);
+    }
+    flush();
+    emitter.emit("close");
+  };
+
+  return emitter;
+}
+
+export default { createInterface };
+"#,
+        );
+    }
+
+    if module_name == "stream" {
+        return String::from(
+            r#"class MiniEmitter {
+  constructor() {
+    this._listeners = new Map();
+    this._onceListeners = new Map();
+  }
+
+  on(event, listener) {
+    const listeners = this._listeners.get(event) ?? [];
+    listeners.push(listener);
+    this._listeners.set(event, listeners);
+    return this;
+  }
+
+  once(event, listener) {
+    const listeners = this._onceListeners.get(event) ?? [];
+    listeners.push(listener);
+    this._onceListeners.set(event, listeners);
+    return this;
+  }
+
+  off(event, listener) {
+    for (const map of [this._listeners, this._onceListeners]) {
+      const listeners = map.get(event) ?? [];
+      map.set(
+        event,
+        listeners.filter((candidate) => candidate !== listener),
+      );
+    }
+    return this;
+  }
+
+  removeListener(event, listener) {
+    return this.off(event, listener);
+  }
+
+  emit(event, ...args) {
+    const persistent = [...(this._listeners.get(event) ?? [])];
+    const once = [...(this._onceListeners.get(event) ?? [])];
+    this._onceListeners.delete(event);
+    for (const listener of persistent) {
+      listener(...args);
+    }
+    for (const listener of once) {
+      listener(...args);
+    }
+    return persistent.length + once.length > 0;
+  }
+}
+
+function getCallback(encodingOrCallback, callback) {
+  if (typeof encodingOrCallback === "function") return encodingOrCallback;
+  if (typeof callback === "function") return callback;
+  return null;
+}
+
+function queueResult(callback, error = null) {
+  if (typeof callback !== "function") return;
+  queueMicrotask(() => callback(error));
+}
+
+class Readable extends MiniEmitter {
+  constructor() {
+    super();
+    this.readable = true;
+    this.readableEnded = false;
+    this.destroyed = false;
+  }
+
+  push(chunk) {
+    if (chunk === null) {
+      if (!this.readableEnded) {
+        this.readableEnded = true;
+        queueMicrotask(() => {
+          this.emit("end");
+          this.emit("close");
+        });
+      }
+      return false;
+    }
+    this.emit("data", Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk ?? []));
+    return true;
+  }
+
+  pipe(destination) {
+    this.on("data", (chunk) => destination.write(chunk));
+    this.once("end", () => destination.end());
+    return destination;
+  }
+
+  destroy(error) {
+    if (this.destroyed) return this;
+    this.destroyed = true;
+    if (error) {
+      queueMicrotask(() => this.emit("error", error));
+    }
+    queueMicrotask(() => this.emit("close"));
+    return this;
+  }
+
+  static fromWeb(stream) {
+    if (!stream || typeof stream.getReader !== "function") {
+      throw new TypeError("Readable.fromWeb expects a WHATWG ReadableStream");
+    }
+    return {
+      async *[Symbol.asyncIterator]() {
+        const reader = stream.getReader();
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            yield Buffer.from(value ?? []);
+          }
+        } finally {
+          reader.releaseLock?.();
+        }
+      },
+    };
+  }
+}
+
+class Writable extends MiniEmitter {
+  constructor() {
+    super();
+    this.writable = true;
+    this.writableEnded = false;
+    this.destroyed = false;
+  }
+
+  write(chunk, encodingOrCallback, callback) {
+    if (this.writableEnded) {
+      const error = new Error("write after end");
+      queueResult(getCallback(encodingOrCallback, callback), error);
+      this.emit("error", error);
+      return false;
+    }
+    const done = getCallback(encodingOrCallback, callback);
+    this._write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk ?? []), done);
+    return true;
+  }
+
+  _write(_chunk, callback) {
+    queueResult(callback);
+  }
+
+  end(chunk, encodingOrCallback, callback) {
+    if (chunk !== undefined && chunk !== null) {
+      this.write(chunk, encodingOrCallback);
+    }
+    if (this.writableEnded) {
+      queueResult(getCallback(encodingOrCallback, callback));
+      return this;
+    }
+    this.writableEnded = true;
+    const done = getCallback(encodingOrCallback, callback);
+    queueMicrotask(() => {
+      queueResult(done);
+      this.emit("finish");
+      this.emit("close");
+    });
+    return this;
+  }
+
+  destroy(error) {
+    if (this.destroyed) return this;
+    this.destroyed = true;
+    if (error) {
+      queueMicrotask(() => this.emit("error", error));
+    }
+    queueMicrotask(() => this.emit("close"));
+    return this;
+  }
+}
+
+class Duplex extends Readable {
+  constructor() {
+    super();
+    this.writable = true;
+    this.writableEnded = false;
+  }
+
+  write(chunk, encodingOrCallback, callback) {
+    return Writable.prototype.write.call(this, chunk, encodingOrCallback, callback);
+  }
+
+  _write(chunk, callback) {
+    queueResult(callback);
+  }
+
+  end(chunk, encodingOrCallback, callback) {
+    return Writable.prototype.end.call(this, chunk, encodingOrCallback, callback);
+  }
+}
+
+class Transform extends Duplex {
+  _write(chunk, callback) {
+    try {
+      this._transform(chunk, "buffer", (error, output) => {
+        if (!error && output !== undefined && output !== null) {
+          this.push(output);
+        }
+        queueResult(callback, error ?? null);
+      });
+    } catch (error) {
+      queueResult(callback, error);
+      this.emit("error", error);
+    }
+  }
+
+  _transform(chunk, _encoding, callback) {
+    callback(null, chunk);
+  }
+
+  end(chunk, encodingOrCallback, callback) {
+    Writable.prototype.end.call(this, chunk, encodingOrCallback, callback);
+    this.push(null);
+    return this;
+  }
+}
+
+class PassThrough extends Transform {}
+
+function finished(stream, callback) {
+  const done = (error = null) => {
+    cleanup();
+    if (typeof callback === "function") callback(error);
+  };
+  const onFinish = () => done();
+  const onEnd = () => done();
+  const onClose = () => done();
+  const onError = (error) => done(error);
+  const cleanup = () => {
+    stream?.off?.("finish", onFinish);
+    stream?.off?.("end", onEnd);
+    stream?.off?.("close", onClose);
+    stream?.off?.("error", onError);
+  };
+  stream?.once?.("finish", onFinish);
+  stream?.once?.("end", onEnd);
+  stream?.once?.("close", onClose);
+  stream?.once?.("error", onError);
+  return cleanup;
+}
+
+function pipeline(...streams) {
+  const callback =
+    streams.length > 0 && typeof streams[streams.length - 1] === "function"
+      ? streams.pop()
+      : null;
+  if (streams.length < 2) {
+    const error = new TypeError("pipeline requires at least two streams");
+    callback?.(error);
+    throw error;
+  }
+  for (let index = 0; index < streams.length - 1; index += 1) {
+    streams[index].pipe(streams[index + 1]);
+  }
+  if (callback) {
+    finished(streams[streams.length - 1], callback);
+  }
+  return streams[streams.length - 1];
+}
+
+function compose(...streams) {
+  return pipeline(...streams);
+}
+
+function addAbortSignal(signal, stream) {
+  if (signal?.aborted) {
+    stream?.destroy?.(signal.reason);
+    return stream;
+  }
+  signal?.addEventListener?.("abort", () => stream?.destroy?.(signal.reason), {
+    once: true,
+  });
+  return stream;
+}
+
+function isReadable(stream) {
+  return Boolean(stream && stream.readable && !stream.destroyed);
+}
+
+function isWritable(stream) {
+  return Boolean(stream && stream.writable && !stream.destroyed);
+}
+
+function isErrored(stream) {
+  return Boolean(stream && stream.errored);
+}
+
+const streamModule = {
+  Duplex,
+  PassThrough,
+  Readable,
+  Transform,
+  Writable,
+  addAbortSignal,
+  compose,
+  finished,
+  isErrored,
+  isReadable,
+  isWritable,
+  pipeline,
+};
+
+export {
+  Duplex,
+  PassThrough,
+  Readable,
+  Transform,
+  Writable,
+  addAbortSignal,
+  compose,
+  finished,
+  isErrored,
+  isReadable,
+  isWritable,
+  pipeline,
+};
+export default streamModule;
+"#,
+        );
+    }
+
+    if module_name == "stream/promises" {
+        return String::from(
+            r#"async function pipeline(source, destination) {
+  const readable =
+    source && typeof source[Symbol.asyncIterator] === "function"
+      ? source
+      : source && typeof source.getReader === "function"
+        ? {
+            async *[Symbol.asyncIterator]() {
+              const reader = source.getReader();
+              try {
+                while (true) {
+                  const { value, done } = await reader.read();
+                  if (done) break;
+                  yield Buffer.from(value ?? []);
+                }
+              } finally {
+                reader.releaseLock?.();
+              }
+            },
+          }
+        : null;
+
+  if (readable == null) {
+    throw new TypeError("pipeline source must be async iterable or a WHATWG ReadableStream");
+  }
+  if (!destination || typeof destination.write !== "function") {
+    throw new TypeError("pipeline destination must provide write()");
+  }
+
+  for await (const chunk of readable) {
+    await new Promise((resolve, reject) => {
+      try {
+        destination.write(chunk, (error) => (error ? reject(error) : resolve()));
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  if (typeof destination.end === "function") {
+    await new Promise((resolve, reject) => {
+      try {
+        destination.end((error) => (error ? reject(error) : resolve()));
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  return destination;
+}
+
+export { pipeline };
+export default { pipeline };
+"#,
+        );
+    }
+
+    if module_name == "stream/web" {
+        return String::from(
+            r#"export const ReadableStream = globalThis.ReadableStream;
+export const WritableStream = globalThis.WritableStream;
+export const TransformStream = globalThis.TransformStream;
+export const TextEncoderStream = globalThis.TextEncoderStream;
+export const TextDecoderStream = globalThis.TextDecoderStream;
+export const CompressionStream = globalThis.CompressionStream;
+export const DecompressionStream = globalThis.DecompressionStream;
+export default {
+  ReadableStream,
+  WritableStream,
+  TransformStream,
+  TextEncoderStream,
+  TextDecoderStream,
+  CompressionStream,
+  DecompressionStream,
+};
+"#,
+        );
+    }
+
+    if module_name == "string_decoder" {
+        return String::from(
+            r#"class StringDecoder {
+  constructor(encoding = "utf8") {
+    this.encoding = encoding;
+    this.decoder = new TextDecoder(encoding, { fatal: false });
+  }
+
+  write(input) {
+    const buffer =
+      typeof input === "string"
+        ? Buffer.from(input, this.encoding)
+        : Buffer.isBuffer(input)
+          ? input
+          : Buffer.from(input ?? []);
+    return this.decoder.decode(buffer, { stream: true });
+  }
+
+  end(input) {
+    let output = "";
+    if (input !== undefined) {
+      output += this.write(input);
+    }
+    output += this.decoder.decode();
+    return output;
+  }
+}
+
+export { StringDecoder };
+export default { StringDecoder };
+"#,
+        );
+    }
+
     let default_target = format!(
         "globalThis._requireFrom({}, \"/\")",
         serde_json::to_string(&format!("node:{module_name}"))
@@ -2556,9 +3469,79 @@ fn build_builtin_module_wrapper(module_name: &str) -> String {
 
 fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
     match module_name {
+        "child_process" => &[
+            "exec",
+            "execFile",
+            "execFileSync",
+            "execSync",
+            "fork",
+            "spawn",
+            "spawnSync",
+        ],
+        "crypto" => &[
+            "createHash",
+            "getRandomValues",
+            "randomBytes",
+            "randomUUID",
+            "subtle",
+        ],
         "events" => &["EventEmitter", "once"],
-        "fs" => &["constants", "promises", "readFileSync"],
-        "fs/promises" => &["access", "open", "readFile", "writeFile"],
+        "fs" => &[
+            "access",
+            "accessSync",
+            "appendFile",
+            "appendFileSync",
+            "chmod",
+            "chmodSync",
+            "closeSync",
+            "constants",
+            "createReadStream",
+            "createWriteStream",
+            "existsSync",
+            "lstat",
+            "lstatSync",
+            "mkdir",
+            "mkdirSync",
+            "openSync",
+            "readFile",
+            "promises",
+            "readFileSync",
+            "readdir",
+            "readSync",
+            "readdirSync",
+            "readlink",
+            "realpathSync",
+            "rename",
+            "readlinkSync",
+            "renameSync",
+            "rm",
+            "rmSync",
+            "stat",
+            "statSync",
+            "unlink",
+            "unlinkSync",
+            "watch",
+            "writeFile",
+            "writeFileSync",
+        ],
+        "fs/promises" => &[
+            "access",
+            "chmod",
+            "copyFile",
+            "lstat",
+            "mkdir",
+            "mkdtemp",
+            "open",
+            "readFile",
+            "readdir",
+            "readlink",
+            "realpath",
+            "rename",
+            "rm",
+            "stat",
+            "unlink",
+            "writeFile",
+        ],
         "http" => &[
             "Agent",
             "METHODS",
@@ -2568,6 +3551,18 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
         ],
         "http2" => &["connect", "createServer", "createSecureServer"],
         "https" => &["Agent", "createServer", "request"],
+        "module" => &[
+            "Module",
+            "_cache",
+            "_extensions",
+            "_resolveFilename",
+            "builtinModules",
+            "createRequire",
+            "findSourceMap",
+            "isBuiltin",
+            "syncBuiltinESMExports",
+            "wrap",
+        ],
         "net" => &[
             "Socket",
             "Server",
@@ -2577,13 +3572,27 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
         ],
         "os" => &[
             "EOL",
+            "arch",
             "availableParallelism",
             "cpus",
+            "endianness",
             "homedir",
             "hostname",
+            "platform",
+            "release",
             "tmpdir",
+            "type",
         ],
-        "path" => &["basename", "dirname", "join", "resolve", "sep"],
+        "path" => &[
+            "basename",
+            "dirname",
+            "isAbsolute",
+            "join",
+            "resolve",
+            "sep",
+        ],
+        "readline" => &["createInterface"],
+        "sqlite" => &["DatabaseSync", "StatementSync", "constants"],
         "tls" => &[
             "TLSSocket",
             "Server",
@@ -2760,10 +3769,12 @@ mod tests {
             response["error"]["code"],
             Value::String(String::from("ERR_AGENT_OS_NODE_SYNC_RPC_TIMEOUT"))
         );
-        assert!(response["error"]["message"]
-            .as_str()
-            .expect("timeout message")
-            .contains("timed out after 20ms"));
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .expect("timeout message")
+                .contains("timed out after 20ms")
+        );
         assert_eq!(
             *pending.lock().expect("pending state lock"),
             Some(PendingSyncRpcState::TimedOut(7))
@@ -2790,8 +3801,10 @@ mod tests {
             started.elapsed() >= Duration::from_millis(30),
             "send should wait for the configured timeout"
         );
-        assert!(error
-            .to_string()
-            .contains("timed out after 30ms while queueing JavaScript sync RPC response"));
+        assert!(
+            error
+                .to_string()
+                .contains("timed out after 30ms while queueing JavaScript sync RPC response")
+        );
     }
 }
