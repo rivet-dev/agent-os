@@ -118,7 +118,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Step 0a final. Check all extracted modules (vm.rs, filesystem.rs, execution.rs, bootstrap.rs, bridge.rs) for inline test blocks. crates/sidecar/tests/ already has ~14 test files — add new ones alongside them."
     },
     {

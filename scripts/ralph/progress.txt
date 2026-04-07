@@ -16,7 +16,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - MountPluginContext<B> is `pub(crate)` with `pub(crate)` fields so vm.rs reconcile_mounts can construct it
 - When extracting methods, check test modules — `use super::*` only imports from the parent module, so removed imports need explicit test-module imports
 - Filesystem-domain extraction from `service.rs` should move guest filesystem ACP handlers, Python VFS RPC handling, and JS filesystem sync RPCs together; leave `service.rs` as a thin dispatch hub and keep shared JS RPC argument parsers / execution response shims `pub(crate)` there
-- Until US-007 moves inline `service.rs` tests into `crates/sidecar/tests/`, extracted helpers they call must stay reachable through `service.rs` via `pub(crate)` re-exports or widened crate visibility
+- When extracting large sidecar test modules out of `src/`, keep the tests in `crates/sidecar/tests/*.rs` by wrapping `include!("../src/...")` in a same-named module and nesting the moved assertions under `mod tests`; service-style harnesses also need crate-root re-exports for `DispatchResult`, `NativeSidecar`, and `SidecarError`
 - Native sidecar mount plugins live under `crates/sidecar/src/plugins/`, and `plugins/mod.rs` owns shared registration for the reusable native plugins while `bridge.rs` only adds sidecar-specific `memory` and `js_bridge` entries
 
 ## 2026-04-06 - US-001
@@ -86,4 +86,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Centralizing native plugin registration in `plugins/mod.rs` keeps plugin-file moves mechanical and limits `bridge.rs` changes to the sidecar-only plugin entries
   - `service.rs` inline tests can keep importing plugin test helpers through the new module paths (`crate::plugins::...`) without changing test behavior
   - `cargo test -p agent-os-sidecar --lib -- --test-threads=1` covers the moved inline plugin tests and matches the repo guidance about avoiding the full parallel sidecar package run
+---
+## 2026-04-06 18:03:27 PDT - US-007
+- Moved the non-trivial inline sidecar and plugin test modules out of `crates/sidecar/src/` and into new `crates/sidecar/tests/{service,host_dir,google_drive,s3,sandbox_agent}.rs` harnesses that wrap the source modules and preserve private helper access
+- Left the single trivial `stdio.rs` unit test inline and removed the extracted `mod tests` blocks from `service.rs`, `plugins/host_dir.rs`, `plugins/google_drive.rs`, `plugins/s3.rs`, and `plugins/sandbox_agent.rs`
+- Files changed: `crates/sidecar/src/service.rs`, `crates/sidecar/src/plugins/host_dir.rs`, `crates/sidecar/src/plugins/google_drive.rs`, `crates/sidecar/src/plugins/s3.rs`, `crates/sidecar/src/plugins/sandbox_agent.rs`, `crates/sidecar/tests/service.rs` (new), `crates/sidecar/tests/host_dir.rs` (new), `crates/sidecar/tests/google_drive.rs` (new), `crates/sidecar/tests/s3.rs` (new), `crates/sidecar/tests/sandbox_agent.rs` (new), `crates/CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Wrapping `include!("../src/...")` in a same-named module and nesting the moved assertions under `mod tests` preserves the original `use super::*` access pattern without reopening the production API
+  - The service test harness also needs crate-root re-exports for `DispatchResult`, `NativeSidecar`, and `SidecarError`, because sibling modules included alongside `service.rs` still import those through `crate::{...}`
+  - `cargo test -p agent-os-sidecar --test service -- --test-threads=1` is a good first validation pass for this harness, then `cargo test -p agent-os-sidecar --lib --test host_dir --test google_drive --test s3 --test sandbox_agent -- --test-threads=1` covers the extracted plugin suites
 ---

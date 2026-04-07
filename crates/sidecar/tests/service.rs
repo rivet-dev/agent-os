@@ -1,0 +1,5760 @@
+pub trait NativeSidecarBridge: agent_os_bridge::HostBridge {}
+impl<T> NativeSidecarBridge for T where T: agent_os_bridge::HostBridge {}
+
+#[path = "../src/bootstrap.rs"]
+mod bootstrap;
+#[path = "../src/bridge.rs"]
+mod bridge;
+#[path = "../src/execution.rs"]
+mod execution;
+#[path = "../src/filesystem.rs"]
+mod filesystem;
+#[path = "../src/plugins/mod.rs"]
+mod plugins;
+#[path = "../src/protocol.rs"]
+mod protocol;
+#[path = "../src/state.rs"]
+mod state;
+#[path = "../src/vm.rs"]
+mod vm;
+
+mod service {
+    include!("../src/service.rs");
+
+    mod tests {
+        #[path = "/home/nathan/a5/crates/bridge/tests/support.rs"]
+        mod bridge_support;
+
+        use super::*;
+        use crate::bridge::{bridge_permissions, HostFilesystem, ScopedHostFilesystem};
+        use crate::plugins::s3::test_support::MockS3Server;
+        use crate::plugins::sandbox_agent::test_support::MockSandboxAgentServer;
+        use crate::protocol::VmCreatedResponse;
+        use crate::protocol::{
+            AuthenticateRequest, BootstrapRootFilesystemRequest, ConfigureVmRequest,
+            CreateVmRequest, DisposeReason, GetZombieTimerCountRequest, GuestRuntimeKind,
+            MountDescriptor, MountPluginDescriptor, OpenSessionRequest, OwnershipScope,
+            PermissionDescriptor, PermissionMode, RequestFrame, RequestPayload, ResponsePayload,
+            RootFilesystemEntry, RootFilesystemEntryKind, SidecarPlacement,
+        };
+        use crate::state::VM_DNS_SERVERS_METADATA_KEY;
+        use agent_os_bridge::{FileKind, SymlinkRequest};
+        use agent_os_execution::PythonVfsRpcMethod;
+        use agent_os_kernel::command_registry::CommandDriver;
+        use agent_os_kernel::kernel::{KernelVmConfig, SpawnOptions};
+        use agent_os_kernel::mount_table::{MountEntry, MountTable};
+        use agent_os_kernel::permissions::{FsAccessRequest, FsOperation, Permissions};
+        use agent_os_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
+        use bridge_support::RecordingBridge;
+        use serde_json::json;
+        use std::collections::BTreeMap;
+        use std::fs;
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+        use std::path::{Path, PathBuf};
+        use std::process::Command;
+        use std::thread;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        const TEST_AUTH_TOKEN: &str = "sidecar-test-token";
+        const TLS_TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQClvETzHfSyd1Y+\n\
+sjCfGkuyGxFMzwQlYjUrE0iwdMF774LYHFdpvtEo3sLOW6/b1xfXS/55jq+aggxS\n\
+v+vgtjrhGf/y33XzdrjxcVBRWIsgAtxMHsNKO4EQ/uA1g6zlbaSIu+ZWX3bkDuTi\n\
+K45VW69M0XSVyv8XFGYOcf8LTI87gTtXHuT92iej77IM2lHqLXCzQVr+NQ9yvXld\n\
+9yHlA2ZfYqhkSTLdDablqfgirrQIzZzLypSGQwZUU06nCtZ+dg6SNV4TGL4NqekD\n\
+jXR3BvmZu5l4sGAsNfFVjLx6hxsLt8uqn65sCAwBDdfucR+39+pHA+esj6NAWAFO\n\
+J9CB94sfAgMBAAECggEABQTA772x+a98aJSbvU2eCiwgp3tDTGB/bKj+U/2NGFQl\n\
+2aZuDTEugzbPnlEPb7BBNA9EiujDr4GNnvnZyimqecOASRn0J+Wp7wG35Waxe8wq\n\
+YJGz5y0LGPkmz+gHVcEusMdDz8y/PGOpEaIxAquukLxs89Y8SDYhawGPsAdm9O3F\n\
+4a+aosyQwS26mkZ/1WZOTsOVd4A1/1pxBvsANURj+pq7ed/1WqgrZBN/BG1TX5Xm\n\
+DZeYy01kTCMWtcAb4f8PxGpbkSGMvBb+Mj5XtZByvfQeC+Cs5ECXhmJtVaYVUHhT\n\
+vI0oTMGvit9ffoYNds0qTeZpEeineaDH3sD16D037QKBgQDX5b65KfIVH0/WvcbJ\n\
+Gx2Wh7knXdDBky40wdq4buKK+ImzPPRxOsQ+xEMgEaZs8gb7LBapbB0cZ+YsKBOt\n\
+4FY86XQU5V5ju2ntldIIIaugIGgvGS0jdRMH3ux6iEjPZE6Fm7/s8bjIgqB7keWh\n\
+1rcZwDrwMzqwAUoBTJX58OY/fQKBgQDEhT5U7TqgEFVSspYh8c8yVRV9udiphPH3\n\
+3XIbo9iV3xzNFdwtNHC+2eLM+4J3WKjhB0UvzrlIegSqKPIsy+0nD1uzaU+O72gg\n\
+7+NKSh0RT61UDolk+P4s/2+5tnZqSNYO7Sd/svE/rkwIEtDEI5tb1nqq75h/HDEW\n\
+k56GHAxvywKBgGmGmTdmIjZizKJYti4b+9VU15I/T8ceCmqtChw1zrNAkgWy2IPz\n\
+xnIreefV2LPNhM4GGbmL55q3yhBxMlU9nsk9DokcJ4u10ivXnAZvdrTYwjOrKZ34\n\
+HmotcwbdUEFWdO7nVuMYr0oKVyivAj+ddHe4ttYrJBddOe/yoCe/sLr9AoGBAKHL\n\
+IVpCRXXqfJStOzWPI4rIyfzMuTg3oA71XjCrYHFjUw715GPDPN+j+znQB8XCVKeP\n\
+mMKXa6vj6Vs+gsOm0QTLfC/lj/6Z1Bzp4zMSeYP7GTSPE0bySDE7y/wV4L/4X2PC\n\
+lDZqWHyZPzeWZhJVTl754dxBjkd4KmHv/x9ikEqpAoGBAJNA0u0fKhdWDz32+a2F\n\
++plJ18kQvGuwKFWIIVHBDc0wCxLKWKr5wgkhdcAEpy4mgosiZ09DzV/OpQBBHVWZ\n\
+v/Cn/DwZyoiXIi5onf7AqWIhw+aem+oMbugbSIYqDwYkwnN79tsza0KC1ScphIuf\n\
+vKoOAdY4xOcG9BEZZoKVOa8R\n\
+-----END PRIVATE KEY-----\n";
+        const TLS_TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIDCTCCAfGgAwIBAgIUJqRgTEIlpbfqbQnyo9hxLyIn3qYwDQYJKoZIhvcNAQEL\n\
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDQwNTA3MTAwOVoXDTI2MDQw\n\
+NjA3MTAwOVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF\n\
+AAOCAQ8AMIIBCgKCAQEApbxE8x30sndWPrIwnxpLshsRTM8EJWI1KxNIsHTBe++C\n\
+2BxXab7RKN7Czluv29cX10v+eY6vmoIMUr/r4LY64Rn/8t9183a48XFQUViLIALc\n\
+TB7DSjuBEP7gNYOs5W2kiLvmVl925A7k4iuOVVuvTNF0lcr/FxRmDnH/C0yPO4E7\n\
+Vx7k/dono++yDNpR6i1ws0Fa/jUPcr15Xfch5QNmX2KoZEky3Q2m5an4Iq60CM2c\n\
+y8qUhkMGVFNOpwrWfnYOkjVeExi+DanpA410dwb5mbuZeLBgLDXxVYy8eocbC7fL\n\
+qp+ubAgMAQ3X7nEft/fqRwPnrI+jQFgBTifQgfeLHwIDAQABo1MwUTAdBgNVHQ4E\n\
+FgQUwViZyKE6S2vgTAkexnZFccSwoPMwHwYDVR0jBBgwFoAUwViZyKE6S2vgTAke\n\
+xnZFccSwoPMwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAadmK\n\
+3Ugrvep6glHAfgPP54um9cjJZQZDPn5I7yvgDr/Zp/u/UMW/OUKSfL1VNHlbAVLc\n\
+Yzq2RVTrJKObiTSoy99OzYkEdgfuEBBP7XBEQlqoOGYNRR+IZXBBiQ+m9CtajNwQ\n\
+G6mr9//zZtV1y2UUBgtxVpry5iOekpkr8iXyDLnGpS2gKL5dwXCzWCKVCO3qVotn\n\
+r6FBg4DCBMkwO6xOVN2yInPd6CPy/JAUPW50zWPnn4DKfeAAU0C+E75HN65jozdi\n\
+12yT4K772P8oSecGPInZhqJgOv1q0BDG8gccOxX1PA4sE00Enqlbvxz7sku9y4zp\n\
+ykAheWCsAteSEWVc0w==\n\
+-----END CERTIFICATE-----\n";
+
+        fn request(
+            request_id: u64,
+            ownership: OwnershipScope,
+            payload: RequestPayload,
+        ) -> RequestFrame {
+            RequestFrame::new(request_id, ownership, payload)
+        }
+
+        fn create_test_sidecar() -> NativeSidecar<RecordingBridge> {
+            NativeSidecar::with_config(
+                RecordingBridge::default(),
+                NativeSidecarConfig {
+                    sidecar_id: String::from("sidecar-test"),
+                    compile_cache_root: Some(
+                        std::env::temp_dir().join("agent-os-sidecar-test-cache"),
+                    ),
+                    expected_auth_token: Some(String::from(TEST_AUTH_TOKEN)),
+                    ..NativeSidecarConfig::default()
+                },
+            )
+            .expect("create sidecar")
+        }
+
+        fn unexpected_response_error(expected: &str, other: ResponsePayload) -> SidecarError {
+            SidecarError::InvalidState(format!("expected {expected} response, got {other:?}"))
+        }
+
+        fn authenticated_connection_id(auth: DispatchResult) -> Result<String, SidecarError> {
+            match auth.response.payload {
+                ResponsePayload::Authenticated(response) => {
+                    assert_eq!(
+                        auth.response.ownership,
+                        OwnershipScope::connection(&response.connection_id)
+                    );
+                    Ok(response.connection_id)
+                }
+                other => Err(unexpected_response_error("authenticated", other)),
+            }
+        }
+
+        fn opened_session_id(session: DispatchResult) -> Result<String, SidecarError> {
+            match session.response.payload {
+                ResponsePayload::SessionOpened(response) => Ok(response.session_id),
+                other => Err(unexpected_response_error("session_opened", other)),
+            }
+        }
+
+        fn created_vm_id(response: DispatchResult) -> Result<String, SidecarError> {
+            match response.response.payload {
+                ResponsePayload::VmCreated(response) => Ok(response.vm_id),
+                other => Err(unexpected_response_error("vm_created", other)),
+            }
+        }
+
+        fn authenticate_and_open_session(
+            sidecar: &mut NativeSidecar<RecordingBridge>,
+        ) -> Result<(String, String), SidecarError> {
+            let auth = sidecar
+                .dispatch(request(
+                    1,
+                    OwnershipScope::connection("conn-1"),
+                    RequestPayload::Authenticate(AuthenticateRequest {
+                        client_name: String::from("service-tests"),
+                        auth_token: String::from(TEST_AUTH_TOKEN),
+                    }),
+                ))
+                .expect("authenticate");
+            let connection_id = authenticated_connection_id(auth)?;
+
+            let session = sidecar
+                .dispatch(request(
+                    2,
+                    OwnershipScope::connection(&connection_id),
+                    RequestPayload::OpenSession(OpenSessionRequest {
+                        placement: SidecarPlacement::Shared { pool: None },
+                        metadata: BTreeMap::new(),
+                    }),
+                ))
+                .expect("open session");
+            let session_id = opened_session_id(session)?;
+            Ok((connection_id, session_id))
+        }
+
+        fn create_vm(
+            sidecar: &mut NativeSidecar<RecordingBridge>,
+            connection_id: &str,
+            session_id: &str,
+            permissions: Vec<PermissionDescriptor>,
+        ) -> Result<String, SidecarError> {
+            create_vm_with_metadata(
+                sidecar,
+                connection_id,
+                session_id,
+                permissions,
+                BTreeMap::new(),
+            )
+        }
+
+        fn create_vm_with_metadata(
+            sidecar: &mut NativeSidecar<RecordingBridge>,
+            connection_id: &str,
+            session_id: &str,
+            permissions: Vec<PermissionDescriptor>,
+            metadata: BTreeMap<String, String>,
+        ) -> Result<String, SidecarError> {
+            let response = sidecar
+                .dispatch(request(
+                    3,
+                    OwnershipScope::session(connection_id, session_id),
+                    RequestPayload::CreateVm(CreateVmRequest {
+                        runtime: GuestRuntimeKind::JavaScript,
+                        metadata,
+                        root_filesystem: Default::default(),
+                        permissions,
+                    }),
+                ))
+                .expect("create vm");
+
+            created_vm_id(response)
+        }
+
+        fn temp_dir(prefix: &str) -> PathBuf {
+            let suffix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be monotonic enough for temp paths")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("{prefix}-{suffix}"));
+            fs::create_dir_all(&path).expect("create temp dir");
+            path
+        }
+
+        fn write_fixture(path: &Path, contents: &str) {
+            fs::write(path, contents).expect("write fixture");
+        }
+
+        fn assert_node_available() {
+            let output = Command::new("node")
+                .arg("--version")
+                .output()
+                .expect("spawn node --version");
+            assert!(
+                output.status.success(),
+                "node must be available for python dispatch tests"
+            );
+        }
+
+        fn run_javascript_entry(
+            sidecar: &mut NativeSidecar<RecordingBridge>,
+            vm_id: &str,
+            cwd: &Path,
+            process_id: &str,
+            allowed_node_builtins: &str,
+        ) -> (String, String, Option<i32>) {
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.to_owned(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+                .javascript_engine
+                .start_execution(StartJavascriptExecutionRequest {
+                    vm_id: vm_id.to_owned(),
+                    context_id: context.context_id,
+                    argv: vec![String::from("./entry.mjs")],
+                    env: BTreeMap::from([(
+                        String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                        allowed_node_builtins.to_owned(),
+                    )]),
+                    cwd: cwd.to_path_buf(),
+                })
+                .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    process_id.to_owned(),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    )
+                    .with_host_cwd(cwd.to_path_buf()),
+                );
+            }
+
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            let mut exit_code = None;
+            for _ in 0..64 {
+                let next_event = {
+                    let vm = sidecar.vms.get(vm_id).expect("javascript vm");
+                    vm.active_processes
+                        .get(process_id)
+                        .map(|process| {
+                            process
+                                .execution
+                                .poll_event(Duration::from_secs(5))
+                                .expect("poll javascript event")
+                        })
+                        .flatten()
+                };
+                let Some(event) = next_event else {
+                    if exit_code.is_some() {
+                        break;
+                    }
+                    panic!("javascript process {process_id} disappeared before exit");
+                };
+
+                match &event {
+                    ActiveExecutionEvent::Stdout(chunk) => {
+                        stdout.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Stderr(chunk) => {
+                        stderr.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Exited(code) => {
+                        exit_code = Some(*code);
+                    }
+                    _ => {}
+                }
+
+                sidecar
+                    .handle_execution_event(vm_id, process_id, event)
+                    .expect("handle javascript event");
+            }
+
+            (stdout, stderr, exit_code)
+        }
+
+        fn start_fake_javascript_process(
+            sidecar: &mut NativeSidecar<RecordingBridge>,
+            vm_id: &str,
+            cwd: &Path,
+            process_id: &str,
+            allowed_node_builtins: &str,
+        ) {
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.to_owned(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+                .javascript_engine
+                .start_execution(StartJavascriptExecutionRequest {
+                    vm_id: vm_id.to_owned(),
+                    context_id: context.context_id,
+                    argv: vec![String::from("./entry.mjs")],
+                    env: BTreeMap::from([(
+                        String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                        allowed_node_builtins.to_owned(),
+                    )]),
+                    cwd: cwd.to_path_buf(),
+                })
+                .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            let vm = sidecar.vms.get_mut(vm_id).expect("javascript vm");
+            vm.active_processes.insert(
+                process_id.to_owned(),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Javascript(execution),
+                )
+                .with_host_cwd(cwd.to_path_buf()),
+            );
+        }
+
+        fn call_javascript_sync_rpc(
+            sidecar: &mut NativeSidecar<RecordingBridge>,
+            vm_id: &str,
+            process_id: &str,
+            request: JavascriptSyncRpcRequest,
+        ) -> Result<Value, SidecarError> {
+            let bridge = sidecar.bridge.clone();
+            let (dns, socket_paths, counts, limits) = {
+                let vm = sidecar.vms.get(vm_id).expect("javascript vm");
+                (
+                    vm.dns.clone(),
+                    build_javascript_socket_path_context(vm).expect("build socket path context"),
+                    vm.active_processes
+                        .get(process_id)
+                        .expect("javascript process")
+                        .network_resource_counts(),
+                    ResourceLimits::default(),
+                )
+            };
+
+            let vm = sidecar.vms.get_mut(vm_id).expect("javascript vm");
+            let process = vm
+                .active_processes
+                .get_mut(process_id)
+                .expect("javascript process");
+            service_javascript_sync_rpc(
+                &bridge,
+                vm_id,
+                &dns,
+                &socket_paths,
+                &mut vm.kernel,
+                process,
+                &request,
+                &limits,
+                counts,
+            )
+        }
+
+        #[test]
+        fn dispose_vm_removes_per_vm_javascript_import_cache_directory() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_a = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm a");
+            let vm_b = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm b");
+
+            let cache_path_a = sidecar
+                .javascript_engine
+                .materialize_import_cache_for_vm(&vm_a)
+                .expect("materialize vm a import cache")
+                .to_path_buf();
+            let cache_path_b = sidecar
+                .javascript_engine
+                .materialize_import_cache_for_vm(&vm_b)
+                .expect("materialize vm b import cache")
+                .to_path_buf();
+            let cache_root_a = cache_path_a
+                .parent()
+                .expect("vm a cache parent")
+                .to_path_buf();
+            let cache_root_b = cache_path_b
+                .parent()
+                .expect("vm b cache parent")
+                .to_path_buf();
+
+            assert_ne!(cache_root_a, cache_root_b);
+            assert!(cache_root_a.exists(), "vm a cache root should exist");
+            assert!(cache_root_b.exists(), "vm b cache root should exist");
+
+            sidecar
+                .dispose_vm_internal(&connection_id, &session_id, &vm_a, DisposeReason::Requested)
+                .expect("dispose vm a");
+
+            assert!(
+                !cache_root_a.exists(),
+                "vm a cache root should be removed on dispose"
+            );
+            assert!(
+                cache_root_b.exists(),
+                "vm b cache root should remain until that VM is disposed"
+            );
+            assert!(
+                sidecar
+                    .javascript_engine
+                    .import_cache_path_for_vm(&vm_a)
+                    .is_none(),
+                "vm a cache entry should be removed from the engine"
+            );
+            assert_eq!(
+                sidecar.javascript_engine.import_cache_path_for_vm(&vm_b),
+                Some(cache_path_b.as_path())
+            );
+
+            sidecar
+                .dispose_vm_internal(&connection_id, &session_id, &vm_b, DisposeReason::Requested)
+                .expect("dispose vm b");
+            assert!(
+                !cache_root_b.exists(),
+                "vm b cache root should be removed on dispose"
+            );
+        }
+
+        #[test]
+        fn get_zombie_timer_count_reports_kernel_state_before_and_after_waitpid() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+
+            let zombie_pid = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
+                vm.kernel
+                    .register_driver(CommandDriver::new("test-driver", ["test-zombie"]))
+                    .expect("register test driver");
+                let process = vm
+                    .kernel
+                    .spawn_process(
+                        "test-zombie",
+                        Vec::new(),
+                        SpawnOptions {
+                            requester_driver: Some(String::from("test-driver")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn test process");
+                process.finish(17);
+                assert_eq!(vm.kernel.zombie_timer_count(), 1);
+                process.pid()
+            };
+
+            let zombie_count = sidecar
+                .dispatch(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::GetZombieTimerCount(GetZombieTimerCountRequest::default()),
+                ))
+                .expect("query zombie count");
+            match zombie_count.response.payload {
+                ResponsePayload::ZombieTimerCount(response) => assert_eq!(response.count, 1),
+                other => panic!("unexpected zombie count response: {other:?}"),
+            }
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
+                let waited = vm.kernel.waitpid(zombie_pid).expect("waitpid");
+                assert_eq!(waited.pid, zombie_pid);
+                assert_eq!(waited.status, 17);
+                assert_eq!(vm.kernel.zombie_timer_count(), 0);
+            }
+
+            let reaped_count = sidecar
+                .dispatch(request(
+                    5,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::GetZombieTimerCount(GetZombieTimerCountRequest::default()),
+                ))
+                .expect("query reaped zombie count");
+            match reaped_count.response.payload {
+                ResponsePayload::ZombieTimerCount(response) => assert_eq!(response.count, 0),
+                other => panic!("unexpected zombie count response: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_signal_only_accepts_whitelisted_guest_signals() {
+            assert_eq!(parse_signal("SIGINT").expect("parse SIGINT"), libc::SIGINT);
+            assert_eq!(parse_signal("kill").expect("parse SIGKILL"), SIGKILL);
+            assert_eq!(parse_signal("15").expect("parse numeric SIGTERM"), SIGTERM);
+            assert_eq!(
+                parse_signal("SIGCONT").expect("parse SIGCONT"),
+                libc::SIGCONT
+            );
+            assert_eq!(
+                parse_signal("SIGSTOP").expect("parse SIGSTOP"),
+                libc::SIGSTOP
+            );
+            assert_eq!(parse_signal("0").expect("parse signal 0"), 0);
+            assert!(parse_signal("SIGUSR1").is_err());
+        }
+
+        #[test]
+        fn runtime_child_liveness_only_tracks_owned_children() {
+            assert!(
+                !runtime_child_is_alive(std::process::id()).expect("current pid is not a child"),
+                "current process should not be treated as a guest runtime child"
+            );
+
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg("sleep 10")
+                .spawn()
+                .expect("spawn child process");
+            let child_pid = child.id();
+
+            assert!(
+                runtime_child_is_alive(child_pid).expect("inspect running child"),
+                "running child should be considered alive"
+            );
+
+            signal_runtime_process(child_pid, SIGTERM).expect("signal running child");
+            child.wait().expect("wait for signaled child");
+
+            assert!(
+                !runtime_child_is_alive(child_pid).expect("inspect reaped child"),
+                "reaped child should no longer be considered alive"
+            );
+            signal_runtime_process(child_pid, SIGTERM).expect("ignore reaped child");
+        }
+
+        #[test]
+        fn authenticated_connection_id_returns_error_for_unexpected_response() {
+            let error = authenticated_connection_id(DispatchResult {
+                response: ResponseFrame::new(
+                    1,
+                    OwnershipScope::connection("conn-1"),
+                    ResponsePayload::SessionOpened(SessionOpenedResponse {
+                        session_id: String::from("session-1"),
+                        owner_connection_id: String::from("conn-1"),
+                    }),
+                ),
+                events: Vec::new(),
+            })
+            .expect_err("unexpected auth payload should return an error");
+
+            match error {
+                SidecarError::InvalidState(message) => {
+                    assert!(message.contains("expected authenticated response"));
+                    assert!(message.contains("SessionOpened"));
+                }
+                other => panic!("expected invalid_state error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn opened_session_id_returns_error_for_unexpected_response() {
+            let error = opened_session_id(DispatchResult {
+                response: ResponseFrame::new(
+                    2,
+                    OwnershipScope::connection("conn-1"),
+                    ResponsePayload::VmCreated(VmCreatedResponse {
+                        vm_id: String::from("vm-1"),
+                    }),
+                ),
+                events: Vec::new(),
+            })
+            .expect_err("unexpected session payload should return an error");
+
+            match error {
+                SidecarError::InvalidState(message) => {
+                    assert!(message.contains("expected session_opened response"));
+                    assert!(message.contains("VmCreated"));
+                }
+                other => panic!("expected invalid_state error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn created_vm_id_returns_error_for_unexpected_response() {
+            let error = created_vm_id(DispatchResult {
+                response: ResponseFrame::new(
+                    3,
+                    OwnershipScope::session("conn-1", "session-1"),
+                    ResponsePayload::Rejected(RejectedResponse {
+                        code: String::from("invalid_state"),
+                        message: String::from("not owned"),
+                    }),
+                ),
+                events: Vec::new(),
+            })
+            .expect_err("unexpected vm payload should return an error");
+
+            match error {
+                SidecarError::InvalidState(message) => {
+                    assert!(message.contains("expected vm_created response"));
+                    assert!(message.contains("Rejected"));
+                }
+                other => panic!("expected invalid_state error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn configure_vm_instantiates_memory_mounts_through_the_plugin_registry() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+
+            sidecar
+                .dispatch(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::BootstrapRootFilesystem(BootstrapRootFilesystemRequest {
+                        entries: vec![
+                            RootFilesystemEntry {
+                                path: String::from("/workspace"),
+                                kind: RootFilesystemEntryKind::Directory,
+                                ..Default::default()
+                            },
+                            RootFilesystemEntry {
+                                path: String::from("/workspace/root-only.txt"),
+                                kind: RootFilesystemEntryKind::File,
+                                content: Some(String::from("root bootstrap file")),
+                                ..Default::default()
+                            },
+                        ],
+                    }),
+                ))
+                .expect("bootstrap root workspace");
+
+            sidecar
+                .dispatch(request(
+                    5,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/workspace"),
+                            read_only: false,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("memory"),
+                                config: json!({}),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: Vec::new(),
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: BTreeMap::new(),
+                    }),
+                ))
+                .expect("configure mounts");
+
+            let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
+            let hidden = vm
+                .kernel
+                .filesystem_mut()
+                .read_file("/workspace/root-only.txt")
+                .expect_err("mounted filesystem should hide root-backed file");
+            assert_eq!(hidden.code(), "ENOENT");
+
+            vm.kernel
+                .filesystem_mut()
+                .write_file("/workspace/from-mount.txt", b"native mount".to_vec())
+                .expect("write mounted file");
+            assert_eq!(
+                vm.kernel
+                    .filesystem_mut()
+                    .read_file("/workspace/from-mount.txt")
+                    .expect("read mounted file"),
+                b"native mount".to_vec()
+            );
+            assert_eq!(
+                vm.kernel.mounted_filesystems(),
+                vec![
+                    MountEntry {
+                        path: String::from("/workspace"),
+                        plugin_id: String::from("memory"),
+                        read_only: false,
+                    },
+                    MountEntry {
+                        path: String::from("/"),
+                        plugin_id: String::from("root"),
+                        read_only: false,
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn configure_vm_applies_read_only_mount_wrappers() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+
+            sidecar
+                .dispatch(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/readonly"),
+                            read_only: true,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("memory"),
+                                config: json!({}),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: Vec::new(),
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: BTreeMap::new(),
+                    }),
+                ))
+                .expect("configure readonly mount");
+
+            let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
+            let error = vm
+                .kernel
+                .filesystem_mut()
+                .write_file("/readonly/blocked.txt", b"nope".to_vec())
+                .expect_err("readonly mount should reject writes");
+            assert_eq!(error.code(), "EROFS");
+        }
+
+        #[test]
+        fn configure_vm_instantiates_host_dir_mounts_through_the_plugin_registry() {
+            let host_dir = temp_dir("agent-os-sidecar-host-dir");
+            fs::write(host_dir.join("hello.txt"), "hello from host").expect("seed host dir");
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+
+            sidecar
+                .dispatch(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::BootstrapRootFilesystem(BootstrapRootFilesystemRequest {
+                        entries: vec![
+                            RootFilesystemEntry {
+                                path: String::from("/workspace"),
+                                kind: RootFilesystemEntryKind::Directory,
+                                ..Default::default()
+                            },
+                            RootFilesystemEntry {
+                                path: String::from("/workspace/root-only.txt"),
+                                kind: RootFilesystemEntryKind::File,
+                                content: Some(String::from("root bootstrap file")),
+                                ..Default::default()
+                            },
+                        ],
+                    }),
+                ))
+                .expect("bootstrap root workspace");
+
+            sidecar
+                .dispatch(request(
+                    5,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/workspace"),
+                            read_only: false,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("host_dir"),
+                                config: json!({
+                                    "hostPath": host_dir,
+                                    "readOnly": false,
+                                }),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: Vec::new(),
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: BTreeMap::new(),
+                    }),
+                ))
+                .expect("configure host_dir mount");
+
+            let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
+            let hidden = vm
+                .kernel
+                .filesystem_mut()
+                .read_file("/workspace/root-only.txt")
+                .expect_err("mounted host dir should hide root-backed file");
+            assert_eq!(hidden.code(), "ENOENT");
+            assert_eq!(
+                vm.kernel
+                    .filesystem_mut()
+                    .read_file("/workspace/hello.txt")
+                    .expect("read mounted host file"),
+                b"hello from host".to_vec()
+            );
+
+            vm.kernel
+                .filesystem_mut()
+                .write_file("/workspace/from-vm.txt", b"native host dir".to_vec())
+                .expect("write host dir file");
+            assert_eq!(
+                fs::read_to_string(host_dir.join("from-vm.txt")).expect("read host output"),
+                "native host dir"
+            );
+
+            fs::remove_dir_all(host_dir).expect("remove temp dir");
+        }
+
+        #[test]
+        fn configure_vm_js_bridge_mount_preserves_hard_link_identity() {
+            let mut sidecar = create_test_sidecar();
+            sidecar
+                .bridge
+                .inspect(|bridge| {
+                    bridge.seed_directory(
+                        "/workspace",
+                        vec![agent_os_bridge::DirectoryEntry {
+                            name: String::from("original.txt"),
+                            kind: FileKind::File,
+                        }],
+                    );
+                    bridge.seed_file("/workspace/original.txt", b"hello world".to_vec());
+                })
+                .expect("seed js bridge filesystem");
+
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+
+            sidecar
+                .dispatch(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/workspace"),
+                            read_only: false,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("js_bridge"),
+                                config: json!({}),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: Vec::new(),
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: BTreeMap::new(),
+                    }),
+                ))
+                .expect("configure js_bridge mount");
+
+            let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
+            vm.kernel
+                .filesystem_mut()
+                .link("/workspace/original.txt", "/workspace/linked.txt")
+                .expect("create js bridge hard link");
+
+            let original = vm
+                .kernel
+                .filesystem_mut()
+                .stat("/workspace/original.txt")
+                .expect("stat original");
+            let linked = vm
+                .kernel
+                .filesystem_mut()
+                .stat("/workspace/linked.txt")
+                .expect("stat linked");
+            assert_eq!(original.ino, linked.ino);
+            assert_eq!(original.nlink, 2);
+            assert_eq!(linked.nlink, 2);
+
+            vm.kernel
+                .filesystem_mut()
+                .write_file("/workspace/linked.txt", b"updated".to_vec())
+                .expect("write through hard link");
+            assert_eq!(
+                vm.kernel
+                    .filesystem_mut()
+                    .read_file("/workspace/original.txt")
+                    .expect("read original through shared inode"),
+                b"updated".to_vec()
+            );
+
+            vm.kernel
+                .filesystem_mut()
+                .remove_file("/workspace/original.txt")
+                .expect("remove original hard link");
+            assert!(!vm
+                .kernel
+                .filesystem()
+                .exists("/workspace/original.txt")
+                .expect("check removed original"));
+            assert_eq!(
+                vm.kernel
+                    .filesystem_mut()
+                    .read_file("/workspace/linked.txt")
+                    .expect("read surviving hard link"),
+                b"updated".to_vec()
+            );
+            assert_eq!(
+                vm.kernel
+                    .filesystem_mut()
+                    .stat("/workspace/linked.txt")
+                    .expect("stat surviving hard link")
+                    .nlink,
+                1
+            );
+        }
+
+        #[test]
+        fn configure_vm_js_bridge_mount_preserves_metadata_updates() {
+            let mut sidecar = create_test_sidecar();
+            sidecar
+                .bridge
+                .inspect(|bridge| {
+                    bridge.seed_directory(
+                        "/workspace",
+                        vec![agent_os_bridge::DirectoryEntry {
+                            name: String::from("original.txt"),
+                            kind: FileKind::File,
+                        }],
+                    );
+                    bridge.seed_file("/workspace/original.txt", b"hello world".to_vec());
+                })
+                .expect("seed js bridge filesystem");
+
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+
+            sidecar
+                .dispatch(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/workspace"),
+                            read_only: false,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("js_bridge"),
+                                config: json!({}),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: Vec::new(),
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: BTreeMap::new(),
+                    }),
+                ))
+                .expect("configure js_bridge mount");
+
+            let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
+            vm.kernel
+                .filesystem_mut()
+                .link("/workspace/original.txt", "/workspace/linked.txt")
+                .expect("create js bridge hard link");
+
+            vm.kernel
+                .filesystem_mut()
+                .chown("/workspace/original.txt", 2000, 3000)
+                .expect("update js bridge ownership");
+            vm.kernel
+                .filesystem_mut()
+                .utimes(
+                    "/workspace/linked.txt",
+                    1_700_000_000_000,
+                    1_710_000_000_000,
+                )
+                .expect("update js bridge timestamps");
+
+            let original = vm
+                .kernel
+                .filesystem_mut()
+                .stat("/workspace/original.txt")
+                .expect("stat original");
+            let linked = vm
+                .kernel
+                .filesystem_mut()
+                .stat("/workspace/linked.txt")
+                .expect("stat linked");
+
+            assert_eq!(original.uid, 2000);
+            assert_eq!(original.gid, 3000);
+            assert_eq!(linked.uid, 2000);
+            assert_eq!(linked.gid, 3000);
+            assert_eq!(original.atime_ms, 1_700_000_000_000);
+            assert_eq!(original.mtime_ms, 1_710_000_000_000);
+            assert_eq!(linked.atime_ms, 1_700_000_000_000);
+            assert_eq!(linked.mtime_ms, 1_710_000_000_000);
+        }
+
+        #[test]
+        fn configure_vm_instantiates_sandbox_agent_mounts_through_the_plugin_registry() {
+            let server = MockSandboxAgentServer::start("agent-os-sidecar-sandbox", None);
+            fs::write(server.root().join("hello.txt"), "hello from sandbox")
+                .expect("seed sandbox file");
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+
+            sidecar
+                .dispatch(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::BootstrapRootFilesystem(BootstrapRootFilesystemRequest {
+                        entries: vec![
+                            RootFilesystemEntry {
+                                path: String::from("/sandbox"),
+                                kind: RootFilesystemEntryKind::Directory,
+                                ..Default::default()
+                            },
+                            RootFilesystemEntry {
+                                path: String::from("/sandbox/root-only.txt"),
+                                kind: RootFilesystemEntryKind::File,
+                                content: Some(String::from("root bootstrap file")),
+                                ..Default::default()
+                            },
+                        ],
+                    }),
+                ))
+                .expect("bootstrap root sandbox dir");
+
+            sidecar
+                .dispatch(request(
+                    5,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/sandbox"),
+                            read_only: false,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("sandbox_agent"),
+                                config: json!({
+                                    "baseUrl": server.base_url(),
+                                }),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: Vec::new(),
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: BTreeMap::new(),
+                    }),
+                ))
+                .expect("configure sandbox_agent mount");
+
+            let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
+            let hidden = vm
+                .kernel
+                .filesystem_mut()
+                .read_file("/sandbox/root-only.txt")
+                .expect_err("mounted sandbox should hide root-backed file");
+            assert_eq!(hidden.code(), "ENOENT");
+            assert_eq!(
+                vm.kernel
+                    .filesystem_mut()
+                    .read_file("/sandbox/hello.txt")
+                    .expect("read mounted sandbox file"),
+                b"hello from sandbox".to_vec()
+            );
+
+            vm.kernel
+                .filesystem_mut()
+                .write_file("/sandbox/from-vm.txt", b"native sandbox mount".to_vec())
+                .expect("write sandbox file");
+            assert_eq!(
+                fs::read_to_string(server.root().join("from-vm.txt")).expect("read sandbox output"),
+                "native sandbox mount"
+            );
+        }
+
+        #[test]
+        fn configure_vm_instantiates_s3_mounts_through_the_plugin_registry() {
+            let server = MockS3Server::start();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+
+            sidecar
+                .dispatch(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::BootstrapRootFilesystem(BootstrapRootFilesystemRequest {
+                        entries: vec![
+                            RootFilesystemEntry {
+                                path: String::from("/data"),
+                                kind: RootFilesystemEntryKind::Directory,
+                                ..Default::default()
+                            },
+                            RootFilesystemEntry {
+                                path: String::from("/data/root-only.txt"),
+                                kind: RootFilesystemEntryKind::File,
+                                content: Some(String::from("root bootstrap file")),
+                                ..Default::default()
+                            },
+                        ],
+                    }),
+                ))
+                .expect("bootstrap root s3 dir");
+
+            sidecar
+                .dispatch(request(
+                    5,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/data"),
+                            read_only: false,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("s3"),
+                                config: json!({
+                                    "bucket": "test-bucket",
+                                    "prefix": "service-test",
+                                    "region": "us-east-1",
+                                    "endpoint": server.base_url(),
+                                    "credentials": {
+                                        "accessKeyId": "minioadmin",
+                                        "secretAccessKey": "minioadmin",
+                                    },
+                                    "chunkSize": 8,
+                                    "inlineThreshold": 4,
+                                }),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: Vec::new(),
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: BTreeMap::new(),
+                    }),
+                ))
+                .expect("configure s3 mount");
+
+            let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
+            let hidden = vm
+                .kernel
+                .filesystem_mut()
+                .read_file("/data/root-only.txt")
+                .expect_err("mounted s3 fs should hide root-backed file");
+            assert_eq!(hidden.code(), "ENOENT");
+
+            vm.kernel
+                .filesystem_mut()
+                .write_file("/data/from-vm.txt", b"native s3 mount".to_vec())
+                .expect("write s3-backed file");
+            assert_eq!(
+                vm.kernel
+                    .filesystem_mut()
+                    .read_file("/data/from-vm.txt")
+                    .expect("read s3-backed file"),
+                b"native s3 mount".to_vec()
+            );
+            drop(sidecar);
+
+            let requests = server.requests();
+            assert!(
+                requests.iter().any(|request| request.method == "PUT"),
+                "expected the native plugin to persist data back to S3"
+            );
+            assert!(
+                requests
+                    .iter()
+                    .any(|request| request.path.contains("filesystem-manifest.json")),
+                "expected the native plugin to store a manifest object"
+            );
+        }
+
+        #[test]
+        fn bridge_permissions_map_symlink_operations_to_symlink_access() {
+            let bridge = SharedBridge::new(RecordingBridge::default());
+            let permissions = bridge_permissions(bridge.clone(), "vm-symlink");
+            let check = permissions
+                .filesystem
+                .as_ref()
+                .expect("filesystem permission callback");
+
+            let decision = check(&FsAccessRequest {
+                vm_id: String::from("ignored-by-bridge"),
+                op: FsOperation::Symlink,
+                path: String::from("/workspace/link.txt"),
+            });
+            assert!(decision.allow);
+
+            let recorded = bridge
+                .inspect(|bridge| bridge.filesystem_permission_requests.clone())
+                .expect("inspect bridge");
+            assert_eq!(
+                recorded,
+                vec![FilesystemPermissionRequest {
+                    vm_id: String::from("vm-symlink"),
+                    path: String::from("/workspace/link.txt"),
+                    access: FilesystemAccess::Symlink,
+                }]
+            );
+        }
+
+        #[test]
+        fn parse_resource_limits_reads_filesystem_limits() {
+            let metadata = BTreeMap::from([
+                (String::from("resource.max_sockets"), String::from("8")),
+                (String::from("resource.max_connections"), String::from("4")),
+                (
+                    String::from("resource.max_filesystem_bytes"),
+                    String::from("4096"),
+                ),
+                (
+                    String::from("resource.max_inode_count"),
+                    String::from("128"),
+                ),
+                (
+                    String::from("resource.max_blocking_read_ms"),
+                    String::from("250"),
+                ),
+                (
+                    String::from("resource.max_pread_bytes"),
+                    String::from("8192"),
+                ),
+                (
+                    String::from("resource.max_fd_write_bytes"),
+                    String::from("4096"),
+                ),
+                (
+                    String::from("resource.max_process_argv_bytes"),
+                    String::from("2048"),
+                ),
+                (
+                    String::from("resource.max_process_env_bytes"),
+                    String::from("1024"),
+                ),
+                (
+                    String::from("resource.max_readdir_entries"),
+                    String::from("32"),
+                ),
+                (String::from("resource.max_wasm_fuel"), String::from("5000")),
+                (
+                    String::from("resource.max_wasm_memory_bytes"),
+                    String::from("131072"),
+                ),
+                (
+                    String::from("resource.max_wasm_stack_bytes"),
+                    String::from("262144"),
+                ),
+            ]);
+
+            let limits =
+                crate::vm::parse_resource_limits(&metadata).expect("parse resource limits");
+            assert_eq!(limits.max_sockets, Some(8));
+            assert_eq!(limits.max_connections, Some(4));
+            assert_eq!(limits.max_filesystem_bytes, Some(4096));
+            assert_eq!(limits.max_inode_count, Some(128));
+            assert_eq!(limits.max_blocking_read_ms, Some(250));
+            assert_eq!(limits.max_pread_bytes, Some(8192));
+            assert_eq!(limits.max_fd_write_bytes, Some(4096));
+            assert_eq!(limits.max_process_argv_bytes, Some(2048));
+            assert_eq!(limits.max_process_env_bytes, Some(1024));
+            assert_eq!(limits.max_readdir_entries, Some(32));
+            assert_eq!(limits.max_wasm_fuel, Some(5000));
+            assert_eq!(limits.max_wasm_memory_bytes, Some(131072));
+            assert_eq!(limits.max_wasm_stack_bytes, Some(262144));
+        }
+
+        #[test]
+        fn create_vm_applies_filesystem_permission_descriptors_to_kernel_access() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                vec![
+                    PermissionDescriptor {
+                        capability: String::from("fs"),
+                        mode: PermissionMode::Allow,
+                    },
+                    PermissionDescriptor {
+                        capability: String::from("fs.read"),
+                        mode: PermissionMode::Deny,
+                    },
+                ],
+            )
+            .expect("create vm");
+
+            let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
+            vm.kernel
+                .filesystem_mut()
+                .write_file("/blocked.txt", b"nope".to_vec())
+                .expect("write should be allowed");
+
+            let read_error = vm
+                .kernel
+                .filesystem_mut()
+                .read_file("/blocked.txt")
+                .expect_err("read should be denied");
+            assert_eq!(read_error.code(), "EACCES");
+        }
+
+        #[test]
+        fn configure_vm_mounts_require_fs_write_permission() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            sidecar
+                .bridge
+                .set_vm_permissions(
+                    &vm_id,
+                    &[PermissionDescriptor {
+                        capability: String::from("fs.write"),
+                        mode: PermissionMode::Deny,
+                    }],
+                )
+                .expect("set vm permissions");
+
+            let result = sidecar
+                .dispatch(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/workspace"),
+                            read_only: false,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("memory"),
+                                config: json!({}),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: Vec::new(),
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: BTreeMap::new(),
+                    }),
+                ))
+                .expect("dispatch configure vm");
+
+            match result.response.payload {
+                ResponsePayload::Rejected(rejected) => {
+                    assert_eq!(rejected.code, "kernel_error");
+                    assert!(
+                        rejected.message.contains("EACCES"),
+                        "unexpected error: {}",
+                        rejected.message
+                    );
+                }
+                other => panic!("expected rejected response, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn configure_vm_sensitive_mounts_require_fs_mount_sensitive_permission() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            sidecar
+                .bridge
+                .set_vm_permissions(
+                    &vm_id,
+                    &[
+                        PermissionDescriptor {
+                            capability: String::from("fs.write"),
+                            mode: PermissionMode::Allow,
+                        },
+                        PermissionDescriptor {
+                            capability: String::from("fs.mount_sensitive"),
+                            mode: PermissionMode::Deny,
+                        },
+                    ],
+                )
+                .expect("set vm permissions");
+
+            let result = sidecar
+                .dispatch(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/etc"),
+                            read_only: false,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("memory"),
+                                config: json!({}),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: Vec::new(),
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: BTreeMap::new(),
+                    }),
+                ))
+                .expect("dispatch configure vm");
+
+            match result.response.payload {
+                ResponsePayload::Rejected(rejected) => {
+                    assert_eq!(rejected.code, "kernel_error");
+                    assert!(
+                        rejected.message.contains("EACCES"),
+                        "unexpected error: {}",
+                        rejected.message
+                    );
+                    assert!(
+                        rejected.message.contains("fs.mount_sensitive"),
+                        "unexpected error: {}",
+                        rejected.message
+                    );
+                }
+                other => panic!("expected rejected response, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn scoped_host_filesystem_unscoped_target_requires_exact_guest_root_prefix() {
+            let filesystem = ScopedHostFilesystem::new(
+                HostFilesystem::new(SharedBridge::new(RecordingBridge::default()), "vm-1"),
+                "/data",
+            );
+
+            assert_eq!(
+                filesystem.unscoped_target(String::from("/database")),
+                "/database"
+            );
+            assert_eq!(
+                filesystem.unscoped_target(String::from("/data/nested.txt")),
+                "/nested.txt"
+            );
+            assert_eq!(filesystem.unscoped_target(String::from("/data")), "/");
+        }
+
+        #[test]
+        fn scoped_host_filesystem_realpath_preserves_paths_outside_guest_root() {
+            let bridge = SharedBridge::new(RecordingBridge::default());
+            bridge
+                .inspect(|bridge| {
+                    agent_os_bridge::FilesystemBridge::symlink(
+                        bridge,
+                        SymlinkRequest {
+                            vm_id: String::from("vm-1"),
+                            target_path: String::from("/database"),
+                            link_path: String::from("/data/alias"),
+                        },
+                    )
+                    .expect("seed alias symlink");
+                })
+                .expect("inspect bridge");
+
+            let filesystem =
+                ScopedHostFilesystem::new(HostFilesystem::new(bridge, "vm-1"), "/data");
+
+            assert_eq!(
+                filesystem.realpath("/alias").expect("resolve alias"),
+                "/database"
+            );
+        }
+
+        #[test]
+        fn host_filesystem_realpath_fails_closed_on_circular_symlinks() {
+            let bridge = SharedBridge::new(RecordingBridge::default());
+            bridge
+                .inspect(|bridge| {
+                    agent_os_bridge::FilesystemBridge::symlink(
+                        bridge,
+                        SymlinkRequest {
+                            vm_id: String::from("vm-1"),
+                            target_path: String::from("/loop-b.txt"),
+                            link_path: String::from("/loop-a.txt"),
+                        },
+                    )
+                    .expect("seed loop-a symlink");
+                    agent_os_bridge::FilesystemBridge::symlink(
+                        bridge,
+                        SymlinkRequest {
+                            vm_id: String::from("vm-1"),
+                            target_path: String::from("/loop-a.txt"),
+                            link_path: String::from("/loop-b.txt"),
+                        },
+                    )
+                    .expect("seed loop-b symlink");
+                })
+                .expect("inspect bridge");
+
+            let filesystem = HostFilesystem::new(bridge, "vm-1");
+            let error = filesystem
+                .realpath("/loop-a.txt")
+                .expect_err("circular symlink chain should fail closed");
+            assert_eq!(error.code(), "ELOOP");
+        }
+
+        #[test]
+        fn configure_vm_host_dir_plugin_fails_closed_for_escape_symlinks() {
+            let host_dir = temp_dir("agent-os-sidecar-host-dir-escape");
+            std::os::unix::fs::symlink("/etc", host_dir.join("escape"))
+                .expect("seed escape symlink");
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+
+            sidecar
+                .dispatch(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/workspace"),
+                            read_only: false,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("host_dir"),
+                                config: json!({
+                                    "hostPath": host_dir,
+                                    "readOnly": false,
+                                }),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: Vec::new(),
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: BTreeMap::new(),
+                    }),
+                ))
+                .expect("configure host_dir mount");
+
+            let vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
+            let error = vm
+                .kernel
+                .filesystem_mut()
+                .read_file("/workspace/escape/hostname")
+                .expect_err("escape symlink should fail closed");
+            assert_eq!(error.code(), "EACCES");
+
+            fs::remove_dir_all(host_dir).expect("remove temp dir");
+        }
+
+        #[test]
+        fn execute_starts_python_runtime_instead_of_rejecting_it() {
+            assert_node_available();
+
+            let cache_root = temp_dir("agent-os-sidecar-python-cache");
+
+            let mut sidecar = NativeSidecar::with_config(
+                RecordingBridge::default(),
+                NativeSidecarConfig {
+                    sidecar_id: String::from("sidecar-python-test"),
+                    compile_cache_root: Some(cache_root),
+                    expected_auth_token: Some(String::from(TEST_AUTH_TOKEN)),
+                    ..NativeSidecarConfig::default()
+                },
+            )
+            .expect("create sidecar");
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+
+            let result = sidecar
+                .dispatch(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::Execute(crate::protocol::ExecuteRequest {
+                        process_id: String::from("proc-python"),
+                        runtime: GuestRuntimeKind::Python,
+                        entrypoint: String::from("print('hello from python')"),
+                        args: Vec::new(),
+                        env: BTreeMap::new(),
+                        cwd: None,
+                        wasm_permission_tier: None,
+                    }),
+                ))
+                .expect("dispatch python execute");
+
+            match result.response.payload {
+                ResponsePayload::ProcessStarted(response) => {
+                    assert_eq!(response.process_id, "proc-python");
+                    assert!(
+                        response.pid.is_some(),
+                        "python runtime should expose a child pid"
+                    );
+                }
+                other => panic!("unexpected execute response: {other:?}"),
+            }
+
+            let vm = sidecar.vms.get(&vm_id).expect("python vm");
+            let process = vm
+                .active_processes
+                .get("proc-python")
+                .expect("python process should be tracked");
+            assert_eq!(process.runtime, GuestRuntimeKind::Python);
+            match &process.execution {
+                ActiveExecution::Python(_) => {}
+                other => panic!("unexpected active execution variant: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn python_vfs_rpc_requests_proxy_into_the_vm_kernel_filesystem() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-python-vfs-rpc-cwd");
+            let pyodide_dir = temp_dir("agent-os-sidecar-python-vfs-rpc-pyodide");
+            write_fixture(
+                &pyodide_dir.join("pyodide.mjs"),
+                r#"
+export async function loadPyodide() {
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync(_code) {
+      await new Promise(() => {});
+    },
+  };
+}
+"#,
+            );
+            write_fixture(
+                &pyodide_dir.join("pyodide-lock.json"),
+                "{\"packages\":[]}\n",
+            );
+
+            let context = sidecar
+                .python_engine
+                .create_context(CreatePythonContextRequest {
+                    vm_id: vm_id.clone(),
+                    pyodide_dist_path: pyodide_dir,
+                });
+            let execution = sidecar
+                .python_engine
+                .start_execution(StartPythonExecutionRequest {
+                    vm_id: vm_id.clone(),
+                    context_id: context.context_id,
+                    code: String::from("print('hold-open')"),
+                    file_path: None,
+                    env: BTreeMap::new(),
+                    cwd: cwd.clone(),
+                })
+                .expect("start fake python execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("python vm");
+                vm.kernel
+                    .spawn_process(
+                        PYTHON_COMMAND,
+                        vec![String::from("print('hold-open')")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel python process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("python vm");
+                vm.active_processes.insert(
+                    String::from("proc-python-vfs"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::Python,
+                        ActiveExecution::Python(execution),
+                    ),
+                );
+            }
+
+            sidecar
+                .handle_python_vfs_rpc_request(
+                    &vm_id,
+                    "proc-python-vfs",
+                    PythonVfsRpcRequest {
+                        id: 1,
+                        method: PythonVfsRpcMethod::Mkdir,
+                        path: String::from("/workspace"),
+                        content_base64: None,
+                        recursive: false,
+                    },
+                )
+                .expect("handle python mkdir rpc");
+            sidecar
+                .handle_python_vfs_rpc_request(
+                    &vm_id,
+                    "proc-python-vfs",
+                    PythonVfsRpcRequest {
+                        id: 2,
+                        method: PythonVfsRpcMethod::Write,
+                        path: String::from("/workspace/note.txt"),
+                        content_base64: Some(String::from("aGVsbG8gZnJvbSBzaWRlY2FyIHJwYw==")),
+                        recursive: false,
+                    },
+                )
+                .expect("handle python write rpc");
+
+            let content = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("python vm");
+                String::from_utf8(
+                    vm.kernel
+                        .read_file("/workspace/note.txt")
+                        .expect("read bridged file from kernel"),
+                )
+                .expect("utf8 file contents")
+            };
+            assert_eq!(content, "hello from sidecar rpc");
+
+            let process = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("python vm");
+                vm.active_processes
+                    .remove("proc-python-vfs")
+                    .expect("remove fake python process")
+            };
+            let _ = signal_runtime_process(process.execution.child_pid(), SIGTERM);
+        }
+
+        #[test]
+        fn javascript_sync_rpc_requests_proxy_into_the_vm_kernel_filesystem() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-sync-rpc-cwd");
+            write_fixture(
+                &cwd.join("entry.mjs"),
+                r#"
+import fs from "node:fs";
+
+fs.writeFileSync("/rpc/note.txt", "hello from sidecar rpc");
+fs.mkdirSync("/rpc/subdir", { recursive: true });
+fs.symlinkSync("/rpc/note.txt", "/rpc/link.txt");
+const linkTarget = fs.readlinkSync("/rpc/link.txt");
+const existsBefore = fs.existsSync("/rpc/note.txt");
+const lstat = fs.lstatSync("/rpc/link.txt");
+fs.linkSync("/rpc/note.txt", "/rpc/hard.txt");
+fs.renameSync("/rpc/hard.txt", "/rpc/renamed.txt");
+const contents = fs.readFileSync("/rpc/renamed.txt", "utf8");
+fs.unlinkSync("/rpc/renamed.txt");
+fs.rmdirSync("/rpc/subdir");
+console.log(JSON.stringify({ existsBefore, linkTarget, linkIsSymlink: lstat.isSymbolicLink(), contents }));
+await new Promise(() => {});
+"#,
+            );
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+                .javascript_engine
+                .start_execution(StartJavascriptExecutionRequest {
+                    vm_id: vm_id.clone(),
+                    context_id: context.context_id,
+                    argv: vec![String::from("./entry.mjs")],
+                    env: BTreeMap::from([(
+                        String::from("AGENT_OS_NODE_SYNC_RPC_ENABLE"),
+                        String::from("1"),
+                    )]),
+                    cwd: cwd.clone(),
+                })
+                .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-sync"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    ),
+                );
+            }
+
+            let mut saw_stdout = false;
+            for _ in 0..16 {
+                let event = {
+                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    let process = vm
+                        .active_processes
+                        .get("proc-js-sync")
+                        .expect("javascript process should be tracked");
+                    process
+                        .execution
+                        .poll_event(Duration::from_secs(5))
+                        .expect("poll javascript sync rpc event")
+                        .expect("javascript sync rpc event")
+                };
+
+                if let ActiveExecutionEvent::Stdout(chunk) = &event {
+                    let stdout = String::from_utf8(chunk.clone()).expect("stdout utf8");
+                    if stdout.contains("\"contents\":\"hello from sidecar rpc\"")
+                        && stdout.contains("\"existsBefore\":true")
+                        && stdout.contains("\"linkTarget\":\"/rpc/note.txt\"")
+                        && stdout.contains("\"linkIsSymlink\":true")
+                    {
+                        saw_stdout = true;
+                        break;
+                    }
+                }
+
+                sidecar
+                    .handle_execution_event(&vm_id, "proc-js-sync", event)
+                    .expect("handle javascript sync rpc event");
+            }
+
+            let content = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                String::from_utf8(
+                    vm.kernel
+                        .read_file("/rpc/note.txt")
+                        .expect("read bridged file from kernel"),
+                )
+                .expect("utf8 file contents")
+            };
+            assert_eq!(content, "hello from sidecar rpc");
+            let link_target = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .read_link("/rpc/link.txt")
+                    .expect("read bridged symlink")
+            };
+            assert_eq!(link_target, "/rpc/note.txt");
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                assert!(
+                    !vm.kernel
+                        .exists("/rpc/renamed.txt")
+                        .expect("renamed file should be gone"),
+                    "expected renamed file to be removed",
+                );
+                assert!(
+                    !vm.kernel
+                        .exists("/rpc/subdir")
+                        .expect("subdir should be gone"),
+                    "expected subdir to be removed",
+                );
+            }
+            assert!(saw_stdout, "expected guest stdout after sync fs round-trip");
+
+            let process = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .remove("proc-js-sync")
+                    .expect("remove fake javascript process")
+            };
+            let _ = signal_runtime_process(process.execution.child_pid(), SIGTERM);
+        }
+
+        #[test]
+        fn python_vfs_rpc_paths_are_scoped_to_workspace_root() {
+            assert_eq!(
+                crate::filesystem::normalize_python_vfs_rpc_path("/workspace/./note.txt")
+                    .expect("normalize workspace path"),
+                String::from("/workspace/note.txt")
+            );
+            assert!(
+                crate::filesystem::normalize_python_vfs_rpc_path("/workspace/../etc/passwd")
+                    .is_err(),
+                "workspace escape should be rejected",
+            );
+            assert!(
+                crate::filesystem::normalize_python_vfs_rpc_path("/etc/passwd").is_err(),
+                "non-workspace paths should be rejected",
+            );
+            assert!(
+                crate::filesystem::normalize_python_vfs_rpc_path("workspace/note.txt").is_err(),
+                "relative paths should be rejected",
+            );
+        }
+
+        #[test]
+        fn javascript_fs_sync_rpc_resolves_proc_self_against_the_kernel_process() {
+            let mut config = KernelVmConfig::new("vm-js-procfs-rpc");
+            config.permissions = Permissions::allow_all();
+            let mut kernel = SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config);
+            kernel
+                .register_driver(CommandDriver::new(
+                    EXECUTION_DRIVER_NAME,
+                    [JAVASCRIPT_COMMAND],
+                ))
+                .expect("register execution driver");
+
+            let process = kernel
+                .spawn_process(
+                    JAVASCRIPT_COMMAND,
+                    Vec::new(),
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .expect("spawn javascript kernel process");
+
+            let link = service_javascript_fs_sync_rpc(
+                &mut kernel,
+                process.pid(),
+                &JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("fs.readlinkSync"),
+                    args: vec![json!("/proc/self")],
+                },
+            )
+            .expect("resolve /proc/self");
+            assert_eq!(link, Value::String(format!("/proc/{}", process.pid())));
+
+            let entries = service_javascript_fs_sync_rpc(
+                &mut kernel,
+                process.pid(),
+                &JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("fs.readdirSync"),
+                    args: vec![json!("/proc/self/fd")],
+                },
+            )
+            .expect("read /proc/self/fd");
+            let entry_names = entries
+                .as_array()
+                .expect("readdir should return an array")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            assert!(entry_names.contains(&"0"));
+            assert!(entry_names.contains(&"1"));
+            assert!(entry_names.contains(&"2"));
+
+            process.finish(0);
+            kernel
+                .waitpid(process.pid())
+                .expect("wait javascript process");
+        }
+
+        #[test]
+        fn javascript_fd_and_stream_rpc_requests_proxy_into_the_vm_kernel_filesystem() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .write_file("/rpc/input.txt", b"abcdefg")
+                    .expect("seed input file");
+            }
+            let cwd = temp_dir("agent-os-sidecar-js-fd-rpc-cwd");
+            write_fixture(
+                &cwd.join("entry.mjs"),
+                r#"
+import fs from "node:fs";
+import { once } from "node:events";
+
+const inFd = fs.openSync("/rpc/input.txt", "r");
+const buffer = Buffer.alloc(5);
+const bytesRead = fs.readSync(inFd, buffer, 0, buffer.length, 1);
+const stat = fs.fstatSync(inFd);
+fs.closeSync(inFd);
+
+const defaultUmask = process.umask();
+const previousUmask = process.umask(0o027);
+const outFd = fs.openSync("/rpc/output.txt", "w", 0o666);
+const written = fs.writeSync(outFd, Buffer.from("kernel"), 0, 6, 0);
+fs.closeSync(outFd);
+fs.mkdirSync("/rpc/private", { mode: 0o777 });
+const outputStat = fs.statSync("/rpc/output.txt");
+const privateDirStat = fs.statSync("/rpc/private");
+
+const asyncSummary = await new Promise((resolve, reject) => {
+  fs.open("/rpc/input.txt", "r", (openError, asyncFd) => {
+    if (openError) {
+      reject(openError);
+      return;
+    }
+
+    const target = Buffer.alloc(5);
+    fs.read(asyncFd, target, 0, 5, 0, (readError, asyncBytesRead) => {
+      if (readError) {
+        reject(readError);
+        return;
+      }
+
+      fs.fstat(asyncFd, (statError, asyncStat) => {
+        if (statError) {
+          reject(statError);
+          return;
+        }
+
+        fs.close(asyncFd, (closeError) => {
+          if (closeError) {
+            reject(closeError);
+            return;
+          }
+
+          resolve({
+            asyncBytesRead,
+            asyncText: target.toString("utf8"),
+            asyncSize: asyncStat.size,
+          });
+        });
+      });
+    });
+  });
+});
+
+const reader = fs.createReadStream("/rpc/input.txt", {
+  encoding: "utf8",
+  start: 0,
+  end: 4,
+  highWaterMark: 3,
+});
+const streamChunks = [];
+reader.on("data", (chunk) => streamChunks.push(chunk));
+await once(reader, "close");
+
+const writer = fs.createWriteStream("/rpc/stream.txt", { start: 0 });
+writer.write("ab");
+writer.end("cd");
+await once(writer, "close");
+
+let watchCode = "";
+let watchFileCode = "";
+try {
+  fs.watch("/rpc/input.txt");
+} catch (error) {
+  watchCode = error.code;
+}
+try {
+  fs.watchFile("/rpc/input.txt", () => {});
+} catch (error) {
+  watchFileCode = error.code;
+}
+
+console.log(
+  JSON.stringify({
+    text: buffer.toString("utf8"),
+    bytesRead,
+    size: stat.size,
+    blocks: stat.blocks,
+    dev: stat.dev,
+    rdev: stat.rdev,
+    written,
+    defaultUmask,
+    previousUmask,
+    outputMode: outputStat.mode & 0o777,
+    privateDirMode: privateDirStat.mode & 0o777,
+    asyncSummary,
+    streamChunks,
+    watchCode,
+    watchFileCode,
+  }),
+);
+"#,
+            );
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"child_process\",\"console\",\"crypto\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-fd"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    ),
+                );
+            }
+
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            let mut exit_code = None;
+            for _ in 0..64 {
+                let next_event = {
+                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    vm.active_processes
+                        .get("proc-js-fd")
+                        .map(|process| {
+                            process
+                                .execution
+                                .poll_event(Duration::from_secs(5))
+                                .expect("poll javascript fd rpc event")
+                        })
+                        .flatten()
+                };
+                let Some(event) = next_event else {
+                    if exit_code.is_some() {
+                        break;
+                    }
+                    panic!("javascript fd process disappeared before exit");
+                };
+
+                match &event {
+                    ActiveExecutionEvent::Stdout(chunk) => {
+                        stdout.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Stderr(chunk) => {
+                        stderr.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Exited(code) => {
+                        exit_code = Some(*code);
+                    }
+                    _ => {}
+                }
+
+                sidecar
+                    .handle_execution_event(&vm_id, "proc-js-fd", event)
+                    .expect("handle javascript fd rpc event");
+            }
+
+            assert_eq!(exit_code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
+            assert!(stdout.contains("\"text\":\"bcdef\""), "stdout: {stdout}");
+            assert!(stdout.contains("\"bytesRead\":5"), "stdout: {stdout}");
+            assert!(stdout.contains("\"size\":7"), "stdout: {stdout}");
+            assert!(stdout.contains("\"blocks\":1"), "stdout: {stdout}");
+            assert!(stdout.contains("\"dev\":1"), "stdout: {stdout}");
+            assert!(stdout.contains("\"rdev\":0"), "stdout: {stdout}");
+            assert!(stdout.contains("\"written\":6"), "stdout: {stdout}");
+            assert!(stdout.contains("\"defaultUmask\":18"), "stdout: {stdout}");
+            assert!(stdout.contains("\"previousUmask\":18"), "stdout: {stdout}");
+            assert!(stdout.contains("\"outputMode\":416"), "stdout: {stdout}");
+            assert!(
+                stdout.contains("\"privateDirMode\":488"),
+                "stdout: {stdout}"
+            );
+            assert!(
+                stdout.contains("\"asyncText\":\"abcde\""),
+                "stdout: {stdout}"
+            );
+            assert!(stdout.contains("\"asyncSize\":7"), "stdout: {stdout}");
+            assert!(
+                stdout.contains("\"streamChunks\":[\"abc\",\"de\"]"),
+                "stdout: {stdout}"
+            );
+            assert!(
+                stdout.contains("\"watchCode\":\"ERR_AGENT_OS_FS_WATCH_UNAVAILABLE\""),
+                "stdout: {stdout}"
+            );
+            assert!(
+                stdout.contains("\"watchFileCode\":\"ERR_AGENT_OS_FS_WATCH_UNAVAILABLE\""),
+                "stdout: {stdout}"
+            );
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let output = String::from_utf8(
+                    vm.kernel
+                        .read_file("/rpc/output.txt")
+                        .expect("read fd output file"),
+                )
+                .expect("utf8 output contents");
+                assert_eq!(output, "kernel");
+
+                let stream = String::from_utf8(
+                    vm.kernel
+                        .read_file("/rpc/stream.txt")
+                        .expect("read stream output file"),
+                )
+                .expect("utf8 stream contents");
+                assert_eq!(stream, "abcd");
+            }
+        }
+
+        #[test]
+        fn javascript_fs_promises_rpc_requests_proxy_into_the_vm_kernel_filesystem() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-promises-rpc-cwd");
+            write_fixture(
+                &cwd.join("entry.mjs"),
+                r#"
+import fs from "node:fs/promises";
+
+await fs.writeFile("/rpc/note.txt", "hello from sidecar promises rpc");
+const contents = await fs.readFile("/rpc/note.txt", "utf8");
+console.log(contents);
+await new Promise(() => {});
+"#,
+            );
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"child_process\",\"crypto\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-promises"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    ),
+                );
+            }
+
+            let mut saw_stdout = false;
+            for _ in 0..4 {
+                let event = {
+                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    let process = vm
+                        .active_processes
+                        .get("proc-js-promises")
+                        .expect("javascript process should be tracked");
+                    process
+                        .execution
+                        .poll_event(Duration::from_secs(5))
+                        .expect("poll javascript promises rpc event")
+                        .expect("javascript promises rpc event")
+                };
+
+                if let ActiveExecutionEvent::Stdout(chunk) = &event {
+                    let stdout = String::from_utf8(chunk.clone()).expect("stdout utf8");
+                    if stdout.contains("hello from sidecar promises rpc") {
+                        saw_stdout = true;
+                        break;
+                    }
+                }
+
+                sidecar
+                    .handle_execution_event(&vm_id, "proc-js-promises", event)
+                    .expect("handle javascript promises rpc event");
+            }
+
+            let content = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                String::from_utf8(
+                    vm.kernel
+                        .read_file("/rpc/note.txt")
+                        .expect("read bridged file from kernel"),
+                )
+                .expect("utf8 file contents")
+            };
+            assert_eq!(content, "hello from sidecar promises rpc");
+            assert!(
+                saw_stdout,
+                "expected guest stdout after fs.promises round-trip"
+            );
+
+            let process = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .remove("proc-js-promises")
+                    .expect("remove fake javascript process")
+            };
+            let _ = signal_runtime_process(process.execution.child_pid(), SIGTERM);
+        }
+
+        #[test]
+        fn javascript_net_rpc_connects_to_host_tcp_server() {
+            assert_node_available();
+
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind tcp listener");
+            let port = listener.local_addr().expect("listener address").port();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept tcp client");
+                let mut received = [0_u8; 4];
+                stream
+                    .read_exact(&mut received)
+                    .expect("read client payload");
+                assert_eq!(
+                    String::from_utf8(received.to_vec()).expect("client utf8"),
+                    "ping"
+                );
+                stream.write_all(b"pong").expect("write server payload");
+            });
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm_with_metadata(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                Vec::new(),
+                BTreeMap::from([(
+                    format!("env.{LOOPBACK_EXEMPT_PORTS_ENV}"),
+                    serde_json::to_string(&vec![port.to_string()]).expect("serialize exempt ports"),
+                )]),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-net-rpc-cwd");
+            write_fixture(
+                &cwd.join("entry.mjs"),
+                &format!(
+                    r#"
+import net from "node:net";
+
+const socket = net.createConnection({{ host: "127.0.0.1", port: {port} }});
+let data = "";
+socket.setEncoding("utf8");
+socket.on("connect", () => {{
+  socket.write("ping");
+}});
+socket.on("data", (chunk) => {{
+  data += chunk;
+}});
+socket.on("error", (error) => {{
+  console.error(error.stack ?? error.message);
+  process.exit(1);
+}});
+socket.on("close", (hadError) => {{
+  console.log(JSON.stringify({{
+    data,
+    hadError,
+    remoteAddress: socket.remoteAddress,
+    remotePort: socket.remotePort,
+    localPort: socket.localPort,
+  }}));
+  process.exit(0);
+}});
+"#,
+                ),
+            );
+
+            let (stdout, stderr, exit_code) = run_javascript_entry(
+            &mut sidecar,
+            &vm_id,
+            &cwd,
+            "proc-js-net",
+            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+        );
+
+            server.join().expect("join tcp server");
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            assert!(
+                stdout.contains("\"remoteAddress\":\"127.0.0.1\""),
+                "stdout: {stdout}"
+            );
+            assert!(
+                stdout.contains(&format!("\"remotePort\":{port}")),
+                "stdout: {stdout}"
+            );
+        }
+
+        #[test]
+        fn javascript_dgram_rpc_sends_and_receives_host_udp_packets() {
+            assert_node_available();
+
+            let listener = UdpSocket::bind("127.0.0.1:0").expect("bind udp listener");
+            let port = listener.local_addr().expect("listener address").port();
+            let server = thread::spawn(move || {
+                let mut buffer = [0_u8; 64 * 1024];
+                let (bytes_read, remote_addr) =
+                    listener.recv_from(&mut buffer).expect("recv packet");
+                assert_eq!(
+                    String::from_utf8(buffer[..bytes_read].to_vec()).expect("udp payload utf8"),
+                    "ping"
+                );
+                listener
+                    .send_to(b"pong", remote_addr)
+                    .expect("send udp response");
+            });
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-dgram-rpc-cwd");
+            write_fixture(
+                &cwd.join("entry.mjs"),
+                &format!(
+                    r#"
+import dgram from "node:dgram";
+
+const socket = dgram.createSocket("udp4");
+const summary = await new Promise((resolve) => {{
+socket.on("error", (error) => {{
+  console.error(error.stack ?? error.message);
+  process.exit(1);
+}});
+socket.on("message", (message, rinfo) => {{
+  const address = socket.address();
+  socket.close(() => {{
+    resolve({{
+      address,
+      message: message.toString("utf8"),
+      rinfo,
+    }});
+  }});
+}});
+socket.bind(0, "127.0.0.1", () => {{
+  socket.send("ping", {port}, "127.0.0.1");
+}});
+}});
+
+console.log(JSON.stringify(summary));
+"#,
+                ),
+            );
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dgram\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-dgram"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    ),
+                );
+            }
+
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            let mut exit_code = None;
+            for _ in 0..64 {
+                let next_event = {
+                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    vm.active_processes
+                        .get("proc-js-dgram")
+                        .map(|process| {
+                            process
+                                .execution
+                                .poll_event(Duration::from_secs(5))
+                                .expect("poll javascript dgram rpc event")
+                        })
+                        .flatten()
+                };
+                let Some(event) = next_event else {
+                    if exit_code.is_some() {
+                        break;
+                    }
+                    panic!("javascript dgram process disappeared before exit");
+                };
+
+                match &event {
+                    ActiveExecutionEvent::Stdout(chunk) => {
+                        stdout.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Stderr(chunk) => {
+                        stderr.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Exited(code) => {
+                        exit_code = Some(*code);
+                    }
+                    _ => {}
+                }
+
+                sidecar
+                    .handle_execution_event(&vm_id, "proc-js-dgram", event)
+                    .expect("handle javascript dgram rpc event");
+            }
+
+            server.join().expect("join udp server");
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            assert!(stdout.contains("\"message\":\"pong\""), "stdout: {stdout}");
+            assert!(
+                stdout.contains("\"address\":{\"address\":\"127.0.0.1\""),
+                "stdout: {stdout}"
+            );
+            assert!(
+                stdout.contains(&format!("\"port\":{port}")),
+                "stdout: {stdout}"
+            );
+        }
+
+        #[test]
+        fn javascript_dns_rpc_resolves_localhost() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-dns-rpc-cwd");
+            write_fixture(
+                &cwd.join("entry.mjs"),
+                r#"
+import dns from "node:dns";
+
+const lookup = await dns.promises.lookup("localhost", { all: true });
+const resolve4 = await dns.promises.resolve4("localhost");
+
+console.log(JSON.stringify({ lookup, resolve4 }));
+"#,
+            );
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-dns"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    ),
+                );
+            }
+
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            let mut exit_code = None;
+            for _ in 0..64 {
+                let next_event = {
+                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    vm.active_processes
+                        .get("proc-js-dns")
+                        .map(|process| {
+                            process
+                                .execution
+                                .poll_event(Duration::from_secs(5))
+                                .expect("poll javascript dns rpc event")
+                        })
+                        .flatten()
+                };
+                let Some(event) = next_event else {
+                    if exit_code.is_some() {
+                        break;
+                    }
+                    panic!("javascript dns process disappeared before exit");
+                };
+
+                match &event {
+                    ActiveExecutionEvent::Stdout(chunk) => {
+                        stdout.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Stderr(chunk) => {
+                        stderr.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Exited(code) => {
+                        exit_code = Some(*code);
+                    }
+                    _ => {}
+                }
+
+                sidecar
+                    .handle_execution_event(&vm_id, "proc-js-dns", event)
+                    .expect("handle javascript dns rpc event");
+            }
+
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse dns JSON");
+            assert!(
+                parsed["lookup"]
+                    .as_array()
+                    .is_some_and(|entries| !entries.is_empty()),
+                "stdout: {stdout}"
+            );
+            assert!(
+                parsed["resolve4"]
+                    .as_array()
+                    .is_some_and(|entries| entries.iter().any(|entry| entry == "127.0.0.1")),
+                "stdout: {stdout}"
+            );
+        }
+
+        #[test]
+        fn javascript_network_ssrf_protection_blocks_private_dns_and_unowned_loopback_targets() {
+            assert_node_available();
+
+            let loopback_listener =
+                TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+            let loopback_port = loopback_listener
+                .local_addr()
+                .expect("loopback listener address")
+                .port();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm_with_metadata(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                Vec::new(),
+                BTreeMap::from([(
+                    String::from("network.dns.override.metadata.test"),
+                    String::from("169.254.169.254"),
+                )]),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-ssrf-protection-cwd");
+            write_fixture(
+                &cwd.join("entry.mjs"),
+                &format!(
+                    r#"
+import dns from "node:dns";
+import net from "node:net";
+
+const dnsLookup = await (async () => {{
+  try {{
+    await dns.promises.lookup("metadata.test", {{ family: 4 }});
+    return {{ unexpected: true }};
+  }} catch (error) {{
+    return {{ code: error.code ?? null, message: error.message }};
+  }}
+}})();
+
+const privateConnect = await new Promise((resolve) => {{
+  const socket = net.createConnection({{ host: "metadata.test", port: 80 }});
+  socket.on("connect", () => {{
+    socket.destroy();
+    resolve({{ unexpected: true }});
+  }});
+  socket.on("error", (error) => {{
+    resolve({{ code: error.code ?? null, message: error.message }});
+  }});
+}});
+
+const loopbackConnect = await new Promise((resolve) => {{
+  const socket = net.createConnection({{ host: "127.0.0.1", port: {loopback_port} }});
+  socket.on("connect", () => {{
+    socket.destroy();
+    resolve({{ unexpected: true }});
+  }});
+  socket.on("error", (error) => {{
+    resolve({{ code: error.code ?? null, message: error.message }});
+  }});
+}});
+
+console.log(JSON.stringify({{ dnsLookup, privateConnect, loopbackConnect }}));
+process.exit(0);
+"#,
+                ),
+            );
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-ssrf-protection"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    ),
+                );
+            }
+
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            let mut exit_code = None;
+            for _ in 0..64 {
+                let next_event = {
+                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    vm.active_processes
+                        .get("proc-js-ssrf-protection")
+                        .map(|process| {
+                            process
+                                .execution
+                                .poll_event(Duration::from_secs(5))
+                                .expect("poll javascript ssrf event")
+                        })
+                        .flatten()
+                };
+                let Some(event) = next_event else {
+                    if exit_code.is_some() {
+                        break;
+                    }
+                    panic!("javascript ssrf process disappeared before exit");
+                };
+
+                match &event {
+                    ActiveExecutionEvent::Stdout(chunk) => {
+                        stdout.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Stderr(chunk) => {
+                        stderr.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Exited(code) => {
+                        exit_code = Some(*code);
+                    }
+                    _ => {}
+                }
+
+                sidecar
+                    .handle_execution_event(&vm_id, "proc-js-ssrf-protection", event)
+                    .expect("handle javascript ssrf event");
+            }
+
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse ssrf JSON");
+            assert_eq!(
+                parsed["dnsLookup"]["code"],
+                Value::String(String::from("EACCES"))
+            );
+            assert!(
+                parsed["dnsLookup"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("169.254.0.0/16")),
+                "stdout: {stdout}"
+            );
+            assert_eq!(
+                parsed["privateConnect"]["code"],
+                Value::String(String::from("EACCES"))
+            );
+            assert!(
+                parsed["privateConnect"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("169.254.0.0/16")),
+                "stdout: {stdout}"
+            );
+            assert_eq!(
+                parsed["loopbackConnect"]["code"],
+                Value::String(String::from("EACCES"))
+            );
+            assert!(
+                parsed["loopbackConnect"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(LOOPBACK_EXEMPT_PORTS_ENV)),
+                "stdout: {stdout}"
+            );
+
+            drop(loopback_listener);
+        }
+
+        #[test]
+        fn javascript_dns_rpc_honors_vm_dns_overrides_and_net_connect_uses_sidecar_dns() {
+            assert_node_available();
+
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind tcp listener");
+            let port = listener.local_addr().expect("listener address").port();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept tcp client");
+                let mut received = Vec::new();
+                stream
+                    .read_to_end(&mut received)
+                    .expect("read client payload");
+                assert_eq!(String::from_utf8(received).expect("client utf8"), "ping");
+                stream.write_all(b"pong").expect("write server payload");
+            });
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm_with_metadata(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                Vec::new(),
+                BTreeMap::from([
+                    (
+                        format!("env.{LOOPBACK_EXEMPT_PORTS_ENV}"),
+                        serde_json::to_string(&vec![port.to_string()])
+                            .expect("serialize exempt ports"),
+                    ),
+                    (
+                        String::from("network.dns.override.example.test"),
+                        String::from("127.0.0.1"),
+                    ),
+                    (
+                        String::from(VM_DNS_SERVERS_METADATA_KEY),
+                        String::from("203.0.113.53:5353"),
+                    ),
+                ]),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-dns-override-rpc-cwd");
+            write_fixture(
+                &cwd.join("entry.mjs"),
+                &format!(
+                    r#"
+import dns from "node:dns";
+import net from "node:net";
+
+const lookup = await dns.promises.lookup("example.test", {{ family: 4 }});
+const resolved = await dns.promises.resolve4("example.test");
+const socketSummary = await new Promise((resolve, reject) => {{
+  const socket = net.createConnection({{ host: "example.test", port: {port} }});
+  let data = "";
+  socket.setEncoding("utf8");
+  socket.on("connect", () => {{
+    socket.end("ping");
+  }});
+  socket.on("data", (chunk) => {{
+    data += chunk;
+  }});
+  socket.on("error", reject);
+  socket.on("close", (hadError) => {{
+    resolve({{
+      data,
+      hadError,
+      remoteAddress: socket.remoteAddress,
+      remotePort: socket.remotePort,
+    }});
+  }});
+}});
+
+console.log(JSON.stringify({{ lookup, resolved, socketSummary }}));
+"#,
+                ),
+            );
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-dns-override"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    ),
+                );
+            }
+
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            let mut exit_code = None;
+            for _ in 0..64 {
+                let next_event = {
+                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    vm.active_processes
+                        .get("proc-js-dns-override")
+                        .map(|process| {
+                            process
+                                .execution
+                                .poll_event(Duration::from_secs(5))
+                                .expect("poll javascript dns override rpc event")
+                        })
+                        .flatten()
+                };
+                let Some(event) = next_event else {
+                    if exit_code.is_some() {
+                        break;
+                    }
+                    panic!("javascript dns override process disappeared before exit");
+                };
+
+                match &event {
+                    ActiveExecutionEvent::Stdout(chunk) => {
+                        stdout.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Stderr(chunk) => {
+                        stderr.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Exited(code) => {
+                        exit_code = Some(*code);
+                    }
+                    _ => {}
+                }
+
+                sidecar
+                    .handle_execution_event(&vm_id, "proc-js-dns-override", event)
+                    .expect("handle javascript dns override rpc event");
+            }
+
+            server.join().expect("join tcp server");
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse dns JSON");
+            assert_eq!(parsed["lookup"]["address"], Value::from("127.0.0.1"));
+            assert_eq!(parsed["lookup"]["family"], Value::from(4));
+            assert_eq!(parsed["resolved"][0], Value::from("127.0.0.1"));
+            assert_eq!(parsed["socketSummary"]["data"], Value::from("pong"));
+            assert_eq!(parsed["socketSummary"]["hadError"], Value::from(false));
+            assert_eq!(
+                parsed["socketSummary"]["remoteAddress"],
+                Value::from("127.0.0.1")
+            );
+            assert_eq!(
+                parsed["socketSummary"]["remotePort"],
+                Value::from(u64::from(port))
+            );
+
+            let events = sidecar
+                .with_bridge_mut(|bridge| bridge.structured_events.clone())
+                .expect("collect structured events");
+            let dns_events = events
+                .iter()
+                .filter(|event| event.name == "network.dns.resolved")
+                .filter(|event| {
+                    event.fields.get("hostname").map(String::as_str) == Some("example.test")
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                dns_events.len() >= 3,
+                "expected dns events for lookup, resolve4, and net.connect: {dns_events:?}"
+            );
+            for event in dns_events {
+                assert_eq!(event.fields["source"], "override");
+                assert_eq!(event.fields["addresses"], "127.0.0.1");
+                assert_eq!(event.fields["resolver_count"], "1");
+                assert_eq!(event.fields["resolvers"], "203.0.113.53:5353");
+            }
+        }
+
+        #[test]
+        fn javascript_network_permission_callbacks_fire_for_dns_lookup_connect_and_listen() {
+            assert_node_available();
+
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind tcp listener");
+            let port = listener.local_addr().expect("listener address").port();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept tcp client");
+                let mut received = Vec::new();
+                stream
+                    .read_to_end(&mut received)
+                    .expect("read client payload");
+                assert_eq!(String::from_utf8(received).expect("client utf8"), "ping");
+            });
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm_with_metadata(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                Vec::new(),
+                BTreeMap::from([
+                    (
+                        format!("env.{LOOPBACK_EXEMPT_PORTS_ENV}"),
+                        serde_json::to_string(&vec![port.to_string()])
+                            .expect("serialize exempt ports"),
+                    ),
+                    (
+                        String::from("network.dns.override.example.test"),
+                        String::from("127.0.0.1"),
+                    ),
+                ]),
+            )
+            .expect("create vm");
+            sidecar
+                .bridge
+                .clear_vm_permissions(&vm_id)
+                .expect("clear static vm permissions");
+            let cwd = temp_dir("agent-os-sidecar-js-network-permission-callbacks");
+            write_fixture(
+                &cwd.join("entry.mjs"),
+                &format!(
+                    r#"
+import dns from "node:dns";
+import net from "node:net";
+
+const lookup = await dns.promises.lookup("example.test", {{ family: 4 }});
+const listenAddress = await new Promise((resolve, reject) => {{
+  const server = net.createServer();
+  server.on("error", reject);
+  server.listen(0, "127.0.0.1", () => {{
+    const address = server.address();
+    server.close((error) => {{
+      if (error) {{
+        reject(error);
+        return;
+      }}
+      resolve(address);
+    }});
+  }});
+}});
+const connectResult = await new Promise((resolve, reject) => {{
+  const socket = net.createConnection({{ host: "127.0.0.1", port: {port} }});
+  socket.on("error", reject);
+  socket.on("connect", () => {{
+    socket.end("ping");
+  }});
+  socket.on("close", (hadError) => {{
+    resolve({{ hadError }});
+  }});
+}});
+
+console.log(JSON.stringify({{ lookup, listenAddress, connectResult }}));
+process.exit(0);
+"#,
+                ),
+            );
+
+            let (stdout, stderr, exit_code) = run_javascript_entry(
+            &mut sidecar,
+            &vm_id,
+            &cwd,
+            "proc-js-network-permission-callbacks",
+            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+        );
+
+            server.join().expect("join tcp server");
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse callback JSON");
+            assert_eq!(
+                parsed["lookup"]["address"],
+                Value::String(String::from("127.0.0.1"))
+            );
+            assert_eq!(parsed["connectResult"]["hadError"], Value::Bool(false));
+            assert!(
+                parsed["listenAddress"]["port"]
+                    .as_u64()
+                    .is_some_and(|value| value > 0),
+                "stdout: {stdout}"
+            );
+
+            let expected = [
+                format!("net:{vm_id}:{}", format_dns_resource("example.test")),
+                format!("net:{vm_id}:{}", format_tcp_resource("127.0.0.1", 0)),
+                format!("net:{vm_id}:{}", format_tcp_resource("127.0.0.1", port)),
+            ];
+            let checks = sidecar
+                .with_bridge_mut(|bridge| {
+                    bridge
+                        .permission_checks
+                        .iter()
+                        .filter(|entry| entry.starts_with("net:"))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .expect("read permission checks");
+            for check in expected {
+                assert!(
+                    checks.iter().any(|entry| entry == &check),
+                    "missing permission check {check:?} in {checks:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn javascript_network_permission_denials_surface_eacces_to_guest_code() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm_with_metadata(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                vec![
+                    PermissionDescriptor {
+                        capability: String::from("fs"),
+                        mode: PermissionMode::Allow,
+                    },
+                    PermissionDescriptor {
+                        capability: String::from("env"),
+                        mode: PermissionMode::Allow,
+                    },
+                    PermissionDescriptor {
+                        capability: String::from("child_process"),
+                        mode: PermissionMode::Allow,
+                    },
+                    PermissionDescriptor {
+                        capability: String::from("network"),
+                        mode: PermissionMode::Allow,
+                    },
+                    PermissionDescriptor {
+                        capability: String::from("network.dns"),
+                        mode: PermissionMode::Deny,
+                    },
+                    PermissionDescriptor {
+                        capability: String::from("network.http"),
+                        mode: PermissionMode::Deny,
+                    },
+                    PermissionDescriptor {
+                        capability: String::from("network.listen"),
+                        mode: PermissionMode::Deny,
+                    },
+                ],
+                BTreeMap::from([(
+                    String::from("network.dns.override.example.test"),
+                    String::from("127.0.0.1"),
+                )]),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-network-permission-denials");
+            write_fixture(
+                &cwd.join("entry.mjs"),
+                r#"
+import dns from "node:dns";
+import net from "node:net";
+
+let dnsResult = null;
+try {
+  dnsResult = { unexpected: await dns.promises.lookup("example.test", { family: 4 }) };
+} catch (error) {
+  dnsResult = { code: error.code ?? null, message: error.message };
+}
+const listenResult = (() => {
+  const server = net.createServer();
+  try {
+    server.listen(0, "127.0.0.1");
+    return { unexpected: true };
+  } catch (error) {
+    return { code: error.code ?? null, message: error.message };
+  }
+})();
+const connectResult = await new Promise((resolve) => {
+  const socket = net.createConnection({ host: "127.0.0.1", port: 43111 });
+  socket.on("connect", () => resolve({ unexpected: true }));
+  socket.on("error", (error) => {
+    resolve({ code: error.code ?? null, message: error.message });
+  });
+});
+
+console.log(JSON.stringify({ dnsResult, listenResult, connectResult }));
+process.exit(0);
+"#,
+            );
+
+            let (stdout, stderr, exit_code) = run_javascript_entry(
+            &mut sidecar,
+            &vm_id,
+            &cwd,
+            "proc-js-network-permission-denials",
+            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+        );
+
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse denial JSON");
+            for field in ["dnsResult", "listenResult", "connectResult"] {
+                assert_eq!(parsed[field]["code"], Value::String(String::from("EACCES")));
+                assert!(
+                    parsed[field]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("blocked by network.")),
+                    "missing policy detail for {field}: {stdout}"
+                );
+            }
+        }
+
+        #[test]
+        fn javascript_tls_rpc_connects_and_serves_over_guest_net() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-tls-rpc-cwd");
+            let entry = format!(
+                r#"
+import tls from "node:tls";
+
+const key = {key:?};
+const cert = {cert:?};
+
+const summary = await new Promise((resolve, reject) => {{
+  const server = tls.createServer({{ key, cert }}, (socket) => {{
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {{
+      received += chunk;
+      socket.end(`pong:${{chunk}}`);
+    }});
+    socket.on("error", reject);
+    socket.on("close", () => {{
+      server.close(() => {{
+        resolve({{
+          authorized: client.authorized,
+          encrypted: client.encrypted,
+          hadError: closeState.hadError,
+          localPort: client.localPort,
+          received,
+          remoteAddress: client.remoteAddress,
+          response,
+          serverPort: port,
+          serverSecure: secureConnectionSeen,
+        }});
+      }});
+    }});
+  }});
+  let response = "";
+  let port = null;
+  let secureConnectionSeen = false;
+  let closeState = {{ hadError: false }};
+  let client = null;
+
+  server.on("secureConnection", () => {{
+    secureConnectionSeen = true;
+  }});
+  server.on("error", reject);
+  server.listen(0, "127.0.0.1", () => {{
+    port = server.address().port;
+    client = tls.connect({{
+      host: "127.0.0.1",
+      port,
+      rejectUnauthorized: false,
+    }}, () => {{
+      client.write("ping");
+    }});
+    client.setEncoding("utf8");
+    client.on("data", (chunk) => {{
+      response += chunk;
+    }});
+    client.on("error", reject);
+    client.on("close", (hadError) => {{
+      closeState = {{ hadError }};
+    }});
+  }});
+}});
+
+console.log(JSON.stringify(summary));
+"#,
+                key = TLS_TEST_KEY_PEM,
+                cert = TLS_TEST_CERT_PEM,
+            );
+            write_fixture(&cwd.join("entry.mjs"), &entry);
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"tls\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-tls"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    ),
+                );
+            }
+
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            let mut exit_code = None;
+            for _ in 0..192 {
+                let next_event = {
+                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    vm.active_processes
+                        .get("proc-js-tls")
+                        .map(|process| {
+                            process
+                                .execution
+                                .poll_event(Duration::from_secs(5))
+                                .expect("poll javascript tls rpc event")
+                        })
+                        .flatten()
+                };
+                let Some(event) = next_event else {
+                    if exit_code.is_some() {
+                        break;
+                    }
+                    continue;
+                };
+
+                match &event {
+                    ActiveExecutionEvent::Stdout(chunk) => {
+                        stdout.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Stderr(chunk) => {
+                        stderr.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Exited(code) => {
+                        exit_code = Some(*code);
+                    }
+                    _ => {}
+                }
+
+                sidecar
+                    .handle_execution_event(&vm_id, "proc-js-tls", event)
+                    .expect("handle javascript tls rpc event");
+            }
+
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse tls JSON");
+            assert_eq!(parsed["response"], Value::String(String::from("pong:ping")));
+            assert_eq!(parsed["received"], Value::String(String::from("ping")));
+            assert_eq!(parsed["serverSecure"], Value::Bool(true));
+            assert_eq!(parsed["encrypted"], Value::Bool(true));
+            assert_eq!(parsed["hadError"], Value::Bool(false));
+            assert_eq!(
+                parsed["remoteAddress"],
+                Value::String(String::from("127.0.0.1"))
+            );
+            assert!(
+                parsed["serverPort"].as_u64().is_some_and(|port| port > 0),
+                "stdout: {stdout}"
+            );
+        }
+
+        #[test]
+        fn javascript_http_rpc_requests_gets_and_serves_over_guest_net() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-http-rpc-cwd");
+            write_fixture(
+                &cwd.join("entry.mjs"),
+                r#"
+import http from "node:http";
+
+const summary = await new Promise((resolve, reject) => {
+  const requests = [];
+  let requestResponse = "";
+  let getResponse = "";
+
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      requests.push({
+        method: req.method,
+        url: req.url,
+        body,
+      });
+      res.end(`pong:${req.method}:${body || req.url}`);
+    });
+  });
+
+  let port = null;
+  server.on("error", reject);
+  server.listen(0, "127.0.0.1", () => {
+    port = server.address().port;
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        method: "POST",
+        path: "/submit",
+        port,
+      },
+      (res) => {
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          requestResponse += chunk;
+        });
+        res.on("end", () => {
+          http
+            .get(`http://127.0.0.1:${port}/health`, (getRes) => {
+              getRes.setEncoding("utf8");
+              getRes.on("data", (chunk) => {
+                getResponse += chunk;
+              });
+              getRes.on("end", () => {
+                server.close(() => {
+                  resolve({
+                    getResponse,
+                    port,
+                    requestResponse,
+                    requests,
+                  });
+                });
+              });
+            })
+            .on("error", reject);
+        });
+      },
+    );
+    req.on("error", reject);
+    req.end("ping");
+  });
+});
+
+console.log(JSON.stringify(summary));
+"#,
+            );
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"http\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-http"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    ),
+                );
+            }
+
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            let mut exit_code = None;
+            for _ in 0..192 {
+                let next_event = {
+                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    vm.active_processes
+                        .get("proc-js-http")
+                        .map(|process| {
+                            process
+                                .execution
+                                .poll_event(Duration::from_secs(5))
+                                .expect("poll javascript http rpc event")
+                        })
+                        .flatten()
+                };
+                let Some(event) = next_event else {
+                    if exit_code.is_some() {
+                        break;
+                    }
+                    continue;
+                };
+
+                match &event {
+                    ActiveExecutionEvent::Stdout(chunk) => {
+                        stdout.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Stderr(chunk) => {
+                        stderr.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Exited(code) => {
+                        exit_code = Some(*code);
+                    }
+                    _ => {}
+                }
+
+                sidecar
+                    .handle_execution_event(&vm_id, "proc-js-http", event)
+                    .expect("handle javascript http rpc event");
+            }
+
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse http JSON");
+            assert_eq!(
+                parsed["requestResponse"],
+                Value::String(String::from("pong:POST:ping"))
+            );
+            assert_eq!(
+                parsed["getResponse"],
+                Value::String(String::from("pong:GET:/health"))
+            );
+            assert_eq!(
+                parsed["requests"][0]["url"],
+                Value::String(String::from("/submit"))
+            );
+            assert_eq!(
+                parsed["requests"][1]["url"],
+                Value::String(String::from("/health"))
+            );
+            assert!(
+                parsed["port"].as_u64().is_some_and(|port| port > 0),
+                "stdout: {stdout}"
+            );
+        }
+
+        #[test]
+        fn javascript_https_rpc_requests_and_serves_over_guest_tls() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-https-rpc-cwd");
+            let entry = format!(
+                r#"
+import https from "node:https";
+
+const key = {key:?};
+const cert = {cert:?};
+
+const summary = await new Promise((resolve, reject) => {{
+  let received = "";
+  let response = "";
+  const server = https.createServer({{ key, cert }}, (req, res) => {{
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {{
+      received += chunk;
+    }});
+    req.on("end", () => {{
+      res.end(`pong:${{req.method}}:${{received}}`);
+    }});
+  }});
+
+  let port = null;
+  server.on("error", reject);
+  server.listen(0, "127.0.0.1", () => {{
+    port = server.address().port;
+    const req = https.request({{
+      host: "127.0.0.1",
+      method: "POST",
+      path: "/secure",
+      port,
+      rejectUnauthorized: false,
+    }}, (res) => {{
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => {{
+        response += chunk;
+      }});
+      res.on("end", () => {{
+        server.close(() => {{
+          resolve({{
+            port,
+            received,
+            response,
+          }});
+        }});
+      }});
+    }});
+    req.on("error", reject);
+    req.end("ping");
+  }});
+}});
+
+console.log(JSON.stringify(summary));
+"#,
+                key = TLS_TEST_KEY_PEM,
+                cert = TLS_TEST_CERT_PEM,
+            );
+            write_fixture(&cwd.join("entry.mjs"), &entry);
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"https\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-https"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    ),
+                );
+            }
+
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            let mut exit_code = None;
+            for _ in 0..192 {
+                let next_event = {
+                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    vm.active_processes
+                        .get("proc-js-https")
+                        .map(|process| {
+                            process
+                                .execution
+                                .poll_event(Duration::from_secs(5))
+                                .expect("poll javascript https rpc event")
+                        })
+                        .flatten()
+                };
+                let Some(event) = next_event else {
+                    if exit_code.is_some() {
+                        break;
+                    }
+                    continue;
+                };
+
+                match &event {
+                    ActiveExecutionEvent::Stdout(chunk) => {
+                        stdout.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Stderr(chunk) => {
+                        stderr.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Exited(code) => {
+                        exit_code = Some(*code);
+                    }
+                    _ => {}
+                }
+
+                sidecar
+                    .handle_execution_event(&vm_id, "proc-js-https", event)
+                    .expect("handle javascript https rpc event");
+            }
+
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse https JSON");
+            assert_eq!(parsed["received"], Value::String(String::from("ping")));
+            assert_eq!(
+                parsed["response"],
+                Value::String(String::from("pong:POST:ping"))
+            );
+            assert!(
+                parsed["port"].as_u64().is_some_and(|port| port > 0),
+                "stdout: {stdout}"
+            );
+        }
+
+        #[test]
+        fn javascript_net_rpc_listens_accepts_connections_and_reports_listener_state() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-net-server-cwd");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-server",
+                "[\"net\"]",
+            );
+
+            let listen = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-server",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 0,
+                        "backlog": 2,
+                    })],
+                },
+            )
+            .expect("listen through sidecar net RPC");
+            let server_id = listen["serverId"].as_str().expect("server id").to_string();
+            let guest_port = listen["localPort"]
+                .as_u64()
+                .and_then(|value| u16::try_from(value).ok())
+                .expect("guest listener port");
+            let host_port = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-server")
+                    .and_then(|process| process.tcp_listeners.get(&server_id))
+                    .expect("sidecar tcp listener")
+                    .local_addr()
+                    .port()
+            };
+
+            let response = sidecar
+                .dispatch(request(
+                    1,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::FindListener(FindListenerRequest {
+                        host: Some(String::from("127.0.0.1")),
+                        port: Some(guest_port),
+                        path: None,
+                    }),
+                ))
+                .expect("query sidecar listener");
+            match response.response.payload {
+                ResponsePayload::ListenerSnapshot(snapshot) => {
+                    let listener = snapshot.listener.expect("listener snapshot");
+                    assert_eq!(listener.process_id, "proc-js-server");
+                    assert_eq!(listener.host.as_deref(), Some("127.0.0.1"));
+                    assert_eq!(listener.port, Some(guest_port));
+                }
+                other => panic!("unexpected find_listener response payload: {other:?}"),
+            }
+
+            let client = thread::spawn(move || {
+                let mut stream = TcpStream::connect(("127.0.0.1", host_port))
+                    .expect("connect to sidecar listener");
+                stream.write_all(b"ping").expect("write client payload");
+                stream
+                    .shutdown(Shutdown::Write)
+                    .expect("shutdown client write half");
+                let mut received = Vec::new();
+                stream
+                    .read_to_end(&mut received)
+                    .expect("read server response");
+                assert_eq!(
+                    String::from_utf8(received).expect("server response utf8"),
+                    "pong:ping"
+                );
+            });
+
+            let accepted = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-server",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("net.server_poll"),
+                    args: vec![json!(server_id), json!(250)],
+                },
+            )
+            .expect("accept connection");
+            assert_eq!(accepted["type"], Value::from("connection"));
+            assert_eq!(accepted["localAddress"], Value::from("127.0.0.1"));
+            assert_eq!(accepted["localPort"], Value::from(guest_port));
+            let socket_id = accepted["socketId"]
+                .as_str()
+                .expect("socket id")
+                .to_string();
+
+            let data = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-server",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("net.poll"),
+                    args: vec![json!(socket_id.clone()), json!(250)],
+                },
+            )
+            .expect("poll socket data");
+            assert_eq!(data["type"], Value::from("data"));
+
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data["data"]["base64"].as_str().expect("base64 payload"))
+                .expect("decode payload");
+            assert_eq!(bytes, b"ping");
+
+            let written = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-server",
+                JavascriptSyncRpcRequest {
+                    id: 4,
+                    method: String::from("net.write"),
+                    args: vec![json!(socket_id.clone()), json!("pong:ping")],
+                },
+            )
+            .expect("write response");
+            assert_eq!(written, Value::from(9));
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-server",
+                JavascriptSyncRpcRequest {
+                    id: 5,
+                    method: String::from("net.shutdown"),
+                    args: vec![json!(socket_id)],
+                },
+            )
+            .expect("shutdown write half");
+            client.join().expect("join tcp client");
+        }
+
+        #[test]
+        fn javascript_net_rpc_reports_connection_counts_and_enforces_backlog() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-net-backlog-cwd");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-backlog"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    ),
+                );
+            }
+
+            let bridge = sidecar.bridge.clone();
+            let dns = sidecar.vms.get(&vm_id).expect("javascript vm").dns.clone();
+            let limits = ResourceLimits::default();
+            let socket_paths = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                build_javascript_socket_path_context(vm).expect("build socket path context")
+            };
+
+            let listen = {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                    .expect("backlog process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-backlog")
+                    .expect("backlog process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 1,
+                        method: String::from("net.listen"),
+                        args: vec![json!({
+                            "host": "127.0.0.1",
+                            "port": 0,
+                            "backlog": 1,
+                        })],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("listen through sidecar net RPC")
+            };
+            let server_id = listen["serverId"].as_str().expect("server id").to_string();
+            let _port = listen["localPort"]
+                .as_u64()
+                .and_then(|value| u16::try_from(value).ok())
+                .expect("listener port");
+            let host_port = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-backlog")
+                    .and_then(|process| process.tcp_listeners.get(&server_id))
+                    .expect("host backlog listener")
+                    .local_addr()
+                    .port()
+            };
+
+            let first_client = thread::spawn(move || {
+                let mut stream = TcpStream::connect(("127.0.0.1", host_port))
+                    .expect("connect first backlog client");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("set first client timeout");
+                let mut received = Vec::new();
+                stream
+                    .read_to_end(&mut received)
+                    .expect("read first backlog client EOF");
+                assert!(
+                    received.is_empty(),
+                    "first backlog client should not receive data"
+                );
+            });
+
+            let first_connection = {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                    .expect("backlog process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-backlog")
+                    .expect("backlog process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 2,
+                        method: String::from("net.server_poll"),
+                        args: vec![json!(server_id), json!(250)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("accept first backlog connection")
+            };
+            let first_socket_id = first_connection["socketId"]
+                .as_str()
+                .expect("first socket id")
+                .to_string();
+
+            let connection_count = {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                    .expect("backlog process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-backlog")
+                    .expect("backlog process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 3,
+                        method: String::from("net.server_connections"),
+                        args: vec![json!(server_id)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("query server connections")
+            };
+            assert_eq!(connection_count, json!(1));
+
+            let second_client = thread::spawn(move || {
+                let address = SocketAddr::from(([127, 0, 0, 1], host_port));
+                let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+                    .expect("connect second backlog client");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("set second client timeout");
+                stream
+                    .write_all(b"blocked")
+                    .expect("write second backlog client payload");
+                let mut buffer = [0_u8; 16];
+                match stream.read(&mut buffer) {
+                    Ok(0) => {}
+                    Ok(bytes_read) => panic!(
+                        "unexpected second backlog payload: {}",
+                        String::from_utf8_lossy(&buffer[..bytes_read])
+                    ),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::NotConnected
+                                | std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::WouldBlock
+                        ) => {}
+                    Err(error) => panic!("unexpected second backlog read error: {error}"),
+                }
+            });
+
+            let second_poll = {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                    .expect("backlog process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-backlog")
+                    .expect("backlog process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 4,
+                        method: String::from("net.server_poll"),
+                        args: vec![json!(server_id), json!(250)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("poll second backlog connection")
+            };
+            assert_eq!(second_poll, Value::Null);
+            second_client.join().expect("join second backlog client");
+
+            let connection_count = {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                    .expect("backlog process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-backlog")
+                    .expect("backlog process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 5,
+                        method: String::from("net.server_connections"),
+                        args: vec![json!(server_id)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("query server connections after backlog rejection")
+            };
+            assert_eq!(connection_count, json!(1));
+
+            {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                    .expect("backlog process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-backlog")
+                    .expect("backlog process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 6,
+                        method: String::from("net.destroy"),
+                        args: vec![json!(first_socket_id)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("destroy first backlog socket");
+            }
+            first_client.join().expect("join first backlog client");
+
+            {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-backlog"))
+                    .expect("backlog process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-backlog")
+                    .expect("backlog process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 7,
+                        method: String::from("net.server_close"),
+                        args: vec![json!(server_id)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("close backlog listener");
+            }
+
+            sidecar
+                .dispose_vm_internal(
+                    &connection_id,
+                    &session_id,
+                    &vm_id,
+                    DisposeReason::Requested,
+                )
+                .expect("dispose backlog vm");
+        }
+
+        #[test]
+        fn javascript_network_bind_policy_restricts_hosts_and_ports() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm_with_metadata(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                Vec::new(),
+                BTreeMap::from([
+                    (
+                        String::from(VM_LISTEN_PORT_MIN_METADATA_KEY),
+                        String::from("49152"),
+                    ),
+                    (
+                        String::from(VM_LISTEN_PORT_MAX_METADATA_KEY),
+                        String::from("49160"),
+                    ),
+                ]),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-bind-policy-cwd");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-bind-policy",
+                "[\"dgram\",\"net\"]",
+            );
+
+            let unspecified = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-bind-policy",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "0.0.0.0",
+                        "port": 49152,
+                    })],
+                },
+            )
+            .expect_err("deny unspecified TCP listen host");
+            assert!(
+                unspecified
+                    .to_string()
+                    .contains("must bind to loopback, not unspecified"),
+                "{unspecified}"
+            );
+
+            let privileged = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-bind-policy",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 80,
+                    })],
+                },
+            )
+            .expect_err("deny privileged port");
+            assert!(
+                privileged
+                    .to_string()
+                    .contains("privileged listen port 80 requires"),
+                "{privileged}"
+            );
+
+            let out_of_range = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-bind-policy",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 40000,
+                    })],
+                },
+            )
+            .expect_err("deny out-of-range port");
+            assert!(
+                out_of_range
+                    .to_string()
+                    .contains("outside the allowed range 49152-49160"),
+                "{out_of_range}"
+            );
+
+            let udp_socket = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-bind-policy",
+                JavascriptSyncRpcRequest {
+                    id: 4,
+                    method: String::from("dgram.createSocket"),
+                    args: vec![json!({ "type": "udp4" })],
+                },
+            )
+            .expect("create udp socket");
+            let udp_socket_id = udp_socket["socketId"]
+                .as_str()
+                .expect("udp socket id")
+                .to_string();
+
+            let udp_unspecified = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-bind-policy",
+                JavascriptSyncRpcRequest {
+                    id: 5,
+                    method: String::from("dgram.bind"),
+                    args: vec![
+                        json!(udp_socket_id),
+                        json!({
+                            "address": "0.0.0.0",
+                            "port": 49153,
+                        }),
+                    ],
+                },
+            )
+            .expect_err("deny unspecified UDP bind host");
+            assert!(
+                udp_unspecified
+                    .to_string()
+                    .contains("must bind to loopback, not unspecified"),
+                "{udp_unspecified}"
+            );
+
+            let success = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-bind-policy",
+                JavascriptSyncRpcRequest {
+                    id: 6,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 49155,
+                    })],
+                },
+            )
+            .expect("allow loopback listener inside configured range");
+            assert_eq!(success["localAddress"], Value::from("127.0.0.1"));
+            assert_eq!(success["localPort"], Value::from(49155));
+        }
+
+        #[test]
+        fn javascript_network_bind_policy_can_allow_privileged_guest_ports() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm_with_metadata(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                Vec::new(),
+                BTreeMap::from([
+                    (
+                        String::from(VM_LISTEN_PORT_MIN_METADATA_KEY),
+                        String::from("1"),
+                    ),
+                    (
+                        String::from(VM_LISTEN_PORT_MAX_METADATA_KEY),
+                        String::from("128"),
+                    ),
+                    (
+                        String::from(VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY),
+                        String::from("true"),
+                    ),
+                ]),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-privileged-listen-cwd");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-privileged",
+                "[\"net\"]",
+            );
+
+            let listen = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-privileged",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 80,
+                    })],
+                },
+            )
+            .expect("allow privileged guest port");
+            assert_eq!(listen["localAddress"], Value::from("127.0.0.1"));
+            assert_eq!(listen["localPort"], Value::from(80));
+        }
+
+        #[test]
+        fn javascript_network_listeners_are_isolated_per_vm_even_with_same_guest_port() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_a = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm a");
+            let vm_b = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm b");
+            let cwd_a = temp_dir("agent-os-sidecar-js-net-isolation-a");
+            let cwd_b = temp_dir("agent-os-sidecar-js-net-isolation-b");
+            write_fixture(&cwd_a.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            write_fixture(&cwd_b.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            start_fake_javascript_process(&mut sidecar, &vm_a, &cwd_a, "proc-a", "[\"net\"]");
+            start_fake_javascript_process(&mut sidecar, &vm_b, &cwd_b, "proc-b", "[\"net\"]");
+
+            let listen_a = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_a,
+                "proc-a",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 43111,
+                    })],
+                },
+            )
+            .expect("listen on vm a");
+            let listen_b = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_b,
+                "proc-b",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 43111,
+                    })],
+                },
+            )
+            .expect("listen on vm b");
+            assert_eq!(listen_a["localPort"], Value::from(43111));
+            assert_eq!(listen_b["localPort"], Value::from(43111));
+
+            let connect_a = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_a,
+                "proc-a",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("net.connect"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 43111,
+                    })],
+                },
+            )
+            .expect("connect within vm a");
+            let connect_b = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_b,
+                "proc-b",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("net.connect"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 43111,
+                    })],
+                },
+            )
+            .expect("connect within vm b");
+            assert_eq!(connect_a["remotePort"], Value::from(43111));
+            assert_eq!(connect_b["remotePort"], Value::from(43111));
+
+            let server_id_a = listen_a["serverId"]
+                .as_str()
+                .expect("server id a")
+                .to_string();
+            let server_id_b = listen_b["serverId"]
+                .as_str()
+                .expect("server id b")
+                .to_string();
+            let accepted_a = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_a,
+                "proc-a",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("net.server_poll"),
+                    args: vec![json!(server_id_a), json!(250)],
+                },
+            )
+            .expect("accept vm a connection");
+            let accepted_b = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_b,
+                "proc-b",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("net.server_poll"),
+                    args: vec![json!(server_id_b), json!(250)],
+                },
+            )
+            .expect("accept vm b connection");
+            assert_eq!(accepted_a["type"], Value::from("connection"));
+            assert_eq!(accepted_b["type"], Value::from("connection"));
+            assert_eq!(accepted_a["localPort"], Value::from(43111));
+            assert_eq!(accepted_b["localPort"], Value::from(43111));
+
+            let query_a = sidecar
+                .dispatch(request(
+                    50,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_a),
+                    RequestPayload::FindListener(FindListenerRequest {
+                        host: Some(String::from("127.0.0.1")),
+                        port: Some(43111),
+                        path: None,
+                    }),
+                ))
+                .expect("query vm a listener");
+            let query_b = sidecar
+                .dispatch(request(
+                    51,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_b),
+                    RequestPayload::FindListener(FindListenerRequest {
+                        host: Some(String::from("127.0.0.1")),
+                        port: Some(43111),
+                        path: None,
+                    }),
+                ))
+                .expect("query vm b listener");
+            match query_a.response.payload {
+                ResponsePayload::ListenerSnapshot(snapshot) => {
+                    let listener = snapshot.listener.expect("vm a listener");
+                    assert_eq!(listener.process_id, "proc-a");
+                    assert_eq!(listener.host.as_deref(), Some("127.0.0.1"));
+                    assert_eq!(listener.port, Some(43111));
+                }
+                other => panic!("unexpected vm a listener response: {other:?}"),
+            }
+            match query_b.response.payload {
+                ResponsePayload::ListenerSnapshot(snapshot) => {
+                    let listener = snapshot.listener.expect("vm b listener");
+                    assert_eq!(listener.process_id, "proc-b");
+                    assert_eq!(listener.host.as_deref(), Some("127.0.0.1"));
+                    assert_eq!(listener.port, Some(43111));
+                }
+                other => panic!("unexpected vm b listener response: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn javascript_net_rpc_listens_and_connects_over_unix_domain_sockets() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-net-unix-cwd");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-unix"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    ),
+                );
+            }
+
+            let bridge = sidecar.bridge.clone();
+            let dns = sidecar.vms.get(&vm_id).expect("javascript vm").dns.clone();
+            let limits = ResourceLimits::default();
+            let socket_paths = JavascriptSocketPathContext {
+                sandbox_root: cwd.clone(),
+                mounts: Vec::new(),
+                listen_policy: VmListenPolicy::default(),
+                loopback_exempt_ports: BTreeSet::new(),
+                tcp_loopback_guest_to_host_ports: BTreeMap::new(),
+                udp_loopback_guest_to_host_ports: BTreeMap::new(),
+                udp_loopback_host_to_guest_ports: BTreeMap::new(),
+                used_tcp_guest_ports: BTreeMap::new(),
+                used_udp_guest_ports: BTreeMap::new(),
+            };
+            let socket_path = "/tmp/agent-os.sock";
+            let host_socket_path = cwd.join("tmp/agent-os.sock");
+
+            let listen = {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 1,
+                        method: String::from("net.listen"),
+                        args: vec![json!({
+                            "path": socket_path,
+                            "backlog": 1,
+                        })],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("listen on unix socket")
+            };
+            let server_id = listen["serverId"].as_str().expect("server id").to_string();
+            assert_eq!(listen["path"], Value::String(String::from(socket_path)));
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                assert!(
+                    vm.kernel
+                        .exists(socket_path)
+                        .expect("kernel socket placeholder exists"),
+                    "kernel did not expose unix socket path"
+                );
+            }
+            assert!(host_socket_path.exists(), "host unix socket path missing");
+
+            let listener_lookup = sidecar
+                .dispatch(request(
+                    2,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::FindListener(FindListenerRequest {
+                        host: None,
+                        port: None,
+                        path: Some(String::from(socket_path)),
+                    }),
+                ))
+                .expect("query unix listener");
+            match listener_lookup.response.payload {
+                ResponsePayload::ListenerSnapshot(snapshot) => {
+                    let listener = snapshot.listener.expect("listener snapshot");
+                    assert_eq!(listener.process_id, "proc-js-unix");
+                    assert_eq!(listener.path.as_deref(), Some(socket_path));
+                }
+                other => panic!("unexpected listener response payload: {other:?}"),
+            }
+
+            let connect = {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 3,
+                        method: String::from("net.connect"),
+                        args: vec![json!({
+                            "path": socket_path,
+                        })],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("connect to unix listener")
+            };
+            let client_socket_id = connect["socketId"]
+                .as_str()
+                .expect("client socket id")
+                .to_string();
+            assert_eq!(
+                connect["remotePath"],
+                Value::String(String::from(socket_path))
+            );
+
+            let accepted = {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 4,
+                        method: String::from("net.server_poll"),
+                        args: vec![json!(server_id), json!(250)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("accept unix socket connection")
+            };
+            let server_socket_id = accepted["socketId"]
+                .as_str()
+                .expect("server socket id")
+                .to_string();
+            assert_eq!(
+                accepted["localPath"],
+                Value::String(String::from(socket_path))
+            );
+
+            {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                let connections = service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 5,
+                        method: String::from("net.server_connections"),
+                        args: vec![json!(server_id)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("query unix server connections");
+                assert_eq!(connections, json!(1));
+            }
+
+            {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 6,
+                        method: String::from("net.write"),
+                        args: vec![
+                            json!(client_socket_id),
+                            json!({
+                                "__agentOsType": "bytes",
+                                "base64": "cGluZw==",
+                            }),
+                        ],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("write unix client payload");
+            }
+
+            {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 7,
+                        method: String::from("net.shutdown"),
+                        args: vec![json!(client_socket_id)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("shutdown unix client write half");
+            }
+
+            let server_data = {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 8,
+                        method: String::from("net.poll"),
+                        args: vec![json!(server_socket_id), json!(250)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("poll unix server socket data")
+            };
+            assert_eq!(
+                server_data["data"]["base64"],
+                Value::String(String::from("cGluZw=="))
+            );
+
+            {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                let server_end = service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 9,
+                        method: String::from("net.poll"),
+                        args: vec![json!(server_socket_id), json!(250)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("poll unix server socket end");
+                assert_eq!(server_end["type"], Value::String(String::from("end")));
+            }
+
+            {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 10,
+                        method: String::from("net.write"),
+                        args: vec![
+                            json!(server_socket_id),
+                            json!({
+                                "__agentOsType": "bytes",
+                                "base64": "cG9uZw==",
+                            }),
+                        ],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("write unix server payload");
+            }
+
+            {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 11,
+                        method: String::from("net.shutdown"),
+                        args: vec![json!(server_socket_id)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("shutdown unix server write half");
+            }
+
+            let client_data = {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 12,
+                        method: String::from("net.poll"),
+                        args: vec![json!(client_socket_id), json!(250)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("poll unix client socket data")
+            };
+            assert_eq!(
+                client_data["data"]["base64"],
+                Value::String(String::from("cG9uZw=="))
+            );
+
+            {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                let client_end = service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 13,
+                        method: String::from("net.poll"),
+                        args: vec![json!(client_socket_id), json!(250)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("poll unix client socket end");
+                assert_eq!(client_end["type"], Value::String(String::from("end")));
+            }
+
+            for (id, request_id) in [(&client_socket_id, 14_u64), (&server_socket_id, 15_u64)] {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: request_id,
+                        method: String::from("net.destroy"),
+                        args: vec![json!(id)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("destroy unix socket");
+            }
+
+            {
+                let counts = sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-unix"))
+                    .expect("unix process")
+                    .network_resource_counts();
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-unix")
+                    .expect("unix process");
+                service_javascript_net_sync_rpc(
+                    &bridge,
+                    &vm_id,
+                    &dns,
+                    &socket_paths,
+                    &mut vm.kernel,
+                    process,
+                    &JavascriptSyncRpcRequest {
+                        id: 16,
+                        method: String::from("net.server_close"),
+                        args: vec![json!(server_id)],
+                    },
+                    &limits,
+                    counts,
+                )
+                .expect("close unix listener");
+            }
+
+            sidecar
+                .dispose_vm_internal(
+                    &connection_id,
+                    &session_id,
+                    &vm_id,
+                    DisposeReason::Requested,
+                )
+                .expect("dispose unix vm");
+        }
+
+        #[test]
+        fn javascript_child_process_rpc_spawns_nested_node_processes_inside_vm_kernel() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(&mut sidecar, &connection_id, &session_id, Vec::new())
+                .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-child-process-cwd");
+            write_fixture(
+                &cwd.join("child.mjs"),
+                r#"
+import fs from "node:fs";
+
+const note = fs.readFileSync("/rpc/note.txt", "utf8").trim();
+console.log(`${process.argv[2]}:${process.pid}:${process.ppid}:${note}`);
+"#,
+            );
+            write_fixture(
+                &cwd.join("entry.mjs"),
+                r#"
+const { execSync, spawn } = require("node:child_process");
+
+const child = spawn("node", ["./child.mjs", "spawn"], {
+  stdio: ["ignore", "pipe", "pipe"],
+});
+let spawnOutput = "";
+child.stdout.setEncoding("utf8");
+child.stdout.on("data", (chunk) => {
+  spawnOutput += chunk;
+});
+await new Promise((resolve, reject) => {
+  child.on("error", reject);
+  child.on("close", (code) => {
+    if (code !== 0) {
+      reject(new Error(`spawn exit ${code}`));
+      return;
+    }
+    resolve();
+  });
+});
+
+const execOutput = execSync("node ./child.mjs exec", {
+  encoding: "utf8",
+}).trim();
+
+console.log(JSON.stringify({
+  parentPid: process.pid,
+  childPid: child.pid,
+  spawnOutput: spawnOutput.trim(),
+  execOutput,
+}));
+"#,
+            );
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .write_file("/rpc/note.txt", b"hello from nested child".to_vec())
+                    .expect("seed rpc note");
+            }
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+            .javascript_engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: vm_id.clone(),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([(
+                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                    String::from(
+                        "[\"assert\",\"buffer\",\"console\",\"child_process\",\"crypto\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+                    ),
+                )]),
+                cwd: cwd.clone(),
+            })
+            .expect("start fake javascript execution");
+
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-child"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    )
+                    .with_host_cwd(cwd.clone()),
+                );
+            }
+
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            let mut exit_code = None;
+            for _ in 0..96 {
+                let next_event = {
+                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    vm.active_processes
+                        .get("proc-js-child")
+                        .map(|process| {
+                            process
+                                .execution
+                                .poll_event(Duration::from_secs(5))
+                                .expect("poll javascript child_process event")
+                        })
+                        .flatten()
+                };
+                let Some(event) = next_event else {
+                    if exit_code.is_some() {
+                        break;
+                    }
+                    continue;
+                };
+
+                match &event {
+                    ActiveExecutionEvent::Stdout(chunk) => {
+                        stdout.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Stderr(chunk) => {
+                        stderr.push_str(&String::from_utf8_lossy(chunk));
+                    }
+                    ActiveExecutionEvent::Exited(code) => exit_code = Some(*code),
+                    _ => {}
+                }
+
+                sidecar
+                    .handle_execution_event(&vm_id, "proc-js-child", event)
+                    .expect("handle javascript child_process event");
+            }
+
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            let parsed: Value =
+                serde_json::from_str(stdout.trim()).expect("parse child_process JSON");
+            let parent_pid = parsed["parentPid"].as_u64().expect("parent pid") as u32;
+            let child_pid = parsed["childPid"].as_u64().expect("child pid") as u32;
+            let spawn_parts = parsed["spawnOutput"]
+                .as_str()
+                .expect("spawn output")
+                .split(':')
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let exec_parts = parsed["execOutput"]
+                .as_str()
+                .expect("exec output")
+                .split(':')
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+
+            assert_eq!(spawn_parts[0], "spawn");
+            assert_eq!(spawn_parts[1].parse::<u32>().expect("spawn pid"), child_pid);
+            assert_eq!(
+                spawn_parts[2].parse::<u32>().expect("spawn ppid"),
+                parent_pid
+            );
+            assert_eq!(spawn_parts[3], "hello from nested child");
+            assert_eq!(exec_parts[0], "exec");
+            assert_eq!(exec_parts[2].parse::<u32>().expect("exec ppid"), parent_pid);
+            assert_eq!(exec_parts[3], "hello from nested child");
+        }
+
+        #[test]
+        fn javascript_child_process_internal_bootstrap_env_is_allowlisted() {
+            let filtered =
+                sanitize_javascript_child_process_internal_bootstrap_env(&BTreeMap::from([
+                    (
+                        String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                        String::from("[\"fs\"]"),
+                    ),
+                    (
+                        String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+                        String::from("[]"),
+                    ),
+                    (
+                        String::from("AGENT_OS_VIRTUAL_PROCESS_UID"),
+                        String::from("0"),
+                    ),
+                    (
+                        String::from("AGENT_OS_VIRTUAL_PROCESS_VERSION"),
+                        String::from("v24.0.0"),
+                    ),
+                    (
+                        String::from("AGENT_OS_VIRTUAL_OS_HOSTNAME"),
+                        String::from("agent-os-test"),
+                    ),
+                    (
+                        String::from("AGENT_OS_PARENT_NODE_ALLOW_CHILD_PROCESS"),
+                        String::from("1"),
+                    ),
+                    (
+                        String::from("VISIBLE_MARKER"),
+                        String::from("child-visible"),
+                    ),
+                ]));
+
+            assert_eq!(
+                filtered.get("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                Some(&String::from("[\"fs\"]"))
+            );
+            assert_eq!(
+                filtered.get("AGENT_OS_GUEST_PATH_MAPPINGS"),
+                Some(&String::from("[]"))
+            );
+            assert_eq!(
+                filtered.get("AGENT_OS_VIRTUAL_PROCESS_UID"),
+                Some(&String::from("0"))
+            );
+            assert_eq!(
+                filtered.get("AGENT_OS_VIRTUAL_PROCESS_VERSION"),
+                Some(&String::from("v24.0.0"))
+            );
+            assert_eq!(
+                filtered.get("AGENT_OS_VIRTUAL_OS_HOSTNAME"),
+                Some(&String::from("agent-os-test"))
+            );
+            assert!(!filtered.contains_key("AGENT_OS_PARENT_NODE_ALLOW_CHILD_PROCESS"));
+            assert!(!filtered.contains_key("VISIBLE_MARKER"));
+        }
+    }
+}
+
+pub use crate::service::{DispatchResult, NativeSidecar, SidecarError};
