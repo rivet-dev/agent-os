@@ -123,6 +123,13 @@ pub struct SpawnOptions {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VirtualProcessOptions {
+    pub parent_pid: Option<u32>,
+    pub env: BTreeMap<String, String>,
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecOptions {
     pub requester_driver: Option<String>,
     pub parent_pid: Option<u32>,
@@ -869,10 +876,131 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.resources
             .check_process_spawn(&self.resource_snapshot(), inherited_fds)?;
 
+        self.register_process(
+            resolved.driver.name().to_owned(),
+            resolved.command,
+            resolved.args,
+            ProcessContext {
+                pid: 0,
+                ppid: options.parent_pid.unwrap_or(0),
+                env,
+                cwd,
+                umask: DEFAULT_PROCESS_UMASK,
+                fds: Default::default(),
+            },
+            options.requester_driver.as_deref(),
+        )
+    }
+
+    pub fn create_virtual_process(
+        &mut self,
+        requester_driver: &str,
+        driver: &str,
+        command: &str,
+        args: Vec<String>,
+        options: VirtualProcessOptions,
+    ) -> KernelResult<KernelProcessHandle> {
+        self.assert_not_terminated()?;
+        if let Some(parent_pid) = options.parent_pid {
+            self.assert_driver_owns(requester_driver, parent_pid)?;
+        }
+
+        let cwd = options.cwd.clone().unwrap_or_else(|| self.cwd.clone());
+        self.resources.check_process_argv_bytes(command, &args)?;
+        self.resources
+            .check_process_env_bytes(&self.env, &options.env)?;
+
+        let mut env = self.env.clone();
+        env.extend(options.env.clone());
+        check_command_execution(
+            &self.vm_id,
+            &self.permissions,
+            command,
+            &args,
+            Some(&cwd),
+            &env,
+        )?;
+
+        let inherited_fds = {
+            let tables = lock_or_recover(&self.fd_tables);
+            options
+                .parent_pid
+                .and_then(|pid| tables.get(pid).map(ProcessFdTable::len))
+                .unwrap_or(3)
+        };
+        self.resources
+            .check_process_spawn(&self.resource_snapshot(), inherited_fds)?;
+
+        self.register_process(
+            String::from(driver),
+            String::from(command),
+            args,
+            ProcessContext {
+                pid: 0,
+                ppid: options.parent_pid.unwrap_or(0),
+                env,
+                cwd,
+                umask: DEFAULT_PROCESS_UMASK,
+                fds: Default::default(),
+            },
+            Some(requester_driver),
+        )
+    }
+
+    pub fn read_process_stdin(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        length: usize,
+        timeout: Option<Duration>,
+    ) -> KernelResult<Option<Vec<u8>>> {
+        self.fd_read_with_timeout_result(requester_driver, pid, 0, length, timeout)
+    }
+
+    pub fn write_process_stdout(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        data: &[u8],
+    ) -> KernelResult<usize> {
+        self.fd_write(requester_driver, pid, 1, data)
+    }
+
+    pub fn write_process_stderr(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        data: &[u8],
+    ) -> KernelResult<usize> {
+        self.fd_write(requester_driver, pid, 2, data)
+    }
+
+    pub fn exit_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        exit_code: i32,
+    ) -> KernelResult<()> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.processes.mark_exited(pid, exit_code);
+        Ok(())
+    }
+
+    fn register_process(
+        &mut self,
+        driver_name: String,
+        command: String,
+        args: Vec<String>,
+        mut ctx: ProcessContext,
+        requester_driver: Option<&str>,
+    ) -> KernelResult<KernelProcessHandle> {
         let pid = self.processes.allocate_pid();
+        ctx.pid = pid;
+
         {
             let mut tables = lock_or_recover(&self.fd_tables);
-            if let Some(parent_pid) = options.parent_pid {
+            if ctx.ppid != 0 {
+                let parent_pid = ctx.ppid;
                 tables.fork(parent_pid, pid);
             } else {
                 tables.create(pid);
@@ -880,27 +1008,22 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         let process = Arc::new(StubDriverProcess::default());
-        let driver_name = resolved.driver.name().to_owned();
         self.processes.register(
             pid,
             driver_name.clone(),
-            resolved.command,
-            resolved.args,
-            ProcessContext {
-                pid,
-                ppid: options.parent_pid.unwrap_or(0),
-                env,
-                cwd,
-                umask: DEFAULT_PROCESS_UMASK,
-                fds: Default::default(),
-            },
+            command,
+            args,
+            ctx,
             process.clone(),
         );
 
         let mut owners = lock_or_recover(&self.driver_pids);
         owners.entry(driver_name.clone()).or_default().insert(pid);
-        if let Some(requester) = options.requester_driver {
-            owners.entry(requester).or_default().insert(pid);
+        if let Some(requester) = requester_driver {
+            owners
+                .entry(String::from(requester))
+                .or_default()
+                .insert(pid);
         }
 
         Ok(KernelProcessHandle {

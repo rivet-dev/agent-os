@@ -390,7 +390,7 @@
         "cargo test passes"
       ],
       "priority": 30,
-      "passes": false,
+      "passes": true,
       "notes": "Step 5 part 1. See spec 'Tool Invocation - Virtual Process Design'. Virtual processes are backed by tool dispatch in the sidecar, not real host OS processes."
     },
     {
