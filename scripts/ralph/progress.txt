@@ -36,6 +36,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Stateful sidecar crypto handlers now live behind `service_javascript_crypto_sync_rpc(&mut ActiveProcess, ...)`; cipher/Diffie-Hellman sessions are per-process state, and AES-GCM `authTagLength` should size the returned auth tag instead of calling `Crypter::set_tag_len()` during encryption
 - Sidecar-initiated callback frames must keep negative request IDs from the first request onward, and current-thread stdio framing must use dedicated OS threads for stdin/stdout so callback-driven mounts can unblock while the main loop waits synchronously
 - Sidecar TCP tests should connect to VM-owned loopback listeners, not arbitrary host `127.0.0.1` ports; guest loopback connections to host-owned ports are blocked unless the port is explicitly exempted
+- HTTP/2 loopback clients must resolve guest loopback ports against the per-process HTTP/2 server table before falling back to generic TCP resolution, and accepted HTTP/2 sockets should be converted to Tokio streams inside the session runtime thread rather than the outer blocking accept loop
 - TLS-capable TCP sockets must keep the plaintext reader lazy until the first `net.socket_read`; a background clone that reads too early will consume ClientHello bytes and break SNI inspection plus TLS upgrade
 - Sidecar service tests that poll `net.server_accept` or `net.socket_read` should sleep briefly between timeout sentinels; tight retry loops can race local loopback delivery in this harness
 
@@ -310,4 +311,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - The V8-era JavaScript integration suite lives in `crates/execution/tests/javascript_v8.rs`; the removed `legacy-js-tests` file only covered the deprecated host-Node guest path
   - If a warmup cache key tracks mutable guest assets, inode-only fingerprints are insufficient because overwriting a file in place can preserve the inode while changing runtime behavior
   - `cargo test -p agent-os-execution -- --test-threads=1` is fully green for this story’s surface; keep benchmark/reporting coverage on stable artifact tests unless the live harness contract changes
+---
+## 2026-04-07 10:29:56 PDT - US-037
+- Implemented the sidecar HTTP/2 bridge in `crates/sidecar/src/execution.rs`, including server/session/stream dispatch, per-process HTTP/2 state management, loopback connect mapping for VM-owned listeners, and the Tokio-backed client/server runtime plumbing needed by the `h2` transport
+- Added HTTP/2 shared state types in `crates/sidecar/src/state.rs`, pulled in the `h2`/`http`/`bytes` dependencies in `crates/sidecar/Cargo.toml`, refreshed `Cargo.lock`, and added service coverage in `crates/sidecar/tests/service.rs` for round-trip requests plus settings/pause/push/file-response surfaces
+- Files changed: `crates/sidecar/Cargo.toml`, `Cargo.lock`, `crates/sidecar/src/state.rs`, `crates/sidecar/src/execution.rs`, `crates/sidecar/tests/service.rs`, `crates/CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - HTTP/2 guest loopback connects cannot rely on generic TCP resolution alone; they need to consult the per-process HTTP/2 server table so guest ports map back to the actual host listener chosen at bind time
+  - `Option::unwrap_or(...)` is the wrong shape for fallback network resolution here because it eagerly evaluates the fallback path; use a lazy `match` or `unwrap_or_else(...)` when the fallback performs permission or loopback checks
+  - Tokio `from_std` handoff for accepted HTTP/2 sockets has to happen inside the per-session runtime thread; doing it in the outer blocking accept loop panics because there is no active reactor
 ---

@@ -23,19 +23,21 @@ use crate::service::{
 };
 use crate::state::{
     ActiveCipherSession, ActiveDhSession, ActiveDiffieHellmanSession, ActiveEcdhSession,
-    ActiveExecution, ActiveExecutionEvent, ActiveHttpServer, ActiveProcess, ActiveTcpListener,
-    ActiveTcpSocket, ActiveTlsState, ActiveTlsStream, ActiveUdpSocket, ActiveUnixListener,
-    ActiveUnixSocket, BridgeError, DnsResolutionSource, JavascriptSocketFamily,
-    JavascriptSocketPathContext, JavascriptTcpListenerEvent, JavascriptTcpSocketEvent,
-    JavascriptTlsBridgeOptions, JavascriptTlsClientHello, JavascriptTlsDataValue,
-    JavascriptTlsMaterial, JavascriptUdpFamily, JavascriptUdpSocketEvent,
-    JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket, PendingUnixSocket,
-    ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution, ResolvedTcpConnectAddr,
-    SharedBridge, SidecarKernel, SocketQueryKind, VmDnsConfig, VmListenPolicy, VmState,
-    DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
-    JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND,
-    VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
-    VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
+    ActiveExecution, ActiveExecutionEvent, ActiveHttp2Server, ActiveHttp2Session,
+    ActiveHttp2Stream, ActiveHttpServer, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
+    ActiveTlsState, ActiveTlsStream, ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket,
+    BridgeError, DnsResolutionSource, Http2BridgeEvent, Http2RuntimeSnapshot,
+    Http2SessionCommand, Http2SessionSnapshot, Http2SocketSnapshot, Http2StreamDirection,
+    JavascriptSocketFamily, JavascriptSocketPathContext, JavascriptTcpListenerEvent,
+    JavascriptTcpSocketEvent, JavascriptTlsBridgeOptions, JavascriptTlsClientHello,
+    JavascriptTlsDataValue, JavascriptTlsMaterial, JavascriptUdpFamily,
+    JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts,
+    PendingTcpSocket, PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope,
+    ResolvedChildProcessExecution, ResolvedTcpConnectAddr, SharedBridge, SidecarKernel,
+    SocketQueryKind, VmDnsConfig, VmListenPolicy, VmState, DEFAULT_JAVASCRIPT_NET_BACKLOG,
+    EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV, JAVASCRIPT_COMMAND,
+    LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND, VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY,
+    VM_LISTEN_PORT_MAX_METADATA_KEY, VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -57,9 +59,12 @@ use agent_os_kernel::process_table::{SIGKILL, SIGTERM};
 use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use base64::Engine;
+use bytes::Bytes;
+use h2::{client, server, Reason};
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
+use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri};
 use hmac::{Hmac, Mac};
 use md5::Md5;
 use nix::libc;
@@ -94,6 +99,7 @@ use sha1::Sha1;
 use sha2::{digest::Digest, Sha256, Sha512};
 use socket2::{SockRef, TcpKeepalive};
 use std::collections::{BTreeMap, BTreeSet};
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -108,6 +114,8 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::runtime::Builder as TokioRuntimeBuilder;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use url::Url;
 
 const DEFAULT_KERNEL_STDIN_READ_MAX_BYTES: usize = 64 * 1024;
@@ -156,6 +164,41 @@ struct JavascriptHttpRequestOptions {
     headers: BTreeMap<String, Value>,
     body: Option<String>,
     reject_unauthorized: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct JavascriptHttp2ServerListenRequest {
+    server_id: u64,
+    secure: bool,
+    port: Option<u16>,
+    host: Option<String>,
+    backlog: Option<u32>,
+    timeout: Option<u64>,
+    settings: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct JavascriptHttp2SessionConnectRequest {
+    authority: Option<String>,
+    protocol: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
+    settings: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct JavascriptHttp2RequestOptions {
+    end_stream: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct JavascriptHttp2FileResponseOptions {
+    offset: Option<u64>,
+    length: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -222,6 +265,7 @@ impl ActiveProcess {
             next_child_process_id: 0,
             http_servers: BTreeMap::new(),
             pending_http_requests: BTreeMap::new(),
+            http2: Default::default(),
             tcp_listeners: BTreeMap::new(),
             next_tcp_listener_id: 0,
             tcp_sockets: BTreeMap::new(),
@@ -289,6 +333,10 @@ impl ActiveProcess {
                 + self.udp_sockets.len(),
             connections: self.tcp_sockets.len() + self.unix_sockets.len(),
         };
+        if let Ok(http2) = self.http2.shared.lock() {
+            counts.sockets += http2.servers.len() + http2.sessions.len();
+            counts.connections += http2.sessions.len();
+        }
 
         for child in self.child_processes.values() {
             let child_counts = child.network_resource_counts();
@@ -4722,6 +4770,22 @@ fn spawn_unix_socket_reader(
 fn terminate_child_process_tree(kernel: &mut SidecarKernel, process: &mut ActiveProcess) {
     process.http_servers.clear();
     process.pending_http_requests.clear();
+    if let Ok(mut http2) = process.http2.shared.lock() {
+        let sessions = http2.sessions.values().cloned().collect::<Vec<_>>();
+        http2.server_events.clear();
+        http2.session_events.clear();
+        http2.streams.clear();
+        http2.servers.clear();
+        http2.sessions.clear();
+        drop(http2);
+        for session in sessions {
+            let (respond_to, _rx) = mpsc::channel();
+            let _ = session.command_tx.send(Http2SessionCommand::Close {
+                abrupt: true,
+                respond_to,
+            });
+        }
+    }
 
     let listener_ids = process.tcp_listeners.keys().cloned().collect::<Vec<_>>();
     for listener_id in listener_ids {
@@ -5008,6 +5072,37 @@ where
             dns,
             socket_paths,
             kernel,
+            process,
+            request,
+            resource_limits,
+            network_counts,
+        ),
+        "net.http2_server_listen"
+        | "net.http2_server_poll"
+        | "net.http2_server_close"
+        | "net.http2_server_respond"
+        | "net.http2_server_wait"
+        | "net.http2_session_connect"
+        | "net.http2_session_request"
+        | "net.http2_session_settings"
+        | "net.http2_session_set_local_window_size"
+        | "net.http2_session_goaway"
+        | "net.http2_session_close"
+        | "net.http2_session_destroy"
+        | "net.http2_session_poll"
+        | "net.http2_session_wait"
+        | "net.http2_stream_respond"
+        | "net.http2_stream_push_stream"
+        | "net.http2_stream_write"
+        | "net.http2_stream_end"
+        | "net.http2_stream_close"
+        | "net.http2_stream_pause"
+        | "net.http2_stream_resume"
+        | "net.http2_stream_respond_with_file" => service_javascript_http2_sync_rpc(
+            bridge,
+            vm_id,
+            dns,
+            socket_paths,
             process,
             request,
             resource_limits,
@@ -7646,6 +7741,1996 @@ where
         }
         other => Err(SidecarError::InvalidState(format!(
             "unsupported JavaScript dgram sync RPC method {other}"
+        ))),
+    }
+}
+
+#[derive(Debug)]
+struct ClientHttp2StreamState {
+    send_stream: Option<h2::SendStream<Bytes>>,
+}
+
+#[derive(Debug)]
+struct ServerHttp2StreamState {
+    send_response: Option<ServerHttp2Responder>,
+    send_stream: Option<h2::SendStream<Bytes>>,
+}
+
+#[derive(Debug)]
+enum ServerHttp2Responder {
+    Regular(server::SendResponse<Bytes>),
+    Pushed(server::SendPushedResponse<Bytes>),
+}
+
+const HTTP2_DEFAULT_WINDOW_SIZE: u32 = 65_535;
+const HTTP2_POLL_DELAY: Duration = Duration::from_millis(10);
+
+fn http2_runtime_snapshot() -> Http2RuntimeSnapshot {
+    Http2RuntimeSnapshot {
+        effective_local_window_size: HTTP2_DEFAULT_WINDOW_SIZE,
+        local_window_size: HTTP2_DEFAULT_WINDOW_SIZE,
+        remote_window_size: HTTP2_DEFAULT_WINDOW_SIZE,
+        next_stream_id: 1,
+        outbound_queue_size: 1,
+        deflate_dynamic_table_size: 0,
+        inflate_dynamic_table_size: 0,
+    }
+}
+
+fn http2_snapshot_json(snapshot: &Http2SessionSnapshot) -> Result<String, SidecarError> {
+    serde_json::to_string(snapshot)
+        .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
+}
+
+fn http2_event_value(event: &Http2BridgeEvent) -> Result<Value, SidecarError> {
+    serde_json::to_string(event)
+        .map(Value::String)
+        .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
+}
+
+fn push_http2_server_event(
+    shared: &Arc<Mutex<crate::state::Http2SharedState>>,
+    server_id: u64,
+    event: Http2BridgeEvent,
+) {
+    if let Ok(mut state) = shared.lock() {
+        state.server_events.entry(server_id).or_default().push_back(event);
+    }
+}
+
+fn push_http2_session_event(
+    shared: &Arc<Mutex<crate::state::Http2SharedState>>,
+    session_id: u64,
+    event: Http2BridgeEvent,
+) {
+    if let Ok(mut state) = shared.lock() {
+        state
+            .session_events
+            .entry(session_id)
+            .or_default()
+            .push_back(event);
+    }
+}
+
+fn pop_http2_event(
+    queue: &mut BTreeMap<u64, VecDeque<Http2BridgeEvent>>,
+    id: u64,
+) -> Option<Http2BridgeEvent> {
+    queue.get_mut(&id).and_then(VecDeque::pop_front)
+}
+
+fn wait_for_http2_event(
+    shared: &Arc<Mutex<crate::state::Http2SharedState>>,
+    id: u64,
+    is_server: bool,
+    wait_ms: u64,
+) -> Option<Http2BridgeEvent> {
+    let deadline = Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        if let Ok(mut state) = shared.lock() {
+            let queue = if is_server {
+                &mut state.server_events
+            } else {
+                &mut state.session_events
+            };
+            if let Some(event) = pop_http2_event(queue, id) {
+                return Some(event);
+            }
+        }
+        if wait_ms == 0 || Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(HTTP2_POLL_DELAY);
+    }
+}
+
+fn next_http2_session_id(shared: &mut crate::state::Http2SharedState) -> u64 {
+    shared.next_session_id += 1;
+    shared.next_session_id
+}
+
+fn next_http2_stream_id(shared: &mut crate::state::Http2SharedState) -> u64 {
+    shared.next_stream_id += 1;
+    shared.next_stream_id
+}
+
+fn http2_reason(code: Option<u32>) -> Reason {
+    code.unwrap_or(Reason::NO_ERROR.into()).into()
+}
+
+fn http2_error_payload(message: impl Into<String>) -> String {
+    serde_json::to_string(&json!({
+        "name": "Error",
+        "code": "ERR_HTTP2_ERROR",
+        "message": message.into(),
+    }))
+    .unwrap_or_else(|_| String::from("{\"name\":\"Error\",\"code\":\"ERR_HTTP2_ERROR\",\"message\":\"HTTP/2 bridge error\"}"))
+}
+
+fn http2_socket_snapshot(local_addr: SocketAddr, remote_addr: SocketAddr) -> Http2SocketSnapshot {
+    Http2SocketSnapshot {
+        encrypted: false,
+        allow_half_open: false,
+        local_address: Some(local_addr.ip().to_string()),
+        local_port: Some(local_addr.port()),
+        local_family: Some(socket_addr_family(&local_addr).to_string()),
+        remote_address: Some(remote_addr.ip().to_string()),
+        remote_port: Some(remote_addr.port()),
+        remote_family: Some(socket_addr_family(&remote_addr).to_string()),
+        servername: None,
+        alpn_protocol: Some(String::from("h2c")),
+    }
+}
+
+fn http2_settings_from_value(settings: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    settings.clone()
+}
+
+fn parse_http2_headers_json(
+    headers_json: &str,
+    label: &str,
+) -> Result<BTreeMap<String, Value>, SidecarError> {
+    serde_json::from_str::<BTreeMap<String, Value>>(headers_json).map_err(|error| {
+        SidecarError::InvalidState(format!("{label} must be valid JSON: {error}"))
+    })
+}
+
+fn apply_http2_header_values(
+    header_map: &mut HeaderMap,
+    name: &str,
+    value: &Value,
+) -> Result<(), SidecarError> {
+    let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+        SidecarError::InvalidState(format!("invalid HTTP/2 header name {name:?}: {error}"))
+    })?;
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                apply_http2_header_values(header_map, name, value)?;
+            }
+        }
+        Value::String(text) => {
+            let value = HeaderValue::from_str(text).map_err(|error| {
+                SidecarError::InvalidState(format!("invalid HTTP/2 header value for {name}: {error}"))
+            })?;
+            header_map.append(header_name.clone(), value);
+        }
+        Value::Number(number) => {
+            let value = HeaderValue::from_str(&number.to_string()).map_err(|error| {
+                SidecarError::InvalidState(format!("invalid HTTP/2 numeric header value for {name}: {error}"))
+            })?;
+            header_map.append(header_name.clone(), value);
+        }
+        Value::Bool(boolean) => {
+            let value = HeaderValue::from_str(if *boolean { "true" } else { "false" }).map_err(
+                |error| {
+                    SidecarError::InvalidState(format!(
+                        "invalid HTTP/2 boolean header value for {name}: {error}"
+                    ))
+                },
+            )?;
+            header_map.append(header_name.clone(), value);
+        }
+        Value::Null => {}
+        Value::Object(_) => {
+            return Err(SidecarError::InvalidState(format!(
+                "unsupported HTTP/2 header object value for {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn build_http2_request(headers_json: &str) -> Result<Request<()>, SidecarError> {
+    let headers = parse_http2_headers_json(headers_json, "HTTP/2 request headers")?;
+    let method = headers
+        .get(":method")
+        .and_then(Value::as_str)
+        .unwrap_or("GET");
+    let path = headers
+        .get(":path")
+        .and_then(Value::as_str)
+        .unwrap_or("/");
+    let mut builder = Request::builder()
+        .method(Method::from_bytes(method.as_bytes()).map_err(|error| {
+            SidecarError::InvalidState(format!("invalid HTTP/2 method {method:?}: {error}"))
+        })?)
+        .uri(
+            path.parse::<Uri>()
+                .map_err(|error| SidecarError::InvalidState(format!("invalid HTTP/2 path {path:?}: {error}")))?,
+        );
+    {
+        let header_map = builder.headers_mut().expect("request header map");
+        for (name, value) in &headers {
+            if name.starts_with(':') {
+                continue;
+            }
+            apply_http2_header_values(header_map, name, value)?;
+        }
+    }
+    builder
+        .body(())
+        .map_err(|error| SidecarError::InvalidState(format!("invalid HTTP/2 request: {error}")))
+}
+
+fn build_http2_response(headers_json: &str) -> Result<Response<()>, SidecarError> {
+    let headers = parse_http2_headers_json(headers_json, "HTTP/2 response headers")?;
+    let status = headers
+        .get(":status")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            headers
+                .get(":status")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<u16>().ok().map(u64::from))
+        })
+        .unwrap_or(200);
+    let mut builder = Response::builder().status(status as u16);
+    {
+        let header_map = builder.headers_mut().expect("response header map");
+        for (name, value) in &headers {
+            if name.starts_with(':') {
+                continue;
+            }
+            apply_http2_header_values(header_map, name, value)?;
+        }
+    }
+    builder.body(()).map_err(|error| {
+        SidecarError::InvalidState(format!("invalid HTTP/2 response headers: {error}"))
+    })
+}
+
+fn serialize_http2_headers_map(
+    pseudo: BTreeMap<String, Value>,
+    headers: &HeaderMap,
+) -> Result<String, SidecarError> {
+    let mut serialized = pseudo;
+    for (name, value) in headers {
+        let name = name.as_str().to_string();
+        let value = Value::String(
+            value
+                .to_str()
+                .map_err(|error| {
+                    SidecarError::Execution(format!("invalid HTTP/2 header value: {error}"))
+                })?
+                .to_owned(),
+        );
+        match serialized.get_mut(&name) {
+            Some(Value::Array(values)) => values.push(value),
+            Some(existing) => {
+                let first = existing.clone();
+                *existing = Value::Array(vec![first, value]);
+            }
+            None => {
+                serialized.insert(name, value);
+            }
+        }
+    }
+    serde_json::to_string(&serialized)
+        .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
+}
+
+fn serialize_http2_request_headers(request: &Request<h2::RecvStream>) -> Result<String, SidecarError> {
+    let mut pseudo = BTreeMap::new();
+    pseudo.insert(
+        String::from(":method"),
+        Value::String(request.method().as_str().to_string()),
+    );
+    pseudo.insert(
+        String::from(":path"),
+        Value::String(
+            request
+                .uri()
+                .path_and_query()
+                .map(|value| value.as_str().to_string())
+                .unwrap_or_else(|| String::from("/")),
+        ),
+    );
+    serialize_http2_headers_map(pseudo, request.headers())
+}
+
+fn serialize_http2_response_headers(response: &Response<h2::RecvStream>) -> Result<String, SidecarError> {
+    let mut pseudo = BTreeMap::new();
+    pseudo.insert(
+        String::from(":status"),
+        Value::Number(serde_json::Number::from(response.status().as_u16())),
+    );
+    serialize_http2_headers_map(pseudo, response.headers())
+}
+
+fn remove_http2_session_resources(
+    shared: &Arc<Mutex<crate::state::Http2SharedState>>,
+    session_id: u64,
+) {
+    if let Ok(mut state) = shared.lock() {
+        state.sessions.remove(&session_id);
+        state.session_events.remove(&session_id);
+        let stream_ids = state
+            .streams
+            .iter()
+            .filter_map(|(stream_id, stream)| (stream.session_id == session_id).then_some(*stream_id))
+            .collect::<Vec<_>>();
+        for stream_id in stream_ids {
+            state.streams.remove(&stream_id);
+        }
+    }
+}
+
+fn spawn_http2_client_session(
+    shared: Arc<Mutex<crate::state::Http2SharedState>>,
+    session_id: u64,
+    remote_addr: SocketAddr,
+    snapshot: Arc<Mutex<Http2SessionSnapshot>>,
+    mut command_rx: UnboundedReceiver<Http2SessionCommand>,
+) {
+    thread::spawn(move || {
+        let runtime = match TokioRuntimeBuilder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                push_http2_session_event(
+                    &shared,
+                    session_id,
+                    Http2BridgeEvent {
+                        kind: String::from("sessionError"),
+                        id: session_id,
+                        data: Some(http2_error_payload(error.to_string())),
+                        ..Http2BridgeEvent::default()
+                    },
+                );
+                remove_http2_session_resources(&shared, session_id);
+                return;
+            }
+        };
+
+        runtime.block_on(async move {
+            let stream = match tokio::net::TcpStream::connect(remote_addr).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    push_http2_session_event(
+                        &shared,
+                        session_id,
+                        Http2BridgeEvent {
+                            kind: String::from("sessionError"),
+                            id: session_id,
+                            data: Some(http2_error_payload(error.to_string())),
+                            ..Http2BridgeEvent::default()
+                        },
+                    );
+                    remove_http2_session_resources(&shared, session_id);
+                    return;
+                }
+            };
+
+            let local_addr = match stream.local_addr() {
+                Ok(addr) => addr,
+                Err(error) => {
+                    push_http2_session_event(
+                        &shared,
+                        session_id,
+                        Http2BridgeEvent {
+                            kind: String::from("sessionError"),
+                            id: session_id,
+                            data: Some(http2_error_payload(error.to_string())),
+                            ..Http2BridgeEvent::default()
+                        },
+                    );
+                    remove_http2_session_resources(&shared, session_id);
+                    return;
+                }
+            };
+
+            {
+                let mut snapshot_guard = snapshot.lock().expect("http2 snapshot lock");
+                snapshot_guard.socket = http2_socket_snapshot(local_addr, remote_addr);
+                snapshot_guard.state = http2_runtime_snapshot();
+            }
+            if let Ok(snapshot_json) =
+                http2_snapshot_json(&snapshot.lock().expect("http2 snapshot lock").clone())
+            {
+                push_http2_session_event(
+                    &shared,
+                    session_id,
+                    Http2BridgeEvent {
+                        kind: String::from("sessionConnect"),
+                        id: session_id,
+                        data: Some(snapshot_json),
+                        ..Http2BridgeEvent::default()
+                    },
+                );
+            }
+
+            let (mut sender, connection) = match client::handshake(stream).await {
+                Ok(parts) => parts,
+                Err(error) => {
+                    push_http2_session_event(
+                        &shared,
+                        session_id,
+                        Http2BridgeEvent {
+                            kind: String::from("sessionError"),
+                            id: session_id,
+                            data: Some(http2_error_payload(error.to_string())),
+                            ..Http2BridgeEvent::default()
+                        },
+                    );
+                    remove_http2_session_resources(&shared, session_id);
+                    return;
+                }
+            };
+
+            let (status_tx, mut status_rx) = unbounded_channel::<Result<(), String>>();
+            tokio::spawn(async move {
+                let _ = status_tx.send(connection.await.map_err(|error| error.to_string()));
+            });
+
+            let streams: Arc<Mutex<BTreeMap<u64, ClientHttp2StreamState>>> =
+                Arc::new(Mutex::new(BTreeMap::new()));
+
+            loop {
+                tokio::select! {
+                    Some(result) = status_rx.recv() => {
+                        if let Err(message) = result {
+                            push_http2_session_event(
+                                &shared,
+                                session_id,
+                                Http2BridgeEvent {
+                                    kind: String::from("sessionError"),
+                                    id: session_id,
+                                    data: Some(http2_error_payload(message)),
+                                    ..Http2BridgeEvent::default()
+                                },
+                            );
+                        }
+                        push_http2_session_event(
+                            &shared,
+                            session_id,
+                            Http2BridgeEvent {
+                                kind: String::from("sessionClose"),
+                                id: session_id,
+                                ..Http2BridgeEvent::default()
+                            },
+                        );
+                        remove_http2_session_resources(&shared, session_id);
+                        break;
+                    }
+                    Some(command) = command_rx.recv() => {
+                        match command {
+                            Http2SessionCommand::Request { headers_json, options_json, respond_to } => {
+                                let request = match build_http2_request(&headers_json) {
+                                    Ok(request) => request,
+                                    Err(error) => {
+                                        let _ = respond_to.send(Err(error.to_string()));
+                                        continue;
+                                    }
+                                };
+                                let options: JavascriptHttp2RequestOptions =
+                                    serde_json::from_str(&options_json).unwrap_or_default();
+                                let stream_id = {
+                                    let mut state = shared.lock().expect("http2 shared state");
+                                    let stream_id = next_http2_stream_id(&mut state);
+                                    state.streams.insert(
+                                        stream_id,
+                                        ActiveHttp2Stream {
+                                            session_id,
+                                            direction: Http2StreamDirection::Client,
+                                            paused: Arc::new(AtomicBool::new(false)),
+                                        },
+                                    );
+                                    stream_id
+                                };
+                                match sender.send_request(request, options.end_stream) {
+                                    Ok((response_future, send_stream)) => {
+                                        if !options.end_stream {
+                                            streams
+                                                .lock()
+                                                .expect("http2 client streams")
+                                                .insert(stream_id, ClientHttp2StreamState { send_stream: Some(send_stream) });
+                                        }
+                                        let shared_clone = Arc::clone(&shared);
+                                        let snapshot_clone = Arc::clone(&snapshot);
+                                        tokio::spawn(async move {
+                                            match response_future.await {
+                                                Ok(response) => {
+                                                    if let Ok(headers_json) = serialize_http2_response_headers(&response) {
+                                                        push_http2_session_event(
+                                                            &shared_clone,
+                                                            session_id,
+                                                            Http2BridgeEvent {
+                                                                kind: String::from("clientResponseHeaders"),
+                                                                id: stream_id,
+                                                                data: Some(headers_json),
+                                                                ..Http2BridgeEvent::default()
+                                                            },
+                                                        );
+                                                    }
+                                                    let mut body = response.into_body();
+                                                    while let Some(chunk) = body.data().await {
+                                                        match chunk {
+                                                            Ok(bytes) => {
+                                                                let paused = {
+                                                                    let state = shared_clone.lock().expect("http2 shared state");
+                                                                    state.streams.get(&stream_id).map(|stream| Arc::clone(&stream.paused))
+                                                                };
+                                                                if let Some(paused) = paused {
+                                                                    while paused.load(Ordering::SeqCst) {
+                                                                        tokio::time::sleep(HTTP2_POLL_DELAY).await;
+                                                                    }
+                                                                }
+                                                                let _ = body.flow_control().release_capacity(bytes.len());
+                                                                push_http2_session_event(
+                                                                    &shared_clone,
+                                                                    session_id,
+                                                                    Http2BridgeEvent {
+                                                                        kind: String::from("clientData"),
+                                                                        id: stream_id,
+                                                                        data: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                                                                        ..Http2BridgeEvent::default()
+                                                                    },
+                                                                );
+                                                            }
+                                                            Err(error) => {
+                                                                push_http2_session_event(
+                                                                    &shared_clone,
+                                                                    session_id,
+                                                                    Http2BridgeEvent {
+                                                                        kind: String::from("clientError"),
+                                                                        id: stream_id,
+                                                                        data: Some(http2_error_payload(error.to_string())),
+                                                                        ..Http2BridgeEvent::default()
+                                                                    },
+                                                                );
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                    {
+                                                        let mut snapshot = snapshot_clone.lock().expect("http2 snapshot lock");
+                                                        snapshot.state.next_stream_id =
+                                                            snapshot.state.next_stream_id.saturating_add(2);
+                                                    }
+                                                    push_http2_session_event(
+                                                        &shared_clone,
+                                                        session_id,
+                                                        Http2BridgeEvent {
+                                                            kind: String::from("clientEnd"),
+                                                            id: stream_id,
+                                                            ..Http2BridgeEvent::default()
+                                                        },
+                                                    );
+                                                    push_http2_session_event(
+                                                        &shared_clone,
+                                                        session_id,
+                                                        Http2BridgeEvent {
+                                                            kind: String::from("clientClose"),
+                                                            id: stream_id,
+                                                            extra_number: Some(0),
+                                                            ..Http2BridgeEvent::default()
+                                                        },
+                                                    );
+                                                    if let Ok(mut state) = shared_clone.lock() {
+                                                        state.streams.remove(&stream_id);
+                                                    }
+                                                }
+                                                Err(error) => {
+                                                    push_http2_session_event(
+                                                        &shared_clone,
+                                                        session_id,
+                                                        Http2BridgeEvent {
+                                                            kind: String::from("clientError"),
+                                                            id: stream_id,
+                                                            data: Some(http2_error_payload(error.to_string())),
+                                                            ..Http2BridgeEvent::default()
+                                                        },
+                                                    );
+                                                    push_http2_session_event(
+                                                        &shared_clone,
+                                                        session_id,
+                                                        Http2BridgeEvent {
+                                                            kind: String::from("clientClose"),
+                                                            id: stream_id,
+                                                            extra_number: Some(u32::from(Reason::INTERNAL_ERROR) as u64),
+                                                            ..Http2BridgeEvent::default()
+                                                        },
+                                                    );
+                                                    if let Ok(mut state) = shared_clone.lock() {
+                                                        state.streams.remove(&stream_id);
+                                                    }
+                                                }
+                                            }
+                                        });
+                                        let _ = respond_to.send(Ok(json!(stream_id)));
+                                    }
+                                    Err(error) => {
+                                        if let Ok(mut state) = shared.lock() {
+                                            state.streams.remove(&stream_id);
+                                        }
+                                        let _ = respond_to.send(Err(error.to_string()));
+                                    }
+                                }
+                            }
+                            Http2SessionCommand::Settings { settings_json, respond_to } => {
+                                let settings = serde_json::from_str::<BTreeMap<String, Value>>(&settings_json)
+                                    .unwrap_or_default();
+                                {
+                                    let mut snapshot = snapshot.lock().expect("http2 snapshot lock");
+                                    snapshot.local_settings = http2_settings_from_value(&settings);
+                                }
+                                if let Ok(headers_json) = serde_json::to_string(&settings) {
+                                    push_http2_session_event(
+                                        &shared,
+                                        session_id,
+                                        Http2BridgeEvent {
+                                            kind: String::from("sessionLocalSettings"),
+                                            id: session_id,
+                                            data: Some(headers_json.clone()),
+                                            ..Http2BridgeEvent::default()
+                                        },
+                                    );
+                                    push_http2_session_event(
+                                        &shared,
+                                        session_id,
+                                        Http2BridgeEvent {
+                                            kind: String::from("sessionSettingsAck"),
+                                            id: session_id,
+                                            ..Http2BridgeEvent::default()
+                                        },
+                                    );
+                                }
+                                let _ = respond_to.send(Ok(Value::Null));
+                            }
+                            Http2SessionCommand::SetLocalWindowSize { size, respond_to } => {
+                                {
+                                    let mut snapshot = snapshot.lock().expect("http2 snapshot lock");
+                                    snapshot.state.local_window_size = size;
+                                    snapshot.state.effective_local_window_size = size;
+                                }
+                                let value = snapshot
+                                    .lock()
+                                    .ok()
+                                    .and_then(|snapshot| http2_snapshot_json(&snapshot.clone()).ok())
+                                    .map(Value::String)
+                                    .unwrap_or(Value::Null);
+                                let _ = respond_to.send(Ok(value));
+                            }
+                            Http2SessionCommand::Goaway { error_code, last_stream_id, opaque_data, respond_to } => {
+                                push_http2_session_event(
+                                    &shared,
+                                    session_id,
+                                    Http2BridgeEvent {
+                                        kind: String::from("sessionGoaway"),
+                                        id: session_id,
+                                        data: opaque_data.map(|value| {
+                                            base64::engine::general_purpose::STANDARD.encode(value)
+                                        }),
+                                        extra_number: Some(error_code as u64),
+                                        flags: Some(last_stream_id as u64),
+                                        ..Http2BridgeEvent::default()
+                                    },
+                                );
+                                let _ = respond_to.send(Ok(Value::Null));
+                            }
+                            Http2SessionCommand::Close { respond_to, .. } => {
+                                let _ = respond_to.send(Ok(Value::Null));
+                                push_http2_session_event(
+                                    &shared,
+                                    session_id,
+                                    Http2BridgeEvent {
+                                        kind: String::from("sessionClose"),
+                                        id: session_id,
+                                        ..Http2BridgeEvent::default()
+                                    },
+                                );
+                                remove_http2_session_resources(&shared, session_id);
+                                break;
+                            }
+                            Http2SessionCommand::StreamWrite { stream_id, chunk, end_stream, respond_to } => {
+                                let result = streams
+                                    .lock()
+                                    .expect("http2 client streams")
+                                    .get_mut(&stream_id)
+                                    .and_then(|stream| stream.send_stream.as_mut())
+                                    .ok_or_else(|| SidecarError::InvalidState(format!("unknown HTTP/2 client stream {stream_id}")))
+                                    .and_then(|stream| stream.send_data(Bytes::from(chunk), end_stream).map_err(|error| SidecarError::Execution(error.to_string())));
+                                match result {
+                                    Ok(()) => {
+                                        if end_stream {
+                                            streams.lock().expect("http2 client streams").remove(&stream_id);
+                                        }
+                                        let _ = respond_to.send(Ok(Value::Bool(true)));
+                                    }
+                                    Err(error) => {
+                                        let _ = respond_to.send(Err(error.to_string()));
+                                    }
+                                }
+                            }
+                            Http2SessionCommand::StreamClose { stream_id, error_code, respond_to } => {
+                                let mut streams = streams.lock().expect("http2 client streams");
+                                let Some(mut state) = streams.remove(&stream_id) else {
+                                    let _ = respond_to.send(Err(format!("unknown HTTP/2 client stream {stream_id}")));
+                                    continue;
+                                };
+                                if let Some(stream) = state.send_stream.as_mut() {
+                                    stream.send_reset(http2_reason(error_code));
+                                }
+                                if let Ok(mut state) = shared.lock() {
+                                    state.streams.remove(&stream_id);
+                                }
+                                push_http2_session_event(
+                                    &shared,
+                                    session_id,
+                                    Http2BridgeEvent {
+                                        kind: String::from("clientClose"),
+                                        id: stream_id,
+                                        extra_number: Some(u32::from(http2_reason(error_code)) as u64),
+                                        ..Http2BridgeEvent::default()
+                                    },
+                                );
+                                let _ = respond_to.send(Ok(Value::Null));
+                            }
+                            Http2SessionCommand::StreamRespond { respond_to, .. }
+                            | Http2SessionCommand::StreamPush { respond_to, .. }
+                            | Http2SessionCommand::StreamRespondWithFile { respond_to, .. } => {
+                                let _ = respond_to.send(Err(String::from("HTTP/2 client streams cannot send server responses")));
+                            }
+                        }
+                    }
+                    else => break,
+                }
+            }
+        });
+    });
+}
+
+fn spawn_http2_server_session(
+    shared: Arc<Mutex<crate::state::Http2SharedState>>,
+    server_id: u64,
+    session_id: u64,
+    stream: TcpStream,
+    snapshot: Arc<Mutex<Http2SessionSnapshot>>,
+    mut command_rx: UnboundedReceiver<Http2SessionCommand>,
+) {
+    thread::spawn(move || {
+        let runtime = match TokioRuntimeBuilder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                push_http2_server_event(
+                    &shared,
+                    server_id,
+                    Http2BridgeEvent {
+                        kind: String::from("serverStreamError"),
+                        id: session_id,
+                        data: Some(http2_error_payload(error.to_string())),
+                        ..Http2BridgeEvent::default()
+                    },
+                );
+                remove_http2_session_resources(&shared, session_id);
+                return;
+            }
+        };
+
+        runtime.block_on(async move {
+            if let Err(error) = stream.set_nonblocking(true) {
+                push_http2_server_event(
+                    &shared,
+                    server_id,
+                    Http2BridgeEvent {
+                        kind: String::from("serverStreamError"),
+                        id: session_id,
+                        data: Some(http2_error_payload(error.to_string())),
+                        ..Http2BridgeEvent::default()
+                    },
+                );
+                remove_http2_session_resources(&shared, session_id);
+                return;
+            }
+            let stream = match tokio::net::TcpStream::from_std(stream) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    push_http2_server_event(
+                        &shared,
+                        server_id,
+                        Http2BridgeEvent {
+                            kind: String::from("serverStreamError"),
+                            id: session_id,
+                            data: Some(http2_error_payload(error.to_string())),
+                            ..Http2BridgeEvent::default()
+                        },
+                    );
+                    remove_http2_session_resources(&shared, session_id);
+                    return;
+                }
+            };
+            let local_addr = match stream.local_addr() {
+                Ok(addr) => addr,
+                Err(error) => {
+                    push_http2_server_event(
+                        &shared,
+                        server_id,
+                        Http2BridgeEvent {
+                            kind: String::from("serverStreamError"),
+                            id: session_id,
+                            data: Some(http2_error_payload(error.to_string())),
+                            ..Http2BridgeEvent::default()
+                        },
+                    );
+                    remove_http2_session_resources(&shared, session_id);
+                    return;
+                }
+            };
+            let remote_addr = match stream.peer_addr() {
+                Ok(addr) => addr,
+                Err(error) => {
+                    push_http2_server_event(
+                        &shared,
+                        server_id,
+                        Http2BridgeEvent {
+                            kind: String::from("serverStreamError"),
+                            id: session_id,
+                            data: Some(http2_error_payload(error.to_string())),
+                            ..Http2BridgeEvent::default()
+                        },
+                    );
+                    remove_http2_session_resources(&shared, session_id);
+                    return;
+                }
+            };
+            {
+                let mut snapshot_guard = snapshot.lock().expect("http2 snapshot lock");
+                snapshot_guard.socket = http2_socket_snapshot(local_addr, remote_addr);
+                snapshot_guard.state = http2_runtime_snapshot();
+            }
+            if let Ok(snapshot_json) =
+                http2_snapshot_json(&snapshot.lock().expect("http2 snapshot lock").clone())
+            {
+                push_http2_server_event(
+                    &shared,
+                    server_id,
+                    Http2BridgeEvent {
+                        kind: String::from("serverConnection"),
+                        id: server_id,
+                        data: Some(serde_json::to_string(&http2_socket_snapshot(local_addr, remote_addr)).unwrap_or_default()),
+                        ..Http2BridgeEvent::default()
+                    },
+                );
+                push_http2_server_event(
+                    &shared,
+                    server_id,
+                    Http2BridgeEvent {
+                        kind: String::from("serverSession"),
+                        id: server_id,
+                        data: Some(snapshot_json),
+                        extra_number: Some(session_id),
+                        ..Http2BridgeEvent::default()
+                    },
+                );
+            }
+
+            let mut connection = match server::handshake(stream).await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    push_http2_server_event(
+                        &shared,
+                        server_id,
+                        Http2BridgeEvent {
+                            kind: String::from("serverStreamError"),
+                            id: session_id,
+                            data: Some(http2_error_payload(error.to_string())),
+                            ..Http2BridgeEvent::default()
+                        },
+                    );
+                    remove_http2_session_resources(&shared, session_id);
+                    return;
+                }
+            };
+
+            let streams: Arc<Mutex<BTreeMap<u64, ServerHttp2StreamState>>> =
+                Arc::new(Mutex::new(BTreeMap::new()));
+
+            loop {
+                tokio::select! {
+                    incoming = connection.accept() => {
+                        match incoming {
+                            Some(Ok((request, respond))) => {
+                                let headers_json = match serialize_http2_request_headers(&request) {
+                                    Ok(headers) => headers,
+                                    Err(error) => {
+                                        push_http2_server_event(
+                                            &shared,
+                                            server_id,
+                                            Http2BridgeEvent {
+                                                kind: String::from("serverStreamError"),
+                                                id: server_id,
+                                                data: Some(http2_error_payload(error.to_string())),
+                                                ..Http2BridgeEvent::default()
+                                            },
+                                        );
+                                        continue;
+                                    }
+                                };
+                                let stream_id = {
+                                    let mut state = shared.lock().expect("http2 shared state");
+                                    let stream_id = next_http2_stream_id(&mut state);
+                                    state.streams.insert(
+                                        stream_id,
+                                        ActiveHttp2Stream {
+                                            session_id,
+                                            direction: Http2StreamDirection::Server,
+                                            paused: Arc::new(AtomicBool::new(false)),
+                                        },
+                                    );
+                                    stream_id
+                                };
+                                streams.lock().expect("http2 server streams").insert(
+                                    stream_id,
+                                    ServerHttp2StreamState {
+                                        send_response: Some(ServerHttp2Responder::Regular(respond)),
+                                        send_stream: None,
+                                    },
+                                );
+                                let snapshot_json = snapshot
+                                    .lock()
+                                    .ok()
+                                    .and_then(|snapshot| http2_snapshot_json(&snapshot.clone()).ok());
+                                push_http2_server_event(
+                                    &shared,
+                                    server_id,
+                                    Http2BridgeEvent {
+                                        kind: String::from("serverStream"),
+                                        id: server_id,
+                                        data: Some(stream_id.to_string()),
+                                        extra: snapshot_json,
+                                        extra_number: Some(session_id),
+                                        extra_headers: Some(headers_json),
+                                        flags: Some(0),
+                                    },
+                                );
+                                let shared_clone = Arc::clone(&shared);
+                                tokio::spawn(async move {
+                                    let mut body = request.into_body();
+                                    while let Some(chunk) = body.data().await {
+                                        match chunk {
+                                            Ok(bytes) => {
+                                                let paused = {
+                                                    let state = shared_clone.lock().expect("http2 shared state");
+                                                    state.streams.get(&stream_id).map(|stream| Arc::clone(&stream.paused))
+                                                };
+                                                if let Some(paused) = paused {
+                                                    while paused.load(Ordering::SeqCst) {
+                                                        tokio::time::sleep(HTTP2_POLL_DELAY).await;
+                                                    }
+                                                }
+                                                let _ = body.flow_control().release_capacity(bytes.len());
+                                                push_http2_server_event(
+                                                    &shared_clone,
+                                                    server_id,
+                                                    Http2BridgeEvent {
+                                                        kind: String::from("serverStreamData"),
+                                                        id: stream_id,
+                                                        data: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                                                        ..Http2BridgeEvent::default()
+                                                    },
+                                                );
+                                            }
+                                            Err(error) => {
+                                                push_http2_server_event(
+                                                    &shared_clone,
+                                                    server_id,
+                                                    Http2BridgeEvent {
+                                                        kind: String::from("serverStreamError"),
+                                                        id: stream_id,
+                                                        data: Some(http2_error_payload(error.to_string())),
+                                                        ..Http2BridgeEvent::default()
+                                                    },
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    push_http2_server_event(
+                                        &shared_clone,
+                                        server_id,
+                                        Http2BridgeEvent {
+                                            kind: String::from("serverStreamEnd"),
+                                            id: stream_id,
+                                            ..Http2BridgeEvent::default()
+                                        },
+                                    );
+                                });
+                            }
+                            Some(Err(error)) => {
+                                push_http2_server_event(
+                                    &shared,
+                                    server_id,
+                                    Http2BridgeEvent {
+                                        kind: String::from("serverStreamError"),
+                                        id: server_id,
+                                        data: Some(http2_error_payload(error.to_string())),
+                                        ..Http2BridgeEvent::default()
+                                    },
+                                );
+                                break;
+                            }
+                            None => {
+                                push_http2_server_event(
+                                    &shared,
+                                    server_id,
+                                    Http2BridgeEvent {
+                                        kind: String::from("sessionClose"),
+                                        id: session_id,
+                                        ..Http2BridgeEvent::default()
+                                    },
+                                );
+                                remove_http2_session_resources(&shared, session_id);
+                                break;
+                            }
+                        }
+                    }
+                    Some(command) = command_rx.recv() => {
+                        match command {
+                            Http2SessionCommand::Settings { settings_json, respond_to } => {
+                                let settings = serde_json::from_str::<BTreeMap<String, Value>>(&settings_json)
+                                    .unwrap_or_default();
+                                if let Some(initial_window_size) = settings
+                                    .get("initialWindowSize")
+                                    .and_then(Value::as_u64)
+                                {
+                                    let _ = connection.set_initial_window_size(initial_window_size as u32);
+                                }
+                                {
+                                    let mut snapshot = snapshot.lock().expect("http2 snapshot lock");
+                                    snapshot.local_settings = http2_settings_from_value(&settings);
+                                }
+                                if let Ok(headers_json) = serde_json::to_string(&settings) {
+                                    push_http2_session_event(
+                                        &shared,
+                                        session_id,
+                                        Http2BridgeEvent {
+                                            kind: String::from("sessionLocalSettings"),
+                                            id: session_id,
+                                            data: Some(headers_json),
+                                            ..Http2BridgeEvent::default()
+                                        },
+                                    );
+                                }
+                                let _ = respond_to.send(Ok(Value::Null));
+                            }
+                            Http2SessionCommand::SetLocalWindowSize { size, respond_to } => {
+                                connection.set_target_window_size(size);
+                                {
+                                    let mut snapshot = snapshot.lock().expect("http2 snapshot lock");
+                                    snapshot.state.local_window_size = size;
+                                    snapshot.state.effective_local_window_size = size;
+                                }
+                                let value = snapshot
+                                    .lock()
+                                    .ok()
+                                    .and_then(|snapshot| http2_snapshot_json(&snapshot.clone()).ok())
+                                    .map(Value::String)
+                                    .unwrap_or(Value::Null);
+                                let _ = respond_to.send(Ok(value));
+                            }
+                            Http2SessionCommand::Goaway { error_code, last_stream_id, opaque_data, respond_to } => {
+                                connection.abrupt_shutdown(http2_reason(Some(error_code)));
+                                push_http2_session_event(
+                                    &shared,
+                                    session_id,
+                                    Http2BridgeEvent {
+                                        kind: String::from("sessionGoaway"),
+                                        id: session_id,
+                                        data: opaque_data.map(|value| {
+                                            base64::engine::general_purpose::STANDARD.encode(value)
+                                        }),
+                                        extra_number: Some(error_code as u64),
+                                        flags: Some(last_stream_id as u64),
+                                        ..Http2BridgeEvent::default()
+                                    },
+                                );
+                                let _ = respond_to.send(Ok(Value::Null));
+                            }
+                            Http2SessionCommand::Close { abrupt, respond_to } => {
+                                if abrupt {
+                                    connection.abrupt_shutdown(Reason::NO_ERROR);
+                                } else {
+                                    connection.graceful_shutdown();
+                                }
+                                let _ = respond_to.send(Ok(Value::Null));
+                                push_http2_session_event(
+                                    &shared,
+                                    session_id,
+                                    Http2BridgeEvent {
+                                        kind: String::from("sessionClose"),
+                                        id: session_id,
+                                        ..Http2BridgeEvent::default()
+                                    },
+                                );
+                                remove_http2_session_resources(&shared, session_id);
+                                break;
+                            }
+                            Http2SessionCommand::StreamRespond { stream_id, headers_json, respond_to } => {
+                                let response = match build_http2_response(&headers_json) {
+                                    Ok(response) => response,
+                                    Err(error) => {
+                                        let _ = respond_to.send(Err(error.to_string()));
+                                        continue;
+                                    }
+                                };
+                                let mut streams = streams.lock().expect("http2 server streams");
+                                let Some(state) = streams.get_mut(&stream_id) else {
+                                    let _ = respond_to.send(Err(format!("unknown HTTP/2 server stream {stream_id}")));
+                                    continue;
+                                };
+                                let Some(send_response) = state.send_response.as_mut() else {
+                                    let _ = respond_to.send(Err(format!("HTTP/2 server stream {stream_id} already responded")));
+                                    continue;
+                                };
+                                match match send_response {
+                                    ServerHttp2Responder::Regular(send_response) => {
+                                        send_response.send_response(response, false)
+                                    }
+                                    ServerHttp2Responder::Pushed(send_response) => {
+                                        send_response.send_response(response, false)
+                                    }
+                                } {
+                                    Ok(send_stream) => {
+                                        state.send_stream = Some(send_stream);
+                                        state.send_response = None;
+                                        let _ = respond_to.send(Ok(Value::Null));
+                                    }
+                                    Err(error) => {
+                                        let _ = respond_to.send(Err(error.to_string()));
+                                    }
+                                }
+                            }
+                            Http2SessionCommand::StreamPush { stream_id, headers_json, options_json: _, respond_to } => {
+                                let request = match build_http2_request(&headers_json) {
+                                    Ok(request) => request,
+                                    Err(error) => {
+                                        let _ = respond_to.send(Err(error.to_string()));
+                                        continue;
+                                    }
+                                };
+                                let mut streams_guard = streams.lock().expect("http2 server streams");
+                                let Some(state) = streams_guard.get_mut(&stream_id) else {
+                                    let _ = respond_to.send(Err(format!("unknown HTTP/2 server stream {stream_id}")));
+                                    continue;
+                                };
+                                let Some(send_response) = state.send_response.as_mut() else {
+                                    let _ = respond_to.send(Err(format!("HTTP/2 server stream {stream_id} cannot push after responding")));
+                                    continue;
+                                };
+                                let ServerHttp2Responder::Regular(send_response) = send_response else {
+                                    let _ = respond_to.send(Err(format!("HTTP/2 pushed stream {stream_id} cannot create nested push promises")));
+                                    continue;
+                                };
+                                match send_response.push_request(request) {
+                                    Ok(mut pushed) => {
+                                        let pushed_stream_id = {
+                                            let mut state = shared.lock().expect("http2 shared state");
+                                            let pushed_stream_id = next_http2_stream_id(&mut state);
+                                            state.streams.insert(
+                                                pushed_stream_id,
+                                                ActiveHttp2Stream {
+                                                    session_id,
+                                                    direction: Http2StreamDirection::Server,
+                                                    paused: Arc::new(AtomicBool::new(false)),
+                                                },
+                                            );
+                                            pushed_stream_id
+                                        };
+                                        streams_guard.insert(
+                                            pushed_stream_id,
+                                            ServerHttp2StreamState {
+                                                send_response: Some(ServerHttp2Responder::Pushed(pushed)),
+                                                send_stream: None,
+                                            },
+                                        );
+                                        let _ = respond_to.send(Ok(json!({
+                                            "streamId": pushed_stream_id,
+                                            "headers": headers_json,
+                                        }).to_string().into()));
+                                    }
+                                    Err(error) => {
+                                        let _ = respond_to.send(Err(error.to_string()));
+                                    }
+                                }
+                            }
+                            Http2SessionCommand::StreamWrite { stream_id, chunk, end_stream, respond_to } => {
+                                let mut streams = streams.lock().expect("http2 server streams");
+                                let Some(state) = streams.get_mut(&stream_id) else {
+                                    let _ = respond_to.send(Err(format!("unknown HTTP/2 server stream {stream_id}")));
+                                    continue;
+                                };
+                                let Some(send_stream) = state.send_stream.as_mut() else {
+                                    let _ = respond_to.send(Err(format!("HTTP/2 server stream {stream_id} has not sent response headers")));
+                                    continue;
+                                };
+                                match send_stream.send_data(Bytes::from(chunk), end_stream) {
+                                    Ok(()) => {
+                                        if end_stream {
+                                            streams.remove(&stream_id);
+                                            if let Ok(mut state) = shared.lock() {
+                                                state.streams.remove(&stream_id);
+                                            }
+                                            push_http2_server_event(
+                                                &shared,
+                                                server_id,
+                                                Http2BridgeEvent {
+                                                    kind: String::from("serverStreamClose"),
+                                                    id: stream_id,
+                                                    extra_number: Some(0),
+                                                    ..Http2BridgeEvent::default()
+                                                },
+                                            );
+                                        }
+                                        let _ = respond_to.send(Ok(Value::Bool(true)));
+                                    }
+                                    Err(error) => {
+                                        let _ = respond_to.send(Err(error.to_string()));
+                                    }
+                                }
+                            }
+                            Http2SessionCommand::StreamClose { stream_id, error_code, respond_to } => {
+                                let mut streams_guard = streams.lock().expect("http2 server streams");
+                                let Some(mut state) = streams_guard.remove(&stream_id) else {
+                                    let _ = respond_to.send(Err(format!("unknown HTTP/2 server stream {stream_id}")));
+                                    continue;
+                                };
+                                let reason = http2_reason(error_code);
+                                if let Some(send_stream) = state.send_stream.as_mut() {
+                                    send_stream.send_reset(reason);
+                                }
+                                if let Some(send_response) = state.send_response.as_mut() {
+                                    match send_response {
+                                        ServerHttp2Responder::Regular(send_response) => {
+                                            send_response.send_reset(reason)
+                                        }
+                                        ServerHttp2Responder::Pushed(send_response) => {
+                                            send_response.send_reset(reason)
+                                        }
+                                    }
+                                }
+                                if let Ok(mut shared_guard) = shared.lock() {
+                                    shared_guard.streams.remove(&stream_id);
+                                }
+                                push_http2_server_event(
+                                    &shared,
+                                    server_id,
+                                    Http2BridgeEvent {
+                                        kind: String::from("serverStreamClose"),
+                                        id: stream_id,
+                                        extra_number: Some(u32::from(reason) as u64),
+                                        ..Http2BridgeEvent::default()
+                                    },
+                                );
+                                let _ = respond_to.send(Ok(Value::Null));
+                            }
+                            Http2SessionCommand::StreamRespondWithFile { stream_id, path, headers_json, options_json, respond_to } => {
+                                let options: JavascriptHttp2FileResponseOptions =
+                                    serde_json::from_str(&options_json).unwrap_or_default();
+                                let response = match build_http2_response(&headers_json) {
+                                    Ok(response) => response,
+                                    Err(error) => {
+                                        let _ = respond_to.send(Err(error.to_string()));
+                                        continue;
+                                    }
+                                };
+                                let body = match fs::read(&path) {
+                                    Ok(body) => body,
+                                    Err(error) => {
+                                        let _ = respond_to.send(Err(error.to_string()));
+                                        continue;
+                                    }
+                                };
+                                let offset = usize::try_from(options.offset.unwrap_or_default()).unwrap_or(0);
+                                let body = if offset >= body.len() {
+                                    Vec::new()
+                                } else {
+                                    let body = &body[offset..];
+                                    match options.length {
+                                        Some(length) if length >= 0 => {
+                                            body[..body.len().min(length as usize)].to_vec()
+                                        }
+                                        _ => body.to_vec(),
+                                    }
+                                };
+                                let mut streams_guard = streams.lock().expect("http2 server streams");
+                                let Some(state) = streams_guard.get_mut(&stream_id) else {
+                                    let _ = respond_to.send(Err(format!("unknown HTTP/2 server stream {stream_id}")));
+                                    continue;
+                                };
+                                let Some(send_response) = state.send_response.as_mut() else {
+                                    let _ = respond_to.send(Err(format!("HTTP/2 server stream {stream_id} already responded")));
+                                    continue;
+                                };
+                                match match send_response {
+                                    ServerHttp2Responder::Regular(send_response) => {
+                                        send_response.send_response(response, body.is_empty())
+                                    }
+                                    ServerHttp2Responder::Pushed(send_response) => {
+                                        send_response.send_response(response, body.is_empty())
+                                    }
+                                } {
+                                    Ok(mut send_stream) => {
+                                        state.send_response = None;
+                                        if body.is_empty() {
+                                            streams_guard.remove(&stream_id);
+                                            if let Ok(mut shared_guard) = shared.lock() {
+                                                shared_guard.streams.remove(&stream_id);
+                                            }
+                                        } else {
+                                            if let Err(error) = send_stream.send_data(Bytes::from(body), true) {
+                                                let _ = respond_to.send(Err(error.to_string()));
+                                                continue;
+                                            }
+                                            streams_guard.remove(&stream_id);
+                                            if let Ok(mut shared_guard) = shared.lock() {
+                                                shared_guard.streams.remove(&stream_id);
+                                            }
+                                        }
+                                        push_http2_server_event(
+                                            &shared,
+                                            server_id,
+                                            Http2BridgeEvent {
+                                                kind: String::from("serverStreamClose"),
+                                                id: stream_id,
+                                                extra_number: Some(0),
+                                                ..Http2BridgeEvent::default()
+                                            },
+                                        );
+                                        let _ = respond_to.send(Ok(Value::Null));
+                                    }
+                                    Err(error) => {
+                                        let _ = respond_to.send(Err(error.to_string()));
+                                    }
+                                }
+                            }
+                            Http2SessionCommand::Request { respond_to, .. } => {
+                                let _ = respond_to.send(Err(String::from("HTTP/2 server sessions cannot initiate client requests")));
+                            }
+                        }
+                    }
+                    else => break,
+                }
+            }
+        });
+    });
+}
+
+fn spawn_http2_server_accept_loop(
+    shared: Arc<Mutex<crate::state::Http2SharedState>>,
+    server_id: u64,
+    listener: TcpListener,
+) {
+    thread::spawn(move || {
+        let listener = listener;
+        loop {
+            let closed = shared
+                .lock()
+                .ok()
+                .and_then(|state| state.servers.get(&server_id).map(|server| server.closed.load(Ordering::SeqCst)))
+                .unwrap_or(true);
+            if closed {
+                break;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let (command_tx, command_rx) = unbounded_channel();
+                    let (guest_local_addr, secure) = {
+                        let state = shared.lock().expect("http2 shared state");
+                        let server = state.servers.get(&server_id).expect("http2 server state");
+                        (server.guest_local_addr, server.secure)
+                    };
+                    let (local_addr, remote_addr) = match (stream.local_addr(), stream.peer_addr()) {
+                        (Ok(local_addr), Ok(remote_addr)) => (local_addr, remote_addr),
+                        _ => continue,
+                    };
+                    let session_snapshot = Arc::new(Mutex::new(Http2SessionSnapshot {
+                        encrypted: secure,
+                        alpn_protocol: Some(if secure { String::from("h2") } else { String::from("h2c") }),
+                        local_settings: BTreeMap::new(),
+                        remote_settings: BTreeMap::new(),
+                        state: http2_runtime_snapshot(),
+                        socket: Http2SocketSnapshot {
+                            local_address: Some(guest_local_addr.ip().to_string()),
+                            local_port: Some(guest_local_addr.port()),
+                            local_family: Some(socket_addr_family(&guest_local_addr).to_string()),
+                            remote_address: Some(remote_addr.ip().to_string()),
+                            remote_port: Some(remote_addr.port()),
+                            remote_family: Some(socket_addr_family(&remote_addr).to_string()),
+                            ..http2_socket_snapshot(local_addr, remote_addr)
+                        },
+                        ..Http2SessionSnapshot::default()
+                    }));
+                    let session_id = {
+                        let mut state = shared.lock().expect("http2 shared state");
+                        let session_id = next_http2_session_id(&mut state);
+                        state.sessions.insert(
+                            session_id,
+                            ActiveHttp2Session {
+                                server_id: Some(server_id),
+                                secure,
+                                command_tx,
+                                snapshot: Arc::clone(&session_snapshot),
+                            },
+                        );
+                        session_id
+                    };
+                    spawn_http2_server_session(
+                        Arc::clone(&shared),
+                        server_id,
+                        session_id,
+                        stream,
+                        session_snapshot,
+                        command_rx,
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(HTTP2_POLL_DELAY);
+                }
+                Err(error) => {
+                    push_http2_server_event(
+                        &shared,
+                        server_id,
+                        Http2BridgeEvent {
+                            kind: String::from("serverStreamError"),
+                            id: server_id,
+                            data: Some(http2_error_payload(error.to_string())),
+                            ..Http2BridgeEvent::default()
+                        },
+                    );
+                    thread::sleep(HTTP2_POLL_DELAY);
+                }
+            }
+        }
+    });
+}
+
+fn send_http2_command(
+    session: &ActiveHttp2Session,
+    command: impl FnOnce(Sender<Result<Value, String>>) -> Http2SessionCommand,
+) -> Result<Value, SidecarError> {
+    let (respond_to, response_rx) = mpsc::channel();
+    session
+        .command_tx
+        .send(command(respond_to))
+        .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 session command channel closed")))?;
+    response_rx
+        .recv_timeout(Duration::from_secs(30))
+        .map_err(|_| SidecarError::Execution(String::from("timed out waiting for HTTP/2 session command")))?
+        .map_err(SidecarError::Execution)
+}
+
+fn parse_http2_server_listen_payload(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<JavascriptHttp2ServerListenRequest, SidecarError> {
+    let payload_json =
+        javascript_sync_rpc_arg_str(&request.args, 0, "net.http2_server_listen payload")?;
+    serde_json::from_str(payload_json).map_err(|error| {
+        SidecarError::InvalidState(format!(
+            "net.http2_server_listen payload must be valid JSON: {error}"
+        ))
+    })
+}
+
+fn parse_http2_connect_payload(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<JavascriptHttp2SessionConnectRequest, SidecarError> {
+    let payload_json =
+        javascript_sync_rpc_arg_str(&request.args, 0, "net.http2_session_connect payload")?;
+    serde_json::from_str(payload_json).map_err(|error| {
+        SidecarError::InvalidState(format!(
+            "net.http2_session_connect payload must be valid JSON: {error}"
+        ))
+    })
+}
+
+fn http2_session_for_id(
+    process: &ActiveProcess,
+    session_id: u64,
+) -> Result<ActiveHttp2Session, SidecarError> {
+    let shared = process
+        .http2
+        .shared
+        .lock()
+        .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned")))?;
+    shared
+        .sessions
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| SidecarError::InvalidState(format!("unknown HTTP/2 session {session_id}")))
+}
+
+fn http2_stream_for_id(
+    process: &ActiveProcess,
+    stream_id: u64,
+) -> Result<ActiveHttp2Stream, SidecarError> {
+    let shared = process
+        .http2
+        .shared
+        .lock()
+        .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned")))?;
+    shared
+        .streams
+        .get(&stream_id)
+        .cloned()
+        .ok_or_else(|| SidecarError::InvalidState(format!("unknown HTTP/2 stream {stream_id}")))
+}
+
+fn service_javascript_http2_sync_rpc<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    dns: &VmDnsConfig,
+    socket_paths: &JavascriptSocketPathContext,
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+    resource_limits: &ResourceLimits,
+    network_counts: NetworkResourceCounts,
+) -> Result<Value, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    match request.method.as_str() {
+        "net.http2_server_listen" => {
+            check_network_resource_limit(
+                resource_limits.max_sockets,
+                network_counts.sockets,
+                1,
+                "socket",
+            )?;
+            let payload = parse_http2_server_listen_payload(request)?;
+            if payload.secure {
+                return Err(SidecarError::Unsupported(String::from(
+                    "HTTP/2 secure servers are not supported yet in the sidecar bridge",
+                )));
+            }
+            let (family, host) = normalize_tcp_listen_host(payload.host.as_deref())?;
+            let requested_port = payload.port.unwrap_or(0);
+            bridge.require_network_access(
+                vm_id,
+                NetworkOperation::Listen,
+                format_tcp_resource(host, requested_port),
+            )?;
+            let port = allocate_guest_listen_port(
+                requested_port,
+                family,
+                &socket_paths.used_tcp_guest_ports,
+                socket_paths.listen_policy,
+            )?;
+            let listener = ActiveTcpListener::bind(host, port, payload.backlog)?;
+            let guest_local_addr = listener.guest_local_addr();
+            let closed = Arc::new(AtomicBool::new(false));
+            {
+                let mut state = process
+                    .http2
+                    .shared
+                    .lock()
+                    .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned")))?;
+                state.servers.insert(
+                    payload.server_id,
+                    ActiveHttp2Server {
+                        actual_local_addr: listener.local_addr(),
+                        guest_local_addr,
+                        secure: false,
+                        closed: Arc::clone(&closed),
+                    },
+                );
+                state.server_events.entry(payload.server_id).or_default();
+            }
+            spawn_http2_server_accept_loop(
+                Arc::clone(&process.http2.shared),
+                payload.server_id,
+                listener.listener,
+            );
+            javascript_net_json_string(
+                json!({
+                    "address": {
+                        "address": guest_local_addr.ip().to_string(),
+                        "family": socket_addr_family(&guest_local_addr),
+                        "port": guest_local_addr.port(),
+                    }
+                }),
+                "net.http2_server_listen",
+            )
+        }
+        "net.http2_server_poll" => {
+            let server_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_server_poll server id")?;
+            let wait_ms =
+                javascript_sync_rpc_arg_u64_optional(&request.args, 1, "net.http2_server_poll wait ms")?
+                    .unwrap_or_default();
+            match wait_for_http2_event(&process.http2.shared, server_id, true, wait_ms) {
+                Some(event) => http2_event_value(&event),
+                None => Ok(Value::Null),
+            }
+        }
+        "net.http2_server_wait" => Ok(Value::Null),
+        "net.http2_server_close" => {
+            let server_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_server_close server id")?;
+            let server = {
+                let mut state = process
+                    .http2
+                    .shared
+                    .lock()
+                    .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned")))?;
+                state.servers.remove(&server_id)
+            }
+            .ok_or_else(|| SidecarError::InvalidState(format!("unknown HTTP/2 server {server_id}")))?;
+            server.closed.store(true, Ordering::SeqCst);
+            push_http2_server_event(
+                &process.http2.shared,
+                server_id,
+                Http2BridgeEvent {
+                    kind: String::from("serverClose"),
+                    id: server_id,
+                    ..Http2BridgeEvent::default()
+                },
+            );
+            Ok(Value::Null)
+        }
+        "net.http2_server_respond" => Ok(Value::Null),
+        "net.http2_session_connect" => {
+            check_network_resource_limit(
+                resource_limits.max_sockets,
+                network_counts.sockets,
+                1,
+                "socket",
+            )?;
+            check_network_resource_limit(
+                resource_limits.max_connections,
+                network_counts.connections,
+                1,
+                "connection",
+            )?;
+            let payload = parse_http2_connect_payload(request)?;
+            let authority = payload
+                .authority
+                .clone()
+                .unwrap_or_else(|| format!("{}://{}:{}", payload.protocol.as_deref().unwrap_or("http"), payload.host.as_deref().unwrap_or("localhost"), payload.port.unwrap_or(80)));
+            let url = Url::parse(&authority).map_err(|error| {
+                SidecarError::InvalidState(format!("invalid HTTP/2 authority {authority:?}: {error}"))
+            })?;
+            if url.scheme() == "https" || payload.protocol.as_deref() == Some("https:") {
+                return Err(SidecarError::Unsupported(String::from(
+                    "HTTP/2 TLS clients are not supported yet in the sidecar bridge",
+                )));
+            }
+            let host = payload
+                .host
+                .as_deref()
+                .or_else(|| url.host_str())
+                .unwrap_or("localhost");
+            let port = payload.port.or_else(|| url.port()).unwrap_or(80);
+            bridge.require_network_access(
+                vm_id,
+                NetworkOperation::Http,
+                format_tcp_resource(host, port),
+            )?;
+            let resolved = {
+                let shared = process
+                    .http2
+                    .shared
+                    .lock()
+                    .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned")))?;
+                shared
+                    .servers
+                    .values()
+                    .find(|server| {
+                        is_loopback_request_host(host) && server.guest_local_addr.port() == port
+                    })
+                    .map(|server| ResolvedTcpConnectAddr {
+                        actual_addr: server.actual_local_addr,
+                        guest_remote_addr: server.guest_local_addr,
+                    })
+            };
+            let resolved = match resolved {
+                Some(resolved) => resolved,
+                None => resolve_tcp_connect_addr(bridge, vm_id, dns, host, port, socket_paths)?,
+            };
+            let (command_tx, command_rx) = unbounded_channel();
+            let snapshot = Arc::new(Mutex::new(Http2SessionSnapshot {
+                encrypted: false,
+                alpn_protocol: Some(String::from("h2c")),
+                local_settings: http2_settings_from_value(&payload.settings),
+                remote_settings: BTreeMap::new(),
+                state: http2_runtime_snapshot(),
+                socket: Http2SocketSnapshot {
+                    remote_address: Some(resolved.guest_remote_addr.ip().to_string()),
+                    remote_port: Some(resolved.guest_remote_addr.port()),
+                    remote_family: Some(socket_addr_family(&resolved.guest_remote_addr).to_string()),
+                    ..Http2SocketSnapshot::default()
+                },
+                ..Http2SessionSnapshot::default()
+            }));
+            let session_id = {
+                let mut state = process
+                    .http2
+                    .shared
+                    .lock()
+                    .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned")))?;
+                let session_id = next_http2_session_id(&mut state);
+                state.sessions.insert(
+                    session_id,
+                    ActiveHttp2Session {
+                        server_id: None,
+                        secure: false,
+                        command_tx,
+                        snapshot: Arc::clone(&snapshot),
+                    },
+                );
+                state.session_events.entry(session_id).or_default();
+                session_id
+            };
+            spawn_http2_client_session(
+                Arc::clone(&process.http2.shared),
+                session_id,
+                resolved.actual_addr,
+                Arc::clone(&snapshot),
+                command_rx,
+            );
+            let snapshot_json =
+                http2_snapshot_json(&snapshot.lock().expect("http2 snapshot lock").clone())?;
+            javascript_net_json_string(
+                json!({
+                    "sessionId": session_id,
+                    "state": snapshot_json,
+                }),
+                "net.http2_session_connect",
+            )
+        }
+        "net.http2_session_request" => {
+            let session_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_session_request session id")?;
+            let headers_json =
+                javascript_sync_rpc_arg_str(&request.args, 1, "net.http2_session_request headers")?;
+            let options_json =
+                javascript_sync_rpc_arg_str(&request.args, 2, "net.http2_session_request options")?;
+            let session = http2_session_for_id(process, session_id)?;
+            send_http2_command(&session, |respond_to| Http2SessionCommand::Request {
+                headers_json: headers_json.to_owned(),
+                options_json: options_json.to_owned(),
+                respond_to,
+            })
+        }
+        "net.http2_session_settings" => {
+            let session_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_session_settings session id")?;
+            let settings_json =
+                javascript_sync_rpc_arg_str(&request.args, 1, "net.http2_session_settings settings")?;
+            let session = http2_session_for_id(process, session_id)?;
+            send_http2_command(&session, |respond_to| Http2SessionCommand::Settings {
+                settings_json: settings_json.to_owned(),
+                respond_to,
+            })
+        }
+        "net.http2_session_set_local_window_size" => {
+            let session_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "net.http2_session_set_local_window_size session id",
+            )?;
+            let window_size = javascript_sync_rpc_arg_u64(
+                &request.args,
+                1,
+                "net.http2_session_set_local_window_size window size",
+            )?;
+            let session = http2_session_for_id(process, session_id)?;
+            send_http2_command(&session, |respond_to| Http2SessionCommand::SetLocalWindowSize {
+                size: window_size as u32,
+                respond_to,
+            })
+        }
+        "net.http2_session_goaway" => {
+            let session_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_session_goaway session id")?;
+            let error_code =
+                javascript_sync_rpc_arg_u64(&request.args, 1, "net.http2_session_goaway error code")?;
+            let last_stream_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                2,
+                "net.http2_session_goaway last stream id",
+            )?;
+            let opaque_data = request
+                .args
+                .get(3)
+                .and_then(Value::as_str)
+                .map(|value| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(value)
+                        .map_err(|error| SidecarError::InvalidState(format!("invalid GOAWAY payload: {error}")))
+                })
+                .transpose()?;
+            let session = http2_session_for_id(process, session_id)?;
+            send_http2_command(&session, |respond_to| Http2SessionCommand::Goaway {
+                error_code: error_code as u32,
+                last_stream_id: last_stream_id as u32,
+                opaque_data,
+                respond_to,
+            })
+        }
+        "net.http2_session_close" | "net.http2_session_destroy" => {
+            let session_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_session_close session id")?;
+            let session = http2_session_for_id(process, session_id)?;
+            send_http2_command(&session, |respond_to| Http2SessionCommand::Close {
+                abrupt: request.method == "net.http2_session_destroy",
+                respond_to,
+            })
+        }
+        "net.http2_session_poll" => {
+            let session_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_session_poll session id")?;
+            let wait_ms =
+                javascript_sync_rpc_arg_u64_optional(&request.args, 1, "net.http2_session_poll wait ms")?
+                    .unwrap_or_default();
+            match wait_for_http2_event(&process.http2.shared, session_id, false, wait_ms) {
+                Some(event) => http2_event_value(&event),
+                None => Ok(Value::Null),
+            }
+        }
+        "net.http2_session_wait" => Ok(Value::Null),
+        "net.http2_stream_respond" => {
+            let stream_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_stream_respond stream id")?;
+            let headers_json =
+                javascript_sync_rpc_arg_str(&request.args, 1, "net.http2_stream_respond headers")?;
+            let stream = http2_stream_for_id(process, stream_id)?;
+            let session = http2_session_for_id(process, stream.session_id)?;
+            send_http2_command(&session, |respond_to| Http2SessionCommand::StreamRespond {
+                stream_id,
+                headers_json: headers_json.to_owned(),
+                respond_to,
+            })
+        }
+        "net.http2_stream_push_stream" => {
+            let stream_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "net.http2_stream_push_stream stream id",
+            )?;
+            let headers_json = javascript_sync_rpc_arg_str(
+                &request.args,
+                1,
+                "net.http2_stream_push_stream headers",
+            )?;
+            let options_json = javascript_sync_rpc_arg_str(
+                &request.args,
+                2,
+                "net.http2_stream_push_stream options",
+            )?;
+            let stream = http2_stream_for_id(process, stream_id)?;
+            let session = http2_session_for_id(process, stream.session_id)?;
+            send_http2_command(&session, |respond_to| Http2SessionCommand::StreamPush {
+                stream_id,
+                headers_json: headers_json.to_owned(),
+                options_json: options_json.to_owned(),
+                respond_to,
+            })
+        }
+        "net.http2_stream_write" => {
+            let stream_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_stream_write stream id")?;
+            let chunk =
+                javascript_sync_rpc_base64_arg(&request.args, 1, "net.http2_stream_write data")?;
+            let stream = http2_stream_for_id(process, stream_id)?;
+            let session = http2_session_for_id(process, stream.session_id)?;
+            send_http2_command(&session, |respond_to| Http2SessionCommand::StreamWrite {
+                stream_id,
+                chunk,
+                end_stream: false,
+                respond_to,
+            })
+        }
+        "net.http2_stream_end" => {
+            let stream_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_stream_end stream id")?;
+            let chunk = request
+                .args
+                .get(1)
+                .and_then(Value::as_str)
+                .map(|value| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(value)
+                        .map_err(|error| SidecarError::InvalidState(format!("invalid HTTP/2 stream payload: {error}")))
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let stream = http2_stream_for_id(process, stream_id)?;
+            let session = http2_session_for_id(process, stream.session_id)?;
+            send_http2_command(&session, |respond_to| Http2SessionCommand::StreamWrite {
+                stream_id,
+                chunk,
+                end_stream: true,
+                respond_to,
+            })
+        }
+        "net.http2_stream_close" => {
+            let stream_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_stream_close stream id")?;
+            let code = javascript_sync_rpc_arg_u64_optional(
+                &request.args,
+                1,
+                "net.http2_stream_close error code",
+            )?
+            .map(|value| value as u32);
+            let stream = http2_stream_for_id(process, stream_id)?;
+            let session = http2_session_for_id(process, stream.session_id)?;
+            send_http2_command(&session, |respond_to| Http2SessionCommand::StreamClose {
+                stream_id,
+                error_code: code,
+                respond_to,
+            })
+        }
+        "net.http2_stream_pause" => {
+            let stream_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_stream_pause stream id")?;
+            let stream = http2_stream_for_id(process, stream_id)?;
+            stream.paused.store(true, Ordering::SeqCst);
+            Ok(Value::Null)
+        }
+        "net.http2_stream_resume" => {
+            let stream_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_stream_resume stream id")?;
+            let stream = http2_stream_for_id(process, stream_id)?;
+            stream.paused.store(false, Ordering::SeqCst);
+            Ok(Value::Null)
+        }
+        "net.http2_stream_respond_with_file" => {
+            let stream_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "net.http2_stream_respond_with_file stream id",
+            )?;
+            let path = javascript_sync_rpc_arg_str(
+                &request.args,
+                1,
+                "net.http2_stream_respond_with_file path",
+            )?;
+            let headers_json = javascript_sync_rpc_arg_str(
+                &request.args,
+                2,
+                "net.http2_stream_respond_with_file headers",
+            )?;
+            let options_json = javascript_sync_rpc_arg_str(
+                &request.args,
+                3,
+                "net.http2_stream_respond_with_file options",
+            )?;
+            let stream = http2_stream_for_id(process, stream_id)?;
+            let session = http2_session_for_id(process, stream.session_id)?;
+            send_http2_command(
+                &session,
+                |respond_to| Http2SessionCommand::StreamRespondWithFile {
+                    stream_id,
+                    path: path.to_owned(),
+                    headers_json: headers_json.to_owned(),
+                    options_json: options_json.to_owned(),
+                    respond_to,
+                },
+            )
+        }
+        other => Err(SidecarError::InvalidState(format!(
+            "unsupported JavaScript HTTP/2 sync RPC method {other}"
         ))),
     }
 }

@@ -19,7 +19,8 @@ use agent_os_kernel::mount_table::MountTable;
 use agent_os_kernel::root_fs::{RootFileSystem, RootFilesystemMode, RootFilesystemSnapshot};
 use rustls::{ClientConnection, ServerConnection, StreamOwned};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -29,6 +30,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::mpsc::UnboundedSender;
 
 // ---------------------------------------------------------------------------
 // Type aliases
@@ -383,6 +385,7 @@ pub(crate) struct ActiveProcess {
     pub(crate) next_child_process_id: usize,
     pub(crate) http_servers: BTreeMap<u64, ActiveHttpServer>,
     pub(crate) pending_http_requests: BTreeMap<(u64, u64), Option<String>>,
+    pub(crate) http2: ActiveHttp2State,
     pub(crate) tcp_listeners: BTreeMap<String, ActiveTcpListener>,
     pub(crate) next_tcp_listener_id: usize,
     pub(crate) tcp_sockets: BTreeMap<String, ActiveTcpSocket>,
@@ -431,6 +434,162 @@ pub(crate) struct ActiveHttpServer {
     pub(crate) listener: TcpListener,
     pub(crate) guest_local_addr: SocketAddr,
     pub(crate) next_request_id: u64,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ActiveHttp2State {
+    pub(crate) shared: Arc<Mutex<Http2SharedState>>,
+}
+
+#[derive(Default)]
+pub(crate) struct Http2SharedState {
+    pub(crate) next_session_id: u64,
+    pub(crate) next_stream_id: u64,
+    pub(crate) servers: BTreeMap<u64, ActiveHttp2Server>,
+    pub(crate) sessions: BTreeMap<u64, ActiveHttp2Session>,
+    pub(crate) streams: BTreeMap<u64, ActiveHttp2Stream>,
+    pub(crate) server_events: BTreeMap<u64, VecDeque<Http2BridgeEvent>>,
+    pub(crate) session_events: BTreeMap<u64, VecDeque<Http2BridgeEvent>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ActiveHttp2Server {
+    pub(crate) actual_local_addr: SocketAddr,
+    pub(crate) guest_local_addr: SocketAddr,
+    pub(crate) secure: bool,
+    pub(crate) closed: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveHttp2Session {
+    pub(crate) server_id: Option<u64>,
+    pub(crate) secure: bool,
+    pub(crate) command_tx: UnboundedSender<Http2SessionCommand>,
+    pub(crate) snapshot: Arc<Mutex<Http2SessionSnapshot>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveHttp2Stream {
+    pub(crate) session_id: u64,
+    pub(crate) direction: Http2StreamDirection,
+    pub(crate) paused: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Http2StreamDirection {
+    Client,
+    Server,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct Http2SocketSnapshot {
+    pub(crate) encrypted: bool,
+    pub(crate) allow_half_open: bool,
+    pub(crate) local_address: Option<String>,
+    pub(crate) local_port: Option<u16>,
+    pub(crate) local_family: Option<String>,
+    pub(crate) remote_address: Option<String>,
+    pub(crate) remote_port: Option<u16>,
+    pub(crate) remote_family: Option<String>,
+    pub(crate) servername: Option<String>,
+    pub(crate) alpn_protocol: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct Http2RuntimeSnapshot {
+    pub(crate) effective_local_window_size: u32,
+    pub(crate) local_window_size: u32,
+    pub(crate) remote_window_size: u32,
+    pub(crate) next_stream_id: u32,
+    pub(crate) outbound_queue_size: u32,
+    pub(crate) deflate_dynamic_table_size: u32,
+    pub(crate) inflate_dynamic_table_size: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct Http2SessionSnapshot {
+    pub(crate) encrypted: bool,
+    pub(crate) alpn_protocol: Option<String>,
+    pub(crate) origin_set: Vec<String>,
+    pub(crate) local_settings: BTreeMap<String, Value>,
+    pub(crate) remote_settings: BTreeMap<String, Value>,
+    pub(crate) state: Http2RuntimeSnapshot,
+    pub(crate) socket: Http2SocketSnapshot,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct Http2BridgeEvent {
+    pub(crate) kind: String,
+    pub(crate) id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) extra: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) extra_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) extra_headers: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) flags: Option<u64>,
+}
+
+pub(crate) enum Http2SessionCommand {
+    Request {
+        headers_json: String,
+        options_json: String,
+        respond_to: Sender<Result<Value, String>>,
+    },
+    Settings {
+        settings_json: String,
+        respond_to: Sender<Result<Value, String>>,
+    },
+    SetLocalWindowSize {
+        size: u32,
+        respond_to: Sender<Result<Value, String>>,
+    },
+    Goaway {
+        error_code: u32,
+        last_stream_id: u32,
+        opaque_data: Option<Vec<u8>>,
+        respond_to: Sender<Result<Value, String>>,
+    },
+    Close {
+        abrupt: bool,
+        respond_to: Sender<Result<Value, String>>,
+    },
+    StreamRespond {
+        stream_id: u64,
+        headers_json: String,
+        respond_to: Sender<Result<Value, String>>,
+    },
+    StreamPush {
+        stream_id: u64,
+        headers_json: String,
+        options_json: String,
+        respond_to: Sender<Result<Value, String>>,
+    },
+    StreamWrite {
+        stream_id: u64,
+        chunk: Vec<u8>,
+        end_stream: bool,
+        respond_to: Sender<Result<Value, String>>,
+    },
+    StreamClose {
+        stream_id: u64,
+        error_code: Option<u32>,
+        respond_to: Sender<Result<Value, String>>,
+    },
+    StreamRespondWithFile {
+        stream_id: u64,
+        path: String,
+        headers_json: String,
+        options_json: String,
+        respond_to: Sender<Result<Value, String>>,
+    },
 }
 
 // ---------------------------------------------------------------------------

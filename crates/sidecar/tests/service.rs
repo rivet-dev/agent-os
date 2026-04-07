@@ -943,6 +943,39 @@ ykAheWCsAteSEWVc0w==\n\
             )
         }
 
+        fn poll_http2_event(
+            sidecar: &mut NativeSidecar<RecordingBridge>,
+            vm_id: &str,
+            process_id: &str,
+            method: &str,
+            id: u64,
+            kind: &str,
+        ) -> Value {
+            for _ in 0..200 {
+                let value = call_javascript_sync_rpc(
+                    sidecar,
+                    vm_id,
+                    process_id,
+                    JavascriptSyncRpcRequest {
+                        id: 9_000,
+                        method: String::from(method),
+                        args: vec![json!(id), json!(25)],
+                    },
+                )
+                .expect("poll http2 event");
+                if value.is_null() {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                let event: Value = serde_json::from_str(value.as_str().expect("event payload"))
+                    .expect("parse http2 event");
+                if event["kind"] == Value::String(String::from(kind)) {
+                    return event;
+                }
+            }
+            panic!("timed out waiting for {method} {kind}");
+        }
+
         fn tls_test_certificates() -> Vec<rustls::pki_types::CertificateDer<'static>> {
             rustls_pemfile::certs(&mut BufReader::new(TLS_TEST_CERT_PEM.as_bytes()))
                 .collect::<Result<Vec<_>, _>>()
@@ -6655,6 +6688,479 @@ console.log(JSON.stringify(summary));
                     .cloned(),
                 Some(Some(response_json)),
             );
+        }
+
+        #[test]
+        fn javascript_http2_listen_connect_request_and_respond_round_trip() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-http2-round-trip");
+            write_fixture(&cwd.join("entry.mjs"), "");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-http2",
+                "[\"buffer\",\"stream\"]",
+            );
+
+            let listen = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.http2_server_listen"),
+                    args: vec![Value::String(String::from(
+                        "{\"serverId\":11,\"secure\":false,\"host\":\"127.0.0.1\",\"port\":0,\"backlog\":8,\"settings\":{}}",
+                    ))],
+                },
+            )
+            .expect("listen via http2 bridge");
+            let listen_payload: Value =
+                serde_json::from_str(listen.as_str().expect("listen payload"))
+                    .expect("parse http2 listen payload");
+            let port = listen_payload["address"]["port"]
+                .as_u64()
+                .expect("http2 listen port") as u16;
+
+            let connect = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("net.http2_session_connect"),
+                    args: vec![Value::String(format!(
+                        "{{\"authority\":\"http://127.0.0.1:{port}\",\"protocol\":\"http:\",\"host\":\"127.0.0.1\",\"port\":{port},\"settings\":{{}}}}"
+                    ))],
+                },
+            )
+            .expect("connect via http2 bridge");
+            let connect_payload: Value =
+                serde_json::from_str(connect.as_str().expect("connect payload"))
+                    .expect("parse http2 connect payload");
+            let client_session_id = connect_payload["sessionId"]
+                .as_u64()
+                .expect("client session id");
+
+            let server_session = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                "net.http2_server_poll",
+                11,
+                "serverSession",
+            );
+            let server_session_id = server_session["extraNumber"]
+                .as_u64()
+                .or_else(|| server_session["id"].as_u64())
+                .unwrap_or_default();
+            assert!(server_session_id > 0, "event: {server_session}");
+
+            let stream_id = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("net.http2_session_request"),
+                    args: vec![
+                        json!(client_session_id),
+                        Value::String(String::from("{\":method\":\"GET\",\":path\":\"/ping\"}")),
+                        Value::String(String::from("{\"endStream\":true}")),
+                    ],
+                },
+            )
+            .expect("issue http2 request")
+            .as_u64()
+            .expect("client stream id");
+
+            let server_stream = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                "net.http2_server_poll",
+                11,
+                "serverStream",
+            );
+            let server_stream_id = server_stream["data"]
+                .as_str()
+                .expect("server stream data")
+                .parse::<u64>()
+                .expect("server stream id");
+            assert!(server_stream_id > 0, "event: {server_stream}");
+            let _ = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                "net.http2_server_poll",
+                11,
+                "serverStreamEnd",
+            );
+
+            let respond = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                JavascriptSyncRpcRequest {
+                    id: 4,
+                    method: String::from("net.http2_stream_respond"),
+                    args: vec![
+                        json!(server_stream_id),
+                        Value::String(String::from(
+                            "{\":status\":200,\"content-type\":\"text/plain\"}",
+                        )),
+                    ],
+                },
+            )
+            .expect("respond over http2");
+            assert_eq!(respond, Value::Null);
+
+            let wrote = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                JavascriptSyncRpcRequest {
+                    id: 5,
+                    method: String::from("net.http2_stream_write"),
+                    args: vec![
+                        json!(server_stream_id),
+                        json!(base64::engine::general_purpose::STANDARD.encode("pong")),
+                    ],
+                },
+            )
+            .expect("write http2 body");
+            assert_eq!(wrote, Value::Bool(true));
+
+            let ended = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                JavascriptSyncRpcRequest {
+                    id: 6,
+                    method: String::from("net.http2_stream_end"),
+                    args: vec![json!(server_stream_id), Value::Null],
+                },
+            )
+            .expect("end http2 stream");
+            assert_eq!(ended, Value::Bool(true));
+
+            let response_headers = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                "net.http2_session_poll",
+                client_session_id,
+                "clientResponseHeaders",
+            );
+            assert_eq!(
+                response_headers["id"].as_u64(),
+                Some(stream_id),
+                "response event: {response_headers}"
+            );
+
+            let response_data = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                "net.http2_session_poll",
+                client_session_id,
+                "clientData",
+            );
+            let body = base64::engine::general_purpose::STANDARD
+                .decode(response_data["data"].as_str().expect("response body"))
+                .expect("decode http2 body");
+            assert_eq!(String::from_utf8(body).expect("utf8 body"), "pong");
+
+            let _ = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                "net.http2_session_poll",
+                client_session_id,
+                "clientEnd",
+            );
+
+            let close = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                JavascriptSyncRpcRequest {
+                    id: 7,
+                    method: String::from("net.http2_session_close"),
+                    args: vec![json!(client_session_id)],
+                },
+            )
+            .expect("close http2 client session");
+            assert_eq!(close, Value::Null);
+
+            let server_close = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2",
+                JavascriptSyncRpcRequest {
+                    id: 8,
+                    method: String::from("net.http2_server_close"),
+                    args: vec![json!(11)],
+                },
+            )
+            .expect("close http2 server");
+            assert_eq!(server_close, Value::Null);
+        }
+
+        #[test]
+        fn javascript_http2_settings_pause_push_and_file_response_surfaces_work() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-http2-surfaces");
+            write_fixture(&cwd.join("entry.mjs"), "");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-http2-surfaces",
+                "[\"buffer\",\"stream\"]",
+            );
+            let file_path = cwd.join("reply.txt");
+            write_fixture(&file_path, "from-file");
+
+            let listen = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                JavascriptSyncRpcRequest {
+                    id: 10,
+                    method: String::from("net.http2_server_listen"),
+                    args: vec![Value::String(String::from(
+                        "{\"serverId\":22,\"secure\":false,\"host\":\"127.0.0.1\",\"port\":0,\"settings\":{}}",
+                    ))],
+                },
+            )
+            .expect("listen via http2 bridge");
+            let port = serde_json::from_str::<Value>(listen.as_str().expect("listen payload"))
+                .expect("parse listen payload")["address"]["port"]
+                .as_u64()
+                .expect("port") as u16;
+
+            let connect = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                JavascriptSyncRpcRequest {
+                    id: 11,
+                    method: String::from("net.http2_session_connect"),
+                    args: vec![Value::String(format!(
+                        "{{\"authority\":\"http://127.0.0.1:{port}\",\"protocol\":\"http:\",\"host\":\"127.0.0.1\",\"port\":{port},\"settings\":{{}}}}"
+                    ))],
+                },
+            )
+            .expect("connect via http2 bridge");
+            let session_id = serde_json::from_str::<Value>(connect.as_str().expect("connect"))
+                .expect("parse connect payload")["sessionId"]
+                .as_u64()
+                .expect("session id");
+
+            let _ = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                "net.http2_server_poll",
+                22,
+                "serverSession",
+            );
+
+            let settings = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                JavascriptSyncRpcRequest {
+                    id: 12,
+                    method: String::from("net.http2_session_settings"),
+                    args: vec![json!(session_id), Value::String(String::from("{\"initialWindowSize\":1234}"))],
+                },
+            )
+            .expect("update http2 settings");
+            assert_eq!(settings, Value::Null);
+            let settings_event = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                "net.http2_session_poll",
+                session_id,
+                "sessionLocalSettings",
+            );
+            assert!(
+                settings_event["data"]
+                    .as_str()
+                    .is_some_and(|payload| payload.contains("1234")),
+                "settings event: {settings_event}"
+            );
+
+            let local_window = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                JavascriptSyncRpcRequest {
+                    id: 13,
+                    method: String::from("net.http2_session_set_local_window_size"),
+                    args: vec![json!(session_id), json!(4096)],
+                },
+            )
+            .expect("set local window size");
+            let local_window_payload: Value =
+                serde_json::from_str(local_window.as_str().expect("window payload"))
+                    .expect("parse local window payload");
+            assert_eq!(local_window_payload["state"]["localWindowSize"], json!(4096));
+
+            let stream_id = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                JavascriptSyncRpcRequest {
+                    id: 14,
+                    method: String::from("net.http2_session_request"),
+                    args: vec![
+                        json!(session_id),
+                        Value::String(String::from("{\":method\":\"GET\",\":path\":\"/file\"}")),
+                        Value::String(String::from("{\"endStream\":true}")),
+                    ],
+                },
+            )
+            .expect("request file response")
+            .as_u64()
+            .expect("stream id");
+            let server_stream = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                "net.http2_server_poll",
+                22,
+                "serverStream",
+            );
+            let server_stream_id = server_stream["data"]
+                .as_str()
+                .expect("server stream data")
+                .parse::<u64>()
+                .expect("server stream id");
+
+            let pause = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                JavascriptSyncRpcRequest {
+                    id: 15,
+                    method: String::from("net.http2_stream_pause"),
+                    args: vec![json!(server_stream_id)],
+                },
+            )
+            .expect("pause http2 stream");
+            assert_eq!(pause, Value::Null);
+            let resume = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                JavascriptSyncRpcRequest {
+                    id: 16,
+                    method: String::from("net.http2_stream_resume"),
+                    args: vec![json!(server_stream_id)],
+                },
+            )
+            .expect("resume http2 stream");
+            assert_eq!(resume, Value::Null);
+
+            let push_result = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                JavascriptSyncRpcRequest {
+                    id: 17,
+                    method: String::from("net.http2_stream_push_stream"),
+                    args: vec![
+                        json!(server_stream_id),
+                        Value::String(String::from(
+                            "{\":method\":\"GET\",\":path\":\"/pushed\"}",
+                        )),
+                        Value::String(String::from("{}")),
+                    ],
+                },
+            )
+            .expect("push http2 stream");
+            let push_payload: Value =
+                serde_json::from_str(push_result.as_str().expect("push payload"))
+                    .expect("parse push payload");
+            let pushed_stream_id = push_payload["streamId"].as_u64().expect("pushed stream id");
+
+            let pushed_close = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                JavascriptSyncRpcRequest {
+                    id: 18,
+                    method: String::from("net.http2_stream_close"),
+                    args: vec![json!(pushed_stream_id), json!(0)],
+                },
+            )
+            .expect("close pushed stream");
+            assert_eq!(pushed_close, Value::Null);
+
+            let file_response = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                JavascriptSyncRpcRequest {
+                    id: 19,
+                    method: String::from("net.http2_stream_respond_with_file"),
+                    args: vec![
+                        json!(server_stream_id),
+                        Value::String(file_path.to_string_lossy().into_owned()),
+                        Value::String(String::from(
+                            "{\":status\":200,\"content-type\":\"text/plain\"}",
+                        )),
+                        Value::String(String::from("{}")),
+                    ],
+                },
+            )
+            .expect("respond with file");
+            assert_eq!(file_response, Value::Null);
+
+            let response_headers = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                "net.http2_session_poll",
+                session_id,
+                "clientResponseHeaders",
+            );
+            assert_eq!(response_headers["id"].as_u64(), Some(stream_id));
+            let response_data = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-surfaces",
+                "net.http2_session_poll",
+                session_id,
+                "clientData",
+            );
+            let body = base64::engine::general_purpose::STANDARD
+                .decode(response_data["data"].as_str().expect("response body"))
+                .expect("decode file body");
+            assert_eq!(String::from_utf8(body).expect("utf8 body"), "from-file");
         }
 
         #[test]

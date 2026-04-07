@@ -751,7 +751,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 http2 passes"
       ],
       "priority": 21,
-      "passes": false,
+      "passes": true,
       "notes": "Lowest priority networking story \u2014 most agents use HTTP/1.1. 21 methods total, all mapped in v8_runtime.rs but with no sidecar handler. Use h2 crate for HTTP/2 framing. This is the largest single networking story. Can be deferred if agents don't need HTTP/2. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/network.ts."
     },
     {
