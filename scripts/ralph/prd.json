@@ -220,7 +220,7 @@
         "pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts passes (pre-existing failures acceptable)"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Step 1. This is kernel-level declarative policy (syscall-time checks), NOT ACP interactive permissions. See spec 'Two Permission Systems'. Check what agent-os.ts and index.ts import from permission-descriptors.ts and update those imports."
     },
     {
@@ -614,6 +614,192 @@
       "priority": 29,
       "passes": false,
       "notes": "Final cleanup story. Known pre-existing failures to fix: (1) packages/dev-shell — 8 integration test failures (kernel.spawn node returns exit code 1, @xterm/headless CJS/ESM import issue on Node ≥ 22), (2) packages/core/tests/native-sidecar-process.test.ts — 4 failures (listener/UDP queries, socketTable/processTable state, connectTerminal, openShell), (3) packages/browser — test failures. Debug each systematically — these are runtime/platform issues, not migration regressions."
+    },
+    {
+      "id": "US-030",
+      "title": "Fix timer scheduling so setTimeout/setInterval actually fire",
+      "description": "As a developer, I want timers to work in V8 guest code. Currently _scheduleTimer is a stub returning 0 — timers are created but never fire.",
+      "acceptanceCriteria": [
+        "_scheduleTimer async bridge call in javascript.rs event bridge creates a real timer (tokio::time::sleep or channel-based) that fires after the requested delay",
+        "Timer expiration sends a StreamCallback or BridgeResponse back to V8 to resolve the pending promise",
+        "The V8 session event loop (session.rs run_event_loop) receives and dispatches timer events",
+        "setTimeout, setInterval, and clearTimeout work correctly in guest code",
+        "Local _loadPolyfill kernelTimerCreate/kernelTimerArm/kernelTimerClear handlers coordinate with the async timer mechanism",
+        "cargo check -p agent-os-execution passes",
+        "cargo test -p agent-os-execution -- --test-threads=1 timer passes",
+        "cargo check -p agent-os-sidecar passes"
+      ],
+      "priority": 30,
+      "passes": false,
+      "notes": "CRITICAL — setTimeout/setInterval are broken, which breaks all async guest code. The _scheduleTimer bridge function is async (in ASYNC_BRIDGE_FNS). The LocalBridgeState already handles kernelTimerCreate/kernelTimerArm/kernelTimerClear via _loadPolyfill dispatch. The gap is that _scheduleTimer itself returns 0 immediately and never fires. Need to wire timer state between the local bridge (which tracks timer IDs) and the async event bridge (which can schedule delayed events). The V8 session event loop already handles StreamCallback messages — use that for timer delivery."
+    },
+    {
+      "id": "US-031",
+      "title": "Wire stdin reads to kernel process stdin",
+      "description": "As a developer, I want guest code to read from stdin so interactive agent sessions work. Currently _kernelStdinRead returns null.",
+      "acceptanceCriteria": [
+        "_kernelStdinRead in LocalBridgeState forwarded to sidecar via SyncRpcRequest instead of returning null",
+        "Sidecar handles __kernel_stdin_read by reading from the process's kernel stdin buffer",
+        "If no stdin data is available, the call blocks up to the requested timeout then returns null",
+        "Guest process.stdin.read() and readline work correctly",
+        "cargo check -p agent-os-execution passes",
+        "cargo check -p agent-os-sidecar passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 stdin passes"
+      ],
+      "priority": 31,
+      "passes": false,
+      "notes": "Currently handled locally as a stub in javascript.rs LocalBridgeState (line ~1991). Should be forwarded to sidecar instead. _kernelStdinRead is in ASYNC_BRIDGE_FNS. The sidecar already handles WriteProcessStdin — this is the read counterpart."
+    },
+    {
+      "id": "US-032",
+      "title": "Implement crypto basic handlers (randomFill, randomUUID, hash, hmac, pbkdf2, scrypt)",
+      "description": "As a developer, I want basic crypto operations to work in guest code. Currently randomFill uses timestamps (INSECURE) and randomUUID is not RFC 4122. The other 4 methods have no handler.",
+      "acceptanceCriteria": [
+        "_cryptoRandomFill in LocalBridgeState uses a CSPRNG (getrandom or rand crate) instead of timestamp-based XOR",
+        "_cryptoRandomUUID generates proper RFC 4122 v4 UUIDs",
+        "crypto.hashDigest sidecar handler added — supports sha256, sha512, md5, sha1 at minimum",
+        "crypto.hmacDigest sidecar handler added",
+        "crypto.pbkdf2 sidecar handler added",
+        "crypto.scrypt sidecar handler added",
+        "Match arms added to service_javascript_sync_rpc dispatch in execution.rs",
+        "cargo check -p agent-os-sidecar passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 crypto passes",
+        "cargo test -p agent-os-execution -- --test-threads=1 crypto passes"
+      ],
+      "priority": 32,
+      "passes": false,
+      "notes": "CRITICAL for agents — API auth uses HMAC/hashing. randomFill (javascript.rs:1964) and randomUUID (javascript.rs:1976) are LOCAL stubs in LocalBridgeState — fix in-place with proper crypto. The other 4 methods fall through to sidecar as crypto.hashDigest etc. via map_bridge_method but the sidecar has NO crypto.* match arms. Add a new service_javascript_crypto_sync_rpc handler in execution.rs. Use ring or openssl crate for implementations. Reference: .agent/recovery/secure-exec/nodejs/src/bridge-handlers.ts (6,405 lines)."
+    },
+    {
+      "id": "US-033",
+      "title": "Implement crypto advanced handlers (ciphers, keys, signatures, DH, subtle)",
+      "description": "As a developer, I want advanced crypto operations (encryption, signing, key generation, DH, WebCrypto) to work in guest code.",
+      "acceptanceCriteria": [
+        "crypto.cipheriv, crypto.decipheriv, crypto.cipherivCreate, crypto.cipherivUpdate, crypto.cipherivFinal handlers added (5 methods)",
+        "crypto.sign, crypto.verify, crypto.asymmetricOp handlers added (3 methods)",
+        "crypto.createKeyObject, crypto.generateKeyPairSync, crypto.generateKeySync, crypto.generatePrimeSync handlers added (4 methods)",
+        "crypto.diffieHellman, crypto.diffieHellmanGroup, crypto.diffieHellmanSessionCreate, crypto.diffieHellmanSessionCall handlers added (4 methods)",
+        "crypto.subtle handler added (WebCrypto API — 1 method)",
+        "All 17 methods dispatched via service_javascript_crypto_sync_rpc in execution.rs",
+        "cargo check -p agent-os-sidecar passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 crypto passes"
+      ],
+      "priority": 33,
+      "passes": false,
+      "notes": "Lower priority than US-032 (basic crypto). Same pattern — add match arms to the crypto handler. 17 methods total. The cipheriv family uses stateful cipher contexts (create → update → final). Key operations need RSA/EC/Ed25519 support. crypto.subtle is the WebCrypto API subset. Reference: .agent/recovery/secure-exec/nodejs/src/bridge-handlers.ts."
+    },
+    {
+      "id": "US-034",
+      "title": "Add TCP socket advanced ops to sidecar dispatch",
+      "description": "As a developer, I want socket read, setNoDelay, setKeepAlive, waitConnect, and server accept to work so TCP servers/clients behave correctly.",
+      "acceptanceCriteria": [
+        "net.socket_read match arm added to service_javascript_net_sync_rpc — reads available data from a connected socket",
+        "net.socket_set_no_delay match arm added — sets TCP_NODELAY on socket",
+        "net.socket_set_keep_alive match arm added — sets SO_KEEPALIVE on socket",
+        "net.socket_wait_connect match arm added — blocks until socket connection completes or timeout",
+        "net.server_accept match arm added — accepts next pending connection from a listening server",
+        "cargo check -p agent-os-sidecar passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 net passes"
+      ],
+      "priority": 34,
+      "passes": false,
+      "notes": "The sidecar already handles net.connect, net.listen, net.poll, net.write, net.shutdown, net.destroy, net.server_poll, net.server_connections, net.server_close in service_javascript_net_sync_rpc (execution.rs:4008-4016). These 5 methods are mapped by map_bridge_method in v8_runtime.rs but missing from the sidecar match arms. Same function, just new match arms."
+    },
+    {
+      "id": "US-035",
+      "title": "Add TLS support to sidecar dispatch",
+      "description": "As a developer, I want TLS upgrade, client hello inspection, TLS query, and cipher listing to work so guest code can make HTTPS connections.",
+      "acceptanceCriteria": [
+        "net.socket_upgrade_tls match arm added — upgrades a TCP socket to TLS using rustls or native-tls",
+        "net.socket_get_tls_client_hello match arm added — returns parsed TLS ClientHello for SNI inspection",
+        "net.socket_tls_query match arm added — returns TLS session info (cipher, protocol, peer cert)",
+        "tls.get_ciphers match arm added — returns list of supported TLS cipher suites",
+        "cargo check -p agent-os-sidecar passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 tls passes"
+      ],
+      "priority": 35,
+      "passes": false,
+      "notes": "Depends on US-034 (TCP advanced). These 4 methods are mapped in v8_runtime.rs but have no sidecar handler. TLS upgrade wraps an existing connected socket with a TLS layer. Use rustls or native-tls. The sidecar needs to track TLS state per socket. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/network.ts (11,149 lines)."
+    },
+    {
+      "id": "US-036",
+      "title": "Add HTTP/1 server request/respond handlers to sidecar",
+      "description": "As a developer, I want guest HTTP servers to handle incoming requests and send responses so agents can serve tools over HTTP.",
+      "acceptanceCriteria": [
+        "net.http_request match arm added — dispatches an outbound HTTP request through the sidecar's network adapter",
+        "net.http_respond match arm added — sends an HTTP response on a server connection",
+        "Guest http.createServer() can accept connections and respond",
+        "cargo check -p agent-os-sidecar passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 http passes"
+      ],
+      "priority": 36,
+      "passes": false,
+      "notes": "3 methods mapped in v8_runtime.rs but no sidecar handler. The sidecar already handles net.listen (for creating TCP listeners) and net.fetch (for outbound requests). These handlers bridge the gap for HTTP-level semantics on top of the TCP primitives. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/network.ts."
+    },
+    {
+      "id": "US-037",
+      "title": "Add HTTP/2 full stack to sidecar",
+      "description": "As a developer, I want HTTP/2 server, session, and stream operations to work in guest code.",
+      "acceptanceCriteria": [
+        "New service_javascript_http2_sync_rpc handler function added to execution.rs",
+        "Server ops: net.http2_server_listen, net.http2_server_poll, net.http2_server_close, net.http2_server_respond (4 methods)",
+        "Session ops: net.http2_session_connect, net.http2_session_request, net.http2_session_settings, net.http2_session_set_local_window_size, net.http2_session_goaway, net.http2_session_close, net.http2_session_destroy, net.http2_session_poll, net.http2_session_wait (9 methods)",
+        "Stream ops: net.http2_stream_respond, net.http2_stream_push_stream, net.http2_stream_write, net.http2_stream_end, net.http2_stream_close, net.http2_stream_pause, net.http2_stream_resume, net.http2_stream_respond_with_file (8 methods)",
+        "All 21 methods dispatched from service_javascript_sync_rpc match block",
+        "HTTP/2 state (sessions, streams) tracked per-process in ActiveProcess",
+        "cargo check -p agent-os-sidecar passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 http2 passes"
+      ],
+      "priority": 37,
+      "passes": false,
+      "notes": "Lowest priority networking story — most agents use HTTP/1.1. 21 methods total, all mapped in v8_runtime.rs but with no sidecar handler. Use h2 crate for HTTP/2 framing. This is the largest single networking story. Can be deferred if agents don't need HTTP/2. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/network.ts."
+    },
+    {
+      "id": "US-038",
+      "title": "Add upgrade socket and dgram extras to sidecar",
+      "description": "As a developer, I want WebSocket upgrade sockets and UDP metadata operations to work.",
+      "acceptanceCriteria": [
+        "net.upgrade_socket_write, net.upgrade_socket_end, net.upgrade_socket_destroy match arms added (3 methods)",
+        "dgram.address match arm added — returns bound address/port of a UDP socket",
+        "dgram.setBufferSize match arm added — sets send/recv buffer size",
+        "dgram.getBufferSize match arm added — gets current buffer size",
+        "cargo check -p agent-os-sidecar passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
+      ],
+      "priority": 38,
+      "passes": false,
+      "notes": "6 small handlers. Upgrade sockets are for HTTP upgrade (WebSocket). The sidecar already handles dgram.createSocket/bind/send/poll/close — these 3 extras are missing from the match arms in service_javascript_dgram_sync_rpc. Reference: execution.rs service_javascript_dgram_sync_rpc."
+    },
+    {
+      "id": "US-039",
+      "title": "Wire PTY raw mode to kernel",
+      "description": "As a developer, I want _ptySetRawMode to actually toggle raw mode on the kernel PTY so interactive shells work correctly.",
+      "acceptanceCriteria": [
+        "_ptySetRawMode removed from LocalBridgeState stub and forwarded to sidecar as __pty_set_raw_mode",
+        "Sidecar handles __pty_set_raw_mode by calling kernel PTY manager to toggle raw/cooked mode",
+        "Guest process.stdin.setRawMode(true) works correctly",
+        "cargo check -p agent-os-sidecar passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 pty passes"
+      ],
+      "priority": 39,
+      "passes": false,
+      "notes": "1 method. Currently a no-op stub in LocalBridgeState (javascript.rs:1992). The kernel already has PTY management with line discipline — this just needs to toggle it. Mapped to __pty_set_raw_mode in v8_runtime.rs."
+    },
+    {
+      "id": "US-040",
+      "title": "Triage and fix failing execution tests for V8 path",
+      "description": "As a developer, I want the execution test suite green so CI catches regressions. ~40 tests fail because they were written for the old Command::new('node') path.",
+      "acceptanceCriteria": [
+        "Every test in cargo test -p agent-os-execution categorized as: (a) delete — tests old loader/node_import_cache mechanics irrelevant to V8, (b) fix — tests real behavior but with wrong assertions for V8 bridge, (c) keep — already passes on V8 path",
+        "Deleted tests documented in a comment block listing what was removed and why",
+        "Fixed tests have V8-compatible assertions (bridge call flow instead of loader hook flow)",
+        "No tests use or assume Command::new('node') execution path",
+        "cargo test -p agent-os-execution -- --test-threads=1 passes with 0 failures",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
+      ],
+      "priority": 40,
+      "passes": false,
+      "notes": "The ~40 failures fall into patterns: (1) ~15 test loader mechanics (node_import_cache.rs template generation, ESM hook injection, runner.mjs materialization) — these are dead code for V8 and should be deleted, (2) ~25 test real behavior (fs, child_process, env hardening) but assert on node process artifacts (exit codes, stderr formats, env vars) that differ under V8 bridge — fix assertions. NEVER restore Command::new('node') to make tests pass."
     }
   ]
 }

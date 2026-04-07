@@ -7,9 +7,16 @@ export {
 export type {
 	NetworkAccessRequest,
 	OpenShellOptions,
-	PermissionCheck,
 	PermissionDecision,
+	PermissionMode,
 	Permissions,
+	FsPermissionRule,
+	PatternPermissionRule,
+	RulePermissions,
+	FsPermissions,
+	NetworkPermissions,
+	ChildProcessPermissions,
+	EnvPermissions,
 	ProcessInfo,
 	VirtualDirEntry,
 	VirtualFileSystem,
@@ -96,7 +103,12 @@ export type {
 } from "./cron/index.js";
 export { CronManager, TimerScheduleDriver } from "./cron/index.js";
 export type { HostTool, ToolExample, ToolKit } from "./host-tools.js";
-export { hostTool, toolKit, validateToolkits, MAX_TOOL_DESCRIPTION_LENGTH } from "./host-tools.js";
+export {
+	hostTool,
+	toolKit,
+	validateToolkits,
+	MAX_TOOL_DESCRIPTION_LENGTH,
+} from "./host-tools.js";
 export { generateToolReference } from "./host-tools-prompt.js";
 export {
 	camelToKebab,

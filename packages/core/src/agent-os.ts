@@ -161,7 +161,7 @@ import {
 	type LocalCompatMount,
 	NativeSidecarKernelProxy,
 } from "./sidecar/native-kernel-proxy.js";
-import { serializePermissionsForSidecar } from "./sidecar/permission-descriptors.js";
+import { serializePermissionsForSidecar } from "./sidecar/permissions.js";
 import type { RootFilesystemEntry } from "./sidecar/native-process-client.js";
 import { NativeSidecarProcessClient } from "./sidecar/native-process-client.js";
 import { serializeRootFilesystemForSidecar } from "./sidecar/root-filesystem-descriptors.js";

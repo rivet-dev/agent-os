@@ -148,13 +148,13 @@ type RequestPayload =
 			runtime: GuestRuntimeKind;
 			metadata: Record<string, string>;
 			root_filesystem: WireRootFilesystemDescriptor;
-			permissions: WirePermissionDescriptor[];
+			permissions?: WirePermissionsPolicy;
 	  }
 	| {
 			type: "configure_vm";
 			mounts: WireMountDescriptor[];
 			software: WireSoftwareDescriptor[];
-			permissions: WirePermissionDescriptor[];
+			permissions?: WirePermissionsPolicy;
 			instructions: string[];
 			projected_modules: WireProjectedModuleDescriptor[];
 			command_permissions: Record<string, WasmPermissionTier>;
@@ -470,14 +470,41 @@ type WireSoftwareDescriptor = {
 	root: string;
 };
 
-export interface SidecarPermissionDescriptor {
-	capability: string;
-	mode: "allow" | "ask" | "deny";
+export type SidecarPermissionMode = "allow" | "ask" | "deny";
+
+export interface SidecarFsPermissionRule {
+	mode: SidecarPermissionMode;
+	operations?: string[];
+	paths?: string[];
 }
 
-type WirePermissionDescriptor = {
-	capability: string;
-	mode: "allow" | "ask" | "deny";
+export interface SidecarPatternPermissionRule {
+	mode: SidecarPermissionMode;
+	operations?: string[];
+	patterns?: string[];
+}
+
+export interface SidecarRulePermissions<TRule> {
+	default?: SidecarPermissionMode;
+	rules: TRule[];
+}
+
+export type SidecarPermissionScope<TRule> =
+	| SidecarPermissionMode
+	| SidecarRulePermissions<TRule>;
+
+export interface SidecarPermissionsPolicy {
+	fs?: SidecarPermissionScope<SidecarFsPermissionRule>;
+	network?: SidecarPermissionScope<SidecarPatternPermissionRule>;
+	childProcess?: SidecarPermissionScope<SidecarPatternPermissionRule>;
+	env?: SidecarPermissionScope<SidecarPatternPermissionRule>;
+}
+
+type WirePermissionsPolicy = {
+	fs?: SidecarPermissionScope<SidecarFsPermissionRule>;
+	network?: SidecarPermissionScope<SidecarPatternPermissionRule>;
+	child_process?: SidecarPermissionScope<SidecarPatternPermissionRule>;
+	env?: SidecarPermissionScope<SidecarPatternPermissionRule>;
 };
 
 export interface SidecarProjectedModuleDescriptor {
@@ -617,7 +644,7 @@ export class NativeSidecarProcessClient {
 			runtime: GuestRuntimeKind;
 			metadata?: Record<string, string>;
 			rootFilesystem?: RootFilesystemDescriptor;
-			permissions?: SidecarPermissionDescriptor[];
+			permissions?: SidecarPermissionsPolicy;
 		},
 	): Promise<CreatedVm> {
 		const response = await this.sendRequest({
@@ -631,9 +658,7 @@ export class NativeSidecarProcessClient {
 				runtime: options.runtime,
 				metadata: options.metadata ?? {},
 				root_filesystem: toWireRootFilesystemDescriptor(options.rootFilesystem),
-				permissions: (options.permissions ?? []).map(
-					toWirePermissionDescriptor,
-				),
+				permissions: toWirePermissionsPolicy(options.permissions),
 			},
 		});
 		if (response.payload.type !== "vm_created") {
@@ -653,7 +678,7 @@ export class NativeSidecarProcessClient {
 		options: {
 			mounts?: SidecarMountDescriptor[];
 			software?: SidecarSoftwareDescriptor[];
-			permissions?: SidecarPermissionDescriptor[];
+			permissions?: SidecarPermissionsPolicy;
 			instructions?: string[];
 			projectedModules?: SidecarProjectedModuleDescriptor[];
 			commandPermissions?: Record<string, WasmPermissionTier>;
@@ -670,9 +695,7 @@ export class NativeSidecarProcessClient {
 				type: "configure_vm",
 				mounts: (options.mounts ?? []).map(toWireMountDescriptor),
 				software: (options.software ?? []).map(toWireSoftwareDescriptor),
-				permissions: (options.permissions ?? []).map(
-					toWirePermissionDescriptor,
-				),
+				permissions: toWirePermissionsPolicy(options.permissions),
 				instructions: options.instructions ?? [],
 				projected_modules: (options.projectedModules ?? []).map(
 					toWireProjectedModuleDescriptor,
@@ -1714,13 +1737,17 @@ function toWireSoftwareDescriptor(descriptor: SidecarSoftwareDescriptor): {
 	};
 }
 
-function toWirePermissionDescriptor(descriptor: SidecarPermissionDescriptor): {
-	capability: string;
-	mode: "allow" | "ask" | "deny";
-} {
+function toWirePermissionsPolicy(
+	policy: SidecarPermissionsPolicy | undefined,
+): WirePermissionsPolicy | undefined {
+	if (!policy) {
+		return undefined;
+	}
 	return {
-		capability: descriptor.capability,
-		mode: descriptor.mode,
+		fs: policy.fs,
+		network: policy.network,
+		child_process: policy.childProcess,
+		env: policy.env,
 	};
 }
 

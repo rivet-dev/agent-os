@@ -2,6 +2,8 @@
 Started: Mon Apr  6 01:03:18 PM PDT 2026
 ---
 ## Codebase Patterns
+- Packages/core permissions should stay camelCase and JSON-serializable in TypeScript; only the native sidecar wire payload translates `childProcess` to `child_process`
+- Partial declarative permission objects must leave unspecified domains unset so Rust can apply deny-by-default per domain; only an omitted top-level permissions object should expand to allow-all
 - V8 binary discovery: `AGENT_OS_V8_RUNTIME_PATH` env var → alongside current exe (+ parent dirs for test deps/) → `target/{release,debug}/agent-os-v8`
 - V8 bridge calls use CBOR codec via `SECURE_EXEC_V8_CODEC=cbor` env var; `ciborium` crate handles CBOR↔JSON conversion in the execution crate
 - Internal V8 bridge calls (logging, module resolution, crypto, timers) are handled in the event bridge thread; only kernel operations (fs, net, child_process, dns) go to the sidecar
@@ -165,4 +167,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Missing entries in `crates/v8-runtime/src/session.rs` bridge registration tables can silently disable polyfills even when `v8-bridge.js`, `map_bridge_method()`, and sidecar handlers already exist, so audit all three layers together
   - Keep host-Node compatibility fixtures behind `legacy-js-tests`; default execution validation for JavaScript must assert the V8 isolate path directly
   - Execution-layer V8 tests are the reliable source of truth for bridge coverage right now; sidecar V8 integration tests that depend on strict stdout/lifecycle ordering may still need temporary ignores until the harness is stabilized
+---
+## 2026-04-07 06:35:12 PDT - US-010
+- Replaced the TypeScript-side callback permission descriptors with declarative JSON permission types and pass-through sidecar serialization, while keeping Rust as the source of truth for rule evaluation
+- Added focused client coverage for the `childProcess` → `child_process` wire mapping, updated serializer tests for partial-policy behavior, and fixed the browser driver docs example to use declarative permission modes
+- Files changed: `docs/system-drivers/browser.mdx`, `packages/core/CLAUDE.md`, `packages/core/src/{agent-os.ts,index.ts,runtime.ts}`, `packages/core/src/sidecar/{native-process-client.ts,permissions.ts}`, `packages/core/src/sidecar/permission-descriptors.ts` (deleted), `packages/core/tests/{sidecar-permission-descriptors.test.ts,native-sidecar-process-permissions.test.ts}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - The serializer in `packages/core/src/sidecar/permissions.ts` should be a pass-through shim, not a second permission engine; Rust owns rule interpretation and glob matching
+  - If you need to verify wire shape quickly, prefer a fake-sidecar client test over `tests/native-sidecar-process.test.ts`, because the real-binary suite still has unrelated timeout failures on this branch
+  - `tests/native-sidecar-process.test.ts` currently reports seven timeout failures here; they appear unrelated to declarative permissions and should be treated as existing native-sidecar harness debt unless a permission change touches that path directly
 ---

@@ -1,50 +1,92 @@
 import { describe, expect, test } from "vitest";
 import type { Permissions } from "../src/runtime-compat.js";
-import { serializePermissionsForSidecar } from "../src/sidecar/permission-descriptors.js";
+import { serializePermissionsForSidecar } from "../src/sidecar/permissions.js";
 
 describe("serializePermissionsForSidecar", () => {
-	test("uses allow-all descriptors when permissions are omitted", () => {
-		expect(serializePermissionsForSidecar()).toEqual([
-			{ capability: "fs", mode: "allow" },
-			{ capability: "network", mode: "allow" },
-			{ capability: "child_process", mode: "allow" },
-			{ capability: "env", mode: "allow" },
-		]);
+	test("uses allow-all policy when permissions are omitted", () => {
+		expect(serializePermissionsForSidecar()).toEqual({
+			fs: "allow",
+			network: "allow",
+			childProcess: "allow",
+			env: "allow",
+		});
 	});
 
-	test("serializes per-operation fs restrictions and preserves env deny-by-default on partial policies", () => {
+	test("passes structured declarative policies through unchanged", () => {
 		const permissions: Permissions = {
-			fs: ({ operation }) => operation === "read",
-			network: () => false,
-			childProcess: () => false,
+			fs: {
+				default: "deny",
+				rules: [
+					{
+						mode: "allow",
+						operations: ["read"],
+						paths: ["/workspace/**"],
+					},
+				],
+			},
+			network: {
+				default: "deny",
+				rules: [
+					{
+						mode: "allow",
+						operations: ["dns"],
+						patterns: ["dns://*.example.test"],
+					},
+				],
+			},
+			childProcess: "deny",
 		};
 
-		expect(serializePermissionsForSidecar(permissions)).toEqual([
-			{ capability: "fs.read", mode: "allow" },
-			{ capability: "fs.write", mode: "deny" },
-			{ capability: "fs.create_dir", mode: "deny" },
-			{ capability: "fs.readdir", mode: "deny" },
-			{ capability: "fs.stat", mode: "deny" },
-			{ capability: "fs.rm", mode: "deny" },
-			{ capability: "fs.rename", mode: "deny" },
-			{ capability: "fs.symlink", mode: "deny" },
-			{ capability: "fs.readlink", mode: "deny" },
-			{ capability: "fs.chmod", mode: "deny" },
-			{ capability: "fs.truncate", mode: "deny" },
-			{ capability: "fs.mount_sensitive", mode: "deny" },
-			{ capability: "network", mode: "deny" },
-			{ capability: "child_process", mode: "deny" },
-			{ capability: "env", mode: "deny" },
-		]);
+		expect(serializePermissionsForSidecar(permissions)).toEqual({
+			fs: {
+				default: "deny",
+				rules: [
+					{
+						mode: "allow",
+						operations: ["read"],
+						paths: ["/workspace/**"],
+					},
+				],
+			},
+			network: {
+				default: "deny",
+				rules: [
+					{
+						mode: "allow",
+						operations: ["dns"],
+						patterns: ["dns://*.example.test"],
+					},
+				],
+			},
+			childProcess: "deny",
+			env: undefined,
+		});
 	});
 
-	test("rejects resource-dependent permission callbacks that the native sidecar cannot serialize", () => {
+	test("preserves partial policies so unspecified domains can be denied in Rust", () => {
 		const permissions: Permissions = {
-			fs: ({ path }) => path.startsWith("/workspace"),
+			env: {
+				rules: [
+					{
+						mode: "allow",
+						patterns: ["OPENAI_*", "PATH"],
+					},
+				],
+			},
 		};
 
-		expect(() => serializePermissionsForSidecar(permissions)).toThrow(
-			/varies by resource/,
-		);
+		expect(serializePermissionsForSidecar(permissions)).toEqual({
+			fs: undefined,
+			network: undefined,
+			childProcess: undefined,
+			env: {
+				rules: [
+					{
+						mode: "allow",
+						patterns: ["OPENAI_*", "PATH"],
+					},
+				],
+			},
+		});
 	});
 });

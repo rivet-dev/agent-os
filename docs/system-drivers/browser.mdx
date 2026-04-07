@@ -43,7 +43,7 @@ Enable the browser fetch adapter to allow sandboxed code to make HTTP requests.
 ```ts
 const driver = await createBrowserDriver({
   useDefaultNetwork: true,
-  permissions: { network: true },
+  permissions: { network: "allow" },
 });
 ```
 

@@ -81,12 +81,8 @@ let ensuredSidecarBinary: string | null = null;
 
 export type StdioChannel = "stdout" | "stderr";
 export type TimingMitigation = "off" | "freeze";
-export type PermissionDecision =
-	| boolean
-	| {
-			allowed: boolean;
-			reason?: string;
-	  };
+export type PermissionMode = "allow" | "deny";
+export type PermissionDecision = PermissionMode;
 
 export interface VirtualDirEntry {
 	name: string;
@@ -144,6 +140,34 @@ export interface NetworkAccessRequest {
 	port?: number;
 	protocol?: string;
 }
+
+export interface FsPermissionRule {
+	mode: PermissionMode;
+	operations?: string[];
+	paths?: string[];
+}
+
+export interface PatternPermissionRule {
+	mode: PermissionMode;
+	operations?: string[];
+	patterns?: string[];
+}
+
+export interface RulePermissions<TRule> {
+	default?: PermissionMode;
+	rules: TRule[];
+}
+
+export type FsPermissions = PermissionMode | RulePermissions<FsPermissionRule>;
+export type NetworkPermissions =
+	| PermissionMode
+	| RulePermissions<PatternPermissionRule>;
+export type ChildProcessPermissions =
+	| PermissionMode
+	| RulePermissions<PatternPermissionRule>;
+export type EnvPermissions =
+	| PermissionMode
+	| RulePermissions<PatternPermissionRule>;
 
 export interface ProcessInfo {
 	pid: number;
@@ -231,13 +255,12 @@ export type StatInfo = VirtualStat;
 export type DirEntry = VirtualDirEntry;
 export type StdioEvent = { channel: StdioChannel; message: string };
 export type StdioHook = (event: StdioEvent) => void;
-export type PermissionCheck<T = unknown> = (request: T) => PermissionDecision;
 
 export interface Permissions {
-	fs?: PermissionCheck<{ path: string; operation: string }>;
-	network?: PermissionCheck<NetworkAccessRequest>;
-	childProcess?: PermissionCheck<{ command: string; args: string[] }>;
-	env?: PermissionCheck<{ name: string; value: string }>;
+	fs?: FsPermissions;
+	network?: NetworkPermissions;
+	childProcess?: ChildProcessPermissions;
+	env?: EnvPermissions;
 }
 
 export interface ResourceBudgets {
@@ -289,7 +312,12 @@ export interface NetworkAdapter {
 	}>;
 	dnsLookup(
 		hostname: string,
-	): Promise<{ address?: string; family?: number; error?: string; code?: string }>;
+	): Promise<{
+		address?: string;
+		family?: number;
+		error?: string;
+		code?: string;
+	}>;
 	httpRequest(
 		url: string,
 		options?: {
@@ -339,7 +367,10 @@ export interface NodeRuntimeDriver {
 	run<T = unknown>(code: string, filePath?: string): Promise<RunResult<T>>;
 	dispose(): void;
 	terminate?(): Promise<void>;
-	readonly network?: Pick<NetworkAdapter, "fetch" | "dnsLookup" | "httpRequest">;
+	readonly network?: Pick<
+		NetworkAdapter,
+		"fetch" | "dnsLookup" | "httpRequest"
+	>;
 }
 
 export interface NodeRuntimeDriverFactory {
@@ -574,9 +605,7 @@ export class InMemoryFileSystem implements VirtualFileSystem {
 		const normalized = normalizePath(targetPath);
 		await this.mkdir(dirnameVirtual(normalized), { recursive: true });
 		const data =
-			typeof content === "string"
-				? new TextEncoder().encode(content)
-				: content;
+			typeof content === "string" ? new TextEncoder().encode(content) : content;
 		const existing = this.entries.get(normalized);
 		if (existing?.type === "file") {
 			existing.data = data;
@@ -770,7 +799,11 @@ export class InMemoryFileSystem implements VirtualFileSystem {
 		entry.ctimeMs = Date.now();
 	}
 
-	async utimes(targetPath: string, atime: number, mtime: number): Promise<void> {
+	async utimes(
+		targetPath: string,
+		atime: number,
+		mtime: number,
+	): Promise<void> {
 		const entry = this.resolveEntry(targetPath);
 		if (!entry) throw errnoError("ENOENT", `utimes '${targetPath}'`);
 		entry.atimeMs = atime;
@@ -804,7 +837,10 @@ export class InMemoryFileSystem implements VirtualFileSystem {
 			throw errnoError("ENOENT", `open '${targetPath}'`);
 		}
 		if (offset >= entry.data.length) return new Uint8Array(0);
-		return entry.data.slice(offset, Math.min(offset + length, entry.data.length));
+		return entry.data.slice(
+			offset,
+			Math.min(offset + length, entry.data.length),
+		);
 	}
 
 	async pwrite(
@@ -915,7 +951,8 @@ export class NodeFileSystem implements VirtualFileSystem {
 		return {
 			mode: stat.mode,
 			size: stat.size,
-			blocks: posixStat.blocks ?? (stat.size === 0 ? 0 : Math.ceil(stat.size / 512)),
+			blocks:
+				posixStat.blocks ?? (stat.size === 0 ? 0 : Math.ceil(stat.size / 512)),
 			dev: posixStat.dev ?? 1,
 			rdev: posixStat.rdev ?? 0,
 			isDirectory: stat.isDirectory(),
@@ -1024,10 +1061,7 @@ export class NodeFileSystem implements VirtualFileSystem {
 	}
 
 	async link(oldPath: string, newPath: string): Promise<void> {
-		await fs.link(
-			this.normalizeTarget(oldPath),
-			this.normalizeTarget(newPath),
-		);
+		await fs.link(this.normalizeTarget(oldPath), this.normalizeTarget(newPath));
 	}
 
 	async chmod(targetPath: string, mode: number): Promise<void> {
@@ -1038,8 +1072,16 @@ export class NodeFileSystem implements VirtualFileSystem {
 		await fs.chown(this.normalizeTarget(targetPath), uid, gid);
 	}
 
-	async utimes(targetPath: string, atime: number, mtime: number): Promise<void> {
-		await fs.utimes(this.normalizeTarget(targetPath), atime / 1000, mtime / 1000);
+	async utimes(
+		targetPath: string,
+		atime: number,
+		mtime: number,
+	): Promise<void> {
+		await fs.utimes(
+			this.normalizeTarget(targetPath),
+			atime / 1000,
+			mtime / 1000,
+		);
 	}
 
 	async truncate(targetPath: string, length: number): Promise<void> {
@@ -1075,18 +1117,47 @@ export class NodeFileSystem implements VirtualFileSystem {
 	}
 }
 
-function normalizeDecision(
-	decision: PermissionDecision | undefined,
-): { allowed: boolean } {
-	if (decision === undefined) return { allowed: true };
-	if (typeof decision === "boolean") return { allowed: decision };
-	return { allowed: decision.allowed };
+function permissionAllows(mode: PermissionMode | undefined): boolean {
+	return mode !== "deny";
 }
 
-export const allowAllFs: PermissionCheck = () => true;
-export const allowAllNetwork: PermissionCheck = () => true;
-export const allowAllChildProcess: PermissionCheck = () => true;
-export const allowAllEnv: PermissionCheck = () => true;
+function globMatches(pattern: string, value: string): boolean {
+	const escaped = pattern.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+	const expression = escaped.replace(/\*/g, ".*");
+	return new RegExp(`^${expression}$`).test(value);
+}
+
+function envPolicyAllows(
+	policy: EnvPermissions | undefined,
+	name: string,
+): boolean {
+	if (policy === undefined) {
+		return true;
+	}
+	if (typeof policy === "string") {
+		return permissionAllows(policy);
+	}
+	let mode = policy.default ?? "deny";
+	for (const rule of policy.rules) {
+		const operationsMatch =
+			!rule.operations ||
+			rule.operations.length === 0 ||
+			rule.operations.includes("read");
+		const patternsMatch =
+			!rule.patterns ||
+			rule.patterns.length === 0 ||
+			rule.patterns.some((pattern) => globMatches(pattern, name));
+		if (operationsMatch && patternsMatch) {
+			mode = rule.mode;
+		}
+	}
+	return permissionAllows(mode);
+}
+
+export const allowAllFs: FsPermissions = "allow";
+export const allowAllNetwork: NetworkPermissions = "allow";
+export const allowAllChildProcess: ChildProcessPermissions = "allow";
+export const allowAllEnv: EnvPermissions = "allow";
 export const allowAll: Permissions = {
 	fs: allowAllFs,
 	network: allowAllNetwork,
@@ -1102,7 +1173,7 @@ export function filterEnv(
 	if (!permissions?.env) return { ...input };
 	const output: Record<string, string> = {};
 	for (const [name, value] of Object.entries(input)) {
-		if (normalizeDecision(permissions.env({ name, value })).allowed) {
+		if (envPolicyAllows(permissions.env, name)) {
 			output[name] = value;
 		}
 	}
@@ -1162,9 +1233,7 @@ export function createNodeHostCommandExecutor(): CommandExecutor {
 	};
 }
 
-export function createKernelCommandExecutor(
-	kernel: Kernel,
-): CommandExecutor {
+export function createKernelCommandExecutor(kernel: Kernel): CommandExecutor {
 	return {
 		spawn(command, args, options) {
 			return kernel.spawn(command, args, options);
@@ -1244,7 +1313,9 @@ export function createDefaultNetworkAdapter(): NetworkAdapter {
 	};
 }
 
-export function createNodeDriver(options: NodeDriverOptions = {}): SystemDriver {
+export function createNodeDriver(
+	options: NodeDriverOptions = {},
+): SystemDriver {
 	return {
 		filesystem: options.filesystem,
 		network: options.networkAdapter,
@@ -1258,7 +1329,10 @@ export function createNodeDriver(options: NodeDriverOptions = {}): SystemDriver 
 }
 
 export class NodeExecutionDriver implements NodeRuntimeDriver {
-	readonly network?: Pick<NetworkAdapter, "fetch" | "dnsLookup" | "httpRequest">;
+	readonly network?: Pick<
+		NetworkAdapter,
+		"fetch" | "dnsLookup" | "httpRequest"
+	>;
 
 	constructor(private readonly options: RuntimeDriverOptions) {
 		this.network = options.system.network;
@@ -1562,9 +1636,9 @@ function discoverCommands(commandDirs: string[]): string[] {
 	for (const commandDir of commandDirs) {
 		let entries: string[];
 		try {
-			entries = fsSync.readdirSync(commandDir).sort((left, right) =>
-				left.localeCompare(right),
-			);
+			entries = fsSync
+				.readdirSync(commandDir)
+				.sort((left, right) => left.localeCompare(right));
 		} catch {
 			continue;
 		}
@@ -1632,7 +1706,9 @@ function sidecarBinaryNeedsBuild(): boolean {
 		return true;
 	}
 	const binaryMtime = latestMtimeMs(SIDECAR_BINARY);
-	return SIDECAR_BUILD_INPUTS.some((inputPath) => latestMtimeMs(inputPath) > binaryMtime);
+	return SIDECAR_BUILD_INPUTS.some(
+		(inputPath) => latestMtimeMs(inputPath) > binaryMtime,
+	);
 }
 
 function ensureNativeSidecarBinary(): string {
@@ -1701,7 +1777,9 @@ async function snapshotFilesystemEntries(
 	output: RootFilesystemEntry[] = [],
 ): Promise<RootFilesystemEntry[]> {
 	const statInfo =
-		targetPath === "/" ? await filesystem.stat(targetPath) : await filesystem.lstat(targetPath);
+		targetPath === "/"
+			? await filesystem.stat(targetPath)
+			: await filesystem.lstat(targetPath);
 	if (statInfo.isSymbolicLink) {
 		output.push({
 			path: targetPath,
@@ -1740,7 +1818,9 @@ async function snapshotFilesystemEntries(
 		mode: statInfo.mode,
 		uid: statInfo.uid,
 		gid: statInfo.gid,
-		content: Buffer.from(await filesystem.readFile(targetPath)).toString("base64"),
+		content: Buffer.from(await filesystem.readFile(targetPath)).toString(
+			"base64",
+		),
 		encoding: "base64",
 	});
 	return output;
@@ -1754,9 +1834,9 @@ function collectGuestCommandPaths(
 	commandDirs.forEach((commandDir, index) => {
 		let entries: string[];
 		try {
-			entries = fsSync.readdirSync(commandDir).sort((left, right) =>
-				left.localeCompare(right),
-			);
+			entries = fsSync
+				.readdirSync(commandDir)
+				.sort((left, right) => left.localeCompare(right));
 		} catch {
 			return;
 		}
@@ -1764,7 +1844,10 @@ function collectGuestCommandPaths(
 			if (entry.startsWith(".")) continue;
 			if (!isWasmBinaryFile(path.join(commandDir, entry))) continue;
 			if (!guestPaths.has(entry)) {
-				guestPaths.set(entry, `/__agentos/commands/${startIndex + index}/${entry}`);
+				guestPaths.set(
+					entry,
+					`/__agentos/commands/${startIndex + index}/${entry}`,
+				);
 			}
 		}
 	});
@@ -1783,9 +1866,7 @@ async function ensureCommandStubs(
 }
 
 class DeferredFileSystem implements VirtualFileSystem {
-	constructor(
-		private readonly getFilesystem: () => VirtualFileSystem | null,
-	) {}
+	constructor(private readonly getFilesystem: () => VirtualFileSystem | null) {}
 
 	private filesystem(): VirtualFileSystem {
 		const filesystem = this.getFilesystem();
@@ -1892,21 +1973,30 @@ class NativeKernel implements Kernel {
 			env?: Record<string, string>;
 			cwd?: string;
 			hostNetworkAdapter?: unknown;
-			mounts?: Array<{ path: string; fs: VirtualFileSystem; readOnly?: boolean }>;
+			mounts?: Array<{
+				path: string;
+				fs: VirtualFileSystem;
+				readOnly?: boolean;
+			}>;
 		},
 	) {
 		this.env = { ...(options.env ?? {}) };
 		this.cwd = options.cwd ?? "/";
 		this.socketTable = {
 			hasHostNetworkAdapter: () => Boolean(options.hostNetworkAdapter),
-			findListener: (request: { host?: string; port?: number; path?: string }) =>
-				this.proxy?.findListener(request) ?? null,
+			findListener: (request: {
+				host?: string;
+				port?: number;
+				path?: string;
+			}) => this.proxy?.findListener(request) ?? null,
 			findBoundUdp: (request: { host?: string; port?: number }) =>
 				this.proxy?.findBoundUdp(request) ?? null,
 		};
 		this.processTable = {
 			getSignalState: (pid: number) =>
-				this.proxy?.getSignalState(pid) ?? { handlers: new Map<number, unknown>() },
+				this.proxy?.getSignalState(pid) ?? {
+					handlers: new Map<number, unknown>(),
+				},
 		};
 		for (const mount of options.mounts ?? []) {
 			this.pendingLocalMounts.push({
@@ -2130,7 +2220,8 @@ class NativeKernel implements Kernel {
 		});
 		await client.waitForEvent(
 			(event) =>
-				event.payload.type === "vm_lifecycle" && event.payload.state === "ready",
+				event.payload.type === "vm_lifecycle" &&
+				event.payload.state === "ready",
 			10_000,
 		);
 
@@ -2142,7 +2233,9 @@ class NativeKernel implements Kernel {
 			cwd: this.cwd,
 			localMounts: this.pendingLocalMounts,
 			commandGuestPaths: new Map<string, string>(),
-			hostPathMappings: hostRoot ? [{ guestPath: "/", hostPath: hostRoot }] : [],
+			hostPathMappings: hostRoot
+				? [{ guestPath: "/", hostPath: hostRoot }]
+				: [],
 			nodeExecutionCwd: this.cwd,
 		});
 
