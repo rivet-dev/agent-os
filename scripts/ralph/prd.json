@@ -702,7 +702,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 net passes"
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": "The sidecar already handles net.connect, net.listen, net.poll, net.write, net.shutdown, net.destroy, net.server_poll, net.server_connections, net.server_close in service_javascript_net_sync_rpc (execution.rs:4008-4016). These 5 methods are mapped by map_bridge_method in v8_runtime.rs but missing from the sidecar match arms. Same function, just new match arms."
     },
     {

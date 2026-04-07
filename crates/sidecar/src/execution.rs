@@ -23,16 +23,16 @@ use crate::service::{
 };
 use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
-    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError, DnsResolutionSource,
-    JavascriptSocketFamily, JavascriptSocketPathContext, JavascriptTcpListenerEvent,
-    JavascriptTcpSocketEvent, JavascriptUdpFamily, JavascriptUdpSocketEvent,
-    JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket, PendingUnixSocket,
-    ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution, ResolvedTcpConnectAddr,
-    SharedBridge, SidecarKernel, SocketQueryKind, VmDnsConfig, VmListenPolicy, VmState,
-    DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
-    JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND,
+    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError,
+    DEFAULT_JAVASCRIPT_NET_BACKLOG, DnsResolutionSource, EXECUTION_DRIVER_NAME,
+    EXECUTION_SANDBOX_ROOT_ENV, JAVASCRIPT_COMMAND, JavascriptSocketFamily,
+    JavascriptSocketPathContext, JavascriptTcpListenerEvent, JavascriptTcpSocketEvent,
+    JavascriptUdpFamily, JavascriptUdpSocketEvent, JavascriptUnixListenerEvent,
+    LOOPBACK_EXEMPT_PORTS_ENV, NetworkResourceCounts, PYTHON_COMMAND, PendingTcpSocket,
+    PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution,
+    ResolvedTcpConnectAddr, SharedBridge, SidecarKernel, SocketQueryKind,
     VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
-    VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
+    VM_LISTEN_PORT_MIN_METADATA_KEY, VmDnsConfig, VmListenPolicy, VmState, WASM_COMMAND,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -53,21 +53,22 @@ use agent_os_kernel::permissions::NetworkOperation;
 use agent_os_kernel::process_table::{SIGKILL, SIGTERM};
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use base64::Engine;
+use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::TokioResolver;
 use hmac::{Hmac, Mac};
 use md5::Md5;
 use nix::libc;
-use nix::sys::signal::{kill as send_signal, Signal};
-use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
+use nix::sys::signal::{Signal, kill as send_signal};
+use nix::sys::wait::{Id as WaitId, WaitPidFlag, WaitStatus, waitid as wait_on_child};
 use nix::unistd::Pid;
 use pbkdf2::pbkdf2_hmac;
-use scrypt::{scrypt, Params as ScryptParams};
+use scrypt::{Params as ScryptParams, scrypt};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha1::Sha1;
-use sha2::{digest::Digest, Sha256, Sha512};
+use sha2::{Sha256, Sha512, digest::Digest};
+use socket2::{SockRef, TcpKeepalive};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
@@ -87,6 +88,7 @@ use url::Url;
 
 const DEFAULT_KERNEL_STDIN_READ_MAX_BYTES: usize = 64 * 1024;
 const DEFAULT_KERNEL_STDIN_READ_TIMEOUT_MS: u64 = 100;
+const JAVASCRIPT_NET_TIMEOUT_SENTINEL: &str = "__secure_exec_net_timeout__";
 const DEFAULT_SCRYPT_COST: u64 = 16_384;
 const DEFAULT_SCRYPT_BLOCK_SIZE: u32 = 8;
 const DEFAULT_SCRYPT_PARALLELIZATION: u32 = 1;
@@ -262,6 +264,48 @@ impl ActiveTcpSocket {
         }
     }
 
+    fn socket_info(&self) -> Value {
+        json!({
+            "localAddress": self.guest_local_addr.ip().to_string(),
+            "localPort": self.guest_local_addr.port(),
+            "localFamily": socket_addr_family(&self.guest_local_addr),
+            "remoteAddress": self.guest_remote_addr.ip().to_string(),
+            "remotePort": self.guest_remote_addr.port(),
+            "remoteFamily": socket_addr_family(&self.guest_remote_addr),
+        })
+    }
+
+    fn set_no_delay(&self, enable: bool) -> Result<(), SidecarError> {
+        let stream = self
+            .stream
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("TCP socket lock poisoned")))?;
+        stream.set_nodelay(enable).map_err(sidecar_net_error)
+    }
+
+    fn set_keep_alive(
+        &self,
+        enable: bool,
+        initial_delay_secs: Option<u64>,
+    ) -> Result<(), SidecarError> {
+        let stream = self
+            .stream
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("TCP socket lock poisoned")))?;
+        let socket = SockRef::from(&*stream);
+        socket.set_keepalive(enable).map_err(sidecar_net_error)?;
+        if enable {
+            if let Some(delay_secs) = initial_delay_secs {
+                socket
+                    .set_tcp_keepalive(
+                        &TcpKeepalive::new().with_time(Duration::from_secs(delay_secs)),
+                    )
+                    .map_err(sidecar_net_error)?;
+            }
+        }
+        Ok(())
+    }
+
     fn write_all(&self, contents: &[u8]) -> Result<usize, SidecarError> {
         let mut stream = self
             .stream
@@ -312,8 +356,8 @@ impl ActiveUnixSocket {
     fn from_stream(
         stream: UnixStream,
         listener_id: Option<String>,
-        _local_path: Option<String>,
-        _remote_path: Option<String>,
+        local_path: Option<String>,
+        remote_path: Option<String>,
     ) -> Result<Self, SidecarError> {
         let read_stream = stream.try_clone().map_err(sidecar_net_error)?;
         let stream = Arc::new(Mutex::new(stream));
@@ -334,6 +378,8 @@ impl ActiveUnixSocket {
             events,
             event_sender: sender,
             listener_id,
+            local_path,
+            remote_path,
             saw_local_shutdown,
             saw_remote_end,
             close_notified,
@@ -346,6 +392,13 @@ impl ActiveUnixSocket {
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => Ok(None),
         }
+    }
+
+    fn socket_info(&self) -> Value {
+        json!({
+            "localPath": self.local_path.clone(),
+            "remotePath": self.remote_path.clone(),
+        })
     }
 
     fn write_all(&self, contents: &[u8]) -> Result<usize, SidecarError> {
@@ -3700,6 +3753,36 @@ fn socket_addr_family(addr: &SocketAddr) -> &'static str {
     }
 }
 
+fn javascript_net_timeout_value() -> Value {
+    Value::String(String::from(JAVASCRIPT_NET_TIMEOUT_SENTINEL))
+}
+
+fn javascript_net_json_string(value: Value, label: &str) -> Result<Value, SidecarError> {
+    serde_json::to_string(&value)
+        .map(Value::String)
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("failed to serialize {label} payload: {error}"))
+        })
+}
+
+fn javascript_net_read_value(
+    event: Option<JavascriptTcpSocketEvent>,
+) -> Result<Value, SidecarError> {
+    match event {
+        Some(JavascriptTcpSocketEvent::Data(chunk)) => Ok(Value::String(
+            base64::engine::general_purpose::STANDARD.encode(chunk),
+        )),
+        Some(JavascriptTcpSocketEvent::End | JavascriptTcpSocketEvent::Close { .. }) => {
+            Ok(Value::Null)
+        }
+        Some(JavascriptTcpSocketEvent::Error { code, message }) => {
+            let detail = code.unwrap_or_else(|| String::from("socket read"));
+            Err(SidecarError::Execution(format!("{detail}: {message}")))
+        }
+        None => Ok(javascript_net_timeout_value()),
+    }
+}
+
 fn io_error_code(error: &std::io::Error) -> Option<String> {
     match error.raw_os_error() {
         Some(libc::EADDRINUSE) => Some(String::from("EADDRINUSE")),
@@ -3876,6 +3959,16 @@ pub(crate) fn javascript_sync_rpc_arg_str<'a>(
     args.get(index)
         .and_then(Value::as_str)
         .ok_or_else(|| SidecarError::InvalidState(format!("{label} must be a string argument")))
+}
+
+pub(crate) fn javascript_sync_rpc_arg_bool(
+    args: &[Value],
+    index: usize,
+    label: &str,
+) -> Result<bool, SidecarError> {
+    args.get(index)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| SidecarError::InvalidState(format!("{label} must be a boolean argument")))
 }
 
 pub(crate) fn javascript_sync_rpc_encoding(args: &[Value]) -> Option<String> {
@@ -4070,7 +4163,12 @@ where
         "net.connect"
         | "net.listen"
         | "net.poll"
+        | "net.socket_wait_connect"
+        | "net.socket_read"
+        | "net.socket_set_no_delay"
+        | "net.socket_set_keep_alive"
         | "net.server_poll"
+        | "net.server_accept"
         | "net.server_connections"
         | "net.write"
         | "net.shutdown"
@@ -4930,6 +5028,69 @@ where
                 None => Ok(Value::Null),
             }
         }
+        "net.socket_wait_connect" => {
+            let socket_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "net.socket_wait_connect socket id")?;
+            if let Some(socket) = process.tcp_sockets.get(socket_id) {
+                javascript_net_json_string(socket.socket_info(), "net.socket_wait_connect")
+            } else {
+                let socket = process.unix_sockets.get(socket_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("unknown net socket {socket_id}"))
+                })?;
+                javascript_net_json_string(socket.socket_info(), "net.socket_wait_connect")
+            }
+        }
+        "net.socket_read" => {
+            let socket_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "net.socket_read socket id")?;
+            if let Some(socket) = process.tcp_sockets.get_mut(socket_id) {
+                javascript_net_read_value(socket.poll(Duration::ZERO)?)
+            } else {
+                let socket = process.unix_sockets.get_mut(socket_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("unknown net socket {socket_id}"))
+                })?;
+                javascript_net_read_value(socket.poll(Duration::ZERO)?)
+            }
+        }
+        "net.socket_set_no_delay" => {
+            let socket_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "net.socket_set_no_delay socket id")?;
+            let enable =
+                javascript_sync_rpc_arg_bool(&request.args, 1, "net.socket_set_no_delay enabled")?;
+            if let Some(socket) = process.tcp_sockets.get(socket_id) {
+                socket.set_no_delay(enable)?;
+            } else if !process.unix_sockets.contains_key(socket_id) {
+                return Err(SidecarError::InvalidState(format!(
+                    "unknown net socket {socket_id}"
+                )));
+            }
+            Ok(Value::Null)
+        }
+        "net.socket_set_keep_alive" => {
+            let socket_id = javascript_sync_rpc_arg_str(
+                &request.args,
+                0,
+                "net.socket_set_keep_alive socket id",
+            )?;
+            let enable = javascript_sync_rpc_arg_bool(
+                &request.args,
+                1,
+                "net.socket_set_keep_alive enabled",
+            )?;
+            let initial_delay_secs = javascript_sync_rpc_arg_u64_optional(
+                &request.args,
+                2,
+                "net.socket_set_keep_alive initial delay seconds",
+            )?;
+            if let Some(socket) = process.tcp_sockets.get(socket_id) {
+                socket.set_keep_alive(enable, initial_delay_secs)?;
+            } else if !process.unix_sockets.contains_key(socket_id) {
+                return Err(SidecarError::InvalidState(format!(
+                    "unknown net socket {socket_id}"
+                )));
+            }
+            Ok(Value::Null)
+        }
         "net.server_poll" => {
             let listener_id =
                 javascript_sync_rpc_arg_str(&request.args, 0, "net.server_poll listener id")?;
@@ -5050,6 +5211,106 @@ where
                     "message": message,
                 })),
                 None => Ok(Value::Null),
+            }
+        }
+        "net.server_accept" => {
+            let listener_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "net.server_accept listener id")?;
+            if let Some(listener) = process.tcp_listeners.get_mut(listener_id) {
+                return match listener.poll(Duration::ZERO)? {
+                    Some(JavascriptTcpListenerEvent::Connection(pending)) => {
+                        check_network_resource_limit(
+                            resource_limits.max_sockets,
+                            network_counts.sockets,
+                            1,
+                            "socket",
+                        )?;
+                        check_network_resource_limit(
+                            resource_limits.max_connections,
+                            network_counts.connections,
+                            1,
+                            "connection",
+                        )?;
+                        let info = json!({
+                            "localAddress": pending.guest_local_addr.ip().to_string(),
+                            "localPort": pending.guest_local_addr.port(),
+                            "localFamily": socket_addr_family(&pending.guest_local_addr),
+                            "remoteAddress": pending.guest_remote_addr.ip().to_string(),
+                            "remotePort": pending.guest_remote_addr.port(),
+                            "remoteFamily": socket_addr_family(&pending.guest_remote_addr),
+                        });
+                        let socket = ActiveTcpSocket::from_stream(
+                            pending.stream,
+                            Some(listener_id.to_string()),
+                            pending.guest_local_addr,
+                            pending.guest_remote_addr,
+                        )?;
+                        let socket_id = process.allocate_tcp_socket_id();
+                        if let Some(listener) = process.tcp_listeners.get_mut(listener_id) {
+                            listener.register_connection(&socket_id);
+                        }
+                        process.tcp_sockets.insert(socket_id.clone(), socket);
+                        javascript_net_json_string(
+                            json!({
+                                "socketId": socket_id,
+                                "info": info,
+                            }),
+                            "net.server_accept",
+                        )
+                    }
+                    Some(JavascriptTcpListenerEvent::Error { code, message }) => {
+                        let detail = code.unwrap_or_else(|| String::from("server accept"));
+                        Err(SidecarError::Execution(format!("{detail}: {message}")))
+                    }
+                    None => Ok(javascript_net_timeout_value()),
+                };
+            }
+
+            let listener = process.unix_listeners.get_mut(listener_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown net listener {listener_id}"))
+            })?;
+            match listener.poll(Duration::ZERO)? {
+                Some(JavascriptUnixListenerEvent::Connection(pending)) => {
+                    check_network_resource_limit(
+                        resource_limits.max_sockets,
+                        network_counts.sockets,
+                        1,
+                        "socket",
+                    )?;
+                    check_network_resource_limit(
+                        resource_limits.max_connections,
+                        network_counts.connections,
+                        1,
+                        "connection",
+                    )?;
+                    let info = json!({
+                        "localPath": pending.local_path.clone(),
+                        "remotePath": pending.remote_path.clone(),
+                    });
+                    let socket = ActiveUnixSocket::from_stream(
+                        pending.stream,
+                        Some(listener_id.to_string()),
+                        pending.local_path,
+                        pending.remote_path,
+                    )?;
+                    let socket_id = process.allocate_unix_socket_id();
+                    if let Some(listener) = process.unix_listeners.get_mut(listener_id) {
+                        listener.register_connection(&socket_id);
+                    }
+                    process.unix_sockets.insert(socket_id.clone(), socket);
+                    javascript_net_json_string(
+                        json!({
+                            "socketId": socket_id,
+                            "info": info,
+                        }),
+                        "net.server_accept",
+                    )
+                }
+                Some(JavascriptUnixListenerEvent::Error { code, message }) => {
+                    let detail = code.unwrap_or_else(|| String::from("server accept"));
+                    Err(SidecarError::Execution(format!("{detail}: {message}")))
+                }
+                None => Ok(javascript_net_timeout_value()),
             }
         }
         "net.server_connections" => {

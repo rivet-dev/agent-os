@@ -26,7 +26,7 @@ mod service {
         mod bridge_support;
 
         use super::*;
-        use crate::bridge::{bridge_permissions, HostFilesystem, ScopedHostFilesystem};
+        use crate::bridge::{HostFilesystem, ScopedHostFilesystem, bridge_permissions};
         use crate::plugins::s3::test_support::MockS3Server;
         use crate::plugins::sandbox_agent::test_support::MockSandboxAgentServer;
         use crate::protocol::VmCreatedResponse;
@@ -47,10 +47,13 @@ mod service {
         use agent_os_kernel::kernel::{KernelVmConfig, SpawnOptions};
         use agent_os_kernel::mount_table::{MountEntry, MountTable};
         use agent_os_kernel::permissions::{FsAccessRequest, FsOperation, Permissions};
-        use agent_os_kernel::vfs::{MemoryFileSystem, VfsError, VirtualDirEntry, VirtualFileSystem, VirtualStat};
+        use agent_os_kernel::vfs::{
+            MemoryFileSystem, VfsError, VirtualDirEntry, VirtualFileSystem, VirtualStat,
+        };
         use base64::Engine;
         use bridge_support::RecordingBridge;
-        use serde_json::{json, Value};
+        use serde_json::{Value, json};
+        use socket2::SockRef;
         use std::collections::BTreeMap;
         use std::fs;
         use std::io::{Read, Write};
@@ -190,7 +193,10 @@ ykAheWCsAteSEWVc0w==\n\
 
         fn install_memory_js_bridge_handler(
             sidecar: &mut NativeSidecar<RecordingBridge>,
-        ) -> (Arc<Mutex<MemoryFileSystem>>, Arc<Mutex<Vec<JsBridgeCallRecord>>>) {
+        ) -> (
+            Arc<Mutex<MemoryFileSystem>>,
+            Arc<Mutex<Vec<JsBridgeCallRecord>>>,
+        ) {
             let filesystem = Arc::new(Mutex::new(MemoryFileSystem::new()));
             let calls = Arc::new(Mutex::new(Vec::<JsBridgeCallRecord>::new()));
             let handler_filesystem = filesystem.clone();
@@ -403,7 +409,11 @@ ykAheWCsAteSEWVc0w==\n\
                             .map(|()| None)
                             .map_err(|error| format!("{}: {error}", error.code()))
                     }
-                    other => return Err(SidecarError::Unsupported(format!("unsupported op: {other}"))),
+                    other => {
+                        return Err(SidecarError::Unsupported(format!(
+                            "unsupported op: {other}"
+                        )));
+                    }
                 };
 
                 match response {
@@ -854,6 +864,469 @@ ykAheWCsAteSEWVc0w==\n\
                 &limits,
                 counts,
             )
+        }
+
+        #[test]
+        fn javascript_net_socket_wait_connect_reports_tcp_socket_info() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-net-wait-connect-cwd");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-net-wait-connect",
+                "[\"net\"]",
+            );
+
+            let listen = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-wait-connect",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 0,
+                        "backlog": 1,
+                    })],
+                },
+            )
+            .expect("listen through sidecar net RPC");
+            let server_id = listen["serverId"].as_str().expect("server id").to_string();
+            let guest_port = listen["localPort"]
+                .as_u64()
+                .and_then(|value| u16::try_from(value).ok())
+                .expect("guest listener port");
+
+            let connect = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-wait-connect",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("net.connect"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": guest_port,
+                    })],
+                },
+            )
+            .expect("connect to vm-owned listener");
+            let socket_id = connect["socketId"].as_str().expect("socket id").to_string();
+
+            let info = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-wait-connect",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("net.socket_wait_connect"),
+                    args: vec![json!(socket_id.clone())],
+                },
+            )
+            .expect("wait for connect");
+            let parsed: Value = serde_json::from_str(info.as_str().expect("socket info string"))
+                .expect("parse socket info");
+            assert_eq!(parsed["remoteAddress"], Value::from("127.0.0.1"));
+            assert_eq!(parsed["remotePort"], Value::from(guest_port));
+            assert_eq!(parsed["remoteFamily"], Value::from("IPv4"));
+            assert_eq!(parsed["localFamily"], Value::from("IPv4"));
+            assert!(
+                parsed["localPort"].as_u64().is_some_and(|port| port > 0),
+                "socket info: {parsed}"
+            );
+
+            let accepted = (0..20)
+                .find_map(|attempt| {
+                    let value = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-net-wait-connect",
+                        JavascriptSyncRpcRequest {
+                            id: 4 + attempt,
+                            method: String::from("net.server_accept"),
+                            args: vec![json!(server_id.clone())],
+                        },
+                    )
+                    .expect("accept connected client");
+                    (value != Value::from("__secure_exec_net_timeout__")).then_some(value)
+                })
+                .expect("eventually accept connected client");
+            let accepted: Value =
+                serde_json::from_str(accepted.as_str().expect("accepted payload string"))
+                    .expect("parse accepted payload");
+            let accepted_socket_id = accepted["socketId"]
+                .as_str()
+                .expect("accepted socket id")
+                .to_string();
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-wait-connect",
+                JavascriptSyncRpcRequest {
+                    id: 50,
+                    method: String::from("net.destroy"),
+                    args: vec![json!(socket_id)],
+                },
+            )
+            .expect("destroy connected socket");
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-wait-connect",
+                JavascriptSyncRpcRequest {
+                    id: 51,
+                    method: String::from("net.destroy"),
+                    args: vec![json!(accepted_socket_id)],
+                },
+            )
+            .expect("destroy accepted socket");
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-wait-connect",
+                JavascriptSyncRpcRequest {
+                    id: 52,
+                    method: String::from("net.server_close"),
+                    args: vec![json!(server_id)],
+                },
+            )
+            .expect("close listener");
+        }
+
+        #[test]
+        fn javascript_net_socket_read_and_socket_options_work_for_tcp_sockets() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-net-read-cwd");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-net-read",
+                "[\"net\"]",
+            );
+
+            let listen = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-read",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 0,
+                        "backlog": 1,
+                    })],
+                },
+            )
+            .expect("listen through sidecar net RPC");
+            let server_id = listen["serverId"].as_str().expect("server id").to_string();
+            let guest_port = listen["localPort"]
+                .as_u64()
+                .and_then(|value| u16::try_from(value).ok())
+                .expect("guest listener port");
+
+            let connect = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-read",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("net.connect"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": guest_port,
+                    })],
+                },
+            )
+            .expect("connect to vm-owned listener");
+            let socket_id = connect["socketId"].as_str().expect("socket id").to_string();
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-read",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("net.socket_set_no_delay"),
+                    args: vec![json!(socket_id.clone()), Value::Bool(true)],
+                },
+            )
+            .expect("enable TCP_NODELAY");
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-read",
+                JavascriptSyncRpcRequest {
+                    id: 4,
+                    method: String::from("net.socket_set_keep_alive"),
+                    args: vec![json!(socket_id.clone()), Value::Bool(true), json!(1)],
+                },
+            )
+            .expect("enable SO_KEEPALIVE");
+
+            let accepted = (0..20)
+                .find_map(|attempt| {
+                    let value = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-net-read",
+                        JavascriptSyncRpcRequest {
+                            id: 5 + attempt,
+                            method: String::from("net.server_accept"),
+                            args: vec![json!(server_id.clone())],
+                        },
+                    )
+                    .expect("accept connected client");
+                    (value != Value::from("__secure_exec_net_timeout__")).then_some(value)
+                })
+                .expect("eventually accept connected client");
+            let accepted: Value =
+                serde_json::from_str(accepted.as_str().expect("accepted payload string"))
+                    .expect("parse accepted payload");
+            let server_socket_id = accepted["socketId"]
+                .as_str()
+                .expect("accepted socket id")
+                .to_string();
+
+            {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                let process = vm
+                    .active_processes
+                    .get("proc-js-net-read")
+                    .expect("javascript process");
+                let socket = process.tcp_sockets.get(&socket_id).expect("tcp socket");
+                let stream = socket.stream.lock().expect("lock tcp socket");
+                assert!(stream.nodelay().expect("read TCP_NODELAY"));
+                assert!(
+                    SockRef::from(&*stream)
+                        .keepalive()
+                        .expect("read SO_KEEPALIVE")
+                );
+            }
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-read",
+                JavascriptSyncRpcRequest {
+                    id: 60,
+                    method: String::from("net.write"),
+                    args: vec![json!(server_socket_id.clone()), json!("ping")],
+                },
+            )
+            .expect("write server payload");
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-read",
+                JavascriptSyncRpcRequest {
+                    id: 61,
+                    method: String::from("net.shutdown"),
+                    args: vec![json!(server_socket_id.clone())],
+                },
+            )
+            .expect("shutdown server write half");
+
+            let payload = (0..20)
+                .find_map(|attempt| {
+                    let value = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-net-read",
+                        JavascriptSyncRpcRequest {
+                            id: 10 + attempt,
+                            method: String::from("net.socket_read"),
+                            args: vec![json!(socket_id.clone())],
+                        },
+                    )
+                    .expect("read bridged socket chunk");
+                    (value != Value::from("__secure_exec_net_timeout__")).then_some(value)
+                })
+                .expect("eventually receive bridged socket data");
+            assert_eq!(payload, Value::from("cGluZw=="));
+
+            let end = (0..20)
+                .find_map(|attempt| {
+                    let value = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-net-read",
+                        JavascriptSyncRpcRequest {
+                            id: 40 + attempt,
+                            method: String::from("net.socket_read"),
+                            args: vec![json!(socket_id.clone())],
+                        },
+                    )
+                    .expect("read bridged socket end");
+                    (value != Value::from("__secure_exec_net_timeout__")).then_some(value)
+                })
+                .expect("eventually receive bridged socket EOF");
+            assert_eq!(end, Value::Null);
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-read",
+                JavascriptSyncRpcRequest {
+                    id: 99,
+                    method: String::from("net.destroy"),
+                    args: vec![json!(socket_id)],
+                },
+            )
+            .expect("destroy connected socket");
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-read",
+                JavascriptSyncRpcRequest {
+                    id: 100,
+                    method: String::from("net.destroy"),
+                    args: vec![json!(server_socket_id)],
+                },
+            )
+            .expect("destroy accepted socket");
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-net-read",
+                JavascriptSyncRpcRequest {
+                    id: 101,
+                    method: String::from("net.server_close"),
+                    args: vec![json!(server_id)],
+                },
+            )
+            .expect("close listener");
+        }
+
+        #[test]
+        fn javascript_net_server_accept_returns_timeout_then_pending_connection() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-server-accept-cwd");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-server-accept",
+                "[\"net\"]",
+            );
+
+            let listen = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-server-accept",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 0,
+                        "backlog": 1,
+                    })],
+                },
+            )
+            .expect("listen through sidecar net RPC");
+            let server_id = listen["serverId"].as_str().expect("server id").to_string();
+            let guest_port = listen["localPort"]
+                .as_u64()
+                .and_then(|value| u16::try_from(value).ok())
+                .expect("guest listener port");
+            let host_port = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-server-accept")
+                    .and_then(|process| process.tcp_listeners.get(&server_id))
+                    .expect("sidecar tcp listener")
+                    .local_addr()
+                    .port()
+            };
+
+            let timeout = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-server-accept",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("net.server_accept"),
+                    args: vec![json!(server_id.clone())],
+                },
+            )
+            .expect("accept timeout sentinel");
+            assert_eq!(timeout, Value::from("__secure_exec_net_timeout__"));
+
+            let client = thread::spawn(move || {
+                let _stream = TcpStream::connect(("127.0.0.1", host_port))
+                    .expect("connect to sidecar listener");
+            });
+
+            let accepted = (0..20)
+                .find_map(|attempt| {
+                    let value = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-server-accept",
+                        JavascriptSyncRpcRequest {
+                            id: 10 + attempt,
+                            method: String::from("net.server_accept"),
+                            args: vec![json!(server_id.clone())],
+                        },
+                    )
+                    .expect("accept pending connection");
+                    (value != Value::from("__secure_exec_net_timeout__")).then_some(value)
+                })
+                .expect("eventually accept pending TCP connection");
+            let parsed: Value =
+                serde_json::from_str(accepted.as_str().expect("accepted payload string"))
+                    .expect("parse accepted payload");
+            assert!(
+                parsed["socketId"].as_str().is_some(),
+                "accepted payload: {parsed}"
+            );
+            assert_eq!(parsed["info"]["localAddress"], Value::from("127.0.0.1"));
+            assert_eq!(parsed["info"]["localPort"], Value::from(guest_port));
+            assert_eq!(parsed["info"]["localFamily"], Value::from("IPv4"));
+            assert_eq!(parsed["info"]["remoteFamily"], Value::from("IPv4"));
+
+            client.join().expect("join tcp client");
         }
 
         #[test]
@@ -1620,8 +2093,7 @@ ykAheWCsAteSEWVc0w==\n\
                 call.mount_id == "mount-1"
                     && call.operation == "link"
                     && call.path.is_none()
-                    && call.ownership
-                        == OwnershipScope::vm(&connection_id, &session_id, &vm_id)
+                    && call.ownership == OwnershipScope::vm(&connection_id, &session_id, &vm_id)
             }));
             assert!(calls.iter().any(|call| {
                 call.mount_id == "mount-1"
@@ -3359,12 +3831,12 @@ socket.on("close", (hadError) => {{
             );
 
             let (stdout, stderr, exit_code) = run_javascript_entry(
-            &mut sidecar,
-            &vm_id,
-            &cwd,
-            "proc-js-net",
-            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
-        );
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-net",
+                "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+            );
 
             server.join().expect("join tcp server");
             assert_eq!(exit_code, Some(0), "stderr: {stderr}");
@@ -4180,12 +4652,12 @@ process.exit(0);
             );
 
             let (stdout, stderr, exit_code) = run_javascript_entry(
-            &mut sidecar,
-            &vm_id,
-            &cwd,
-            "proc-js-network-permission-callbacks",
-            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
-        );
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-network-permission-callbacks",
+                "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+            );
 
             server.join().expect("join tcp server");
             assert_eq!(exit_code, Some(0), "stderr: {stderr}");
@@ -4288,12 +4760,12 @@ process.exit(0);
             );
 
             let (stdout, stderr, exit_code) = run_javascript_entry(
-            &mut sidecar,
-            &vm_id,
-            &cwd,
-            "proc-js-network-permission-denials",
-            "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
-        );
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-network-permission-denials",
+                "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+            );
 
             assert_eq!(exit_code, Some(0), "stderr: {stderr}");
             let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse denial JSON");

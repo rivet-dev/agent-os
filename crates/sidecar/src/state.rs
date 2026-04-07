@@ -4,10 +4,10 @@
 //! types, and other shared data structures extracted from service.rs.
 
 use crate::protocol::{
-    EventFrame, GuestRuntimeKind, MountDescriptor, PermissionsPolicy, ProjectedModuleDescriptor,
-    ResponseFrame, SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame,
-    SidecarResponsePayload, SignalHandlerRegistration, SoftwareDescriptor, WasmPermissionTier,
-    DEFAULT_MAX_FRAME_BYTES,
+    DEFAULT_MAX_FRAME_BYTES, EventFrame, GuestRuntimeKind, MountDescriptor, PermissionsPolicy,
+    ProjectedModuleDescriptor, ResponseFrame, SidecarRequestFrame, SidecarRequestPayload,
+    SidecarResponseFrame, SidecarResponsePayload, SignalHandlerRegistration, SoftwareDescriptor,
+    WasmPermissionTier,
 };
 use agent_os_bridge::{BridgeTypes, FilesystemSnapshot};
 use agent_os_execution::{
@@ -160,9 +160,7 @@ impl SharedSidecarRequestClient {
         timeout: Duration,
     ) -> Result<SidecarResponsePayload, SidecarError> {
         let transport = self.transport.as_ref().ok_or_else(|| {
-            SidecarError::Unsupported(String::from(
-                "sidecar request transport is not configured",
-            ))
+            SidecarError::Unsupported(String::from("sidecar request transport is not configured"))
         })?;
         let request_id = self.next_request_id.fetch_sub(1, Ordering::Relaxed);
         let request = SidecarRequestFrame::new(request_id, ownership.clone(), payload);
@@ -486,6 +484,8 @@ pub(crate) struct ActiveUnixSocket {
     pub(crate) events: Receiver<JavascriptTcpSocketEvent>,
     pub(crate) event_sender: Sender<JavascriptTcpSocketEvent>,
     pub(crate) listener_id: Option<String>,
+    pub(crate) local_path: Option<String>,
+    pub(crate) remote_path: Option<String>,
     pub(crate) saw_local_shutdown: Arc<AtomicBool>,
     pub(crate) saw_remote_end: Arc<AtomicBool>,
     pub(crate) close_notified: Arc<AtomicBool>,

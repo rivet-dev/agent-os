@@ -31,6 +31,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Live guest stdin has two paths: `AGENT_OS_KEEP_STDIN_OPEN` still uses `"stdin"` / `"stdin_end"` stream events, but TTY-style `_kernelStdinRead` must read the process’s kernel fd `0` pipe so timeout and EOF can be distinguished
 - Guest `crypto` is easiest to validate in two layers for now: execution tests should cover local entropy hooks (`globalThis.crypto.getRandomValues` / `randomUUID`), while sidecar hash/HMAC/KDF coverage should target `service_javascript_crypto_sync_rpc` directly until the guest builtin module exposes `crypto` cleanly in file-based tests
 - Sidecar-initiated callback frames must keep negative request IDs from the first request onward, and current-thread stdio framing must use dedicated OS threads for stdin/stdout so callback-driven mounts can unblock while the main loop waits synchronously
+- Sidecar TCP tests should connect to VM-owned loopback listeners, not arbitrary host `127.0.0.1` ports; guest loopback connections to host-owned ports are blocked unless the port is explicitly exempted
 
 ## 2026-04-06 - US-001
 - Extracted shared state types from service.rs into new state.rs module (~450 lines)
@@ -228,4 +229,14 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - `SharedSidecarRequestClient` cannot rely on the derived `Default` for request IDs; the counter must start at `-1` or the first sidecar callback frame is rejected by protocol validation
   - The real stdio path exercises extra VFS probes beyond the in-process tests, including `realpath`, root `lstat("/")`, and missing-path `stat` checks before writes, so callback harnesses should answer those probes explicitly
   - On a current-thread Tokio runtime, async stdin/stdout frame tasks deadlock callback-driven mounts; keep framed stdio on dedicated OS threads when a request path blocks waiting for host responses
+---
+## 2026-04-07 08:23:09 PDT - US-034
+- Added the missing sidecar TCP sync-RPC match arms for `net.socket_wait_connect`, `net.socket_read`, `net.socket_set_no_delay`, `net.socket_set_keep_alive`, and `net.server_accept`, including V8-bridge-compatible timeout and JSON payload shapes
+- Extended TCP socket handling with direct socket-info serialization plus `TCP_NODELAY` / `SO_KEEPALIVE` configuration, and kept Unix socket wait/accept payloads consistent by storing local/remote paths on active Unix sockets
+- Added focused service coverage for wait-connect info, bridge-style socket reads plus socket options, and server-accept timeout/accept flows using VM-owned listeners so the tests respect loopback ownership rules
+- Files changed: `Cargo.lock`, `crates/AGENTS.md`, `crates/sidecar/Cargo.toml`, `crates/sidecar/src/{execution,state}.rs`, `crates/sidecar/tests/service.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - `net.socket_read` and `net.server_accept` should mirror the V8 bridge contract exactly: timeout is the `"__secure_exec_net_timeout__"` sentinel, EOF is `null`, and structured socket metadata is returned as a JSON string payload
+  - TCP socket-option coverage is easiest to assert from sidecar tests by inspecting the live `TcpStream` (`nodelay()` plus `socket2::SockRef::keepalive()`) after the sync RPC runs
+  - Loopback networking tests need VM-owned listeners rather than standalone host listeners, otherwise the sidecar correctly rejects the guest connect with SSRF/ownership protection
 ---
