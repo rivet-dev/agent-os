@@ -26,7 +26,7 @@ mod service {
         mod bridge_support;
 
         use super::*;
-        use crate::bridge::{HostFilesystem, ScopedHostFilesystem, bridge_permissions};
+        use crate::bridge::{bridge_permissions, HostFilesystem, ScopedHostFilesystem};
         use crate::plugins::s3::test_support::MockS3Server;
         use crate::plugins::sandbox_agent::test_support::MockSandboxAgentServer;
         use crate::protocol::VmCreatedResponse;
@@ -61,7 +61,7 @@ mod service {
             ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, ServerConfig,
             ServerConnection, SignatureScheme,
         };
-        use serde_json::{Value, json};
+        use serde_json::{json, Value};
         use socket2::SockRef;
         use std::collections::BTreeMap;
         use std::fs;
@@ -145,7 +145,8 @@ ykAheWCsAteSEWVc0w==\n\
             .expect("create sidecar")
         }
 
-        fn create_kernel_process_handle_for_tests() -> agent_os_kernel::kernel::KernelProcessHandle {
+        fn create_kernel_process_handle_for_tests() -> agent_os_kernel::kernel::KernelProcessHandle
+        {
             let mut config = KernelVmConfig::new("vm-js-crypto-rpc");
             config.permissions = Permissions::allow_all();
             let mut kernel = SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config);
@@ -181,13 +182,13 @@ ykAheWCsAteSEWVc0w==\n\
             .expect("create vm");
             let cwd = temp_dir("agent-os-sidecar-js-crypto-rpc");
             write_fixture(&cwd.join("entry.mjs"), "export {};\n");
-            let context = sidecar
-                .javascript_engine
-                .create_context(agent_os_execution::CreateJavascriptContextRequest {
+            let context = sidecar.javascript_engine.create_context(
+                agent_os_execution::CreateJavascriptContextRequest {
                     vm_id: vm_id.clone(),
                     bootstrap_module: None,
                     compile_cache_root: None,
-                });
+                },
+            );
             let execution = sidecar
                 .javascript_engine
                 .start_execution(agent_os_execution::StartJavascriptExecutionRequest {
@@ -955,12 +956,13 @@ ykAheWCsAteSEWVc0w==\n\
         }
 
         fn tls_test_server_config(alpn: &[&str]) -> Arc<ServerConfig> {
-            let mut config = ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
-                .with_safe_default_protocol_versions()
-                .expect("TLS server protocol versions")
-                .with_no_client_auth()
-                .with_single_cert(tls_test_certificates(), tls_test_private_key())
-                .expect("build TLS test server config");
+            let mut config =
+                ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                    .with_safe_default_protocol_versions()
+                    .expect("TLS server protocol versions")
+                    .with_no_client_auth()
+                    .with_single_cert(tls_test_certificates(), tls_test_private_key())
+                    .expect("build TLS test server config");
             config.alpn_protocols = alpn
                 .iter()
                 .map(|protocol| protocol.as_bytes().to_vec())
@@ -1008,10 +1010,7 @@ ykAheWCsAteSEWVc0w==\n\
             }
         }
 
-        fn tls_test_client_config(
-            trust_test_cert: bool,
-            alpn: &[&str],
-        ) -> Arc<ClientConfig> {
+        fn tls_test_client_config(trust_test_cert: bool, alpn: &[&str]) -> Arc<ClientConfig> {
             let provider = Arc::new(aws_lc_rs::default_provider());
             let builder = ClientConfig::builder_with_provider(provider.clone())
                 .with_safe_default_protocol_versions()
@@ -1299,11 +1298,9 @@ ykAheWCsAteSEWVc0w==\n\
                 let socket = process.tcp_sockets.get(&socket_id).expect("tcp socket");
                 let stream = socket.stream.lock().expect("lock tcp socket");
                 assert!(stream.nodelay().expect("read TCP_NODELAY"));
-                assert!(
-                    SockRef::from(&*stream)
-                        .keepalive()
-                        .expect("read SO_KEEPALIVE")
-                );
+                assert!(SockRef::from(&*stream)
+                    .keepalive()
+                    .expect("read SO_KEEPALIVE"));
             }
 
             call_javascript_sync_rpc(
@@ -1422,9 +1419,13 @@ ykAheWCsAteSEWVc0w==\n\
                 assert_eq!(stream.conn.alpn_protocol(), Some(b"http/1.1".as_slice()));
 
                 let mut payload = [0_u8; 4];
-                stream.read_exact(&mut payload).expect("read client payload");
+                stream
+                    .read_exact(&mut payload)
+                    .expect("read client payload");
                 assert_eq!(&payload, b"ping");
-                stream.write_all(b"pong").expect("write TLS server response");
+                stream
+                    .write_all(b"pong")
+                    .expect("write TLS server response");
                 stream.flush().expect("flush TLS server response");
             });
 
@@ -1463,8 +1464,8 @@ ykAheWCsAteSEWVc0w==\n\
                 },
             )
             .expect("list TLS ciphers");
-            let ciphers: Value =
-                serde_json::from_str(ciphers.as_str().expect("cipher JSON")).expect("parse ciphers");
+            let ciphers: Value = serde_json::from_str(ciphers.as_str().expect("cipher JSON"))
+                .expect("parse ciphers");
             assert!(
                 ciphers
                     .as_array()
@@ -1520,10 +1521,9 @@ ykAheWCsAteSEWVc0w==\n\
                 },
             )
             .expect("query TLS protocol");
-            let protocol: Value = serde_json::from_str(
-                protocol.as_str().expect("TLS protocol query JSON"),
-            )
-            .expect("parse TLS protocol");
+            let protocol: Value =
+                serde_json::from_str(protocol.as_str().expect("TLS protocol query JSON"))
+                    .expect("parse TLS protocol");
             assert!(
                 protocol == Value::String(String::from("TLSv1.3"))
                     || protocol == Value::String(String::from("TLSv1.2")),
@@ -1553,7 +1553,11 @@ ykAheWCsAteSEWVc0w==\n\
                 JavascriptSyncRpcRequest {
                     id: 6,
                     method: String::from("net.socket_tls_query"),
-                    args: vec![json!(socket_id.clone()), json!("getPeerCertificate"), Value::Bool(true)],
+                    args: vec![
+                        json!(socket_id.clone()),
+                        json!("getPeerCertificate"),
+                        Value::Bool(true),
+                    ],
                 },
             )
             .expect("query TLS peer certificate");
@@ -1669,8 +1673,7 @@ ykAheWCsAteSEWVc0w==\n\
                 let config = tls_test_client_config(false, &["h2", "http/1.1"]);
                 let stream =
                     TcpStream::connect(("127.0.0.1", host_port)).expect("connect to TLS server");
-                let server_name =
-                    ServerName::try_from("localhost").expect("TLS test server name");
+                let server_name = ServerName::try_from("localhost").expect("TLS test server name");
                 let mut stream = rustls::StreamOwned::new(
                     ClientConnection::new(config, server_name)
                         .expect("create TLS client connection"),
@@ -1686,7 +1689,9 @@ ykAheWCsAteSEWVc0w==\n\
                 stream.write_all(b"ping").expect("write TLS client payload");
                 stream.flush().expect("flush TLS client payload");
                 let mut response = [0_u8; 4];
-                stream.read_exact(&mut response).expect("read TLS server response");
+                stream
+                    .read_exact(&mut response)
+                    .expect("read TLS server response");
                 assert_eq!(&response, b"pong");
             });
 
@@ -1714,7 +1719,10 @@ ykAheWCsAteSEWVc0w==\n\
             let accepted: Value =
                 serde_json::from_str(accepted.as_str().expect("accepted payload string"))
                     .expect("parse accepted payload");
-            let socket_id = accepted["socketId"].as_str().expect("accepted socket id").to_string();
+            let socket_id = accepted["socketId"]
+                .as_str()
+                .expect("accepted socket id")
+                .to_string();
 
             let client_hello = (0..30)
                 .find_map(|attempt| {
@@ -1729,10 +1737,9 @@ ykAheWCsAteSEWVc0w==\n\
                         },
                     )
                     .expect("get TLS client hello");
-                    let parsed: Value = serde_json::from_str(
-                        value.as_str().expect("TLS client hello JSON"),
-                    )
-                    .expect("parse TLS client hello");
+                    let parsed: Value =
+                        serde_json::from_str(value.as_str().expect("TLS client hello JSON"))
+                            .expect("parse TLS client hello");
                     if parsed["servername"] == Value::from("localhost") {
                         Some(parsed)
                     } else {
@@ -2135,6 +2142,145 @@ ykAheWCsAteSEWVc0w==\n\
             sidecar
                 .kill_process_internal(&vm_id, "proc-js-stdin", "SIGKILL")
                 .expect("kill javascript stdin process");
+        }
+
+        #[test]
+        fn javascript_sync_rpc_pty_set_raw_mode_toggles_kernel_tty_discipline() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-pty-raw-mode");
+            write_fixture(&cwd.join("entry.mjs"), "export {};\n");
+
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+                .javascript_engine
+                .start_execution(StartJavascriptExecutionRequest {
+                    vm_id: vm_id.clone(),
+                    context_id: context.context_id,
+                    argv: vec![String::from("./entry.mjs")],
+                    env: BTreeMap::new(),
+                    cwd: cwd.clone(),
+                    inline_code: None,
+                })
+                .expect("start fake javascript execution");
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let (_master_fd, slave_fd, _pty_path) = vm
+                    .kernel
+                    .open_pty(EXECUTION_DRIVER_NAME, kernel_handle.pid())
+                    .expect("open kernel pty");
+                vm.kernel
+                    .fd_dup2(EXECUTION_DRIVER_NAME, kernel_handle.pid(), slave_fd, 0)
+                    .expect("dup kernel pty slave onto fd 0");
+                vm.kernel
+                    .fd_close(EXECUTION_DRIVER_NAME, kernel_handle.pid(), slave_fd)
+                    .expect("close extra kernel pty slave fd");
+                vm.active_processes.insert(
+                    String::from("proc-js-pty"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    )
+                    .with_host_cwd(cwd.clone()),
+                );
+            }
+
+            {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                let kernel_pid = vm.active_processes["proc-js-pty"].kernel_pid;
+                let termios = vm
+                    .kernel
+                    .tcgetattr(EXECUTION_DRIVER_NAME, kernel_pid, 0)
+                    .expect("read cooked termios");
+                assert!(termios.icanon);
+                assert!(termios.echo);
+                assert!(termios.isig);
+            }
+
+            let raw = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-pty",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("__pty_set_raw_mode"),
+                    args: vec![json!(true)],
+                },
+            )
+            .expect("enable raw mode");
+            assert_eq!(raw, Value::Null);
+
+            {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                let kernel_pid = vm.active_processes["proc-js-pty"].kernel_pid;
+                let termios = vm
+                    .kernel
+                    .tcgetattr(EXECUTION_DRIVER_NAME, kernel_pid, 0)
+                    .expect("read raw termios");
+                assert!(!termios.icanon);
+                assert!(!termios.echo);
+                assert!(!termios.isig);
+            }
+
+            let cooked = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-pty",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("__pty_set_raw_mode"),
+                    args: vec![json!(false)],
+                },
+            )
+            .expect("disable raw mode");
+            assert_eq!(cooked, Value::Null);
+
+            {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                let kernel_pid = vm.active_processes["proc-js-pty"].kernel_pid;
+                let termios = vm
+                    .kernel
+                    .tcgetattr(EXECUTION_DRIVER_NAME, kernel_pid, 0)
+                    .expect("read restored cooked termios");
+                assert!(termios.icanon);
+                assert!(termios.echo);
+                assert!(termios.isig);
+            }
+
+            sidecar
+                .kill_process_internal(&vm_id, "proc-js-pty", "SIGKILL")
+                .expect("kill javascript pty process");
         }
 
         #[test]
@@ -4303,31 +4449,29 @@ await new Promise(() => {});
 
             let mut process = create_crypto_test_process();
 
-            let sha256 =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut process,
-                    &JavascriptSyncRpcRequest {
-                        id: 1,
-                        method: String::from("crypto.hashDigest"),
-                        args: vec![json!("sha256"), json!("YWdlbnQtb3M=")],
-                    },
-                )
-                .expect("hashDigest response");
+            let sha256 = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut process,
+                &JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("crypto.hashDigest"),
+                    args: vec![json!("sha256"), json!("YWdlbnQtb3M=")],
+                },
+            )
+            .expect("hashDigest response");
             assert_eq!(
                 decode_base64_response(sha256),
                 decode_hex("c242c43a13eb523ec02bb1de36d3d467947790e3f005eb7a9cefff357ca54101")
             );
 
-            let sha512 =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut process,
-                    &JavascriptSyncRpcRequest {
-                        id: 2,
-                        method: String::from("crypto.hashDigest"),
-                        args: vec![json!("sha512"), json!("YWdlbnQtb3M=")],
-                    },
-                )
-                .expect("hashDigest response");
+            let sha512 = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut process,
+                &JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("crypto.hashDigest"),
+                    args: vec![json!("sha512"), json!("YWdlbnQtb3M=")],
+                },
+            )
+            .expect("hashDigest response");
             assert_eq!(
                 decode_base64_response(sha512),
                 decode_hex(
@@ -4335,91 +4479,86 @@ await new Promise(() => {});
                 )
             );
 
-            let sha1 =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut process,
-                    &JavascriptSyncRpcRequest {
-                        id: 3,
-                        method: String::from("crypto.hashDigest"),
-                        args: vec![json!("sha1"), json!("YWdlbnQtb3M=")],
-                    },
-                )
-                .expect("hashDigest response");
+            let sha1 = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut process,
+                &JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("crypto.hashDigest"),
+                    args: vec![json!("sha1"), json!("YWdlbnQtb3M=")],
+                },
+            )
+            .expect("hashDigest response");
             assert_eq!(
                 decode_base64_response(sha1),
                 decode_hex("1d43407501651ea75bc63085f352f99bdcc6e364")
             );
 
-            let md5 =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut process,
-                    &JavascriptSyncRpcRequest {
-                        id: 4,
-                        method: String::from("crypto.hashDigest"),
-                        args: vec![json!("md5"), json!("YWdlbnQtb3M=")],
-                    },
-                )
-                .expect("hashDigest response");
+            let md5 = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut process,
+                &JavascriptSyncRpcRequest {
+                    id: 4,
+                    method: String::from("crypto.hashDigest"),
+                    args: vec![json!("md5"), json!("YWdlbnQtb3M=")],
+                },
+            )
+            .expect("hashDigest response");
             assert_eq!(
                 decode_base64_response(md5),
                 decode_hex("43e0189b46f53703cf6cb1e6e93ff10d")
             );
 
-            let hmac =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut process,
-                    &JavascriptSyncRpcRequest {
-                        id: 5,
-                        method: String::from("crypto.hmacDigest"),
-                        args: vec![
-                            json!("sha256"),
-                            json!("YnJpZGdlLWtleQ=="),
-                            json!("YWdlbnQtb3M="),
-                        ],
-                    },
-                )
-                .expect("hmacDigest response");
+            let hmac = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut process,
+                &JavascriptSyncRpcRequest {
+                    id: 5,
+                    method: String::from("crypto.hmacDigest"),
+                    args: vec![
+                        json!("sha256"),
+                        json!("YnJpZGdlLWtleQ=="),
+                        json!("YWdlbnQtb3M="),
+                    ],
+                },
+            )
+            .expect("hmacDigest response");
             assert_eq!(
                 decode_base64_response(hmac),
                 decode_hex("c24fdd6215522cb3e716855135a1dec9402a3b13be243892c2192d17c57db3a3")
             );
 
-            let pbkdf2 =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut process,
-                    &JavascriptSyncRpcRequest {
-                        id: 6,
-                        method: String::from("crypto.pbkdf2"),
-                        args: vec![
-                            json!("aHVudGVyMg=="),
-                            json!("YWdlbnQtb3Mtc2FsdA=="),
-                            json!(1000),
-                            json!(32),
-                            json!("sha256"),
-                        ],
-                    },
-                )
-                .expect("pbkdf2 response");
+            let pbkdf2 = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut process,
+                &JavascriptSyncRpcRequest {
+                    id: 6,
+                    method: String::from("crypto.pbkdf2"),
+                    args: vec![
+                        json!("aHVudGVyMg=="),
+                        json!("YWdlbnQtb3Mtc2FsdA=="),
+                        json!(1000),
+                        json!(32),
+                        json!("sha256"),
+                    ],
+                },
+            )
+            .expect("pbkdf2 response");
             assert_eq!(
                 decode_base64_response(pbkdf2),
                 decode_hex("8e97a9f68ca2ebf44885a7a82d1ec3185cf2d6dcfde51a90278f793f9e57f0e8")
             );
 
-            let scrypt =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut process,
-                    &JavascriptSyncRpcRequest {
-                        id: 7,
-                        method: String::from("crypto.scrypt"),
-                        args: vec![
-                            json!("aHVudGVyMg=="),
-                            json!("YWdlbnQtb3Mtc2FsdA=="),
-                            json!(32),
-                            json!(r#"{"cost":16384,"blockSize":8,"parallelization":1}"#),
-                        ],
-                    },
-                )
-                .expect("scrypt response");
+            let scrypt = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut process,
+                &JavascriptSyncRpcRequest {
+                    id: 7,
+                    method: String::from("crypto.scrypt"),
+                    args: vec![
+                        json!("aHVudGVyMg=="),
+                        json!("YWdlbnQtb3Mtc2FsdA=="),
+                        json!(32),
+                        json!(r#"{"cost":16384,"blockSize":8,"parallelization":1}"#),
+                    ],
+                },
+            )
+            .expect("scrypt response");
             assert_eq!(
                 decode_base64_response(scrypt),
                 decode_hex("1d0e6ac5c075c16c94c156480f725eb1c041e531fbb7f61f294f1d4fa50c14d9")
@@ -4439,68 +4578,65 @@ await new Promise(() => {});
                     .expect("parse json string")
             }
 
-            let cipher_response =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut create_crypto_test_process(),
-                    &JavascriptSyncRpcRequest {
-                        id: 10,
-                        method: String::from("crypto.cipheriv"),
-                        args: vec![
-                            json!("aes-256-gcm"),
-                            json!(base64::engine::general_purpose::STANDARD.encode([7_u8; 32])),
-                            json!(base64::engine::general_purpose::STANDARD.encode([3_u8; 12])),
-                            json!(base64::engine::general_purpose::STANDARD.encode(b"agent-os")),
-                            json!(r#"{"aad":"YWR2YW5jZWQ=","authTagLength":16}"#),
-                        ],
-                    },
-                )
-                .expect("cipheriv response");
+            let cipher_response = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut create_crypto_test_process(),
+                &JavascriptSyncRpcRequest {
+                    id: 10,
+                    method: String::from("crypto.cipheriv"),
+                    args: vec![
+                        json!("aes-256-gcm"),
+                        json!(base64::engine::general_purpose::STANDARD.encode([7_u8; 32])),
+                        json!(base64::engine::general_purpose::STANDARD.encode([3_u8; 12])),
+                        json!(base64::engine::general_purpose::STANDARD.encode(b"agent-os")),
+                        json!(r#"{"aad":"YWR2YW5jZWQ=","authTagLength":16}"#),
+                    ],
+                },
+            )
+            .expect("cipheriv response");
             let cipher_payload = parse_json_string(cipher_response);
             let ciphertext = cipher_payload["data"].as_str().expect("cipher data");
             let auth_tag = cipher_payload["authTag"].as_str().expect("auth tag");
 
-            let decipher_response =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut create_crypto_test_process(),
-                    &JavascriptSyncRpcRequest {
-                        id: 11,
-                        method: String::from("crypto.decipheriv"),
-                        args: vec![
-                            json!("aes-256-gcm"),
-                            json!(base64::engine::general_purpose::STANDARD.encode([7_u8; 32])),
-                            json!(base64::engine::general_purpose::STANDARD.encode([3_u8; 12])),
-                            json!(ciphertext),
-                            json!(format!(
-                                r#"{{"aad":"YWR2YW5jZWQ=","authTag":"{auth_tag}","authTagLength":16}}"#
-                            )),
-                        ],
-                    },
-                )
-                .expect("decipheriv response");
+            let decipher_response = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut create_crypto_test_process(),
+                &JavascriptSyncRpcRequest {
+                    id: 11,
+                    method: String::from("crypto.decipheriv"),
+                    args: vec![
+                        json!("aes-256-gcm"),
+                        json!(base64::engine::general_purpose::STANDARD.encode([7_u8; 32])),
+                        json!(base64::engine::general_purpose::STANDARD.encode([3_u8; 12])),
+                        json!(ciphertext),
+                        json!(format!(
+                            r#"{{"aad":"YWR2YW5jZWQ=","authTag":"{auth_tag}","authTagLength":16}}"#
+                        )),
+                    ],
+                },
+            )
+            .expect("decipheriv response");
             assert_eq!(
                 decode_base64(decipher_response.as_str().expect("decipher response")),
                 b"agent-os"
             );
 
             let mut streaming_process = create_crypto_test_process();
-            let session_id =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut streaming_process,
-                    &JavascriptSyncRpcRequest {
-                        id: 12,
-                        method: String::from("crypto.cipherivCreate"),
-                        args: vec![
-                            json!("cipher"),
-                            json!("aes-256-cbc"),
-                            json!(base64::engine::general_purpose::STANDARD.encode([9_u8; 32])),
-                            json!(base64::engine::general_purpose::STANDARD.encode([4_u8; 16])),
-                            json!(r#"{}"#),
-                        ],
-                    },
-                )
-                .expect("cipherivCreate")
-                .as_u64()
-                .expect("session id");
+            let session_id = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut streaming_process,
+                &JavascriptSyncRpcRequest {
+                    id: 12,
+                    method: String::from("crypto.cipherivCreate"),
+                    args: vec![
+                        json!("cipher"),
+                        json!("aes-256-cbc"),
+                        json!(base64::engine::general_purpose::STANDARD.encode([9_u8; 32])),
+                        json!(base64::engine::general_purpose::STANDARD.encode([4_u8; 16])),
+                        json!(r#"{}"#),
+                    ],
+                },
+            )
+            .expect("cipherivCreate")
+            .as_u64()
+            .expect("session id");
             let update =
                 crate::execution::service_javascript_crypto_sync_rpc(
                     &mut streaming_process,
@@ -4509,9 +4645,8 @@ await new Promise(() => {});
                         method: String::from("crypto.cipherivUpdate"),
                         args: vec![
                             json!(session_id),
-                            json!(base64::engine::general_purpose::STANDARD.encode(
-                                b"hello world 1234"
-                            )),
+                            json!(base64::engine::general_purpose::STANDARD
+                                .encode(b"hello world 1234")),
                         ],
                     },
                 )
@@ -4531,80 +4666,70 @@ await new Promise(() => {});
             assert!(final_payload["data"].as_str().expect("final data").len() > 0);
 
             let rsa = openssl::rsa::Rsa::generate(2048).expect("generate rsa");
-            let private_key =
-                openssl::pkey::PKey::from_rsa(rsa).expect("private pkey from rsa");
+            let private_key = openssl::pkey::PKey::from_rsa(rsa).expect("private pkey from rsa");
             let private_pem = String::from_utf8(
                 private_key
                     .private_key_to_pem_pkcs8()
                     .expect("private key to pem"),
             )
             .expect("private pem utf8");
-            let public_pem = String::from_utf8(
-                private_key.public_key_to_pem().expect("public key to pem"),
-            )
-            .expect("public pem utf8");
+            let public_pem =
+                String::from_utf8(private_key.public_key_to_pem().expect("public key to pem"))
+                    .expect("public pem utf8");
             let sign_key_json = serde_json::to_string(&public_pem).expect("public pem json");
             let private_key_json = serde_json::to_string(&private_pem).expect("private pem json");
 
-            let signature =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut create_crypto_test_process(),
-                    &JavascriptSyncRpcRequest {
-                        id: 15,
-                        method: String::from("crypto.sign"),
-                        args: vec![
-                            json!("sha256"),
-                            json!(base64::engine::general_purpose::STANDARD.encode(b"signed")),
-                            json!(private_key_json),
-                        ],
-                    },
-                )
-                .expect("crypto.sign");
-            let verified =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut create_crypto_test_process(),
-                    &JavascriptSyncRpcRequest {
-                        id: 16,
-                        method: String::from("crypto.verify"),
-                        args: vec![
-                            json!("sha256"),
-                            json!(base64::engine::general_purpose::STANDARD.encode(b"signed")),
-                            json!(sign_key_json),
-                            signature,
-                        ],
-                    },
-                )
-                .expect("crypto.verify");
+            let signature = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut create_crypto_test_process(),
+                &JavascriptSyncRpcRequest {
+                    id: 15,
+                    method: String::from("crypto.sign"),
+                    args: vec![
+                        json!("sha256"),
+                        json!(base64::engine::general_purpose::STANDARD.encode(b"signed")),
+                        json!(private_key_json),
+                    ],
+                },
+            )
+            .expect("crypto.sign");
+            let verified = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut create_crypto_test_process(),
+                &JavascriptSyncRpcRequest {
+                    id: 16,
+                    method: String::from("crypto.verify"),
+                    args: vec![
+                        json!("sha256"),
+                        json!(base64::engine::general_purpose::STANDARD.encode(b"signed")),
+                        json!(sign_key_json),
+                        signature,
+                    ],
+                },
+            )
+            .expect("crypto.verify");
             assert_eq!(verified, json!(true));
 
-            let encrypted =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut create_crypto_test_process(),
-                    &JavascriptSyncRpcRequest {
-                        id: 17,
-                        method: String::from("crypto.asymmetricOp"),
-                        args: vec![
-                            json!("publicEncrypt"),
-                            json!(sign_key_json),
-                            json!(base64::engine::general_purpose::STANDARD.encode(b"secret")),
-                        ],
-                    },
-                )
-                .expect("publicEncrypt");
-            let decrypted =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut create_crypto_test_process(),
-                    &JavascriptSyncRpcRequest {
-                        id: 18,
-                        method: String::from("crypto.asymmetricOp"),
-                        args: vec![
-                            json!("privateDecrypt"),
-                            json!(private_key_json),
-                            encrypted,
-                        ],
-                    },
-                )
-                .expect("privateDecrypt");
+            let encrypted = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut create_crypto_test_process(),
+                &JavascriptSyncRpcRequest {
+                    id: 17,
+                    method: String::from("crypto.asymmetricOp"),
+                    args: vec![
+                        json!("publicEncrypt"),
+                        json!(sign_key_json),
+                        json!(base64::engine::general_purpose::STANDARD.encode(b"secret")),
+                    ],
+                },
+            )
+            .expect("publicEncrypt");
+            let decrypted = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut create_crypto_test_process(),
+                &JavascriptSyncRpcRequest {
+                    id: 18,
+                    method: String::from("crypto.asymmetricOp"),
+                    args: vec![json!("privateDecrypt"), json!(private_key_json), encrypted],
+                },
+            )
+            .expect("privateDecrypt");
             assert_eq!(
                 decode_base64(decrypted.as_str().expect("privateDecrypt string")),
                 b"secret"
@@ -4673,31 +4798,29 @@ await new Promise(() => {});
             assert_eq!(generated_prime["__type"], json!("bigint"));
 
             let mut alice = create_crypto_test_process();
-            let alice_id =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut alice,
-                    &JavascriptSyncRpcRequest {
-                        id: 23,
-                        method: String::from("crypto.diffieHellmanSessionCreate"),
-                        args: vec![json!(r#"{"type":"ecdh","name":"P-256"}"#)],
-                    },
-                )
-                .expect("alice session")
-                .as_u64()
-                .expect("alice session id");
+            let alice_id = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut alice,
+                &JavascriptSyncRpcRequest {
+                    id: 23,
+                    method: String::from("crypto.diffieHellmanSessionCreate"),
+                    args: vec![json!(r#"{"type":"ecdh","name":"P-256"}"#)],
+                },
+            )
+            .expect("alice session")
+            .as_u64()
+            .expect("alice session id");
             let mut bob = create_crypto_test_process();
-            let bob_id =
-                crate::execution::service_javascript_crypto_sync_rpc(
-                    &mut bob,
-                    &JavascriptSyncRpcRequest {
-                        id: 24,
-                        method: String::from("crypto.diffieHellmanSessionCreate"),
-                        args: vec![json!(r#"{"type":"ecdh","name":"P-256"}"#)],
-                    },
-                )
-                .expect("bob session")
-                .as_u64()
-                .expect("bob session id");
+            let bob_id = crate::execution::service_javascript_crypto_sync_rpc(
+                &mut bob,
+                &JavascriptSyncRpcRequest {
+                    id: 24,
+                    method: String::from("crypto.diffieHellmanSessionCreate"),
+                    args: vec![json!(r#"{"type":"ecdh","name":"P-256"}"#)],
+                },
+            )
+            .expect("bob session")
+            .as_u64()
+            .expect("bob session id");
             let alice_public = parse_json_string(
                 crate::execution::service_javascript_crypto_sync_rpc(
                     &mut alice,
@@ -4730,7 +4853,10 @@ await new Promise(() => {});
                         method: String::from("crypto.diffieHellmanSessionCall"),
                         args: vec![
                             json!(alice_id),
-                            json!(format!(r#"{{"method":"computeSecret","args":[{}]}}"#, serde_json::to_string(&bob_public).expect("serialize bob public"))),
+                            json!(format!(
+                                r#"{{"method":"computeSecret","args":[{}]}}"#,
+                                serde_json::to_string(&bob_public).expect("serialize bob public")
+                            )),
                         ],
                     },
                 )
@@ -4745,7 +4871,11 @@ await new Promise(() => {});
                         method: String::from("crypto.diffieHellmanSessionCall"),
                         args: vec![
                             json!(bob_id),
-                            json!(format!(r#"{{"method":"computeSecret","args":[{}]}}"#, serde_json::to_string(&alice_public).expect("serialize alice public"))),
+                            json!(format!(
+                                r#"{{"method":"computeSecret","args":[{}]}}"#,
+                                serde_json::to_string(&alice_public)
+                                    .expect("serialize alice public")
+                            )),
                         ],
                     },
                 )
@@ -4760,12 +4890,17 @@ await new Promise(() => {});
                     &JavascriptSyncRpcRequest {
                         id: 29,
                         method: String::from("crypto.subtle"),
-                        args: vec![json!(r#"{"op":"digest","algorithm":"SHA-256","data":"YWdlbnQtb3M="}"#)],
+                        args: vec![json!(
+                            r#"{"op":"digest","algorithm":"SHA-256","data":"YWdlbnQtb3M="}"#
+                        )],
                     },
                 )
                 .expect("crypto.subtle digest"),
             );
-            assert_eq!(decode_base64(subtle_digest["data"].as_str().expect("subtle digest")), decode_base64("wkLEOhPrUj7AK7HeNtPUZ5R3kOPwBet6nO//NXylQQE="));
+            assert_eq!(
+                decode_base64(subtle_digest["data"].as_str().expect("subtle digest")),
+                decode_base64("wkLEOhPrUj7AK7HeNtPUZ5R3kOPwBet6nO//NXylQQE=")
+            );
         }
 
         #[test]
@@ -5996,13 +6131,7 @@ console.log(JSON.stringify(summary));
             .expect("create vm");
             let cwd = temp_dir("agent-os-sidecar-http-listen");
             write_fixture(&cwd.join("entry.mjs"), "");
-            start_fake_javascript_process(
-                &mut sidecar,
-                &vm_id,
-                &cwd,
-                "proc-js-http-listen",
-                "[]",
-            );
+            start_fake_javascript_process(&mut sidecar, &vm_id, &cwd, "proc-js-http-listen", "[]");
 
             let listen = call_javascript_sync_rpc(
                 &mut sidecar,
@@ -6076,19 +6205,10 @@ console.log(JSON.stringify(summary));
             .expect("create vm");
             let cwd = temp_dir("agent-os-sidecar-http-request");
             write_fixture(&cwd.join("entry.mjs"), "");
-            start_fake_javascript_process(
-                &mut sidecar,
-                &vm_id,
-                &cwd,
-                "proc-js-http-request",
-                "[]",
-            );
+            start_fake_javascript_process(&mut sidecar, &vm_id, &cwd, "proc-js-http-request", "[]");
 
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind host http listener");
-            let port = listener
-                .local_addr()
-                .expect("listener addr")
-                .port();
+            let port = listener.local_addr().expect("listener addr").port();
             let server = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().expect("accept http request");
                 let mut buffer = [0_u8; 4096];
@@ -6145,13 +6265,7 @@ console.log(JSON.stringify(summary));
             .expect("create vm");
             let cwd = temp_dir("agent-os-sidecar-http-respond");
             write_fixture(&cwd.join("entry.mjs"), "");
-            start_fake_javascript_process(
-                &mut sidecar,
-                &vm_id,
-                &cwd,
-                "proc-js-http-respond",
-                "[]",
-            );
+            start_fake_javascript_process(&mut sidecar, &vm_id, &cwd, "proc-js-http-respond", "[]");
 
             let response_json = String::from(
                 "{\"status\":200,\"headers\":[[\"content-type\",\"text/plain\"]],\"body\":\"cG9uZw==\",\"bodyEncoding\":\"base64\"}",

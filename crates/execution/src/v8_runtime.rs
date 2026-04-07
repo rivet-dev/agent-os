@@ -439,9 +439,7 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
         "_networkHttp2StreamCloseRaw" => ("net.http2_stream_close", false),
         "_networkHttp2StreamPauseRaw" => ("net.http2_stream_pause", false),
         "_networkHttp2StreamResumeRaw" => ("net.http2_stream_resume", false),
-        "_networkHttp2StreamRespondWithFileRaw" => {
-            ("net.http2_stream_respond_with_file", false)
-        }
+        "_networkHttp2StreamRespondWithFileRaw" => ("net.http2_stream_respond_with_file", false),
         "_networkHttp2ServerRespondRaw" => ("net.http2_server_respond", false),
         "_upgradeSocketWriteRaw" => ("net.upgrade_socket_write", false),
         "_upgradeSocketEndRaw" => ("net.upgrade_socket_end", false),

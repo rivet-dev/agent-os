@@ -30,6 +30,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - The sidecar now owns the bundled base filesystem artifact: TypeScript should serialize the default lower as `bundled_base_filesystem` and let Rust load `base-filesystem.json` locally instead of inlining the snapshot entries
 - `ConfigureVmRequest` callers need to set `module_access_cwd` (or `None` in Rust tests); the sidecar turns that host cwd into the read-only `/root/node_modules` `module_access` mount automatically
 - Live guest stdin has two paths: `AGENT_OS_KEEP_STDIN_OPEN` still uses `"stdin"` / `"stdin_end"` stream events, but TTY-style `_kernelStdinRead` must read the process’s kernel fd `0` pipe so timeout and EOF can be distinguished
+- Guest `stdin.setRawMode()` should stay kernel-backed too: leave `_ptySetRawMode` unhandled in the execution bridge, forward it to sidecar `__pty_set_raw_mode`, and toggle PTY discipline on the guest process fd `0`
 - Guest `crypto` is easiest to validate in two layers for now: execution tests should cover local entropy hooks (`globalThis.crypto.getRandomValues` / `randomUUID`), while sidecar hash/HMAC/KDF coverage should target `service_javascript_crypto_sync_rpc` directly until the guest builtin module exposes `crypto` cleanly in file-based tests
 - Stateful sidecar crypto handlers now live behind `service_javascript_crypto_sync_rpc(&mut ActiveProcess, ...)`; cipher/Diffie-Hellman sessions are per-process state, and AES-GCM `authTagLength` should size the returned auth tag instead of calling `Crypter::set_tag_len()` during encryption
 - Sidecar-initiated callback frames must keep negative request IDs from the first request onward, and current-thread stdio framing must use dedicated OS threads for stdin/stdout so callback-driven mounts can unblock while the main loop waits synchronously
@@ -270,4 +271,14 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - `service_javascript_crypto_sync_rpc` is no longer a pure helper: tests and callers need a real mutable `ActiveProcess` whenever cipher or Diffie-Hellman session methods are in play
   - In this OpenSSL provider setup, AES-GCM `authTagLength` should control the size of the tag returned by `get_tag()`; calling `Crypter::set_tag_len()` during encryption fails
   - `cargo test -p agent-os-sidecar -- --test-threads=1 crypto` is still the right focused verification target for sidecar crypto work on this branch
+---
+## 2026-04-07 09:40:28 PDT - US-039
+- Removed the local `_ptySetRawMode` no-op in the V8 execution bridge, added sidecar `__pty_set_raw_mode` handling, and wired it to kernel PTY discipline toggles on guest fd `0`
+- Added a focused sidecar service regression that attaches a real kernel PTY to a fake JavaScript process stdin and verifies raw mode disables `icanon`/`echo`/`isig` while cooked mode restores them
+- Preserved the PTY raw-mode bridge rule in `crates/execution/AGENTS.md`
+- Files changed: `crates/execution/src/javascript.rs`, `crates/sidecar/src/execution.rs`, `crates/sidecar/tests/service.rs`, `crates/execution/AGENTS.md`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - `stdin.setRawMode()` needs the same kernel-backed split as `_kernelStdinRead`: the execution bridge should forward, and the sidecar should operate on the process PTY instead of maintaining local TTY state
+  - The right sidecar target for PTY discipline changes is the guest process fd `0`; tests can exercise that path by opening a PTY, duping the slave onto stdin, and asserting with `tcgetattr`
+  - `cargo test -p agent-os-sidecar -- --test-threads=1 pty` is a stable focused verification command for PTY line-discipline work and currently also exercises the Python stdin EOF regression
 ---

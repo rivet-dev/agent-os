@@ -32,9 +32,9 @@ impl<Context> FileSystemPluginFactory<Context> for ModuleAccessMountPlugin {
         validate_module_access_root(&config.host_path)?;
         let filesystem = HostDirFilesystem::new(&config.host_path)
             .map_err(|error| PluginError::invalid_input(error.to_string()))?;
-        Ok(Box::new(ReadOnlyFileSystem::new(MountedVirtualFileSystem::new(
-            filesystem,
-        ))))
+        Ok(Box::new(ReadOnlyFileSystem::new(
+            MountedVirtualFileSystem::new(filesystem),
+        )))
     }
 }
 

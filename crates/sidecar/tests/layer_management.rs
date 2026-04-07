@@ -3,8 +3,8 @@ mod support;
 use agent_os_sidecar::protocol::{
     ConfigureVmRequest, CreateLayerRequest, CreateOverlayRequest, ExportSnapshotRequest,
     GuestFilesystemCallRequest, GuestFilesystemOperation, GuestRuntimeKind, ImportSnapshotRequest,
-    OwnershipScope, RequestPayload, ResponsePayload, RootFilesystemEntry,
-    RootFilesystemEntryKind, RootFilesystemMode, SealLayerRequest,
+    OwnershipScope, RequestPayload, ResponsePayload, RootFilesystemEntry, RootFilesystemEntryKind,
+    RootFilesystemMode, SealLayerRequest,
 };
 use std::collections::BTreeMap;
 use std::fs::{create_dir_all, write};

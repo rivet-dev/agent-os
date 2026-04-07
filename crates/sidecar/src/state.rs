@@ -4,10 +4,10 @@
 //! types, and other shared data structures extracted from service.rs.
 
 use crate::protocol::{
-    DEFAULT_MAX_FRAME_BYTES, EventFrame, GuestRuntimeKind, MountDescriptor, PermissionsPolicy,
-    ProjectedModuleDescriptor, ResponseFrame, SidecarRequestFrame, SidecarRequestPayload,
-    SidecarResponseFrame, SidecarResponsePayload, SignalHandlerRegistration, SoftwareDescriptor,
-    WasmPermissionTier,
+    EventFrame, GuestRuntimeKind, MountDescriptor, PermissionsPolicy, ProjectedModuleDescriptor,
+    ResponseFrame, SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame,
+    SidecarResponsePayload, SignalHandlerRegistration, SoftwareDescriptor, WasmPermissionTier,
+    DEFAULT_MAX_FRAME_BYTES,
 };
 use agent_os_bridge::{BridgeTypes, FilesystemSnapshot};
 use agent_os_execution::{

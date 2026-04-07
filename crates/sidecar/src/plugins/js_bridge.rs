@@ -110,7 +110,11 @@ impl JsBridgeFilesystem {
             .invoke(self.ownership.clone(), payload, JS_BRIDGE_TIMEOUT)
             .map_err(|error| Self::sidecar_error_to_vfs(operation, "/", error))?
         {
-            SidecarResponsePayload::JsBridgeResult(JsBridgeResultResponse { result, error, .. }) => {
+            SidecarResponsePayload::JsBridgeResult(JsBridgeResultResponse {
+                result,
+                error,
+                ..
+            }) => {
                 if let Some(error) = error {
                     return Err(Self::js_error_to_vfs(operation, "/", &error));
                 }
@@ -122,12 +126,7 @@ impl JsBridgeFilesystem {
         }
     }
 
-    fn request_path(
-        &self,
-        operation: &str,
-        path: &str,
-        args: Value,
-    ) -> VfsResult<Option<Value>> {
+    fn request_path(&self, operation: &str, path: &str, args: Value) -> VfsResult<Option<Value>> {
         let payload = SidecarRequestPayload::JsBridgeCall(JsBridgeCallRequest {
             call_id: self.next_call_id(),
             mount_id: self.mount_id.clone(),
@@ -139,7 +138,11 @@ impl JsBridgeFilesystem {
             .invoke(self.ownership.clone(), payload, JS_BRIDGE_TIMEOUT)
             .map_err(|error| Self::sidecar_error_to_vfs(operation, path, error))?
         {
-            SidecarResponsePayload::JsBridgeResult(JsBridgeResultResponse { result, error, .. }) => {
+            SidecarResponsePayload::JsBridgeResult(JsBridgeResultResponse {
+                result,
+                error,
+                ..
+            }) => {
                 if let Some(error) = error {
                     return Err(Self::js_error_to_vfs(operation, path, &error));
                 }
@@ -196,7 +199,12 @@ impl JsBridgeFilesystem {
         })
     }
 
-    fn parse_bytes(&self, operation: &str, path: &str, result: Option<Value>) -> VfsResult<Vec<u8>> {
+    fn parse_bytes(
+        &self,
+        operation: &str,
+        path: &str,
+        result: Option<Value>,
+    ) -> VfsResult<Vec<u8>> {
         match result.ok_or_else(|| {
             VfsError::io(format!(
                 "js_bridge returned no payload for {operation} '{path}'"
@@ -305,7 +313,11 @@ impl VirtualFileSystem for JsBridgeFilesystem {
     }
 
     fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>> {
-        self.parse_required("readDir", path, self.request_path("readDir", path, json!({ "path": path }))?)
+        self.parse_required(
+            "readDir",
+            path,
+            self.request_path("readDir", path, json!({ "path": path }))?,
+        )
     }
 
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
@@ -361,11 +373,11 @@ impl VirtualFileSystem for JsBridgeFilesystem {
             )
             .ok()
             .and_then(|payload| match payload {
-                SidecarResponsePayload::JsBridgeResult(JsBridgeResultResponse { result, error, .. })
-                    if error.is_none() =>
-                {
-                    result
-                }
+                SidecarResponsePayload::JsBridgeResult(JsBridgeResultResponse {
+                    result,
+                    error,
+                    ..
+                }) if error.is_none() => result,
                 _ => None,
             })
             .and_then(|value| value.as_bool())
@@ -373,8 +385,11 @@ impl VirtualFileSystem for JsBridgeFilesystem {
     }
 
     fn stat(&mut self, path: &str) -> VfsResult<VirtualStat> {
-        let stat: JsBridgeVirtualStat =
-            self.parse_required("stat", path, self.request_path("stat", path, json!({ "path": path }))?)?;
+        let stat: JsBridgeVirtualStat = self.parse_required(
+            "stat",
+            path,
+            self.request_path("stat", path, json!({ "path": path }))?,
+        )?;
         Ok(stat.into())
     }
 

@@ -298,7 +298,7 @@
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
       "priority": 25,
-      "passes": false,
+      "passes": true,
       "notes": "Step 2 (TypeScript side). Depends on US-011, US-012, US-013. CRITICAL: US-013 must have migrated all tests from createInMemoryFileSystem BEFORE this story deletes it. Check index.ts for ALL re-exports from deleted files and remove them."
     },
     {

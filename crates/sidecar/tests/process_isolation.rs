@@ -23,10 +23,7 @@ fn concurrent_vm_processes_stay_isolated_with_vm_scoped_events() {
     let slow_entry = cwd.join("slow.cjs");
     let fast_entry = cwd.join("fast.cjs");
 
-    write_fixture(
-        &slow_entry,
-        "setTimeout(() => {}, 150);\n",
-    );
+    write_fixture(&slow_entry, "setTimeout(() => {}, 150);\n");
     write_fixture(&fast_entry, "void 0;\n");
 
     let connection_id = authenticate(&mut sidecar, "conn-1");

@@ -40,8 +40,8 @@ use crate::state::{
     JavascriptTcpListenerEvent, JavascriptTcpSocketEvent, JavascriptUdpFamily,
     JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket,
     PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution,
-    ResolvedTcpConnectAddr, SessionState, SharedBridge, SharedSidecarRequestClient,
-    SidecarRequestTransport, SidecarKernel, SocketQueryKind, VmDnsConfig, VmListenPolicy, VmState,
+    ResolvedTcpConnectAddr, SessionState, SharedBridge, SharedSidecarRequestClient, SidecarKernel,
+    SidecarRequestTransport, SocketQueryKind, VmDnsConfig, VmListenPolicy, VmState,
     DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
     JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND,
     VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
@@ -140,14 +140,14 @@ fn parse_javascript_child_process_spawn_request(
     let parsed_args = serde_json::from_str::<Vec<String>>(raw_args).map_err(|error| {
         SidecarError::InvalidState(format!("invalid child_process.spawn args payload: {error}"))
     })?;
-    let parsed_options =
-        serde_json::from_str::<LegacyJavascriptChildProcessSpawnOptions>(raw_options).map_err(
-            |error| {
-                SidecarError::InvalidState(format!(
-                    "invalid child_process.spawn options payload: {error}"
-                ))
-            },
-        )?;
+    let parsed_options = serde_json::from_str::<LegacyJavascriptChildProcessSpawnOptions>(
+        raw_options,
+    )
+    .map_err(|error| {
+        SidecarError::InvalidState(format!(
+            "invalid child_process.spawn options payload: {error}"
+        ))
+    })?;
 
     Ok((
         JavascriptChildProcessSpawnRequest {
@@ -799,10 +799,7 @@ where
         self.bridge.inspect(operation)
     }
 
-    pub fn set_sidecar_request_transport(
-        &mut self,
-        transport: Arc<dyn SidecarRequestTransport>,
-    ) {
+    pub fn set_sidecar_request_transport(&mut self, transport: Arc<dyn SidecarRequestTransport>) {
         self.sidecar_requests.set_transport(transport);
     }
 
@@ -1061,21 +1058,23 @@ where
                 .collect::<Vec<_>>();
 
             if !trailing.is_empty() {
-                self.pending_process_events.push_front(ProcessEventEnvelope {
-                    connection_id: connection_id.clone(),
-                    session_id: session_id.clone(),
-                    vm_id: vm_id.clone(),
-                    process_id: process_id.clone(),
-                    event,
-                });
-                for event in trailing.into_iter().rev() {
-                    self.pending_process_events.push_front(ProcessEventEnvelope {
+                self.pending_process_events
+                    .push_front(ProcessEventEnvelope {
                         connection_id: connection_id.clone(),
                         session_id: session_id.clone(),
                         vm_id: vm_id.clone(),
                         process_id: process_id.clone(),
                         event,
                     });
+                for event in trailing.into_iter().rev() {
+                    self.pending_process_events
+                        .push_front(ProcessEventEnvelope {
+                            connection_id: connection_id.clone(),
+                            session_id: session_id.clone(),
+                            vm_id: vm_id.clone(),
+                            process_id: process_id.clone(),
+                            event,
+                        });
                 }
                 return Ok(None);
             }
@@ -1276,12 +1275,7 @@ where
                 let vm = self.vms.get(vm_id).expect("VM should exist");
                 let (payload, max_buffer) =
                     parse_javascript_child_process_spawn_request(vm, &request.args)?;
-                self.spawn_javascript_child_process_sync(
-                    vm_id,
-                    process_id,
-                    payload,
-                    max_buffer,
-                )
+                self.spawn_javascript_child_process_sync(vm_id, process_id, payload, max_buffer)
             }
             "child_process.poll" => {
                 let child_process_id =

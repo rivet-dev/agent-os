@@ -262,9 +262,9 @@ fn flush_sidecar_requests(
     writer: &mpsc::Sender<ProtocolFrame>,
 ) -> Result<(), Box<dyn Error>> {
     while let Some(request) = sidecar.pop_sidecar_request() {
-        writer.send(ProtocolFrame::SidecarRequest(request)).map_err(|error| {
-            io::Error::new(io::ErrorKind::BrokenPipe, error.to_string())
-        })?;
+        writer
+            .send(ProtocolFrame::SidecarRequest(request))
+            .map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()))?;
     }
     Ok(())
 }
@@ -649,7 +649,10 @@ impl SidecarRequestTransport for FrameSidecarRequestTransport {
                 SidecarError::Bridge(String::from("sidecar callback waiter map lock poisoned"))
             })?
             .insert(request.request_id, sender);
-        if let Err(error) = self.writer.send(ProtocolFrame::SidecarRequest(request.clone())) {
+        if let Err(error) = self
+            .writer
+            .send(ProtocolFrame::SidecarRequest(request.clone()))
+        {
             let _ = self
                 .pending
                 .lock()
@@ -670,9 +673,9 @@ impl SidecarRequestTransport for FrameSidecarRequestTransport {
                     timeout.as_secs()
                 )))
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(SidecarError::Io(
-                String::from("sidecar response waiter disconnected"),
-            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(SidecarError::Io(String::from(
+                "sidecar response waiter disconnected",
+            ))),
         }
     }
 }

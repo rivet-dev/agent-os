@@ -5,8 +5,8 @@ use agent_os_sidecar::protocol::{
     GuestFilesystemCallRequest, GuestFilesystemOperation, GuestRuntimeKind, MountDescriptor,
     MountPluginDescriptor, NativeFrameCodec, OpenSessionRequest, OwnershipScope, ProtocolFrame,
     RequestFrame, RequestId, RequestPayload, ResponseFrame, ResponsePayload, SidecarPlacement,
-    SidecarRequestFrame, SidecarResponseFrame, SidecarResponsePayload, SnapshotRootFilesystemRequest,
-    StreamChannel,
+    SidecarRequestFrame, SidecarResponseFrame, SidecarResponsePayload,
+    SnapshotRootFilesystemRequest, StreamChannel,
 };
 use base64::Engine;
 use serde_json::json;
@@ -89,7 +89,11 @@ fn recv_response_with_sidecar_handler(
                 send_sidecar_response(
                     stdin,
                     codec,
-                    SidecarResponseFrame::new(request.request_id, request.ownership.clone(), payload),
+                    SidecarResponseFrame::new(
+                        request.request_id,
+                        request.ownership.clone(),
+                        payload,
+                    ),
                 );
             }
             other => panic!("unexpected frame while waiting for response {request_id}: {other:?}"),
@@ -813,7 +817,10 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
         5,
         &mut buffered_events,
         |request| {
-            assert_eq!(request.ownership, OwnershipScope::vm(&connection_id, &session_id, &vm_id));
+            assert_eq!(
+                request.ownership,
+                OwnershipScope::vm(&connection_id, &session_id, &vm_id)
+            );
             let agent_os_sidecar::protocol::SidecarRequestPayload::JsBridgeCall(call) =
                 &request.payload
             else {
@@ -839,8 +846,7 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
                         call_id: call.call_id.clone(),
                         result: Some(serde_json::Value::String(
                             base64::engine::general_purpose::STANDARD.encode(
-                                fs::read(host_root.join("existing.txt"))
-                                    .expect("read host file"),
+                                fs::read(host_root.join("existing.txt")).expect("read host file"),
                             ),
                         )),
                         error: None,

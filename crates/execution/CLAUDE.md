@@ -89,6 +89,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 - Have `crates/sidecar/src/service.rs` ignore stale `sync RPC request ... is no longer pending` races after the timeout fires.
 - Guest V8 timers have two host paths in `javascript.rs`: `_scheduleTimer` is an async bridge call that resolves its pending Promise later, while `kernelTimerCreate`/`kernelTimerArm`/`kernelTimerClear` are local `_loadPolyfill` dispatches that must emit `"timer"` stream events back into the V8 session so `setTimeout`/`setInterval` callbacks fire.
 - Live guest stdin also has two delivery paths: `AGENT_OS_KEEP_STDIN_OPEN` uses `"stdin"` / `"stdin_end"` stream events, while TTY-style reads use `_kernelStdinRead` and must stay forwarded to the sidecar-backed kernel fd `0` pipe so timeout and EOF remain distinguishable.
+- Guest `stdin.setRawMode()` should follow the same bridge pattern as `_kernelStdinRead`: leave `_ptySetRawMode` unhandled in `LocalBridgeState`, map it to sidecar `__pty_set_raw_mode`, and have the sidecar toggle kernel PTY discipline on the guest process's fd `0` instead of keeping a local execution-only stub.
 - The current V8 sync-RPC bridge effectively supports one in-flight request at a time. Do not leave long-lived network waits such as HTTP server close listeners parked on a pending sync-RPC Promise; use stream events plus short-lived follow-up RPCs so later bridge calls cannot deadlock behind the wait.
 
 ## Runner Script Assets

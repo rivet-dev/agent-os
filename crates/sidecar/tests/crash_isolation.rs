@@ -92,7 +92,10 @@ fn guest_failure_in_one_vm_does_not_break_peer_vm_execution() {
             .poll_event_blocking(&ownership, Duration::from_millis(100))
             .expect("poll crash-isolation event");
         let Some(event) = event else {
-            assert!(Instant::now() < deadline, "timed out waiting for crash-isolation events");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for crash-isolation events"
+            );
             continue;
         };
 

@@ -5293,9 +5293,7 @@ fn add_esm_runtime_prelude(source: &str) -> String {
         return source.to_owned();
     }
 
-    format!(
-        "const require = globalThis._moduleModule.createRequire(import.meta.url);\n{source}"
-    )
+    format!("const require = globalThis._moduleModule.createRequire(import.meta.url);\n{source}")
 }
 
 fn is_valid_js_ident(s: &str) -> bool {

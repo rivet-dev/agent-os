@@ -213,10 +213,7 @@ fn vm_resource_limits_cap_active_processes_without_poisoning_followup_execs() {
     let slow_entry = cwd.join("slow.cjs");
     let fast_entry = cwd.join("fast.cjs");
 
-    write_fixture(
-        &slow_entry,
-        "setTimeout(() => {}, 200);\n",
-    );
+    write_fixture(&slow_entry, "setTimeout(() => {}, 200);\n");
     write_fixture(&fast_entry, "void 0;\n");
 
     let connection_id = authenticate(&mut sidecar, "conn-1");

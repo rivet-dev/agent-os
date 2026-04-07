@@ -21,8 +21,8 @@ use crate::service::{
 };
 use crate::state::{
     BridgeError, VmConfiguration, VmDnsConfig, VmLayer, VmLayerStore, VmOverlayLayer, VmState,
-    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME,
-    JAVASCRIPT_COMMAND, PYTHON_COMMAND, WASM_COMMAND,
+    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME, JAVASCRIPT_COMMAND,
+    PYTHON_COMMAND, WASM_COMMAND,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -306,7 +306,9 @@ where
             SidecarError::InvalidState(format!("unknown layer: {}", payload.layer_id))
         })?;
         let snapshot = match layer {
-            VmLayer::Writable(mut filesystem) => filesystem.snapshot().map_err(root_filesystem_error)?,
+            VmLayer::Writable(mut filesystem) => {
+                filesystem.snapshot().map_err(root_filesystem_error)?
+            }
             VmLayer::Snapshot(_) | VmLayer::Overlay(_) => {
                 return Err(SidecarError::InvalidState(format!(
                     "layer {} is not writable",
@@ -649,7 +651,10 @@ fn append_module_access_mount(
     mounts: &mut Vec<MountDescriptor>,
     module_access_cwd: Option<&String>,
 ) -> Result<(), SidecarError> {
-    if mounts.iter().any(|mount| mount.guest_path == "/root/node_modules") {
+    if mounts
+        .iter()
+        .any(|mount| mount.guest_path == "/root/node_modules")
+    {
         return Ok(());
     }
 
