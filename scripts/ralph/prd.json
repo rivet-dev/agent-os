@@ -48,7 +48,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Step 0a. Bootstrap handles building the root FS from base layer + overlays. Bridge handles communication with the host Node.js process for filesystem and permission operations."
     },
     {

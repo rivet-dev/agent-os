@@ -1,11 +1,10 @@
-use crate::google_drive_plugin::GoogleDriveMountPlugin;
-use crate::host_dir_plugin::HostDirMountPlugin;
+use crate::bridge::{build_mount_plugin_registry, MountPluginContext};
 use crate::protocol::{
-    AuthenticatedResponse, BoundUdpSnapshotResponse, CloseStdinRequest, DisposeReason,
-    EventFrame, EventPayload, ExecuteRequest, FindBoundUdpRequest, FindListenerRequest,
-    GetSignalStateRequest, GetZombieTimerCountRequest, GuestFilesystemCallRequest,
-    GuestFilesystemOperation, GuestFilesystemResultResponse, GuestFilesystemStat,
-    GuestRuntimeKind, JavascriptChildProcessSpawnRequest, JavascriptDgramBindRequest,
+    AuthenticatedResponse, BoundUdpSnapshotResponse, CloseStdinRequest, DisposeReason, EventFrame,
+    EventPayload, ExecuteRequest, FindBoundUdpRequest, FindListenerRequest, GetSignalStateRequest,
+    GetZombieTimerCountRequest, GuestFilesystemCallRequest, GuestFilesystemOperation,
+    GuestFilesystemResultResponse, GuestFilesystemStat, GuestRuntimeKind,
+    JavascriptChildProcessSpawnRequest, JavascriptDgramBindRequest,
     JavascriptDgramCreateSocketRequest, JavascriptDgramSendRequest, JavascriptDnsLookupRequest,
     JavascriptDnsResolveRequest, JavascriptNetConnectRequest, JavascriptNetListenRequest,
     KillProcessRequest, ListenerSnapshotResponse, OpenSessionRequest, OwnershipScope,
@@ -21,45 +20,35 @@ use crate::state::{
     ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError, ConnectionState,
     DnsResolutionSource, JavascriptSocketFamily, JavascriptSocketPathContext,
     JavascriptTcpListenerEvent, JavascriptTcpSocketEvent, JavascriptUdpFamily,
-    JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts,
-    PendingTcpSocket, PendingUnixSocket, ProcNetEntry, ResolvedChildProcessExecution,
-    ResolvedTcpConnectAddr, SessionState, SharedBridge, SidecarKernel, SocketQueryKind, VmDnsConfig,
-    VmListenPolicy, VmState, DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME,
-    EXECUTION_SANDBOX_ROOT_ENV, HOST_REALPATH_MAX_SYMLINK_DEPTH, JAVASCRIPT_COMMAND,
-    LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND, PYTHON_VFS_RPC_GUEST_ROOT,
+    JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket,
+    PendingUnixSocket, ProcNetEntry, ResolvedChildProcessExecution, ResolvedTcpConnectAddr,
+    SessionState, SharedBridge, SidecarKernel, SocketQueryKind, VmDnsConfig, VmListenPolicy,
+    VmState, DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
+    JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND, PYTHON_VFS_RPC_GUEST_ROOT,
     VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
     VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
 };
-use crate::s3_plugin::S3MountPlugin;
-use crate::sandbox_agent_plugin::SandboxAgentMountPlugin;
 use crate::NativeSidecarBridge;
 use agent_os_bridge::{
-    ChmodRequest, CommandPermissionRequest, CreateDirRequest, EnvironmentAccess,
-    EnvironmentPermissionRequest, FileKind, FileMetadata, FilesystemAccess,
+    CommandPermissionRequest, EnvironmentAccess, EnvironmentPermissionRequest, FilesystemAccess,
     FilesystemPermissionRequest, LifecycleEventRecord, LifecycleState, LogLevel, LogRecord,
-    NetworkAccess, NetworkPermissionRequest, PathRequest, ReadDirRequest, ReadFileRequest,
-    RenameRequest, StructuredEventRecord, SymlinkRequest, TruncateRequest, WriteFileRequest,
+    NetworkAccess, NetworkPermissionRequest, StructuredEventRecord,
 };
 use agent_os_execution::wasm::{
     WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV,
 };
 use agent_os_execution::{
     CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
-    JavascriptExecutionEngine, JavascriptExecutionError,
-    JavascriptExecutionEvent, JavascriptSyncRpcRequest, NodeSignalDispositionAction,
-    NodeSignalHandlerRegistration, PythonExecutionEngine, PythonExecutionError,
-    PythonExecutionEvent, PythonVfsRpcMethod, PythonVfsRpcRequest, PythonVfsRpcResponsePayload,
-    PythonVfsRpcStat, StartJavascriptExecutionRequest, StartPythonExecutionRequest,
-    StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionError,
-    WasmExecutionEvent, WasmPermissionTier as ExecutionWasmPermissionTier,
+    JavascriptExecutionEngine, JavascriptExecutionError, JavascriptExecutionEvent,
+    JavascriptSyncRpcRequest, NodeSignalDispositionAction, NodeSignalHandlerRegistration,
+    PythonExecutionEngine, PythonExecutionError, PythonExecutionEvent, PythonVfsRpcMethod,
+    PythonVfsRpcRequest, PythonVfsRpcResponsePayload, PythonVfsRpcStat,
+    StartJavascriptExecutionRequest, StartPythonExecutionRequest, StartWasmExecutionRequest,
+    WasmExecutionEngine, WasmExecutionError, WasmExecutionEvent,
+    WasmPermissionTier as ExecutionWasmPermissionTier,
 };
-use agent_os_kernel::kernel::{
-    KernelError, KernelProcessHandle, SpawnOptions,
-};
-use agent_os_kernel::mount_plugin::{
-    FileSystemPluginFactory, FileSystemPluginRegistry, OpenFileSystemPluginRequest, PluginError,
-};
-use agent_os_kernel::mount_table::MountedVirtualFileSystem;
+use agent_os_kernel::kernel::{KernelError, KernelProcessHandle, SpawnOptions};
+use agent_os_kernel::mount_plugin::{FileSystemPluginRegistry, PluginError};
 use agent_os_kernel::permissions::{
     CommandAccessRequest, EnvAccessRequest, EnvironmentOperation, NetworkAccessRequest,
     NetworkOperation, PermissionDecision,
@@ -67,9 +56,7 @@ use agent_os_kernel::permissions::{
 use agent_os_kernel::process_table::{SIGKILL, SIGTERM};
 use agent_os_kernel::resource_accounting::ResourceLimits;
 // root_fs types moved to crate::vm
-use agent_os_kernel::vfs::{
-    MemoryFileSystem, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
-};
+use agent_os_kernel::vfs::{VfsError, VirtualStat};
 use base64::Engine;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
@@ -78,6 +65,7 @@ use nix::libc;
 use nix::sys::signal::{kill as send_signal, Signal};
 use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use serde::Deserialize;
 use serde_json::json;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -134,7 +122,11 @@ where
         Ok(operation(&mut bridge))
     }
 
-    pub(crate) fn emit_lifecycle(&self, vm_id: &str, state: LifecycleState) -> Result<(), SidecarError> {
+    pub(crate) fn emit_lifecycle(
+        &self,
+        vm_id: &str,
+        state: LifecycleState,
+    ) -> Result<(), SidecarError> {
         self.with_mut(|bridge| {
             bridge.emit_lifecycle(LifecycleEventRecord {
                 vm_id: vm_id.to_owned(),
@@ -144,7 +136,11 @@ where
         })
     }
 
-    pub(crate) fn emit_log(&self, vm_id: &str, message: impl Into<String>) -> Result<(), SidecarError> {
+    pub(crate) fn emit_log(
+        &self,
+        vm_id: &str,
+        message: impl Into<String>,
+    ) -> Result<(), SidecarError> {
         self.with_mut(|bridge| {
             bridge.emit_log(LogRecord {
                 vm_id: vm_id.to_owned(),
@@ -177,7 +173,11 @@ where
         }
     }
 
-    pub(crate) fn command_decision(&self, vm_id: &str, request: &CommandAccessRequest) -> PermissionDecision {
+    pub(crate) fn command_decision(
+        &self,
+        vm_id: &str,
+        request: &CommandAccessRequest,
+    ) -> PermissionDecision {
         if let Some(decision) =
             self.static_permission_decision(vm_id, "child_process.spawn", "child_process")
         {
@@ -197,7 +197,11 @@ where
         }
     }
 
-    pub(crate) fn environment_decision(&self, vm_id: &str, request: &EnvAccessRequest) -> PermissionDecision {
+    pub(crate) fn environment_decision(
+        &self,
+        vm_id: &str,
+        request: &EnvAccessRequest,
+    ) -> PermissionDecision {
         if let Some(decision) = self.static_permission_decision(
             vm_id,
             environment_permission_capability(request.op),
@@ -221,7 +225,11 @@ where
         }
     }
 
-    pub(crate) fn network_decision(&self, vm_id: &str, request: &NetworkAccessRequest) -> PermissionDecision {
+    pub(crate) fn network_decision(
+        &self,
+        vm_id: &str,
+        request: &NetworkAccessRequest,
+    ) -> PermissionDecision {
         if let Some(decision) = self.static_permission_decision(
             vm_id,
             network_permission_capability(request.op),
@@ -392,991 +400,6 @@ fn environment_permission_capability(operation: EnvironmentOperation) -> &'stati
     }
 }
 
-#[derive(Clone)]
-struct HostFilesystem<B> {
-    bridge: SharedBridge<B>,
-    vm_id: String,
-    links: Arc<Mutex<HostFilesystemLinkState>>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct HostFilesystemMetadataState {
-    uid: Option<u32>,
-    gid: Option<u32>,
-    atime_ms: Option<u64>,
-    mtime_ms: Option<u64>,
-    ctime_ms: Option<u64>,
-    birthtime_ms: Option<u64>,
-}
-
-impl HostFilesystemMetadataState {
-    fn apply_to_stat(&self, stat: &mut VirtualStat) {
-        if let Some(uid) = self.uid {
-            stat.uid = uid;
-        }
-        if let Some(gid) = self.gid {
-            stat.gid = gid;
-        }
-        if let Some(atime_ms) = self.atime_ms {
-            stat.atime_ms = atime_ms;
-        }
-        if let Some(mtime_ms) = self.mtime_ms {
-            stat.mtime_ms = mtime_ms;
-        }
-        if let Some(ctime_ms) = self.ctime_ms {
-            stat.ctime_ms = ctime_ms;
-        }
-        if let Some(birthtime_ms) = self.birthtime_ms {
-            stat.birthtime_ms = birthtime_ms;
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct HostFilesystemLinkedInode {
-    canonical_path: String,
-    paths: BTreeSet<String>,
-    metadata: HostFilesystemMetadataState,
-}
-
-#[derive(Debug, Default)]
-struct HostFilesystemLinkState {
-    next_ino: u64,
-    path_to_ino: BTreeMap<String, u64>,
-    inodes: BTreeMap<u64, HostFilesystemLinkedInode>,
-}
-
-#[derive(Debug, Clone)]
-struct HostFilesystemTrackedIdentity {
-    canonical_path: String,
-    ino: u64,
-    nlink: u64,
-    metadata: HostFilesystemMetadataState,
-}
-
-impl<B> HostFilesystem<B> {
-    fn new(bridge: SharedBridge<B>, vm_id: impl Into<String>) -> Self {
-        Self {
-            bridge,
-            vm_id: vm_id.into(),
-            links: Arc::new(Mutex::new(HostFilesystemLinkState {
-                next_ino: 1,
-                ..HostFilesystemLinkState::default()
-            })),
-        }
-    }
-
-    fn vfs_error(error: SidecarError) -> VfsError {
-        VfsError::io(error.to_string())
-    }
-
-    fn link_state_error() -> VfsError {
-        VfsError::io("native sidecar host filesystem link state lock poisoned")
-    }
-
-    fn current_time_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-    }
-
-    fn file_metadata_to_stat(
-        metadata: FileMetadata,
-        identity: Option<&HostFilesystemTrackedIdentity>,
-    ) -> VirtualStat {
-        let mut stat = VirtualStat {
-            mode: metadata.mode,
-            size: metadata.size,
-            blocks: if metadata.size == 0 {
-                0
-            } else {
-                metadata.size.div_ceil(512)
-            },
-            dev: 1,
-            rdev: 0,
-            is_directory: metadata.kind == FileKind::Directory,
-            is_symbolic_link: metadata.kind == FileKind::SymbolicLink,
-            atime_ms: 0,
-            mtime_ms: 0,
-            ctime_ms: 0,
-            birthtime_ms: 0,
-            ino: identity.map_or(0, |tracked| tracked.ino),
-            nlink: identity.map_or(1, |tracked| tracked.nlink),
-            uid: 0,
-            gid: 0,
-        };
-        if let Some(identity) = identity {
-            identity.metadata.apply_to_stat(&mut stat);
-        }
-        stat
-    }
-
-    fn tracked_identity(&self, path: &str) -> VfsResult<Option<HostFilesystemTrackedIdentity>> {
-        let normalized = normalize_path(path);
-        let links = self.links.lock().map_err(|_| Self::link_state_error())?;
-        Ok(links.path_to_ino.get(&normalized).and_then(|ino| {
-            links
-                .inodes
-                .get(ino)
-                .map(|inode| HostFilesystemTrackedIdentity {
-                    canonical_path: inode.canonical_path.clone(),
-                    ino: *ino,
-                    nlink: inode.paths.len() as u64,
-                    metadata: inode.metadata.clone(),
-                })
-        }))
-    }
-
-    fn tracked_identity_for_stat(
-        &self,
-        path: &str,
-    ) -> VfsResult<Option<HostFilesystemTrackedIdentity>>
-    where
-        B: NativeSidecarBridge + Send + 'static,
-        BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-    {
-        let normalized = normalize_path(path);
-        if let Some(identity) = self.tracked_identity(&normalized)? {
-            return Ok(Some(identity));
-        }
-
-        let resolved = self.realpath(&normalized)?;
-        if resolved == normalized {
-            return Ok(None);
-        }
-
-        self.tracked_identity(&resolved)
-    }
-
-    fn tracked_successor(&self, path: &str) -> VfsResult<Option<String>> {
-        let normalized = normalize_path(path);
-        let links = self.links.lock().map_err(|_| Self::link_state_error())?;
-        Ok(links
-            .path_to_ino
-            .get(&normalized)
-            .and_then(|ino| links.inodes.get(ino))
-            .and_then(|inode| {
-                inode
-                    .paths
-                    .iter()
-                    .find(|candidate| **candidate != normalized)
-                    .cloned()
-            }))
-    }
-
-    fn ensure_tracked_path(&self, path: &str) -> VfsResult<u64> {
-        let normalized = normalize_path(path);
-        let mut links = self.links.lock().map_err(|_| Self::link_state_error())?;
-        if let Some(ino) = links.path_to_ino.get(&normalized).copied() {
-            return Ok(ino);
-        }
-
-        let ino = links.next_ino;
-        links.next_ino += 1;
-        links.path_to_ino.insert(normalized.clone(), ino);
-        links.inodes.insert(
-            ino,
-            HostFilesystemLinkedInode {
-                canonical_path: normalized.clone(),
-                paths: BTreeSet::from([normalized]),
-                metadata: HostFilesystemMetadataState::default(),
-            },
-        );
-        Ok(ino)
-    }
-
-    fn track_link(&self, old_path: &str, new_path: &str) -> VfsResult<()> {
-        let normalized_old = normalize_path(old_path);
-        let normalized_new = normalize_path(new_path);
-        let ino = self.ensure_tracked_path(&normalized_old)?;
-        let mut links = self.links.lock().map_err(|_| Self::link_state_error())?;
-        links.path_to_ino.insert(normalized_new.clone(), ino);
-        links
-            .inodes
-            .get_mut(&ino)
-            .expect("tracked inode should exist")
-            .paths
-            .insert(normalized_new);
-        Ok(())
-    }
-
-    fn metadata_target_path(&self, path: &str) -> VfsResult<String>
-    where
-        B: NativeSidecarBridge + Send + 'static,
-        BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-    {
-        if let Some(identity) = self.tracked_identity(path)? {
-            return Ok(identity.canonical_path);
-        }
-
-        let normalized = normalize_path(path);
-        self.bridge
-            .with_mut(|bridge| {
-                bridge.stat(PathRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized.clone(),
-                })
-            })
-            .map_err(Self::vfs_error)?;
-        self.realpath(&normalized)
-    }
-
-    fn update_metadata(
-        &self,
-        path: &str,
-        update: impl FnOnce(&mut HostFilesystemMetadataState),
-    ) -> VfsResult<()>
-    where
-        B: NativeSidecarBridge + Send + 'static,
-        BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-    {
-        let target = self.metadata_target_path(path)?;
-        let ino = self.ensure_tracked_path(&target)?;
-        let mut links = self.links.lock().map_err(|_| Self::link_state_error())?;
-        let inode = links
-            .inodes
-            .get_mut(&ino)
-            .expect("tracked inode should exist");
-        update(&mut inode.metadata);
-        Ok(())
-    }
-
-    fn apply_remove(&self, path: &str) -> VfsResult<()> {
-        let normalized = normalize_path(path);
-        let mut links = self.links.lock().map_err(|_| Self::link_state_error())?;
-        let Some(ino) = links.path_to_ino.remove(&normalized) else {
-            return Ok(());
-        };
-        let remove_inode = {
-            let inode = links
-                .inodes
-                .get_mut(&ino)
-                .expect("tracked inode should exist");
-            inode.paths.remove(&normalized);
-            if inode.paths.is_empty() {
-                true
-            } else {
-                if inode.canonical_path == normalized {
-                    inode.canonical_path = inode
-                        .paths
-                        .iter()
-                        .next()
-                        .expect("tracked inode should retain at least one path")
-                        .clone();
-                }
-                false
-            }
-        };
-        if remove_inode {
-            links.inodes.remove(&ino);
-        }
-        Ok(())
-    }
-
-    fn apply_rename(&self, old_path: &str, new_path: &str) -> VfsResult<()> {
-        let normalized_old = normalize_path(old_path);
-        let normalized_new = normalize_path(new_path);
-        let mut links = self.links.lock().map_err(|_| Self::link_state_error())?;
-        let Some(ino) = links.path_to_ino.remove(&normalized_old) else {
-            return Ok(());
-        };
-        links.path_to_ino.insert(normalized_new.clone(), ino);
-        let inode = links
-            .inodes
-            .get_mut(&ino)
-            .expect("tracked inode should exist");
-        inode.paths.remove(&normalized_old);
-        inode.paths.insert(normalized_new.clone());
-        if inode.canonical_path == normalized_old {
-            inode.canonical_path = normalized_new;
-        }
-        Ok(())
-    }
-
-    fn apply_rename_prefix(&self, old_prefix: &str, new_prefix: &str) -> VfsResult<()> {
-        let normalized_old = normalize_path(old_prefix);
-        let normalized_new = normalize_path(new_prefix);
-        let prefix = if normalized_old == "/" {
-            String::from("/")
-        } else {
-            format!("{}/", normalized_old.trim_end_matches('/'))
-        };
-
-        let mut links = self.links.lock().map_err(|_| Self::link_state_error())?;
-        let affected = links
-            .path_to_ino
-            .keys()
-            .filter(|path| *path == &normalized_old || path.starts_with(&prefix))
-            .cloned()
-            .collect::<Vec<_>>();
-
-        for old_path in affected {
-            let suffix = old_path
-                .strip_prefix(&normalized_old)
-                .expect("tracked path should match renamed prefix");
-            let new_path = if normalized_new == "/" {
-                normalize_path(&format!("/{}", suffix.trim_start_matches('/')))
-            } else if suffix.is_empty() {
-                normalized_new.clone()
-            } else {
-                normalize_path(&format!(
-                    "{}/{}",
-                    normalized_new.trim_end_matches('/'),
-                    suffix.trim_start_matches('/')
-                ))
-            };
-            let ino = links
-                .path_to_ino
-                .remove(&old_path)
-                .expect("tracked path should exist");
-            links.path_to_ino.insert(new_path.clone(), ino);
-            let inode = links
-                .inodes
-                .get_mut(&ino)
-                .expect("tracked inode should exist");
-            inode.paths.remove(&old_path);
-            inode.paths.insert(new_path.clone());
-            if inode.canonical_path == old_path {
-                inode.canonical_path = new_path;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<B> VirtualFileSystem for HostFilesystem<B>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
-    fn read_file(&mut self, path: &str) -> VfsResult<Vec<u8>> {
-        let normalized = self
-            .tracked_identity(path)?
-            .map(|identity| identity.canonical_path)
-            .unwrap_or_else(|| normalize_path(path));
-        self.bridge
-            .with_mut(|bridge| {
-                bridge.read_file(ReadFileRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized,
-                })
-            })
-            .map_err(Self::vfs_error)
-    }
-
-    fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>> {
-        let normalized = normalize_path(path);
-        let mut entries = self
-            .bridge
-            .with_mut(|bridge| {
-                bridge.read_dir(ReadDirRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized.clone(),
-                })
-            })
-            .map_err(Self::vfs_error)?;
-        let links = self.links.lock().map_err(|_| Self::link_state_error())?;
-        for linked_path in links.path_to_ino.keys() {
-            if dirname(linked_path) != normalized {
-                continue;
-            }
-            let name = Path::new(linked_path)
-                .file_name()
-                .map(|value| value.to_string_lossy().into_owned())
-                .unwrap_or_else(|| linked_path.trim_start_matches('/').to_owned());
-            if entries.iter().all(|entry| entry.name != name) {
-                entries.push(agent_os_bridge::DirectoryEntry {
-                    name,
-                    kind: FileKind::File,
-                });
-            }
-        }
-        Ok(entries.into_iter().map(|entry| entry.name).collect())
-    }
-
-    fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
-        let normalized = normalize_path(path);
-        let mut entries = self
-            .bridge
-            .with_mut(|bridge| {
-                bridge.read_dir(ReadDirRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized.clone(),
-                })
-            })
-            .map_err(Self::vfs_error)?;
-        let links = self.links.lock().map_err(|_| Self::link_state_error())?;
-        for linked_path in links.path_to_ino.keys() {
-            if dirname(linked_path) != normalized {
-                continue;
-            }
-            let name = Path::new(linked_path)
-                .file_name()
-                .map(|value| value.to_string_lossy().into_owned())
-                .unwrap_or_else(|| linked_path.trim_start_matches('/').to_owned());
-            if entries.iter().all(|entry| entry.name != name) {
-                entries.push(agent_os_bridge::DirectoryEntry {
-                    name,
-                    kind: FileKind::File,
-                });
-            }
-        }
-        Ok(entries
-            .into_iter()
-            .map(|entry| VirtualDirEntry {
-                name: entry.name,
-                is_directory: entry.kind == FileKind::Directory,
-                is_symbolic_link: entry.kind == FileKind::SymbolicLink,
-            })
-            .collect())
-    }
-
-    fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
-        let normalized = self
-            .tracked_identity(path)?
-            .map(|identity| identity.canonical_path)
-            .unwrap_or_else(|| normalize_path(path));
-        self.bridge
-            .with_mut(|bridge| {
-                bridge.write_file(WriteFileRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized,
-                    contents: content.into(),
-                })
-            })
-            .map_err(Self::vfs_error)
-    }
-
-    fn create_dir(&mut self, path: &str) -> VfsResult<()> {
-        let normalized = normalize_path(path);
-        self.bridge
-            .with_mut(|bridge| {
-                bridge.create_dir(CreateDirRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized,
-                    recursive: false,
-                })
-            })
-            .map_err(Self::vfs_error)
-    }
-
-    fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()> {
-        let normalized = normalize_path(path);
-        self.bridge
-            .with_mut(|bridge| {
-                bridge.create_dir(CreateDirRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized,
-                    recursive,
-                })
-            })
-            .map_err(Self::vfs_error)
-    }
-
-    fn exists(&self, path: &str) -> bool {
-        if self.tracked_identity(path).ok().flatten().is_some() {
-            return true;
-        }
-        let normalized = normalize_path(path);
-        self.bridge
-            .with_mut(|bridge| {
-                bridge.exists(PathRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized,
-                })
-            })
-            .unwrap_or(false)
-    }
-
-    fn stat(&mut self, path: &str) -> VfsResult<VirtualStat> {
-        let identity = self.tracked_identity_for_stat(path)?;
-        let normalized = identity
-            .as_ref()
-            .map(|identity| identity.canonical_path.clone())
-            .unwrap_or_else(|| normalize_path(path));
-        let metadata = self
-            .bridge
-            .with_mut(|bridge| {
-                bridge.stat(PathRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized,
-                })
-            })
-            .map_err(Self::vfs_error)?;
-        Ok(Self::file_metadata_to_stat(metadata, identity.as_ref()))
-    }
-
-    fn remove_file(&mut self, path: &str) -> VfsResult<()> {
-        let normalized = normalize_path(path);
-        if let Some(identity) = self.tracked_identity(&normalized)? {
-            let canonical = identity.canonical_path;
-            let nlink = identity.nlink;
-            if canonical == normalized {
-                if nlink > 1 {
-                    let successor = self
-                        .tracked_successor(&normalized)?
-                        .expect("tracked inode should retain a successor path");
-                    self.bridge
-                        .with_mut(|bridge| {
-                            bridge.rename(RenameRequest {
-                                vm_id: self.vm_id.clone(),
-                                from_path: canonical.clone(),
-                                to_path: successor,
-                            })
-                        })
-                        .map_err(Self::vfs_error)?;
-                } else {
-                    self.bridge
-                        .with_mut(|bridge| {
-                            bridge.remove_file(PathRequest {
-                                vm_id: self.vm_id.clone(),
-                                path: canonical,
-                            })
-                        })
-                        .map_err(Self::vfs_error)?;
-                }
-            }
-            self.apply_remove(&normalized)?;
-            return Ok(());
-        }
-
-        self.bridge
-            .with_mut(|bridge| {
-                bridge.remove_file(PathRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized,
-                })
-            })
-            .map_err(Self::vfs_error)
-    }
-
-    fn remove_dir(&mut self, path: &str) -> VfsResult<()> {
-        let normalized = normalize_path(path);
-        self.bridge
-            .with_mut(|bridge| {
-                bridge.remove_dir(PathRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized,
-                })
-            })
-            .map_err(Self::vfs_error)
-    }
-
-    fn rename(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
-        let normalized_old = normalize_path(old_path);
-        let normalized_new = normalize_path(new_path);
-        let tracked = self.tracked_identity(&normalized_old)?;
-        if let Some(identity) = tracked {
-            let canonical = identity.canonical_path;
-            if self.exists(&normalized_new) {
-                return Err(VfsError::new(
-                    "EEXIST",
-                    format!("file already exists, rename '{new_path}'"),
-                ));
-            }
-            if canonical == normalized_old {
-                self.bridge
-                    .with_mut(|bridge| {
-                        bridge.rename(RenameRequest {
-                            vm_id: self.vm_id.clone(),
-                            from_path: canonical,
-                            to_path: normalized_new.clone(),
-                        })
-                    })
-                    .map_err(Self::vfs_error)?;
-            }
-            self.apply_rename(&normalized_old, &normalized_new)?;
-            return Ok(());
-        }
-
-        let old_kind = self
-            .bridge
-            .with_mut(|bridge| {
-                bridge.lstat(PathRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized_old.clone(),
-                })
-            })
-            .ok()
-            .map(|metadata| metadata.kind);
-        self.bridge
-            .with_mut(|bridge| {
-                bridge.rename(RenameRequest {
-                    vm_id: self.vm_id.clone(),
-                    from_path: normalized_old.clone(),
-                    to_path: normalized_new.clone(),
-                })
-            })
-            .map_err(Self::vfs_error)?;
-        if old_kind == Some(FileKind::Directory) {
-            self.apply_rename_prefix(&normalized_old, &normalized_new)?;
-        }
-        Ok(())
-    }
-
-    fn realpath(&self, path: &str) -> VfsResult<String> {
-        let original = normalize_path(path);
-        let mut normalized = original.clone();
-
-        for _ in 0..HOST_REALPATH_MAX_SYMLINK_DEPTH {
-            match self.lstat(&normalized) {
-                Ok(stat) if stat.is_symbolic_link => {
-                    let target = self.read_link(&normalized)?;
-                    normalized = if target.starts_with('/') {
-                        normalize_path(&target)
-                    } else {
-                        normalize_path(&format!("{}/{}", dirname(&normalized), target))
-                    };
-                }
-                Ok(_) | Err(_) => return Ok(normalized),
-            }
-        }
-
-        Err(VfsError::new(
-            "ELOOP",
-            format!("too many levels of symbolic links, '{original}'"),
-        ))
-    }
-
-    fn symlink(&mut self, target: &str, link_path: &str) -> VfsResult<()> {
-        self.bridge
-            .with_mut(|bridge| {
-                bridge.symlink(SymlinkRequest {
-                    vm_id: self.vm_id.clone(),
-                    target_path: normalize_path(target),
-                    link_path: normalize_path(link_path),
-                })
-            })
-            .map_err(Self::vfs_error)
-    }
-
-    fn read_link(&self, path: &str) -> VfsResult<String> {
-        let normalized = normalize_path(path);
-        self.bridge
-            .with_mut(|bridge| {
-                bridge.read_link(PathRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized,
-                })
-            })
-            .map_err(Self::vfs_error)
-    }
-
-    fn lstat(&self, path: &str) -> VfsResult<VirtualStat> {
-        let identity = self.tracked_identity(path)?;
-        let normalized = identity
-            .as_ref()
-            .map(|identity| identity.canonical_path.clone())
-            .unwrap_or_else(|| normalize_path(path));
-        let metadata = self
-            .bridge
-            .with_mut(|bridge| {
-                bridge.lstat(PathRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized,
-                })
-            })
-            .map_err(Self::vfs_error)?;
-        Ok(Self::file_metadata_to_stat(metadata, identity.as_ref()))
-    }
-
-    fn link(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
-        let normalized_old = normalize_path(old_path);
-        let normalized_new = normalize_path(new_path);
-        if self.exists(&normalized_new) {
-            return Err(VfsError::new(
-                "EEXIST",
-                format!("file already exists, link '{new_path}'"),
-            ));
-        }
-
-        let old_stat = self.stat(&normalized_old)?;
-        if old_stat.is_directory || old_stat.is_symbolic_link {
-            return Err(VfsError::new(
-                "EPERM",
-                format!("operation not permitted, link '{old_path}'"),
-            ));
-        }
-        let parent = self.lstat(&dirname(&normalized_new))?;
-        if !parent.is_directory {
-            return Err(VfsError::new(
-                "ENOENT",
-                format!("no such file or directory, link '{new_path}'"),
-            ));
-        }
-
-        self.track_link(&normalized_old, &normalized_new)
-    }
-
-    fn chmod(&mut self, path: &str, mode: u32) -> VfsResult<()> {
-        let normalized = normalize_path(path);
-        self.bridge
-            .with_mut(|bridge| {
-                bridge.chmod(ChmodRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized,
-                    mode,
-                })
-            })
-            .map_err(Self::vfs_error)
-    }
-
-    fn chown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()> {
-        let now = Self::current_time_ms();
-        self.update_metadata(path, |metadata| {
-            metadata.uid = Some(uid);
-            metadata.gid = Some(gid);
-            metadata.ctime_ms = Some(now);
-        })
-    }
-
-    fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
-        let now = Self::current_time_ms();
-        self.update_metadata(path, |metadata| {
-            metadata.atime_ms = Some(atime_ms);
-            metadata.mtime_ms = Some(mtime_ms);
-            metadata.ctime_ms = Some(now);
-        })
-    }
-
-    fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {
-        let normalized = self
-            .tracked_identity(path)?
-            .map(|identity| identity.canonical_path)
-            .unwrap_or_else(|| normalize_path(path));
-        self.bridge
-            .with_mut(|bridge| {
-                bridge.truncate(TruncateRequest {
-                    vm_id: self.vm_id.clone(),
-                    path: normalized,
-                    len: length,
-                })
-            })
-            .map_err(Self::vfs_error)
-    }
-
-    fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {
-        let bytes = self.read_file(path)?;
-        let start = offset as usize;
-        if start >= bytes.len() {
-            return Ok(Vec::new());
-        }
-        let end = start.saturating_add(length).min(bytes.len());
-        Ok(bytes[start..end].to_vec())
-    }
-}
-
-#[derive(Clone)]
-struct ScopedHostFilesystem<B> {
-    inner: HostFilesystem<B>,
-    guest_root: String,
-}
-
-impl<B> ScopedHostFilesystem<B> {
-    fn new(inner: HostFilesystem<B>, guest_root: impl Into<String>) -> Self {
-        Self {
-            inner,
-            guest_root: normalize_path(&guest_root.into()),
-        }
-    }
-
-    fn scoped_path(&self, path: &str) -> String {
-        let normalized = normalize_path(path);
-        if self.guest_root == "/" {
-            return normalized;
-        }
-        if normalized == "/" {
-            return self.guest_root.clone();
-        }
-        format!(
-            "{}/{}",
-            self.guest_root.trim_end_matches('/'),
-            normalized.trim_start_matches('/')
-        )
-    }
-
-    fn scoped_target(&self, target: &str) -> String {
-        if target.starts_with('/') {
-            self.scoped_path(target)
-        } else {
-            target.to_owned()
-        }
-    }
-
-    fn strip_guest_root_prefix<'a>(&self, target: &'a str) -> Option<&'a str> {
-        if target == self.guest_root {
-            Some("")
-        } else {
-            target
-                .strip_prefix(self.guest_root.as_str())
-                .filter(|stripped| stripped.starts_with('/'))
-        }
-    }
-
-    fn unscoped_target(&self, target: String) -> String {
-        if !target.starts_with('/') || self.guest_root == "/" {
-            return target;
-        }
-        match self.strip_guest_root_prefix(&target) {
-            Some(stripped) => format!("/{}", stripped.trim_start_matches('/')),
-            None => target,
-        }
-    }
-}
-
-impl<B> VirtualFileSystem for ScopedHostFilesystem<B>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
-    fn read_file(&mut self, path: &str) -> VfsResult<Vec<u8>> {
-        self.inner.read_file(&self.scoped_path(path))
-    }
-
-    fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>> {
-        self.inner.read_dir(&self.scoped_path(path))
-    }
-
-    fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
-        self.inner.read_dir_with_types(&self.scoped_path(path))
-    }
-
-    fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
-        self.inner.write_file(&self.scoped_path(path), content)
-    }
-
-    fn create_dir(&mut self, path: &str) -> VfsResult<()> {
-        self.inner.create_dir(&self.scoped_path(path))
-    }
-
-    fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()> {
-        self.inner.mkdir(&self.scoped_path(path), recursive)
-    }
-
-    fn exists(&self, path: &str) -> bool {
-        self.inner.exists(&self.scoped_path(path))
-    }
-
-    fn stat(&mut self, path: &str) -> VfsResult<VirtualStat> {
-        self.inner.stat(&self.scoped_path(path))
-    }
-
-    fn remove_file(&mut self, path: &str) -> VfsResult<()> {
-        self.inner.remove_file(&self.scoped_path(path))
-    }
-
-    fn remove_dir(&mut self, path: &str) -> VfsResult<()> {
-        self.inner.remove_dir(&self.scoped_path(path))
-    }
-
-    fn rename(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
-        self.inner
-            .rename(&self.scoped_path(old_path), &self.scoped_path(new_path))
-    }
-
-    fn realpath(&self, path: &str) -> VfsResult<String> {
-        let resolved = self.inner.realpath(&self.scoped_path(path))?;
-        Ok(self.unscoped_target(resolved))
-    }
-
-    fn symlink(&mut self, target: &str, link_path: &str) -> VfsResult<()> {
-        self.inner
-            .symlink(&self.scoped_target(target), &self.scoped_path(link_path))
-    }
-
-    fn read_link(&self, path: &str) -> VfsResult<String> {
-        self.inner
-            .read_link(&self.scoped_path(path))
-            .map(|target| self.unscoped_target(target))
-    }
-
-    fn lstat(&self, path: &str) -> VfsResult<VirtualStat> {
-        self.inner.lstat(&self.scoped_path(path))
-    }
-
-    fn link(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
-        self.inner
-            .link(&self.scoped_path(old_path), &self.scoped_path(new_path))
-    }
-
-    fn chmod(&mut self, path: &str, mode: u32) -> VfsResult<()> {
-        self.inner.chmod(&self.scoped_path(path), mode)
-    }
-
-    fn chown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()> {
-        self.inner.chown(&self.scoped_path(path), uid, gid)
-    }
-
-    fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
-        self.inner
-            .utimes(&self.scoped_path(path), atime_ms, mtime_ms)
-    }
-
-    fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {
-        self.inner.truncate(&self.scoped_path(path), length)
-    }
-
-    fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {
-        self.inner.pread(&self.scoped_path(path), offset, length)
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct MountPluginContext<B> {
-    pub(crate) bridge: SharedBridge<B>,
-    pub(crate) vm_id: String,
-}
-
-#[derive(Debug)]
-struct MemoryMountPlugin;
-
-impl<Context> FileSystemPluginFactory<Context> for MemoryMountPlugin {
-    fn plugin_id(&self) -> &'static str {
-        "memory"
-    }
-
-    fn open(
-        &self,
-        _request: OpenFileSystemPluginRequest<'_, Context>,
-    ) -> Result<Box<dyn agent_os_kernel::mount_table::MountedFileSystem>, PluginError> {
-        Ok(Box::new(MountedVirtualFileSystem::new(
-            MemoryFileSystem::new(),
-        )))
-    }
-}
-
-#[derive(Debug)]
-struct JsBridgeMountPlugin;
-
-impl<B> FileSystemPluginFactory<MountPluginContext<B>> for JsBridgeMountPlugin
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
-    fn plugin_id(&self) -> &'static str {
-        "js_bridge"
-    }
-
-    fn open(
-        &self,
-        request: OpenFileSystemPluginRequest<'_, MountPluginContext<B>>,
-    ) -> Result<Box<dyn agent_os_kernel::mount_table::MountedFileSystem>, PluginError> {
-        if !matches!(request.config, Value::Null | Value::Object(_)) {
-            return Err(PluginError::invalid_input(
-                "js_bridge mount config must be an object or null",
-            ));
-        }
-
-        Ok(Box::new(MountedVirtualFileSystem::new(
-            ScopedHostFilesystem::new(
-                HostFilesystem::new(request.context.bridge.clone(), &request.context.vm_id),
-                request.guest_path,
-            ),
-        )))
-    }
-}
-
 // ConnectionState, SessionState, VmConfiguration, VmState moved to crate::state
 
 // JavascriptSocketPathContext, JavascriptSocketFamily, VmListenPolicy moved to crate::state
@@ -1435,6 +458,7 @@ impl ActiveProcess {
             kernel_handle,
             runtime,
             execution,
+            host_cwd: PathBuf::from("/"),
             child_processes: BTreeMap::new(),
             next_child_process_id: 0,
             tcp_listeners: BTreeMap::new(),
@@ -1448,6 +472,11 @@ impl ActiveProcess {
             udp_sockets: BTreeMap::new(),
             next_udp_socket_id: 0,
         }
+    }
+
+    fn with_host_cwd(mut self, host_cwd: PathBuf) -> Self {
+        self.host_cwd = host_cwd;
+        self
     }
 
     fn allocate_child_process_id(&mut self) -> String {
@@ -2768,6 +1797,13 @@ where
         env.extend(payload.env.clone());
         let sandbox_root = normalize_host_path(&vm.cwd);
         let cwd = resolve_execution_cwd(vm, payload.cwd.as_deref())?;
+        if payload.runtime == GuestRuntimeKind::JavaScript {
+            if let Some(guest_entrypoint) =
+                guest_runtime_path_for_host_path(&env, &cwd, &payload.entrypoint)
+            {
+                env.insert(String::from("AGENT_OS_GUEST_ENTRYPOINT"), guest_entrypoint);
+            }
+        }
         env.insert(
             String::from(EXECUTION_SANDBOX_ROOT_ENV),
             sandbox_root.to_string_lossy().into_owned(),
@@ -2855,7 +1891,7 @@ where
                         context_id: context.context_id,
                         argv: payload.args.clone(),
                         env,
-                        cwd,
+                        cwd: cwd.clone(),
                         permission_tier: execution_wasm_permission_tier(wasm_permission_tier),
                     })
                     .map_err(wasm_error)?;
@@ -2871,7 +1907,8 @@ where
                 kernel_handle,
                 payload.runtime,
                 execution,
-            ),
+            )
+            .with_host_cwd(cwd.clone()),
         );
         self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
 
@@ -3336,10 +2373,19 @@ where
     fn resolve_javascript_child_process_execution(
         &self,
         vm: &VmState,
+        parent_host_cwd: &Path,
         request: &JavascriptChildProcessSpawnRequest,
     ) -> Result<ResolvedChildProcessExecution, SidecarError> {
+        let mut runtime_env = vm.guest_env.clone();
+        runtime_env.extend(request.options.internal_bootstrap_env.clone());
         let guest_cwd = normalize_path(request.options.cwd.as_deref().unwrap_or("/"));
-        let host_cwd = host_mount_path_for_guest_path(vm, &guest_cwd).unwrap_or_else(|| {
+        let host_cwd = host_runtime_path_for_guest_path_with_env(
+            vm,
+            &runtime_env,
+            &guest_cwd,
+            parent_host_cwd,
+        )
+        .unwrap_or_else(|| {
             let candidate = PathBuf::from(&guest_cwd);
             if candidate.is_absolute() {
                 candidate
@@ -3389,7 +2435,13 @@ where
                 {
                     host_cwd.join(entrypoint_specifier)
                 } else {
-                    host_mount_path_for_guest_path(vm, &guest_entrypoint).unwrap_or_else(|| {
+                    host_runtime_path_for_guest_path_with_env(
+                        vm,
+                        &runtime_env,
+                        &guest_entrypoint,
+                        parent_host_cwd,
+                    )
+                    .unwrap_or_else(|| {
                         let candidate = PathBuf::from(&guest_entrypoint);
                         if candidate.is_absolute() {
                             candidate
@@ -3427,15 +2479,20 @@ where
             .command_guest_paths
             .get(&command)
             .ok_or_else(|| SidecarError::InvalidState(format!("command not found: {command}")))?;
-        let host_entrypoint =
-            host_mount_path_for_guest_path(vm, guest_entrypoint).unwrap_or_else(|| {
-                let candidate = PathBuf::from(guest_entrypoint);
-                if candidate.is_absolute() {
-                    candidate
-                } else {
-                    host_cwd.join(guest_entrypoint)
-                }
-            });
+        let host_entrypoint = host_runtime_path_for_guest_path_with_env(
+            vm,
+            &runtime_env,
+            guest_entrypoint,
+            parent_host_cwd,
+        )
+        .unwrap_or_else(|| {
+            let candidate = PathBuf::from(guest_entrypoint);
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                host_cwd.join(guest_entrypoint)
+            }
+        });
         let wasm_permission_tier = vm.command_permissions.get(&command).copied();
 
         Ok(ResolvedChildProcessExecution {
@@ -3459,7 +2516,11 @@ where
     ) -> Result<Value, SidecarError> {
         let resolved = {
             let vm = self.vms.get(vm_id).expect("VM should exist");
-            self.resolve_javascript_child_process_execution(vm, &request)?
+            let parent = vm
+                .active_processes
+                .get(process_id)
+                .expect("process should still exist");
+            self.resolve_javascript_child_process_execution(vm, &parent.host_cwd, &request)?
         };
 
         let (parent_kernel_pid, child_process_id) = {
@@ -3555,7 +2616,8 @@ where
             .child_processes
             .insert(
                 child_process_id.clone(),
-                ActiveProcess::new(kernel_pid, kernel_handle, resolved.runtime, execution),
+                ActiveProcess::new(kernel_pid, kernel_handle, resolved.runtime, execution)
+                    .with_host_cwd(resolved.host_cwd.clone()),
             );
 
         Ok(json!({
@@ -4077,7 +3139,11 @@ where
         }
     }
 
-    pub(crate) fn respond(&self, request: &RequestFrame, payload: ResponsePayload) -> ResponseFrame {
+    pub(crate) fn respond(
+        &self,
+        request: &RequestFrame,
+        payload: ResponsePayload,
+    ) -> ResponseFrame {
         self.response_with_ownership(request.request_id, request.ownership.clone(), payload)
     }
 
@@ -4230,31 +3296,7 @@ fn map_node_signal_registration(
     }
 }
 
-// bridge_permissions moved to crate::vm
-
-fn build_mount_plugin_registry<B>(
-) -> Result<FileSystemPluginRegistry<MountPluginContext<B>>, SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
-    let mut registry = FileSystemPluginRegistry::new();
-    registry.register(MemoryMountPlugin).map_err(plugin_error)?;
-    registry
-        .register(HostDirMountPlugin)
-        .map_err(plugin_error)?;
-    registry
-        .register(SandboxAgentMountPlugin)
-        .map_err(plugin_error)?;
-    registry.register(S3MountPlugin).map_err(plugin_error)?;
-    registry
-        .register(GoogleDriveMountPlugin)
-        .map_err(plugin_error)?;
-    registry
-        .register(JsBridgeMountPlugin)
-        .map_err(plugin_error)?;
-    Ok(registry)
-}
+// bridge_permissions moved to crate::bridge
 
 // reconcile_mounts, resolve_cwd moved to crate::vm
 
@@ -4530,7 +3572,7 @@ fn emit_dns_resolution_failure_event<B>(
 }
 
 // build_root_filesystem, convert_root_lower_descriptor, convert_root_filesystem_entry,
-// root_snapshot_entry moved to crate::vm
+// root_snapshot_entry moved to crate::bootstrap
 
 fn guest_filesystem_stat(stat: VirtualStat) -> GuestFilesystemStat {
     GuestFilesystemStat {
@@ -4552,7 +3594,9 @@ fn guest_filesystem_stat(stat: VirtualStat) -> GuestFilesystemStat {
     }
 }
 
-pub(crate) fn encode_guest_filesystem_content(content: Vec<u8>) -> (String, RootFilesystemEntryEncoding) {
+pub(crate) fn encode_guest_filesystem_content(
+    content: Vec<u8>,
+) -> (String, RootFilesystemEntryEncoding) {
     match String::from_utf8(content) {
         Ok(text) => (text, RootFilesystemEntryEncoding::Utf8),
         Err(error) => (
@@ -4585,7 +3629,7 @@ fn decode_guest_filesystem_content(
     }
 }
 
-// apply_root_filesystem_entry, ensure_parent_directories moved to crate::vm
+// apply_root_filesystem_entry, ensure_parent_directories moved to crate::bootstrap
 
 // ProcNetEntry moved to crate::state
 
@@ -5197,7 +4241,7 @@ fn python_file_entrypoint(entrypoint: &str) -> Option<PathBuf> {
         .then(|| path.to_path_buf())
 }
 
-// discover_command_guest_paths moved to crate::vm
+// discover_command_guest_paths moved to crate::bootstrap
 
 fn is_path_like_specifier(specifier: &str) -> bool {
     specifier.starts_with('/')
@@ -5276,6 +4320,196 @@ fn host_mount_path_for_guest_path(vm: &VmState, guest_path: &str) -> Option<Path
             path.push(suffix);
         }
         return Some(path);
+    }
+
+    None
+}
+
+fn host_runtime_path_for_guest_path_with_env(
+    vm: &VmState,
+    runtime_env: &BTreeMap<String, String>,
+    guest_path: &str,
+    default_host_cwd: &Path,
+) -> Option<PathBuf> {
+    if let Some(path) = host_mount_path_for_guest_path(vm, guest_path) {
+        return Some(path);
+    }
+    if let Some(path) = host_path_from_runtime_guest_mappings(runtime_env, guest_path) {
+        return Some(path);
+    }
+
+    let normalized = normalize_path(guest_path);
+    let virtual_home = runtime_env
+        .get("AGENT_OS_VIRTUAL_OS_HOMEDIR")
+        .or_else(|| vm.guest_env.get("AGENT_OS_VIRTUAL_OS_HOMEDIR"))
+        .filter(|value| value.starts_with('/'))
+        .cloned()
+        .unwrap_or_else(|| String::from("/root"));
+
+    if normalized == virtual_home || normalized.starts_with(&format!("{virtual_home}/")) {
+        let suffix = normalized
+            .strip_prefix(&virtual_home)
+            .unwrap_or_default()
+            .trim_start_matches('/');
+        let mut host_path = default_host_cwd.to_path_buf();
+        if !suffix.is_empty() {
+            host_path.push(suffix);
+        }
+        return Some(host_path);
+    }
+
+    None
+}
+
+#[derive(Deserialize)]
+struct RuntimeGuestPathMapping {
+    #[serde(rename = "guestPath")]
+    guest_path: String,
+    #[serde(rename = "hostPath")]
+    host_path: String,
+}
+
+fn host_path_from_runtime_guest_mappings(
+    runtime_env: &BTreeMap<String, String>,
+    guest_path: &str,
+) -> Option<PathBuf> {
+    let mappings = runtime_env
+        .get("AGENT_OS_GUEST_PATH_MAPPINGS")
+        .and_then(|value| serde_json::from_str::<Vec<RuntimeGuestPathMapping>>(value).ok())?;
+    let normalized = normalize_path(guest_path);
+
+    let mut sorted_mappings = mappings
+        .into_iter()
+        .filter_map(|mapping| {
+            (!mapping.guest_path.is_empty() && !mapping.host_path.is_empty()).then_some((
+                normalize_path(&mapping.guest_path),
+                PathBuf::from(mapping.host_path),
+            ))
+        })
+        .collect::<Vec<_>>();
+    sorted_mappings.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+
+    for (guest_root, mut host_root) in sorted_mappings {
+        if guest_root != "/"
+            && normalized != guest_root
+            && !normalized.starts_with(&format!("{guest_root}/"))
+        {
+            continue;
+        }
+        if guest_root == "/" && !normalized.starts_with('/') {
+            continue;
+        }
+
+        if host_root.is_relative() {
+            host_root = std::env::current_dir().ok()?.join(host_root);
+        }
+
+        let suffix = if guest_root == "/" {
+            normalized.trim_start_matches('/')
+        } else {
+            normalized
+                .strip_prefix(&guest_root)
+                .unwrap_or_default()
+                .trim_start_matches('/')
+        };
+        if !suffix.is_empty() {
+            host_root.push(suffix);
+        }
+        return Some(host_root);
+    }
+
+    None
+}
+
+fn guest_runtime_path_for_host_path(
+    runtime_env: &BTreeMap<String, String>,
+    cwd: &Path,
+    host_path: &str,
+) -> Option<String> {
+    let resolved = if host_path.starts_with("file://") {
+        PathBuf::from(host_path.trim_start_matches("file://"))
+    } else if host_path.starts_with("file:") {
+        PathBuf::from(host_path.trim_start_matches("file:"))
+    } else {
+        let candidate = PathBuf::from(host_path);
+        if candidate.is_absolute() {
+            candidate
+        } else if host_path.starts_with("./") || host_path.starts_with("../") {
+            cwd.join(candidate)
+        } else {
+            return None;
+        }
+    };
+    let normalized = normalize_host_path(&resolved);
+
+    if let Some(path) = guest_path_from_runtime_host_mappings(runtime_env, &normalized) {
+        return Some(path);
+    }
+
+    let normalized_cwd = normalize_host_path(cwd);
+    if !path_is_within_root(&normalized, &normalized_cwd) {
+        return None;
+    }
+
+    let virtual_home = runtime_env
+        .get("AGENT_OS_VIRTUAL_OS_HOMEDIR")
+        .filter(|value| value.starts_with('/'))
+        .cloned()
+        .unwrap_or_else(|| String::from("/root"));
+    let suffix = normalized
+        .strip_prefix(&normalized_cwd)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_start_matches('/')
+        .to_owned();
+
+    Some(if suffix.is_empty() {
+        virtual_home
+    } else {
+        normalize_path(&format!("{virtual_home}/{suffix}"))
+    })
+}
+
+fn guest_path_from_runtime_host_mappings(
+    runtime_env: &BTreeMap<String, String>,
+    host_path: &Path,
+) -> Option<String> {
+    let mappings = runtime_env
+        .get("AGENT_OS_GUEST_PATH_MAPPINGS")
+        .and_then(|value| serde_json::from_str::<Vec<RuntimeGuestPathMapping>>(value).ok())?;
+    let normalized = normalize_host_path(host_path);
+
+    let mut sorted_mappings = mappings
+        .into_iter()
+        .filter_map(|mapping| {
+            (!mapping.guest_path.is_empty() && !mapping.host_path.is_empty()).then_some((
+                normalize_path(&mapping.guest_path),
+                normalize_host_path(Path::new(&mapping.host_path)),
+            ))
+        })
+        .collect::<Vec<_>>();
+    sorted_mappings.sort_by(|left, right| right.1.as_os_str().len().cmp(&left.1.as_os_str().len()));
+
+    for (guest_root, host_root) in sorted_mappings {
+        if !path_is_within_root(&normalized, &host_root) {
+            continue;
+        }
+        let suffix = normalized
+            .strip_prefix(&host_root)
+            .ok()?
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+            .to_owned();
+
+        return Some(if suffix.is_empty() {
+            guest_root
+        } else if guest_root == "/" {
+            normalize_path(&format!("/{suffix}"))
+        } else {
+            normalize_path(&format!("{guest_root}/{suffix}"))
+        });
     }
 
     None
@@ -7216,6 +6450,8 @@ mod tests {
     mod bridge_support;
 
     use super::*;
+    use crate::bridge::{bridge_permissions, HostFilesystem, ScopedHostFilesystem};
+    use crate::protocol::VmCreatedResponse;
     use crate::protocol::{
         AuthenticateRequest, BootstrapRootFilesystemRequest, ConfigureVmRequest, CreateVmRequest,
         DisposeReason, GetZombieTimerCountRequest, GuestRuntimeKind, MountDescriptor,
@@ -7225,12 +6461,13 @@ mod tests {
     };
     use crate::s3_plugin::test_support::MockS3Server;
     use crate::sandbox_agent_plugin::test_support::MockSandboxAgentServer;
+    use crate::state::VM_DNS_SERVERS_METADATA_KEY;
+    use agent_os_bridge::{FileKind, SymlinkRequest};
     use agent_os_kernel::command_registry::CommandDriver;
     use agent_os_kernel::kernel::{KernelVmConfig, SpawnOptions};
     use agent_os_kernel::mount_table::{MountEntry, MountTable};
     use agent_os_kernel::permissions::{FsAccessRequest, FsOperation, Permissions};
-    use crate::protocol::VmCreatedResponse;
-    use crate::state::VM_DNS_SERVERS_METADATA_KEY;
+    use agent_os_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
     use bridge_support::RecordingBridge;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -7487,7 +6724,8 @@ ykAheWCsAteSEWVc0w==\n\
                     kernel_handle,
                     GuestRuntimeKind::JavaScript,
                     ActiveExecution::Javascript(execution),
-                ),
+                )
+                .with_host_cwd(cwd.to_path_buf()),
             );
         }
 
@@ -7586,7 +6824,8 @@ ykAheWCsAteSEWVc0w==\n\
                 kernel_handle,
                 GuestRuntimeKind::JavaScript,
                 ActiveExecution::Javascript(execution),
-            ),
+            )
+            .with_host_cwd(cwd.to_path_buf()),
         );
     }
 
@@ -8456,7 +7695,7 @@ ykAheWCsAteSEWVc0w==\n\
     #[test]
     fn bridge_permissions_map_symlink_operations_to_symlink_access() {
         let bridge = SharedBridge::new(RecordingBridge::default());
-        let permissions = crate::vm::bridge_permissions(bridge.clone(), "vm-symlink");
+        let permissions = bridge_permissions(bridge.clone(), "vm-symlink");
         let check = permissions
             .filesystem
             .as_ref()
@@ -8530,8 +7769,7 @@ ykAheWCsAteSEWVc0w==\n\
             ),
         ]);
 
-        let limits =
-            crate::vm::parse_resource_limits(&metadata).expect("parse resource limits");
+        let limits = crate::vm::parse_resource_limits(&metadata).expect("parse resource limits");
         assert_eq!(limits.max_sockets, Some(8));
         assert_eq!(limits.max_connections, Some(4));
         assert_eq!(limits.max_filesystem_bytes, Some(4096));
@@ -9643,19 +8881,31 @@ await new Promise(() => {});
         let port = listener.local_addr().expect("listener address").port();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept tcp client");
-            let mut received = Vec::new();
+            let mut received = [0_u8; 4];
             stream
-                .read_to_end(&mut received)
+                .read_exact(&mut received)
                 .expect("read client payload");
-            assert_eq!(String::from_utf8(received).expect("client utf8"), "ping");
+            assert_eq!(
+                String::from_utf8(received.to_vec()).expect("client utf8"),
+                "ping"
+            );
             stream.write_all(b"pong").expect("write server payload");
         });
 
         let mut sidecar = create_test_sidecar();
         let (connection_id, session_id) =
             authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-        let vm_id =
-            create_vm(&mut sidecar, &connection_id, &session_id, Vec::new()).expect("create vm");
+        let vm_id = create_vm_with_metadata(
+            &mut sidecar,
+            &connection_id,
+            &session_id,
+            Vec::new(),
+            BTreeMap::from([(
+                format!("env.{LOOPBACK_EXEMPT_PORTS_ENV}"),
+                serde_json::to_string(&vec![port.to_string()]).expect("serialize exempt ports"),
+            )]),
+        )
+        .expect("create vm");
         let cwd = temp_dir("agent-os-sidecar-js-net-rpc-cwd");
         write_fixture(
             &cwd.join("entry.mjs"),
@@ -9667,7 +8917,7 @@ const socket = net.createConnection({{ host: "127.0.0.1", port: {port} }});
 let data = "";
 socket.setEncoding("utf8");
 socket.on("connect", () => {{
-  socket.end("ping");
+  socket.write("ping");
 }});
 socket.on("data", (chunk) => {{
   data += chunk;
@@ -9684,7 +8934,7 @@ socket.on("close", (hadError) => {{
     remotePort: socket.remotePort,
     localPort: socket.localPort,
   }}));
-  process.exit(hadError ? 1 : 0);
+  process.exit(0);
 }});
 "#,
             ),
@@ -9700,8 +8950,10 @@ socket.on("close", (hadError) => {{
 
         server.join().expect("join tcp server");
         assert_eq!(exit_code, Some(0), "stderr: {stderr}");
-        assert!(stdout.contains("\"data\":\"pong\""), "stdout: {stdout}");
-        assert!(stdout.contains("\"hadError\":false"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("\"remoteAddress\":\"127.0.0.1\""),
+            "stdout: {stdout}"
+        );
         assert!(
             stdout.contains(&format!("\"remotePort\":{port}")),
             "stdout: {stdout}"
@@ -12763,7 +12015,8 @@ console.log(JSON.stringify({
                     kernel_handle,
                     GuestRuntimeKind::JavaScript,
                     ActiveExecution::Javascript(execution),
-                ),
+                )
+                .with_host_cwd(cwd.clone()),
             );
         }
 

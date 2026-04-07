@@ -2,6 +2,8 @@
 
 //! Native sidecar scaffold that composes the kernel and execution crates.
 
+pub(crate) mod bootstrap;
+pub(crate) mod bridge;
 mod google_drive_plugin;
 mod host_dir_plugin;
 pub mod protocol;

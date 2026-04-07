@@ -8,6 +8,8 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Protocol-level deserialized request types (with `#[derive(Deserialize)]`) belong in protocol.rs
 - Internal state types without Deserialize belong in state.rs
 - Pre-existing flaky tests in security_hardening.rs fail when run in parallel but pass individually (Node import cache race conditions)
+- `host_dir` mounts must handle `lstat("/")` because kernel filesystem accounting probes mounted roots before write-limit checks
+- Bridge-backed host filesystem adapters must translate missing `stat`/`lstat` results to `ENOENT`; generic `EIO` breaks create-on-write flows on `js_bridge` mounts
 - Rust allows splitting impl blocks across modules — struct definition in state.rs, method impls in service.rs
 - NativeSidecar<B> fields are `pub(crate)` so impl blocks in vm.rs (and future domain modules) can access them
 - Cross-module method calls require `pub(crate)` visibility on the called method (e.g., vm.rs calling service.rs helper methods)
@@ -44,4 +46,14 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - extract_guest_env and normalize_dns_hostname are also used by execution code in service.rs (build_javascript_socket_path_context and resolve_dns_with_overrides) — made pub(crate) in vm.rs
   - Root filesystem types (decode/encode snapshot, KernelFilesystemEntry, etc.) moved entirely to vm.rs since no other service.rs code uses them
   - Test module `use super::*` only brings in parent module scope — when parent stops importing types (KernelVmConfig, MountTable, FsAccessRequest, etc.), test module needs explicit imports
+---
+
+## 2026-04-06 17:18:40 PDT - US-003
+- Extracted root filesystem/bootstrap helpers into `crates/sidecar/src/bootstrap.rs` and host bridge/mount plumbing into `crates/sidecar/src/bridge.rs`, with `service.rs` delegating to the new modules
+- Fixed follow-on sidecar regressions uncovered by package tests: Python runtime launch hardening, HTTP/HTTPS guest transport agent wiring, JS child-process host cwd mapping, `host_dir` root `lstat`, and js-bridge missing-path errno mapping
+- Files changed: `crates/sidecar/src/bootstrap.rs`, `crates/sidecar/src/bridge.rs`, `crates/sidecar/src/lib.rs`, `crates/sidecar/src/service.rs`, `crates/sidecar/src/state.rs`, `crates/sidecar/src/vm.rs`, `crates/sidecar/src/host_dir_plugin.rs`, `crates/sidecar/tests/python.rs`, `crates/execution/src/node_import_cache.rs`, `crates/execution/src/python.rs`, `crates/execution/assets/runners/python-runner.mjs`, `crates/CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - `host_dir` mount roots participate in kernel resource accounting, so root-level metadata ops like `lstat("/")` have to succeed for mounted filesystems
+  - `js_bridge`/bridge-backed filesystems need `stat`/`lstat` misses to surface as `ENOENT`, otherwise kernel pre-write limit checks reject new files before the bridge write runs
+  - `security_hardening.rs` remains parallel-sensitive; use `cargo test -p agent-os-sidecar -- --test-threads=1` when validating the sidecar package end to end
 ---

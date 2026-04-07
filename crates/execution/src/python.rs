@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 const NODE_ALLOWED_BUILTINS_ENV: &str = "AGENT_OS_ALLOWED_NODE_BUILTINS";
+const NODE_ALLOW_PROCESS_BINDINGS_ENV: &str = "AGENT_OS_ALLOW_PROCESS_BINDINGS";
 const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const PYODIDE_INDEX_URL_ENV: &str = "AGENT_OS_PYODIDE_INDEX_URL";
 const PYTHON_CODE_ENV: &str = "AGENT_OS_PYTHON_CODE";
@@ -58,6 +59,7 @@ const RESERVED_PYTHON_ENV_KEYS: &[&str] = &[
     NODE_COMPILE_CACHE_ENV,
     NODE_DISABLE_COMPILE_CACHE_ENV,
     NODE_ALLOWED_BUILTINS_ENV,
+    NODE_ALLOW_PROCESS_BINDINGS_ENV,
     NODE_SANDBOX_ROOT_ENV,
     NODE_FROZEN_TIME_ENV,
     NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
@@ -985,6 +987,7 @@ fn create_node_child(
         )
         .env(NODE_IMPORT_CACHE_ASSET_ROOT_ENV, import_cache.asset_root())
         .env(NODE_IMPORT_CACHE_PATH_ENV, import_cache.cache_path())
+        .env(NODE_ALLOW_PROCESS_BINDINGS_ENV, "1")
         .env(PYTHON_CODE_ENV, &request.code)
         .env(
             PYTHON_VFS_RPC_TIMEOUT_MS_ENV,
@@ -1048,7 +1051,7 @@ fn configure_python_node_sandbox(
         &sandbox_root,
         &read_paths,
         &write_paths,
-        true,
+        false,
         false,
         true,
         false,
@@ -1117,6 +1120,7 @@ fn prewarm_python_path(
         )
         .env(NODE_IMPORT_CACHE_ASSET_ROOT_ENV, import_cache.asset_root())
         .env(NODE_IMPORT_CACHE_PATH_ENV, import_cache.cache_path())
+        .env(NODE_ALLOW_PROCESS_BINDINGS_ENV, "1")
         .env(PYTHON_PREWARM_ONLY_ENV, "1")
         .env(NODE_FROZEN_TIME_ENV, frozen_time_ms.to_string());
     configure_node_command(&mut command, import_cache)?;

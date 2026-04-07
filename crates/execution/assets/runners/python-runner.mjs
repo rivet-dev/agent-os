@@ -17,6 +17,7 @@ const PYTHON_WARMUP_METRICS_PREFIX = '__AGENT_OS_PYTHON_WARMUP_METRICS__:';
 const PYTHON_PRELOAD_PACKAGES_ENV = 'AGENT_OS_PYTHON_PRELOAD_PACKAGES';
 const PYTHON_VFS_RPC_REQUEST_FD_ENV = 'AGENT_OS_PYTHON_VFS_RPC_REQUEST_FD';
 const PYTHON_VFS_RPC_RESPONSE_FD_ENV = 'AGENT_OS_PYTHON_VFS_RPC_RESPONSE_FD';
+const ALLOW_PROCESS_BINDINGS = process.env.AGENT_OS_ALLOW_PROCESS_BINDINGS === '1';
 const STDIN_FD = 0;
 const SUPPORTED_PRELOAD_PACKAGES = ['numpy', 'pandas'];
 const SUPPORTED_PRELOAD_PACKAGE_SET = new Set(SUPPORTED_PRELOAD_PACKAGES);
@@ -481,15 +482,17 @@ function installPythonGuestPreloadHardening() {
 }
 
 function installPythonGuestProcessHardening() {
-  hardenProperty(process, 'binding', () => {
-    throw accessDenied('process.binding');
-  });
-  hardenProperty(process, '_linkedBinding', () => {
-    throw accessDenied('process._linkedBinding');
-  });
-  hardenProperty(process, 'dlopen', () => {
-    throw accessDenied('process.dlopen');
-  });
+  if (!ALLOW_PROCESS_BINDINGS) {
+    hardenProperty(process, 'binding', () => {
+      throw accessDenied('process.binding');
+    });
+    hardenProperty(process, '_linkedBinding', () => {
+      throw accessDenied('process._linkedBinding');
+    });
+    hardenProperty(process, 'dlopen', () => {
+      throw accessDenied('process.dlopen');
+    });
+  }
 
   if (originalGetBuiltinModule) {
     hardenProperty(process, 'getBuiltinModule', (specifier) => {

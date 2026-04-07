@@ -1838,6 +1838,7 @@ if (!fs || !path || typeof pathToFileURL !== 'function') {
 }
 
 const HOST_PROCESS_ENV = { ...process.env };
+const ALLOW_PROCESS_BINDINGS = HOST_PROCESS_ENV.AGENT_OS_ALLOW_PROCESS_BINDINGS === '1';
 const Module =
   typeof process.getBuiltinModule === 'function'
     ? process.getBuiltinModule('node:module')
@@ -5256,14 +5257,21 @@ function createRpcBackedHttpModule(httpModule, transportModule, defaultProtocol 
     };
   };
   const createRequest = (options, callback) => {
+    class AgentOsHttpAgent extends httpModule.Agent {
+      createConnection() {
+        return transportModule.connect(options.connectionOptions);
+      }
+    }
+
+    const agent = new AgentOsHttpAgent({ keepAlive: false });
     const request = httpModule.request(
       {
         ...options.requestOptions,
-        agent: false,
-        createConnection: () => transportModule.connect(options.connectionOptions),
+        agent,
       },
       callback,
     );
+    request.once('close', () => agent.destroy());
     return request;
   };
   const normalizeServerCreation = (args) => {
@@ -5439,14 +5447,22 @@ function createRpcBackedHttpsModule(httpsModule, tlsModule) {
 
   const request = (...args) => {
     const normalized = normalizeRequestInvocation(args);
-    return httpsModule.request(
+    class AgentOsHttpsAgent extends httpsModule.Agent {
+      createConnection() {
+        return tlsModule.connect(normalized.tlsConnectOptions);
+      }
+    }
+
+    const agent = new AgentOsHttpsAgent({ keepAlive: false });
+    const request = httpsModule.request(
       {
         ...normalized.requestOptions,
-        agent: false,
-        createConnection: () => tlsModule.connect(normalized.tlsConnectOptions),
+        agent,
       },
       normalized.callback,
     );
+    request.once('close', () => agent.destroy());
+    return request;
   };
   const get = (...args) => {
     const req = request(...args);
@@ -7308,15 +7324,17 @@ function installGuestHardening() {
   hardenProperty(process, 'getgid', guestGetGid);
   hardenProperty(process, 'umask', guestProcessUmask);
 
-  hardenProperty(process, 'binding', () => {
-    throw accessDenied('process.binding');
-  });
-  hardenProperty(process, '_linkedBinding', () => {
-    throw accessDenied('process._linkedBinding');
-  });
-  hardenProperty(process, 'dlopen', () => {
-    throw accessDenied('process.dlopen');
-  });
+  if (!ALLOW_PROCESS_BINDINGS) {
+    hardenProperty(process, 'binding', () => {
+      throw accessDenied('process.binding');
+    });
+    hardenProperty(process, '_linkedBinding', () => {
+      throw accessDenied('process._linkedBinding');
+    });
+    hardenProperty(process, 'dlopen', () => {
+      throw accessDenied('process.dlopen');
+    });
+  }
   for (const methodName of [
     'addListener',
     'on',
@@ -8308,8 +8326,15 @@ struct NodeImportCacheMaterialization {
 
 impl Default for NodeImportCache {
     fn default() -> Self {
-        Self::new_in(env::temp_dir())
+        Self::new_in(default_node_import_cache_base_dir())
     }
+}
+
+fn default_node_import_cache_base_dir() -> PathBuf {
+    env::temp_dir().join(format!(
+        "{NODE_IMPORT_CACHE_DIR_PREFIX}-roots-{}",
+        std::process::id()
+    ))
 }
 
 fn cleanup_stale_node_import_caches_once(base_dir: &Path) {

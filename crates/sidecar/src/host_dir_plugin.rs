@@ -514,6 +514,14 @@ impl VirtualFileSystem for HostDirFilesystem {
     }
 
     fn lstat(&self, path: &str) -> VfsResult<VirtualStat> {
+        if normalize_path(path) == "/" {
+            return self
+                .host_root_dir
+                .metadata()
+                .map(Self::stat_from_metadata)
+                .map_err(|error| io_error_to_vfs("lstat", path, error));
+        }
+
         let (parent_dir, _, name, normalized) = self.split_parent(path, false)?;
         fstatat(
             Some(parent_dir.as_raw_fd()),

@@ -883,9 +883,9 @@ fn workspace_files_are_shared_between_javascript_and_python_runtimes() {
     assert_node_available();
 
     let mut sidecar = new_sidecar("cross-runtime-workspace");
-    let cwd = temp_dir("cross-runtime-workspace-cwd");
-    let js_entry = cwd.join("cross-runtime.mjs");
     let workspace_host_dir = temp_dir("cross-runtime-workspace-host");
+    let cwd = workspace_host_dir.clone();
+    let js_entry = workspace_host_dir.join("cross-runtime.mjs");
     let connection_id = authenticate(&mut sidecar, "conn-cross-runtime");
     let session_id = open_session(&mut sidecar, 2, &connection_id);
     let (vm_id, _) = create_vm(
@@ -900,7 +900,7 @@ fn workspace_files_are_shared_between_javascript_and_python_runtimes() {
     write_fixture(
         &js_entry,
         r#"
-import * as fs from 'agent-os:builtin/fs-promises';
+import fs from 'node:fs/promises';
 
 const mode = process.argv[2];
 
@@ -1012,7 +1012,10 @@ if (mode === 'write') {
     );
     let js_write: Value =
         serde_json::from_str(js_write_stdout.trim()).expect("parse JavaScript write JSON");
-    assert_eq!(js_write["entries"], serde_json::json!(["from-js.txt"]));
+    assert_eq!(
+        js_write["entries"],
+        serde_json::json!(["cross-runtime.mjs", "from-js.txt"])
+    );
 
     execute_inline_python(
         &mut sidecar,
@@ -1058,7 +1061,7 @@ print(json.dumps({
     assert_eq!(python_result["fromJs"], "from js");
     assert_eq!(
         python_result["entries"],
-        serde_json::json!(["from-js.txt", "from-python.txt"])
+        serde_json::json!(["cross-runtime.mjs", "from-js.txt", "from-python.txt"])
     );
 
     execute_javascript_with_env(
@@ -1093,7 +1096,7 @@ print(json.dumps({
     assert_eq!(js_read["fromPython"], "from python");
     assert_eq!(
         js_read["entries"],
-        serde_json::json!(["from-js.txt", "from-python.txt"])
+        serde_json::json!(["cross-runtime.mjs", "from-js.txt", "from-python.txt"])
     );
 }
 

@@ -51,8 +51,7 @@ pub(crate) const VM_DNS_SERVERS_METADATA_KEY: &str = "network.dns.servers";
 pub(crate) const VM_DNS_OVERRIDE_METADATA_PREFIX: &str = "network.dns.override.";
 pub(crate) const VM_LISTEN_PORT_MIN_METADATA_KEY: &str = "network.listen.port_min";
 pub(crate) const VM_LISTEN_PORT_MAX_METADATA_KEY: &str = "network.listen.port_max";
-pub(crate) const VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY: &str =
-    "network.listen.allow_privileged";
+pub(crate) const VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY: &str = "network.listen.allow_privileged";
 pub(crate) const DEFAULT_JAVASCRIPT_NET_BACKLOG: u32 = 511;
 pub(crate) const LOOPBACK_EXEMPT_PORTS_ENV: &str = "AGENT_OS_LOOPBACK_EXEMPT_PORTS";
 
@@ -122,8 +121,7 @@ impl Error for SidecarError {}
 
 pub(crate) struct SharedBridge<B> {
     pub(crate) inner: Arc<Mutex<B>>,
-    pub(crate) permissions:
-        Arc<Mutex<BTreeMap<String, BTreeMap<String, PermissionMode>>>>,
+    pub(crate) permissions: Arc<Mutex<BTreeMap<String, BTreeMap<String, PermissionMode>>>>,
 }
 
 impl<B> Clone for SharedBridge<B> {
@@ -279,6 +277,7 @@ pub(crate) struct ActiveProcess {
     pub(crate) kernel_handle: KernelProcessHandle,
     pub(crate) runtime: GuestRuntimeKind,
     pub(crate) execution: ActiveExecution,
+    pub(crate) host_cwd: PathBuf,
     pub(crate) child_processes: BTreeMap<String, ActiveProcess>,
     pub(crate) next_child_process_id: usize,
     pub(crate) tcp_listeners: BTreeMap<String, ActiveTcpListener>,
@@ -323,7 +322,9 @@ pub(crate) struct PendingTcpSocket {
 pub(crate) enum JavascriptTcpSocketEvent {
     Data(Vec<u8>),
     End,
-    Close { had_error: bool },
+    Close {
+        had_error: bool,
+    },
     Error {
         code: Option<String>,
         message: String,
