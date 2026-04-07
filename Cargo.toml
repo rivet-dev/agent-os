@@ -6,6 +6,7 @@ members = [
     "crates/execution",
     "crates/sidecar",
     "crates/sidecar-browser",
+    "crates/v8-runtime",
 ]
 
 [workspace.package]

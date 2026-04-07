@@ -1,0 +1,21 @@
+{
+  "name": "@secure-exec/v8-linux-arm64-gnu",
+  "version": "0.2.1",
+  "license": "Apache-2.0",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "secure-exec-v8",
+  "files": [
+    "secure-exec-v8",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rivet-dev/secure-exec.git",
+    "directory": "native/v8-runtime/npm/linux-arm64-gnu"
+  }
+}

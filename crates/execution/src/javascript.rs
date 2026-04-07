@@ -14,6 +14,9 @@ use crate::runtime_support::{
     NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
     NODE_SANDBOX_ROOT_ENV,
 };
+use crate::v8_host::{V8RuntimeHost, V8SessionHandle};
+use crate::v8_ipc::BinaryFrame;
+use crate::v8_runtime;
 use nix::fcntl::OFlag;
 use nix::unistd::pipe2;
 use serde::Deserialize;
@@ -218,6 +221,11 @@ pub struct StartJavascriptExecutionRequest {
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: PathBuf,
+    /// Optional inline JavaScript code to execute directly in the V8 isolate.
+    /// When set, this code is passed as user_code instead of generating a
+    /// require() call for the entrypoint. Used by the sidecar to pass
+    /// entrypoint content read from the VFS.
+    pub inline_code: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,6 +352,8 @@ pub struct JavascriptExecution {
     pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
     sync_rpc_responses: Option<JavascriptSyncRpcResponseWriter>,
     _import_cache_guard: Arc<NodeImportCacheCleanup>,
+    /// V8 session handle for sending bridge responses (None for legacy node mode).
+    v8_session: Option<V8SessionHandle>,
 }
 
 impl JavascriptExecution {
@@ -356,6 +366,20 @@ impl JavascriptExecution {
     }
 
     pub fn write_stdin(&mut self, chunk: &[u8]) -> Result<(), JavascriptExecutionError> {
+        // V8 stdin via stream event
+        if let Some(session) = &self.v8_session {
+            // CBOR-encode the stdin data
+            let payload = v8_runtime::json_to_cbor_payload(
+                &Value::String(String::from_utf8_lossy(chunk).into_owned()),
+            )
+            .map_err(|e| JavascriptExecutionError::Stdin(e))?;
+            session
+                .send_stream_event("stdin", payload)
+                .map_err(|e| JavascriptExecutionError::Stdin(e))?;
+            return Ok(());
+        }
+
+        // Legacy node stdin pipe
         let stdin = self
             .stdin
             .as_mut()
@@ -367,6 +391,13 @@ impl JavascriptExecution {
     }
 
     pub fn close_stdin(&mut self) -> Result<(), JavascriptExecutionError> {
+        // V8 stdin end via stream event
+        if let Some(session) = &self.v8_session {
+            let _ = session.send_stream_event("stdin_end", vec![]);
+            return Ok(());
+        }
+
+        // Legacy node stdin pipe
         if let Some(stdin) = self.stdin.take() {
             drop(stdin);
         }
@@ -378,12 +409,6 @@ impl JavascriptExecution {
         id: u64,
         result: Value,
     ) -> Result<(), JavascriptExecutionError> {
-        let Some(writer) = &self.sync_rpc_responses else {
-            return Err(JavascriptExecutionError::RpcResponse(String::from(
-                "no sync RPC channel is active for this JavaScript execution",
-            )));
-        };
-
         match self.clear_pending_sync_rpc(id)? {
             PendingSyncRpcResolution::Pending => {}
             PendingSyncRpcResolution::TimedOut => {
@@ -392,6 +417,22 @@ impl JavascriptExecution {
             PendingSyncRpcResolution::Missing => {}
         }
 
+        // V8 bridge response path
+        if let Some(session) = &self.v8_session {
+            let payload = v8_runtime::json_to_cbor_payload(&result)
+                .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()))?;
+            session
+                .send_bridge_response(id, 0, payload)
+                .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()))?;
+            return Ok(());
+        }
+
+        // Legacy node pipe-based response path
+        let Some(writer) = &self.sync_rpc_responses else {
+            return Err(JavascriptExecutionError::RpcResponse(String::from(
+                "no sync RPC channel is active for this JavaScript execution",
+            )));
+        };
         write_javascript_sync_rpc_response(
             writer,
             json!({
@@ -408,12 +449,6 @@ impl JavascriptExecution {
         code: impl Into<String>,
         message: impl Into<String>,
     ) -> Result<(), JavascriptExecutionError> {
-        let Some(writer) = &self.sync_rpc_responses else {
-            return Err(JavascriptExecutionError::RpcResponse(String::from(
-                "no sync RPC channel is active for this JavaScript execution",
-            )));
-        };
-
         match self.clear_pending_sync_rpc(id)? {
             PendingSyncRpcResolution::Pending => {}
             PendingSyncRpcResolution::TimedOut => {
@@ -422,6 +457,22 @@ impl JavascriptExecution {
             PendingSyncRpcResolution::Missing => {}
         }
 
+        // V8 bridge response path
+        if let Some(session) = &self.v8_session {
+            let error_msg = message.into();
+            let payload = error_msg.into_bytes();
+            session
+                .send_bridge_response(id, 1, payload)
+                .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()))?;
+            return Ok(());
+        }
+
+        // Legacy node pipe-based response path
+        let Some(writer) = &self.sync_rpc_responses else {
+            return Err(JavascriptExecutionError::RpcResponse(String::from(
+                "no sync RPC channel is active for this JavaScript execution",
+            )));
+        };
         write_javascript_sync_rpc_response(
             writer,
             json!({
@@ -528,12 +579,35 @@ impl JavascriptExecution {
     }
 }
 
-#[derive(Debug, Default)]
 pub struct JavascriptExecutionEngine {
     next_context_id: usize,
     next_execution_id: usize,
     contexts: BTreeMap<String, JavascriptContext>,
     import_caches: BTreeMap<String, NodeImportCache>,
+    v8_host: Option<V8RuntimeHost>,
+}
+
+impl Default for JavascriptExecutionEngine {
+    fn default() -> Self {
+        Self {
+            next_context_id: 0,
+            next_execution_id: 0,
+            contexts: BTreeMap::new(),
+            import_caches: BTreeMap::new(),
+            v8_host: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for JavascriptExecutionEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JavascriptExecutionEngine")
+            .field("next_context_id", &self.next_context_id)
+            .field("next_execution_id", &self.next_execution_id)
+            .field("contexts", &self.contexts)
+            .field("v8_host", &self.v8_host.is_some())
+            .finish()
+    }
 }
 
 impl JavascriptExecutionEngine {
@@ -581,92 +655,78 @@ impl JavascriptExecutionEngine {
             return Err(JavascriptExecutionError::EmptyArgv);
         }
 
-        let frozen_time_ms = frozen_time_ms();
-        let warmup_metrics = {
-            let import_cache = self.import_caches.entry(context.vm_id.clone()).or_default();
-            import_cache
-                .ensure_materialized()
-                .map_err(JavascriptExecutionError::PrepareImportCache)?;
-            prewarm_node_import_path(import_cache, &context, &request, frozen_time_ms)?
-        };
+        // Ensure import cache is materialized (still needed for module resolution)
+        let import_cache = self.import_caches.entry(context.vm_id.clone()).or_default();
+        import_cache
+            .ensure_materialized()
+            .map_err(JavascriptExecutionError::PrepareImportCache)?;
+        let import_cache_guard = import_cache.cleanup_guard();
 
         self.next_execution_id += 1;
         let execution_id = format!("exec-{}", self.next_execution_id);
-        let control_channel =
-            create_node_control_channel().map_err(JavascriptExecutionError::Spawn)?;
-        let sync_rpc_channels = Some(create_javascript_sync_rpc_channels()?);
-        let import_cache = self
-            .import_caches
-            .get(&context.vm_id)
-            .expect("vm import cache should exist after materialization");
-        let import_cache_guard = import_cache.cleanup_guard();
         let sync_rpc_timeout = javascript_sync_rpc_timeout(&request);
-        let (mut child, sync_rpc_request_reader, sync_rpc_response_writer) = create_node_child(
-            import_cache,
-            &context,
-            &request,
-            frozen_time_ms,
-            &control_channel.child_writer,
-            sync_rpc_channels,
-        )?;
-        let child_pid = child.id();
 
-        let stdin = child.stdin.take();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(JavascriptExecutionError::MissingChildStream("stdout"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or(JavascriptExecutionError::MissingChildStream("stderr"))?;
-
-        let (sender, receiver) = mpsc::channel();
-        if let Some(metrics) = warmup_metrics {
-            let _ = sender.send(JavascriptProcessEvent::RawStderr(metrics));
+        // Lazily spawn the V8 runtime host
+        if self.v8_host.is_none() {
+            self.v8_host = Some(V8RuntimeHost::spawn().map_err(JavascriptExecutionError::Spawn)?);
         }
+        let v8_host = self.v8_host.as_ref().unwrap();
 
-        let stdout_reader =
-            spawn_stream_reader(stdout, sender.clone(), JavascriptProcessEvent::Stdout);
-        let stderr_reader =
-            spawn_stream_reader(stderr, sender.clone(), JavascriptProcessEvent::RawStderr);
-        if let Some(reader) = sync_rpc_request_reader {
-            let _sync_rpc_reader = spawn_javascript_sync_rpc_reader(reader, sender.clone());
-        }
-        let _control_reader = spawn_node_control_reader(
-            control_channel.parent_reader,
-            sender.clone(),
-            JavascriptProcessEvent::Control,
-            |message| JavascriptProcessEvent::RawStderr(message.into_bytes()),
-        );
-        spawn_waiter(
-            child,
-            stdout_reader,
-            stderr_reader,
-            true,
-            sender,
-            JavascriptProcessEvent::Exited,
-            |message| JavascriptProcessEvent::RawStderr(message.into_bytes()),
+        // Create a V8 session
+        let session_id = format!("v8-{execution_id}");
+        let frame_receiver = v8_host.register_session(&session_id);
+
+        v8_host
+            .send_frame(&BinaryFrame::CreateSession {
+                session_id: session_id.clone(),
+                heap_limit_mb: 0, // no limit for now
+                cpu_time_limit_ms: 0,
+            })
+            .map_err(JavascriptExecutionError::Spawn)?;
+
+        // Build user code: prefer inline code, fall back to entrypoint-based
+        let entrypoint = &request.argv[0];
+        let user_code = request
+            .inline_code
+            .clone()
+            .unwrap_or_else(|| build_v8_user_code(entrypoint, &request.env));
+
+        // Execute bridge code + user code in the V8 isolate
+        v8_host
+            .send_frame(&BinaryFrame::Execute {
+                session_id: session_id.clone(),
+                mode: 0, // exec (CJS)
+                file_path: entrypoint.clone(),
+                bridge_code: V8RuntimeHost::bridge_code().to_owned(),
+                post_restore_script: String::new(),
+                user_code,
+            })
+            .map_err(JavascriptExecutionError::Spawn)?;
+
+        // Create session handle for sending bridge responses
+        let v8_session = V8SessionHandle::new(
+            session_id.clone(),
+            v8_host.writer_handle(),
         );
 
-        let stderr_filter = Arc::new(Mutex::new(LinePrefixFilter::default()));
+        // Spawn V8 event bridge thread that converts BinaryFrame → JavascriptExecutionEvent
         let pending_sync_rpc = Arc::new(Mutex::new(None));
-        let events = spawn_javascript_event_bridge(
-            receiver,
-            stderr_filter,
+        let events = spawn_v8_event_bridge(
+            frame_receiver,
             pending_sync_rpc.clone(),
-            sync_rpc_response_writer.clone(),
             sync_rpc_timeout,
+            v8_session.clone(),
         );
 
         Ok(JavascriptExecution {
             execution_id,
-            child_pid,
-            stdin,
+            child_pid: 0, // V8 isolate has no host PID
+            stdin: None,
             events: RefCell::new(events),
             pending_sync_rpc,
-            sync_rpc_responses: sync_rpc_response_writer,
+            sync_rpc_responses: None,
             _import_cache_guard: import_cache_guard,
+            v8_session: Some(v8_session),
         })
     }
 
@@ -1300,6 +1360,240 @@ fn spawn_javascript_sync_rpc_response_writer(
             }
         }
     })
+}
+
+/// Build the user code wrapper for V8 execution.
+/// This wraps the entrypoint in a way that the V8 bridge can execute it.
+fn build_v8_user_code(entrypoint: &str, env: &BTreeMap<String, String>) -> String {
+    // The bridge code (polyfills) sets up the module system and globals.
+    // User code is executed after the bridge completes.
+    // For file-based entrypoints, we load and execute them through the module system.
+    // For inline code (-e flag), we execute directly.
+    if entrypoint == "-e" || entrypoint == "--eval" {
+        // Inline code from NODE_EVAL or similar
+        env.get("AGENT_OS_NODE_EVAL")
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        // Module entrypoint - use require to load it
+        format!(
+            "require({});",
+            serde_json::to_string(entrypoint).unwrap_or_else(|_| format!("\"{}\"", entrypoint))
+        )
+    }
+}
+
+/// Spawn a V8 event bridge thread that converts V8 BinaryFrame messages
+/// into JavascriptExecutionEvent for the sidecar event loop.
+///
+/// Internal bridge calls (module loading, logging, timers) are handled locally
+/// by the event bridge. Kernel operations (fs, net, child_process, dns) are
+/// forwarded to the sidecar via SyncRpcRequest events.
+fn spawn_v8_event_bridge(
+    frame_receiver: mpsc::Receiver<BinaryFrame>,
+    pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
+    _sync_rpc_timeout: Duration,
+    v8_session: V8SessionHandle,
+) -> UnboundedReceiver<JavascriptExecutionEvent> {
+    let (sender, receiver) = unbounded_channel();
+
+    thread::spawn(move || {
+        while let Ok(frame) = frame_receiver.recv() {
+            let event = match frame {
+                BinaryFrame::BridgeCall {
+                    call_id,
+                    method,
+                    payload,
+                    ..
+                } => {
+                    // Convert CBOR payload to JSON args
+                    let args = v8_runtime::cbor_payload_to_json_args(&payload)
+                        .unwrap_or_default();
+
+                    // Check if this is an internal bridge call we handle locally
+                    if let Some(response) = handle_internal_bridge_call(&method, &args) {
+                        // Respond directly to the V8 isolate
+                        let cbor_payload = v8_runtime::json_to_cbor_payload(&response)
+                            .unwrap_or_default();
+                        let _ = v8_session.send_bridge_response(call_id, 0, cbor_payload);
+                        continue;
+                    }
+
+                    // Handle logging locally (produce stdout/stderr events)
+                    if method == "_log" || method == "_error" {
+                        let msg = args
+                            .iter()
+                            .map(|a| match a {
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let msg_with_newline = format!("{msg}\n");
+                        // Respond to the bridge call
+                        let _ = v8_session.send_bridge_response(
+                            call_id,
+                            0,
+                            v8_runtime::json_to_cbor_payload(&Value::Null).unwrap_or_default(),
+                        );
+                        if method == "_log" {
+                            let _ = sender.send(JavascriptExecutionEvent::Stdout(
+                                msg_with_newline.into_bytes(),
+                            ));
+                        } else {
+                            let _ = sender.send(JavascriptExecutionEvent::Stderr(
+                                msg_with_newline.into_bytes(),
+                            ));
+                        }
+                        continue;
+                    }
+
+                    // Map the bridge method name to the sidecar sync RPC method name
+                    let (sidecar_method, _needs_translation) =
+                        v8_runtime::map_bridge_method(&method);
+
+                    // Track pending sync RPC
+                    if let Ok(mut pending) = pending_sync_rpc.lock() {
+                        *pending = Some(PendingSyncRpcState::Pending(call_id));
+                    }
+
+                    Some(JavascriptExecutionEvent::SyncRpcRequest(
+                        JavascriptSyncRpcRequest {
+                            id: call_id,
+                            method: sidecar_method.to_owned(),
+                            args,
+                        },
+                    ))
+                }
+                BinaryFrame::Log {
+                    channel, message, ..
+                } => {
+                    if channel == 0 {
+                        Some(JavascriptExecutionEvent::Stdout(message.into_bytes()))
+                    } else {
+                        Some(JavascriptExecutionEvent::Stderr(message.into_bytes()))
+                    }
+                }
+                BinaryFrame::ExecutionResult {
+                    exit_code, error, ..
+                } => {
+                    if let Some(err) = &error {
+                        let error_msg = if err.stack.is_empty() {
+                            format!("{}: {}\n", err.error_type, err.message)
+                        } else {
+                            format!("{}\n", err.stack)
+                        };
+                        let _ = sender.send(JavascriptExecutionEvent::Stderr(
+                            error_msg.into_bytes(),
+                        ));
+                    }
+                    Some(JavascriptExecutionEvent::Exited(exit_code))
+                }
+                BinaryFrame::StreamCallback { .. } => None,
+                _ => None,
+            };
+
+            if let Some(event) = event {
+                if sender.send(event).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    receiver
+}
+
+/// Handle internal bridge calls that don't need to go to the sidecar.
+/// Returns Some(response) if handled locally, None if it should be forwarded.
+fn handle_internal_bridge_call(method: &str, args: &[Value]) -> Option<Value> {
+    match method {
+        // Module resolution: simple path joining for relative specifiers
+        "_resolveModule" | "_resolveModuleSync" => {
+            let specifier = args.first().and_then(Value::as_str).unwrap_or("");
+            let parent = args.get(1).and_then(Value::as_str).unwrap_or("/");
+
+            if specifier.starts_with('.') {
+                // Relative path - resolve against parent directory
+                let parent_dir = if parent.contains('/') {
+                    parent.rsplit_once('/').map_or("/", |(dir, _)| dir)
+                } else {
+                    "/"
+                };
+                let resolved = if parent_dir == "/" || parent_dir.is_empty() {
+                    format!("/{}", specifier.trim_start_matches("./"))
+                } else {
+                    format!("{}/{}", parent_dir, specifier.trim_start_matches("./"))
+                };
+                Some(Value::String(resolved))
+            } else if specifier.starts_with('/') {
+                // Absolute path
+                Some(Value::String(specifier.to_owned()))
+            } else {
+                // Bare specifier - return error to indicate not found
+                Some(Value::Null)
+            }
+        }
+
+        // File loading: map to fs.readFileSync by returning the path
+        // (the actual loading is done via fs.readFileSync in the sidecar)
+        "_loadFile" | "_loadFileSync" => None, // Forward to sidecar as fs.readFileSync
+
+        // Polyfill loading: return empty for now
+        "_loadPolyfill" => Some(Value::String(String::new())),
+
+        // Batch module resolution
+        "_batchResolveModules" => {
+            // Return empty results for now
+            Some(json!({}))
+        }
+
+        // Crypto random fill
+        "_cryptoRandomFill" => {
+            let size = args
+                .first()
+                .and_then(Value::as_u64)
+                .unwrap_or(16) as usize;
+            // Simple random bytes using timestamp-based entropy
+            let mut bytes = vec![0u8; size];
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            for (i, byte) in bytes.iter_mut().enumerate() {
+                *byte = ((seed >> (i % 16 * 8)) & 0xFF) as u8 ^ (i as u8);
+            }
+            Some(json!({ "__type": "Buffer", "data": v8_runtime::base64_encode_pub(&bytes) }))
+        }
+
+        // Crypto random UUID
+        "_cryptoRandomUUID" => {
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            Some(Value::String(format!(
+                "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+                (seed >> 96) as u32,
+                (seed >> 80) as u16,
+                (seed >> 64) as u16 & 0x0FFF,
+                ((seed >> 48) as u16 & 0x3FFF) | 0x8000,
+                seed as u64 & 0xFFFFFFFFFFFF,
+            )))
+        }
+
+        // Timer scheduling - respond with timer ID
+        "_scheduleTimer" => Some(json!(0)),
+
+        // Kernel stdin read - return empty
+        "_kernelStdinRead" => Some(Value::Null),
+
+        // PTY raw mode - no-op
+        "_ptySetRawMode" => Some(Value::Null),
+
+        // Not an internal call
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -2,6 +2,10 @@
 Started: Mon Apr  6 01:03:18 PM PDT 2026
 ---
 ## Codebase Patterns
+- V8 binary discovery: `AGENT_OS_V8_RUNTIME_PATH` env var → alongside current exe (+ parent dirs for test deps/) → `target/{release,debug}/agent-os-v8`
+- V8 bridge calls use CBOR codec via `SECURE_EXEC_V8_CODEC=cbor` env var; `ciborium` crate handles CBOR↔JSON conversion in the execution crate
+- Internal V8 bridge calls (logging, module resolution, crypto, timers) are handled in the event bridge thread; only kernel operations (fs, net, child_process, dns) go to the sidecar
+- The sidecar reads entrypoint files from VFS and passes as `inline_code` to avoid V8 module loading bridge calls in synchronous dispatch
 - service.rs type definitions use `pub(crate)` fields when extracted to state.rs so impl blocks in service.rs can still access them
 - service.rs re-exports public types from state.rs via `pub use crate::state::{...}` so lib.rs re-exports continue to work
 - Protocol-level deserialized request types (with `#[derive(Deserialize)]`) belong in protocol.rs
@@ -108,4 +112,29 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - All execution Rust tests pass except pre-existing benchmark failure (PendingSyncRpcRequest — same failure on HEAD)
 - TypeScript integration tests: 5 pass / 4 fail, matching HEAD exactly (pre-existing failures)
 - Files changed: crates/sidecar/src/{stdio,service,execution,filesystem,vm,state,plugins/sandbox_agent}.rs, crates/sidecar/Cargo.toml, crates/sidecar/tests/*.rs, crates/execution/src/{javascript,python,wasm,benchmark}.rs, crates/execution/Cargo.toml, crates/execution/tests/*.rs, Cargo.lock
+---
+
+## 2026-04-07 - US-008a
+- Restored V8 isolate execution engine — guest JavaScript now runs inside V8 isolates managed by the agent-os-v8 binary instead of real host node child processes
+- Added `crates/v8-runtime/` — Rust V8 runtime binary (ported from secure-exec-v8) with session management, bridge function injection, snapshot caching, binary IPC protocol
+- Added `crates/execution/src/v8_ipc.rs` — binary frame codec matching the V8 runtime's wire protocol (length-prefixed frames with message type routing)
+- Added `crates/execution/src/v8_host.rs` — V8 runtime host with session multiplexing: spawns V8 binary, demultiplexes frames via reader thread, manages session channels
+- Added `crates/execution/src/v8_runtime.rs` — bridge call method name mapping (V8 polyfill names → sidecar sync RPC names), CBOR↔JSON conversion for bridge payloads
+- Added `crates/execution/assets/v8-bridge.js` — 18K-line bundled polyfill code compiled from recovered @secure-exec/nodejs bridge modules (fs, network, child-process, process, os, module system)
+- Modified `crates/execution/src/javascript.rs` — `start_execution()` now spawns V8 isolate sessions instead of `Command::new("node")`; bridge calls from V8 converted to `JavascriptSyncRpcRequest` events; internal bridge calls (logging, module resolution, crypto, timers) handled locally in event bridge
+- Modified `crates/sidecar/src/execution.rs` — reads entrypoint files from VFS and passes as `inline_code` to avoid module loading bridge calls during synchronous dispatch
+- Added `StartJavascriptExecutionRequest.inline_code` field for sidecar-provided entrypoint content
+- All execution crate tests pass (35 tests, 0 failures)
+- All sidecar protocol/auth/bridge tests pass
+- cargo check passes for both execution and sidecar crates
+- crash_isolation test hangs: synchronous dispatch model cannot pump V8 bridge calls during execution setup — requires the async event loop to properly interleave bridge call handling
+- Files changed: Cargo.toml, Cargo.lock, crates/v8-runtime/ (new crate, 11 files), crates/execution/{Cargo.toml, src/lib.rs, src/javascript.rs, src/v8_ipc.rs, src/v8_host.rs, src/v8_runtime.rs, src/benchmark.rs, assets/v8-bridge.js}, crates/sidecar/src/execution.rs
+- **Learnings for future iterations:**
+  - V8 binary communicates via Unix domain socket with length-prefixed binary framing; authentication uses constant-time token comparison
+  - CBOR codec mode (`SECURE_EXEC_V8_CODEC=cbor`) avoids V8-native serialization dependency in the execution crate; use `ciborium` for CBOR↔JSON conversion
+  - V8 polyfill bridge code (18K lines) initializes without making any bridge calls — all setup is self-contained JavaScript. Bridge calls only happen when user code invokes kernel operations
+  - The V8 binary must be discoverable at runtime: checks `AGENT_OS_V8_RUNTIME_PATH` env var, alongside current executable (including parent directories for test binaries in `target/debug/deps/`), then `target/{release,debug}/agent-os-v8`
+  - Internal bridge calls (module resolution, logging, crypto random, timers) must be handled locally in the event bridge thread — forwarding them to the sidecar causes deadlocks in synchronous dispatch tests
+  - The sidecar should read entrypoint files from VFS and pass as `inline_code` to avoid module loading bridge calls that require the sidecar's async event loop
+  - The `crash_isolation` test exposes a fundamental limitation: V8 sync bridge calls block the isolate until the host responds, but synchronous `dispatch()` calls can't pump events while blocked
 ---

@@ -923,6 +923,19 @@ where
 
         let execution = match payload.runtime {
             GuestRuntimeKind::JavaScript => {
+                // Read the entrypoint file from the VFS so the V8 isolate
+                // can execute it directly without module loading bridge calls.
+                let entrypoint_path = if payload.entrypoint.starts_with('/') {
+                    payload.entrypoint.clone()
+                } else {
+                    format!("{}/{}", cwd.display(), payload.entrypoint)
+                };
+                let inline_code = vm
+                    .kernel
+                    .read_file(&entrypoint_path)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok());
+
                 let context =
                     self.javascript_engine
                         .create_context(CreateJavascriptContextRequest {
@@ -940,6 +953,7 @@ where
                             .collect(),
                         env: env.clone(),
                         cwd: cwd.clone(),
+                        inline_code,
                     })
                     .map_err(javascript_error)?;
                 ActiveExecution::Javascript(execution)
@@ -1588,6 +1602,18 @@ where
                             bootstrap_module: None,
                             compile_cache_root: Some(self.cache_root.join("node-compile-cache")),
                         });
+                // Read entrypoint from VFS for inline V8 execution
+                let entrypoint_path = if resolved.entrypoint.starts_with('/') {
+                    resolved.entrypoint.clone()
+                } else {
+                    format!("{}/{}", resolved.host_cwd.display(), resolved.entrypoint)
+                };
+                let inline_code = vm
+                    .kernel
+                    .read_file(&entrypoint_path)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok());
+
                 let execution = self
                     .javascript_engine
                     .start_execution(StartJavascriptExecutionRequest {
@@ -1598,6 +1624,7 @@ where
                             .collect(),
                         env: execution_env,
                         cwd: resolved.host_cwd.clone(),
+                        inline_code,
                     })
                     .map_err(javascript_error)?;
                 ActiveExecution::Javascript(execution)

@@ -6,8 +6,12 @@ mod common;
 mod node_import_cache;
 mod node_process;
 mod runtime_support;
+pub mod v8_host;
+pub mod v8_ipc;
+pub mod v8_runtime;
 
 pub mod benchmark;
+#[allow(dead_code, unused_imports)]
 pub mod javascript;
 pub mod python;
 pub mod wasm;

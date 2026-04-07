@@ -1,0 +1,19 @@
+# Build base pinned to Debian Bullseye (glibc 2.31) for portability.
+# See docs-internal/arch/glibc-portability.md
+FROM rust:1.85.0-bullseye AS builder
+WORKDIR /build
+COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --target x86_64-unknown-linux-gnu
+COPY src/ src/
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    touch src/main.rs && \
+    cargo build --release --target x86_64-unknown-linux-gnu && \
+    cp target/x86_64-unknown-linux-gnu/release/secure-exec-v8 /secure-exec-v8
+FROM scratch
+COPY --from=builder /secure-exec-v8 /secure-exec-v8

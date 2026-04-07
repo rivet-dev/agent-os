@@ -2547,6 +2547,7 @@ fn run_native_sample(
         argv: vec![String::from(scenario.entrypoint)],
         env: scenario_env(workspace, scenario),
         cwd: workspace.root.clone(),
+        inline_code: None,
     })?;
     let startup_ms = startup_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -2668,6 +2669,7 @@ fn measure_transport_rtt(
         argv: vec![String::from("./bench/transport-echo.mjs")],
         env: BTreeMap::from([(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"))]),
         cwd: workspace.root.clone(),
+        inline_code: None,
     })?;
 
     let mut stdout_buffer = String::new();
