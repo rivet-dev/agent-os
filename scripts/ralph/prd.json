@@ -782,7 +782,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 pty passes"
       ],
       "priority": 18,
-      "passes": false,
+      "passes": true,
       "notes": "1 method. Currently a no-op stub in LocalBridgeState (javascript.rs:1992). The kernel already has PTY management with line discipline \u2014 this just needs to toggle it. Mapped to __pty_set_raw_mode in v8_runtime.rs."
     },
     {

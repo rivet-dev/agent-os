@@ -282,3 +282,11 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - The right sidecar target for PTY discipline changes is the guest process fd `0`; tests can exercise that path by opening a PTY, duping the slave onto stdin, and asserting with `tcgetattr`
   - `cargo test -p agent-os-sidecar -- --test-threads=1 pty` is a stable focused verification command for PTY line-discipline work and currently also exercises the Python stdin EOF regression
 ---
+## 2026-04-07 09:43:13 PDT - US-039
+- Verified the landed PTY raw-mode implementation against the story acceptance criteria and corrected the PRD status to match the code already on this branch
+- Re-ran the focused checks: `cargo check -p agent-os-sidecar` and `cargo test -p agent-os-sidecar -- --test-threads=1 pty`
+- Files changed: `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - When a story’s code has already landed but the PRD status is stale, re-run the story’s scoped acceptance commands before flipping `passes` so the bookkeeping stays trustworthy
+  - For PTY raw-mode changes on this branch, `cargo test -p agent-os-sidecar -- --test-threads=1 pty` is the focused acceptance command to use before broader test sweeps
+---
