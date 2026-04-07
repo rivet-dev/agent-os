@@ -5,8 +5,8 @@ The Rust sidecar implements the kernel: virtual filesystem, process table, socke
 The kernel orchestrates three execution environments:
 
 - **WASM processes** -- POSIX utilities (coreutils, sh, grep, etc.) compiled to WebAssembly, running within the sidecar's managed runtime.
-- **Node.js** -- JS/TS in child processes with ESM loader hooks intercepting `require()`/`import` for builtins. Every builtin must be a kernel-backed polyfill. See `crates/execution/CLAUDE.md`.
-- **Python (Pyodide)** -- CPython compiled to WASM via Pyodide, with kernel-backed file/network I/O.
+- **Node.js** -- JS/TS runs in real host Node.js child processes with ESM loader hooks and CJS `Module._load` patches intercepting every `require()`/`import`. Intercepted builtins are replaced with kernel-backed polyfills that communicate with the sidecar via a synchronous RPC channel (SharedArrayBuffer + `Atomics.wait`). The loader template is generated at runtime by `crates/execution/src/node_import_cache.rs`. **Current state is deficient** -- many builtins still fall through to real host modules. See `crates/execution/CLAUDE.md` for the gap table and polyfill rules.
+- **Python (Pyodide)** -- CPython compiled to WASM via Pyodide, running in a Node.js worker thread with kernel-backed file/network I/O via the same sync RPC bridge.
 
 All runtimes are managed by the sidecar's execution engines and kernel process table. Guest code must never escape the sidecar's isolation boundary to run on the host.
 
