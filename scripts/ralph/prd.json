@@ -17,7 +17,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "Step 0a \u2014 first extraction. Read .agent/specs/typescript-to-rust-migration.md 'Step 0a: Split service.rs'. IMPORTANT: protocol.rs already exists at crates/sidecar/src/protocol.rs (1,353 lines). Do NOT recreate it \u2014 only move remaining protocol-related types from service.rs into it. Extract state types first because all domain modules depend on them."
     },
     {
@@ -258,7 +258,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 23,
-      "passes": true,
+      "passes": false,
       "notes": "Step 2 (Rust side, part 2). Depends on US-009 (bidirectional frames). See spec 'JS-Bridge Mounts' section. This is the same async callback pattern used by tool invocations \u2014 sidecar pushes request, holds, TypeScript runs callback, returns result."
     },
     {
@@ -630,7 +630,7 @@
         "cargo check -p agent-os-sidecar passes"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "CRITICAL \u2014 setTimeout/setInterval are broken, which breaks all async guest code. The _scheduleTimer bridge function is async (in ASYNC_BRIDGE_FNS). The LocalBridgeState already handles kernelTimerCreate/kernelTimerArm/kernelTimerClear via _loadPolyfill dispatch. The gap is that _scheduleTimer itself returns 0 immediately and never fires. Need to wire timer state between the local bridge (which tracks timer IDs) and the async event bridge (which can schedule delayed events). The V8 session event loop already handles StreamCallback messages \u2014 use that for timer delivery."
     },
     {
