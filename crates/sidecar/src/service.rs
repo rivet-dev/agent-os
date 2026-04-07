@@ -1,4 +1,14 @@
 use crate::bridge::{build_mount_plugin_registry, MountPluginContext};
+use crate::acp::compat::{
+    is_cancel_method_not_found, maybe_normalize_permission_response,
+    normalize_inbound_permission_request, summarize_inbound_notification,
+    summarize_inbound_request, summarize_inbound_response, to_record, ACP_CANCEL_METHOD,
+};
+use crate::acp::{
+    deserialize_message, serialize_message, JsonRpcError, JsonRpcId, JsonRpcMessage,
+    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
+};
+use crate::acp::session::AcpSessionState;
 pub(crate) use crate::execution::{
     build_javascript_socket_path_context, error_code, format_dns_resource, format_tcp_resource,
     ignore_stale_javascript_sync_rpc_response, javascript_sync_rpc_arg_str,
@@ -16,21 +26,24 @@ use crate::filesystem::{
     service_javascript_fs_sync_rpc,
 };
 use crate::protocol::{
-    AuthenticatedResponse, BoundUdpSnapshotResponse, CloseStdinRequest, DisposeReason, EventFrame,
+    AgentSessionClosedResponse, AuthenticatedResponse, BoundUdpSnapshotResponse,
+    CloseAgentSessionRequest, CloseStdinRequest, CreateSessionRequest, DisposeReason, EventFrame,
     EventPayload, ExecuteRequest, FindBoundUdpRequest, FindListenerRequest, FsPermissionScope,
-    GetSignalStateRequest, GetZombieTimerCountRequest, GuestFilesystemCallRequest,
-    GuestRuntimeKind, JavascriptChildProcessSpawnOptions, JavascriptChildProcessSpawnRequest,
-    JavascriptDgramBindRequest, JavascriptDgramCreateSocketRequest, JavascriptDgramSendRequest,
-    JavascriptDnsLookupRequest, JavascriptDnsResolveRequest, JavascriptNetConnectRequest,
-    JavascriptNetListenRequest, KillProcessRequest, ListenerSnapshotResponse, OpenSessionRequest,
-    OwnershipScope, PatternPermissionRule, PatternPermissionScope, PermissionMode,
-    PermissionsPolicy, ProcessExitedEvent, ProcessKilledResponse, ProcessOutputEvent,
-    ProcessStartedResponse, ProtocolSchema, RejectedResponse, RequestFrame, RequestId,
-    RequestPayload, ResponseFrame, ResponsePayload, SessionOpenedResponse, SidecarRequestFrame,
-    SidecarRequestPayload, SidecarResponseFrame, SidecarResponsePayload, SidecarResponseTracker,
-    SidecarResponseTrackerError, SignalDispositionAction, SignalHandlerRegistration,
-    SignalStateResponse, SocketStateEntry, StdinClosedResponse, StdinWrittenResponse,
-    StreamChannel, VmLifecycleEvent, VmLifecycleState, WasmPermissionTier, WriteStdinRequest,
+    GetSessionStateRequest, GetSignalStateRequest, GetZombieTimerCountRequest,
+    GuestFilesystemCallRequest, GuestRuntimeKind, JavascriptChildProcessSpawnOptions,
+    JavascriptChildProcessSpawnRequest, JavascriptDgramBindRequest,
+    JavascriptDgramCreateSocketRequest, JavascriptDgramSendRequest, JavascriptDnsLookupRequest,
+    JavascriptDnsResolveRequest, JavascriptNetConnectRequest, JavascriptNetListenRequest,
+    KillProcessRequest, ListenerSnapshotResponse, OpenSessionRequest, OwnershipScope,
+    PatternPermissionRule, PatternPermissionScope, PermissionMode, PermissionsPolicy,
+    ProcessExitedEvent, ProcessKilledResponse, ProcessOutputEvent, ProcessStartedResponse,
+    ProtocolSchema, RejectedResponse, RequestFrame, RequestId, RequestPayload, ResponseFrame,
+    ResponsePayload, SessionOpenedResponse, SessionRequest as AgentSessionRequest,
+    SessionRpcResponse, SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame,
+    SidecarResponsePayload, SidecarResponseTracker, SidecarResponseTrackerError,
+    SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse, SocketStateEntry,
+    StdinClosedResponse, StdinWrittenResponse, StreamChannel, StructuredEvent,
+    VmLifecycleEvent, VmLifecycleState, WasmPermissionTier, WriteStdinRequest,
     ZombieTimerCountResponse,
 };
 use crate::state::{
@@ -85,8 +98,7 @@ use nix::sys::signal::{kill as send_signal, Signal};
 use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use serde::Deserialize;
-use serde_json::json;
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::fs;
@@ -702,10 +714,13 @@ pub struct NativeSidecar<B> {
     pub(crate) next_connection_id: usize,
     pub(crate) next_session_id: usize,
     pub(crate) next_vm_id: usize,
+    pub(crate) next_agent_process_id: usize,
     pub(crate) next_sidecar_request_id: RequestId,
     pub(crate) connections: BTreeMap<String, ConnectionState>,
     pub(crate) sessions: BTreeMap<String, SessionState>,
     pub(crate) vms: BTreeMap<String, VmState>,
+    pub(crate) acp_sessions: BTreeMap<String, AcpSessionState>,
+    pub(crate) acp_process_stdout_buffers: BTreeMap<String, String>,
     pub(crate) process_event_sender: UnboundedSender<ProcessEventEnvelope>,
     pub(crate) process_event_receiver: Option<UnboundedReceiver<ProcessEventEnvelope>>,
     pub(crate) pending_process_events: VecDeque<ProcessEventEnvelope>,
@@ -723,9 +738,15 @@ impl<B> fmt::Debug for NativeSidecar<B> {
             .field("next_connection_id", &self.next_connection_id)
             .field("next_session_id", &self.next_session_id)
             .field("next_vm_id", &self.next_vm_id)
+            .field("next_agent_process_id", &self.next_agent_process_id)
             .field("connection_count", &self.connections.len())
             .field("session_count", &self.sessions.len())
             .field("vm_count", &self.vms.len())
+            .field("acp_session_count", &self.acp_sessions.len())
+            .field(
+                "acp_process_stdout_buffer_count",
+                &self.acp_process_stdout_buffers.len(),
+            )
             .finish()
     }
 }
@@ -775,10 +796,13 @@ where
             next_connection_id: 0,
             next_session_id: 0,
             next_vm_id: 0,
+            next_agent_process_id: 0,
             next_sidecar_request_id: -1,
             connections: BTreeMap::new(),
             sessions: BTreeMap::new(),
             vms: BTreeMap::new(),
+            acp_sessions: BTreeMap::new(),
+            acp_process_stdout_buffers: BTreeMap::new(),
             process_event_sender,
             process_event_receiver: Some(process_event_receiver),
             pending_process_events: VecDeque::new(),
@@ -926,6 +950,16 @@ where
             }
             RequestPayload::OpenSession(payload) => self.open_session(&request, payload).await,
             RequestPayload::CreateVm(payload) => self.create_vm(&request, payload).await,
+            RequestPayload::CreateSession(payload) => self.create_session(&request, payload).await,
+            RequestPayload::SessionRequest(payload) => {
+                self.session_request(&request, payload).await
+            }
+            RequestPayload::GetSessionState(payload) => {
+                self.get_session_state(&request, payload).await
+            }
+            RequestPayload::CloseAgentSession(payload) => {
+                self.close_agent_session(&request, payload).await
+            }
             RequestPayload::DisposeVm(payload) => self.dispose_vm(&request, payload).await,
             RequestPayload::BootstrapRootFilesystem(payload) => {
                 self.bootstrap_root_filesystem(&request, payload.entries)
@@ -1201,6 +1235,331 @@ where
                 ResponsePayload::SessionOpened(SessionOpenedResponse {
                     session_id,
                     owner_connection_id: connection_id,
+                }),
+            ),
+            events: Vec::new(),
+        })
+    }
+
+    async fn create_session(
+        &mut self,
+        request: &RequestFrame,
+        payload: CreateSessionRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
+        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+
+        self.next_agent_process_id += 1;
+        let process_id = format!("acp-agent-{}", self.next_agent_process_id);
+        let mut env = payload.env.clone();
+        env.insert(
+            String::from("AGENT_OS_KEEP_STDIN_OPEN"),
+            String::from("1"),
+        );
+        let execute_result = self
+            .execute(
+                request,
+                ExecuteRequest {
+                    process_id: process_id.clone(),
+                    command: None,
+                    runtime: Some(payload.runtime.clone()),
+                    entrypoint: Some(payload.adapter_entrypoint.clone()),
+                    args: payload.args.clone(),
+                    env,
+                    cwd: Some(payload.cwd.clone()),
+                    wasm_permission_tier: None,
+                },
+            )
+            .await?;
+        let mut events = execute_result.events;
+
+        let initialize = JsonRpcRequest {
+            jsonrpc: String::from("2.0"),
+            id: JsonRpcId::Number(1),
+            method: String::from("initialize"),
+            params: Some(json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {
+                    "fs": {
+                        "readTextFile": true,
+                        "writeTextFile": true,
+                    },
+                    "terminal": true,
+                }
+            })),
+        };
+        let initialize_response = match self.send_acp_request_and_collect(
+            &vm_id,
+            &process_id,
+            &payload.agent_type,
+            None,
+            initialize,
+        ) {
+            Ok((response, response_events)) => {
+                events.extend(response_events);
+                response
+            }
+            Err(error) => {
+                self.kill_acp_process(&vm_id, &process_id);
+                return Err(error);
+            }
+        };
+        if let Some(error) = &initialize_response.error {
+            self.kill_acp_process(&vm_id, &process_id);
+            return Err(SidecarError::InvalidState(format!(
+                "ACP initialize failed: {}",
+                error.message
+            )));
+        }
+        let init_result = to_record(initialize_response.result);
+
+        let session_new = JsonRpcRequest {
+            jsonrpc: String::from("2.0"),
+            id: JsonRpcId::Number(2),
+            method: String::from("session/new"),
+            params: Some(json!({
+                "cwd": payload.cwd,
+                "mcpServers": payload.mcp_servers,
+            })),
+        };
+        let session_response = match self.send_acp_request_and_collect(
+            &vm_id,
+            &process_id,
+            &payload.agent_type,
+            None,
+            session_new,
+        ) {
+            Ok((response, response_events)) => {
+                events.extend(response_events);
+                response
+            }
+            Err(error) => {
+                self.kill_acp_process(&vm_id, &process_id);
+                return Err(error);
+            }
+        };
+        if let Some(error) = &session_response.error {
+            self.kill_acp_process(&vm_id, &process_id);
+            return Err(SidecarError::InvalidState(format!(
+                "ACP session/new failed: {}",
+                error.message
+            )));
+        }
+        let session_result = to_record(session_response.result);
+        let acp_session_id = session_result
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                SidecarError::InvalidState(String::from(
+                    "ACP session/new response missing sessionId",
+                ))
+            })?
+            .to_owned();
+
+        let mut session = AcpSessionState::new(
+            acp_session_id.clone(),
+            vm_id.clone(),
+            payload.agent_type,
+            process_id,
+            &init_result,
+            &session_result,
+        );
+        if let Some(buffer) = self.acp_process_stdout_buffers.remove(&session.process_id) {
+            session.stdout_buffer = buffer;
+        }
+        let created = session.created_response();
+        self.acp_sessions.insert(acp_session_id, session);
+
+        Ok(DispatchResult {
+            response: self.respond(request, ResponsePayload::SessionCreated(created)),
+            events,
+        })
+    }
+
+    async fn session_request(
+        &mut self,
+        request: &RequestFrame,
+        payload: AgentSessionRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
+        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+
+        let (process_id, agent_type) = {
+            let session = self.require_acp_session(&payload.session_id, &vm_id)?;
+            (session.process_id.clone(), session.agent_type.clone())
+        };
+
+        let normalized = {
+            let session = self
+                .acp_sessions
+                .get_mut(&payload.session_id)
+                .expect("ACP session should exist");
+            maybe_normalize_permission_response(
+                &payload.method,
+                payload.params.clone(),
+                &mut session.pending_permission_requests,
+            )
+        };
+        if let Some((response_id, result)) = normalized {
+            let response = JsonRpcResponse {
+                jsonrpc: String::from("2.0"),
+                id: response_id.clone(),
+                result: Some(result.clone()),
+                error: None,
+            };
+            self.write_json_rpc_message(
+                &vm_id,
+                &process_id,
+                JsonRpcMessage::Response(response.clone()),
+            )?;
+            return Ok(DispatchResult {
+                response: self.respond(
+                    request,
+                    ResponsePayload::SessionRpc(SessionRpcResponse {
+                        session_id: payload.session_id,
+                        response: serde_json::to_value(response)
+                            .expect("serialize ACP permission response"),
+                    }),
+                ),
+                events: Vec::new(),
+            });
+        }
+
+        let event_count_before = self
+            .acp_sessions
+            .get(&payload.session_id)
+            .expect("ACP session should exist")
+            .events
+            .len();
+        let rpc_id = {
+            let session = self
+                .acp_sessions
+                .get_mut(&payload.session_id)
+                .expect("ACP session should exist");
+            let rpc_id = session.next_request_id;
+            session.next_request_id += 1;
+            session.record_activity(format!(
+                "sent request {} id={}",
+                payload.method, rpc_id
+            ));
+            rpc_id
+        };
+        let merged_params = {
+            let mut params = to_record(payload.params.clone());
+            params.insert(
+                String::from("sessionId"),
+                Value::String(payload.session_id.clone()),
+            );
+            params
+        };
+        let outbound = JsonRpcRequest {
+            jsonrpc: String::from("2.0"),
+            id: JsonRpcId::Number(rpc_id),
+            method: payload.method.clone(),
+            params: Some(Value::Object(merged_params.clone())),
+        };
+
+        let (mut response, mut events) = self.send_acp_request_and_collect(
+            &vm_id,
+            &process_id,
+            &agent_type,
+            Some(&payload.session_id),
+            outbound,
+        )?;
+        if payload.method == ACP_CANCEL_METHOD && is_cancel_method_not_found(&response) {
+            let notification = JsonRpcNotification {
+                jsonrpc: String::from("2.0"),
+                method: payload.method.clone(),
+                params: Some(Value::Object(merged_params.clone())),
+            };
+            self.write_json_rpc_message(
+                &vm_id,
+                &process_id,
+                JsonRpcMessage::Notification(notification),
+            )?;
+            response = JsonRpcResponse {
+                jsonrpc: String::from("2.0"),
+                id: response.id,
+                result: Some(json!({
+                    "cancelled": false,
+                    "requested": true,
+                    "via": "notification-fallback",
+                })),
+                error: None,
+            };
+        }
+        if response.error.is_none() {
+            let synthetic = {
+                let session = self
+                    .acp_sessions
+                    .get_mut(&payload.session_id)
+                    .expect("ACP session should exist");
+                session.apply_request_success(
+                    &payload.method,
+                    &merged_params,
+                    event_count_before,
+                )
+            };
+            if let Some(notification) = synthetic {
+                events.push(self.build_acp_event_frame(
+                    &request.ownership,
+                    &payload.session_id,
+                    self.acp_sessions
+                        .get(&payload.session_id)
+                        .expect("ACP session should exist")
+                        .next_sequence_number
+                        - 1,
+                    &notification,
+                )?);
+            }
+        }
+
+        Ok(DispatchResult {
+            response: self.respond(
+                request,
+                ResponsePayload::SessionRpc(SessionRpcResponse {
+                    session_id: payload.session_id,
+                    response: serde_json::to_value(response)
+                        .expect("serialize ACP JSON-RPC response"),
+                }),
+            ),
+            events,
+        })
+    }
+
+    async fn get_session_state(
+        &mut self,
+        request: &RequestFrame,
+        payload: GetSessionStateRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        let (_, _, vm_id) = self.vm_scope_for(&request.ownership)?;
+        let session = self.require_acp_session(&payload.session_id, &vm_id)?;
+        Ok(DispatchResult {
+            response: self.respond(
+                request,
+                ResponsePayload::SessionState(session.state_response()),
+            ),
+            events: Vec::new(),
+        })
+    }
+
+    async fn close_agent_session(
+        &mut self,
+        request: &RequestFrame,
+        payload: CloseAgentSessionRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        let (_, _, vm_id) = self.vm_scope_for(&request.ownership)?;
+        let process_id = self
+            .require_acp_session(&payload.session_id, &vm_id)?
+            .process_id
+            .clone();
+        self.kill_acp_process(&vm_id, &process_id);
+        self.acp_sessions.remove(&payload.session_id);
+        Ok(DispatchResult {
+            response: self.respond(
+                request,
+                ResponsePayload::AgentSessionClosed(AgentSessionClosedResponse {
+                    session_id: payload.session_id,
                 }),
             ),
             events: Vec::new(),
@@ -1493,6 +1852,361 @@ where
     fn allocate_connection_id(&mut self) -> String {
         self.next_connection_id += 1;
         format!("conn-{}", self.next_connection_id)
+    }
+
+    fn require_acp_session(
+        &self,
+        acp_session_id: &str,
+        vm_id: &str,
+    ) -> Result<&AcpSessionState, SidecarError> {
+        let session = self.acp_sessions.get(acp_session_id).ok_or_else(|| {
+            SidecarError::InvalidState(format!("unknown ACP session {acp_session_id}"))
+        })?;
+        if session.vm_id == vm_id {
+            Ok(session)
+        } else {
+            Err(SidecarError::InvalidState(format!(
+                "ACP session {acp_session_id} is not owned by VM {vm_id}"
+            )))
+        }
+    }
+
+    fn build_acp_event_frame(
+        &self,
+        ownership: &OwnershipScope,
+        session_id: &str,
+        sequence_number: u64,
+        notification: &JsonRpcNotification,
+    ) -> Result<EventFrame, SidecarError> {
+        Ok(EventFrame::new(
+            ownership.clone(),
+            EventPayload::Structured(StructuredEvent {
+                name: String::from("acp.session_event"),
+                detail: BTreeMap::from([
+                    (String::from("session_id"), String::from(session_id)),
+                    (
+                        String::from("sequence_number"),
+                        sequence_number.to_string(),
+                    ),
+                    (
+                        String::from("method"),
+                        notification.method.clone(),
+                    ),
+                    (
+                        String::from("notification"),
+                        serde_json::to_string(notification).map_err(|error| {
+                            SidecarError::InvalidState(format!(
+                                "failed to serialize ACP notification: {error}"
+                            ))
+                        })?,
+                    ),
+                ]),
+            }),
+        ))
+    }
+
+    fn write_json_rpc_message(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        message: JsonRpcMessage,
+    ) -> Result<(), SidecarError> {
+        let encoded = serialize_message(&message).map_err(|error| {
+            SidecarError::InvalidState(format!("failed to serialize ACP frame: {error}"))
+        })?;
+        let vm = self
+            .vms
+            .get_mut(vm_id)
+            .ok_or_else(|| SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}")))?;
+        let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
+            SidecarError::InvalidState(format!("VM {vm_id} has no active process {process_id}"))
+        })?;
+        process.execution.write_stdin(encoded.as_bytes())
+    }
+
+    fn kill_acp_process(&mut self, vm_id: &str, process_id: &str) {
+        let _ = self.kill_process_internal(vm_id, process_id, "SIGKILL");
+        self.acp_process_stdout_buffers.remove(process_id);
+        if let Some(vm) = self.vms.get_mut(vm_id) {
+            vm.active_processes.remove(process_id);
+            vm.signal_states.remove(process_id);
+        }
+    }
+
+    fn session_timeout_error(
+        session: &AcpSessionState,
+        method: &str,
+        id: &JsonRpcId,
+    ) -> SidecarError {
+        let activity = if session.recent_activity.is_empty() {
+            String::from("no recent ACP activity")
+        } else {
+            session
+                .recent_activity
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        SidecarError::InvalidState(format!(
+            "ACP request {method} (id={id}) timed out after 120000ms. process exitCode={:?}. Recent ACP activity: {activity}",
+            session.exit_code
+        ))
+    }
+
+    fn send_acp_request_and_collect(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        agent_type: &str,
+        session_id: Option<&str>,
+        request: JsonRpcRequest,
+    ) -> Result<(JsonRpcResponse, Vec<EventFrame>), SidecarError> {
+        self.write_json_rpc_message(vm_id, process_id, JsonRpcMessage::Request(request.clone()))?;
+
+        let ownership = self.vm_ownership(vm_id)?;
+        let deadline = Instant::now() + Duration::from_millis(120_000);
+        let mut events = Vec::new();
+
+        loop {
+            let event = {
+                let vm = self
+                    .vms
+                    .get_mut(vm_id)
+                    .ok_or_else(|| SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}")))?;
+                let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!(
+                        "VM {vm_id} has no active process {process_id}"
+                    ))
+                })?;
+                process
+                    .execution
+                    .poll_event_blocking(Duration::from_millis(10))?
+            };
+
+            if let Some(event) = event {
+                if let Some(response) = self.handle_acp_process_event(
+                    vm_id,
+                    process_id,
+                    session_id,
+                    &ownership,
+                    event,
+                    &mut events,
+                )? {
+                    if response.id == request.id {
+                        return Ok((response, events));
+                    }
+                }
+            }
+
+            if Instant::now() >= deadline {
+                let session = session_id
+                    .and_then(|session_id| self.acp_sessions.get(session_id))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        AcpSessionState::new(
+                            String::new(),
+                            String::from(vm_id),
+                            String::from(agent_type),
+                            String::from(process_id),
+                            &Map::new(),
+                            &Map::new(),
+                        )
+                    });
+                return Err(Self::session_timeout_error(&session, &request.method, &request.id));
+            }
+        }
+    }
+
+    fn handle_acp_process_event(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        session_id: Option<&str>,
+        ownership: &OwnershipScope,
+        event: ActiveExecutionEvent,
+        events: &mut Vec<EventFrame>,
+    ) -> Result<Option<JsonRpcResponse>, SidecarError> {
+        match event {
+            ActiveExecutionEvent::Stdout(chunk) => {
+                let mut matched_response = None;
+                let chunk = String::from_utf8_lossy(&chunk);
+                let buffer = if let Some(session_id) = session_id {
+                    self.acp_sessions
+                        .get_mut(session_id)
+                        .map(|session| {
+                            session.stdout_buffer.push_str(&chunk);
+                            std::mem::take(&mut session.stdout_buffer)
+                        })
+                        .unwrap_or_else(|| chunk.into_owned())
+                } else {
+                    let buffer = self
+                        .acp_process_stdout_buffers
+                        .entry(String::from(process_id))
+                        .or_default();
+                    buffer.push_str(&chunk);
+                    std::mem::take(buffer)
+                };
+                let mut pending = buffer;
+                while let Some(index) = pending.find('\n') {
+                    let line = pending[..index].trim().to_owned();
+                    pending = pending[index + 1..].to_owned();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let Some(message) = deserialize_message(&line) else {
+                        if let Some(session_id) = session_id {
+                            if let Some(session) = self.acp_sessions.get_mut(session_id) {
+                                session.record_activity(format!("non_json {}", line));
+                            }
+                        }
+                        continue;
+                    };
+                    match message {
+                        JsonRpcMessage::Response(response) => {
+                            if let Some(session_id) = session_id {
+                                if let Some(session) = self.acp_sessions.get_mut(session_id) {
+                                    session.record_activity(summarize_inbound_response(&response));
+                                }
+                            }
+                            matched_response = Some(response);
+                        }
+                        JsonRpcMessage::Notification(notification) => {
+                            if let Some(session_id) = session_id {
+                                let sequence_number = {
+                                    let session = self
+                                        .acp_sessions
+                                        .get_mut(session_id)
+                                        .expect("ACP session should exist");
+                                    session.record_activity(summarize_inbound_notification(
+                                        &notification,
+                                    ));
+                                    let sequence_number = session.next_sequence_number;
+                                    session.record_notification(notification.clone());
+                                    sequence_number
+                                };
+                                events.push(self.build_acp_event_frame(
+                                    ownership,
+                                    session_id,
+                                    sequence_number,
+                                    &notification,
+                                )?);
+                            }
+                        }
+                        JsonRpcMessage::Request(request) => {
+                            if let Some(session_id) = session_id {
+                                let (normalized, duplicate) = {
+                                    let session = self
+                                        .acp_sessions
+                                        .get_mut(session_id)
+                                        .expect("ACP session should exist");
+                                    session.record_activity(summarize_inbound_request(&request));
+                                    let duplicate =
+                                        session.seen_inbound_request_ids.contains(&request.id);
+                                    let normalized = normalize_inbound_permission_request(
+                                        &request,
+                                        &mut session.seen_inbound_request_ids,
+                                        &mut session.pending_permission_requests,
+                                    );
+                                    if normalized.is_none() && !duplicate {
+                                        session
+                                            .seen_inbound_request_ids
+                                            .insert(request.id.clone());
+                                    }
+                                    (normalized, duplicate)
+                                };
+                                if let Some(notification) = normalized {
+                                    let sequence_number = {
+                                        let session = self
+                                            .acp_sessions
+                                            .get_mut(session_id)
+                                            .expect("ACP session should exist");
+                                        let sequence_number = session.next_sequence_number;
+                                        session.record_notification(notification.clone());
+                                        sequence_number
+                                    };
+                                    events.push(self.build_acp_event_frame(
+                                        ownership,
+                                        session_id,
+                                        sequence_number,
+                                        &notification,
+                                    )?);
+                                } else if !duplicate {
+                                    self.write_json_rpc_message(
+                                        vm_id,
+                                        process_id,
+                                        JsonRpcMessage::Response(JsonRpcResponse {
+                                            jsonrpc: String::from("2.0"),
+                                            id: request.id,
+                                            result: None,
+                                            error: Some(JsonRpcError {
+                                                code: -32601,
+                                                message: format!(
+                                                    "Method not found: {}",
+                                                    request.method
+                                                ),
+                                                data: None,
+                                            }),
+                                        }),
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(session_id) = session_id {
+                    if let Some(session) = self.acp_sessions.get_mut(session_id) {
+                        session.stdout_buffer = pending;
+                    }
+                } else {
+                    self.acp_process_stdout_buffers
+                        .insert(String::from(process_id), pending);
+                }
+                Ok(matched_response)
+            }
+            ActiveExecutionEvent::Stderr(chunk) => {
+                if let Some(session_id) = session_id {
+                    if let Some(session) = self.acp_sessions.get_mut(session_id) {
+                        session.record_activity(format!(
+                            "stderr {}",
+                            String::from_utf8_lossy(&chunk)
+                        ));
+                    }
+                }
+                Ok(None)
+            }
+            ActiveExecutionEvent::JavascriptSyncRpcRequest(request) => {
+                self.handle_javascript_sync_rpc_request(vm_id, process_id, request)?;
+                Ok(None)
+            }
+            ActiveExecutionEvent::PythonVfsRpcRequest(request) => {
+                self.handle_python_vfs_rpc_request(vm_id, process_id, request)?;
+                Ok(None)
+            }
+            ActiveExecutionEvent::SignalState {
+                signal,
+                registration,
+            } => {
+                let vm = self
+                    .vms
+                    .get_mut(vm_id)
+                    .ok_or_else(|| SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}")))?;
+                vm.signal_states
+                    .entry(String::from(process_id))
+                    .or_default()
+                    .insert(signal, registration);
+                Ok(None)
+            }
+            ActiveExecutionEvent::Exited(exit_code) => {
+                if let Some(session_id) = session_id {
+                    if let Some(session) = self.acp_sessions.get_mut(session_id) {
+                        session.closed = true;
+                        session.exit_code = Some(exit_code);
+                    }
+                }
+                Ok(None)
+            }
+        }
     }
 
     fn allocate_sidecar_request_id(&mut self) -> RequestId {

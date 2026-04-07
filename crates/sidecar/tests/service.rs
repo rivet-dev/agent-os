@@ -3,6 +3,8 @@ impl<T> NativeSidecarBridge for T where T: agent_os_bridge::HostBridge {}
 
 #[path = "../src/bootstrap.rs"]
 mod bootstrap;
+#[path = "../src/acp/mod.rs"]
+mod acp;
 #[path = "../src/bridge.rs"]
 mod bridge;
 #[path = "../src/execution.rs"]

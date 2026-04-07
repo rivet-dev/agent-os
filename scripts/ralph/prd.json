@@ -477,7 +477,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 34,
-      "passes": false,
+      "passes": true,
       "notes": "Step 6 part 2. Depends on US-022 (ACP client). Session creation flow: TypeScript resolves adapter path via packages.ts + runs prepareInstructions callback, sends CreateSession RPC with resolved paths. Sidecar handles everything after. Read session.ts (493 lines) at packages/core/src/session.ts."
     },
     {

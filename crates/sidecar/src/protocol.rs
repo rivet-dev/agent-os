@@ -192,6 +192,10 @@ pub enum RequestPayload {
     Authenticate(AuthenticateRequest),
     OpenSession(OpenSessionRequest),
     CreateVm(CreateVmRequest),
+    CreateSession(CreateSessionRequest),
+    SessionRequest(SessionRequest),
+    GetSessionState(GetSessionStateRequest),
+    CloseAgentSession(CloseAgentSessionRequest),
     DisposeVm(DisposeVmRequest),
     BootstrapRootFilesystem(BootstrapRootFilesystemRequest),
     ConfigureVm(ConfigureVmRequest),
@@ -223,6 +227,10 @@ pub enum ResponsePayload {
     Authenticated(AuthenticatedResponse),
     SessionOpened(SessionOpenedResponse),
     VmCreated(VmCreatedResponse),
+    SessionCreated(SessionCreatedResponse),
+    SessionRpc(SessionRpcResponse),
+    SessionState(SessionStateResponse),
+    AgentSessionClosed(AgentSessionClosedResponse),
     VmDisposed(VmDisposedResponse),
     RootFilesystemBootstrapped(RootFilesystemBootstrappedResponse),
     VmConfigured(VmConfiguredResponse),
@@ -285,6 +293,10 @@ pub enum GuestRuntimeKind {
     JavaScript,
     Python,
     WebAssembly,
+}
+
+fn default_create_session_runtime() -> GuestRuntimeKind {
+    GuestRuntimeKind::JavaScript
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -477,6 +489,39 @@ pub struct CreateVmRequest {
     pub root_filesystem: RootFilesystemDescriptor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionsPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateSessionRequest {
+    pub agent_type: String,
+    #[serde(default = "default_create_session_runtime")]
+    pub runtime: GuestRuntimeKind,
+    pub adapter_entrypoint: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    pub cwd: String,
+    #[serde(default)]
+    pub mcp_servers: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRequest {
+    pub session_id: String,
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetSessionStateRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseAgentSessionRequest {
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -784,6 +829,54 @@ pub struct SessionOpenedResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmCreatedResponse {
     pub vm_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCreatedResponse {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_options: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_capabilities: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_info: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRpcResponse {
+    pub session_id: String,
+    pub response: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequencedNotification {
+    pub sequence_number: u64,
+    pub notification: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionStateResponse {
+    pub session_id: String,
+    pub agent_type: String,
+    pub process_id: String,
+    pub closed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_options: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_capabilities: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_info: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<SequencedNotification>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSessionClosedResponse {
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1534,6 +1627,10 @@ enum ExpectedResponseKind {
     Authenticated,
     SessionOpened,
     VmCreated,
+    SessionCreated,
+    SessionRpc,
+    SessionState,
+    AgentSessionClosed,
     VmDisposed,
     RootFilesystemBootstrapped,
     VmConfigured,
@@ -1571,6 +1668,10 @@ impl ExpectedResponseKind {
             Self::Authenticated => "authenticated",
             Self::SessionOpened => "session_opened",
             Self::VmCreated => "vm_created",
+            Self::SessionCreated => "session_created",
+            Self::SessionRpc => "session_rpc",
+            Self::SessionState => "session_state",
+            Self::AgentSessionClosed => "agent_session_closed",
             Self::VmDisposed => "vm_disposed",
             Self::RootFilesystemBootstrapped => "root_filesystem_bootstrapped",
             Self::VmConfigured => "vm_configured",
@@ -1625,6 +1726,10 @@ impl RequestPayload {
             Self::CreateVm(_) | Self::PersistenceLoad(_) | Self::PersistenceFlush(_) => {
                 OwnershipRequirement::Session
             }
+            Self::CreateSession(_)
+            | Self::SessionRequest(_)
+            | Self::GetSessionState(_)
+            | Self::CloseAgentSession(_) => OwnershipRequirement::Vm,
             Self::DisposeVm(_)
             | Self::BootstrapRootFilesystem(_)
             | Self::ConfigureVm(_)
@@ -1654,6 +1759,10 @@ impl RequestPayload {
             Self::Authenticate(_) => ExpectedResponseKind::Authenticated,
             Self::OpenSession(_) => ExpectedResponseKind::SessionOpened,
             Self::CreateVm(_) => ExpectedResponseKind::VmCreated,
+            Self::CreateSession(_) => ExpectedResponseKind::SessionCreated,
+            Self::SessionRequest(_) => ExpectedResponseKind::SessionRpc,
+            Self::GetSessionState(_) => ExpectedResponseKind::SessionState,
+            Self::CloseAgentSession(_) => ExpectedResponseKind::AgentSessionClosed,
             Self::DisposeVm(_) => ExpectedResponseKind::VmDisposed,
             Self::BootstrapRootFilesystem(_) => ExpectedResponseKind::RootFilesystemBootstrapped,
             Self::ConfigureVm(_) => ExpectedResponseKind::VmConfigured,
@@ -1698,10 +1807,16 @@ impl ResponsePayload {
     fn ownership_requirement(&self) -> OwnershipRequirement {
         match self {
             Self::Authenticated(_) | Self::SessionOpened(_) => OwnershipRequirement::Connection,
-            Self::VmCreated(_) | Self::PersistenceState(_) | Self::PersistenceFlushed(_) => {
+            Self::VmCreated(_)
+            | Self::SessionCreated(_)
+            | Self::PersistenceState(_)
+            | Self::PersistenceFlushed(_) => {
                 OwnershipRequirement::Session
             }
             Self::Rejected(_) => OwnershipRequirement::Any,
+            Self::SessionRpc(_) | Self::SessionState(_) | Self::AgentSessionClosed(_) => {
+                OwnershipRequirement::Vm
+            }
             Self::VmDisposed(_)
             | Self::RootFilesystemBootstrapped(_)
             | Self::VmConfigured(_)
@@ -1731,6 +1846,10 @@ impl ResponsePayload {
             Self::Authenticated(_) => "authenticated",
             Self::SessionOpened(_) => "session_opened",
             Self::VmCreated(_) => "vm_created",
+            Self::SessionCreated(_) => "session_created",
+            Self::SessionRpc(_) => "session_rpc",
+            Self::SessionState(_) => "session_state",
+            Self::AgentSessionClosed(_) => "agent_session_closed",
             Self::VmDisposed(_) => "vm_disposed",
             Self::RootFilesystemBootstrapped(_) => "root_filesystem_bootstrapped",
             Self::VmConfigured(_) => "vm_configured",
