@@ -16,10 +16,12 @@ import {
 	createKernel,
 	createNodeRuntime,
 } from "../src/runtime.js";
-import { serializeMountConfigForSidecar } from "../src/sidecar/mount-descriptors.js";
-import { toSidecarSignalName } from "../src/sidecar/native-kernel-proxy.js";
-import { NativeSidecarProcessClient } from "../src/sidecar/native-process-client.js";
-import { serializeRootFilesystemForSidecar } from "../src/sidecar/root-filesystem-descriptors.js";
+import {
+	NativeSidecarProcessClient,
+	serializeMountConfigForSidecar,
+	serializeRootFilesystemForSidecar,
+	toSidecarSignalName,
+} from "../src/sidecar/rpc-client.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const SIDECAR_BINARY = join(REPO_ROOT, "target/debug/agent-os-sidecar");

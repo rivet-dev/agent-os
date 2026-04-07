@@ -1,4 +1,5 @@
 import { execFileSync, spawn as spawnChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
 	existsSync,
 	mkdtempSync,
@@ -30,10 +31,7 @@ import type {
 } from "./agent-session-types.js";
 import { type HostTool, type ToolKit, validateToolkits } from "./host-tools.js";
 import { zodToJsonSchema } from "./host-tools-zod.js";
-import type {
-	JsonRpcNotification,
-	JsonRpcResponse,
-} from "./json-rpc.js";
+import type { JsonRpcNotification, JsonRpcResponse } from "./json-rpc.js";
 import {
 	type ConnectTerminalOptions,
 	createInMemoryFileSystem,
@@ -157,23 +155,16 @@ import {
 } from "./packages.js";
 import { createNodeHostNetworkAdapter } from "./runtime-compat.js";
 import {
-	type AgentOsCreateSidecarOptions,
-	type AgentOsSharedSidecarOptions,
-	type AgentOsSidecar,
-	type AgentOsSidecarConfig,
-	type AgentOsSidecarVmLease,
-	createAgentOsSidecar,
-	getSharedAgentOsSidecar,
-	leaseAgentOsSidecarVm,
-} from "./sidecar/handle.js";
-import type { InProcessSidecarVmAdmin } from "./sidecar/in-process-transport.js";
-import { serializeMountConfigForSidecar } from "./sidecar/mount-descriptors.js";
-import {
+	type AgentOsSidecarClient,
+	type AgentOsSidecarPlacement,
+	type AgentOsSidecarSessionBootstrap,
+	type AgentOsSidecarSessionHandle,
+	type AgentOsSidecarTransport,
+	type AgentOsSidecarVmBootstrap,
+	type AgentOsSidecarVmHandle,
 	type LocalCompatMount,
+	NativeSidecarProcessClient,
 	NativeSidecarKernelProxy,
-} from "./sidecar/native-kernel-proxy.js";
-import { serializePermissionsForSidecar } from "./sidecar/permissions.js";
-import type {
 	AuthenticatedSession,
 	CreatedVm,
 	RootFilesystemEntry,
@@ -181,15 +172,42 @@ import type {
 	SidecarRequestFrame,
 	SidecarResponsePayload,
 	SidecarSessionState,
-} from "./sidecar/native-process-client.js";
-import { NativeSidecarProcessClient } from "./sidecar/native-process-client.js";
-import { serializeRootFilesystemForSidecar } from "./sidecar/root-filesystem-descriptors.js";
+	createAgentOsSidecarClient,
+	serializeMountConfigForSidecar,
+	serializeRootFilesystemForSidecar,
+} from "./sidecar/rpc-client.js";
+import { serializePermissionsForSidecar } from "./sidecar/permissions.js";
 
-export type {
-	AgentOsCreateSidecarOptions,
-	AgentOsSharedSidecarOptions,
-	AgentOsSidecarConfig,
-} from "./sidecar/handle.js";
+export interface AgentOsSharedSidecarOptions {
+	pool?: string;
+}
+
+export interface AgentOsCreateSidecarOptions {
+	sidecarId?: string;
+}
+
+export type AgentOsSidecarConfig =
+	| { kind: "shared"; pool?: string }
+	| { kind: "explicit"; handle: AgentOsSidecar };
+
+export interface AgentOsSidecarDescription {
+	sidecarId: string;
+	placement: AgentOsSidecarPlacement;
+	state: "ready" | "disposing" | "disposed";
+	activeVmCount: number;
+}
+
+interface InProcessSidecarVmAdmin {
+	dispose(): Promise<void>;
+}
+
+interface AgentOsSidecarVmLease<TVmAdmin extends InProcessSidecarVmAdmin> {
+	sidecar: AgentOsSidecar;
+	session: AgentOsSidecarSessionHandle;
+	vm: AgentOsSidecarVmHandle;
+	admin: TVmAdmin;
+	dispose(): Promise<void>;
+}
 
 interface HostMountInfo {
 	vmPath: string;
@@ -1240,7 +1258,7 @@ function materializeToolShimDir(toolKits: ToolKit[]): string {
 	const shimDir = mkdtempSync(join(tmpdir(), "agent-os-host-tools-shims-"));
 	writeFileSync(
 		join(shimDir, "agentos"),
-		"#!/bin/sh\nexec /bin/agentos \"$@\"\n",
+		'#!/bin/sh\nexec /bin/agentos "$@"\n',
 		{ mode: 0o755 },
 	);
 
@@ -1262,7 +1280,9 @@ function validationMessage(error: unknown): string {
 		"issues" in error &&
 		Array.isArray((error as { issues?: unknown[] }).issues)
 	) {
-		return (error as { issues: Array<{ message: string; path?: unknown[] }> }).issues
+		return (
+			error as { issues: Array<{ message: string; path?: unknown[] }> }
+		).issues
 			.map((issue) => {
 				const path =
 					Array.isArray(issue.path) && issue.path.length > 0
@@ -1275,7 +1295,9 @@ function validationMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function toolToSidecarDefinition(tool: HostTool): SidecarRegisteredToolDefinition {
+function toolToSidecarDefinition(
+	tool: HostTool,
+): SidecarRegisteredToolDefinition {
 	return {
 		description: tool.description,
 		inputSchema: zodToJsonSchema(tool.inputSchema),
@@ -1467,13 +1489,13 @@ export class AgentOs {
 	static async createSidecar(
 		options: AgentOsCreateSidecarOptions = {},
 	): Promise<AgentOsSidecar> {
-		return createAgentOsSidecar(options);
+		return createAgentOsSidecarInternal(options);
 	}
 
 	static async getSharedSidecar(
 		options: AgentOsSharedSidecarOptions = {},
 	): Promise<AgentOsSidecar> {
-		return getSharedAgentOsSidecar(options);
+		return getSharedAgentOsSidecarInternal(options);
 	}
 
 	static async create(options?: AgentOsOptions): Promise<AgentOs> {
@@ -2364,7 +2386,10 @@ export class AgentOs {
 		) {
 			const params = toRecord(notification.params);
 			const permissionId = params.permissionId;
-			if (typeof permissionId === "string" || typeof permissionId === "number") {
+			if (
+				typeof permissionId === "string" ||
+				typeof permissionId === "number"
+			) {
 				const request: PermissionRequest = {
 					permissionId: String(permissionId),
 					description:
@@ -2449,9 +2474,9 @@ export class AgentOs {
 			this._sidecarSession,
 			this._sidecarVm,
 			{
-			sessionId,
-			method,
-			params,
+				sessionId,
+				method,
+				params,
 			},
 		);
 		if (!response.error) {
@@ -2487,7 +2512,9 @@ export class AgentOs {
 		value: string,
 	): Promise<JsonRpcResponse> {
 		const session = this._requireSession(sessionId);
-		const option = session.configOptions.find((entry) => entry.category === category);
+		const option = session.configOptions.find(
+			(entry) => entry.category === category,
+		);
 		if (option?.readOnly) {
 			return this._unsupportedConfigResponse(session.agentType, category);
 		}
@@ -2511,7 +2538,9 @@ export class AgentOs {
 		);
 	}
 
-	private async _hydrateSessionState(session: AgentSessionEntry): Promise<void> {
+	private async _hydrateSessionState(
+		session: AgentSessionEntry,
+	): Promise<void> {
 		const state = await this._sidecarClient.getSessionState(
 			this._sidecarSession,
 			this._sidecarVm,
@@ -2699,9 +2728,13 @@ export class AgentOs {
 		const unsubscribe = this.onSessionEvent(sessionId, handler);
 
 		try {
-			const response = await this._sendSessionRequest(sessionId, "session/prompt", {
-				prompt: [{ type: "text", text }],
-			});
+			const response = await this._sendSessionRequest(
+				sessionId,
+				"session/prompt",
+				{
+					prompt: [{ type: "text", text }],
+				},
+			);
 			return { response, text: agentText };
 		} finally {
 			unsubscribe();
@@ -2883,10 +2916,274 @@ function resolveAgentOsSidecar(
 	config: AgentOsSidecarConfig | undefined,
 ): AgentOsSidecar {
 	if (!config || config.kind === "shared") {
-		return getSharedAgentOsSidecar(
+		return getSharedAgentOsSidecarInternal(
 			config?.kind === "shared" ? { pool: config.pool } : undefined,
 		);
 	}
 
 	return config.handle;
+}
+
+interface CreateInProcessSidecarTransportOptions<
+	TVmAdmin extends InProcessSidecarVmAdmin,
+> {
+	createVm(
+		sessionBootstrap: AgentOsSidecarSessionBootstrap,
+		vmBootstrap: AgentOsSidecarVmBootstrap,
+	): Promise<TVmAdmin>;
+}
+
+interface InProcessSidecarTransport<TVmAdmin extends InProcessSidecarVmAdmin>
+	extends AgentOsSidecarTransport {
+	getVmAdmin(vmId: string): TVmAdmin | undefined;
+}
+
+interface AgentOsSidecarLeaseRecord {
+	dispose(): Promise<void>;
+}
+
+interface AgentOsSidecarState {
+	description: AgentOsSidecarDescription;
+	activeLeases: Set<AgentOsSidecarLeaseRecord>;
+	sharedPool?: string;
+}
+
+const sidecarStates = new WeakMap<AgentOsSidecar, AgentOsSidecarState>();
+const sharedSidecars = new Map<string, AgentOsSidecar>();
+
+export class AgentOsSidecar {
+	constructor(
+		sidecarId: string,
+		placement: AgentOsSidecarPlacement,
+		sharedPool?: string,
+	) {
+		sidecarStates.set(this, {
+			description: {
+				sidecarId,
+				placement: cloneSidecarPlacement(placement),
+				state: "ready",
+				activeVmCount: 0,
+			},
+			activeLeases: new Set(),
+			sharedPool,
+		});
+	}
+
+	describe(): AgentOsSidecarDescription {
+		const state = getSidecarState(this);
+		return cloneSidecarDescription(state.description);
+	}
+
+	async dispose(): Promise<void> {
+		const state = getSidecarState(this);
+		if (state.description.state === "disposed") {
+			return;
+		}
+
+		state.description.state = "disposing";
+		const errors: Error[] = [];
+		for (const lease of [...state.activeLeases]) {
+			try {
+				await lease.dispose();
+			} catch (error) {
+				errors.push(error instanceof Error ? error : new Error(String(error)));
+			}
+		}
+		state.activeLeases.clear();
+		state.description.activeVmCount = 0;
+		state.description.state = "disposed";
+		if (state.sharedPool && sharedSidecars.get(state.sharedPool) === this) {
+			sharedSidecars.delete(state.sharedPool);
+		}
+		if (errors.length > 0) {
+			throw new Error(errors.map((error) => error.message).join("; "));
+		}
+	}
+}
+
+function createAgentOsSidecarInternal(
+	options: AgentOsCreateSidecarOptions = {},
+): AgentOsSidecar {
+	const sidecarId = options.sidecarId ?? `agent-os-sidecar-${randomUUID()}`;
+	return new AgentOsSidecar(sidecarId, {
+		kind: "explicit",
+		sidecarId,
+	});
+}
+
+function getSharedAgentOsSidecarInternal(
+	options: AgentOsSharedSidecarOptions = {},
+): AgentOsSidecar {
+	const pool = options.pool ?? "default";
+	const existing = sharedSidecars.get(pool);
+	if (existing && existing.describe().state !== "disposed") {
+		return existing;
+	}
+
+	const sidecar = new AgentOsSidecar(
+		`agent-os-shared-sidecar:${pool}`,
+		{ kind: "shared", ...(pool ? { pool } : {}) },
+		pool,
+	);
+	sharedSidecars.set(pool, sidecar);
+	return sidecar;
+}
+
+async function leaseAgentOsSidecarVm<TVmAdmin extends InProcessSidecarVmAdmin>(
+	sidecar: AgentOsSidecar,
+	options: CreateInProcessSidecarTransportOptions<TVmAdmin>,
+): Promise<AgentOsSidecarVmLease<TVmAdmin>> {
+	const state = getSidecarState(sidecar);
+	if (state.description.state !== "ready") {
+		throw new Error(
+			`Cannot lease VM from sidecar ${state.description.sidecarId} while it is ${state.description.state}`,
+		);
+	}
+
+	let transport: InProcessSidecarTransport<TVmAdmin> | undefined;
+	const client: AgentOsSidecarClient = createAgentOsSidecarClient({
+		async createSessionTransport(sessionBootstrap) {
+			transport = await createInProcessSidecarTransport(
+				sessionBootstrap,
+				options,
+			);
+			return transport;
+		},
+	});
+
+	let disposed = false;
+	let leaseRecord: AgentOsSidecarLeaseRecord | undefined;
+
+	try {
+		const session = await client.createSession({
+			placement: cloneSidecarPlacement(state.description.placement),
+		});
+		const vm = await session.createVm();
+		const admin = transport?.getVmAdmin(vm.vmId);
+		if (!admin) {
+			throw new Error(`Sidecar VM admin was not registered for ${vm.vmId}`);
+		}
+
+		const lease: AgentOsSidecarVmLease<TVmAdmin> = {
+			sidecar,
+			session,
+			vm,
+			admin,
+			async dispose() {
+				if (disposed) {
+					return;
+				}
+				disposed = true;
+				state.activeLeases.delete(leaseRecord!);
+				state.description.activeVmCount = state.activeLeases.size;
+				await client.dispose();
+			},
+		};
+
+		leaseRecord = {
+			dispose: () => lease.dispose(),
+		};
+		state.activeLeases.add(leaseRecord);
+		state.description.activeVmCount = state.activeLeases.size;
+		return lease;
+	} catch (error) {
+		await client.dispose().catch(() => {});
+		throw error;
+	}
+}
+
+async function createInProcessSidecarTransport<
+	TVmAdmin extends InProcessSidecarVmAdmin,
+>(
+	sessionBootstrap: AgentOsSidecarSessionBootstrap,
+	options: CreateInProcessSidecarTransportOptions<TVmAdmin>,
+): Promise<InProcessSidecarTransport<TVmAdmin>> {
+	const vmAdmins = new Map<string, TVmAdmin>();
+	let disposed = false;
+
+	async function disposeVmAdmin(vmId: string): Promise<void> {
+		const admin = vmAdmins.get(vmId);
+		if (!admin) {
+			return;
+		}
+
+		vmAdmins.delete(vmId);
+		await admin.dispose();
+	}
+
+	return {
+		async createVm(vmBootstrap) {
+			if (disposed) {
+				throw new Error(
+					`Cannot create VM ${vmBootstrap.vmId} for disposed sidecar session ${sessionBootstrap.sessionId}`,
+				);
+			}
+
+			const admin = await options.createVm(sessionBootstrap, vmBootstrap);
+			vmAdmins.set(vmBootstrap.vmId, admin);
+		},
+
+		async disposeVm(vmId) {
+			await disposeVmAdmin(vmId);
+		},
+
+		async dispose() {
+			if (disposed) {
+				return;
+			}
+			disposed = true;
+
+			const errors: Error[] = [];
+			for (const vmId of [...vmAdmins.keys()]) {
+				try {
+					await disposeVmAdmin(vmId);
+				} catch (error) {
+					errors.push(
+						error instanceof Error ? error : new Error(String(error)),
+					);
+				}
+			}
+
+			if (errors.length > 0) {
+				throw new Error(errors.map((error) => error.message).join("; "));
+			}
+		},
+
+		getVmAdmin(vmId) {
+			return vmAdmins.get(vmId);
+		},
+	};
+}
+
+function getSidecarState(sidecar: AgentOsSidecar): AgentOsSidecarState {
+	const state = sidecarStates.get(sidecar);
+	if (!state) {
+		throw new Error("Unknown Agent OS sidecar handle");
+	}
+	return state;
+}
+
+function cloneSidecarDescription(
+	description: AgentOsSidecarDescription,
+): AgentOsSidecarDescription {
+	return {
+		...description,
+		placement: cloneSidecarPlacement(description.placement),
+	};
+}
+
+function cloneSidecarPlacement(
+	placement: AgentOsSidecarPlacement,
+): AgentOsSidecarPlacement {
+	if (placement.kind === "shared") {
+		return {
+			kind: "shared",
+			...(placement.pool ? { pool: placement.pool } : {}),
+		};
+	}
+
+	return {
+		kind: "explicit",
+		sidecarId: placement.sidecarId,
+	};
 }

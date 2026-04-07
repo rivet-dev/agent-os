@@ -1,9 +1,15 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
-import { NativeSidecarProcessClient } from "../src/sidecar/native-process-client.js";
+import { NativeSidecarProcessClient } from "../src/sidecar/rpc-client.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 
@@ -206,9 +212,9 @@ describe("native sidecar process client permissions", () => {
 					},
 				},
 			]);
-			expect(captured.every((entry) => !("childProcess" in entry.permissions))).toBe(
-				true,
-			);
+			expect(
+				captured.every((entry) => !("childProcess" in entry.permissions)),
+			).toBe(true);
 		} finally {
 			await client.dispose();
 		}

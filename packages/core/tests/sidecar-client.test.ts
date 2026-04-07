@@ -3,7 +3,7 @@ import {
 	AgentOsSidecarClient,
 	type AgentOsSidecarSessionBootstrap,
 	type AgentOsSidecarVmBootstrap,
-} from "../src/sidecar/client.js";
+} from "../src/sidecar/rpc-client.js";
 
 describe("AgentOsSidecarClient", () => {
 	it("tracks sidecar session and VM lifecycle through a mock transport", async () => {
@@ -107,7 +107,9 @@ describe("AgentOsSidecarClient", () => {
 			async createSessionTransport(bootstrap) {
 				return {
 					async createVm(vmBootstrap) {
-						disposedSessions.push(`create:${bootstrap.sessionId}:${vmBootstrap.vmId}`);
+						disposedSessions.push(
+							`create:${bootstrap.sessionId}:${vmBootstrap.vmId}`,
+						);
 					},
 					async disposeVm(vmId) {
 						disposedVms.push(vmId);

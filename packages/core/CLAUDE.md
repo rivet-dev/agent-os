@@ -13,8 +13,9 @@
 - `fetch(port, request)` reaches services running inside the VM using the kernel network adapter pattern (`proc.network.fetch`).
 - **Cron scheduling stays in the TypeScript layer.** The Rust sidecar has no concept of cron jobs. Cron expression parsing, timer management, overlap policies, and job execution dispatch all live in the TypeScript SDK.
 - Native sidecar execution requests should stay unresolved on the TypeScript side. Forward `command`, `args`, `cwd`, and VM config through the wire payload, and let Rust own command lookup, guest-path to host-path mapping, shadow materialization, and `AGENT_OS_*` runtime env assembly.
-- Native sidecar `exec()` should stay a thin `sh -c` wrapper when the guest shell exists. Do not reintroduce TypeScript tokenization or `node` special-casing in `native-kernel-proxy.ts`.
+- Native sidecar `exec()` should stay a thin `sh -c` wrapper when the guest shell exists. Do not reintroduce TypeScript tokenization or `node` special-casing in `src/sidecar/rpc-client.ts`.
 - Host tool registration is split across the boundary: TypeScript converts Zod schemas to JSON Schema, validates sidecar tool invocations, and runs the local `execute()` callbacks, while the sidecar owns CLI flag parsing, `agentos` command dispatch, and prompt-markdown generation via `register_toolkit`.
+- `src/sidecar/rpc-client.ts` is the consolidated home for framed sidecar I/O, compat proxy helpers, and sidecar descriptor serializers. Keep shared/explicit sidecar pool and VM lease bookkeeping in `src/agent-os.ts` rather than reintroducing another sidecar lifecycle layer.
 
 ## Agent Sessions (ACP)
 

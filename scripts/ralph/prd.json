@@ -562,7 +562,7 @@
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
       "priority": 38,
-      "passes": false,
+      "passes": true,
       "notes": "Step 7 part 2. At this point native-kernel-proxy.ts should have very little code remaining (previous stories deleted ~1,400 lines from its original 1,831). Inline whatever is left."
     },
     {

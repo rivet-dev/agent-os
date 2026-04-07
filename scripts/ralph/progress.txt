@@ -11,6 +11,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- `packages/core/src/sidecar/rpc-client.ts` is now the single home for sidecar wire helpers, compat proxy helpers, and sidecar descriptor serializers; keep shared/explicit sidecar pooling and VM lease bookkeeping in `packages/core/src/agent-os.ts`
 - Session launch/instruction tests in `packages/core` should assert against sidecar session metadata such as `getSessionAgentInfo(sessionId).argv`; `createSession()` no longer goes through a directly spyable kernel `spawn()`
 - ACP compatibility logic in `crates/sidecar/src/acp/` must preserve the TypeScript edge-case bundle together: dedupe repeated inbound request IDs, shim `session/request_permission` vs `request/permission`, normalize permission option IDs, and fall back from cancel requests to a notification on `-32601`
 - ACP `CreateSession` in `crates/sidecar/src/service.rs` must force `AGENT_OS_KEEP_STDIN_OPEN=1` for adapter processes and keep a process-scoped stdout buffer until `session/new` returns the ACP `sessionId`, because handshake fragments can arrive before an `AcpSessionState` exists
@@ -246,6 +247,15 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - One-shot timer state needs host-side cleanup when the delayed event is scheduled, otherwise `setTimeout` leaks timer handles even if the guest deletes its local entry
   - For V8 runtime behavior, prefer control-flow assertions in `crates/execution/tests/javascript_v8.rs` over stdout-only assertions; the exit code is a more stable signal for async bridge behavior
   - `cargo fmt --all` can touch unrelated Rust files in this workspace, so check `git diff --stat` before committing and drop formatting-only churn outside the story scope
+---
+## 2026-04-07 15:33:34 PDT - US-027
+- Consolidated the legacy sidecar TypeScript helpers into `packages/core/src/sidecar/rpc-client.ts`, moved shared/explicit sidecar pooling plus VM lease bookkeeping into `packages/core/src/agent-os.ts`, and replaced the old `sidecar/handle.ts` with a thin spawn/dispose wrapper
+- Deleted `packages/core/src/sidecar/{client.ts,in-process-transport.ts,mount-descriptors.ts,native-kernel-proxy.ts,root-filesystem-descriptors.ts}`, updated `packages/core/src/{agent-os.ts,index.ts,runtime.ts,sidecar/permissions.ts}`, refreshed `packages/core/CLAUDE.md`, and repointed the affected sidecar/mount/root-filesystem tests to the consolidated module
+- Files changed: `packages/core/src/{agent-os.ts,index.ts,runtime.ts}`, `packages/core/src/sidecar/{rpc-client.ts,handle.ts,permissions.ts}`, `packages/core/src/sidecar/{client.ts,in-process-transport.ts,mount-descriptors.ts,native-kernel-proxy.ts,root-filesystem-descriptors.ts}` (deleted), `packages/core/tests/{allowed-node-builtins.test.ts,mount-descriptors.test.ts,native-sidecar-process-permissions.test.ts,native-sidecar-process.test.ts,root-filesystem-descriptors.test.ts,sidecar-client.test.ts,sidecar-placement.test.ts,wasm-permission-tiers.test.ts}`, `packages/core/CLAUDE.md`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - `packages/core/src/sidecar/rpc-client.ts` now owns both the framed sidecar client and the remaining host-side compat proxy/descriptor helpers; new sidecar-specific helpers should land there instead of reviving split modules
+  - Shared/explicit sidecar pooling is no longer a separate `sidecar/handle.ts` subsystem; `AgentOs.createSidecar()`, `getSharedSidecar()`, and VM lease bookkeeping now live directly in `packages/core/src/agent-os.ts`
+  - `pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts` still has pre-existing real-sidecar `ENOENT`/timeout failures on this branch, so use focused sidecar unit/integration files for consolidation work unless you are explicitly fixing that harness
 ---
 ## 2026-04-07 07:12:25 PDT - US-031
 - Forwarded V8 `_kernelStdinRead` bridge calls to the sidecar, added sidecar `__kernel_stdin_read` handling against kernel fd `0`, and wired sidecar-managed process stdin writes/closes through both the runtime stream path and a dedicated kernel pipe

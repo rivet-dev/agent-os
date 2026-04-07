@@ -68,8 +68,8 @@ export type {
 	SpawnedProcessInfo,
 } from "./agent-os.js";
 export { AgentOs } from "./agent-os.js";
-export type { AgentOsSidecarDescription } from "./sidecar/handle.js";
-export { AgentOsSidecar } from "./sidecar/handle.js";
+export type { AgentOsSidecarDescription } from "./agent-os.js";
+export { AgentOsSidecar } from "./agent-os.js";
 export type {
 	AgentConfig,
 	AgentType,

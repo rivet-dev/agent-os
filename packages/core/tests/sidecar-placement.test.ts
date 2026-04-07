@@ -50,9 +50,9 @@ describe("AgentOs sidecar placement", () => {
 			});
 
 			await vm.writeFile("/tmp/placement-check.txt", "ok");
-			expect(new TextDecoder().decode(await vm.readFile("/tmp/placement-check.txt"))).toBe(
-				"ok",
-			);
+			expect(
+				new TextDecoder().decode(await vm.readFile("/tmp/placement-check.txt")),
+			).toBe("ok");
 		} finally {
 			await vm.dispose();
 			await sidecar.dispose();

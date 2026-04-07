@@ -1,6 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { createHostDirBackend, createInMemoryFileSystem } from "../src/index.js";
-import { serializeMountConfigForSidecar } from "../src/sidecar/mount-descriptors.js";
+import {
+	createHostDirBackend,
+	createInMemoryFileSystem,
+} from "../src/index.js";
+import { serializeMountConfigForSidecar } from "../src/sidecar/rpc-client.js";
 
 describe("sidecar mount descriptors", () => {
 	test("serializes declarative native host-dir mount configs", () => {

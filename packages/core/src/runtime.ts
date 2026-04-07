@@ -8,14 +8,12 @@ import { fileURLToPath } from "node:url";
 import {
 	NativeSidecarKernelProxy,
 	type LocalCompatMount,
-} from "./sidecar/native-kernel-proxy.js";
-import {
 	NativeSidecarProcessClient,
+	serializeMountConfigForSidecar,
 	type AuthenticatedSession,
 	type CreatedVm,
 	type RootFilesystemEntry,
-} from "./sidecar/native-process-client.js";
-import { serializeMountConfigForSidecar } from "./sidecar/mount-descriptors.js";
+} from "./sidecar/rpc-client.js";
 
 export const AF_INET = 2;
 export const AF_UNIX = 1;
@@ -310,9 +308,7 @@ export interface NetworkAdapter {
 		url: string;
 		redirected: boolean;
 	}>;
-	dnsLookup(
-		hostname: string,
-	): Promise<{
+	dnsLookup(hostname: string): Promise<{
 		address?: string;
 		family?: number;
 		error?: string;

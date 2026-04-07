@@ -2,12 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { NativeSidecarKernelProxy } from "../src/sidecar/native-kernel-proxy.js";
+import { NativeSidecarKernelProxy } from "../src/sidecar/rpc-client.js";
 import type {
 	AuthenticatedSession,
 	CreatedVm,
 	NativeSidecarProcessClient,
-} from "../src/sidecar/native-process-client.js";
+} from "../src/sidecar/rpc-client.js";
 
 describe("NativeSidecarKernelProxy execute payloads", () => {
 	let proxy: NativeSidecarKernelProxy | null = null;
@@ -111,10 +111,11 @@ describe("NativeSidecarKernelProxy execute payloads", () => {
 			commandGuestPaths: new Map([["sh", "/__agentos/commands/000/sh"]]),
 		});
 
-		await expect(proxy.exec("node /workspace/entry.mjs --flag")).resolves
-			.toMatchObject({
-				exitCode: 1,
-			});
+		await expect(
+			proxy.exec("node /workspace/entry.mjs --flag"),
+		).resolves.toMatchObject({
+			exitCode: 1,
+		});
 		expect(execute).toHaveBeenCalledTimes(1);
 		expect(execute.mock.calls[0]?.[2]).toMatchObject({
 			command: "sh",

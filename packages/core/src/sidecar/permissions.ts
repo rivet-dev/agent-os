@@ -1,5 +1,5 @@
 import type { Permissions } from "../runtime-compat.js";
-import type { SidecarPermissionsPolicy } from "./native-process-client.js";
+import type { SidecarPermissionsPolicy } from "./rpc-client.js";
 
 export function serializePermissionsForSidecar(
 	permissions?: Permissions,

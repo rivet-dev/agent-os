@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import type { FilesystemEntry } from "../src/filesystem-snapshot.js";
 import { createSnapshotExport } from "../src/index.js";
-import { serializeRootFilesystemForSidecar } from "../src/sidecar/root-filesystem-descriptors.js";
+import { serializeRootFilesystemForSidecar } from "../src/sidecar/rpc-client.js";
 
 function toExpectedSidecarEntry(entry: FilesystemEntry) {
 	const mode = Number.parseInt(entry.mode, 8);
@@ -82,11 +82,15 @@ describe("sidecar root filesystem descriptors", () => {
 			lowers: [
 				{
 					kind: "snapshot",
-					entries: configLower.source.filesystem.entries.map(toExpectedSidecarEntry),
+					entries: configLower.source.filesystem.entries.map(
+						toExpectedSidecarEntry,
+					),
 				},
 				{
 					kind: "snapshot",
-					entries: bootstrapLower.source.filesystem.entries.map(toExpectedSidecarEntry),
+					entries: bootstrapLower.source.filesystem.entries.map(
+						toExpectedSidecarEntry,
+					),
 				},
 			],
 			bootstrapEntries: [],
