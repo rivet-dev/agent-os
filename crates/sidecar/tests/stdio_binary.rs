@@ -633,8 +633,9 @@ fn native_sidecar_binary_runs_the_framed_protocol_over_stdio() {
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::Execute(ExecuteRequest {
                 process_id: String::from("proc-1"),
-                runtime: GuestRuntimeKind::JavaScript,
-                entrypoint: String::from("./entry.mjs"),
+                command: None,
+                runtime: Some(GuestRuntimeKind::JavaScript),
+                entrypoint: Some(String::from("./entry.mjs")),
                 args: Vec::new(),
                 env: BTreeMap::new(),
                 cwd: None,
@@ -775,6 +776,8 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
                 command_permissions: BTreeMap::new(),
+                allowed_node_builtins: Vec::new(),
+                loopback_exempt_ports: Vec::new(),
             }),
         ),
     );

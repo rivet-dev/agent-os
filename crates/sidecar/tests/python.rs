@@ -105,8 +105,9 @@ fn execute_python_entrypoint_with_env(
             OwnershipScope::vm(connection_id, session_id, vm_id),
             RequestPayload::Execute(ExecuteRequest {
                 process_id: process_id.to_owned(),
-                runtime: GuestRuntimeKind::Python,
-                entrypoint: entrypoint.to_owned(),
+                command: None,
+                runtime: Some(GuestRuntimeKind::Python),
+                entrypoint: Some(entrypoint.to_owned()),
                 args: Vec::new(),
                 env,
                 cwd: None,
@@ -140,8 +141,9 @@ fn execute_javascript_with_env(
             OwnershipScope::vm(connection_id, session_id, vm_id),
             RequestPayload::Execute(ExecuteRequest {
                 process_id: process_id.to_owned(),
-                runtime: GuestRuntimeKind::JavaScript,
-                entrypoint: entrypoint.to_string_lossy().into_owned(),
+                command: None,
+                runtime: Some(GuestRuntimeKind::JavaScript),
+                entrypoint: Some(entrypoint.to_string_lossy().into_owned()),
                 args,
                 env,
                 cwd: None,
@@ -957,6 +959,8 @@ if (mode === 'write') {
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
                 command_permissions: BTreeMap::new(),
+                allowed_node_builtins: Vec::new(),
+                loopback_exempt_ports: Vec::new(),
             }),
         ))
         .expect("configure host_dir workspace mount");

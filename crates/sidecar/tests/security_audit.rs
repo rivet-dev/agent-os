@@ -99,6 +99,8 @@ fn filesystem_permission_denials_emit_security_audit_events() {
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
                 command_permissions: Default::default(),
+                allowed_node_builtins: Vec::new(),
+                loopback_exempt_ports: Vec::new(),
             }),
         ))
         .expect("configure vm permissions");
@@ -217,6 +219,8 @@ fn mount_operations_emit_security_audit_events() {
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
                 command_permissions: Default::default(),
+                allowed_node_builtins: Vec::new(),
+                loopback_exempt_ports: Vec::new(),
             }),
         ))
         .expect("mount workspace");
@@ -233,6 +237,8 @@ fn mount_operations_emit_security_audit_events() {
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
                 command_permissions: Default::default(),
+                allowed_node_builtins: Vec::new(),
+                loopback_exempt_ports: Vec::new(),
             }),
         ))
         .expect("unmount workspace");
@@ -285,8 +291,9 @@ fn kill_requests_emit_security_audit_events() {
             OwnershipScope::vm(&connection_id, &session_id, &vm_id),
             RequestPayload::Execute(ExecuteRequest {
                 process_id: String::from("proc-kill"),
-                runtime: GuestRuntimeKind::JavaScript,
-                entrypoint: entry.to_string_lossy().into_owned(),
+                command: None,
+                runtime: Some(GuestRuntimeKind::JavaScript),
+                entrypoint: Some(entry.to_string_lossy().into_owned()),
                 args: Vec::new(),
                 env: Default::default(),
                 cwd: None,

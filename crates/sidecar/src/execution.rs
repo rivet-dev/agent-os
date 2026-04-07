@@ -127,6 +127,29 @@ const HTTP_LOOPBACK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_SCRYPT_COST: u64 = 16_384;
 const DEFAULT_SCRYPT_BLOCK_SIZE: u32 = 8;
 const DEFAULT_SCRYPT_PARALLELIZATION: u32 = 1;
+const DEFAULT_ALLOWED_NODE_BUILTINS: &[&str] = &[
+    "assert",
+    "buffer",
+    "console",
+    "child_process",
+    "crypto",
+    "dns",
+    "events",
+    "fs",
+    "http",
+    "http2",
+    "https",
+    "os",
+    "path",
+    "querystring",
+    "stream",
+    "string_decoder",
+    "timers",
+    "tls",
+    "url",
+    "util",
+    "zlib",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JavascriptCryptoDigestAlgorithm {
@@ -1472,37 +1495,20 @@ where
             )));
         }
 
-        let command = match payload.runtime {
-            GuestRuntimeKind::JavaScript => JAVASCRIPT_COMMAND,
-            GuestRuntimeKind::Python => PYTHON_COMMAND,
-            GuestRuntimeKind::WebAssembly => WASM_COMMAND,
-        };
-        let mut env = vm.guest_env.clone();
-        env.extend(payload.env.clone());
+        let resolved = resolve_execute_request(vm, &payload)?;
+        let mut env = resolved.env.clone();
         let sandbox_root = normalize_host_path(&vm.cwd);
-        let cwd = resolve_execution_cwd(vm, payload.cwd.as_deref())?;
-        if payload.runtime == GuestRuntimeKind::JavaScript {
-            let guest_entrypoint = if payload.entrypoint.starts_with('/') {
-                Some(normalize_path(&payload.entrypoint))
-            } else {
-                guest_runtime_path_for_host_path(&env, &cwd, &payload.entrypoint)
-            };
-            if let Some(guest_entrypoint) = guest_entrypoint {
-                env.entry(String::from("AGENT_OS_GUEST_ENTRYPOINT"))
-                    .or_insert(guest_entrypoint);
-            }
-        }
         env.insert(
             String::from(EXECUTION_SANDBOX_ROOT_ENV),
             sandbox_root.to_string_lossy().into_owned(),
         );
-        let argv = std::iter::once(payload.entrypoint.clone())
-            .chain(payload.args.iter().cloned())
+        let argv = std::iter::once(resolved.entrypoint.clone())
+            .chain(resolved.execution_args.iter().cloned())
             .collect::<Vec<_>>();
         let kernel_handle = vm
             .kernel
             .spawn_process(
-                command,
+                &resolved.command,
                 argv,
                 SpawnOptions {
                     requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
@@ -1512,13 +1518,15 @@ where
             )
             .map_err(kernel_error)?;
 
-        let execution = match payload.runtime {
+        let execution = match resolved.runtime {
             GuestRuntimeKind::JavaScript => {
-                // Prefer guest VFS source when the entrypoint is available there,
-                // but fall back to the VM's host root for fixture-style executions
-                // that only provide a host cwd plus relative/absolute host paths.
-                let inline_code =
-                    load_javascript_entrypoint_source(vm, &cwd, &payload.entrypoint, &env);
+                prepare_javascript_shadow(vm, &resolved)?;
+                let inline_code = load_javascript_entrypoint_source(
+                    vm,
+                    &resolved.host_cwd,
+                    &resolved.entrypoint,
+                    &env,
+                );
 
                 let context =
                     self.javascript_engine
@@ -1532,18 +1540,18 @@ where
                     .start_execution(StartJavascriptExecutionRequest {
                         vm_id: vm_id.clone(),
                         context_id: context.context_id,
-                        argv: std::iter::once(payload.entrypoint.clone())
-                            .chain(payload.args.iter().cloned())
+                        argv: std::iter::once(resolved.entrypoint.clone())
+                            .chain(resolved.execution_args.iter().cloned())
                             .collect(),
                         env: env.clone(),
-                        cwd: cwd.clone(),
+                        cwd: resolved.host_cwd.clone(),
                         inline_code,
                     })
                     .map_err(javascript_error)?;
                 ActiveExecution::Javascript(execution)
             }
             GuestRuntimeKind::Python => {
-                let python_file_path = python_file_entrypoint(&payload.entrypoint);
+                let python_file_path = python_file_entrypoint(&resolved.entrypoint);
                 let pyodide_dist_path = self
                     .python_engine
                     .bundled_pyodide_dist_path_for_vm(&vm_id)
@@ -1559,34 +1567,36 @@ where
                     .start_execution(StartPythonExecutionRequest {
                         vm_id: vm_id.clone(),
                         context_id: context.context_id,
-                        code: payload.entrypoint.clone(),
+                        code: resolved.entrypoint.clone(),
                         file_path: python_file_path,
                         env: env.clone(),
-                        cwd: cwd.clone(),
+                        cwd: resolved.host_cwd.clone(),
                     })
                     .map_err(python_error)?;
                 ActiveExecution::Python(execution)
             }
             GuestRuntimeKind::WebAssembly => {
                 apply_wasm_limit_env(&mut env, vm.kernel.resource_limits());
-                let wasm_permission_tier = resolve_wasm_permission_tier(
-                    vm,
-                    None,
-                    payload.wasm_permission_tier,
-                    &payload.entrypoint,
-                );
+                let wasm_permission_tier = resolved.wasm_permission_tier.unwrap_or_else(|| {
+                    resolve_wasm_permission_tier(
+                        vm,
+                        Some(&resolved.command),
+                        None,
+                        &resolved.entrypoint,
+                    )
+                });
                 let context = self.wasm_engine.create_context(CreateWasmContextRequest {
                     vm_id: vm_id.clone(),
-                    module_path: Some(payload.entrypoint.clone()),
+                    module_path: Some(resolved.entrypoint.clone()),
                 });
                 let execution = self
                     .wasm_engine
                     .start_execution(StartWasmExecutionRequest {
                         vm_id: vm_id.clone(),
                         context_id: context.context_id,
-                        argv: payload.args.clone(),
+                        argv: resolved.execution_args.clone(),
                         env,
-                        cwd: cwd.clone(),
+                        cwd: resolved.host_cwd.clone(),
                         permission_tier: execution_wasm_permission_tier(wasm_permission_tier),
                     })
                     .map_err(wasm_error)?;
@@ -1601,11 +1611,11 @@ where
             ActiveProcess::new(
                 kernel_handle.pid(),
                 kernel_handle,
-                payload.runtime,
+                resolved.runtime,
                 execution,
             )
             .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
-            .with_host_cwd(cwd.clone()),
+            .with_host_cwd(resolved.host_cwd.clone()),
         );
         self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
 
@@ -2073,9 +2083,9 @@ where
             .unwrap_or_else(|| {
                 let candidate = PathBuf::from(&guest_cwd);
                 if candidate.is_absolute() {
-                    candidate
+                    shadow_path_for_guest(vm, &guest_cwd)
                 } else {
-                    vm.cwd.clone()
+                    vm.host_cwd.clone()
                 }
             });
         let mut env = vm.guest_env.clone();
@@ -2682,30 +2692,459 @@ fn map_node_signal_registration(
 
 // reconcile_mounts, resolve_cwd moved to crate::vm
 
-fn resolve_execution_cwd(vm: &VmState, value: Option<&str>) -> Result<PathBuf, SidecarError> {
-    let sandbox_root = normalize_host_path(&vm.cwd);
-    let candidate = match value {
-        Some(path) => {
-            let path = PathBuf::from(path);
-            if path.is_absolute() {
-                path
-            } else {
-                sandbox_root.join(path)
-            }
-        }
-        None => sandbox_root.clone(),
-    };
-    let normalized = normalize_host_path(&candidate);
-
-    if !path_is_within_root(&normalized, &sandbox_root) {
-        return Err(SidecarError::InvalidState(format!(
-            "execute cwd {} escapes VM sandbox root {}",
-            normalized.display(),
-            sandbox_root.display()
-        )));
+fn resolve_execute_request(
+    vm: &VmState,
+    payload: &ExecuteRequest,
+) -> Result<ResolvedChildProcessExecution, SidecarError> {
+    if let Some(command) = payload.command.as_deref() {
+        return resolve_command_execution(
+            vm,
+            command,
+            &payload.args,
+            &payload.env,
+            payload.cwd.as_deref(),
+            payload.wasm_permission_tier,
+        );
     }
 
-    Ok(normalized)
+    let runtime = payload.runtime.clone().ok_or_else(|| {
+        SidecarError::InvalidState(String::from(
+            "execute requires either command or runtime",
+        ))
+    })?;
+    let entrypoint = payload.entrypoint.clone().ok_or_else(|| {
+        SidecarError::InvalidState(String::from(
+            "execute requires either command or entrypoint",
+        ))
+    })?;
+    let guest_cwd = resolve_guest_execution_cwd(vm, payload.cwd.as_deref());
+    let host_cwd = resolve_vm_guest_path_to_host(vm, &guest_cwd);
+    let mut env = vm.guest_env.clone();
+    env.extend(payload.env.clone());
+
+    if runtime == GuestRuntimeKind::JavaScript {
+        let guest_entrypoint = guest_entrypoint_for_specifier(&guest_cwd, &entrypoint);
+        prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
+    }
+
+    Ok(ResolvedChildProcessExecution {
+        command: match runtime {
+            GuestRuntimeKind::JavaScript => String::from(JAVASCRIPT_COMMAND),
+            GuestRuntimeKind::Python => String::from(PYTHON_COMMAND),
+            GuestRuntimeKind::WebAssembly => String::from(WASM_COMMAND),
+        },
+        process_args: std::iter::once(entrypoint.clone())
+            .chain(payload.args.iter().cloned())
+            .collect(),
+        runtime,
+        entrypoint,
+        execution_args: payload.args.clone(),
+        env,
+        guest_cwd,
+        host_cwd,
+        wasm_permission_tier: payload.wasm_permission_tier,
+    })
+}
+
+fn resolve_command_execution(
+    vm: &VmState,
+    command: &str,
+    args: &[String],
+    extra_env: &BTreeMap<String, String>,
+    cwd: Option<&str>,
+    explicit_wasm_permission_tier: Option<WasmPermissionTier>,
+) -> Result<ResolvedChildProcessExecution, SidecarError> {
+    let guest_cwd = resolve_guest_execution_cwd(vm, cwd);
+    let host_cwd = resolve_vm_guest_path_to_host(vm, &guest_cwd);
+    let mut env = vm.guest_env.clone();
+    env.extend(extra_env.clone());
+
+    if matches!(command, "node" | "npm" | "npx") {
+        let Some(entrypoint_specifier) = args.first() else {
+            return Err(SidecarError::InvalidState(format!(
+                "{command} execution requires an entrypoint"
+            )));
+        };
+
+        let (entrypoint, execution_args, guest_entrypoint) =
+            if matches!(entrypoint_specifier.as_str(), "-e" | "--eval") {
+                env.insert(
+                    String::from("AGENT_OS_NODE_EVAL"),
+                    args.get(1).cloned().unwrap_or_default(),
+                );
+                (
+                    entrypoint_specifier.clone(),
+                    args.iter().skip(2).cloned().collect(),
+                    None,
+                )
+            } else {
+                let guest_entrypoint = guest_entrypoint_for_specifier(&guest_cwd, entrypoint_specifier);
+                let entrypoint = guest_entrypoint.as_ref().map_or_else(
+                    || entrypoint_specifier.clone(),
+                    |guest_entrypoint| {
+                        resolve_vm_guest_path_to_host(vm, guest_entrypoint)
+                            .to_string_lossy()
+                            .into_owned()
+                    },
+                );
+                (entrypoint, args.iter().skip(1).cloned().collect(), guest_entrypoint)
+            };
+
+        prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
+
+        return Ok(ResolvedChildProcessExecution {
+            command: String::from(JAVASCRIPT_COMMAND),
+            process_args: std::iter::once(command.to_owned())
+                .chain(args.iter().cloned())
+                .collect(),
+            runtime: GuestRuntimeKind::JavaScript,
+            entrypoint,
+            execution_args,
+            env,
+            guest_cwd,
+            host_cwd,
+            wasm_permission_tier: None,
+        });
+    }
+
+    if command.ends_with(".js") || command.ends_with(".mjs") || command.ends_with(".cjs") {
+        let guest_entrypoint = guest_entrypoint_for_specifier(&guest_cwd, command);
+        let entrypoint = guest_entrypoint.as_ref().map_or_else(
+            || command.to_owned(),
+            |guest_entrypoint| {
+                resolve_vm_guest_path_to_host(vm, guest_entrypoint)
+                    .to_string_lossy()
+                    .into_owned()
+            },
+        );
+        prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
+
+        return Ok(ResolvedChildProcessExecution {
+            command: String::from(JAVASCRIPT_COMMAND),
+            process_args: std::iter::once(command.to_owned())
+                .chain(args.iter().cloned())
+                .collect(),
+            runtime: GuestRuntimeKind::JavaScript,
+            entrypoint,
+            execution_args: args.to_vec(),
+            env,
+            guest_cwd,
+            host_cwd,
+            wasm_permission_tier: None,
+        });
+    }
+
+    let guest_entrypoint = if is_path_like_specifier(command) {
+        Some(resolve_path_like_guest_specifier(&guest_cwd, command))
+    } else {
+        vm.command_guest_paths.get(command).cloned()
+    }
+    .ok_or_else(|| {
+        SidecarError::InvalidState(format!("command not found on native sidecar path: {command}"))
+    })?;
+    let wasm_permission_tier = explicit_wasm_permission_tier
+        .or_else(|| vm.command_permissions.get(command).copied())
+        .or_else(|| {
+            Path::new(&guest_entrypoint)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| vm.command_permissions.get(name).copied())
+        });
+
+    let host_entrypoint = resolve_vm_guest_path_to_host(vm, &guest_entrypoint);
+
+    Ok(ResolvedChildProcessExecution {
+        command: String::from(WASM_COMMAND),
+        process_args: std::iter::once(command.to_owned())
+            .chain(args.iter().cloned())
+            .collect(),
+        runtime: GuestRuntimeKind::WebAssembly,
+        entrypoint: host_entrypoint.to_string_lossy().into_owned(),
+        execution_args: args.to_vec(),
+        env,
+        guest_cwd,
+        host_cwd,
+        wasm_permission_tier,
+    })
+}
+
+fn resolve_guest_execution_cwd(vm: &VmState, value: Option<&str>) -> String {
+    value.map(normalize_path).unwrap_or_else(|| vm.guest_cwd.clone())
+}
+
+fn resolve_vm_guest_path_to_host(vm: &VmState, guest_path: &str) -> PathBuf {
+    host_mount_path_for_guest_path(vm, guest_path)
+        .unwrap_or_else(|| shadow_path_for_guest(vm, guest_path))
+}
+
+fn shadow_path_for_guest(vm: &VmState, guest_path: &str) -> PathBuf {
+    let normalized = normalize_path(guest_path);
+    let relative = normalized.trim_start_matches('/');
+    if relative.is_empty() {
+        return vm.cwd.clone();
+    }
+    vm.cwd.join(relative)
+}
+
+fn resolve_path_like_guest_specifier(cwd: &str, specifier: &str) -> String {
+    if specifier.starts_with("file://") {
+        normalize_path(specifier.trim_start_matches("file://"))
+    } else if specifier.starts_with("file:") {
+        normalize_path(specifier.trim_start_matches("file:"))
+    } else if specifier.starts_with('/') {
+        normalize_path(specifier)
+    } else {
+        normalize_path(&format!("{cwd}/{specifier}"))
+    }
+}
+
+fn guest_entrypoint_for_specifier(cwd: &str, specifier: &str) -> Option<String> {
+    is_path_like_specifier(specifier).then(|| resolve_path_like_guest_specifier(cwd, specifier))
+}
+
+fn prepare_javascript_runtime_env(
+    vm: &VmState,
+    env: &mut BTreeMap<String, String>,
+    guest_cwd: &str,
+    host_cwd: &Path,
+    guest_entrypoint: Option<String>,
+) -> Result<(), SidecarError> {
+    let path_mappings = runtime_guest_path_mappings(vm);
+    let read_paths = expand_host_access_paths(
+        std::iter::once(vm.cwd.clone())
+            .chain(path_mappings.iter().map(|mapping| PathBuf::from(&mapping.host_path)))
+            .chain(std::iter::once(host_cwd.to_path_buf()))
+            .collect::<Vec<_>>()
+            .as_slice(),
+    );
+    let write_paths = dedupe_host_paths(&[vm.cwd.clone(), host_cwd.to_path_buf()]);
+    let allowed_node_builtins = configured_allowed_node_builtins(vm);
+    let loopback_exempt_ports = configured_loopback_exempt_ports(vm);
+
+    env.insert(
+        String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+        serde_json::to_string(&path_mappings)
+            .map_err(|error| SidecarError::InvalidState(format!("failed to encode guest path mappings: {error}")))?,
+    );
+    env.insert(
+        String::from("AGENT_OS_EXTRA_FS_READ_PATHS"),
+        serde_json::to_string(
+            &read_paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| SidecarError::InvalidState(format!("failed to encode read paths: {error}")))?,
+    );
+    env.insert(
+        String::from("AGENT_OS_EXTRA_FS_WRITE_PATHS"),
+        serde_json::to_string(
+            &write_paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| SidecarError::InvalidState(format!("failed to encode write paths: {error}")))?,
+    );
+    env.insert(
+        String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+        serde_json::to_string(&allowed_node_builtins).map_err(|error| {
+            SidecarError::InvalidState(format!("failed to encode allowed builtins: {error}"))
+        })?,
+    );
+    env.insert(String::from("HOME"), guest_cwd.to_owned());
+    if !loopback_exempt_ports.is_empty() {
+        env.insert(
+            String::from(LOOPBACK_EXEMPT_PORTS_ENV),
+            serde_json::to_string(&loopback_exempt_ports)
+                .map_err(|error| SidecarError::InvalidState(format!("failed to encode loopback exemptions: {error}")))?,
+        );
+    }
+    if let Some(guest_entrypoint) = guest_entrypoint {
+        env.insert(String::from("AGENT_OS_GUEST_ENTRYPOINT"), guest_entrypoint);
+    }
+    Ok(())
+}
+
+fn configured_allowed_node_builtins(vm: &VmState) -> Vec<String> {
+    let configured = if vm.configuration.allowed_node_builtins.is_empty() {
+        DEFAULT_ALLOWED_NODE_BUILTINS
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect::<Vec<_>>()
+    } else {
+        vm.configuration.allowed_node_builtins.clone()
+    };
+    dedupe_strings(&configured)
+}
+
+fn configured_loopback_exempt_ports(vm: &VmState) -> Vec<String> {
+    if !vm.configuration.loopback_exempt_ports.is_empty() {
+        return vm
+            .configuration
+            .loopback_exempt_ports
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+    }
+
+    vm.metadata
+        .get(&format!("env.{LOOPBACK_EXEMPT_PORTS_ENV}"))
+        .and_then(|value| serde_json::from_str::<Vec<Value>>(value).ok())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| match value {
+            Value::String(text) => Some(text),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn runtime_guest_path_mappings(vm: &VmState) -> Vec<RuntimeGuestPathMapping> {
+    let mut mappings = vm
+        .configuration
+        .mounts
+        .iter()
+        .filter_map(|mount| {
+            (mount.plugin.id == "host_dir")
+                .then(|| {
+                    mount
+                        .plugin
+                        .config
+                        .get("hostPath")
+                        .and_then(Value::as_str)
+                        .map(|host_path| RuntimeGuestPathMapping {
+                            guest_path: normalize_path(&mount.guest_path),
+                            host_path: host_path.to_owned(),
+                        })
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    mappings.push(RuntimeGuestPathMapping {
+        guest_path: String::from("/"),
+        host_path: vm.cwd.to_string_lossy().into_owned(),
+    });
+    mappings.sort_by(|left, right| right.guest_path.len().cmp(&left.guest_path.len()));
+    mappings
+}
+
+fn dedupe_strings(values: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::new();
+    for value in values {
+        if seen.insert(value.clone()) {
+            deduped.push(value.clone());
+        }
+    }
+    deduped
+}
+
+fn dedupe_host_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::new();
+    for path in paths {
+        let normalized = normalize_host_path(path);
+        let key = normalized.to_string_lossy().into_owned();
+        if seen.insert(key) {
+            deduped.push(normalized);
+        }
+    }
+    deduped
+}
+
+fn expand_host_access_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut expanded = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    let mut add_path = |candidate: PathBuf| {
+        let normalized = normalize_host_path(&candidate);
+        let key = normalized.to_string_lossy().into_owned();
+        if seen.insert(key) {
+            expanded.push(normalized);
+        }
+    };
+
+    for host_path in paths {
+        add_path(host_path.clone());
+        if let Ok(realpath) = fs::canonicalize(host_path) {
+            add_path(realpath);
+        }
+
+        if host_path.file_name().and_then(|name| name.to_str()) != Some("node_modules") {
+            continue;
+        }
+
+        let mut current = host_path.parent();
+        while let Some(parent) = current {
+            let candidate = parent.join("node_modules");
+            if candidate.exists() {
+                add_path(candidate.clone());
+                if let Ok(realpath) = fs::canonicalize(&candidate) {
+                    add_path(realpath);
+                }
+            }
+            current = parent.parent();
+        }
+    }
+
+    expanded
+}
+
+fn prepare_javascript_shadow(
+    vm: &mut VmState,
+    resolved: &ResolvedChildProcessExecution,
+) -> Result<(), SidecarError> {
+    let guest_entrypoint = resolved
+        .env
+        .get("AGENT_OS_GUEST_ENTRYPOINT")
+        .cloned()
+        .or_else(|| resolved.entrypoint.starts_with('/').then(|| normalize_path(&resolved.entrypoint)));
+    let Some(guest_entrypoint) = guest_entrypoint else {
+        return Ok(());
+    };
+    if host_mount_path_for_guest_path(vm, &guest_entrypoint).is_some() {
+        return Ok(());
+    }
+    materialize_guest_tree_to_shadow(vm, &dirname(&guest_entrypoint))
+}
+
+fn materialize_guest_tree_to_shadow(vm: &mut VmState, guest_path: &str) -> Result<(), SidecarError> {
+    let stat = vm.kernel.lstat(guest_path).map_err(kernel_error)?;
+    let shadow_path = shadow_path_for_guest(vm, guest_path);
+
+    if stat.is_symbolic_link {
+        if let Some(parent) = shadow_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                SidecarError::Io(format!("failed to create shadow symlink parent: {error}"))
+            })?;
+        }
+        let _ = fs::remove_file(&shadow_path);
+        let _ = fs::remove_dir_all(&shadow_path);
+        let target = vm.kernel.read_link(guest_path).map_err(kernel_error)?;
+        std::os::unix::fs::symlink(&target, &shadow_path)
+            .map_err(|error| SidecarError::Io(format!("failed to mirror symlink: {error}")))?;
+        return Ok(());
+    }
+
+    if stat.is_directory {
+        fs::create_dir_all(&shadow_path)
+            .map_err(|error| SidecarError::Io(format!("failed to create shadow directory: {error}")))?;
+        for entry in vm.kernel.read_dir(guest_path).map_err(kernel_error)? {
+            materialize_guest_tree_to_shadow(vm, &normalize_path(&format!("{guest_path}/{entry}")))?;
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = shadow_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| SidecarError::Io(format!("failed to create shadow parent: {error}")))?;
+    }
+    let bytes = vm.kernel.read_file(guest_path).map_err(kernel_error)?;
+    fs::write(&shadow_path, bytes)
+        .map_err(|error| SidecarError::Io(format!("failed to mirror guest file into shadow root: {error}")))?;
+    Ok(())
 }
 
 fn load_javascript_entrypoint_source(
@@ -3664,7 +4103,7 @@ fn host_runtime_path_for_guest_path_with_env(
     None
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RuntimeGuestPathMapping {
     #[serde(rename = "guestPath")]
     guest_path: String,

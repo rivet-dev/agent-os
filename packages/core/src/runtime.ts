@@ -2187,10 +2187,6 @@ class NativeKernel implements Kernel {
 	}
 
 	private async initialize(): Promise<void> {
-		const hostRoot =
-			this.options.filesystem instanceof NodeFileSystem
-				? this.options.filesystem.rootPath
-				: null;
 		const rootFilesystem = {
 			disableDefaultBaseLayer: true,
 			lowers: [
@@ -2233,10 +2229,6 @@ class NativeKernel implements Kernel {
 			cwd: this.cwd,
 			localMounts: this.pendingLocalMounts,
 			commandGuestPaths: new Map<string, string>(),
-			hostPathMappings: hostRoot
-				? [{ guestPath: "/", hostPath: hostRoot }]
-				: [],
-			nodeExecutionCwd: this.cwd,
 		});
 
 		this.client = client;

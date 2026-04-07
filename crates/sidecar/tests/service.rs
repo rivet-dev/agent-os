@@ -729,7 +729,7 @@ ykAheWCsAteSEWVc0w==\n\
             path
         }
 
-        fn write_fixture(path: &Path, contents: &str) {
+        fn write_fixture(path: &Path, contents: impl AsRef<[u8]>) {
             fs::write(path, contents).expect("write fixture");
         }
 
@@ -803,19 +803,27 @@ ykAheWCsAteSEWVc0w==\n\
                 );
             }
 
+            drain_process_output(sidecar, vm_id, process_id)
+        }
+
+        fn drain_process_output(
+            sidecar: &mut NativeSidecar<RecordingBridge>,
+            vm_id: &str,
+            process_id: &str,
+        ) -> (String, String, Option<i32>) {
             let mut stdout = String::new();
             let mut stderr = String::new();
             let mut exit_code = None;
             for _ in 0..64 {
                 let next_event = {
-                    let vm = sidecar.vms.get(vm_id).expect("javascript vm");
+                    let vm = sidecar.vms.get(vm_id).expect("active vm");
                     vm.active_processes
                         .get(process_id)
                         .map(|process| {
                             process
                                 .execution
                                 .poll_event_blocking(Duration::from_secs(5))
-                                .expect("poll javascript event")
+                                .expect("poll process event")
                         })
                         .flatten()
                 };
@@ -823,7 +831,7 @@ ykAheWCsAteSEWVc0w==\n\
                     if exit_code.is_some() {
                         break;
                     }
-                    panic!("javascript process {process_id} disappeared before exit");
+                    panic!("process {process_id} disappeared before exit");
                 };
 
                 match &event {
@@ -841,7 +849,7 @@ ykAheWCsAteSEWVc0w==\n\
 
                 sidecar
                     .handle_execution_event(vm_id, process_id, event)
-                    .expect("handle javascript event");
+                    .expect("handle process event");
             }
 
             (stdout, stderr, exit_code)
@@ -2995,6 +3003,8 @@ ykAheWCsAteSEWVc0w==\n\
                         instructions: Vec::new(),
                         projected_modules: Vec::new(),
                         command_permissions: BTreeMap::new(),
+                        allowed_node_builtins: Vec::new(),
+                        loopback_exempt_ports: Vec::new(),
                     }),
                 ))
                 .expect("configure mounts");
@@ -3067,6 +3077,8 @@ ykAheWCsAteSEWVc0w==\n\
                         instructions: Vec::new(),
                         projected_modules: Vec::new(),
                         command_permissions: BTreeMap::new(),
+                        allowed_node_builtins: Vec::new(),
+                        loopback_exempt_ports: Vec::new(),
                     }),
                 ))
                 .expect("configure readonly mount");
@@ -3140,6 +3152,8 @@ ykAheWCsAteSEWVc0w==\n\
                         instructions: Vec::new(),
                         projected_modules: Vec::new(),
                         command_permissions: BTreeMap::new(),
+                        allowed_node_builtins: Vec::new(),
+                        loopback_exempt_ports: Vec::new(),
                     }),
                 ))
                 .expect("configure host_dir mount");
@@ -3210,6 +3224,8 @@ ykAheWCsAteSEWVc0w==\n\
                         instructions: Vec::new(),
                         projected_modules: Vec::new(),
                         command_permissions: BTreeMap::new(),
+                        allowed_node_builtins: Vec::new(),
+                        loopback_exempt_ports: Vec::new(),
                     }),
                 ))
                 .expect("configure js_bridge mount");
@@ -3366,6 +3382,8 @@ ykAheWCsAteSEWVc0w==\n\
                         instructions: Vec::new(),
                         projected_modules: Vec::new(),
                         command_permissions: BTreeMap::new(),
+                        allowed_node_builtins: Vec::new(),
+                        loopback_exempt_ports: Vec::new(),
                     }),
                 ))
                 .expect("configure js_bridge mount");
@@ -3460,6 +3478,8 @@ ykAheWCsAteSEWVc0w==\n\
                         instructions: Vec::new(),
                         projected_modules: Vec::new(),
                         command_permissions: BTreeMap::new(),
+                        allowed_node_builtins: Vec::new(),
+                        loopback_exempt_ports: Vec::new(),
                     }),
                 ))
                 .expect("configure sandbox_agent mount");
@@ -3556,6 +3576,8 @@ ykAheWCsAteSEWVc0w==\n\
                         instructions: Vec::new(),
                         projected_modules: Vec::new(),
                         command_permissions: BTreeMap::new(),
+                        allowed_node_builtins: Vec::new(),
+                        loopback_exempt_ports: Vec::new(),
                     }),
                 ))
                 .expect("configure s3 mount");
@@ -3757,6 +3779,8 @@ ykAheWCsAteSEWVc0w==\n\
                         instructions: Vec::new(),
                         projected_modules: Vec::new(),
                         command_permissions: BTreeMap::new(),
+                        allowed_node_builtins: Vec::new(),
+                        loopback_exempt_ports: Vec::new(),
                     }),
                 ))
                 .expect("dispatch configure vm");
@@ -3816,6 +3840,8 @@ ykAheWCsAteSEWVc0w==\n\
                         instructions: Vec::new(),
                         projected_modules: Vec::new(),
                         command_permissions: BTreeMap::new(),
+                        allowed_node_builtins: Vec::new(),
+                        loopback_exempt_ports: Vec::new(),
                     }),
                 ))
                 .expect("dispatch configure vm");
@@ -3954,6 +3980,8 @@ ykAheWCsAteSEWVc0w==\n\
                         instructions: Vec::new(),
                         projected_modules: Vec::new(),
                         command_permissions: BTreeMap::new(),
+                        allowed_node_builtins: Vec::new(),
+                        loopback_exempt_ports: Vec::new(),
                     }),
                 ))
                 .expect("configure host_dir mount");
@@ -4001,8 +4029,9 @@ ykAheWCsAteSEWVc0w==\n\
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::Execute(crate::protocol::ExecuteRequest {
                         process_id: String::from("proc-python"),
-                        runtime: GuestRuntimeKind::Python,
-                        entrypoint: String::from("print('hello from python')"),
+                        command: None,
+                        runtime: Some(GuestRuntimeKind::Python),
+                        entrypoint: Some(String::from("print('hello from python')")),
                         args: Vec::new(),
                         env: BTreeMap::new(),
                         cwd: None,
@@ -4031,6 +4060,294 @@ ykAheWCsAteSEWVc0w==\n\
             match &process.execution {
                 ActiveExecution::Python(_) => {}
                 other => panic!("unexpected active execution variant: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn command_resolution_executes_wasm_command_from_sidecar_path() {
+            let command_root = temp_dir("agent-os-sidecar-command-resolution-wasm");
+            write_fixture(
+                &command_root.join("hello"),
+                wat::parse_str(
+                    r#"
+(module
+  (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (type $fd_write_t)))
+  (memory (export "memory") 1)
+  (data (i32.const 16) "wasm:ready\n")
+  (func $_start (export "_start")
+    (i32.store (i32.const 0) (i32.const 16))
+    (i32.store (i32.const 4) (i32.const 11))
+    (drop
+      (call $fd_write
+        (i32.const 1)
+        (i32.const 0)
+        (i32.const 1)
+        (i32.const 32)
+      )
+    )
+  )
+)
+"#,
+                )
+                .expect("compile wasm fixture"),
+            );
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+
+            sidecar
+                .dispatch_blocking(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/__agentos/commands/0"),
+                            read_only: true,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("host_dir"),
+                                config: json!({
+                                    "hostPath": command_root,
+                                    "readOnly": true,
+                                }),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: None,
+                        module_access_cwd: None,
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: BTreeMap::new(),
+                        allowed_node_builtins: Vec::new(),
+                        loopback_exempt_ports: Vec::new(),
+                    }),
+                ))
+                .expect("configure command mount");
+
+            let response = sidecar
+                .dispatch_blocking(request(
+                    5,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::Execute(crate::protocol::ExecuteRequest {
+                        process_id: String::from("proc-command-wasm"),
+                        command: Some(String::from("hello")),
+                        runtime: None,
+                        entrypoint: None,
+                        args: Vec::new(),
+                        env: BTreeMap::new(),
+                        cwd: None,
+                        wasm_permission_tier: None,
+                    }),
+                ))
+                .expect("dispatch wasm command execute");
+
+            match response.response.payload {
+                ResponsePayload::ProcessStarted(response) => {
+                    assert_eq!(response.process_id, "proc-command-wasm");
+                }
+                other => panic!("unexpected execute response: {other:?}"),
+            }
+
+            let (stdout, stderr, exit_code) =
+                drain_process_output(&mut sidecar, &vm_id, "proc-command-wasm");
+
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            assert!(stdout.contains("wasm:ready"), "stdout: {stdout}");
+        }
+
+        #[test]
+        fn command_resolution_executes_javascript_path_command_with_sidecar_mappings() {
+            let workspace = temp_dir("agent-os-sidecar-command-resolution-js");
+            write_fixture(
+                &workspace.join("entry.js"),
+                r#"
+const { message } = require("./message.js");
+
+process.stdout.write(`${JSON.stringify({
+  message,
+})}\n`);
+"#,
+            );
+            write_fixture(
+                &workspace.join("message.js"),
+                r#"module.exports = { message: "resolved-from-mounted-workspace" };"#,
+            );
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+
+            sidecar
+                .dispatch_blocking(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/workspace"),
+                            read_only: false,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("host_dir"),
+                                config: json!({
+                                    "hostPath": workspace,
+                                    "readOnly": false,
+                                }),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: None,
+                        module_access_cwd: None,
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: BTreeMap::new(),
+                        allowed_node_builtins: vec![
+                            String::from("fs"),
+                            String::from("path"),
+                            String::from("path"),
+                        ],
+                        loopback_exempt_ports: vec![4312],
+                    }),
+                ))
+                .expect("configure workspace mount");
+
+            let response = sidecar
+                .dispatch_blocking(request(
+                    5,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::Execute(crate::protocol::ExecuteRequest {
+                        process_id: String::from("proc-command-js"),
+                        command: Some(String::from("./entry.js")),
+                        runtime: None,
+                        entrypoint: None,
+                        args: Vec::new(),
+                        env: BTreeMap::new(),
+                        cwd: Some(String::from("/workspace")),
+                        wasm_permission_tier: None,
+                    }),
+                ))
+                .expect("dispatch javascript command execute");
+
+            match response.response.payload {
+                ResponsePayload::ProcessStarted(response) => {
+                    assert_eq!(response.process_id, "proc-command-js");
+                }
+                other => panic!("unexpected execute response: {other:?}"),
+            }
+
+            let (stdout, stderr, exit_code) =
+                drain_process_output(&mut sidecar, &vm_id, "proc-command-js");
+
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            let payload: Value =
+                serde_json::from_str(stdout.trim()).expect("parse javascript command JSON");
+            assert_eq!(
+                payload["message"],
+                Value::String(String::from("resolved-from-mounted-workspace"))
+            );
+        }
+
+        #[test]
+        fn command_resolution_executes_node_eval_command() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+
+            let response = sidecar
+                .dispatch_blocking(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::Execute(crate::protocol::ExecuteRequest {
+                        process_id: String::from("proc-command-node-eval"),
+                        command: Some(String::from("node")),
+                        runtime: None,
+                        entrypoint: None,
+                        args: vec![
+                            String::from("-e"),
+                            String::from("process.stdout.write('node-eval-ok\\n')"),
+                        ],
+                        env: BTreeMap::new(),
+                        cwd: None,
+                        wasm_permission_tier: None,
+                    }),
+                ))
+                .expect("dispatch node eval execute");
+
+            match response.response.payload {
+                ResponsePayload::ProcessStarted(response) => {
+                    assert_eq!(response.process_id, "proc-command-node-eval");
+                }
+                other => panic!("unexpected execute response: {other:?}"),
+            }
+
+            let (stdout, stderr, exit_code) =
+                drain_process_output(&mut sidecar, &vm_id, "proc-command-node-eval");
+
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            assert!(stdout.contains("node-eval-ok"), "stdout: {stdout}");
+        }
+
+        #[test]
+        fn command_resolution_rejects_unknown_command() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+
+            let response = sidecar
+                .dispatch_blocking(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::Execute(crate::protocol::ExecuteRequest {
+                        process_id: String::from("proc-command-missing"),
+                        command: Some(String::from("definitely-not-a-command")),
+                        runtime: None,
+                        entrypoint: None,
+                        args: Vec::new(),
+                        env: BTreeMap::new(),
+                        cwd: None,
+                        wasm_permission_tier: None,
+                    }),
+                ))
+                .expect("dispatch missing command execute");
+
+            match response.response.payload {
+                ResponsePayload::Rejected(rejected) => {
+                    assert_eq!(rejected.code, "invalid_state");
+                    assert!(
+                        rejected
+                            .message
+                            .contains("command not found on native sidecar path"),
+                        "unexpected rejection: {rejected:?}"
+                    );
+                }
+                other => panic!("unexpected execute response: {other:?}"),
             }
         }
 

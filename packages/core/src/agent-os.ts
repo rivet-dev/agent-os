@@ -1311,6 +1311,8 @@ export class AgentOs {
 					permissions: sidecarPermissions,
 					moduleAccessCwd,
 					commandPermissions: processed.commandPermissions,
+					allowedNodeBuiltins: options?.allowedNodeBuiltins,
+					loopbackExemptPorts: options?.loopbackExemptPorts,
 				});
 
 				rootBridge = new NativeSidecarKernelProxy({
@@ -1321,14 +1323,6 @@ export class AgentOs {
 					cwd: "/home/user",
 					localMounts,
 					commandGuestPaths,
-					wasmCommandPermissions: processed.commandPermissions,
-					hostPathMappings: hostPathMappings.map((mapping) => ({
-						guestPath: mapping.vmPath,
-						hostPath: mapping.hostPath,
-					})),
-					allowedNodeBuiltins: options?.allowedNodeBuiltins,
-					loopbackExemptPorts: options?.loopbackExemptPorts,
-					nodeExecutionCwd: "/home/user",
 					onDispose: cleanup,
 				});
 

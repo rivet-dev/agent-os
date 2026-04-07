@@ -232,6 +232,8 @@ pub(crate) struct VmConfiguration {
     pub(crate) instructions: Vec<String>,
     pub(crate) projected_modules: Vec<ProjectedModuleDescriptor>,
     pub(crate) command_permissions: BTreeMap<String, WasmPermissionTier>,
+    pub(crate) allowed_node_builtins: Vec<String>,
+    pub(crate) loopback_exempt_ports: Vec<u16>,
 }
 
 #[allow(dead_code)]
@@ -273,7 +275,9 @@ pub(crate) struct VmState {
     pub(crate) dns: VmDnsConfig,
     pub(crate) guest_env: BTreeMap<String, String>,
     pub(crate) requested_runtime: GuestRuntimeKind,
+    pub(crate) guest_cwd: String,
     pub(crate) cwd: PathBuf,
+    pub(crate) host_cwd: PathBuf,
     pub(crate) kernel: SidecarKernel,
     pub(crate) loaded_snapshot: Option<FilesystemSnapshot>,
     pub(crate) configuration: VmConfiguration,

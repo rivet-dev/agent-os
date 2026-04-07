@@ -1,20 +1,7 @@
 import { execFileSync } from "node:child_process";
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	realpathSync,
-	rmSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
-import { constants as osConstants, tmpdir } from "node:os";
-import {
-	basename as basenameHostPath,
-	dirname as dirnameHostPath,
-	join as joinHostPath,
-	posix as posixPath,
-} from "node:path";
+import { rmSync } from "node:fs";
+import { constants as osConstants } from "node:os";
+import { posix as posixPath } from "node:path";
 import type {
 	ConnectTerminalOptions,
 	Kernel,
@@ -23,7 +10,6 @@ import type {
 	KernelSpawnOptions,
 	ManagedProcess,
 	OpenShellOptions,
-	PermissionTier,
 	ProcessInfo,
 	ShellHandle,
 	VirtualFileSystem,
@@ -40,48 +26,6 @@ import type {
 
 const SYNTHETIC_PID_BASE = 1_000_000;
 const EVENT_PUMP_TIMEOUT_MS = 86_400_000;
-const GUEST_PATH_MAPPINGS_ENV = "AGENT_OS_GUEST_PATH_MAPPINGS";
-const EXTRA_FS_READ_PATHS_ENV = "AGENT_OS_EXTRA_FS_READ_PATHS";
-const EXTRA_FS_WRITE_PATHS_ENV = "AGENT_OS_EXTRA_FS_WRITE_PATHS";
-const ALLOWED_NODE_BUILTINS_ENV = "AGENT_OS_ALLOWED_NODE_BUILTINS";
-const LOOPBACK_EXEMPT_PORTS_ENV = "AGENT_OS_LOOPBACK_EXEMPT_PORTS";
-const DEFAULT_ALLOWED_NODE_BUILTINS = [
-	"assert",
-	"buffer",
-	"console",
-	"child_process",
-	"crypto",
-	"dns",
-	"events",
-	"fs",
-	"http",
-	"http2",
-	"https",
-	"os",
-	"path",
-	"querystring",
-	"stream",
-	"string_decoder",
-	"timers",
-	"tls",
-	"url",
-	"util",
-	"zlib",
-] as const;
-
-function normalizeAllowedNodeBuiltins(
-	allowedNodeBuiltins?: readonly string[],
-): string[] {
-	if (allowedNodeBuiltins === undefined) {
-		return [...DEFAULT_ALLOWED_NODE_BUILTINS];
-	}
-
-	return [
-		...new Set(
-			allowedNodeBuiltins.filter((value) => typeof value === "string"),
-		),
-	];
-}
 
 const PREFERRED_SIGNAL_NAMES = [
 	"SIGHUP",
@@ -157,11 +101,6 @@ export interface LocalCompatMount {
 	readOnly: boolean;
 }
 
-interface HostPathMapping {
-	guestPath: string;
-	hostPath: string;
-}
-
 interface KernelSocketSnapshot {
 	processId: string;
 	host?: string;
@@ -183,11 +122,6 @@ interface KernelSignalState {
 interface SocketLookupCacheEntry {
 	value: KernelSocketSnapshot | null;
 	pending: Promise<void> | null;
-}
-
-export interface NativeKernelHostPathMapping {
-	guestPath: string;
-	hostPath: string;
 }
 
 interface TrackedProcessEntry {
@@ -229,11 +163,6 @@ interface NativeSidecarKernelProxyOptions {
 	cwd: string;
 	localMounts: LocalCompatMount[];
 	commandGuestPaths: ReadonlyMap<string, string>;
-	wasmCommandPermissions?: Readonly<Record<string, PermissionTier>>;
-	hostPathMappings: HostPathMapping[];
-	allowedNodeBuiltins?: readonly string[];
-	loopbackExemptPorts?: number[];
-	nodeExecutionCwd: string;
 	onDispose?: () => Promise<void>;
 }
 
@@ -249,11 +178,6 @@ export class NativeSidecarKernelProxy {
 	private readonly vm: CreatedVm;
 	private readonly localMounts: LocalCompatMount[];
 	private readonly commandGuestPaths: Map<string, string>;
-	private readonly wasmCommandPermissions: Readonly<Record<string, PermissionTier>>;
-	private readonly hostPathMappings: HostPathMapping[];
-	private readonly allowedNodeBuiltins: readonly string[];
-	private readonly loopbackExemptPorts: readonly number[];
-	private readonly nodeExecutionCwd: string;
 	private readonly onDispose: (() => Promise<void>) | undefined;
 	private readonly trackedProcesses = new Map<number, TrackedProcessEntry>();
 	private readonly trackedProcessesById = new Map<
@@ -271,7 +195,6 @@ export class NativeSidecarKernelProxy {
 	private pumpError: Error | null = null;
 	private nextSyntheticPid = SYNTHETIC_PID_BASE;
 	private readonly eventPump: Promise<void>;
-	private readonly shadowRoot: string;
 
 	constructor(options: NativeSidecarKernelProxyOptions) {
 		this.client = options.client;
@@ -283,22 +206,7 @@ export class NativeSidecarKernelProxy {
 			(left, right) => right.path.length - left.path.length,
 		);
 		this.commandGuestPaths = new Map(options.commandGuestPaths);
-		this.wasmCommandPermissions = Object.freeze({
-			...(options.wasmCommandPermissions ?? {}),
-		});
-		this.hostPathMappings = [...options.hostPathMappings].sort(
-			(left, right) => right.guestPath.length - left.guestPath.length,
-		);
-		this.allowedNodeBuiltins = normalizeAllowedNodeBuiltins(
-			options.allowedNodeBuiltins,
-		);
-		this.loopbackExemptPorts = [...(options.loopbackExemptPorts ?? [])];
-		this.nodeExecutionCwd = options.nodeExecutionCwd;
 		this.onDispose = options.onDispose;
-		this.shadowRoot = mkdtempSync(
-			joinHostPath(tmpdir(), "agent-os-native-shadow-"),
-		);
-		this.materializeHostPathMappings();
 		this.commands = buildCommandMap(this.commandGuestPaths);
 		this.vfs = this.createFilesystemView(true);
 		this.rootView = this.createFilesystemView(false);
@@ -350,7 +258,6 @@ export class NativeSidecarKernelProxy {
 		}
 		await this.client.dispose().catch(() => {});
 		await this.eventPump.catch(() => {});
-		rmSync(this.shadowRoot, { recursive: true, force: true });
 		await this.onDispose?.().catch(() => {});
 	}
 
@@ -617,10 +524,7 @@ export class NativeSidecarKernelProxy {
 		return this.dispatchWrite(
 			path,
 			(mount, relativePath) => mount.fs.writeFile(relativePath, content),
-			async () => {
-				await this.client.writeFile(this.session, this.vm, path, content);
-				this.mirrorGuestFile(path, content);
-			},
+			() => this.client.writeFile(this.session, this.vm, path, content),
 		);
 	}
 
@@ -821,18 +725,12 @@ export class NativeSidecarKernelProxy {
 	}
 
 	private async startTrackedProcess(entry: TrackedProcessEntry): Promise<void> {
-		const execution = await this.resolveExecution(entry);
-		if (execution.bootstrap) {
-			await execution.bootstrap();
-		}
 		const started = await this.client.execute(this.session, this.vm, {
 			processId: entry.processId,
-			runtime: execution.runtime,
-			entrypoint: execution.entrypoint,
-			args: execution.args,
-			env: execution.env,
-			cwd: execution.cwd,
-			wasmPermissionTier: execution.wasmPermissionTier,
+			command: entry.command,
+			args: entry.args,
+			env: entry.env,
+			cwd: entry.cwd,
 		});
 		entry.hostPid = started.pid;
 		entry.started = true;
@@ -1021,178 +919,6 @@ export class NativeSidecarKernelProxy {
 		);
 	}
 
-	private async resolveExecution(entry: TrackedProcessEntry): Promise<{
-		runtime: "java_script" | "web_assembly";
-		entrypoint: string;
-		args: string[];
-		cwd?: string;
-		env?: Record<string, string>;
-		wasmPermissionTier?: PermissionTier;
-		bootstrap?: () => Promise<void>;
-	}> {
-		if (entry.command === "node") {
-			if (entry.args.length === 0) {
-				throw new Error("node spawn requires an entrypoint");
-			}
-			if (entry.args[0] === "-e") {
-				const source = entry.args[1] ?? "";
-				const guestEntrypoint = `/tmp/agent-os-inline-${entry.pid}.mjs`;
-				const entrypoint = this.shadowPathForGuest(guestEntrypoint, false);
-				return {
-					runtime: "java_script",
-					entrypoint: guestEntrypoint,
-					args: entry.args.slice(2),
-					cwd: this.resolveNodeCwd(entry.cwd),
-					env: this.buildNodeExecutionEnv(entry, guestEntrypoint),
-					bootstrap: async () => {
-						mkdirSync(dirnameHostPath(entrypoint), { recursive: true });
-						writeFileSync(entrypoint, source);
-					},
-				};
-			}
-			const entrypoint = await this.resolveNodeEntrypoint(
-				entry.args[0],
-				entry.cwd,
-			);
-			return {
-				runtime: "java_script",
-				entrypoint,
-				args: entry.args.slice(1),
-				cwd: this.resolveNodeCwd(entry.cwd),
-				env: this.buildNodeExecutionEnv(entry, entrypoint),
-			};
-		}
-
-		const wasmEntrypoint = this.commandGuestPaths.get(entry.command);
-		if (wasmEntrypoint) {
-				return {
-					runtime: "web_assembly",
-					entrypoint: wasmEntrypoint,
-					args: entry.args,
-					cwd: entry.cwd,
-					env: entry.env,
-					wasmPermissionTier: this.wasmCommandPermissions[entry.command],
-				};
-			}
-
-		throw new Error(
-			`command not found on native sidecar path: ${entry.command}`,
-		);
-	}
-
-	private async resolveNodeEntrypoint(
-		entrypoint: string,
-		cwd: string,
-	): Promise<string> {
-		if (!isPathLikeSpecifier(entrypoint)) {
-			return entrypoint;
-		}
-
-		if (entrypoint.startsWith("file:")) {
-			return entrypoint;
-		}
-
-		const guestPath = entrypoint.startsWith("/")
-			? posixPath.normalize(entrypoint)
-			: posixPath.normalize(posixPath.join(cwd, entrypoint));
-		if (!this.resolveHostPath(guestPath)) {
-			await this.materializeGuestFile(guestPath);
-		}
-		return guestPath;
-	}
-
-	private resolveNodeCwd(cwd: string): string {
-		return this.resolveHostPath(cwd) ?? this.shadowPathForGuest(cwd, true);
-	}
-
-	private resolveHostPath(guestPath: string): string | null {
-		const normalized = posixPath.normalize(guestPath);
-		for (const mapping of this.hostPathMappings) {
-			if (
-				normalized !== mapping.guestPath &&
-				!normalized.startsWith(`${mapping.guestPath}/`)
-			) {
-				continue;
-			}
-			const suffix =
-				normalized === mapping.guestPath
-					? ""
-					: normalized.slice(mapping.guestPath.length + 1);
-			return suffix.length === 0
-				? mapping.hostPath
-				: joinHostPath(mapping.hostPath, suffix);
-		}
-		return null;
-	}
-
-	private shadowPathForGuest(guestPath: string, directory: boolean): string {
-		const relativePath = posixPath.normalize(guestPath).replace(/^\/+/, "");
-		const hostPath = joinHostPath(this.shadowRoot, relativePath);
-		mkdirSync(directory ? hostPath : dirnameHostPath(hostPath), {
-			recursive: true,
-		});
-		return hostPath;
-	}
-
-	private async materializeGuestFile(guestPath: string): Promise<string> {
-		const hostPath = joinHostPath(
-			this.shadowRoot,
-			posixPath.normalize(guestPath).replace(/^\/+/, ""),
-		);
-		mkdirSync(dirnameHostPath(hostPath), { recursive: true });
-		writeFileSync(hostPath, Buffer.from(await this.readFile(guestPath)));
-		return hostPath;
-	}
-
-	private materializeHostPathMappings(): void {
-		for (const mapping of this.hostPathMappings) {
-			const linkPath = this.shadowPathForGuest(mapping.guestPath, false);
-			rmSync(linkPath, { recursive: true, force: true });
-			symlinkSync(mapping.hostPath, linkPath);
-		}
-	}
-
-	private buildNodeExecutionEnv(
-		entry: TrackedProcessEntry,
-		guestEntrypoint: string,
-	): Record<string, string> {
-		const pathMappings = [
-			...this.hostPathMappings,
-			{ guestPath: "/", hostPath: this.shadowRoot },
-		];
-		const guestLiteralPaths = [
-			entry.cwd,
-			entry.env.HOME ?? this.env.HOME,
-			...this.hostPathMappings.map((mapping) => mapping.guestPath),
-		].filter(
-			(candidate): candidate is string =>
-				typeof candidate === "string" && candidate.startsWith("/"),
-		);
-		const extraReadPaths = dedupePaths([
-			...expandHostAccessPaths([
-				this.shadowRoot,
-				...pathMappings.map((mapping) => mapping.hostPath),
-			]),
-			...guestLiteralPaths,
-		]);
-		const extraWritePaths = dedupePaths([
-			this.shadowRoot,
-			...guestLiteralPaths,
-		]);
-
-		return {
-			...entry.env,
-			[GUEST_PATH_MAPPINGS_ENV]: JSON.stringify(pathMappings),
-			[EXTRA_FS_READ_PATHS_ENV]: JSON.stringify(extraReadPaths),
-			[EXTRA_FS_WRITE_PATHS_ENV]: JSON.stringify(extraWritePaths),
-			[ALLOWED_NODE_BUILTINS_ENV]: JSON.stringify(this.allowedNodeBuiltins),
-			[LOOPBACK_EXEMPT_PORTS_ENV]: JSON.stringify(
-				this.loopbackExemptPorts.map((port) => String(port)),
-			),
-			AGENT_OS_GUEST_ENTRYPOINT: guestEntrypoint,
-		};
-	}
-
 	private createFilesystemView(includeLocalMounts: boolean): VirtualFileSystem {
 		return {
 			readFile: (path) =>
@@ -1241,10 +967,7 @@ export class NativeSidecarKernelProxy {
 				this.dispatchWrite(
 					path,
 					(mount, relativePath) => mount.fs.writeFile(relativePath, content),
-					async () => {
-						await this.client.writeFile(this.session, this.vm, path, content);
-						this.mirrorGuestFile(path, content);
-					},
+					() => this.client.writeFile(this.session, this.vm, path, content),
 					includeLocalMounts,
 				),
 			createDir: (path) =>
@@ -1574,17 +1297,6 @@ export class NativeSidecarKernelProxy {
 		}
 	}
 
-	private mirrorGuestFile(path: string, content: string | Uint8Array): void {
-		if (this.resolveHostPath(path)) {
-			return;
-		}
-		const hostPath = this.shadowPathForGuest(path, false);
-		writeFileSync(
-			hostPath,
-			typeof content === "string" ? content : Buffer.from(content),
-		);
-	}
-
 	private updateTrackedProcessSnapshot(entry: TrackedProcessEntry): void {
 		this.processes.set(entry.pid, {
 			pid: entry.pid,
@@ -1615,15 +1327,6 @@ function buildCommandMap(
 		commands.set(name, "wasmvm");
 	}
 	return commands;
-}
-
-function isPathLikeSpecifier(specifier: string): boolean {
-	return (
-		specifier.startsWith("/") ||
-		specifier.startsWith("./") ||
-		specifier.startsWith("../") ||
-		specifier.startsWith("file:")
-	);
 }
 
 function isNoSuchProcessError(error: unknown): boolean {
@@ -1777,55 +1480,4 @@ function readHostProcesses(): HostProcessRow[] {
 	} catch {
 		return [];
 	}
-}
-
-function expandHostAccessPaths(paths: readonly string[]): string[] {
-	const expanded: string[] = [];
-	const seen = new Set<string>();
-
-	const addPath = (candidate: string | null): void => {
-		if (!candidate || seen.has(candidate)) {
-			return;
-		}
-		seen.add(candidate);
-		expanded.push(candidate);
-	};
-
-	for (const hostPath of paths) {
-		addPath(hostPath);
-		addPath(safeRealpathSync(hostPath));
-
-		if (basenameHostPath(hostPath) !== "node_modules") {
-			continue;
-		}
-
-		let current = dirnameHostPath(hostPath);
-		while (true) {
-			const candidate = joinHostPath(current, "node_modules");
-			if (existsSync(candidate)) {
-				addPath(candidate);
-				addPath(safeRealpathSync(candidate));
-			}
-
-			const parent = dirnameHostPath(current);
-			if (parent === current) {
-				break;
-			}
-			current = parent;
-		}
-	}
-
-	return expanded;
-}
-
-function safeRealpathSync(path: string): string | null {
-	try {
-		return realpathSync.native(path);
-	} catch {
-		return null;
-	}
-}
-
-function dedupePaths(paths: readonly string[]): string[] {
-	return [...new Set(paths)];
 }

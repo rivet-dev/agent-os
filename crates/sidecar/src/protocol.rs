@@ -528,16 +528,24 @@ pub struct RootFilesystemEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigureVmRequest {
+    #[serde(default)]
     pub mounts: Vec<MountDescriptor>,
+    #[serde(default)]
     pub software: Vec<SoftwareDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionsPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module_access_cwd: Option<String>,
+    #[serde(default)]
     pub instructions: Vec<String>,
+    #[serde(default)]
     pub projected_modules: Vec<ProjectedModuleDescriptor>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub command_permissions: BTreeMap<String, WasmPermissionTier>,
+    #[serde(default)]
+    pub allowed_node_builtins: Vec<String>,
+    #[serde(default)]
+    pub loopback_exempt_ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -637,8 +645,12 @@ pub enum WasmPermissionTier {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecuteRequest {
     pub process_id: String,
-    pub runtime: GuestRuntimeKind,
-    pub entrypoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<GuestRuntimeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<String>,
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,

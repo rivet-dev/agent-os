@@ -354,7 +354,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 28,
-      "passes": false,
+      "passes": true,
       "notes": "Step 4 (Rust side). Depends on process management (US-015). Add tests in crates/execution/tests/javascript/command_resolution.rs."
     },
     {

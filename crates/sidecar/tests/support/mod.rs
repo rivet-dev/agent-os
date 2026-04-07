@@ -190,8 +190,9 @@ pub fn execute(
             OwnershipScope::vm(connection_id, session_id, vm_id),
             RequestPayload::Execute(ExecuteRequest {
                 process_id: process_id.to_owned(),
-                runtime,
-                entrypoint: entrypoint.to_string_lossy().into_owned(),
+                command: None,
+                runtime: Some(runtime),
+                entrypoint: Some(entrypoint.to_string_lossy().into_owned()),
                 args,
                 env: BTreeMap::new(),
                 cwd: None,

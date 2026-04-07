@@ -2,7 +2,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { AgentOsOptions } from "../src/index.js";
 import { NativeSidecarKernelProxy } from "../src/sidecar/native-kernel-proxy.js";
 import type {
 	AuthenticatedSession,
@@ -10,7 +9,7 @@ import type {
 	NativeSidecarProcessClient,
 } from "../src/sidecar/native-process-client.js";
 
-describe("AgentOsOptions.allowedNodeBuiltins", () => {
+describe("NativeSidecarKernelProxy execute payloads", () => {
 	let proxy: NativeSidecarKernelProxy | null = null;
 	let fixtureRoot: string | null = null;
 
@@ -53,9 +52,7 @@ describe("AgentOsOptions.allowedNodeBuiltins", () => {
 		return { client, execute };
 	}
 
-	async function captureAllowedNodeBuiltins(
-		options: Partial<AgentOsOptions> = {},
-	) {
+	async function captureExecutePayload() {
 		fixtureRoot = mkdtempSync(join(tmpdir(), "agent-os-allowed-builtins-"));
 		const { client, execute } = createMockClient();
 
@@ -70,14 +67,6 @@ describe("AgentOsOptions.allowedNodeBuiltins", () => {
 			cwd: "/workspace",
 			localMounts: [],
 			commandGuestPaths: new Map(),
-			hostPathMappings: [
-				{
-					guestPath: "/workspace",
-					hostPath: fixtureRoot,
-				},
-			],
-			allowedNodeBuiltins: options.allowedNodeBuiltins,
-			nodeExecutionCwd: "/workspace",
 		});
 
 		const proc = proxy.spawn("node", ["/workspace/entry.mjs"], {
@@ -88,26 +77,20 @@ describe("AgentOsOptions.allowedNodeBuiltins", () => {
 
 		expect(exitCode).toBe(1);
 		expect(execute).toHaveBeenCalledTimes(1);
-		return execute.mock.calls[0]?.[2]?.env?.AGENT_OS_ALLOWED_NODE_BUILTINS;
+		return execute.mock.calls[0]?.[2];
 	}
 
-	test("overrides the native sidecar Node builtin allowlist for guest executions", async () => {
-		const options: AgentOsOptions = {
-			allowedNodeBuiltins: ["worker_threads"],
-		};
-
-		expect(await captureAllowedNodeBuiltins(options)).toBe(
-			JSON.stringify(options.allowedNodeBuiltins),
-		);
-	});
-
-	test("uses the hardened default allowlist when guest executions do not override it", async () => {
-		const builtins = JSON.parse(await captureAllowedNodeBuiltins());
-		expect(builtins).toContain("os");
-		expect(builtins).toContain("dns");
-		expect(builtins).toContain("http");
-		expect(builtins).toContain("http2");
-		expect(builtins).toContain("https");
-		expect(builtins).toContain("tls");
+	test("leaves internal AGENT_OS runtime env construction to the sidecar", async () => {
+		await expect(captureExecutePayload()).resolves.toMatchObject({
+			command: "node",
+			args: ["/workspace/entry.mjs"],
+			cwd: "/workspace",
+			env: { HOME: "/workspace" },
+		});
+		await expect(captureExecutePayload()).resolves.not.toMatchObject({
+			env: {
+				AGENT_OS_ALLOWED_NODE_BUILTINS: expect.anything(),
+			},
+		});
 	});
 });

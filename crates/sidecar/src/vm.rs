@@ -43,9 +43,10 @@ use agent_os_kernel::root_fs::{
 };
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
 // NativeSidecar VM lifecycle methods
@@ -66,7 +67,11 @@ where
 
         self.next_vm_id += 1;
         let vm_id = format!("vm-{}", self.next_vm_id);
-        let cwd = resolve_cwd(payload.metadata.get("cwd"))?;
+        let guest_cwd = resolve_guest_cwd(payload.metadata.get("cwd"));
+        let cwd = create_vm_shadow_root(&vm_id)?;
+        let host_cwd = shadow_path_for_guest(&cwd, &guest_cwd);
+        fs::create_dir_all(&host_cwd)
+            .map_err(|error| SidecarError::Io(format!("failed to create VM cwd: {error}")))?;
         let resource_limits = parse_resource_limits(&payload.metadata)?;
         let dns = parse_vm_dns_config(&payload.metadata)?;
         let permissions_policy = payload.permissions.clone().unwrap_or_default();
@@ -124,7 +129,9 @@ where
                 dns,
                 guest_env,
                 requested_runtime: payload.runtime,
+                guest_cwd,
                 cwd,
+                host_cwd,
                 kernel,
                 loaded_snapshot,
                 configuration: VmConfiguration::default(),
@@ -253,6 +260,8 @@ where
             instructions: payload.instructions.clone(),
             projected_modules: payload.projected_modules.clone(),
             command_permissions: payload.command_permissions.clone(),
+            allowed_node_builtins: payload.allowed_node_builtins.clone(),
+            loopback_exempt_ports: payload.loopback_exempt_ports.clone(),
         };
         if let Some(permissions) = payload.permissions.as_ref() {
             self.bridge.set_vm_permissions(&vm_id, permissions)?;
@@ -487,6 +496,7 @@ where
         self.javascript_engine.dispose_vm(vm_id);
         self.python_engine.dispose_vm(vm_id);
         self.wasm_engine.dispose_vm(vm_id);
+        let _ = fs::remove_dir_all(&vm.cwd);
 
         if let Some(session) = self.sessions.get_mut(session_id) {
             session.vm_ids.remove(vm_id);
@@ -661,7 +671,7 @@ fn append_module_access_mount(
     let Some(module_access_cwd) = module_access_cwd else {
         return Ok(());
     };
-    let root = resolve_cwd(Some(module_access_cwd))?.join("node_modules");
+    let root = resolve_host_path(Some(module_access_cwd))?.join("node_modules");
     if !root.is_dir() {
         return Ok(());
     }
@@ -775,7 +785,13 @@ fn dedupe_overlay_bootstrap_entries(
         .collect()
 }
 
-fn resolve_cwd(value: Option<&String>) -> Result<PathBuf, SidecarError> {
+fn resolve_guest_cwd(value: Option<&String>) -> String {
+    value
+        .map(|path| normalize_guest_path(path))
+        .unwrap_or_else(|| String::from("/"))
+}
+
+fn resolve_host_path(value: Option<&String>) -> Result<PathBuf, SidecarError> {
     match value {
         Some(path) => {
             let cwd = PathBuf::from(path);
@@ -793,6 +809,49 @@ fn resolve_cwd(value: Option<&String>) -> Result<PathBuf, SidecarError> {
         None => std::env::current_dir().map_err(|error| {
             SidecarError::Io(format!("failed to resolve current directory: {error}"))
         }),
+    }
+}
+
+fn create_vm_shadow_root(vm_id: &str) -> Result<PathBuf, SidecarError> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| SidecarError::Io(format!("failed to compute shadow-root nonce: {error}")))?
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("agent-os-sidecar-shadow-{vm_id}-{nonce}"));
+    fs::create_dir_all(&root)
+        .map_err(|error| SidecarError::Io(format!("failed to create VM shadow root: {error}")))?;
+    Ok(root)
+}
+
+fn shadow_path_for_guest(shadow_root: &std::path::Path, guest_path: &str) -> PathBuf {
+    let normalized = normalize_guest_path(guest_path);
+    let relative = normalized.trim_start_matches('/');
+    if relative.is_empty() {
+        return shadow_root.to_path_buf();
+    }
+    shadow_root.join(relative)
+}
+
+fn normalize_guest_path(path: &str) -> String {
+    let mut segments = Vec::new();
+    let absolute = path.starts_with('/');
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+
+    if !absolute {
+        return format!("/{}", segments.join("/"));
+    }
+    if segments.is_empty() {
+        String::from("/")
+    } else {
+        format!("/{}", segments.join("/"))
     }
 }
 

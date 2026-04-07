@@ -46,6 +46,8 @@ fn vm_layer_rpcs_and_module_access_mounts_are_scoped_per_vm() {
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
                 command_permissions: BTreeMap::new(),
+                allowed_node_builtins: Vec::new(),
+                loopback_exempt_ports: Vec::new(),
             }),
         ))
         .expect("configure vm");

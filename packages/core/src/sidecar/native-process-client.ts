@@ -163,6 +163,8 @@ type RequestPayload =
 			instructions: string[];
 			projected_modules: WireProjectedModuleDescriptor[];
 			command_permissions: Record<string, WasmPermissionTier>;
+			allowed_node_builtins?: string[];
+			loopback_exempt_ports?: number[];
 	  }
 	| {
 			type: "dispose_vm";
@@ -215,8 +217,9 @@ type RequestPayload =
 	| {
 			type: "execute";
 			process_id: string;
-			runtime: GuestRuntimeKind;
-			entrypoint: string;
+			command?: string;
+			runtime?: GuestRuntimeKind;
+			entrypoint?: string;
 			args: string[];
 			env?: Record<string, string>;
 			cwd?: string;
@@ -730,6 +733,8 @@ export class NativeSidecarProcessClient {
 			instructions?: string[];
 			projectedModules?: SidecarProjectedModuleDescriptor[];
 			commandPermissions?: Record<string, WasmPermissionTier>;
+			allowedNodeBuiltins?: string[];
+			loopbackExemptPorts?: number[];
 		},
 	): Promise<void> {
 		const response = await this.sendRequest({
@@ -750,6 +755,12 @@ export class NativeSidecarProcessClient {
 					toWireProjectedModuleDescriptor,
 				),
 				command_permissions: options.commandPermissions ?? {},
+				...(options.allowedNodeBuiltins
+					? { allowed_node_builtins: options.allowedNodeBuiltins }
+					: {}),
+				...(options.loopbackExemptPorts
+					? { loopback_exempt_ports: options.loopbackExemptPorts }
+					: {}),
 			},
 		});
 		if (response.payload.type !== "vm_configured") {
@@ -1195,8 +1206,9 @@ export class NativeSidecarProcessClient {
 		vm: CreatedVm,
 		options: {
 			processId: string;
-			runtime: GuestRuntimeKind;
-			entrypoint: string;
+			command?: string;
+			runtime?: GuestRuntimeKind;
+			entrypoint?: string;
 			args?: string[];
 			env?: Record<string, string>;
 			cwd?: string;
@@ -1213,9 +1225,10 @@ export class NativeSidecarProcessClient {
 			payload: {
 				type: "execute",
 				process_id: options.processId,
-				runtime: options.runtime,
-				entrypoint: options.entrypoint,
 				args: options.args ?? [],
+				...(options.command ? { command: options.command } : {}),
+				...(options.runtime ? { runtime: options.runtime } : {}),
+				...(options.entrypoint ? { entrypoint: options.entrypoint } : {}),
 				...(options.env ? { env: options.env } : {}),
 				...(options.cwd ? { cwd: options.cwd } : {}),
 				...(options.wasmPermissionTier
