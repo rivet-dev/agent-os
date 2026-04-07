@@ -17,6 +17,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - When extracting methods, check test modules — `use super::*` only imports from the parent module, so removed imports need explicit test-module imports
 - Filesystem-domain extraction from `service.rs` should move guest filesystem ACP handlers, Python VFS RPC handling, and JS filesystem sync RPCs together; leave `service.rs` as a thin dispatch hub and keep shared JS RPC argument parsers / execution response shims `pub(crate)` there
 - Until US-007 moves inline `service.rs` tests into `crates/sidecar/tests/`, extracted helpers they call must stay reachable through `service.rs` via `pub(crate)` re-exports or widened crate visibility
+- Native sidecar mount plugins live under `crates/sidecar/src/plugins/`, and `plugins/mod.rs` owns shared registration for the reusable native plugins while `bridge.rs` only adds sidecar-specific `memory` and `js_bridge` entries
 
 ## 2026-04-06 - US-001
 - Extracted shared state types from service.rs into new state.rs module (~450 lines)
@@ -77,4 +78,12 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - `service.rs` inline tests call a large set of private execution helpers directly; mechanical extractions need to preserve that access path through `pub(crate)` visibility or `service.rs` re-exports until US-007 moves those tests out
   - Extraction compile passes are not enough for `service.rs`; the lib test suite catches additional visibility gaps because the inline tests exercise helper functions that normal crate code no longer references
   - Running `cargo fmt` after these module splits can touch adjacent files like `bridge.rs`; check those diffs before committing so incidental formatting doesn’t hide functional changes
+---
+## 2026-04-06 17:51:25 PDT - US-006
+- Reorganized the native mount plugins into `crates/sidecar/src/plugins/`, adding `plugins/mod.rs` with shared plugin-registration glue and updating `bridge.rs`, `lib.rs`, and `service.rs` to use the new module layout
+- Files changed: `crates/sidecar/src/plugins/mod.rs` (new), `crates/sidecar/src/plugins/host_dir.rs`, `crates/sidecar/src/plugins/s3.rs`, `crates/sidecar/src/plugins/google_drive.rs`, `crates/sidecar/src/plugins/sandbox_agent.rs`, `crates/sidecar/src/bridge.rs`, `crates/sidecar/src/lib.rs`, `crates/sidecar/src/service.rs`, `crates/CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Centralizing native plugin registration in `plugins/mod.rs` keeps plugin-file moves mechanical and limits `bridge.rs` changes to the sidecar-only plugin entries
+  - `service.rs` inline tests can keep importing plugin test helpers through the new module paths (`crate::plugins::...`) without changing test behavior
+  - `cargo test -p agent-os-sidecar --lib -- --test-threads=1` covers the moved inline plugin tests and matches the repo guidance about avoiding the full parallel sidecar package run
 ---

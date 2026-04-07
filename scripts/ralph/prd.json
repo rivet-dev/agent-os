@@ -103,7 +103,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Step 0a. IMPORTANT: These plugin files already exist as top-level files (host_dir_plugin.rs at 796 lines, s3_plugin.rs at 1,439 lines, google_drive_plugin.rs at 1,792 lines, sandbox_agent_plugin.rs at 2,300 lines). This story moves them into a plugins/ subdirectory and adds a shared trait. A js_bridge.rs plugin will be added later."
     },
     {

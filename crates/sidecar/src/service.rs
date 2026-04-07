@@ -1,15 +1,14 @@
 use crate::bridge::{build_mount_plugin_registry, MountPluginContext};
 pub(crate) use crate::execution::{
-    build_javascript_socket_path_context, error_code, ignore_stale_javascript_sync_rpc_response,
-    format_dns_resource, format_tcp_resource,
-    javascript_sync_rpc_arg_str, javascript_sync_rpc_arg_u32, javascript_sync_rpc_arg_u32_optional,
-    javascript_sync_rpc_arg_u64, javascript_sync_rpc_arg_u64_optional,
-    javascript_sync_rpc_bytes_arg, javascript_sync_rpc_bytes_value, javascript_sync_rpc_encoding,
-    javascript_sync_rpc_error_code, javascript_sync_rpc_option_bool,
-    javascript_sync_rpc_option_u32, parse_signal, service_javascript_sync_rpc,
-    service_javascript_net_sync_rpc, signal_runtime_process,
-    sanitize_javascript_child_process_internal_bootstrap_env, vm_network_resource_counts,
-    runtime_child_is_alive,
+    build_javascript_socket_path_context, error_code, format_dns_resource, format_tcp_resource,
+    ignore_stale_javascript_sync_rpc_response, javascript_sync_rpc_arg_str,
+    javascript_sync_rpc_arg_u32, javascript_sync_rpc_arg_u32_optional, javascript_sync_rpc_arg_u64,
+    javascript_sync_rpc_arg_u64_optional, javascript_sync_rpc_bytes_arg,
+    javascript_sync_rpc_bytes_value, javascript_sync_rpc_encoding, javascript_sync_rpc_error_code,
+    javascript_sync_rpc_option_bool, javascript_sync_rpc_option_u32, parse_signal,
+    runtime_child_is_alive, sanitize_javascript_child_process_internal_bootstrap_env,
+    service_javascript_net_sync_rpc, service_javascript_sync_rpc, signal_runtime_process,
+    vm_network_resource_counts,
 };
 use crate::filesystem::{
     guest_filesystem_call as filesystem_guest_filesystem_call,
@@ -1326,6 +1325,8 @@ mod tests {
 
     use super::*;
     use crate::bridge::{bridge_permissions, HostFilesystem, ScopedHostFilesystem};
+    use crate::plugins::s3::test_support::MockS3Server;
+    use crate::plugins::sandbox_agent::test_support::MockSandboxAgentServer;
     use crate::protocol::VmCreatedResponse;
     use crate::protocol::{
         AuthenticateRequest, BootstrapRootFilesystemRequest, ConfigureVmRequest, CreateVmRequest,
@@ -1334,8 +1335,6 @@ mod tests {
         PermissionMode, RequestFrame, RequestPayload, ResponsePayload, RootFilesystemEntry,
         RootFilesystemEntryKind, SidecarPlacement,
     };
-    use crate::s3_plugin::test_support::MockS3Server;
-    use crate::sandbox_agent_plugin::test_support::MockSandboxAgentServer;
     use crate::state::VM_DNS_SERVERS_METADATA_KEY;
     use agent_os_bridge::{FileKind, SymlinkRequest};
     use agent_os_execution::PythonVfsRpcMethod;

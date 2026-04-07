@@ -1,9 +1,6 @@
 //! Host bridge filesystem and permission plumbing extracted from service.rs.
 
-use crate::google_drive_plugin::GoogleDriveMountPlugin;
-use crate::host_dir_plugin::HostDirMountPlugin;
-use crate::s3_plugin::S3MountPlugin;
-use crate::sandbox_agent_plugin::SandboxAgentMountPlugin;
+use crate::plugins::register_native_mount_plugins;
 use crate::service::{
     audit_fields, dirname, emit_security_audit_event, filesystem_permission_capability,
     normalize_path, plugin_error,
@@ -1159,16 +1156,7 @@ where
 {
     let mut registry = FileSystemPluginRegistry::new();
     registry.register(MemoryMountPlugin).map_err(plugin_error)?;
-    registry
-        .register(HostDirMountPlugin)
-        .map_err(plugin_error)?;
-    registry
-        .register(SandboxAgentMountPlugin)
-        .map_err(plugin_error)?;
-    registry.register(S3MountPlugin).map_err(plugin_error)?;
-    registry
-        .register(GoogleDriveMountPlugin)
-        .map_err(plugin_error)?;
+    register_native_mount_plugins(&mut registry).map_err(plugin_error)?;
     registry
         .register(JsBridgeMountPlugin)
         .map_err(plugin_error)?;
