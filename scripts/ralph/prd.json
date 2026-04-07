@@ -184,6 +184,25 @@
       "notes": "Step 0b continued. See spec 'Wire Protocol' section for SidecarRequestPayload and SidecarResponsePayload enums. native-process-client.ts is at packages/core/src/sidecar/native-process-client.ts (1,593 lines). This bidirectional capability is used by tool invocations (US-020) and JS-bridge mounts (US-012)."
     },
     {
+      "id": "US-009a",
+      "title": "Register missing V8 bridge functions, remove dead node_binary() code, verify tests exercise V8 path",
+      "description": "As a developer, I want all ~80 unregistered bridge functions (networking, crypto, HTTP/2, TLS, dgram) registered on the V8 global so polyfills actually work at runtime, dead Command::new('node') code removed from guest execution paths, and tests verified to exercise the V8 isolate path",
+      "acceptanceCriteria": [
+        "All bridge functions referenced by v8-bridge.js polyfills are registered in SYNC_BRIDGE_FNS/ASYNC_BRIDGE_FNS in crates/v8-runtime/src/session.rs — no undefined globals at runtime",
+        "TCP sockets (net.connect, net.createServer), TLS, dgram, HTTP/2, dns, and crypto bridge functions all registered and forwarded to sidecar handlers via map_bridge_method",
+        "create_node_child() dead code removed from crates/execution/src/javascript.rs",
+        "Prewarm path Command::new(node_binary()) at javascript.rs:879 either removed or clearly gated behind a non-guest-execution flag",
+        "Existing cargo test -p agent-os-execution tests verified to exercise the V8 isolate path, not the old node process path",
+        "cargo check -p agent-os-v8-runtime passes",
+        "cargo check -p agent-os-execution passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes",
+        "cargo test -p agent-os-execution -- --test-threads=1 passes"
+      ],
+      "priority": 9.5,
+      "passes": false,
+      "notes": "Follow-up to US-008a. Three issues found in audit: (1) ~80 bridge functions (_netSocketConnectRaw, _netServerListenRaw, _dgramSocket*Raw, _networkHttp2*Raw, _crypto*, _tlsGetCiphersRaw, _ptySetRawMode, _batchResolveModules, etc.) exist in v8-bridge.js polyfills and in map_bridge_method/sidecar handlers, but are NOT registered in the V8 session's SYNC_BRIDGE_FNS/ASYNC_BRIDGE_FNS arrays (session.rs lines 743-802). The JS polyfills check typeof === 'undefined' and silently degrade, meaning networking is effectively broken. (2) create_node_child() at javascript.rs:918 is dead code that should be removed. (3) Tests may still exercise the old node path. Check crates/v8-runtime/src/session.rs register_bridge_functions(), crates/execution/src/v8_runtime.rs map_bridge_method(), and crates/sidecar/src/execution.rs for the full forwarding chain."
+    },
+    {
       "id": "US-010",
       "title": "Implement declarative permissions in Rust and replace TypeScript permission-descriptors.ts",
       "description": "As a developer, I want permissions to be declarative JSON objects evaluated in Rust instead of TypeScript callback functions",
