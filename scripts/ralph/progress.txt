@@ -7,6 +7,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - V8 binary discovery: `AGENT_OS_V8_RUNTIME_PATH` env var → alongside current exe (+ parent dirs for test deps/) → `target/{release,debug}/agent-os-v8`
 - V8 bridge calls use CBOR codec via `SECURE_EXEC_V8_CODEC=cbor` env var; `ciborium` crate handles CBOR↔JSON conversion in the execution crate
 - Internal V8 bridge calls (logging, module resolution, crypto, timers) are handled in the event bridge thread; only kernel operations (fs, net, child_process, dns) go to the sidecar
+- Guest V8 timers split across two host paths in `crates/execution/src/javascript.rs`: `_scheduleTimer` must resolve its async bridge Promise later, while `kernelTimerCreate`/`kernelTimerArm`/`kernelTimerClear` must emit `"timer"` stream events so `setTimeout`/`setInterval` callbacks actually fire
 - The sidecar reads entrypoint files from VFS and passes as `inline_code` to avoid V8 module loading bridge calls in synchronous dispatch
 - Execution crate host-Node compatibility coverage stays behind the `legacy-js-tests` feature; default JavaScript validation should target the V8 isolate path and `crates/execution/tests/javascript_v8.rs`
 - service.rs type definitions use `pub(crate)` fields when extracted to state.rs so impl blocks in service.rs can still access them
@@ -187,4 +188,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - The sidecar’s layer handles are VM-scoped state, so exporting or sealing a layer ID from another VM should reject with `invalid_state` rather than silently crossing ownership boundaries
   - Overlay exports should dedupe directory entries that already exist in lower layers before replaying upper bootstrap entries; otherwise duplicated directories like `/workspace` fail with `EEXIST`
   - `tests/native-sidecar-process.test.ts` still has unrelated real-binary timeout failures on this branch, so prefer targeted `-t` runs for the sidecar behavior you changed unless you are actively fixing that harness
+---
+## 2026-04-07 06:58:42 PDT - US-030
+- Replaced the stubbed local `_scheduleTimer` bridge path with delayed host-side responses, and wired `kernelTimerArm` to schedule real timer expirations that emit `"timer"` stream events back into the V8 session
+- Added focused V8 execution coverage for direct `_scheduleTimer` resolution plus `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` behavior without relying on the legacy host-Node test suite
+- Files changed: `crates/execution/CLAUDE.md`, `crates/execution/src/javascript.rs`, `crates/execution/tests/javascript_v8.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - One-shot timer state needs host-side cleanup when the delayed event is scheduled, otherwise `setTimeout` leaks timer handles even if the guest deletes its local entry
+  - For V8 runtime behavior, prefer control-flow assertions in `crates/execution/tests/javascript_v8.rs` over stdout-only assertions; the exit code is a more stable signal for async bridge behavior
+  - `cargo fmt --all` can touch unrelated Rust files in this workspace, so check `git diff --stat` before committing and drop formatting-only churn outside the story scope
 ---

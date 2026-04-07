@@ -291,7 +291,8 @@ struct LocalBridgeState {
     resolution_cache: LocalModuleResolutionCache,
     handle_descriptions: HashMap<String, String>,
     next_timer_id: u64,
-    timers: HashMap<u64, bool>,
+    timers: Arc<Mutex<HashMap<u64, LocalTimerEntry>>>,
+    v8_session: Option<V8SessionHandle>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -314,6 +315,33 @@ struct LocalPackageJson {
     imports: Option<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalTimerEntry {
+    delay_ms: u64,
+    generation: u64,
+    repeat: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum LocalBridgeCallResult {
+    Immediate(Value),
+    Deferred,
+}
+
+fn timer_delay_ms(value: Option<&Value>) -> u64 {
+    let delay = match value {
+        Some(Value::Number(number)) => number.as_f64().unwrap_or(0.0),
+        Some(Value::String(text)) => text.parse::<f64>().unwrap_or(0.0),
+        _ => 0.0,
+    };
+
+    if !delay.is_finite() || delay <= 0.0 {
+        0
+    } else {
+        delay.floor().min(u64::MAX as f64) as u64
+    }
+}
+
 impl GuestPathTranslator {
     fn from_request(request: &StartJavascriptExecutionRequest) -> Self {
         let implicit_guest_cwd = request
@@ -327,10 +355,9 @@ impl GuestPathTranslator {
             .filter(|mapping| mapping.guest_path.starts_with('/'))
             .collect::<Vec<_>>();
 
-        if !mappings
-            .iter()
-            .any(|mapping| mapping.host_path == request.cwd && mapping.guest_path == implicit_guest_cwd)
-        {
+        if !mappings.iter().any(|mapping| {
+            mapping.host_path == request.cwd && mapping.guest_path == implicit_guest_cwd
+        }) {
             mappings.push(GuestPathMapping {
                 guest_path: implicit_guest_cwd.clone(),
                 host_path: request.cwd.clone(),
@@ -338,7 +365,8 @@ impl GuestPathTranslator {
         }
 
         mappings.sort_by(|left, right| {
-            right.host_path
+            right
+                .host_path
                 .components()
                 .count()
                 .cmp(&left.host_path.components().count())
@@ -498,9 +526,7 @@ fn translate_v8_bridge_value_to_legacy(value: &Value) -> Value {
                 .map(translate_v8_bridge_value_to_legacy)
                 .collect(),
         ),
-        Value::Object(map)
-            if map.get("__type").and_then(Value::as_str) == Some("Buffer") =>
-        {
+        Value::Object(map) if map.get("__type").and_then(Value::as_str) == Some("Buffer") => {
             json!({
                 "__agentOsType": "bytes",
                 "base64": map.get("data").cloned().unwrap_or(Value::String(String::new())),
@@ -541,9 +567,7 @@ fn translate_legacy_bridge_value_to_v8(value: &Value) -> Value {
                 .map(translate_legacy_bridge_value_to_v8)
                 .collect(),
         ),
-        Value::Object(map)
-            if map.get("__agentOsType").and_then(Value::as_str) == Some("bytes") =>
-        {
+        Value::Object(map) if map.get("__agentOsType").and_then(Value::as_str) == Some("bytes") => {
             json!({
                 "__type": "Buffer",
                 "data": map.get("base64").cloned().unwrap_or(Value::String(String::new())),
@@ -634,7 +658,9 @@ impl fmt::Display for JavascriptExecutionError {
                     "failed to reply to guest JavaScript sync RPC request: {message}"
                 )
             }
-            Self::Terminate(err) => write!(f, "failed to terminate guest JavaScript runtime: {err}"),
+            Self::Terminate(err) => {
+                write!(f, "failed to terminate guest JavaScript runtime: {err}")
+            }
             Self::StdinClosed => f.write_str("guest JavaScript stdin is already closed"),
             Self::Stdin(err) => write!(f, "failed to write guest stdin: {err}"),
             Self::EventChannelClosed => {
@@ -672,9 +698,9 @@ impl JavascriptExecution {
         // V8 stdin via stream event
         if let Some(session) = &self.v8_session {
             // CBOR-encode the stdin data
-            let payload = v8_runtime::json_to_cbor_payload(
-                &Value::String(String::from_utf8_lossy(chunk).into_owned()),
-            )
+            let payload = v8_runtime::json_to_cbor_payload(&Value::String(
+                String::from_utf8_lossy(chunk).into_owned(),
+            ))
             .map_err(|e| JavascriptExecutionError::Stdin(e))?;
             session
                 .send_stream_event("stdin", payload)
@@ -709,7 +735,9 @@ impl JavascriptExecution {
 
     pub fn terminate(&self) -> Result<(), JavascriptExecutionError> {
         if let Some(session) = &self.v8_session {
-            return session.terminate().map_err(JavascriptExecutionError::Terminate);
+            return session
+                .terminate()
+                .map_err(JavascriptExecutionError::Terminate);
         }
 
         Ok(())
@@ -1042,10 +1070,7 @@ impl JavascriptExecutionEngine {
             .map_err(JavascriptExecutionError::Spawn)?;
 
         // Create session handle for sending bridge responses
-        let v8_session = V8SessionHandle::new(
-            session_id.clone(),
-            v8_host.writer_handle(),
-        );
+        let v8_session = V8SessionHandle::new(session_id.clone(), v8_host.writer_handle());
 
         // Spawn V8 event bridge thread that converts BinaryFrame → JavascriptExecutionEvent
         let pending_sync_rpc = Arc::new(Mutex::new(None));
@@ -1056,6 +1081,7 @@ impl JavascriptExecutionEngine {
             v8_session.clone(),
             LocalBridgeState {
                 translator,
+                v8_session: Some(v8_session.clone()),
                 ..Default::default()
             },
         );
@@ -1721,9 +1747,7 @@ fn build_v8_user_code(entrypoint: &str, env: &BTreeMap<String, String>) -> Strin
     // For inline code (-e flag), we execute directly.
     if entrypoint == "-e" || entrypoint == "--eval" {
         // Inline code from NODE_EVAL or similar
-        env.get("AGENT_OS_NODE_EVAL")
-            .cloned()
-            .unwrap_or_default()
+        env.get("AGENT_OS_NODE_EVAL").cloned().unwrap_or_default()
     } else {
         // Module entrypoint - use require to load it
         format!(
@@ -1754,8 +1778,7 @@ fn prepend_v8_runtime_shim(
     cwd: &str,
     env: &BTreeMap<String, String>,
 ) -> String {
-    let argv_json =
-        serde_json::to_string(argv).unwrap_or_else(|_| String::from("[\"node\"]"));
+    let argv_json = serde_json::to_string(argv).unwrap_or_else(|_| String::from("[\"node\"]"));
     let entry_json =
         serde_json::to_string(entrypoint).unwrap_or_else(|_| String::from("\"/<entry>\""));
     let cwd_json = serde_json::to_string(cwd).unwrap_or_else(|_| String::from("\"/\""));
@@ -1836,16 +1859,17 @@ fn spawn_v8_event_bridge(
                     ..
                 } => {
                     // Convert CBOR payload to JSON args
-                    let args = v8_runtime::cbor_payload_to_json_args(&payload)
-                        .unwrap_or_default();
+                    let args = v8_runtime::cbor_payload_to_json_args(&payload).unwrap_or_default();
 
                     // Check if this is an internal bridge call we handle locally
-                    if let Some(response) = local_bridge.handle_internal_bridge_call(&method, &args)
+                    if let Some(response) =
+                        local_bridge.handle_internal_bridge_call(call_id, &method, &args)
                     {
-                        // Respond directly to the V8 isolate
-                        let cbor_payload = v8_runtime::json_to_cbor_payload(&response)
-                            .unwrap_or_default();
-                        let _ = v8_session.send_bridge_response(call_id, 0, cbor_payload);
+                        if let LocalBridgeCallResult::Immediate(response) = response {
+                            let cbor_payload =
+                                v8_runtime::json_to_cbor_payload(&response).unwrap_or_default();
+                            let _ = v8_session.send_bridge_response(call_id, 0, cbor_payload);
+                        }
                         continue;
                     }
 
@@ -1913,9 +1937,8 @@ fn spawn_v8_event_bridge(
                         } else {
                             format!("{}\n", err.stack)
                         };
-                        let _ = sender.send(JavascriptExecutionEvent::Stderr(
-                            error_msg.into_bytes(),
-                        ));
+                        let _ =
+                            sender.send(JavascriptExecutionEvent::Stderr(error_msg.into_bytes()));
                     }
                     Some(JavascriptExecutionEvent::Exited(exit_code))
                 }
@@ -1937,7 +1960,12 @@ fn spawn_v8_event_bridge(
 /// Handle internal bridge calls that don't need to go to the sidecar.
 /// Returns Some(response) if handled locally, None if it should be forwarded.
 impl LocalBridgeState {
-    fn handle_internal_bridge_call(&mut self, method: &str, args: &[Value]) -> Option<Value> {
+    fn handle_internal_bridge_call(
+        &mut self,
+        call_id: u64,
+        method: &str,
+        args: &[Value],
+    ) -> Option<LocalBridgeCallResult> {
         match method {
             "_resolveModule" | "_resolveModuleSync" => {
                 let specifier = args.first().and_then(Value::as_str).unwrap_or("");
@@ -1948,19 +1976,23 @@ impl LocalBridgeState {
                     _ if method == "_resolveModule" => ModuleResolveMode::Import,
                     _ => ModuleResolveMode::Require,
                 };
-                Some(
+                Some(LocalBridgeCallResult::Immediate(
                     self.resolve_module(specifier, parent, mode)
                         .map(Value::String)
                         .unwrap_or(Value::Null),
-                )
+                ))
             }
-            "_loadFile" | "_loadFileSync" => Some(
+            "_loadFile" | "_loadFileSync" => Some(LocalBridgeCallResult::Immediate(
                 self.load_file(args.first().and_then(Value::as_str).unwrap_or(""))
                     .map(Value::String)
                     .unwrap_or(Value::Null),
-            ),
-            "_batchResolveModules" => Some(self.batch_resolve_modules(args)),
-            "_loadPolyfill" => Some(self.handle_polyfill_dispatch(args)),
+            )),
+            "_batchResolveModules" => Some(LocalBridgeCallResult::Immediate(
+                self.batch_resolve_modules(args),
+            )),
+            "_loadPolyfill" => Some(LocalBridgeCallResult::Immediate(
+                self.handle_polyfill_dispatch(args),
+            )),
             "_cryptoRandomFill" => {
                 let size = args.first().and_then(Value::as_u64).unwrap_or(16) as usize;
                 let mut bytes = vec![0u8; size];
@@ -1971,25 +2003,31 @@ impl LocalBridgeState {
                 for (i, byte) in bytes.iter_mut().enumerate() {
                     *byte = ((seed >> (i % 16 * 8)) & 0xFF) as u8 ^ (i as u8);
                 }
-                Some(json!({ "__type": "Buffer", "data": v8_runtime::base64_encode_pub(&bytes) }))
+                Some(LocalBridgeCallResult::Immediate(json!({
+                    "__type": "Buffer",
+                    "data": v8_runtime::base64_encode_pub(&bytes)
+                })))
             }
             "_cryptoRandomUUID" => {
                 let seed = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_nanos();
-                Some(Value::String(format!(
+                Some(LocalBridgeCallResult::Immediate(Value::String(format!(
                     "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
                     (seed >> 96) as u32,
                     (seed >> 80) as u16,
                     (seed >> 64) as u16 & 0x0FFF,
                     ((seed >> 48) as u16 & 0x3FFF) | 0x8000,
                     seed as u64 & 0xFFFFFFFFFFFF,
-                )))
+                ))))
             }
-            "_scheduleTimer" => Some(json!(0)),
-            "_kernelStdinRead" => Some(Value::Null),
-            "_ptySetRawMode" => Some(Value::Null),
+            "_scheduleTimer" => {
+                self.schedule_bridge_timer_response(call_id, timer_delay_ms(args.first()));
+                Some(LocalBridgeCallResult::Deferred)
+            }
+            "_kernelStdinRead" => Some(LocalBridgeCallResult::Immediate(Value::Null)),
+            "_ptySetRawMode" => Some(LocalBridgeCallResult::Immediate(Value::Null)),
             _ => None,
         }
     }
@@ -2036,14 +2074,19 @@ impl LocalBridgeState {
                     .collect(),
             ),
             "kernelTimerCreate" => {
-                self.next_timer_id += 1;
-                self.timers.insert(self.next_timer_id, false);
-                json!(self.next_timer_id)
+                let delay_ms = timer_delay_ms(args.first());
+                let repeat = args.get(1).and_then(Value::as_bool).unwrap_or(false);
+                json!(self.create_kernel_timer(delay_ms, repeat))
             }
-            "kernelTimerArm" => Value::Null,
+            "kernelTimerArm" => {
+                if let Some(timer_id) = args.first().and_then(Value::as_u64) {
+                    self.arm_kernel_timer(timer_id);
+                }
+                Value::Null
+            }
             "kernelTimerClear" => {
                 if let Some(timer_id) = args.first().and_then(Value::as_u64) {
-                    self.timers.remove(&timer_id);
+                    self.clear_kernel_timer(timer_id);
                 }
                 Value::Null
             }
@@ -2056,18 +2099,104 @@ impl LocalBridgeState {
         };
 
         if dispatch_method.starts_with("kernel") {
-            Value::String(serde_json::to_string(&json!({ "__bd_result": result })).unwrap_or_else(
-                |_| String::from("{\"__bd_result\":null}"),
-            ))
+            Value::String(
+                serde_json::to_string(&json!({ "__bd_result": result }))
+                    .unwrap_or_else(|_| String::from("{\"__bd_result\":null}")),
+            )
         } else {
-            Value::String(serde_json::to_string(&json!({
-                "__bd_error": {
-                    "name": "Error",
-                    "message": format!("No handler: {dispatch_method}"),
-                }
-            }))
-            .unwrap_or_else(|_| String::from("{\"__bd_error\":{\"name\":\"Error\",\"message\":\"dispatch failed\"}}")))
+            Value::String(
+                serde_json::to_string(&json!({
+                    "__bd_error": {
+                        "name": "Error",
+                        "message": format!("No handler: {dispatch_method}"),
+                    }
+                }))
+                .unwrap_or_else(|_| {
+                    String::from(
+                        "{\"__bd_error\":{\"name\":\"Error\",\"message\":\"dispatch failed\"}}",
+                    )
+                }),
+            )
         }
+    }
+
+    fn create_kernel_timer(&mut self, delay_ms: u64, repeat: bool) -> u64 {
+        self.next_timer_id += 1;
+        if let Ok(mut timers) = self.timers.lock() {
+            timers.insert(
+                self.next_timer_id,
+                LocalTimerEntry {
+                    delay_ms,
+                    generation: 0,
+                    repeat,
+                },
+            );
+        }
+        self.next_timer_id
+    }
+
+    fn arm_kernel_timer(&self, timer_id: u64) {
+        let Some(session) = self.v8_session.clone() else {
+            return;
+        };
+
+        let Some((delay_ms, generation, timers)) =
+            self.timers.lock().ok().and_then(|mut timers| {
+                let entry = timers.get_mut(&timer_id)?;
+                entry.generation = entry.generation.wrapping_add(1);
+                Some((entry.delay_ms, entry.generation, self.timers.clone()))
+            })
+        else {
+            return;
+        };
+
+        thread::spawn(move || {
+            if delay_ms > 0 {
+                thread::sleep(Duration::from_millis(delay_ms));
+            }
+
+            let should_fire = timers
+                .lock()
+                .ok()
+                .and_then(|mut timers| {
+                    let (current_generation, repeat) = timers
+                        .get(&timer_id)
+                        .map(|entry| (entry.generation, entry.repeat))?;
+                    if current_generation != generation {
+                        return Some(false);
+                    }
+                    if !repeat {
+                        timers.remove(&timer_id);
+                    }
+                    Some(true)
+                })
+                .unwrap_or(false);
+            if !should_fire {
+                return;
+            }
+
+            let payload = v8_runtime::json_to_cbor_payload(&json!(timer_id)).unwrap_or_default();
+            let _ = session.send_stream_event("timer", payload);
+        });
+    }
+
+    fn clear_kernel_timer(&self, timer_id: u64) {
+        if let Ok(mut timers) = self.timers.lock() {
+            timers.remove(&timer_id);
+        }
+    }
+
+    fn schedule_bridge_timer_response(&self, call_id: u64, delay_ms: u64) {
+        let Some(session) = self.v8_session.clone() else {
+            return;
+        };
+
+        thread::spawn(move || {
+            if delay_ms > 0 {
+                thread::sleep(Duration::from_millis(delay_ms));
+            }
+            let _ = session.send_bridge_response(call_id, 0, Vec::new());
+        });
     }
 
     fn batch_resolve_modules(&mut self, args: &[Value]) -> Value {
@@ -2105,11 +2234,7 @@ impl LocalBridgeState {
         mode: ModuleResolveMode,
     ) -> Option<String> {
         let normalized_from = normalize_module_resolve_context(from_dir);
-        let cache_key = (
-            specifier.to_owned(),
-            normalized_from.clone(),
-            mode,
-        );
+        let cache_key = (specifier.to_owned(), normalized_from.clone(), mode);
         if let Some(cached) = self.resolution_cache.resolve_results.get(&cache_key) {
             return cached.clone();
         }
@@ -2186,7 +2311,8 @@ impl LocalBridgeState {
         let mut dir = normalize_guest_path(from_dir);
         loop {
             for package_dir in node_modules_candidate_dirs(&dir, package_name) {
-                if let Some(entry) = self.resolve_package_entry_from_dir(&package_dir, subpath, mode)
+                if let Some(entry) =
+                    self.resolve_package_entry_from_dir(&package_dir, subpath, mode)
                 {
                     return Some(entry);
                 }
@@ -2223,11 +2349,7 @@ impl LocalBridgeState {
                 } else {
                     format!("./{subpath}")
                 };
-                let exports_target = resolve_exports_target(
-                    exports,
-                    &exports_subpath,
-                    mode,
-                )?;
+                let exports_target = resolve_exports_target(exports, &exports_subpath, mode)?;
                 let target_path = join_guest_path(package_dir, &exports_target);
                 return self.resolve_path(&target_path, mode).or(Some(target_path));
             }
@@ -2376,11 +2498,9 @@ fn dirname_guest_path(path: &str) -> String {
 fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
     let bare = specifier.trim_start_matches("node:");
     match bare {
-        "child_process" | "crypto" | "dgram" | "dns" | "events" | "fs" | "fs/promises"
-        | "http" | "http2" | "https" | "module" | "net" | "os" | "path" | "process"
-        | "stream" | "tls" | "tty" | "url" | "util" | "zlib" => {
-            Some(format!("node:{bare}"))
-        }
+        "child_process" | "crypto" | "dgram" | "dns" | "events" | "fs" | "fs/promises" | "http"
+        | "http2" | "https" | "module" | "net" | "os" | "path" | "process" | "stream" | "tls"
+        | "tty" | "url" | "util" | "zlib" => Some(format!("node:{bare}")),
         _ => None,
     }
 }
@@ -2392,7 +2512,8 @@ fn is_builtin_specifier(specifier: &str) -> bool {
 fn build_builtin_module_wrapper(module_name: &str) -> String {
     let default_target = format!(
         "globalThis._requireFrom({}, \"/\")",
-        serde_json::to_string(&format!("node:{module_name}")).unwrap_or_else(|_| format!("\"node:{module_name}\""))
+        serde_json::to_string(&format!("node:{module_name}"))
+            .unwrap_or_else(|_| format!("\"node:{module_name}\""))
     );
     let mut exports = builtin_named_exports(module_name)
         .into_iter()
@@ -2413,13 +2534,39 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
         "events" => &["EventEmitter", "once"],
         "fs" => &["constants", "promises", "readFileSync"],
         "fs/promises" => &["access", "open", "readFile", "writeFile"],
-        "http" => &["Agent", "METHODS", "STATUS_CODES", "createServer", "request"],
+        "http" => &[
+            "Agent",
+            "METHODS",
+            "STATUS_CODES",
+            "createServer",
+            "request",
+        ],
         "http2" => &["connect", "createServer", "createSecureServer"],
         "https" => &["Agent", "createServer", "request"],
-        "net" => &["Socket", "Server", "connect", "createConnection", "createServer"],
-        "os" => &["EOL", "availableParallelism", "cpus", "homedir", "hostname", "tmpdir"],
+        "net" => &[
+            "Socket",
+            "Server",
+            "connect",
+            "createConnection",
+            "createServer",
+        ],
+        "os" => &[
+            "EOL",
+            "availableParallelism",
+            "cpus",
+            "homedir",
+            "hostname",
+            "tmpdir",
+        ],
         "path" => &["basename", "dirname", "join", "resolve", "sep"],
-        "tls" => &["TLSSocket", "Server", "connect", "createSecureContext", "createServer", "getCiphers"],
+        "tls" => &[
+            "TLSSocket",
+            "Server",
+            "connect",
+            "createSecureContext",
+            "createServer",
+            "getCiphers",
+        ],
         "url" => &["URL", "fileURLToPath", "pathToFileURL"],
         _ => &[],
     }
@@ -2443,7 +2590,10 @@ fn split_package_request(request: &str) -> Option<(&str, &str)> {
 
 fn node_modules_candidate_dirs(dir: &str, package_name: &str) -> Vec<String> {
     let mut candidates = HashSet::new();
-    candidates.insert(join_guest_path(dir, &format!("node_modules/{package_name}")));
+    candidates.insert(join_guest_path(
+        dir,
+        &format!("node_modules/{package_name}"),
+    ));
     candidates.insert(join_guest_path(
         dir,
         &format!("node_modules/.pnpm/node_modules/{package_name}"),
@@ -2538,8 +2688,7 @@ fn resolve_imports_target(
             for (key, value) in record {
                 if let Some((prefix, suffix)) = key.split_once('*') {
                     if specifier.starts_with(prefix) && specifier.ends_with(suffix) {
-                        let wildcard =
-                            &specifier[prefix.len()..specifier.len() - suffix.len()];
+                        let wildcard = &specifier[prefix.len()..specifier.len() - suffix.len()];
                         let resolved = resolve_exports_target(value, ".", mode)?;
                         return Some(resolved.replace('*', wildcard));
                     }

@@ -258,7 +258,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 23,
-      "passes": false,
+      "passes": true,
       "notes": "Step 2 (Rust side, part 2). Depends on US-009 (bidirectional frames). See spec 'JS-Bridge Mounts' section. This is the same async callback pattern used by tool invocations \u2014 sidecar pushes request, holds, TypeScript runs callback, returns result."
     },
     {

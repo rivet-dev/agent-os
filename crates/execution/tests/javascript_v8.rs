@@ -146,7 +146,11 @@ if (process.ppid !== 41) throw new Error(`ppid=${process.ppid}`);
 
     let result = execution.wait().expect("wait for JavaScript execution");
     assert_eq!(result.exit_code, 0);
-    assert!(result.stderr.is_empty(), "unexpected stderr: {:?}", result.stderr);
+    assert!(
+        result.stderr.is_empty(),
+        "unexpected stderr: {:?}",
+        result.stderr
+    );
 }
 
 #[test]
@@ -203,4 +207,107 @@ fs.statSync("/workspace/note.txt");
 
     let result = execution.wait().expect("wait for JavaScript execution");
     assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn javascript_execution_v8_timer_callbacks_fire_and_clear_correctly() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.js")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+(async () => {
+  const clearedTimeout = setTimeout(() => {
+    throw new Error("cleared timeout fired");
+  }, 10);
+  clearTimeout(clearedTimeout);
+
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  let intervalTicks = 0;
+  await new Promise((resolve, reject) => {
+    const interval = setInterval(() => {
+      intervalTicks += 1;
+      if (intervalTicks === 2) {
+        clearInterval(interval);
+        resolve();
+      } else if (intervalTicks > 2) {
+        reject(new Error(`interval fired too many times: ${intervalTicks}`));
+      }
+    }, 10);
+
+    setTimeout(() => reject(new Error(`interval timeout: ${intervalTicks}`)), 250);
+  });
+
+  if (intervalTicks !== 2) {
+    throw new Error(`interval tick count mismatch: ${intervalTicks}`);
+  }
+})().catch((error) => {
+  process.exitCode = 1;
+  throw error;
+});
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    assert_eq!(result.exit_code, 0);
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn javascript_execution_v8_schedule_timer_bridge_resolves() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.js")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+(async () => {
+  let resolved = false;
+  await _scheduleTimer.apply(undefined, [15]).then(() => {
+    resolved = true;
+  });
+  if (!resolved) {
+    throw new Error("_scheduleTimer did not resolve");
+  }
+})().catch((error) => {
+  process.exitCode = 1;
+  throw error;
+});
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    assert_eq!(result.exit_code, 0);
+
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }

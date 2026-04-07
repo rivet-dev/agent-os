@@ -87,6 +87,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 - Track the pending request ID on the host, auto-emit `ERR_AGENT_OS_NODE_SYNC_RPC_TIMEOUT` after the configured wait.
 - Queue replies through a bounded async writer so slow guest reads cannot block the sidecar thread.
 - Have `crates/sidecar/src/service.rs` ignore stale `sync RPC request ... is no longer pending` races after the timeout fires.
+- Guest V8 timers have two host paths in `javascript.rs`: `_scheduleTimer` is an async bridge call that resolves its pending Promise later, while `kernelTimerCreate`/`kernelTimerArm`/`kernelTimerClear` are local `_loadPolyfill` dispatches that must emit `"timer"` stream events back into the V8 session so `setTimeout`/`setInterval` callbacks fire.
 
 ## Runner Script Assets
 
