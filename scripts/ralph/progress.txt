@@ -25,6 +25,8 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Filesystem-domain extraction from `service.rs` should move guest filesystem ACP handlers, Python VFS RPC handling, and JS filesystem sync RPCs together; leave `service.rs` as a thin dispatch hub and keep shared JS RPC argument parsers / execution response shims `pub(crate)` there
 - When extracting large sidecar test modules out of `src/`, keep the tests in `crates/sidecar/tests/*.rs` by wrapping `include!("../src/...")` in a same-named module and nesting the moved assertions under `mod tests`; service-style harnesses also need crate-root re-exports for `DispatchResult`, `NativeSidecar`, and `SidecarError`
 - Native sidecar mount plugins live under `crates/sidecar/src/plugins/`, and `plugins/mod.rs` owns shared registration for the reusable native plugins while `bridge.rs` only adds sidecar-specific `memory` and `js_bridge` entries
+- The sidecar now owns the bundled base filesystem artifact: TypeScript should serialize the default lower as `bundled_base_filesystem` and let Rust load `base-filesystem.json` locally instead of inlining the snapshot entries
+- `ConfigureVmRequest` callers need to set `module_access_cwd` (or `None` in Rust tests); the sidecar turns that host cwd into the read-only `/root/node_modules` `module_access` mount automatically
 
 ## 2026-04-06 - US-001
 - Extracted shared state types from service.rs into new state.rs module (~450 lines)
@@ -176,4 +178,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - The serializer in `packages/core/src/sidecar/permissions.ts` should be a pass-through shim, not a second permission engine; Rust owns rule interpretation and glob matching
   - If you need to verify wire shape quickly, prefer a fake-sidecar client test over `tests/native-sidecar-process.test.ts`, because the real-binary suite still has unrelated timeout failures on this branch
   - `tests/native-sidecar-process.test.ts` currently reports seven timeout failures here; they appear unrelated to declarative permissions and should be treated as existing native-sidecar harness debt unless a permission change touches that path directly
+---
+## 2026-04-07 06:51:09 PDT - US-011
+- Added VM-scoped layer RPCs on the sidecar (`create_layer`, `seal_layer`, `import_snapshot`, `export_snapshot`, `create_overlay`) with new Rust state tracking and client helpers, plus regression coverage for exporting overlays and rejecting cross-VM layer access
+- Moved bundled base filesystem ownership into the sidecar and replaced the TypeScript-side inlined base lower with the `bundled_base_filesystem` descriptor kind; `AgentOs.create()` now passes `moduleAccessCwd` through `ConfigureVm`, and Rust mounts `/root/node_modules` via the new read-only `module_access` plugin
+- Files changed: `crates/sidecar/src/{bootstrap,protocol,service,state,vm}.rs`, `crates/sidecar/src/plugins/{mod,module_access}.rs`, `crates/sidecar/tests/{layer_management,protocol,python,security_audit,service,stdio_binary}.rs`, `packages/core/src/{agent-os.ts}`, `packages/core/src/sidecar/{native-process-client,root-filesystem-descriptors}.ts`, `packages/core/tests/{native-sidecar-process,root-filesystem-descriptors}.test.ts`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - The sidecar’s layer handles are VM-scoped state, so exporting or sealing a layer ID from another VM should reject with `invalid_state` rather than silently crossing ownership boundaries
+  - Overlay exports should dedupe directory entries that already exist in lower layers before replaying upper bootstrap entries; otherwise duplicated directories like `/workspace` fail with `EEXIST`
+  - `tests/native-sidecar-process.test.ts` still has unrelated real-binary timeout failures on this branch, so prefer targeted `-t` runs for the sidecar behavior you changed unless you are actively fixing that harness
 ---

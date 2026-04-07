@@ -15,6 +15,7 @@ use agent_os_execution::{
 };
 use agent_os_kernel::kernel::{KernelProcessHandle, KernelVm};
 use agent_os_kernel::mount_table::MountTable;
+use agent_os_kernel::root_fs::{RootFileSystem, RootFilesystemMode, RootFilesystemSnapshot};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -159,9 +160,41 @@ pub(crate) struct VmConfiguration {
     pub(crate) mounts: Vec<MountDescriptor>,
     pub(crate) software: Vec<SoftwareDescriptor>,
     pub(crate) permissions: PermissionsPolicy,
+    pub(crate) module_access_cwd: Option<String>,
     pub(crate) instructions: Vec<String>,
     pub(crate) projected_modules: Vec<ProjectedModuleDescriptor>,
     pub(crate) command_permissions: BTreeMap<String, WasmPermissionTier>,
+}
+
+#[allow(dead_code)]
+pub(crate) struct VmLayerStore {
+    pub(crate) next_layer_id: u64,
+    pub(crate) layers: BTreeMap<String, VmLayer>,
+}
+
+impl Default for VmLayerStore {
+    fn default() -> Self {
+        Self {
+            next_layer_id: 1,
+            layers: BTreeMap::new(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) enum VmLayer {
+    Writable(RootFileSystem),
+    Snapshot(RootFilesystemSnapshot),
+    Overlay(VmOverlayLayer),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct VmOverlayLayer {
+    pub(crate) mode: RootFilesystemMode,
+    pub(crate) upper_layer_id: Option<String>,
+    pub(crate) lower_layer_ids: Vec<String>,
 }
 
 #[allow(dead_code)]
@@ -176,6 +209,7 @@ pub(crate) struct VmState {
     pub(crate) kernel: SidecarKernel,
     pub(crate) loaded_snapshot: Option<FilesystemSnapshot>,
     pub(crate) configuration: VmConfiguration,
+    pub(crate) layers: VmLayerStore,
     pub(crate) command_guest_paths: BTreeMap<String, String>,
     pub(crate) command_permissions: BTreeMap<String, WasmPermissionTier>,
     pub(crate) active_processes: BTreeMap<String, ActiveProcess>,

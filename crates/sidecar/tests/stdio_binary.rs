@@ -662,6 +662,7 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
                 }],
                 software: Vec::new(),
                 permissions: None,
+                module_access_cwd: None,
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
                 command_permissions: BTreeMap::new(),

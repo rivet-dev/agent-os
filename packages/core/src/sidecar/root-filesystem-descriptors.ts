@@ -1,4 +1,3 @@
-import { getBaseFilesystemEntries } from "../base-filesystem.js";
 import type { RootFilesystemConfig, RootLowerInput } from "../agent-os.js";
 import type { FilesystemEntry } from "../filesystem-snapshot.js";
 import type { RootSnapshotExport } from "../layers.js";
@@ -11,8 +10,8 @@ export interface SidecarRootFilesystemDescriptor {
 }
 
 export interface SidecarRootFilesystemLowerDescriptor {
-	kind: "snapshot";
-	entries: SidecarRootFilesystemEntry[];
+	kind: "snapshot" | "bundled_base_filesystem";
+	entries?: SidecarRootFilesystemEntry[];
 }
 
 export interface SidecarRootFilesystemEntry {
@@ -46,8 +45,7 @@ function serializeRootLowerForSidecar(
 ): SidecarRootFilesystemLowerDescriptor {
 	if (lower.kind === "bundled-base-filesystem") {
 		return {
-			kind: "snapshot",
-			entries: getBaseFilesystemEntries().map(serializeFilesystemEntryForSidecar),
+			kind: "bundled_base_filesystem",
 		};
 	}
 

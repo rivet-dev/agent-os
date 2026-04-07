@@ -342,6 +342,104 @@ describe("native sidecar process client", () => {
 		}
 	}, 60_000);
 
+	test("exercises moduleAccessCwd and layer RPCs against the real sidecar binary", async () => {
+		const fixtureRoot = mkdtempSync(join(tmpdir(), "agent-os-native-sidecar-"));
+		cleanupPaths.push(fixtureRoot);
+		execFileSync("cargo", ["build", "-q", "-p", "agent-os-sidecar"], {
+			cwd: REPO_ROOT,
+			stdio: "pipe",
+		});
+
+		const client = NativeSidecarProcessClient.spawn({
+			cwd: REPO_ROOT,
+			command: SIDECAR_BINARY,
+			args: [],
+			frameTimeoutMs: 20_000,
+		});
+
+		try {
+			const session = await client.authenticateAndOpenSession();
+			const vm = await client.createVm(session, {
+				runtime: "java_script",
+				metadata: {
+					cwd: fixtureRoot,
+				},
+				rootFilesystem: serializeRootFilesystemForSidecar(),
+			});
+
+			await client.waitForEvent(
+				(event) =>
+					event.payload.type === "vm_lifecycle" &&
+					event.payload.state === "ready",
+				10_000,
+			);
+
+			await client.configureVm(session, vm, {
+				moduleAccessCwd: join(REPO_ROOT, "packages/core"),
+			});
+
+			const modulePackage = JSON.parse(
+				new TextDecoder().decode(
+					await client.readFile(
+						session,
+						vm,
+						"/root/node_modules/vitest/package.json",
+					),
+				),
+			) as { name: string };
+			expect(modulePackage.name).toBe("vitest");
+
+			const writableLayer = await client.createLayer(session, vm);
+			const sealedLayer = await client.sealLayer(session, vm, writableLayer);
+			const sealedEntries = await client.exportSnapshot(
+				session,
+				vm,
+				sealedLayer,
+			);
+			expect(sealedEntries.some((entry) => entry.path === "/")).toBe(true);
+
+			const lowerLayer = await client.importSnapshot(session, vm, [
+				{
+					path: "/workspace",
+					kind: "directory",
+				},
+				{
+					path: "/workspace/lower.txt",
+					kind: "file",
+					content: "lower",
+				},
+			]);
+			const upperLayer = await client.importSnapshot(session, vm, [
+				{
+					path: "/workspace",
+					kind: "directory",
+				},
+				{
+					path: "/workspace/upper.txt",
+					kind: "file",
+					content: "upper",
+				},
+			]);
+			const overlayLayer = await client.createOverlay(session, vm, {
+				lowerLayerIds: [lowerLayer],
+				upperLayerId: upperLayer,
+			});
+			const overlayEntries = await client.exportSnapshot(
+				session,
+				vm,
+				overlayLayer,
+			);
+			expect(
+				overlayEntries.some((entry) => entry.path === "/workspace/lower.txt"),
+			).toBe(true);
+			expect(
+				overlayEntries.some((entry) => entry.path === "/workspace/upper.txt"),
+			).toBe(true);
+		} finally {
+			await client.dispose();
+		}
+	}, 60_000);
+
 	test("configures native mounts and streams stdin through the real Rust sidecar binary", async () => {
 		const fixtureRoot = mkdtempSync(join(tmpdir(), "agent-os-native-sidecar-"));
 		const hostMountRoot = mkdtempSync(

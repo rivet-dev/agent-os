@@ -891,6 +891,15 @@ where
                     .await
             }
             RequestPayload::ConfigureVm(payload) => self.configure_vm(&request, payload).await,
+            RequestPayload::CreateLayer(payload) => self.create_layer(&request, payload).await,
+            RequestPayload::SealLayer(payload) => self.seal_layer(&request, payload).await,
+            RequestPayload::ImportSnapshot(payload) => {
+                self.import_snapshot(&request, payload).await
+            }
+            RequestPayload::ExportSnapshot(payload) => {
+                self.export_snapshot(&request, payload).await
+            }
+            RequestPayload::CreateOverlay(payload) => self.create_overlay(&request, payload).await,
             RequestPayload::GuestFilesystemCall(payload) => {
                 self.guest_filesystem_call(&request, payload).await
             }

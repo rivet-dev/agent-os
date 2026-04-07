@@ -1,7 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { FilesystemEntry } from "../src/filesystem-snapshot.js";
 import { createSnapshotExport } from "../src/index.js";
-import { getBaseFilesystemEntries } from "../src/base-filesystem.js";
 import { serializeRootFilesystemForSidecar } from "../src/sidecar/root-filesystem-descriptors.js";
 
 function toExpectedSidecarEntry(entry: FilesystemEntry) {
@@ -105,8 +104,7 @@ describe("sidecar root filesystem descriptors", () => {
 		expect(descriptor.bootstrapEntries).toEqual([]);
 		expect(descriptor.lowers).toHaveLength(1);
 		expect(descriptor.lowers[0]).toEqual({
-			kind: "snapshot",
-			entries: getBaseFilesystemEntries().map(toExpectedSidecarEntry),
+			kind: "bundled_base_filesystem",
 		});
 	});
 });

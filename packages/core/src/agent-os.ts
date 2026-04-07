@@ -1070,12 +1070,9 @@ function collectSidecarMountPlan(options: {
 		join(options.moduleAccessCwd, "node_modules"),
 	);
 	if (existsSync(moduleNodeModules)) {
-		pushMount({
-			path: "/root/node_modules",
-			plugin: createHostDirBackend({
-				hostPath: moduleNodeModules,
-				readOnly: true,
-			}),
+		hostPathMappings.push({
+			vmPath: "/root/node_modules",
+			hostPath: moduleNodeModules,
 			readOnly: true,
 		});
 	}
@@ -1312,6 +1309,7 @@ export class AgentOs {
 				await client.configureVm(session, nativeVm, {
 					mounts: sidecarMounts,
 					permissions: sidecarPermissions,
+					moduleAccessCwd,
 					commandPermissions: processed.commandPermissions,
 				});
 

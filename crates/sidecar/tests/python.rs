@@ -953,6 +953,7 @@ if (mode === 'write') {
                 }],
                 software: Vec::new(),
                 permissions: None,
+                module_access_cwd: None,
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
                 command_permissions: BTreeMap::new(),

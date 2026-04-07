@@ -19,7 +19,11 @@ use agent_os_kernel::root_fs::{
 };
 use agent_os_kernel::vfs::VirtualFileSystem;
 use base64::Engine;
+use serde::Deserialize;
 use std::collections::BTreeMap;
+
+const BUNDLED_BASE_FILESYSTEM_JSON: &[u8] =
+    include_bytes!("../../../packages/core/fixtures/base-filesystem.json");
 
 pub(crate) fn build_root_filesystem(
     descriptor: &RootFilesystemDescriptor,
@@ -33,7 +37,7 @@ pub(crate) fn build_root_filesystem(
     };
     let has_restored_snapshot = restored_snapshot.is_some();
 
-    let lowers = if let Some(snapshot) = restored_snapshot {
+    let mut lowers = if let Some(snapshot) = restored_snapshot {
         vec![snapshot]
     } else {
         descriptor
@@ -42,13 +46,16 @@ pub(crate) fn build_root_filesystem(
             .map(convert_root_lower_descriptor)
             .collect::<Result<Vec<_>, _>>()?
     };
+    if !has_restored_snapshot && !descriptor.disable_default_base_layer {
+        lowers.push(load_bundled_base_snapshot()?);
+    }
 
     RootFileSystem::from_descriptor(KernelRootFilesystemDescriptor {
         mode: match descriptor.mode {
             RootFilesystemMode::Ephemeral => KernelRootFilesystemMode::Ephemeral,
             RootFilesystemMode::ReadOnly => KernelRootFilesystemMode::ReadOnly,
         },
-        disable_default_base_layer: has_restored_snapshot || descriptor.disable_default_base_layer,
+        disable_default_base_layer: true,
         lowers,
         bootstrap_entries: descriptor
             .bootstrap_entries
@@ -84,6 +91,21 @@ pub(crate) fn root_snapshot_entry(entry: &KernelFilesystemEntry) -> RootFilesyst
         executable: matches!(entry.kind, KernelFilesystemEntryKind::File)
             && (entry.mode & 0o111) != 0,
     }
+}
+
+pub(crate) fn root_snapshot_entries(snapshot: &RootFilesystemSnapshot) -> Vec<RootFilesystemEntry> {
+    snapshot.entries.iter().map(root_snapshot_entry).collect()
+}
+
+pub(crate) fn root_snapshot_from_entries(
+    entries: &[RootFilesystemEntry],
+) -> Result<RootFilesystemSnapshot, SidecarError> {
+    Ok(RootFilesystemSnapshot {
+        entries: entries
+            .iter()
+            .map(convert_root_filesystem_entry)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
 }
 
 pub(crate) fn apply_root_filesystem_entry<F>(
@@ -167,6 +189,7 @@ fn convert_root_lower_descriptor(
                 .map(convert_root_filesystem_entry)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
+        RootFilesystemLowerDescriptor::BundledBaseFilesystem => load_bundled_base_snapshot(),
     }
 }
 
@@ -226,4 +249,94 @@ where
         filesystem.mkdir(&parent, true).map_err(vfs_error)?;
     }
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct RawBaseFilesystemSnapshot {
+    filesystem: RawFilesystemEntries,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawFilesystemEntries {
+    entries: Vec<RawFilesystemEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawFilesystemEntry {
+    path: String,
+    #[serde(rename = "type")]
+    kind: RawFilesystemEntryKind,
+    mode: String,
+    uid: u32,
+    gid: u32,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    encoding: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RawFilesystemEntryKind {
+    File,
+    Directory,
+    Symlink,
+}
+
+fn load_bundled_base_snapshot() -> Result<RootFilesystemSnapshot, SidecarError> {
+    let raw: RawBaseFilesystemSnapshot = serde_json::from_slice(BUNDLED_BASE_FILESYSTEM_JSON)
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("parse bundled base filesystem: {error}"))
+        })?;
+    Ok(RootFilesystemSnapshot {
+        entries: raw
+            .filesystem
+            .entries
+            .into_iter()
+            .map(convert_raw_entry)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn convert_raw_entry(raw: RawFilesystemEntry) -> Result<KernelFilesystemEntry, SidecarError> {
+    let content = match raw.content {
+        Some(content) => match raw.encoding.as_deref() {
+            Some("base64") => Some(
+                base64::engine::general_purpose::STANDARD
+                    .decode(content)
+                    .map_err(|error| {
+                        SidecarError::InvalidState(format!(
+                            "decode base64 bundled content for {}: {error}",
+                            raw.path
+                        ))
+                    })?,
+            ),
+            Some("utf8") | None => Some(content.into_bytes()),
+            Some(other) => {
+                return Err(SidecarError::InvalidState(format!(
+                    "unsupported bundled content encoding for {}: {other}",
+                    raw.path
+                )));
+            }
+        },
+        None => None,
+    };
+
+    Ok(KernelFilesystemEntry {
+        path: raw.path,
+        kind: match raw.kind {
+            RawFilesystemEntryKind::File => KernelFilesystemEntryKind::File,
+            RawFilesystemEntryKind::Directory => KernelFilesystemEntryKind::Directory,
+            RawFilesystemEntryKind::Symlink => KernelFilesystemEntryKind::Symlink,
+        },
+        mode: u32::from_str_radix(&raw.mode, 8).map_err(|error| {
+            SidecarError::InvalidState(format!("parse bundled mode {}: {error}", raw.mode))
+        })?,
+        uid: raw.uid,
+        gid: raw.gid,
+        content,
+        target: raw.target,
+    })
 }

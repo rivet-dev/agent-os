@@ -5,21 +5,24 @@
 
 use crate::bootstrap::{
     apply_root_filesystem_entry, build_root_filesystem, discover_command_guest_paths,
-    root_snapshot_entry,
+    root_snapshot_entries, root_snapshot_entry, root_snapshot_from_entries,
 };
 use crate::bridge::{bridge_permissions, MountPluginContext};
 use crate::protocol::{
-    ConfigureVmRequest, DisposeReason, EventFrame, ResponsePayload, RootFilesystemEntry,
-    RootFilesystemSnapshotResponse, SnapshotRootFilesystemRequest, VmConfiguredResponse,
-    VmCreatedResponse, VmDisposedResponse, VmLifecycleState,
+    ConfigureVmRequest, CreateLayerRequest, CreateOverlayRequest, DisposeReason, EventFrame,
+    ExportSnapshotRequest, ImportSnapshotRequest, LayerCreatedResponse, LayerSealedResponse,
+    MountDescriptor, MountPluginDescriptor, OverlayCreatedResponse, ResponsePayload,
+    RootFilesystemEntry, RootFilesystemMode, RootFilesystemSnapshotResponse, SealLayerRequest,
+    SnapshotExportedResponse, SnapshotImportedResponse, SnapshotRootFilesystemRequest,
+    VmConfiguredResponse, VmCreatedResponse, VmDisposedResponse, VmLifecycleState,
 };
 use crate::service::{
     audit_fields, emit_security_audit_event, kernel_error, plugin_error, root_filesystem_error,
 };
 use crate::state::{
-    BridgeError, VmConfiguration, VmDnsConfig, VmState, DISPOSE_VM_SIGKILL_GRACE,
-    DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME, JAVASCRIPT_COMMAND, PYTHON_COMMAND,
-    WASM_COMMAND,
+    BridgeError, VmConfiguration, VmDnsConfig, VmLayer, VmLayerStore, VmOverlayLayer, VmState,
+    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME,
+    JAVASCRIPT_COMMAND, PYTHON_COMMAND, WASM_COMMAND,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -33,7 +36,10 @@ use agent_os_kernel::mount_table::MountOptions;
 use agent_os_kernel::permissions::filter_env;
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use agent_os_kernel::root_fs::{
-    encode_snapshot as encode_root_snapshot, ROOT_FILESYSTEM_SNAPSHOT_FORMAT,
+    encode_snapshot as encode_root_snapshot, RootFileSystem,
+    RootFilesystemDescriptor as KernelRootFilesystemDescriptor,
+    RootFilesystemMode as KernelRootFilesystemMode, RootFilesystemSnapshot,
+    ROOT_FILESYSTEM_SNAPSHOT_FORMAT,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -122,6 +128,7 @@ where
                 kernel,
                 loaded_snapshot,
                 configuration: VmConfiguration::default(),
+                layers: VmLayerStore::default(),
                 command_guest_paths: BTreeMap::new(),
                 command_permissions: BTreeMap::new(),
                 active_processes: BTreeMap::new(),
@@ -206,10 +213,12 @@ where
 
         let mount_plugins = &self.mount_plugins;
         let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
+        let mut effective_mounts = payload.mounts.clone();
+        append_module_access_mount(&mut effective_mounts, payload.module_access_cwd.as_ref())?;
         reconcile_mounts(
             mount_plugins,
             vm,
-            &payload.mounts,
+            &effective_mounts,
             MountPluginContext {
                 bridge: self.bridge.clone(),
                 vm_id: vm_id.clone(),
@@ -234,9 +243,10 @@ where
             .clone()
             .unwrap_or_else(|| vm.configuration.permissions.clone());
         vm.configuration = VmConfiguration {
-            mounts: payload.mounts.clone(),
+            mounts: effective_mounts.clone(),
             software: payload.software.clone(),
             permissions: configured_permissions.clone(),
+            module_access_cwd: payload.module_access_cwd.clone(),
             instructions: payload.instructions.clone(),
             projected_modules: payload.projected_modules.clone(),
             command_permissions: payload.command_permissions.clone(),
@@ -249,9 +259,160 @@ where
             response: self.respond(
                 request,
                 ResponsePayload::VmConfigured(VmConfiguredResponse {
-                    applied_mounts: payload.mounts.len() as u32,
+                    applied_mounts: effective_mounts.len() as u32,
                     applied_software: payload.software.len() as u32,
                 }),
+            ),
+            events: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn create_layer(
+        &mut self,
+        request: &crate::protocol::RequestFrame,
+        _payload: CreateLayerRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
+        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+
+        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
+        let layer_id = allocate_vm_layer_id(&mut vm.layers);
+        vm.layers
+            .layers
+            .insert(layer_id.clone(), VmLayer::Writable(new_writable_layer()?));
+
+        Ok(DispatchResult {
+            response: self.respond(
+                request,
+                ResponsePayload::LayerCreated(LayerCreatedResponse { layer_id }),
+            ),
+            events: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn seal_layer(
+        &mut self,
+        request: &crate::protocol::RequestFrame,
+        payload: SealLayerRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
+        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+
+        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
+        let layer = vm.layers.layers.remove(&payload.layer_id).ok_or_else(|| {
+            SidecarError::InvalidState(format!("unknown layer: {}", payload.layer_id))
+        })?;
+        let snapshot = match layer {
+            VmLayer::Writable(mut filesystem) => filesystem.snapshot().map_err(root_filesystem_error)?,
+            VmLayer::Snapshot(_) | VmLayer::Overlay(_) => {
+                return Err(SidecarError::InvalidState(format!(
+                    "layer {} is not writable",
+                    payload.layer_id
+                )));
+            }
+        };
+        let layer_id = allocate_vm_layer_id(&mut vm.layers);
+        vm.layers
+            .layers
+            .insert(layer_id.clone(), VmLayer::Snapshot(snapshot));
+
+        Ok(DispatchResult {
+            response: self.respond(
+                request,
+                ResponsePayload::LayerSealed(LayerSealedResponse { layer_id }),
+            ),
+            events: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn import_snapshot(
+        &mut self,
+        request: &crate::protocol::RequestFrame,
+        payload: ImportSnapshotRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
+        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+
+        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
+        let layer_id = allocate_vm_layer_id(&mut vm.layers);
+        vm.layers.layers.insert(
+            layer_id.clone(),
+            VmLayer::Snapshot(root_snapshot_from_entries(&payload.entries)?),
+        );
+
+        Ok(DispatchResult {
+            response: self.respond(
+                request,
+                ResponsePayload::SnapshotImported(SnapshotImportedResponse { layer_id }),
+            ),
+            events: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn export_snapshot(
+        &mut self,
+        request: &crate::protocol::RequestFrame,
+        payload: ExportSnapshotRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
+        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+
+        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
+        let snapshot = materialize_vm_layer_snapshot(&mut vm.layers, &payload.layer_id)?;
+
+        Ok(DispatchResult {
+            response: self.respond(
+                request,
+                ResponsePayload::SnapshotExported(SnapshotExportedResponse {
+                    layer_id: payload.layer_id,
+                    entries: root_snapshot_entries(&snapshot),
+                }),
+            ),
+            events: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn create_overlay(
+        &mut self,
+        request: &crate::protocol::RequestFrame,
+        payload: CreateOverlayRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
+        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+
+        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
+        for layer_id in &payload.lower_layer_ids {
+            if !vm.layers.layers.contains_key(layer_id) {
+                return Err(SidecarError::InvalidState(format!(
+                    "unknown lower layer: {layer_id}"
+                )));
+            }
+        }
+        if let Some(upper_layer_id) = payload.upper_layer_id.as_ref() {
+            if !vm.layers.layers.contains_key(upper_layer_id) {
+                return Err(SidecarError::InvalidState(format!(
+                    "unknown upper layer: {upper_layer_id}"
+                )));
+            }
+        }
+
+        let layer_id = allocate_vm_layer_id(&mut vm.layers);
+        vm.layers.layers.insert(
+            layer_id.clone(),
+            VmLayer::Overlay(VmOverlayLayer {
+                mode: match payload.mode {
+                    RootFilesystemMode::Ephemeral => KernelRootFilesystemMode::Ephemeral,
+                    RootFilesystemMode::ReadOnly => KernelRootFilesystemMode::ReadOnly,
+                },
+                upper_layer_id: payload.upper_layer_id,
+                lower_layer_ids: payload.lower_layer_ids,
+            }),
+        );
+
+        Ok(DispatchResult {
+            response: self.respond(
+                request,
+                ResponsePayload::OverlayCreated(OverlayCreatedResponse { layer_id }),
             ),
             events: Vec::new(),
         })
@@ -479,6 +640,131 @@ where
     }
 
     Ok(())
+}
+
+fn append_module_access_mount(
+    mounts: &mut Vec<MountDescriptor>,
+    module_access_cwd: Option<&String>,
+) -> Result<(), SidecarError> {
+    if mounts.iter().any(|mount| mount.guest_path == "/root/node_modules") {
+        return Ok(());
+    }
+
+    let Some(module_access_cwd) = module_access_cwd else {
+        return Ok(());
+    };
+    let root = resolve_cwd(Some(module_access_cwd))?.join("node_modules");
+    if !root.is_dir() {
+        return Ok(());
+    }
+
+    mounts.push(MountDescriptor {
+        guest_path: String::from("/root/node_modules"),
+        read_only: true,
+        plugin: MountPluginDescriptor {
+            id: String::from("module_access"),
+            config: serde_json::json!({
+                "hostPath": root,
+            }),
+        },
+    });
+    Ok(())
+}
+
+fn allocate_vm_layer_id(layers: &mut VmLayerStore) -> String {
+    let layer_id = format!("layer-{}", layers.next_layer_id);
+    layers.next_layer_id += 1;
+    layer_id
+}
+
+fn new_writable_layer() -> Result<RootFileSystem, SidecarError> {
+    RootFileSystem::from_descriptor(KernelRootFilesystemDescriptor {
+        mode: KernelRootFilesystemMode::Ephemeral,
+        disable_default_base_layer: true,
+        lowers: Vec::new(),
+        bootstrap_entries: Vec::new(),
+    })
+    .map_err(root_filesystem_error)
+}
+
+fn materialize_vm_layer_snapshot(
+    layers: &mut VmLayerStore,
+    layer_id: &str,
+) -> Result<RootFilesystemSnapshot, SidecarError> {
+    materialize_vm_layer_snapshot_inner(layers, layer_id, &mut std::collections::BTreeSet::new())
+}
+
+fn materialize_vm_layer_snapshot_inner(
+    layers: &mut VmLayerStore,
+    layer_id: &str,
+    active: &mut std::collections::BTreeSet<String>,
+) -> Result<RootFilesystemSnapshot, SidecarError> {
+    if !active.insert(layer_id.to_owned()) {
+        return Err(SidecarError::InvalidState(format!(
+            "layer graph cycle detected at {layer_id}"
+        )));
+    }
+
+    let result = if let Some(VmLayer::Snapshot(snapshot)) = layers.layers.get(layer_id) {
+        Ok(snapshot.clone())
+    } else if let Some(VmLayer::Overlay(overlay)) = layers.layers.get(layer_id) {
+        let overlay = overlay.clone();
+        let lowers = overlay
+            .lower_layer_ids
+            .iter()
+            .map(|lower_id| materialize_vm_layer_snapshot_inner(layers, lower_id, active))
+            .collect::<Result<Vec<_>, _>>()?;
+        let bootstrap_entries = match overlay.upper_layer_id.as_deref() {
+            Some(upper_layer_id) => dedupe_overlay_bootstrap_entries(
+                &lowers,
+                materialize_vm_layer_snapshot_inner(layers, upper_layer_id, active)?.entries,
+            ),
+            None => Vec::new(),
+        };
+        let mut root = RootFileSystem::from_descriptor(KernelRootFilesystemDescriptor {
+            mode: overlay.mode,
+            disable_default_base_layer: true,
+            lowers,
+            bootstrap_entries,
+        })
+        .map_err(root_filesystem_error)?;
+        root.snapshot().map_err(root_filesystem_error)
+    } else if let Some(VmLayer::Writable(filesystem)) = layers.layers.get_mut(layer_id) {
+        filesystem.snapshot().map_err(root_filesystem_error)
+    } else {
+        Err(SidecarError::InvalidState(format!(
+            "unknown layer: {layer_id}"
+        )))
+    };
+
+    active.remove(layer_id);
+    result
+}
+
+fn dedupe_overlay_bootstrap_entries(
+    lowers: &[RootFilesystemSnapshot],
+    upper_entries: Vec<agent_os_kernel::root_fs::FilesystemEntry>,
+) -> Vec<agent_os_kernel::root_fs::FilesystemEntry> {
+    let mut lower_paths = lowers
+        .iter()
+        .flat_map(|snapshot| snapshot.entries.iter().map(|entry| entry.path.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    upper_entries
+        .into_iter()
+        .filter(|entry| {
+            if lower_paths.contains(&entry.path)
+                && matches!(
+                    entry.kind,
+                    agent_os_kernel::root_fs::FilesystemEntryKind::Directory
+                )
+            {
+                return false;
+            }
+            lower_paths.insert(entry.path.clone());
+            true
+        })
+        .collect()
 }
 
 fn resolve_cwd(value: Option<&String>) -> Result<PathBuf, SidecarError> {

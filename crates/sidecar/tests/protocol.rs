@@ -420,6 +420,7 @@ fn schema_supports_configuration_and_structured_events() {
                 child_process: None,
                 env: None,
             }),
+            module_access_cwd: None,
             instructions: vec!["keep timing mitigation enabled".to_string()],
             projected_modules: vec![ProjectedModuleDescriptor {
                 package_name: "workspace".to_string(),

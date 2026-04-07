@@ -2,7 +2,7 @@
   "project": "agentOS",
   "branchName": "finish-ts-rust-migration",
   "description": "Migrate kernel logic from TypeScript to Rust sidecar. Split the service.rs monolith, convert to async, then migrate permissions, filesystem, process management, command resolution, tools, ACP sessions, and SQLite to Rust. TypeScript becomes a thin SDK (~2,500 lines down from ~10,400). See .agent/specs/typescript-to-rust-migration.md for the full design spec.",
-  "testPolicy": "IMPORTANT: Do NOT run bare `pnpm test` — dev-shell and browser integration tests have pre-existing failures unrelated to this migration. Use scoped test commands specified in each story's acceptanceCriteria. The final story (US-029) addresses full pnpm test green.",
+  "testPolicy": "IMPORTANT: Do NOT run bare `pnpm test` \u2014 dev-shell and browser integration tests have pre-existing failures unrelated to this migration. Use scoped test commands specified in each story's acceptanceCriteria. The final story (US-029) addresses full pnpm test green.",
   "userStories": [
     {
       "id": "US-001",
@@ -12,13 +12,13 @@
         "crates/sidecar/src/state.rs exists with all shared state structs/enums moved from service.rs (VmState, session state, configuration types, etc.)",
         "protocol.rs (already exists at 1,353 lines) is expanded if needed with any protocol-related types still in service.rs",
         "service.rs imports from state.rs and protocol.rs instead of defining these types inline",
-        "No behavior changes — pure mechanical extraction with identical function signatures",
+        "No behavior changes \u2014 pure mechanical extraction with identical function signatures",
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Step 0a — first extraction. Read .agent/specs/typescript-to-rust-migration.md 'Step 0a: Split service.rs'. IMPORTANT: protocol.rs already exists at crates/sidecar/src/protocol.rs (1,353 lines). Do NOT recreate it — only move remaining protocol-related types from service.rs into it. Extract state types first because all domain modules depend on them."
+      "notes": "Step 0a \u2014 first extraction. Read .agent/specs/typescript-to-rust-migration.md 'Step 0a: Split service.rs'. IMPORTANT: protocol.rs already exists at crates/sidecar/src/protocol.rs (1,353 lines). Do NOT recreate it \u2014 only move remaining protocol-related types from service.rs into it. Extract state types first because all domain modules depend on them."
     },
     {
       "id": "US-002",
@@ -28,7 +28,7 @@
         "crates/sidecar/src/vm.rs exists with all VM lifecycle functions moved from service.rs",
         "Includes create_vm, configure_vm, dispose_vm and their helper functions (~1,500 lines)",
         "service.rs delegates VM operations to vm.rs",
-        "No behavior changes — pure mechanical extraction",
+        "No behavior changes \u2014 pure mechanical extraction",
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
@@ -44,7 +44,7 @@
         "crates/sidecar/src/bootstrap.rs exists with root filesystem construction and snapshot helpers (~1,000 lines)",
         "crates/sidecar/src/bridge.rs exists with host filesystem access and permission bridge code (~500 lines)",
         "service.rs delegates to these modules",
-        "No behavior changes — pure mechanical extraction",
+        "No behavior changes \u2014 pure mechanical extraction",
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
@@ -60,13 +60,13 @@
         "crates/sidecar/src/filesystem.rs exists with all guest filesystem dispatch handlers (~1,500 lines)",
         "Includes handlers for readFile, writeFile, mkdir, stat, readdir, symlink, link, chmod, chown, utimes, truncate, rename, delete, exists, realpath, and all other VFS operations",
         "service.rs delegates filesystem RPCs to filesystem.rs",
-        "No behavior changes — pure mechanical extraction",
+        "No behavior changes \u2014 pure mechanical extraction",
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 4,
       "passes": true,
-      "notes": "Step 0a. Standalone filesystem domain — no cross-cutting dependencies beyond state types."
+      "notes": "Step 0a. Standalone filesystem domain \u2014 no cross-cutting dependencies beyond state types."
     },
     {
       "id": "US-005",
@@ -78,13 +78,13 @@
         "Networking stays co-located with execution because ActiveProcess owns socket state",
         "handle_javascript_sync_rpc_request stays in service.rs as the cross-cutting dispatch hub (~700 lines)",
         "service.rs delegates process/networking operations to execution.rs",
-        "No behavior changes — pure mechanical extraction",
+        "No behavior changes \u2014 pure mechanical extraction",
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 5,
       "passes": true,
-      "notes": "Step 0a. Largest extraction (~4,000 lines) but purely mechanical — cut functions, move to new file, update imports. handle_javascript_sync_rpc_request is the cross-cutting dispatch hub that delegates to domain modules."
+      "notes": "Step 0a. Largest extraction (~4,000 lines) but purely mechanical \u2014 cut functions, move to new file, update imports. handle_javascript_sync_rpc_request is the cross-cutting dispatch hub that delegates to domain modules."
     },
     {
       "id": "US-006",
@@ -99,7 +99,7 @@
         "sandbox_agent_plugin.rs moved to plugins/sandbox_agent.rs",
         "Old top-level plugin files deleted",
         "All module declarations updated (lib.rs or mod.rs)",
-        "No behavior changes — pure reorganization",
+        "No behavior changes \u2014 pure reorganization",
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
@@ -115,12 +115,12 @@
         "All #[cfg(test)] mod tests blocks extracted from service.rs and other extracted modules to crates/sidecar/tests/ files",
         "Only trivial unit tests of private helper functions remain inline in source files",
         "Test files organized by domain matching the source modules",
-        "All extracted tests pass identically — no test behavior changes",
+        "All extracted tests pass identically \u2014 no test behavior changes",
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 7,
       "passes": true,
-      "notes": "Step 0a final. Check all extracted modules (vm.rs, filesystem.rs, execution.rs, bootstrap.rs, bridge.rs) for inline test blocks. crates/sidecar/tests/ already has ~14 test files — add new ones alongside them."
+      "notes": "Step 0a final. Check all extracted modules (vm.rs, filesystem.rs, execution.rs, bootstrap.rs, bridge.rs) for inline test blocks. crates/sidecar/tests/ already has ~14 test files \u2014 add new ones alongside them."
     },
     {
       "id": "US-008",
@@ -130,7 +130,7 @@
         "The nix::poll loop in stdio.rs (~587 lines) is replaced with a tokio::select! event loop",
         "stdin reading converted to async I/O with the existing NativeFrameCodec",
         "All request handler methods converted to async fn across all domain modules (vm.rs, filesystem.rs, execution.rs, etc.)",
-        "Single-task select! model — only one branch runs at a time, &mut self sufficient (no Arc<Mutex>)",
+        "Single-task select! model \u2014 only one branch runs at a time, &mut self sufficient (no Arc<Mutex>)",
         "Process events received via a tokio channel branch in the select! loop",
         "The existing tokio dependency (used by S3/sandbox agent plugins) extends to the main event loop",
         "nix::poll dependency removed from stdio.rs",
@@ -140,18 +140,18 @@
       ],
       "priority": 8,
       "passes": true,
-      "notes": "Step 0b. See spec 'Step 0b: Async migration'. The async fn conversion across modules is mechanical (add async keyword + .await). The creative work is rewriting stdio.rs's run() function from sync poll to tokio::select!. Concurrency model stays single-task. IMPORTANT: Do NOT introduce Arc<Mutex> — the select! loop runs one branch at a time."
+      "notes": "Step 0b. See spec 'Step 0b: Async migration'. The async fn conversion across modules is mechanical (add async keyword + .await). The creative work is rewriting stdio.rs's run() function from sync poll to tokio::select!. Concurrency model stays single-task. IMPORTANT: Do NOT introduce Arc<Mutex> \u2014 the select! loop runs one branch at a time."
     },
     {
       "id": "US-008a",
       "title": "Restore V8 isolate execution engine with kernel-backed polyfills",
-      "description": "As a developer, I want the Node.js execution engine to run guest JS/TS inside V8 isolates with kernel-backed polyfills instead of spawning real host node processes. This is the single most critical architectural fix — without it, every guest process escapes the kernel to the real host.",
+      "description": "As a developer, I want the Node.js execution engine to run guest JS/TS inside V8 isolates with kernel-backed polyfills instead of spawning real host node processes. This is the single most critical architectural fix \u2014 without it, every guest process escapes the kernel to the real host.",
       "acceptanceCriteria": [
         "Guest JS/TS code executes inside V8 isolates managed by the Rust sidecar, NOT in real host node child processes",
         "All Node.js builtins (fs, net, child_process, dns, http, os, etc.) are kernel-backed polyfills that route through the kernel VFS, socket table, and process table",
-        "Module loading is fully intercepted — guest require()/import never falls through to real host modules",
+        "Module loading is fully intercepted \u2014 guest require()/import never falls through to real host modules",
         "The sync RPC bridge (SharedArrayBuffer + Atomics.wait or equivalent) connects guest polyfills to the kernel",
-        "Guest code cannot observe it is running inside a V8 isolate — process.pid returns kernel PID, fs.readdirSync('/') shows kernel VFS, etc.",
+        "Guest code cannot observe it is running inside a V8 isolate \u2014 process.pid returns kernel PID, fs.readdirSync('/') shows kernel VFS, etc.",
         "Command::new('node') is no longer used for guest code execution in javascript.rs",
         "cargo check -p agent-os-execution passes",
         "cargo test -p agent-os-execution -- --test-threads=1 passes",
@@ -160,7 +160,7 @@
       ],
       "priority": 8.5,
       "passes": true,
-      "notes": "CRITICAL FIX. V8 isolate execution engine restored. The agent-os-v8 binary (crates/v8-runtime/) manages V8 isolates. The execution engine (crates/execution/src/javascript.rs) now spawns V8 isolates instead of real node processes. Polyfills (18K lines) are bundled into crates/execution/assets/v8-bridge.js. IPC protocol (v8_ipc.rs), runtime manager (v8_host.rs), and bridge call translation (v8_runtime.rs) wire polyfill bridge calls to the sidecar's kernel handlers. Internal bridge calls (logging, module resolution, crypto, timers) are handled locally in the event bridge. The sidecar reads entrypoint files from the VFS and passes inline code to avoid module loading bridge calls during synchronous dispatch. Remaining integration: crash_isolation test hangs due to synchronous dispatch model not supporting concurrent bridge call handling — needs the async event loop (US-008's tokio::select!) to properly pump V8 bridge calls."
+      "notes": "CRITICAL FIX. V8 isolate execution engine restored. The agent-os-v8 binary (crates/v8-runtime/) manages V8 isolates. The execution engine (crates/execution/src/javascript.rs) now spawns V8 isolates instead of real node processes. Polyfills (18K lines) are bundled into crates/execution/assets/v8-bridge.js. IPC protocol (v8_ipc.rs), runtime manager (v8_host.rs), and bridge call translation (v8_runtime.rs) wire polyfill bridge calls to the sidecar's kernel handlers. Internal bridge calls (logging, module resolution, crypto, timers) are handled locally in the event bridge. The sidecar reads entrypoint files from the VFS and passes inline code to avoid module loading bridge calls during synchronous dispatch. Remaining integration: crash_isolation test hangs due to synchronous dispatch model not supporting concurrent bridge call handling \u2014 needs the async event loop (US-008's tokio::select!) to properly pump V8 bridge calls."
     },
     {
       "id": "US-009",
@@ -188,7 +188,7 @@
       "title": "Register missing V8 bridge functions, remove dead node_binary() code, verify tests exercise V8 path",
       "description": "As a developer, I want all ~80 unregistered bridge functions (networking, crypto, HTTP/2, TLS, dgram) registered on the V8 global so polyfills actually work at runtime, dead Command::new('node') code removed from guest execution paths, and tests verified to exercise the V8 isolate path",
       "acceptanceCriteria": [
-        "All bridge functions referenced by v8-bridge.js polyfills are registered in SYNC_BRIDGE_FNS/ASYNC_BRIDGE_FNS in crates/v8-runtime/src/session.rs — no undefined globals at runtime",
+        "All bridge functions referenced by v8-bridge.js polyfills are registered in SYNC_BRIDGE_FNS/ASYNC_BRIDGE_FNS in crates/v8-runtime/src/session.rs \u2014 no undefined globals at runtime",
         "TCP sockets (net.connect, net.createServer), TLS, dgram, HTTP/2, dns, and crypto bridge functions all registered and forwarded to sidecar handlers via map_bridge_method",
         "create_node_child() dead code removed from crates/execution/src/javascript.rs",
         "Prewarm path Command::new(node_binary()) at javascript.rs:879 either removed or clearly gated behind a non-guest-execution flag",
@@ -208,9 +208,9 @@
       "description": "As a developer, I want permissions to be declarative JSON objects evaluated in Rust instead of TypeScript callback functions",
       "acceptanceCriteria": [
         "Rust sidecar evaluates declarative permission rules with glob matching for filesystem paths",
-        "Permission domains: fs, network, childProcess, env — each accepts 'allow', 'deny', or structured rules with path/pattern lists",
+        "Permission domains: fs, network, childProcess, env \u2014 each accepts 'allow', 'deny', or structured rules with path/pattern lists",
         "AgentOs.create() in TypeScript accepts declarative permissions object (no callback functions)",
-        "agent-os.ts imports updated — no longer imports from permission-descriptors.ts",
+        "agent-os.ts imports updated \u2014 no longer imports from permission-descriptors.ts",
         "packages/core/src/sidecar/permission-descriptors.ts (346 lines) deleted",
         "index.ts updated to remove any re-exports from permission-descriptors.ts",
         "Existing tests updated to use declarative permission format",
@@ -232,14 +232,14 @@
         "base-filesystem.json bundled into the sidecar binary via include_bytes! (~13KB)",
         "Sidecar constructs the root overlay filesystem from the bundled base layer during VM creation",
         "Layer state is scoped per-VM (multiple VMs have independent layers)",
-        "ModuleAccessFileSystem logic moved to Rust as native mount plugin — read-only host_dir scoped to node_modules/ directories",
+        "ModuleAccessFileSystem logic moved to Rust as native mount plugin \u2014 read-only host_dir scoped to node_modules/ directories",
         "TypeScript passes moduleAccessCwd host path during ConfigureVm; sidecar handles the rest",
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
-      "priority": 11,
-      "passes": false,
-      "notes": "Step 2 (Rust side, part 1). The kernel already has overlay_fs.rs and MemoryFileSystem — this is wiring new RPCs to existing primitives. ModuleAccessFileSystem is essentially a read-only host_dir mount scoped to node_modules/."
+      "priority": 22,
+      "passes": true,
+      "notes": "Step 2 (Rust side, part 1). The kernel already has overlay_fs.rs and MemoryFileSystem \u2014 this is wiring new RPCs to existing primitives. ModuleAccessFileSystem is essentially a read-only host_dir mount scoped to node_modules/."
     },
     {
       "id": "US-012",
@@ -257,9 +257,9 @@
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
-      "priority": 12,
+      "priority": 23,
       "passes": false,
-      "notes": "Step 2 (Rust side, part 2). Depends on US-009 (bidirectional frames). See spec 'JS-Bridge Mounts' section. This is the same async callback pattern used by tool invocations — sidecar pushes request, holds, TypeScript runs callback, returns result."
+      "notes": "Step 2 (Rust side, part 2). Depends on US-009 (bidirectional frames). See spec 'JS-Bridge Mounts' section. This is the same async callback pattern used by tool invocations \u2014 sidecar pushes request, holds, TypeScript runs callback, returns result."
     },
     {
       "id": "US-013",
@@ -271,11 +271,11 @@
         "All tests in packages/core/tests/ that use createInMemoryFileSystem() or createKernel() updated to use createTestVm()",
         "registry/tests/helpers.ts updated to use createTestVm() instead of createInMemoryFileSystem/createKernel re-exports",
         "All registry tests that import from helpers.ts updated",
-        "No InProcessSidecarTransport usage remains — all tests use real sidecar binary",
+        "No InProcessSidecarTransport usage remains \u2014 all tests use real sidecar binary",
         "pnpm --dir packages/core exec tsc --noEmit passes",
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
-      "priority": 13,
+      "priority": 24,
       "passes": false,
       "notes": "Must happen BEFORE US-014 (which deletes InMemoryFileSystem). See spec 'Test Structure' section for createTestVm() definition. The helper is ~20-30 lines. The bulk of work is updating imports across 15+ test files."
     },
@@ -292,12 +292,12 @@
         "agent-os.ts filesystem methods (readFile, writeFile, mkdir, stat, etc.) are thin RPC wrappers to sidecar",
         "mountFs() stores VirtualFileSystem callback locally, registers JS-bridge mount via RPC",
         "Surviving VFS types (VirtualFileSystem interface, VirtualStat, VirtualDirEntry) extracted to types.ts",
-        "index.ts updated — remove re-exports of deleted modules (RootSnapshotExport, createOverlayBackend, etc.)",
+        "index.ts updated \u2014 remove re-exports of deleted modules (RootSnapshotExport, createOverlayBackend, etc.)",
         "JS-bridge dispatch handler added to agent-os.ts event loop for SidecarRequest JsBridgeCall callbacks",
         "pnpm --dir packages/core exec tsc --noEmit passes",
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
-      "priority": 14,
+      "priority": 25,
       "passes": false,
       "notes": "Step 2 (TypeScript side). Depends on US-011, US-012, US-013. CRITICAL: US-013 must have migrated all tests from createInMemoryFileSystem BEFORE this story deletes it. Check index.ts for ALL re-exports from deleted files and remove them."
     },
@@ -306,7 +306,7 @@
       "title": "Add process management and shell/terminal RPCs to sidecar",
       "description": "As a developer, I want the sidecar to expose process and shell RPCs so TypeScript stops managing synthetic PIDs",
       "acceptanceCriteria": [
-        "Sidecar handles process RPCs: WaitProcess (blocking — returns immediately if already exited), ListProcesses, GetProcessTree, GetProcess",
+        "Sidecar handles process RPCs: WaitProcess (blocking \u2014 returns immediately if already exited), ListProcesses, GetProcessTree, GetProcess",
         "Sidecar handles shell RPCs: OpenShell, WriteShell, ResizeShell, CloseShell, ConnectTerminal",
         "Sidecar handles process I/O RPCs: WriteProcessStdin, KillProcess",
         "ProcessOutput and ProcessExited push events use kernel PIDs (not synthetic IDs)",
@@ -316,9 +316,9 @@
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
-      "priority": 15,
+      "priority": 26,
       "passes": false,
-      "notes": "Step 3 (Rust side). WaitProcess MUST be a blocking RPC — if process already exited, return exit code immediately. This avoids the race condition of event-based waitProcess. See spec 'API Changes'."
+      "notes": "Step 3 (Rust side). WaitProcess MUST be a blocking RPC \u2014 if process already exited, return exit code immediately. This avoids the race condition of event-based waitProcess. See spec 'API Changes'."
     },
     {
       "id": "US-016",
@@ -329,7 +329,7 @@
         "flushPendingStdin, buildProcessSnapshot, readHostProcesses deleted from native-kernel-proxy.ts",
         "openShell, connectTerminal wrappers deleted from native-kernel-proxy.ts",
         "spawn() in agent-os.ts is a thin RPC returning kernel PID",
-        "waitProcess(pid) calls this.rpc.call('wait_process', { pid }) — blocking RPC, no event race",
+        "waitProcess(pid) calls this.rpc.call('wait_process', { pid }) \u2014 blocking RPC, no event race",
         "writeProcessStdin, killProcess are thin RPCs",
         "Shell methods (openShell, writeShell, onShellData, resizeShell, closeShell) are thin RPCs",
         "Event routing for process_output, process_exited, shell_data events added to agent-os.ts event loop",
@@ -337,7 +337,7 @@
         "pnpm --dir packages/core exec tsc --noEmit passes",
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
-      "priority": 16,
+      "priority": 27,
       "passes": false,
       "notes": "Step 3 (TypeScript side). Depends on US-015. native-kernel-proxy.ts is at packages/core/src/sidecar/native-kernel-proxy.ts (1,831 lines). This story removes ~600 lines from it."
     },
@@ -353,7 +353,7 @@
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
-      "priority": 17,
+      "priority": 28,
       "passes": false,
       "notes": "Step 4 (Rust side). Depends on process management (US-015). Add tests in crates/execution/tests/javascript/command_resolution.rs."
     },
@@ -371,7 +371,7 @@
         "pnpm --dir packages/core exec tsc --noEmit passes",
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
-      "priority": 18,
+      "priority": 29,
       "passes": false,
       "notes": "Step 4 (TypeScript side). Depends on US-017. After this, native-kernel-proxy.ts should be significantly smaller (filesystem view dispatch + socket cache remaining)."
     },
@@ -381,7 +381,7 @@
       "description": "As a developer, I want the kernel to support virtual processes (entries with PID/stdin/stdout/exit but no real host process) for tool dispatch",
       "acceptanceCriteria": [
         "Kernel process table supports creating virtual process entries",
-        "Virtual processes have PID, stdin buffer, stdout buffer, exit code — same interface as real processes",
+        "Virtual processes have PID, stdin buffer, stdout buffer, exit code \u2014 same interface as real processes",
         "Virtual processes appear in process listings and process tree queries",
         "Sidecar can write to virtual process stdout (tool result output)",
         "Sidecar can exit a virtual process with a specified exit code",
@@ -389,7 +389,7 @@
         "cargo check passes",
         "cargo test passes"
       ],
-      "priority": 19,
+      "priority": 30,
       "passes": false,
       "notes": "Step 5 part 1. See spec 'Tool Invocation - Virtual Process Design'. Virtual processes are backed by tool dispatch in the sidecar, not real host OS processes."
     },
@@ -411,7 +411,7 @@
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
-      "priority": 20,
+      "priority": 31,
       "passes": false,
       "notes": "Step 5 part 2. Depends on US-019 (virtual processes) and US-009 (bidirectional frames). See spec 'Tool Invocation - Virtual Process Design' for the flow diagram. Port host-tools-argv.ts parsing logic to Rust."
     },
@@ -432,7 +432,7 @@
         "pnpm --dir packages/core exec tsc --noEmit passes",
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
-      "priority": 21,
+      "priority": 32,
       "passes": false,
       "notes": "Step 5 (TypeScript side). Depends on US-020. Check index.ts for re-exports from host-tools-argv.ts, host-tools-prompt.ts, host-tools-shims.ts."
     },
@@ -444,7 +444,7 @@
         "crates/sidecar/src/acp/ directory created with mod.rs",
         "JSON-RPC 2.0 NDJSON codec: parse/serialize requests, responses, notifications over newline-delimited JSON",
         "ACP client sends requests and correlates responses with request IDs and configurable timeouts",
-        "Permission request deduplication (_seenInboundRequestIds — VM stdout can duplicate NDJSON lines)",
+        "Permission request deduplication (_seenInboundRequestIds \u2014 VM stdout can duplicate NDJSON lines)",
         "Legacy permission method shimming (request/permission vs session/request_permission)",
         "Cancel fallback: send as request first, fall back to notification if agent returns -32601 (method not found)",
         "Permission option normalization (always/allow_always, once/allow_once, reject/reject_once)",
@@ -454,9 +454,9 @@
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
-      "priority": 22,
+      "priority": 33,
       "passes": false,
-      "notes": "Step 6 part 1. See spec 'ACP in Rust - Complexity Acknowledgment'. ALL edge cases are compatibility workarounds for real agent behaviors — port faithfully from acp-client.ts (564 lines), do NOT simplify or omit any. Read the existing TypeScript acp-client.ts at packages/core/src/acp-client.ts to understand each edge case."
+      "notes": "Step 6 part 1. See spec 'ACP in Rust - Complexity Acknowledgment'. ALL edge cases are compatibility workarounds for real agent behaviors \u2014 port faithfully from acp-client.ts (564 lines), do NOT simplify or omit any. Read the existing TypeScript acp-client.ts at packages/core/src/acp-client.ts to understand each edge case."
     },
     {
       "id": "US-023",
@@ -476,7 +476,7 @@
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
-      "priority": 23,
+      "priority": 34,
       "passes": false,
       "notes": "Step 6 part 2. Depends on US-022 (ACP client). Session creation flow: TypeScript resolves adapter path via packages.ts + runs prepareInstructions callback, sends CreateSession RPC with resolved paths. Sidecar handles everything after. Read session.ts (493 lines) at packages/core/src/session.ts."
     },
@@ -485,20 +485,20 @@
       "title": "Implement inbound ACP request handling in Rust",
       "description": "As a developer, I want the sidecar to serve ACP inbound requests (agent->sidecar) directly from its VFS and process table",
       "acceptanceCriteria": [
-        "Sidecar handles inbound fs/read_text_file — reads from kernel VFS directly",
-        "Sidecar handles inbound fs/write_text_file — writes to kernel VFS directly",
-        "Sidecar handles inbound terminal/create — creates terminal via kernel process table",
-        "Sidecar handles inbound terminal/output — streams terminal output",
-        "Sidecar handles inbound terminal/wait_for_exit — waits for terminal process exit",
-        "Sidecar handles inbound terminal/kill — kills terminal process",
-        "Sidecar handles inbound terminal/release — releases terminal resources",
-        "No round-trip to TypeScript for any inbound request — served directly from sidecar state",
+        "Sidecar handles inbound fs/read_text_file \u2014 reads from kernel VFS directly",
+        "Sidecar handles inbound fs/write_text_file \u2014 writes to kernel VFS directly",
+        "Sidecar handles inbound terminal/create \u2014 creates terminal via kernel process table",
+        "Sidecar handles inbound terminal/output \u2014 streams terminal output",
+        "Sidecar handles inbound terminal/wait_for_exit \u2014 waits for terminal process exit",
+        "Sidecar handles inbound terminal/kill \u2014 kills terminal process",
+        "Sidecar handles inbound terminal/release \u2014 releases terminal resources",
+        "No round-trip to TypeScript for any inbound request \u2014 served directly from sidecar state",
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar passes"
       ],
-      "priority": 24,
+      "priority": 35,
       "passes": false,
-      "notes": "Step 6 part 3. Depends on US-023. These are requests FROM agent processes TO the sidecar. The sidecar already has VFS and process table — this is dispatch wiring."
+      "notes": "Step 6 part 3. Depends on US-023. These are requests FROM agent processes TO the sidecar. The sidecar already has VFS and process table \u2014 this is dispatch wiring."
     },
     {
       "id": "US-025",
@@ -521,7 +521,7 @@
         "pnpm --dir packages/core exec tsc --noEmit passes",
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
-      "priority": 25,
+      "priority": 36,
       "passes": false,
       "notes": "Step 6 (TypeScript side). Depends on US-022, US-023, US-024. Check index.ts for re-exports from session.ts, acp-client.ts, protocol.ts. Split existing pi-acp-adapter.test.ts and pi-sdk-adapter.test.ts: protocol tests -> Rust, e2e agent tests stay TypeScript."
     },
@@ -542,7 +542,7 @@
         "pnpm --dir packages/core exec tsc --noEmit passes",
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
-      "priority": 26,
+      "priority": 37,
       "passes": false,
       "notes": "Step 7 part 1. Combines Rust addition and TypeScript deletion since they're tightly coupled."
     },
@@ -551,7 +551,7 @@
       "title": "Consolidate sidecar/ TypeScript files and eliminate native-kernel-proxy.ts",
       "description": "As a developer, I want the sidecar/ TypeScript directory consolidated into minimal files",
       "acceptanceCriteria": [
-        "native-kernel-proxy.ts fully eliminated — any remaining code inlined into agent-os.ts or sidecar/rpc-client.ts",
+        "native-kernel-proxy.ts fully eliminated \u2014 any remaining code inlined into agent-os.ts or sidecar/rpc-client.ts",
         "sidecar/handle.ts simplified to ~30 lines (spawn + kill sidecar binary only)",
         "sidecar/client.ts (420 lines) merged into sidecar/rpc-client.ts",
         "sidecar/in-process-transport.ts (88 lines) deleted",
@@ -561,7 +561,7 @@
         "pnpm --dir packages/core exec tsc --noEmit passes",
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
-      "priority": 27,
+      "priority": 38,
       "passes": false,
       "notes": "Step 7 part 2. At this point native-kernel-proxy.ts should have very little code remaining (previous stories deleted ~1,400 lines from its original 1,831). Inline whatever is left."
     },
@@ -570,19 +570,19 @@
       "title": "Gut runtime.ts to types.ts and verify final target architecture",
       "description": "As a developer, I want runtime.ts reduced to type exports only and the final SDK architecture to match the spec target",
       "acceptanceCriteria": [
-        "runtime.ts gutted — VFS/kernel implementations removed, only type definitions survive",
+        "runtime.ts gutted \u2014 VFS/kernel implementations removed, only type definitions survive",
         "Types extracted to types.ts: VirtualFileSystem interface, VirtualStat, VirtualDirEntry, ProcessInfo, Permissions types, ExecResult, SessionEvent types, CronEvent types",
         "os-instructions.ts (19 lines) deleted if still present",
         "packages/core/src/ matches target layout: index.ts, agent-os.ts, types.ts, host-tools.ts, host-tools-zod.ts, packages.ts, agents.ts, js-bridge.ts, cron/, sidecar/rpc-client.ts, sidecar/process.ts",
-        "All exports updated in index.ts — clean public API surface",
+        "All exports updated in index.ts \u2014 clean public API surface",
         "No references to deleted files remain anywhere in packages/core/",
         "pnpm --dir packages/core exec tsc --noEmit passes",
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)",
         "pnpm build passes"
       ],
-      "priority": 28,
+      "priority": 39,
       "passes": false,
-      "notes": "Step 7 final. See spec 'Target TypeScript Architecture' for exact file layout. Also update downstream packages within this repo (secure-exec re-exports, registry test helpers, dev-shell). Actor layer in Rivet repo (~/r-aos) needs separate update — ask user for guidance."
+      "notes": "Step 7 final. See spec 'Target TypeScript Architecture' for exact file layout. Also update downstream packages within this repo (secure-exec re-exports, registry test helpers, dev-shell). Actor layer in Rivet repo (~/r-aos) needs separate update \u2014 ask user for guidance."
     },
     {
       "id": "US-028a",
@@ -595,9 +595,9 @@
         "cargo test -p agent-os-sidecar --test service javascript_dgram_rpc_sends_and_receives_host_udp_packets -- --test-threads=1 passes",
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes (no dgram-related regressions)"
       ],
-      "priority": 28.5,
+      "priority": 40,
       "passes": false,
-      "notes": "Known blocker from US-009a work. The V8 polyfill sends _dgramSocketSendRaw which maps to dgram.send via map_bridge_method. The sidecar has full dgram handlers in execution.rs (lines 516-584). The bug is in the wiring — either the sync RPC response isn't reaching the V8 isolate correctly, or the guest-to-host port mapping is broken. Debug the full chain: V8 polyfill → _dgramSocketSendRaw → v8_ipc → v8_host event bridge → JavascriptSyncRpcRequest → sidecar execution.rs dgram handler → UdpSocket::send_to → response back to V8. Check crates/execution/assets/v8-bridge.js dgram section, crates/execution/src/v8_runtime.rs map_bridge_method, and crates/sidecar/src/execution.rs dgram handlers."
+      "notes": "Known blocker from US-009a work. The V8 polyfill sends _dgramSocketSendRaw which maps to dgram.send via map_bridge_method. The sidecar has full dgram handlers in execution.rs (lines 516-584). The bug is in the wiring \u2014 either the sync RPC response isn't reaching the V8 isolate correctly, or the guest-to-host port mapping is broken. Debug the full chain: V8 polyfill \u2192 _dgramSocketSendRaw \u2192 v8_ipc \u2192 v8_host event bridge \u2192 JavascriptSyncRpcRequest \u2192 sidecar execution.rs dgram handler \u2192 UdpSocket::send_to \u2192 response back to V8. Check crates/execution/assets/v8-bridge.js dgram section, crates/execution/src/v8_runtime.rs map_bridge_method, and crates/sidecar/src/execution.rs dgram handlers."
     },
     {
       "id": "US-029",
@@ -609,16 +609,16 @@
         "pnpm build passes",
         "pnpm lint passes",
         "All pre-existing test failures from dev-shell, browser, and native-sidecar-process resolved",
-        "No test files skipped or disabled to pass — all tests run and pass"
+        "No test files skipped or disabled to pass \u2014 all tests run and pass"
       ],
-      "priority": 29,
+      "priority": 41,
       "passes": false,
-      "notes": "Final cleanup story. Known pre-existing failures to fix: (1) packages/dev-shell — 8 integration test failures (kernel.spawn node returns exit code 1, @xterm/headless CJS/ESM import issue on Node ≥ 22), (2) packages/core/tests/native-sidecar-process.test.ts — 4 failures (listener/UDP queries, socketTable/processTable state, connectTerminal, openShell), (3) packages/browser — test failures. Debug each systematically — these are runtime/platform issues, not migration regressions."
+      "notes": "Final cleanup story. Known pre-existing failures to fix: (1) packages/dev-shell \u2014 8 integration test failures (kernel.spawn node returns exit code 1, @xterm/headless CJS/ESM import issue on Node \u2265 22), (2) packages/core/tests/native-sidecar-process.test.ts \u2014 4 failures (listener/UDP queries, socketTable/processTable state, connectTerminal, openShell), (3) packages/browser \u2014 test failures. Debug each systematically \u2014 these are runtime/platform issues, not migration regressions."
     },
     {
       "id": "US-030",
       "title": "Fix timer scheduling so setTimeout/setInterval actually fire",
-      "description": "As a developer, I want timers to work in V8 guest code. Currently _scheduleTimer is a stub returning 0 — timers are created but never fire.",
+      "description": "As a developer, I want timers to work in V8 guest code. Currently _scheduleTimer is a stub returning 0 \u2014 timers are created but never fire.",
       "acceptanceCriteria": [
         "_scheduleTimer async bridge call in javascript.rs event bridge creates a real timer (tokio::time::sleep or channel-based) that fires after the requested delay",
         "Timer expiration sends a StreamCallback or BridgeResponse back to V8 to resolve the pending promise",
@@ -629,9 +629,9 @@
         "cargo test -p agent-os-execution -- --test-threads=1 timer passes",
         "cargo check -p agent-os-sidecar passes"
       ],
-      "priority": 30,
+      "priority": 11,
       "passes": false,
-      "notes": "CRITICAL — setTimeout/setInterval are broken, which breaks all async guest code. The _scheduleTimer bridge function is async (in ASYNC_BRIDGE_FNS). The LocalBridgeState already handles kernelTimerCreate/kernelTimerArm/kernelTimerClear via _loadPolyfill dispatch. The gap is that _scheduleTimer itself returns 0 immediately and never fires. Need to wire timer state between the local bridge (which tracks timer IDs) and the async event bridge (which can schedule delayed events). The V8 session event loop already handles StreamCallback messages — use that for timer delivery."
+      "notes": "CRITICAL \u2014 setTimeout/setInterval are broken, which breaks all async guest code. The _scheduleTimer bridge function is async (in ASYNC_BRIDGE_FNS). The LocalBridgeState already handles kernelTimerCreate/kernelTimerArm/kernelTimerClear via _loadPolyfill dispatch. The gap is that _scheduleTimer itself returns 0 immediately and never fires. Need to wire timer state between the local bridge (which tracks timer IDs) and the async event bridge (which can schedule delayed events). The V8 session event loop already handles StreamCallback messages \u2014 use that for timer delivery."
     },
     {
       "id": "US-031",
@@ -646,9 +646,9 @@
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar -- --test-threads=1 stdin passes"
       ],
-      "priority": 31,
+      "priority": 12,
       "passes": false,
-      "notes": "Currently handled locally as a stub in javascript.rs LocalBridgeState (line ~1991). Should be forwarded to sidecar instead. _kernelStdinRead is in ASYNC_BRIDGE_FNS. The sidecar already handles WriteProcessStdin — this is the read counterpart."
+      "notes": "Currently handled locally as a stub in javascript.rs LocalBridgeState (line ~1991). Should be forwarded to sidecar instead. _kernelStdinRead is in ASYNC_BRIDGE_FNS. The sidecar already handles WriteProcessStdin \u2014 this is the read counterpart."
     },
     {
       "id": "US-032",
@@ -657,7 +657,7 @@
       "acceptanceCriteria": [
         "_cryptoRandomFill in LocalBridgeState uses a CSPRNG (getrandom or rand crate) instead of timestamp-based XOR",
         "_cryptoRandomUUID generates proper RFC 4122 v4 UUIDs",
-        "crypto.hashDigest sidecar handler added — supports sha256, sha512, md5, sha1 at minimum",
+        "crypto.hashDigest sidecar handler added \u2014 supports sha256, sha512, md5, sha1 at minimum",
         "crypto.hmacDigest sidecar handler added",
         "crypto.pbkdf2 sidecar handler added",
         "crypto.scrypt sidecar handler added",
@@ -666,9 +666,9 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 crypto passes",
         "cargo test -p agent-os-execution -- --test-threads=1 crypto passes"
       ],
-      "priority": 32,
+      "priority": 13,
       "passes": false,
-      "notes": "CRITICAL for agents — API auth uses HMAC/hashing. randomFill (javascript.rs:1964) and randomUUID (javascript.rs:1976) are LOCAL stubs in LocalBridgeState — fix in-place with proper crypto. The other 4 methods fall through to sidecar as crypto.hashDigest etc. via map_bridge_method but the sidecar has NO crypto.* match arms. Add a new service_javascript_crypto_sync_rpc handler in execution.rs. Use ring or openssl crate for implementations. Reference: .agent/recovery/secure-exec/nodejs/src/bridge-handlers.ts (6,405 lines)."
+      "notes": "CRITICAL for agents \u2014 API auth uses HMAC/hashing. randomFill (javascript.rs:1964) and randomUUID (javascript.rs:1976) are LOCAL stubs in LocalBridgeState \u2014 fix in-place with proper crypto. The other 4 methods fall through to sidecar as crypto.hashDigest etc. via map_bridge_method but the sidecar has NO crypto.* match arms. Add a new service_javascript_crypto_sync_rpc handler in execution.rs. Use ring or openssl crate for implementations. Reference: .agent/recovery/secure-exec/nodejs/src/bridge-handlers.ts (6,405 lines)."
     },
     {
       "id": "US-033",
@@ -679,29 +679,29 @@
         "crypto.sign, crypto.verify, crypto.asymmetricOp handlers added (3 methods)",
         "crypto.createKeyObject, crypto.generateKeyPairSync, crypto.generateKeySync, crypto.generatePrimeSync handlers added (4 methods)",
         "crypto.diffieHellman, crypto.diffieHellmanGroup, crypto.diffieHellmanSessionCreate, crypto.diffieHellmanSessionCall handlers added (4 methods)",
-        "crypto.subtle handler added (WebCrypto API — 1 method)",
+        "crypto.subtle handler added (WebCrypto API \u2014 1 method)",
         "All 17 methods dispatched via service_javascript_crypto_sync_rpc in execution.rs",
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar -- --test-threads=1 crypto passes"
       ],
-      "priority": 33,
+      "priority": 17,
       "passes": false,
-      "notes": "Lower priority than US-032 (basic crypto). Same pattern — add match arms to the crypto handler. 17 methods total. The cipheriv family uses stateful cipher contexts (create → update → final). Key operations need RSA/EC/Ed25519 support. crypto.subtle is the WebCrypto API subset. Reference: .agent/recovery/secure-exec/nodejs/src/bridge-handlers.ts."
+      "notes": "Lower priority than US-032 (basic crypto). Same pattern \u2014 add match arms to the crypto handler. 17 methods total. The cipheriv family uses stateful cipher contexts (create \u2192 update \u2192 final). Key operations need RSA/EC/Ed25519 support. crypto.subtle is the WebCrypto API subset. Reference: .agent/recovery/secure-exec/nodejs/src/bridge-handlers.ts."
     },
     {
       "id": "US-034",
       "title": "Add TCP socket advanced ops to sidecar dispatch",
       "description": "As a developer, I want socket read, setNoDelay, setKeepAlive, waitConnect, and server accept to work so TCP servers/clients behave correctly.",
       "acceptanceCriteria": [
-        "net.socket_read match arm added to service_javascript_net_sync_rpc — reads available data from a connected socket",
-        "net.socket_set_no_delay match arm added — sets TCP_NODELAY on socket",
-        "net.socket_set_keep_alive match arm added — sets SO_KEEPALIVE on socket",
-        "net.socket_wait_connect match arm added — blocks until socket connection completes or timeout",
-        "net.server_accept match arm added — accepts next pending connection from a listening server",
+        "net.socket_read match arm added to service_javascript_net_sync_rpc \u2014 reads available data from a connected socket",
+        "net.socket_set_no_delay match arm added \u2014 sets TCP_NODELAY on socket",
+        "net.socket_set_keep_alive match arm added \u2014 sets SO_KEEPALIVE on socket",
+        "net.socket_wait_connect match arm added \u2014 blocks until socket connection completes or timeout",
+        "net.server_accept match arm added \u2014 accepts next pending connection from a listening server",
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar -- --test-threads=1 net passes"
       ],
-      "priority": 34,
+      "priority": 14,
       "passes": false,
       "notes": "The sidecar already handles net.connect, net.listen, net.poll, net.write, net.shutdown, net.destroy, net.server_poll, net.server_connections, net.server_close in service_javascript_net_sync_rpc (execution.rs:4008-4016). These 5 methods are mapped by map_bridge_method in v8_runtime.rs but missing from the sidecar match arms. Same function, just new match arms."
     },
@@ -710,14 +710,14 @@
       "title": "Add TLS support to sidecar dispatch",
       "description": "As a developer, I want TLS upgrade, client hello inspection, TLS query, and cipher listing to work so guest code can make HTTPS connections.",
       "acceptanceCriteria": [
-        "net.socket_upgrade_tls match arm added — upgrades a TCP socket to TLS using rustls or native-tls",
-        "net.socket_get_tls_client_hello match arm added — returns parsed TLS ClientHello for SNI inspection",
-        "net.socket_tls_query match arm added — returns TLS session info (cipher, protocol, peer cert)",
-        "tls.get_ciphers match arm added — returns list of supported TLS cipher suites",
+        "net.socket_upgrade_tls match arm added \u2014 upgrades a TCP socket to TLS using rustls or native-tls",
+        "net.socket_get_tls_client_hello match arm added \u2014 returns parsed TLS ClientHello for SNI inspection",
+        "net.socket_tls_query match arm added \u2014 returns TLS session info (cipher, protocol, peer cert)",
+        "tls.get_ciphers match arm added \u2014 returns list of supported TLS cipher suites",
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar -- --test-threads=1 tls passes"
       ],
-      "priority": 35,
+      "priority": 15,
       "passes": false,
       "notes": "Depends on US-034 (TCP advanced). These 4 methods are mapped in v8_runtime.rs but have no sidecar handler. TLS upgrade wraps an existing connected socket with a TLS layer. Use rustls or native-tls. The sidecar needs to track TLS state per socket. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/network.ts (11,149 lines)."
     },
@@ -726,13 +726,13 @@
       "title": "Add HTTP/1 server request/respond handlers to sidecar",
       "description": "As a developer, I want guest HTTP servers to handle incoming requests and send responses so agents can serve tools over HTTP.",
       "acceptanceCriteria": [
-        "net.http_request match arm added — dispatches an outbound HTTP request through the sidecar's network adapter",
-        "net.http_respond match arm added — sends an HTTP response on a server connection",
+        "net.http_request match arm added \u2014 dispatches an outbound HTTP request through the sidecar's network adapter",
+        "net.http_respond match arm added \u2014 sends an HTTP response on a server connection",
         "Guest http.createServer() can accept connections and respond",
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar -- --test-threads=1 http passes"
       ],
-      "priority": 36,
+      "priority": 16,
       "passes": false,
       "notes": "3 methods mapped in v8_runtime.rs but no sidecar handler. The sidecar already handles net.listen (for creating TCP listeners) and net.fetch (for outbound requests). These handlers bridge the gap for HTTP-level semantics on top of the TCP primitives. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/network.ts."
     },
@@ -750,9 +750,9 @@
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar -- --test-threads=1 http2 passes"
       ],
-      "priority": 37,
+      "priority": 21,
       "passes": false,
-      "notes": "Lowest priority networking story — most agents use HTTP/1.1. 21 methods total, all mapped in v8_runtime.rs but with no sidecar handler. Use h2 crate for HTTP/2 framing. This is the largest single networking story. Can be deferred if agents don't need HTTP/2. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/network.ts."
+      "notes": "Lowest priority networking story \u2014 most agents use HTTP/1.1. 21 methods total, all mapped in v8_runtime.rs but with no sidecar handler. Use h2 crate for HTTP/2 framing. This is the largest single networking story. Can be deferred if agents don't need HTTP/2. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/network.ts."
     },
     {
       "id": "US-038",
@@ -760,15 +760,15 @@
       "description": "As a developer, I want WebSocket upgrade sockets and UDP metadata operations to work.",
       "acceptanceCriteria": [
         "net.upgrade_socket_write, net.upgrade_socket_end, net.upgrade_socket_destroy match arms added (3 methods)",
-        "dgram.address match arm added — returns bound address/port of a UDP socket",
-        "dgram.setBufferSize match arm added — sets send/recv buffer size",
-        "dgram.getBufferSize match arm added — gets current buffer size",
+        "dgram.address match arm added \u2014 returns bound address/port of a UDP socket",
+        "dgram.setBufferSize match arm added \u2014 sets send/recv buffer size",
+        "dgram.getBufferSize match arm added \u2014 gets current buffer size",
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
       ],
-      "priority": 38,
+      "priority": 19,
       "passes": false,
-      "notes": "6 small handlers. Upgrade sockets are for HTTP upgrade (WebSocket). The sidecar already handles dgram.createSocket/bind/send/poll/close — these 3 extras are missing from the match arms in service_javascript_dgram_sync_rpc. Reference: execution.rs service_javascript_dgram_sync_rpc."
+      "notes": "6 small handlers. Upgrade sockets are for HTTP upgrade (WebSocket). The sidecar already handles dgram.createSocket/bind/send/poll/close \u2014 these 3 extras are missing from the match arms in service_javascript_dgram_sync_rpc. Reference: execution.rs service_javascript_dgram_sync_rpc."
     },
     {
       "id": "US-039",
@@ -781,25 +781,25 @@
         "cargo check -p agent-os-sidecar passes",
         "cargo test -p agent-os-sidecar -- --test-threads=1 pty passes"
       ],
-      "priority": 39,
+      "priority": 18,
       "passes": false,
-      "notes": "1 method. Currently a no-op stub in LocalBridgeState (javascript.rs:1992). The kernel already has PTY management with line discipline — this just needs to toggle it. Mapped to __pty_set_raw_mode in v8_runtime.rs."
+      "notes": "1 method. Currently a no-op stub in LocalBridgeState (javascript.rs:1992). The kernel already has PTY management with line discipline \u2014 this just needs to toggle it. Mapped to __pty_set_raw_mode in v8_runtime.rs."
     },
     {
       "id": "US-040",
       "title": "Triage and fix failing execution tests for V8 path",
       "description": "As a developer, I want the execution test suite green so CI catches regressions. ~40 tests fail because they were written for the old Command::new('node') path.",
       "acceptanceCriteria": [
-        "Every test in cargo test -p agent-os-execution categorized as: (a) delete — tests old loader/node_import_cache mechanics irrelevant to V8, (b) fix — tests real behavior but with wrong assertions for V8 bridge, (c) keep — already passes on V8 path",
+        "Every test in cargo test -p agent-os-execution categorized as: (a) delete \u2014 tests old loader/node_import_cache mechanics irrelevant to V8, (b) fix \u2014 tests real behavior but with wrong assertions for V8 bridge, (c) keep \u2014 already passes on V8 path",
         "Deleted tests documented in a comment block listing what was removed and why",
         "Fixed tests have V8-compatible assertions (bridge call flow instead of loader hook flow)",
         "No tests use or assume Command::new('node') execution path",
         "cargo test -p agent-os-execution -- --test-threads=1 passes with 0 failures",
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
       ],
-      "priority": 40,
+      "priority": 20,
       "passes": false,
-      "notes": "The ~40 failures fall into patterns: (1) ~15 test loader mechanics (node_import_cache.rs template generation, ESM hook injection, runner.mjs materialization) — these are dead code for V8 and should be deleted, (2) ~25 test real behavior (fs, child_process, env hardening) but assert on node process artifacts (exit codes, stderr formats, env vars) that differ under V8 bridge — fix assertions. NEVER restore Command::new('node') to make tests pass."
+      "notes": "The ~40 failures fall into patterns: (1) ~15 test loader mechanics (node_import_cache.rs template generation, ESM hook injection, runner.mjs materialization) \u2014 these are dead code for V8 and should be deleted, (2) ~25 test real behavior (fs, child_process, env hardening) but assert on node process artifacts (exit codes, stderr formats, env vars) that differ under V8 bridge \u2014 fix assertions. NEVER restore Command::new('node') to make tests pass."
     }
   ]
 }

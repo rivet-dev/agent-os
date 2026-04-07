@@ -195,6 +195,11 @@ pub enum RequestPayload {
     DisposeVm(DisposeVmRequest),
     BootstrapRootFilesystem(BootstrapRootFilesystemRequest),
     ConfigureVm(ConfigureVmRequest),
+    CreateLayer(CreateLayerRequest),
+    SealLayer(SealLayerRequest),
+    ImportSnapshot(ImportSnapshotRequest),
+    ExportSnapshot(ExportSnapshotRequest),
+    CreateOverlay(CreateOverlayRequest),
     GuestFilesystemCall(GuestFilesystemCallRequest),
     SnapshotRootFilesystem(SnapshotRootFilesystemRequest),
     Execute(ExecuteRequest),
@@ -220,6 +225,11 @@ pub enum ResponsePayload {
     VmDisposed(VmDisposedResponse),
     RootFilesystemBootstrapped(RootFilesystemBootstrappedResponse),
     VmConfigured(VmConfiguredResponse),
+    LayerCreated(LayerCreatedResponse),
+    LayerSealed(LayerSealedResponse),
+    SnapshotImported(SnapshotImportedResponse),
+    SnapshotExported(SnapshotExportedResponse),
+    OverlayCreated(OverlayCreatedResponse),
     GuestFilesystemResult(GuestFilesystemResultResponse),
     RootFilesystemSnapshot(RootFilesystemSnapshotResponse),
     ProcessStarted(ProcessStartedResponse),
@@ -425,6 +435,7 @@ pub enum RootFilesystemMode {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RootFilesystemLowerDescriptor {
     Snapshot { entries: Vec<RootFilesystemEntry> },
+    BundledBaseFilesystem,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -521,10 +532,40 @@ pub struct ConfigureVmRequest {
     pub software: Vec<SoftwareDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionsPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_access_cwd: Option<String>,
     pub instructions: Vec<String>,
     pub projected_modules: Vec<ProjectedModuleDescriptor>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub command_permissions: BTreeMap<String, WasmPermissionTier>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CreateLayerRequest {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealLayerRequest {
+    pub layer_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportSnapshotRequest {
+    pub entries: Vec<RootFilesystemEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportSnapshotRequest {
+    pub layer_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateOverlayRequest {
+    #[serde(default)]
+    pub mode: RootFilesystemMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper_layer_id: Option<String>,
+    #[serde(default)]
+    pub lower_layer_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -764,6 +805,32 @@ pub struct GuestFilesystemResultResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootFilesystemSnapshotResponse {
     pub entries: Vec<RootFilesystemEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayerCreatedResponse {
+    pub layer_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayerSealedResponse {
+    pub layer_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotImportedResponse {
+    pub layer_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotExportedResponse {
+    pub layer_id: String,
+    pub entries: Vec<RootFilesystemEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlayCreatedResponse {
+    pub layer_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1426,6 +1493,11 @@ enum ExpectedResponseKind {
     VmDisposed,
     RootFilesystemBootstrapped,
     VmConfigured,
+    LayerCreated,
+    LayerSealed,
+    SnapshotImported,
+    SnapshotExported,
+    OverlayCreated,
     GuestFilesystemResult,
     RootFilesystemSnapshot,
     ProcessStarted,
@@ -1457,6 +1529,11 @@ impl ExpectedResponseKind {
             Self::VmDisposed => "vm_disposed",
             Self::RootFilesystemBootstrapped => "root_filesystem_bootstrapped",
             Self::VmConfigured => "vm_configured",
+            Self::LayerCreated => "layer_created",
+            Self::LayerSealed => "layer_sealed",
+            Self::SnapshotImported => "snapshot_imported",
+            Self::SnapshotExported => "snapshot_exported",
+            Self::OverlayCreated => "overlay_created",
             Self::GuestFilesystemResult => "guest_filesystem_result",
             Self::RootFilesystemSnapshot => "root_filesystem_snapshot",
             Self::ProcessStarted => "process_started",
@@ -1505,6 +1582,11 @@ impl RequestPayload {
             Self::DisposeVm(_)
             | Self::BootstrapRootFilesystem(_)
             | Self::ConfigureVm(_)
+            | Self::CreateLayer(_)
+            | Self::SealLayer(_)
+            | Self::ImportSnapshot(_)
+            | Self::ExportSnapshot(_)
+            | Self::CreateOverlay(_)
             | Self::GuestFilesystemCall(_)
             | Self::SnapshotRootFilesystem(_)
             | Self::Execute(_)
@@ -1528,6 +1610,11 @@ impl RequestPayload {
             Self::DisposeVm(_) => ExpectedResponseKind::VmDisposed,
             Self::BootstrapRootFilesystem(_) => ExpectedResponseKind::RootFilesystemBootstrapped,
             Self::ConfigureVm(_) => ExpectedResponseKind::VmConfigured,
+            Self::CreateLayer(_) => ExpectedResponseKind::LayerCreated,
+            Self::SealLayer(_) => ExpectedResponseKind::LayerSealed,
+            Self::ImportSnapshot(_) => ExpectedResponseKind::SnapshotImported,
+            Self::ExportSnapshot(_) => ExpectedResponseKind::SnapshotExported,
+            Self::CreateOverlay(_) => ExpectedResponseKind::OverlayCreated,
             Self::GuestFilesystemCall(_) => ExpectedResponseKind::GuestFilesystemResult,
             Self::SnapshotRootFilesystem(_) => ExpectedResponseKind::RootFilesystemSnapshot,
             Self::Execute(_) => ExpectedResponseKind::ProcessStarted,
@@ -1570,6 +1657,11 @@ impl ResponsePayload {
             Self::VmDisposed(_)
             | Self::RootFilesystemBootstrapped(_)
             | Self::VmConfigured(_)
+            | Self::LayerCreated(_)
+            | Self::LayerSealed(_)
+            | Self::SnapshotImported(_)
+            | Self::SnapshotExported(_)
+            | Self::OverlayCreated(_)
             | Self::GuestFilesystemResult(_)
             | Self::RootFilesystemSnapshot(_)
             | Self::ProcessStarted(_)
@@ -1593,6 +1685,11 @@ impl ResponsePayload {
             Self::VmDisposed(_) => "vm_disposed",
             Self::RootFilesystemBootstrapped(_) => "root_filesystem_bootstrapped",
             Self::VmConfigured(_) => "vm_configured",
+            Self::LayerCreated(_) => "layer_created",
+            Self::LayerSealed(_) => "layer_sealed",
+            Self::SnapshotImported(_) => "snapshot_imported",
+            Self::SnapshotExported(_) => "snapshot_exported",
+            Self::OverlayCreated(_) => "overlay_created",
             Self::GuestFilesystemResult(_) => "guest_filesystem_result",
             Self::RootFilesystemSnapshot(_) => "root_filesystem_snapshot",
             Self::ProcessStarted(_) => "process_started",

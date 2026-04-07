@@ -50,14 +50,18 @@ export interface RootFilesystemEntry {
 }
 
 export interface RootFilesystemLowerDescriptor {
-	kind: "snapshot";
-	entries: RootFilesystemEntry[];
+	kind: "snapshot" | "bundled_base_filesystem";
+	entries?: RootFilesystemEntry[];
 }
 
-type WireRootFilesystemLowerDescriptor = {
-	kind: "snapshot";
-	entries: WireRootFilesystemEntry[];
-};
+type WireRootFilesystemLowerDescriptor =
+	| {
+			kind: "snapshot";
+			entries: WireRootFilesystemEntry[];
+	  }
+	| {
+			kind: "bundled_base_filesystem";
+	  };
 
 type WireRootFilesystemEntry = {
 	path: string;
@@ -155,6 +159,7 @@ type RequestPayload =
 			mounts: WireMountDescriptor[];
 			software: WireSoftwareDescriptor[];
 			permissions?: WirePermissionsPolicy;
+			module_access_cwd?: string;
 			instructions: string[];
 			projected_modules: WireProjectedModuleDescriptor[];
 			command_permissions: Record<string, WasmPermissionTier>;
@@ -166,6 +171,27 @@ type RequestPayload =
 	| {
 			type: "bootstrap_root_filesystem";
 			entries: RootFilesystemEntry[];
+	  }
+	| {
+			type: "create_layer";
+	  }
+	| {
+			type: "seal_layer";
+			layer_id: string;
+	  }
+	| {
+			type: "import_snapshot";
+			entries: RootFilesystemEntry[];
+	  }
+	| {
+			type: "export_snapshot";
+			layer_id: string;
+	  }
+	| {
+			type: "create_overlay";
+			mode?: "ephemeral" | "read_only";
+			upper_layer_id?: string;
+			lower_layer_ids: string[];
 	  }
 	| {
 			type: "snapshot_root_filesystem";
@@ -322,6 +348,27 @@ interface ResponseFrame {
 				type: "vm_configured";
 				applied_mounts: number;
 				applied_software: number;
+		  }
+		| {
+				type: "layer_created";
+				layer_id: string;
+		  }
+		| {
+				type: "layer_sealed";
+				layer_id: string;
+		  }
+		| {
+				type: "snapshot_imported";
+				layer_id: string;
+		  }
+		| {
+				type: "snapshot_exported";
+				layer_id: string;
+				entries: RootFilesystemEntry[];
+		  }
+		| {
+				type: "overlay_created";
+				layer_id: string;
 		  }
 		| {
 				type: "root_filesystem_bootstrapped";
@@ -679,6 +726,7 @@ export class NativeSidecarProcessClient {
 			mounts?: SidecarMountDescriptor[];
 			software?: SidecarSoftwareDescriptor[];
 			permissions?: SidecarPermissionsPolicy;
+			moduleAccessCwd?: string;
 			instructions?: string[];
 			projectedModules?: SidecarProjectedModuleDescriptor[];
 			commandPermissions?: Record<string, WasmPermissionTier>;
@@ -696,6 +744,7 @@ export class NativeSidecarProcessClient {
 				mounts: (options.mounts ?? []).map(toWireMountDescriptor),
 				software: (options.software ?? []).map(toWireSoftwareDescriptor),
 				permissions: toWirePermissionsPolicy(options.permissions),
+				module_access_cwd: options.moduleAccessCwd,
 				instructions: options.instructions ?? [],
 				projected_modules: (options.projectedModules ?? []).map(
 					toWireProjectedModuleDescriptor,
@@ -708,6 +757,135 @@ export class NativeSidecarProcessClient {
 				`unexpected configure_vm response: ${response.payload.type}`,
 			);
 		}
+	}
+
+	async createLayer(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+	): Promise<string> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload: {
+				type: "create_layer",
+			},
+		});
+		if (response.payload.type !== "layer_created") {
+			throw new Error(
+				`unexpected create_layer response: ${response.payload.type}`,
+			);
+		}
+		return response.payload.layer_id;
+	}
+
+	async sealLayer(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+		layerId: string,
+	): Promise<string> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload: {
+				type: "seal_layer",
+				layer_id: layerId,
+			},
+		});
+		if (response.payload.type !== "layer_sealed") {
+			throw new Error(
+				`unexpected seal_layer response: ${response.payload.type}`,
+			);
+		}
+		return response.payload.layer_id;
+	}
+
+	async importSnapshot(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+		entries: RootFilesystemEntry[],
+	): Promise<string> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload: {
+				type: "import_snapshot",
+				entries,
+			},
+		});
+		if (response.payload.type !== "snapshot_imported") {
+			throw new Error(
+				`unexpected import_snapshot response: ${response.payload.type}`,
+			);
+		}
+		return response.payload.layer_id;
+	}
+
+	async exportSnapshot(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+		layerId: string,
+	): Promise<RootFilesystemEntry[]> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload: {
+				type: "export_snapshot",
+				layer_id: layerId,
+			},
+		});
+		if (response.payload.type !== "snapshot_exported") {
+			throw new Error(
+				`unexpected export_snapshot response: ${response.payload.type}`,
+			);
+		}
+		return response.payload.entries;
+	}
+
+	async createOverlay(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+		options: {
+			mode?: "ephemeral" | "read_only";
+			upperLayerId?: string;
+			lowerLayerIds: string[];
+		},
+	): Promise<string> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload: {
+				type: "create_overlay",
+				mode: options.mode,
+				upper_layer_id: options.upperLayerId,
+				lower_layer_ids: options.lowerLayerIds,
+			},
+		});
+		if (response.payload.type !== "overlay_created") {
+			throw new Error(
+				`unexpected create_overlay response: ${response.payload.type}`,
+			);
+		}
+		return response.payload.layer_id;
 	}
 
 	async bootstrapRootFilesystem(
@@ -1632,20 +1810,7 @@ function toWireRootFilesystemDescriptor(
 ): {
 	mode?: "ephemeral" | "read_only";
 	disable_default_base_layer?: boolean;
-	lowers?: Array<{
-		kind: "snapshot";
-		entries: Array<{
-			path: string;
-			kind: "file" | "directory" | "symlink";
-			mode?: number;
-			uid?: number;
-			gid?: number;
-			content?: string;
-			encoding?: RootFilesystemEntryEncoding;
-			target?: string;
-			executable?: boolean;
-		}>;
-	}>;
+	lowers?: WireRootFilesystemLowerDescriptor[];
 	bootstrap_entries?: Array<{
 		path: string;
 		kind: "file" | "directory" | "symlink";
@@ -1669,10 +1834,14 @@ function toWireRootFilesystemDescriptor(
 			: {}),
 		...(descriptor.lowers
 			? {
-					lowers: descriptor.lowers.map((lower) => ({
-						kind: lower.kind,
-						entries: lower.entries.map(toWireRootFilesystemEntry),
-					})),
+					lowers: descriptor.lowers.map((lower) =>
+						lower.kind === "bundled_base_filesystem"
+							? { kind: "bundled_base_filesystem" }
+							: {
+									kind: "snapshot",
+									entries: (lower.entries ?? []).map(toWireRootFilesystemEntry),
+								},
+					),
 				}
 			: {}),
 		...(descriptor.bootstrapEntries
