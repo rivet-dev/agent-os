@@ -10,6 +10,8 @@ The kernel orchestrates three execution environments:
 
 **ALL guest code MUST execute inside the kernel with ZERO host escapes.** No runtime may spawn unsandboxed host processes, touch real host filesystems, open real network sockets, or call real Node.js builtins. Every syscall goes through the kernel. This is the single most important architectural invariant. Any path where guest code reaches the real host is a critical security violation.
 
+**NEVER use `Command::new("node")` for guest code execution.** Guest JavaScript runs inside V8 isolates (`crates/v8-runtime/`), not real Node.js processes. Do NOT add execution mode flags, host fallback paths, or "legacy node mode" — even temporarily, even behind a feature flag. If tests fail because they were written for the old host-process model, fix or delete the tests.
+
 ## Virtualization Invariants
 
 These are hard rules with no exceptions:
@@ -50,6 +52,7 @@ These are hard rules with no exceptions:
 - **All guest code must execute within the kernel's isolation boundary (WASM or in-kernel isolate).** No runtime may escape to a host-native process. If a language runtime requires a JavaScript host (e.g., Emscripten-compiled WASM like Pyodide), the JS host must itself run inside the kernel -- not as a host-side Node.js subprocess. Spawning an unsandboxed host process to run guest code is never acceptable, even as a convenience shortcut.
 - **Guest code must never touch real host APIs.** Every `require('fs')`, `require('net')`, `require('child_process')`, etc. must return a kernel-backed polyfill. Path-translating wrappers over real `node:fs` or real `node:child_process` are NOT acceptable. If a polyfill does not exist yet for a builtin, that builtin must be denied at the loader level until one is built.
 - **Native sidecar permission policy has to be available during `create_vm`, not just `configure_vm`.** Guest env filtering and kernel bootstrap driver registration happen while the VM is being constructed, so `AgentOsOptions.permissions` must be serialized into the `CreateVmRequest`.
+- **`ConfigureVm.permissions` is replace-on-write.** Omit the field to preserve the VM policy set during `create_vm`; send an explicit declarative policy object only when the caller intends to replace the current static permission policy.
 - **WASM permission tiers must gate host Node WASI access as well as guest-side preopens.** In `crates/execution/src/wasm.rs`, keep `Isolated` executions off `--allow-wasi` entirely, and let `ReadOnly` / `ReadWrite` / `Full` differentiate the read/write scope through the guest WASI layer rather than a blanket host flag.
 - **`sandbox_agent` mounts on `sandbox-agent@0.4.2` only get basic file endpoints (`entries`, `file`, `mkdir`, `move`, `stat`) from the HTTP fs API.** When the sidecar needs symlink/readlink/realpath/link/chmod/chown/utimes semantics, it must use the remote process API as a fallback and return `ENOSYS` when that helper path is unavailable.
 - **Native sidecar security/audit telemetry should use structured bridge events, not ad hoc strings.** In `crates/sidecar/src/service.rs`, emit security-relevant records with `bridge.emit_structured_event(...)` and include a `timestamp` field plus stable keys such as `policy`, `path`, `source_pid`, `target_pid`, or `reason` so tests and downstream aggregation can assert on them directly.

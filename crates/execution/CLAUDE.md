@@ -2,7 +2,11 @@
 
 Runtime execution for Node.js (JavaScript/TypeScript) and Python (Pyodide) guest code.
 
-**⚠️ CRITICAL INVARIANT: ALL guest code MUST execute inside the kernel with ZERO host escapes.** Guest code must never spawn real host processes, touch real host filesystems, open real network sockets, or call real Node.js builtins. Every operation goes through kernel-backed polyfills. Any path where guest code reaches the real host is a critical security violation.
+**⚠️ ABSOLUTE RULE — NO EXCEPTIONS, NO FALLBACKS, NO "TEMPORARY" WORKAROUNDS:**
+
+**ALL guest code MUST execute inside V8 isolates with kernel-backed polyfills. NEVER spawn real host Node.js processes for guest code. NEVER use `Command::new("node")` for guest execution. NEVER add a "legacy node mode", "host execution fallback", or "execution mode flag" that routes guest code through real host processes. There is exactly ONE execution path for guest JavaScript: V8 isolates managed by `crates/v8-runtime/` with polyfills that route through the kernel. Any code path where guest code reaches the real host — even as a "temporary" measure, even behind a flag, even for "compatibility" — is a critical security violation and MUST NOT be merged.**
+
+If tests fail because they were written for the old `Command::new("node")` path, **fix or delete the tests** — do NOT restore host execution to make them pass.
 
 ## Node.js Isolation Model
 
