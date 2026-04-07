@@ -338,7 +338,7 @@
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
       "priority": 27,
-      "passes": false,
+      "passes": true,
       "notes": "Step 3 (TypeScript side). Depends on US-015. native-kernel-proxy.ts is at packages/core/src/sidecar/native-kernel-proxy.ts (1,831 lines). This story removes ~600 lines from it."
     },
     {
@@ -767,7 +767,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
       ],
       "priority": 19,
-      "passes": false,
+      "passes": true,
       "notes": "6 small handlers. Upgrade sockets are for HTTP upgrade (WebSocket). The sidecar already handles dgram.createSocket/bind/send/poll/close \u2014 these 3 extras are missing from the match arms in service_javascript_dgram_sync_rpc. Reference: execution.rs service_javascript_dgram_sync_rpc."
     },
     {
