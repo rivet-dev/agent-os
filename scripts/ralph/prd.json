@@ -143,6 +143,26 @@
       "notes": "Step 0b. See spec 'Step 0b: Async migration'. The async fn conversion across modules is mechanical (add async keyword + .await). The creative work is rewriting stdio.rs's run() function from sync poll to tokio::select!. Concurrency model stays single-task. IMPORTANT: Do NOT introduce Arc<Mutex> — the select! loop runs one branch at a time."
     },
     {
+      "id": "US-008a",
+      "title": "Restore V8 isolate execution engine with kernel-backed polyfills",
+      "description": "As a developer, I want the Node.js execution engine to run guest JS/TS inside V8 isolates with kernel-backed polyfills instead of spawning real host node processes. This is the single most critical architectural fix — without it, every guest process escapes the kernel to the real host.",
+      "acceptanceCriteria": [
+        "Guest JS/TS code executes inside V8 isolates managed by the Rust sidecar, NOT in real host node child processes",
+        "All Node.js builtins (fs, net, child_process, dns, http, os, etc.) are kernel-backed polyfills that route through the kernel VFS, socket table, and process table",
+        "Module loading is fully intercepted — guest require()/import never falls through to real host modules",
+        "The sync RPC bridge (SharedArrayBuffer + Atomics.wait or equivalent) connects guest polyfills to the kernel",
+        "Guest code cannot observe it is running inside a V8 isolate — process.pid returns kernel PID, fs.readdirSync('/') shows kernel VFS, etc.",
+        "Command::new('node') is no longer used for guest code execution in javascript.rs",
+        "cargo check -p agent-os-execution passes",
+        "cargo test -p agent-os-execution -- --test-threads=1 passes",
+        "cargo check -p agent-os-sidecar passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
+      ],
+      "priority": 8.5,
+      "passes": false,
+      "notes": "CRITICAL FIX. The execution engine was working before commit 5a43882 via @secure-exec/core + @secure-exec/nodejs + @secure-exec/v8. The original approach: a Rust binary (secure-exec-v8) manages V8 isolates, communicated with via IPC. Guest polyfills inside the isolate call host-registered FunctionTemplate functions for kernel operations. The complete working code has been recovered to .agent/recovery/secure-exec/ (source repo: /home/nathan/secure-exec-1/ tagged v0.2.1). Key files to port: nodejs/src/bridge/ (fs.ts, network.ts, child-process.ts, process.ts, polyfills.ts — ~20K lines of polyfills), nodejs/src/execution-driver.ts (V8 session lifecycle), nodejs/src/bridge-handlers.ts (host-side kernel bridge), v8/src/ (Rust V8 runtime manager). The Rust sidecar already has the kernel subsystems (VFS, process table, socket table, pipes, PTYs) — the work is wiring guest builtins to those subsystems via the V8 isolate bridge instead of spawning real node processes."
+    },
+    {
       "id": "US-009",
       "title": "Add bidirectional frame support to wire protocol and TypeScript client",
       "description": "As a developer, I want the wire protocol to support sidecar-initiated requests so the sidecar can call back into TypeScript",
