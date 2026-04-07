@@ -647,7 +647,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 stdin passes"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "Currently handled locally as a stub in javascript.rs LocalBridgeState (line ~1991). Should be forwarded to sidecar instead. _kernelStdinRead is in ASYNC_BRIDGE_FNS. The sidecar already handles WriteProcessStdin \u2014 this is the read counterpart."
     },
     {

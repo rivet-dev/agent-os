@@ -1045,6 +1045,19 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         fd: u32,
         length: usize,
     ) -> KernelResult<Vec<u8>> {
+        Ok(self
+            .fd_read_with_timeout_result(requester_driver, pid, fd, length, None)?
+            .unwrap_or_default())
+    }
+
+    pub fn fd_read_with_timeout_result(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        length: usize,
+        timeout: Option<Duration>,
+    ) -> KernelResult<Option<Vec<u8>>> {
         self.assert_driver_owns(requester_driver, pid)?;
         let entry = {
             let tables = lock_or_recover(&self.fd_tables);
@@ -1056,33 +1069,27 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         };
 
         if self.pipes.is_pipe(entry.description.id()) {
-            return Ok(self
-                .pipes
-                .read_with_timeout(
-                    entry.description.id(),
-                    length,
-                    if entry.status_flags & O_NONBLOCK != 0 {
-                        Some(Duration::ZERO)
-                    } else {
-                        self.blocking_read_timeout()
-                    },
-                )?
-                .unwrap_or_default());
+            return Ok(self.pipes.read_with_timeout(
+                entry.description.id(),
+                length,
+                if entry.status_flags & O_NONBLOCK != 0 {
+                    Some(Duration::ZERO)
+                } else {
+                    timeout.or_else(|| self.blocking_read_timeout())
+                },
+            )?);
         }
 
         if self.ptys.is_pty(entry.description.id()) {
-            return Ok(self
-                .ptys
-                .read_with_timeout(
-                    entry.description.id(),
-                    length,
-                    if entry.status_flags & O_NONBLOCK != 0 {
-                        Some(Duration::ZERO)
-                    } else {
-                        self.blocking_read_timeout()
-                    },
-                )?
-                .unwrap_or_default());
+            return Ok(self.ptys.read_with_timeout(
+                entry.description.id(),
+                length,
+                if entry.status_flags & O_NONBLOCK != 0 {
+                    Some(Duration::ZERO)
+                } else {
+                    timeout.or_else(|| self.blocking_read_timeout())
+                },
+            )?);
         }
 
         if is_proc_path(entry.description.path()) {
@@ -1100,7 +1107,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                     .cursor()
                     .saturating_add(chunk.len() as u64),
             );
-            return Ok(chunk);
+            return Ok(Some(chunk));
         }
 
         let cursor = entry.description.cursor();
@@ -1113,7 +1120,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         entry
             .description
             .set_cursor(cursor.saturating_add(bytes.len() as u64));
-        Ok(bytes)
+        Ok(Some(bytes))
     }
 
     pub fn fd_write(

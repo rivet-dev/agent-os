@@ -2026,7 +2026,6 @@ impl LocalBridgeState {
                 self.schedule_bridge_timer_response(call_id, timer_delay_ms(args.first()));
                 Some(LocalBridgeCallResult::Deferred)
             }
-            "_kernelStdinRead" => Some(LocalBridgeCallResult::Immediate(Value::Null)),
             "_ptySetRawMode" => Some(LocalBridgeCallResult::Immediate(Value::Null)),
             _ => None,
         }

@@ -28,6 +28,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Native sidecar mount plugins live under `crates/sidecar/src/plugins/`, and `plugins/mod.rs` owns shared registration for the reusable native plugins while `bridge.rs` only adds sidecar-specific `memory` and `js_bridge` entries
 - The sidecar now owns the bundled base filesystem artifact: TypeScript should serialize the default lower as `bundled_base_filesystem` and let Rust load `base-filesystem.json` locally instead of inlining the snapshot entries
 - `ConfigureVmRequest` callers need to set `module_access_cwd` (or `None` in Rust tests); the sidecar turns that host cwd into the read-only `/root/node_modules` `module_access` mount automatically
+- Live guest stdin has two paths: `AGENT_OS_KEEP_STDIN_OPEN` still uses `"stdin"` / `"stdin_end"` stream events, but TTY-style `_kernelStdinRead` must read the process’s kernel fd `0` pipe so timeout and EOF can be distinguished
 
 ## 2026-04-06 - US-001
 - Extracted shared state types from service.rs into new state.rs module (~450 lines)
@@ -197,4 +198,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - One-shot timer state needs host-side cleanup when the delayed event is scheduled, otherwise `setTimeout` leaks timer handles even if the guest deletes its local entry
   - For V8 runtime behavior, prefer control-flow assertions in `crates/execution/tests/javascript_v8.rs` over stdout-only assertions; the exit code is a more stable signal for async bridge behavior
   - `cargo fmt --all` can touch unrelated Rust files in this workspace, so check `git diff --stat` before committing and drop formatting-only churn outside the story scope
+---
+## 2026-04-07 07:12:25 PDT - US-031
+- Forwarded V8 `_kernelStdinRead` bridge calls to the sidecar, added sidecar `__kernel_stdin_read` handling against kernel fd `0`, and wired sidecar-managed process stdin writes/closes through both the runtime stream path and a dedicated kernel pipe
+- Added a focused sidecar service test that covers timeout -> `null`, buffered stdin payload reads, and EOF reporting for kernel-backed stdin reads
+- Files changed: `crates/execution/CLAUDE.md`, `crates/execution/assets/v8-bridge.js`, `crates/execution/src/javascript.rs`, `crates/kernel/src/kernel.rs`, `crates/sidecar/src/{execution,state}.rs`, `crates/sidecar/tests/service.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Use a per-process kernel pipe duped onto fd `0` when guest code needs blocking stdin reads; plain `fd_read()` collapses EOF to empty bytes, so timeout-sensitive paths should use the timeout-preserving kernel read helper
+  - Keep runtime stdin stream events and kernel-backed stdin pipes in sync on write/close; stream mode and `_kernelStdinRead` are parallel delivery paths, not replacements for each other
+  - For targeted sidecar verification here, `cargo test -p agent-os-sidecar -- --test-threads=1 stdin` exercises both the new JS kernel-stdin service test and the existing Python stdin regressions
 ---

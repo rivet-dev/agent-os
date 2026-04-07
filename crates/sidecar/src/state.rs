@@ -309,6 +309,7 @@ impl Default for VmListenPolicy {
 pub(crate) struct ActiveProcess {
     pub(crate) kernel_pid: u32,
     pub(crate) kernel_handle: KernelProcessHandle,
+    pub(crate) kernel_stdin_writer_fd: Option<u32>,
     pub(crate) runtime: GuestRuntimeKind,
     pub(crate) execution: ActiveExecution,
     pub(crate) host_cwd: PathBuf,

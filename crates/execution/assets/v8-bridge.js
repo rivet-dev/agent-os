@@ -17496,7 +17496,7 @@ ${headerLines}\r
           if (typeof _kernelStdinRead === "undefined") {
             break;
           }
-          const next = await _kernelStdinRead.apply(void 0, [], {
+          const next = await _kernelStdinRead.apply(void 0, [65536, 100], {
             result: { promise: true }
           });
           if (next?.done) {

@@ -79,6 +79,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 use url::Url;
 
+const DEFAULT_KERNEL_STDIN_READ_MAX_BYTES: usize = 64 * 1024;
+const DEFAULT_KERNEL_STDIN_READ_TIMEOUT_MS: u64 = 100;
+
 impl ActiveProcess {
     pub(crate) fn new(
         kernel_pid: u32,
@@ -89,6 +92,7 @@ impl ActiveProcess {
         Self {
             kernel_pid,
             kernel_handle,
+            kernel_stdin_writer_fd: None,
             runtime,
             execution,
             host_cwd: PathBuf::from("/"),
@@ -109,6 +113,11 @@ impl ActiveProcess {
 
     pub(crate) fn with_host_cwd(mut self, host_cwd: PathBuf) -> Self {
         self.host_cwd = host_cwd;
+        self
+    }
+
+    pub(crate) fn with_kernel_stdin_writer_fd(mut self, fd: u32) -> Self {
+        self.kernel_stdin_writer_fd = Some(fd);
         self
     }
 
@@ -1006,6 +1015,8 @@ where
             }
         };
         let child_pid = execution.child_pid();
+        let kernel_stdin_writer_fd =
+            install_kernel_stdin_pipe(&mut vm.kernel, kernel_handle.pid())?;
         vm.active_processes.insert(
             payload.process_id.clone(),
             ActiveProcess::new(
@@ -1014,6 +1025,7 @@ where
                 payload.runtime,
                 execution,
             )
+            .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
             .with_host_cwd(cwd.clone()),
         );
         self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
@@ -1049,6 +1061,7 @@ where
                 ))
             })?;
         process.execution.write_stdin(payload.chunk.as_bytes())?;
+        write_kernel_process_stdin(&mut vm.kernel, process, payload.chunk.as_bytes())?;
 
         Ok(DispatchResult {
             response: self.respond(
@@ -1081,6 +1094,7 @@ where
                 ))
             })?;
         process.execution.close_stdin()?;
+        close_kernel_process_stdin(&mut vm.kernel, process)?;
 
         Ok(DispatchResult {
             response: self.respond(
@@ -1469,22 +1483,22 @@ where
             })
             .unwrap_or_else(|| (String::from("/"), None));
         let host_cwd = host_cwd_override
-        .or_else(|| {
-            host_runtime_path_for_guest_path_with_env(
-                vm,
-                &runtime_env,
-                &guest_cwd,
-                parent_host_cwd,
-            )
-        })
-        .unwrap_or_else(|| {
-            let candidate = PathBuf::from(&guest_cwd);
-            if candidate.is_absolute() {
-                candidate
-            } else {
-                vm.cwd.clone()
-            }
-        });
+            .or_else(|| {
+                host_runtime_path_for_guest_path_with_env(
+                    vm,
+                    &runtime_env,
+                    &guest_cwd,
+                    parent_host_cwd,
+                )
+            })
+            .unwrap_or_else(|| {
+                let candidate = PathBuf::from(&guest_cwd);
+                if candidate.is_absolute() {
+                    candidate
+                } else {
+                    vm.cwd.clone()
+                }
+            });
         let mut env = vm.guest_env.clone();
         env.extend(request.options.env.clone());
 
@@ -1716,6 +1730,7 @@ where
             }
             GuestRuntimeKind::Python => unreachable!("python child_process execution is rejected"),
         };
+        let kernel_stdin_writer_fd = install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?;
 
         vm.active_processes
             .get_mut(process_id)
@@ -1724,6 +1739,7 @@ where
             .insert(
                 child_process_id.clone(),
                 ActiveProcess::new(kernel_pid, kernel_handle, resolved.runtime, execution)
+                    .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
                     .with_host_cwd(resolved.host_cwd.clone()),
             );
 
@@ -1981,7 +1997,8 @@ where
             .ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown child process {child_process_id}"))
             })?;
-        child.execution.write_stdin(chunk)
+        child.execution.write_stdin(chunk)?;
+        write_kernel_process_stdin(&mut vm.kernel, child, chunk)
     }
 
     pub(crate) fn close_javascript_child_process_stdin(
@@ -2000,7 +2017,8 @@ where
             .ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown child process {child_process_id}"))
             })?;
-        child.execution.close_stdin()
+        child.execution.close_stdin()?;
+        close_kernel_process_stdin(&mut vm.kernel, child)
     }
 
     pub(crate) fn kill_javascript_child_process(
@@ -2967,8 +2985,7 @@ fn command_requires_shell(command: &str) -> bool {
     command.chars().any(|ch| {
         matches!(
             ch,
-            '|'
-                | '&'
+            '|' | '&'
                 | ';'
                 | '<'
                 | '>'
@@ -4001,6 +4018,7 @@ where
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
     match request.method.as_str() {
+        "__kernel_stdin_read" => service_javascript_kernel_stdin_sync_rpc(kernel, process, request),
         "dns.lookup" | "dns.resolve" | "dns.resolve4" | "dns.resolve6" => {
             service_javascript_dns_sync_rpc(bridge, vm_id, dns, request)
         }
@@ -4045,6 +4063,80 @@ where
         }
         _ => service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request),
     }
+}
+
+fn service_javascript_kernel_stdin_sync_rpc(
+    kernel: &mut SidecarKernel,
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let max_bytes =
+        javascript_sync_rpc_arg_u64_optional(&request.args, 0, "__kernel_stdin_read max bytes")?
+            .map(|value| value.clamp(1, DEFAULT_KERNEL_STDIN_READ_MAX_BYTES as u64) as usize)
+            .unwrap_or(DEFAULT_KERNEL_STDIN_READ_MAX_BYTES);
+    let timeout_ms =
+        javascript_sync_rpc_arg_u64_optional(&request.args, 1, "__kernel_stdin_read timeout ms")?
+            .unwrap_or(DEFAULT_KERNEL_STDIN_READ_TIMEOUT_MS);
+
+    match kernel
+        .fd_read_with_timeout_result(
+            EXECUTION_DRIVER_NAME,
+            process.kernel_pid,
+            0,
+            max_bytes,
+            Some(Duration::from_millis(timeout_ms)),
+        )
+        .map_err(kernel_error)
+    {
+        Ok(Some(chunk)) if !chunk.is_empty() => Ok(json!({
+            "dataBase64": base64::engine::general_purpose::STANDARD.encode(chunk),
+        })),
+        Ok(Some(_)) => Ok(Value::Null),
+        Ok(None) => Ok(json!({
+            "done": true,
+        })),
+        Err(SidecarError::Kernel(error)) if error.starts_with("EAGAIN:") => Ok(Value::Null),
+        Err(error) => Err(error),
+    }
+}
+
+fn install_kernel_stdin_pipe(kernel: &mut SidecarKernel, pid: u32) -> Result<u32, SidecarError> {
+    let (read_fd, write_fd) = kernel
+        .open_pipe(EXECUTION_DRIVER_NAME, pid)
+        .map_err(kernel_error)?;
+    kernel
+        .fd_dup2(EXECUTION_DRIVER_NAME, pid, read_fd, 0)
+        .map_err(kernel_error)?;
+    kernel
+        .fd_close(EXECUTION_DRIVER_NAME, pid, read_fd)
+        .map_err(kernel_error)?;
+    Ok(write_fd)
+}
+
+fn write_kernel_process_stdin(
+    kernel: &mut SidecarKernel,
+    process: &mut ActiveProcess,
+    chunk: &[u8],
+) -> Result<(), SidecarError> {
+    let Some(writer_fd) = process.kernel_stdin_writer_fd else {
+        return Ok(());
+    };
+    kernel
+        .fd_write(EXECUTION_DRIVER_NAME, process.kernel_pid, writer_fd, chunk)
+        .map(|_| ())
+        .map_err(kernel_error)
+}
+
+fn close_kernel_process_stdin(
+    kernel: &mut SidecarKernel,
+    process: &mut ActiveProcess,
+) -> Result<(), SidecarError> {
+    let Some(writer_fd) = process.kernel_stdin_writer_fd.take() else {
+        return Ok(());
+    };
+    kernel
+        .fd_close(EXECUTION_DRIVER_NAME, process.kernel_pid, writer_fd)
+        .map_err(kernel_error)
 }
 
 fn service_javascript_fetch_sync_rpc<B>(
@@ -4131,9 +4223,7 @@ fn build_data_url_fetch_response(resource: &str) -> Result<Option<Value>, Sideca
     serde_json::to_string(&response)
         .map(Value::String)
         .map(Some)
-        .map_err(|error| {
-            SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}"))
-        })
+        .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
 }
 
 fn service_javascript_dns_sync_rpc<B>(

@@ -31,13 +31,13 @@ mod service {
         use crate::plugins::sandbox_agent::test_support::MockSandboxAgentServer;
         use crate::protocol::VmCreatedResponse;
         use crate::protocol::{
-            AuthenticateRequest, BootstrapRootFilesystemRequest, ConfigureVmRequest,
-            CreateVmRequest, DisposeReason, FsPermissionRule, FsPermissionRuleSet,
-            FsPermissionScope, GetZombieTimerCountRequest, GuestRuntimeKind, MountDescriptor,
-            MountPluginDescriptor, OpenSessionRequest, OwnershipScope, PatternPermissionRule,
-            PatternPermissionRuleSet, PatternPermissionScope, PermissionMode, PermissionsPolicy,
-            RequestFrame, RequestPayload, ResponsePayload, RootFilesystemEntry,
-            RootFilesystemEntryKind, SidecarPlacement,
+            AuthenticateRequest, BootstrapRootFilesystemRequest, CloseStdinRequest,
+            ConfigureVmRequest, CreateVmRequest, DisposeReason, FsPermissionRule,
+            FsPermissionRuleSet, FsPermissionScope, GetZombieTimerCountRequest, GuestRuntimeKind,
+            MountDescriptor, MountPluginDescriptor, OpenSessionRequest, OwnershipScope,
+            PatternPermissionRule, PatternPermissionRuleSet, PatternPermissionScope,
+            PermissionMode, PermissionsPolicy, RequestFrame, RequestPayload, ResponsePayload,
+            RootFilesystemEntry, RootFilesystemEntryKind, SidecarPlacement, WriteStdinRequest,
         };
         use crate::state::VM_DNS_SERVERS_METADATA_KEY;
         use agent_os_bridge::{FileKind, SymlinkRequest};
@@ -47,6 +47,7 @@ mod service {
         use agent_os_kernel::mount_table::{MountEntry, MountTable};
         use agent_os_kernel::permissions::{FsAccessRequest, FsOperation, Permissions};
         use agent_os_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
+        use base64::Engine;
         use bridge_support::RecordingBridge;
         use serde_json::json;
         use std::collections::BTreeMap;
@@ -569,6 +570,173 @@ ykAheWCsAteSEWVc0w==\n\
                 &limits,
                 counts,
             )
+        }
+
+        #[test]
+        fn javascript_kernel_stdin_reads_buffered_input_and_reports_timeout_and_eof() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-kernel-stdin-cwd");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            let context =
+                sidecar
+                    .javascript_engine
+                    .create_context(CreateJavascriptContextRequest {
+                        vm_id: vm_id.clone(),
+                        bootstrap_module: None,
+                        compile_cache_root: None,
+                    });
+            let execution = sidecar
+                .javascript_engine
+                .start_execution(StartJavascriptExecutionRequest {
+                    vm_id: vm_id.clone(),
+                    context_id: context.context_id,
+                    argv: vec![String::from("./entry.mjs")],
+                    env: BTreeMap::from([(
+                        String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                        String::from(
+                            "[\"assert\",\"buffer\",\"console\",\"events\",\"fs\",\"path\",\"readline\",\"stream\",\"string_decoder\",\"timers\",\"util\"]",
+                        ),
+                    )]),
+                    cwd: cwd.clone(),
+                    inline_code: None,
+                })
+                .expect("start fake javascript execution");
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        vec![String::from("./entry.mjs")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel javascript process")
+            };
+            let kernel_stdin_writer_fd = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                let (read_fd, write_fd) = vm
+                    .kernel
+                    .open_pipe(EXECUTION_DRIVER_NAME, kernel_handle.pid())
+                    .expect("open kernel stdin pipe");
+                vm.kernel
+                    .fd_dup2(EXECUTION_DRIVER_NAME, kernel_handle.pid(), read_fd, 0)
+                    .expect("dup kernel stdin pipe onto fd 0");
+                vm.kernel
+                    .fd_close(EXECUTION_DRIVER_NAME, kernel_handle.pid(), read_fd)
+                    .expect("close extra kernel stdin read fd");
+                write_fd
+            };
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.active_processes.insert(
+                    String::from("proc-js-stdin"),
+                    ActiveProcess::new(
+                        kernel_handle.pid(),
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Javascript(execution),
+                    )
+                    .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
+                    .with_host_cwd(cwd.clone()),
+                );
+            }
+
+            let initial = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-stdin",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("__kernel_stdin_read"),
+                    args: vec![json!(1024), json!(10)],
+                },
+            )
+            .expect("poll empty kernel stdin");
+            assert_eq!(initial, Value::Null);
+
+            let write = sidecar
+                .dispatch_blocking(request(
+                    11,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::WriteStdin(WriteStdinRequest {
+                        process_id: String::from("proc-js-stdin"),
+                        chunk: String::from("hello from stdin"),
+                    }),
+                ))
+                .expect("write stdin");
+            match write.response.payload {
+                ResponsePayload::StdinWritten(response) => {
+                    assert_eq!(response.process_id, "proc-js-stdin");
+                    assert_eq!(response.accepted_bytes, "hello from stdin".len() as u64);
+                }
+                other => panic!("unexpected stdin_written response: {other:?}"),
+            }
+
+            let next = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-stdin",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("__kernel_stdin_read"),
+                    args: vec![json!(1024), json!(10)],
+                },
+            )
+            .expect("read kernel stdin payload");
+            assert_eq!(
+                next,
+                json!({
+                    "dataBase64": base64::engine::general_purpose::STANDARD
+                        .encode("hello from stdin"),
+                })
+            );
+
+            let close = sidecar
+                .dispatch_blocking(request(
+                    12,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::CloseStdin(CloseStdinRequest {
+                        process_id: String::from("proc-js-stdin"),
+                    }),
+                ))
+                .expect("close stdin");
+            match close.response.payload {
+                ResponsePayload::StdinClosed(response) => {
+                    assert_eq!(response.process_id, "proc-js-stdin");
+                }
+                other => panic!("unexpected stdin_closed response: {other:?}"),
+            }
+
+            let eof = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-stdin",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("__kernel_stdin_read"),
+                    args: vec![json!(1024), json!(10)],
+                },
+            )
+            .expect("read kernel stdin eof");
+            assert_eq!(eof, json!({ "done": true }));
+
+            sidecar
+                .kill_process_internal(&vm_id, "proc-js-stdin", "SIGKILL")
+                .expect("kill javascript stdin process");
         }
 
         #[test]

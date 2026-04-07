@@ -88,6 +88,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 - Queue replies through a bounded async writer so slow guest reads cannot block the sidecar thread.
 - Have `crates/sidecar/src/service.rs` ignore stale `sync RPC request ... is no longer pending` races after the timeout fires.
 - Guest V8 timers have two host paths in `javascript.rs`: `_scheduleTimer` is an async bridge call that resolves its pending Promise later, while `kernelTimerCreate`/`kernelTimerArm`/`kernelTimerClear` are local `_loadPolyfill` dispatches that must emit `"timer"` stream events back into the V8 session so `setTimeout`/`setInterval` callbacks fire.
+- Live guest stdin also has two delivery paths: `AGENT_OS_KEEP_STDIN_OPEN` uses `"stdin"` / `"stdin_end"` stream events, while TTY-style reads use `_kernelStdinRead` and must stay forwarded to the sidecar-backed kernel fd `0` pipe so timeout and EOF remain distinguishable.
 
 ## Runner Script Assets
 
