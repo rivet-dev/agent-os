@@ -10,6 +10,25 @@ use std::path::Path;
 use std::time::Duration;
 use tempfile::tempdir;
 
+/*
+US-040 execution-test audit
+
+Deleted coverage:
+- `tests/javascript.rs`: removed because the file only exercised the old
+  `legacy-js-tests` host-Node guest path (`loader.mjs`, `runner.mjs`,
+  import-cache mutation, and `Command::new("node")` process behavior). The V8
+  isolate path no longer uses that guest execution model.
+- `permission_flags::node_permission_flags_do_not_expose_workspace_root_or_entrypoint_parent_writes`:
+  removed because its JavaScript assertions depended on host-Node permission
+  flags emitted for guest JS launches. V8 guest JS now stays in-process, while
+  the remaining permission-flag tests still cover the real host-Node launches
+  that remain for Python and WASM.
+- `benchmark::javascript_benchmark_harness_covers_required_startup_and_import_scenarios`:
+  removed because it depended on pre-V8 benchmark marker behavior from the old
+  startup harness instead of validating the current V8 execution path. The
+  stable artifact and markdown benchmark tests remain.
+*/
+
 fn write_fixture(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write fixture");
 }

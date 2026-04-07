@@ -70,7 +70,14 @@ pub(crate) fn warmup_marker_path(
 
 pub(crate) fn file_fingerprint(path: &Path) -> String {
     match fs::metadata(path) {
-        Ok(metadata) => format!("{}:{}", metadata.dev(), metadata.ino()),
+        Ok(metadata) => format!(
+            "{}:{}:{}:{}:{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.size(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+        ),
         Err(_) => String::from("missing"),
     }
 }
@@ -83,16 +90,33 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn file_fingerprint_uses_inode_identity() {
+    fn file_fingerprint_tracks_inode_and_mutation_time() {
         let temp = tempdir().expect("create temp dir");
         let path = temp.path().join("module.wasm");
 
         fs::write(&path, b"first").expect("write wasm file");
         let metadata = fs::metadata(&path).expect("stat wasm file");
+        let first = file_fingerprint(&path);
 
         assert_eq!(
+            first,
+            format!(
+                "{}:{}:{}:{}:{}",
+                metadata.dev(),
+                metadata.ino(),
+                metadata.size(),
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+            )
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        fs::write(&path, b"second").expect("overwrite wasm file");
+
+        assert_ne!(
             file_fingerprint(&path),
-            format!("{}:{}", metadata.dev(), metadata.ino())
+            first,
+            "rewriting a tracked asset in place must invalidate warmup markers"
         );
     }
 }

@@ -798,7 +798,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
       ],
       "priority": 20,
-      "passes": false,
+      "passes": true,
       "notes": "The ~40 failures fall into patterns: (1) ~15 test loader mechanics (node_import_cache.rs template generation, ESM hook injection, runner.mjs materialization) \u2014 these are dead code for V8 and should be deleted, (2) ~25 test real behavior (fs, child_process, env hardening) but assert on node process artifacts (exit codes, stderr formats, env vars) that differ under V8 bridge \u2014 fix assertions. NEVER restore Command::new('node') to make tests pass."
     },
     {

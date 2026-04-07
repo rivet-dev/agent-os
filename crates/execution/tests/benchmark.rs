@@ -1,6 +1,6 @@
 use agent_os_execution::benchmark::{
-    run_javascript_benchmarks, BenchmarkDistributionStats, BenchmarkHost, BenchmarkResourceUsage,
-    BenchmarkScenarioPhases, BenchmarkScenarioReport, BenchmarkStats, BenchmarkTransportRttReport,
+    BenchmarkDistributionStats, BenchmarkHost, BenchmarkResourceUsage, BenchmarkScenarioPhases,
+    BenchmarkScenarioReport, BenchmarkStats, BenchmarkTransportRttReport,
     JavascriptBenchmarkConfig, JavascriptBenchmarkReport,
 };
 use serde_json::Value;
@@ -113,8 +113,9 @@ fn resource_stats(
     }
 }
 
-#[test]
-#[ignore = "runtime benchmark fixture list still assumes the pre-V8 startup harness"]
+/*
+Deleted in US-040 because this harness asserted the old startup-path benchmark
+marker behavior instead of the current V8 runtime contract.
 fn javascript_benchmark_harness_covers_required_startup_and_import_scenarios() {
     let report = run_javascript_benchmarks(&JavascriptBenchmarkConfig {
         iterations: 1,
@@ -463,6 +464,7 @@ fn javascript_benchmark_harness_covers_required_startup_and_import_scenarios() {
             && scenario["resource_usage_samples"]["heap_used_bytes"].is_array()
     }));
 }
+*/
 
 #[test]
 fn javascript_benchmark_json_artifact_stays_stable_for_summary_and_samples() {

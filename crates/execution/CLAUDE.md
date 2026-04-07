@@ -143,4 +143,5 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 - `wait(None)` should still enforce the per-run `AGENT_OS_PYTHON_EXECUTION_TIMEOUT_MS` cap.
 - `wait()` should bound accumulated stdout/stderr via the hidden `AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES` env knob rather than growing buffers without limit.
 - Node heap caps from `AGENT_OS_PYTHON_MAX_OLD_SPACE_MB` need to apply to both prewarm and execution launches without leaking those control vars into guest `process.env`.
+- Warmup marker fingerprints for guest assets must include mutation data (`size` plus `mtime`/`mtime_nsec`), not just inode identity; in-place rewrites of Pyodide or WASM assets can preserve the inode and still need to invalidate prewarm stamps.
 - Pyodide bootstrap hardening in `node_import_cache.rs` must stay staged: `globalThis` guards can go in before `loadPyodide()`, but mutating `process` before `loadPyodide()` breaks the bundled Pyodide runtime under Node `--permission`.

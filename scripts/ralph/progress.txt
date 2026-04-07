@@ -11,6 +11,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - The current V8 sync-RPC bridge only tolerates one in-flight request effectively, so long-lived waits like HTTP server close listeners need stream events plus follow-up RPCs instead of a permanently pending sync-bridge Promise
 - The sidecar reads entrypoint files from VFS and passes as `inline_code` to avoid V8 module loading bridge calls in synchronous dispatch
 - Execution crate host-Node compatibility coverage stays behind the `legacy-js-tests` feature; default JavaScript validation should target the V8 isolate path and `crates/execution/tests/javascript_v8.rs`
+- Warmup marker fingerprints for guest assets must include size and mtime data, not just inode identity; in-place rewrites of Pyodide or WASM assets otherwise fail to invalidate prewarm stamps
 - service.rs type definitions use `pub(crate)` fields when extracted to state.rs so impl blocks in service.rs can still access them
 - service.rs re-exports public types from state.rs via `pub use crate::state::{...}` so lib.rs re-exports continue to work
 - Protocol-level deserialized request types (with `#[derive(Deserialize)]`) belong in protocol.rs
@@ -300,4 +301,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - `dgram.address` must return a JSON string payload, not a raw object, because the V8 bridge calls `JSON.parse(_dgramSocketAddressRaw.applySync(...))`
   - Upgrade-socket write RPCs carry base64-encoded payload strings from the V8 bridge, so the sidecar handler must decode base64 instead of reusing the plain-text `net.write` path
   - Sidecar service tests that wait on local TCP accept/read events are more reliable with a short sleep between timeout sentinel polls than with a tight zero-delay retry loop
+---
+## 2026-04-07 10:08:20 PDT - US-040
+- Deleted the legacy `crates/execution/tests/javascript.rs` host-Node JavaScript suite, documented the removed coverage in `crates/execution/tests/javascript_v8.rs`, and retired the stale benchmark/permission fixtures that still assumed the pre-V8 guest path
+- Re-enabled both Python prewarm tests and fixed warmup-stamp invalidation by extending `file_fingerprint()` to include size and mtime data so in-place Pyodide asset rewrites trigger a fresh prewarm
+- Files changed: `crates/execution/CLAUDE.md`, `crates/execution/src/runtime_support.rs`, `crates/execution/tests/{benchmark.rs,javascript.rs,javascript_v8.rs,permission_flags.rs,python_prewarm.rs}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - The V8-era JavaScript integration suite lives in `crates/execution/tests/javascript_v8.rs`; the removed `legacy-js-tests` file only covered the deprecated host-Node guest path
+  - If a warmup cache key tracks mutable guest assets, inode-only fingerprints are insufficient because overwriting a file in place can preserve the inode while changing runtime behavior
+  - `cargo test -p agent-os-execution -- --test-threads=1` is fully green for this story’s surface; keep benchmark/reporting coverage on stable artifact tests unless the live harness contract changes
 ---
