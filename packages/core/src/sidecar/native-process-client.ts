@@ -136,6 +136,18 @@ type GuestFilesystemOperation =
 	| "utimes"
 	| "truncate";
 
+export interface SidecarRegisteredToolExample {
+	description: string;
+	input: unknown;
+}
+
+export interface SidecarRegisteredToolDefinition {
+	description: string;
+	inputSchema: unknown;
+	timeoutMs?: number;
+	examples?: SidecarRegisteredToolExample[];
+}
+
 type RequestPayload =
 	| {
 			type: "authenticate";
@@ -165,6 +177,20 @@ type RequestPayload =
 			command_permissions: Record<string, WasmPermissionTier>;
 			allowed_node_builtins?: string[];
 			loopback_exempt_ports?: number[];
+	  }
+	| {
+			type: "register_toolkit";
+			name: string;
+			description: string;
+			tools: Record<
+				string,
+				{
+					description: string;
+					input_schema: unknown;
+					timeout_ms?: number;
+					examples?: Array<{ description: string; input: unknown }>;
+				}
+			>;
 	  }
 	| {
 			type: "dispose_vm";
@@ -351,6 +377,12 @@ interface ResponseFrame {
 				type: "vm_configured";
 				applied_mounts: number;
 				applied_software: number;
+		  }
+		| {
+				type: "toolkit_registered";
+				toolkit: string;
+				command_count: number;
+				prompt_markdown: string;
 		  }
 		| {
 				type: "layer_created";
@@ -768,6 +800,60 @@ export class NativeSidecarProcessClient {
 				`unexpected configure_vm response: ${response.payload.type}`,
 			);
 		}
+	}
+
+	async registerToolkit(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+		toolkit: {
+			name: string;
+			description: string;
+			tools: Record<string, SidecarRegisteredToolDefinition>;
+		},
+	): Promise<{ toolkit: string; commandCount: number; promptMarkdown: string }> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload: {
+				type: "register_toolkit",
+				name: toolkit.name,
+				description: toolkit.description,
+				tools: Object.fromEntries(
+					Object.entries(toolkit.tools).map(([toolName, tool]) => [
+						toolName,
+						{
+							description: tool.description,
+							input_schema: tool.inputSchema,
+							...(tool.timeoutMs !== undefined
+								? { timeout_ms: tool.timeoutMs }
+								: {}),
+							...(tool.examples && tool.examples.length > 0
+								? {
+										examples: tool.examples.map((example) => ({
+											description: example.description,
+											input: example.input,
+										})),
+									}
+								: {}),
+						},
+					]),
+				),
+			},
+		});
+		if (response.payload.type !== "toolkit_registered") {
+			throw new Error(
+				`unexpected register_toolkit response: ${response.payload.type}`,
+			);
+		}
+		return {
+			toolkit: response.payload.toolkit,
+			commandCount: response.payload.command_count,
+			promptMarkdown: response.payload.prompt_markdown,
+		};
 	}
 
 	async createLayer(

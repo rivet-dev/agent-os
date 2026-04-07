@@ -138,6 +138,7 @@ where
                 layers: VmLayerStore::default(),
                 command_guest_paths: BTreeMap::new(),
                 command_permissions: BTreeMap::new(),
+                toolkits: BTreeMap::new(),
                 active_processes: BTreeMap::new(),
                 signal_states: BTreeMap::new(),
             },

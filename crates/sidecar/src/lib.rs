@@ -10,6 +10,7 @@ pub(crate) mod plugins;
 pub mod protocol;
 pub mod service;
 pub(crate) mod state;
+pub(crate) mod tools;
 pub(crate) mod vm;
 
 pub use service::{DispatchResult, NativeSidecar, NativeSidecarConfig, SidecarError};

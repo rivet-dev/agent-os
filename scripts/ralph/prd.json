@@ -412,7 +412,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 31,
-      "passes": false,
+      "passes": true,
       "notes": "Step 5 part 2. Depends on US-019 (virtual processes) and US-009 (bidirectional frames). See spec 'Tool Invocation - Virtual Process Design' for the flow diagram. Port host-tools-argv.ts parsing logic to Rust."
     },
     {

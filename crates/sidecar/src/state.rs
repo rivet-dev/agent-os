@@ -5,9 +5,9 @@
 
 use crate::protocol::{
     EventFrame, GuestRuntimeKind, MountDescriptor, PermissionsPolicy, ProjectedModuleDescriptor,
-    ResponseFrame, SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame,
-    SidecarResponsePayload, SignalHandlerRegistration, SoftwareDescriptor, WasmPermissionTier,
-    DEFAULT_MAX_FRAME_BYTES,
+    RegisterToolkitRequest, ResponseFrame, SidecarRequestFrame, SidecarRequestPayload,
+    SidecarResponseFrame, SidecarResponsePayload, SignalHandlerRegistration, SoftwareDescriptor,
+    WasmPermissionTier, DEFAULT_MAX_FRAME_BYTES,
 };
 use agent_os_bridge::{BridgeTypes, FilesystemSnapshot};
 use agent_os_execution::{
@@ -61,6 +61,8 @@ pub(crate) const VM_LISTEN_PORT_MAX_METADATA_KEY: &str = "network.listen.port_ma
 pub(crate) const VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY: &str = "network.listen.allow_privileged";
 pub(crate) const DEFAULT_JAVASCRIPT_NET_BACKLOG: u32 = 511;
 pub(crate) const LOOPBACK_EXEMPT_PORTS_ENV: &str = "AGENT_OS_LOOPBACK_EXEMPT_PORTS";
+pub(crate) const TOOL_DRIVER_NAME: &str = "agent-os-sidecar-tools";
+pub(crate) const TOOL_MASTER_COMMAND: &str = "agentos";
 
 // ---------------------------------------------------------------------------
 // Public API types
@@ -284,6 +286,7 @@ pub(crate) struct VmState {
     pub(crate) layers: VmLayerStore,
     pub(crate) command_guest_paths: BTreeMap<String, String>,
     pub(crate) command_permissions: BTreeMap<String, WasmPermissionTier>,
+    pub(crate) toolkits: BTreeMap<String, RegisterToolkitRequest>,
     pub(crate) active_processes: BTreeMap<String, ActiveProcess>,
     pub(crate) signal_states: BTreeMap<String, BTreeMap<u32, SignalHandlerRegistration>>,
 }
@@ -827,6 +830,20 @@ pub(crate) enum ActiveExecution {
     Javascript(JavascriptExecution),
     Python(PythonExecution),
     Wasm(WasmExecution),
+    Tool(ToolExecution),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ToolExecution {
+    pub(crate) cancelled: Arc<AtomicBool>,
+}
+
+impl Default for ToolExecution {
+    fn default() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 #[derive(Debug)]

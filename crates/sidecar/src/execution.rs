@@ -12,9 +12,9 @@ use crate::protocol::{
     JavascriptDnsResolveRequest, JavascriptNetConnectRequest, JavascriptNetListenRequest,
     KillProcessRequest, ListenerSnapshotResponse, OwnershipScope, ProcessExitedEvent,
     ProcessKilledResponse, ProcessOutputEvent, ProcessStartedResponse, RequestFrame,
-    ResponsePayload, SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse,
-    SocketStateEntry, StdinClosedResponse, StdinWrittenResponse, StreamChannel, WasmPermissionTier,
-    WriteStdinRequest, ZombieTimerCountResponse,
+    ResponsePayload, SidecarRequestPayload, SignalDispositionAction, SignalHandlerRegistration,
+    SignalStateResponse, SocketStateEntry, StdinClosedResponse, StdinWrittenResponse,
+    StreamChannel, WasmPermissionTier, WriteStdinRequest, ZombieTimerCountResponse,
 };
 use crate::service::{
     audit_fields, dirname, emit_security_audit_event, emit_structured_event, javascript_error,
@@ -34,10 +34,14 @@ use crate::state::{
     JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts,
     PendingTcpSocket, PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope,
     ResolvedChildProcessExecution, ResolvedTcpConnectAddr, SharedBridge, SidecarKernel,
-    SocketQueryKind, VmDnsConfig, VmListenPolicy, VmState, DEFAULT_JAVASCRIPT_NET_BACKLOG,
-    EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV, JAVASCRIPT_COMMAND,
+    SocketQueryKind, ToolExecution, VmDnsConfig, VmListenPolicy, VmState,
+    DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
+    JAVASCRIPT_COMMAND, TOOL_DRIVER_NAME,
     LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND, VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY,
     VM_LISTEN_PORT_MAX_METADATA_KEY, VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
+};
+use crate::tools::{
+    format_tool_failure_output, resolve_tool_command, ToolCommandResolution,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -53,7 +57,7 @@ use agent_os_execution::{
     StartWasmExecutionRequest, WasmExecutionEvent,
     WasmPermissionTier as ExecutionWasmPermissionTier,
 };
-use agent_os_kernel::kernel::{KernelProcessHandle, SpawnOptions};
+use agent_os_kernel::kernel::{KernelProcessHandle, SpawnOptions, VirtualProcessOptions};
 use agent_os_kernel::permissions::NetworkOperation;
 use agent_os_kernel::process_table::{SIGKILL, SIGTERM};
 use agent_os_kernel::pty::LineDisciplineConfig;
@@ -1234,6 +1238,7 @@ impl ActiveExecution {
             Self::Javascript(execution) => execution.child_pid(),
             Self::Python(execution) => execution.child_pid(),
             Self::Wasm(execution) => execution.child_pid(),
+            Self::Tool(_) => 0,
         }
     }
 
@@ -1248,6 +1253,7 @@ impl ActiveExecution {
             Self::Wasm(execution) => execution
                 .write_stdin(chunk)
                 .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Tool(_) => Ok(()),
         }
     }
 
@@ -1262,6 +1268,7 @@ impl ActiveExecution {
             Self::Wasm(execution) => execution
                 .close_stdin()
                 .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Tool(_) => Ok(()),
         }
     }
 
@@ -1406,6 +1413,10 @@ impl ActiveExecution {
                     })
                 })
                 .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Tool(_) => {
+                let _ = timeout;
+                Ok(None)
+            }
         }
     }
 
@@ -1470,6 +1481,10 @@ impl ActiveExecution {
                     })
                 })
                 .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Tool(_) => {
+                let _ = timeout;
+                Ok(None)
+            }
         }
     }
 }
@@ -1493,6 +1508,204 @@ where
                 "VM {vm_id} already has an active process with id {}",
                 payload.process_id
             )));
+        }
+
+        if let Some(command) = payload.command.as_deref() {
+            if let Some(tool_resolution) =
+                resolve_tool_command(vm, command, &payload.args, payload.cwd.as_deref())?
+            {
+                let guest_cwd = payload
+                    .cwd
+                    .as_deref()
+                    .map(normalize_path)
+                    .unwrap_or_else(|| vm.guest_cwd.clone());
+                let kernel_handle = vm
+                    .kernel
+                    .create_virtual_process(
+                        EXECUTION_DRIVER_NAME,
+                        TOOL_DRIVER_NAME,
+                        command,
+                        std::iter::once(command.to_owned())
+                            .chain(payload.args.iter().cloned())
+                            .collect(),
+                        VirtualProcessOptions {
+                            env: vm.guest_env.clone(),
+                            cwd: Some(guest_cwd),
+                            ..VirtualProcessOptions::default()
+                        },
+                    )
+                    .map_err(kernel_error)?;
+                let kernel_pid = kernel_handle.pid();
+                let tool_execution = ToolExecution::default();
+                let cancelled = tool_execution.cancelled.clone();
+                vm.active_processes.insert(
+                    payload.process_id.clone(),
+                    ActiveProcess::new(
+                        kernel_pid,
+                        kernel_handle,
+                        GuestRuntimeKind::JavaScript,
+                        ActiveExecution::Tool(tool_execution),
+                    ),
+                );
+                self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
+
+                let sender = self.process_event_sender.clone();
+                let vm_id_for_thread = vm_id.clone();
+                let process_id_for_thread = payload.process_id.clone();
+                let connection_id_for_thread = connection_id.clone();
+                let session_id_for_thread = session_id.clone();
+                let sidecar_requests = self.sidecar_requests.clone();
+
+                std::thread::spawn(move || match tool_resolution {
+                    ToolCommandResolution::Immediate {
+                        stdout,
+                        stderr,
+                        exit_code,
+                    } => {
+                        if cancelled.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if !stdout.is_empty() {
+                            let _ = sender.send(ProcessEventEnvelope {
+                                connection_id: connection_id_for_thread.clone(),
+                                session_id: session_id_for_thread.clone(),
+                                vm_id: vm_id_for_thread.clone(),
+                                process_id: process_id_for_thread.clone(),
+                                event: ActiveExecutionEvent::Stdout(stdout),
+                            });
+                        }
+                        if !stderr.is_empty() {
+                            let _ = sender.send(ProcessEventEnvelope {
+                                connection_id: connection_id_for_thread.clone(),
+                                session_id: session_id_for_thread.clone(),
+                                vm_id: vm_id_for_thread.clone(),
+                                process_id: process_id_for_thread.clone(),
+                                event: ActiveExecutionEvent::Stderr(stderr),
+                            });
+                        }
+                        let _ = sender.send(ProcessEventEnvelope {
+                            connection_id: connection_id_for_thread,
+                            session_id: session_id_for_thread,
+                            vm_id: vm_id_for_thread,
+                            process_id: process_id_for_thread,
+                            event: ActiveExecutionEvent::Exited(exit_code),
+                        });
+                    }
+                    ToolCommandResolution::Invoke { request, timeout } => {
+                        let response = sidecar_requests.invoke(
+                            OwnershipScope::vm(
+                                connection_id_for_thread.clone(),
+                                session_id_for_thread.clone(),
+                                vm_id_for_thread.clone(),
+                            ),
+                            SidecarRequestPayload::ToolInvocation(request.clone()),
+                            timeout,
+                        );
+                        if cancelled.load(Ordering::Relaxed) {
+                            return;
+                        }
+
+                        match response {
+                            Ok(crate::protocol::SidecarResponsePayload::ToolInvocationResult(
+                                result,
+                            )) => {
+                                if let Some(value) = result.result {
+                                    let stdout = serde_json::to_vec(&json!({
+                                        "ok": true,
+                                        "result": value,
+                                    }))
+                                    .unwrap_or_else(|error| {
+                                        format_tool_failure_output(&format!(
+                                            "failed to serialize tool result: {error}"
+                                        ))
+                                    });
+                                    let _ = sender.send(ProcessEventEnvelope {
+                                        connection_id: connection_id_for_thread.clone(),
+                                        session_id: session_id_for_thread.clone(),
+                                        vm_id: vm_id_for_thread.clone(),
+                                        process_id: process_id_for_thread.clone(),
+                                        event: ActiveExecutionEvent::Stdout(stdout),
+                                    });
+                                    let _ = sender.send(ProcessEventEnvelope {
+                                        connection_id: connection_id_for_thread,
+                                        session_id: session_id_for_thread,
+                                        vm_id: vm_id_for_thread,
+                                        process_id: process_id_for_thread,
+                                        event: ActiveExecutionEvent::Exited(0),
+                                    });
+                                } else {
+                                    let message = result.error.unwrap_or_else(|| {
+                                        String::from("tool invocation returned no result")
+                                    });
+                                    let _ = sender.send(ProcessEventEnvelope {
+                                        connection_id: connection_id_for_thread.clone(),
+                                        session_id: session_id_for_thread.clone(),
+                                        vm_id: vm_id_for_thread.clone(),
+                                        process_id: process_id_for_thread.clone(),
+                                        event: ActiveExecutionEvent::Stderr(
+                                            format_tool_failure_output(&message),
+                                        ),
+                                    });
+                                    let _ = sender.send(ProcessEventEnvelope {
+                                        connection_id: connection_id_for_thread,
+                                        session_id: session_id_for_thread,
+                                        vm_id: vm_id_for_thread,
+                                        process_id: process_id_for_thread,
+                                        event: ActiveExecutionEvent::Exited(1),
+                                    });
+                                }
+                            }
+                            Ok(_) => {
+                                let _ = sender.send(ProcessEventEnvelope {
+                                    connection_id: connection_id_for_thread.clone(),
+                                    session_id: session_id_for_thread.clone(),
+                                    vm_id: vm_id_for_thread.clone(),
+                                    process_id: process_id_for_thread.clone(),
+                                    event: ActiveExecutionEvent::Stderr(format_tool_failure_output(
+                                        "unexpected sidecar tool response",
+                                    )),
+                                });
+                                let _ = sender.send(ProcessEventEnvelope {
+                                    connection_id: connection_id_for_thread,
+                                    session_id: session_id_for_thread,
+                                    vm_id: vm_id_for_thread,
+                                    process_id: process_id_for_thread,
+                                    event: ActiveExecutionEvent::Exited(1),
+                                });
+                            }
+                            Err(error) => {
+                                let _ = sender.send(ProcessEventEnvelope {
+                                    connection_id: connection_id_for_thread.clone(),
+                                    session_id: session_id_for_thread.clone(),
+                                    vm_id: vm_id_for_thread.clone(),
+                                    process_id: process_id_for_thread.clone(),
+                                    event: ActiveExecutionEvent::Stderr(
+                                        format_tool_failure_output(&error.to_string()),
+                                    ),
+                                });
+                                let _ = sender.send(ProcessEventEnvelope {
+                                    connection_id: connection_id_for_thread,
+                                    session_id: session_id_for_thread,
+                                    vm_id: vm_id_for_thread,
+                                    process_id: process_id_for_thread,
+                                    event: ActiveExecutionEvent::Exited(1),
+                                });
+                            }
+                        }
+                    }
+                });
+
+                return Ok(DispatchResult {
+                    response: self.respond(
+                        request,
+                        ResponsePayload::ProcessStarted(ProcessStartedResponse {
+                            process_id: payload.process_id,
+                            pid: Some(kernel_pid),
+                        }),
+                    ),
+                    events: Vec::new(),
+                });
+            }
         }
 
         let resolved = resolve_execute_request(vm, &payload)?;
@@ -1831,6 +2044,18 @@ where
         })?;
 
         match &process.execution {
+            ActiveExecution::Tool(execution) => {
+                if signal != 0 {
+                    execution.cancelled.store(true, Ordering::Relaxed);
+                    let _ = self.process_event_sender.send(ProcessEventEnvelope {
+                        connection_id: vm.connection_id.clone(),
+                        session_id: vm.session_id.clone(),
+                        vm_id: vm_id.to_owned(),
+                        process_id: process_id.to_owned(),
+                        event: ActiveExecutionEvent::Exited(128 + signal),
+                    });
+                }
+            }
             ActiveExecution::Javascript(execution) if execution.child_pid() == 0 => {
                 if signal != 0 {
                     execution
@@ -1864,6 +2089,23 @@ where
         ownership: &OwnershipScope,
     ) -> Result<bool, SidecarError> {
         let mut emitted_any = false;
+
+        {
+            let receiver = self.process_event_receiver.as_mut().ok_or_else(|| {
+                SidecarError::InvalidState(String::from("process event receiver unavailable"))
+            })?;
+            loop {
+                match receiver.try_recv() {
+                    Ok(envelope) => {
+                        self.pending_process_events.push_back(envelope);
+                        emitted_any = true;
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                }
+            }
+        }
+
         let vm_ids = self.vm_ids_for_scope(ownership)?;
         for vm_id in vm_ids {
             loop {

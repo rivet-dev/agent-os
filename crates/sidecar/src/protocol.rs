@@ -195,6 +195,7 @@ pub enum RequestPayload {
     DisposeVm(DisposeVmRequest),
     BootstrapRootFilesystem(BootstrapRootFilesystemRequest),
     ConfigureVm(ConfigureVmRequest),
+    RegisterToolkit(RegisterToolkitRequest),
     CreateLayer(CreateLayerRequest),
     SealLayer(SealLayerRequest),
     ImportSnapshot(ImportSnapshotRequest),
@@ -225,6 +226,7 @@ pub enum ResponsePayload {
     VmDisposed(VmDisposedResponse),
     RootFilesystemBootstrapped(RootFilesystemBootstrappedResponse),
     VmConfigured(VmConfiguredResponse),
+    ToolkitRegistered(ToolkitRegisteredResponse),
     LayerCreated(LayerCreatedResponse),
     LayerSealed(LayerSealedResponse),
     SnapshotImported(SnapshotImportedResponse),
@@ -728,6 +730,29 @@ pub struct PersistenceFlushRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterToolkitRequest {
+    pub name: String,
+    pub description: String,
+    pub tools: BTreeMap<String, RegisteredToolDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredToolDefinition {
+    pub description: String,
+    pub input_schema: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<RegisteredToolExample>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredToolExample {
+    pub description: String,
+    pub input: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolInvocationRequest {
     pub invocation_id: String,
     pub tool_key: String,
@@ -775,6 +800,13 @@ pub struct RootFilesystemBootstrappedResponse {
 pub struct VmConfiguredResponse {
     pub applied_mounts: u32,
     pub applied_software: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolkitRegisteredResponse {
+    pub toolkit: String,
+    pub command_count: u32,
+    pub prompt_markdown: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1505,6 +1537,7 @@ enum ExpectedResponseKind {
     VmDisposed,
     RootFilesystemBootstrapped,
     VmConfigured,
+    ToolkitRegistered,
     LayerCreated,
     LayerSealed,
     SnapshotImported,
@@ -1541,6 +1574,7 @@ impl ExpectedResponseKind {
             Self::VmDisposed => "vm_disposed",
             Self::RootFilesystemBootstrapped => "root_filesystem_bootstrapped",
             Self::VmConfigured => "vm_configured",
+            Self::ToolkitRegistered => "toolkit_registered",
             Self::LayerCreated => "layer_created",
             Self::LayerSealed => "layer_sealed",
             Self::SnapshotImported => "snapshot_imported",
@@ -1594,6 +1628,7 @@ impl RequestPayload {
             Self::DisposeVm(_)
             | Self::BootstrapRootFilesystem(_)
             | Self::ConfigureVm(_)
+            | Self::RegisterToolkit(_)
             | Self::CreateLayer(_)
             | Self::SealLayer(_)
             | Self::ImportSnapshot(_)
@@ -1622,6 +1657,7 @@ impl RequestPayload {
             Self::DisposeVm(_) => ExpectedResponseKind::VmDisposed,
             Self::BootstrapRootFilesystem(_) => ExpectedResponseKind::RootFilesystemBootstrapped,
             Self::ConfigureVm(_) => ExpectedResponseKind::VmConfigured,
+            Self::RegisterToolkit(_) => ExpectedResponseKind::ToolkitRegistered,
             Self::CreateLayer(_) => ExpectedResponseKind::LayerCreated,
             Self::SealLayer(_) => ExpectedResponseKind::LayerSealed,
             Self::ImportSnapshot(_) => ExpectedResponseKind::SnapshotImported,
@@ -1669,6 +1705,7 @@ impl ResponsePayload {
             Self::VmDisposed(_)
             | Self::RootFilesystemBootstrapped(_)
             | Self::VmConfigured(_)
+            | Self::ToolkitRegistered(_)
             | Self::LayerCreated(_)
             | Self::LayerSealed(_)
             | Self::SnapshotImported(_)
@@ -1697,6 +1734,7 @@ impl ResponsePayload {
             Self::VmDisposed(_) => "vm_disposed",
             Self::RootFilesystemBootstrapped(_) => "root_filesystem_bootstrapped",
             Self::VmConfigured(_) => "vm_configured",
+            Self::ToolkitRegistered(_) => "toolkit_registered",
             Self::LayerCreated(_) => "layer_created",
             Self::LayerSealed(_) => "layer_sealed",
             Self::SnapshotImported(_) => "snapshot_imported",

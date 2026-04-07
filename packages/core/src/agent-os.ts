@@ -18,16 +18,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ToolKit, validateToolkits } from "./host-tools.js";
-import { generateToolReference } from "./host-tools-prompt.js";
-import {
-	type HostToolsServer,
-	startHostToolsServer,
-} from "./host-tools-server.js";
-import {
-	createShimFilesystem,
-	generateMasterShim,
-	generateToolkitShim,
-} from "./host-tools-shims.js";
+import type { HostToolsServer } from "./host-tools-server.js";
 import {
 	type ConnectTerminalOptions,
 	createInMemoryFileSystem,
@@ -162,6 +153,7 @@ import {
 	NativeSidecarKernelProxy,
 } from "./sidecar/native-kernel-proxy.js";
 import { serializePermissionsForSidecar } from "./sidecar/permissions.js";
+import { registerToolkitsOnSidecar } from "./sidecar/tool-registration.js";
 import type { RootFilesystemEntry } from "./sidecar/native-process-client.js";
 import { NativeSidecarProcessClient } from "./sidecar/native-process-client.js";
 import { serializeRootFilesystemForSidecar } from "./sidecar/root-filesystem-descriptors.js";
@@ -186,6 +178,7 @@ interface AgentOsVmAdmin extends InProcessSidecarVmAdmin {
 	env: Record<string, string>;
 	snapshotRootFilesystem?: () => Promise<RootSnapshotExport>;
 	toolKits: ToolKit[];
+	toolReference: string;
 	toolsServer: HostToolsServer | null;
 	shimFs: ReturnType<typeof createInMemoryFileSystem> | null;
 }
@@ -1119,15 +1112,18 @@ function collectSidecarMountPlan(options: {
 
 function materializeToolShimDir(toolKits: ToolKit[]): string {
 	const shimDir = mkdtempSync(join(tmpdir(), "agent-os-host-tools-shims-"));
-	writeFileSync(join(shimDir, "agentos"), generateMasterShim(), {
-		mode: 0o755,
-	});
+	writeFileSync(
+		join(shimDir, "agentos"),
+		"#!/bin/sh\nexec /bin/agentos \"$@\"\n",
+		{ mode: 0o755 },
+	);
 
 	for (const toolKit of toolKits) {
-		const filename = `agentos-${toolKit.name}`;
-		writeFileSync(join(shimDir, filename), generateToolkitShim(toolKit.name), {
-			mode: 0o755,
-		});
+		writeFileSync(
+			join(shimDir, `agentos-${toolKit.name}`),
+			`#!/bin/sh\nexec /bin/agentos-${toolKit.name} "$@"\n`,
+			{ mode: 0o755 },
+		);
 	}
 
 	return shimDir;
@@ -1162,6 +1158,7 @@ export class AgentOs {
 	private _cronManager!: CronManager;
 	private _toolsServer: HostToolsServer | null = null;
 	private _toolKits: ToolKit[] = [];
+	private _toolReference = "";
 	private _shimFs: ReturnType<typeof createInMemoryFileSystem> | null = null;
 	private _hostMounts: HostMountInfo[];
 	private _acpTerminals = new Map<string, AcpTerminalState>();
@@ -1228,6 +1225,7 @@ export class AgentOs {
 			);
 			let toolsServer: HostToolsServer | null = null;
 			let shimFs: ReturnType<typeof createInMemoryFileSystem> | null = null;
+			let toolReference = "";
 			let rootBridge: NativeSidecarKernelProxy | null = null;
 			let kernel: Kernel | null = null;
 			let client: NativeSidecarProcessClient | null = null;
@@ -1239,10 +1237,6 @@ export class AgentOs {
 					return;
 				}
 				cleanedUp = true;
-				if (toolsServer) {
-					await toolsServer.close().catch(() => {});
-					toolsServer = null;
-				}
 				if (toolShimDir) {
 					rmSync(toolShimDir, { recursive: true, force: true });
 					toolShimDir = null;
@@ -1251,19 +1245,10 @@ export class AgentOs {
 			};
 
 			try {
-				if (toolKits && toolKits.length > 0) {
-					toolsServer = await startHostToolsServer(toolKits);
-				}
-
 				const env: Record<string, string> = getBaseEnvironment();
-				if (toolsServer) {
-					env.AGENTOS_TOOLS_PORT = String(toolsServer.port);
-				}
 				if (toolKits && toolKits.length > 0) {
-					shimFs = await createShimFilesystem(toolKits);
 					toolShimDir = materializeToolShimDir(toolKits);
 				}
-
 				const commandGuestPaths = collectGuestCommandPaths(
 					preparedCommandDirs.commandDirs,
 				);
@@ -1314,6 +1299,21 @@ export class AgentOs {
 					allowedNodeBuiltins: options?.allowedNodeBuiltins,
 					loopbackExemptPorts: options?.loopbackExemptPorts,
 				});
+				if (toolKits && toolKits.length > 0) {
+					toolReference = await registerToolkitsOnSidecar(
+						client,
+						session,
+						nativeVm,
+						toolKits,
+					);
+					commandGuestPaths.set("agentos", "/bin/agentos");
+					for (const toolKit of toolKits) {
+						commandGuestPaths.set(
+							`agentos-${toolKit.name}`,
+							`/bin/agentos-${toolKit.name}`,
+						);
+					}
+				}
 
 				rootBridge = new NativeSidecarKernelProxy({
 					client,
@@ -1334,10 +1334,6 @@ export class AgentOs {
 					getOsInstructions(options?.additionalInstructions),
 				);
 				kernel.mountFs("/etc/agentos", etcAgentosFs, { readOnly: true });
-
-				if (shimFs) {
-					kernel.mountFs("/usr/local/bin", shimFs, { readOnly: true });
-				}
 				const snapshotClient = client;
 
 				return {
@@ -1353,6 +1349,7 @@ export class AgentOs {
 						),
 					shimFs,
 					toolKits: toolKits ?? [],
+					toolReference,
 					toolsServer,
 					async dispose() {
 						if (kernel) {
@@ -1405,6 +1402,7 @@ export class AgentOs {
 			vm._sidecarLease = sidecarLease;
 			vm._toolsServer = vmAdmin.toolsServer;
 			vm._toolKits = vmAdmin.toolKits;
+			vm._toolReference = vmAdmin.toolReference;
 			vm._shimFs = vmAdmin.shimFs;
 			vm._cronManager = new CronManager(
 				vm,
@@ -2312,10 +2310,7 @@ export class AgentOs {
 
 		// Generate tool reference from VM-level toolkits. This is always
 		// injected into the agent prompt, even when skipOsInstructions is true.
-		const toolReference =
-			this._toolKits.length > 0
-				? generateToolReference(this._toolKits)
-				: undefined;
+		const toolReference = this._toolReference || undefined;
 
 		// Prepare OS instructions injection. When skipOsInstructions is true,
 		// the base OS instructions are skipped but tool docs are still injected.

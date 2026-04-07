@@ -47,6 +47,7 @@ use crate::state::{
     VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
     VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
 };
+use crate::tools::register_toolkit;
 use crate::NativeSidecarBridge;
 use agent_os_bridge::{
     CommandPermissionRequest, EnvironmentAccess, EnvironmentPermissionRequest, FilesystemAccess,
@@ -931,6 +932,7 @@ where
                     .await
             }
             RequestPayload::ConfigureVm(payload) => self.configure_vm(&request, payload).await,
+            RequestPayload::RegisterToolkit(payload) => register_toolkit(self, &request, payload),
             RequestPayload::CreateLayer(payload) => self.create_layer(&request, payload).await,
             RequestPayload::SealLayer(payload) => self.seal_layer(&request, payload).await,
             RequestPayload::ImportSnapshot(payload) => {
