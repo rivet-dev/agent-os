@@ -12,6 +12,19 @@ Runtime execution for Node.js (JavaScript/TypeScript) and Python (Pyodide) guest
 
 Guest Node.js code currently runs as **real host Node.js child processes** spawned via `std::process::Command::new("node")` in `javascript.rs`. The ESM loader hooks intercept `require()`/`import` but most builtins either fall through to the real host module or are thin wrappers that call real host APIs. **This fundamentally violates the isolation model.** The execution engine must be rebuilt to use V8 isolates with kernel-backed polyfills instead of spawning real `node` processes. This is being actively worked on.
 
+**Recovery reference:** The complete working polyfill + V8 isolate code from the original `@secure-exec/core` + `@secure-exec/nodejs` + `@secure-exec/v8` packages has been recovered to `.agent/recovery/secure-exec/`. Key files to port:
+- `nodejs/src/bridge/fs.ts` (3,974 lines) -- full kernel-backed `fs`/`fs/promises` polyfill
+- `nodejs/src/bridge/network.ts` (11,149 lines) -- full `net`/`dgram`/`dns` polyfill via kernel socket table
+- `nodejs/src/bridge/child-process.ts` (1,058 lines) -- `child_process` polyfill via kernel process table
+- `nodejs/src/bridge/process.ts` (2,251 lines) -- virtualized `process` global (env, cwd, pid, signals)
+- `nodejs/src/bridge/polyfills.ts` (914 lines) -- polyfill registration and module hijacking
+- `nodejs/src/bridge-handlers.ts` (6,405 lines) -- host-side bridge handlers for all kernel syscalls
+- `nodejs/src/execution-driver.ts` (1,693 lines) -- V8 isolate session lifecycle + bridge setup
+- `kernel/` -- the JS kernel (VFS, process table, socket table, PTY, pipes)
+- `v8/` -- V8 runtime process manager, IPC binary protocol
+
+The original source repo is at `/home/nathan/secure-exec-1/` (tagged `v0.2.1`).
+
 **Prior art -- the original JS kernel had full polyfills:**
 
 Before the Rust sidecar (commit `5a43882`), the JS kernel (`@secure-exec/core` + `@secure-exec/nodejs` + `packages/posix/`) had complete kernel-backed polyfills for all builtins. The pattern was:
