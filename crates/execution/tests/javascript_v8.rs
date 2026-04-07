@@ -228,6 +228,208 @@ fs.statSync("/workspace/note.txt");
     assert_eq!(result.exit_code, 0);
 }
 
+
+#[test]
+fn javascript_execution_v8_dgram_bridge_matches_sidecar_rpc_shapes() {
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import dgram from "node:dgram";
+
+const summary = await new Promise((resolve, reject) => {
+  const socket = dgram.createSocket("udp4");
+  socket.on("error", reject);
+  socket.on("message", (message, rinfo) => {
+    const address = socket.address();
+    socket.close(() => {
+      resolve({
+        address,
+        message: message.toString("utf8"),
+        rinfo,
+      });
+    });
+  });
+  socket.bind(0, "127.0.0.1", () => {
+    socket.send("ping", 7, "127.0.0.1");
+  });
+});
+
+if (summary.message !== "pong") {
+  throw new Error(`unexpected udp message: ${summary.message}`);
+}
+if (summary.address.address !== "127.0.0.1" || summary.address.port !== 45454) {
+  throw new Error(`unexpected socket address: ${JSON.stringify(summary.address)}`);
+}
+if (summary.rinfo.address !== "127.0.0.1" || summary.rinfo.port !== 7) {
+  throw new Error(`unexpected remote info: ${JSON.stringify(summary.rinfo)}`);
+}
+"#,
+    );
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::from([(
+                String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
+                String::from("[\"dgram\"]"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+            inline_code: None,
+        })
+        .expect("start JavaScript execution");
+
+    let request = match execution
+        .poll_event_blocking(Duration::from_secs(5))
+        .expect("poll dgram.createSocket request")
+    {
+        Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => request,
+        other => panic!("expected dgram.createSocket request, got {other:?}"),
+    };
+    assert_eq!(request.method, "dgram.createSocket");
+    assert_eq!(request.args, vec![json!({ "type": "udp4" })]);
+    execution
+        .respond_sync_rpc_success(request.id, json!({ "socketId": "udp-1", "type": "udp4" }))
+        .expect("respond to dgram.createSocket");
+
+    let request = match execution
+        .poll_event_blocking(Duration::from_secs(5))
+        .expect("poll dgram.bind request")
+    {
+        Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => request,
+        other => panic!("expected dgram.bind request, got {other:?}"),
+    };
+    assert_eq!(request.method, "dgram.bind");
+    assert_eq!(
+        request.args,
+        vec![json!("udp-1"), json!({ "address": "127.0.0.1", "port": 0 })]
+    );
+    execution
+        .respond_sync_rpc_success(
+            request.id,
+            json!({
+                "localAddress": "127.0.0.1",
+                "localPort": 45454,
+                "family": "IPv4",
+            }),
+        )
+        .expect("respond to dgram.bind");
+
+    let request = match execution
+        .poll_event_blocking(Duration::from_secs(5))
+        .expect("poll dgram.poll request")
+    {
+        Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => request,
+        other => panic!("expected dgram.poll request, got {other:?}"),
+    };
+    assert_eq!(request.method, "dgram.poll");
+    assert_eq!(request.args, vec![json!("udp-1"), json!(10)]);
+    execution
+        .respond_sync_rpc_success(request.id, json!(null))
+        .expect("respond to initial dgram.poll");
+
+    let request = match execution
+        .poll_event_blocking(Duration::from_secs(5))
+        .expect("poll dgram.send request")
+    {
+        Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => request,
+        other => panic!("expected dgram.send request, got {other:?}"),
+    };
+    assert_eq!(request.method, "dgram.send");
+    assert_eq!(
+        request.args,
+        vec![
+            json!("udp-1"),
+            json!({
+                "__agentOsType": "bytes",
+                "base64": "cGluZw==",
+            }),
+            json!({
+                "address": "127.0.0.1",
+                "port": 7,
+            }),
+        ]
+    );
+    execution
+        .respond_sync_rpc_success(
+            request.id,
+            json!({
+                "bytes": 4,
+                "localAddress": "127.0.0.1",
+                "localPort": 45454,
+                "family": "IPv4",
+            }),
+        )
+        .expect("respond to dgram.send");
+
+    let request = match execution
+        .poll_event_blocking(Duration::from_secs(5))
+        .expect("poll message dgram.poll request")
+    {
+        Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => request,
+        other => panic!("expected message dgram.poll request, got {other:?}"),
+    };
+    assert_eq!(request.method, "dgram.poll");
+    assert_eq!(request.args, vec![json!("udp-1"), json!(10)]);
+    execution
+        .respond_sync_rpc_success(
+            request.id,
+            json!({
+                "type": "message",
+                "data": {
+                    "__agentOsType": "bytes",
+                    "base64": "cG9uZw==",
+                },
+                "remoteAddress": "127.0.0.1",
+                "remotePort": 7,
+                "remoteFamily": "IPv4",
+            }),
+        )
+        .expect("respond to message dgram.poll");
+
+    let request = match execution
+        .poll_event_blocking(Duration::from_secs(5))
+        .expect("poll dgram.address request")
+    {
+        Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => request,
+        other => panic!("expected dgram.address request, got {other:?}"),
+    };
+    assert_eq!(request.method, "dgram.address");
+    assert_eq!(request.args, vec![json!("udp-1")]);
+    execution
+        .respond_sync_rpc_success(
+            request.id,
+            json!("{\"address\":\"127.0.0.1\",\"port\":45454,\"family\":\"IPv4\"}"),
+        )
+        .expect("respond to dgram.address");
+
+    let request = match execution
+        .poll_event_blocking(Duration::from_secs(5))
+        .expect("poll dgram.close request")
+    {
+        Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => request,
+        other => panic!("expected dgram.close request, got {other:?}"),
+    };
+    assert_eq!(request.method, "dgram.close");
+    assert_eq!(request.args, vec![json!("udp-1")]);
+    execution
+        .respond_sync_rpc_success(request.id, json!(null))
+        .expect("respond to dgram.close");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
 #[test]
 fn javascript_execution_v8_timer_callbacks_fire_and_clear_correctly() {
     let temp = tempdir().expect("create temp dir");

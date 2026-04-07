@@ -24,6 +24,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - When sidecar V8 tests add or rename bridge globals in `crates/v8-runtime/`, rebuild `agent-os-v8` before rerunning `cargo test -p agent-os-sidecar`; the sidecar harness can otherwise reuse a stale `target/debug/agent-os-v8` binary
 - V8 bridge calls use CBOR codec via `SECURE_EXEC_V8_CODEC=cbor` env var; `ciborium` crate handles CBOR↔JSON conversion in the execution crate
 - Internal V8 bridge calls (logging, module resolution, crypto, timers) are handled in the event bridge thread; only kernel operations (fs, net, child_process, dns) go to the sidecar
+- V8 `node:dgram` support in `crates/execution/assets/v8-bridge.js` must keep `loadBuiltinModule("dgram")` and `Module.builtinModules` in sync, and its bridge calls must match the sidecar RPC shapes directly (`createSocket` object payload, `send` bytes plus options, `poll` object-or-null responses) instead of JSON-stringifying everything
 - SQLite bridge payloads between guest JS and Rust should preserve bigint/blob values with `__agentosSqliteType` tagged objects so the CBOR/JSON bridge can round-trip 64-bit integers and binary buffers safely
 - Guest V8 timers split across two host paths in `crates/execution/src/javascript.rs`: `_scheduleTimer` must resolve its async bridge Promise later, while `kernelTimerCreate`/`kernelTimerArm`/`kernelTimerClear` must emit `"timer"` stream events so `setTimeout`/`setInterval` callbacks actually fire
 - The current V8 sync-RPC bridge only tolerates one in-flight request effectively, so long-lived waits like HTTP server close listeners need stream events plus follow-up RPCs instead of a permanently pending sync-bridge Promise
@@ -388,6 +389,15 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Command-based JS/WASM execution must resolve guest-visible entrypoints to host paths before creating V8/WASM runtime contexts; guest paths in sidecar/kernel state are not directly readable by those host-side runtimes
   - `ResponsePayload::Rejected` is the public error surface for invalid execute requests like unknown commands; service tests should assert on the rejected payload instead of expecting `dispatch_blocking()` itself to fail
   - Focused `cargo test -p agent-os-sidecar --test service command_resolution` plus compile-only `--no-run` passes for touched test binaries are the safe verification path here; the repo still warns against a bare sidecar package test run
+---
+## 2026-04-07 15:55:26 PDT - US-028a
+- Fixed the V8 `node:dgram` bridge so socket creation, bind/send, address lookup, and receive polling use the current sidecar RPC payload shapes, and re-enabled the sidecar UDP integration test with in-guest assertions instead of stdout matching
+- Added focused V8 execution coverage that asserts the exact dgram sync-RPC sequence and payload shapes the sidecar expects, including bytes-tagged sends and object/null poll responses
+- Files changed: `crates/execution/assets/v8-bridge.js`, `crates/execution/tests/javascript_v8.rs`, `crates/sidecar/tests/service.rs`, `crates/execution/CLAUDE.md`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - `node:dgram` will silently fall back out of the V8 builtin wrapper path unless `"dgram"` is listed in `Module.builtinModules`, even if `loadBuiltinModule()` already has a `case "dgram"`
+  - The current sidecar dgram bridge expects native payload shapes, not JSON-stringified blobs: `createSocket` takes an options object, `send` takes tagged bytes plus `{ address, port }`, and `poll` returns either a message/error object or `null`
+  - Sidecar UDP integration tests are more reliable when the guest script validates the received payload/address/rinfo internally and exits non-zero on mismatch instead of depending on the final `console.log()` flush
 ---
 ## 2026-04-07 11:01:49 PDT - US-018
 - Removed the last TypeScript-side exec command parsing from `NativeSidecarKernelProxy` so native sidecar `exec()` now always forwards `sh -c <command>` when the guest shell exists and otherwise fails fast instead of tokenizing commands locally

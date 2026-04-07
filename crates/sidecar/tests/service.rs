@@ -6260,7 +6260,6 @@ socket.on("close", (hadError) => {{
         }
 
         #[test]
-        #[ignore = "V8 sidecar UDP integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_dgram_rpc_sends_and_receives_host_udp_packets() {
             assert_node_available();
 
@@ -6317,7 +6316,15 @@ socket.bind(0, "127.0.0.1", () => {{
 }});
 }});
 
-console.log(JSON.stringify(summary));
+if (summary.message !== "pong") {{
+  throw new Error(`unexpected udp message: ${{summary.message}}`);
+}}
+if (summary.address.address !== "127.0.0.1") {{
+  throw new Error(`unexpected udp address: ${{JSON.stringify(summary.address)}}`);
+}}
+if (summary.rinfo.address !== "127.0.0.1" || summary.rinfo.port !== {port}) {{
+  throw new Error(`unexpected udp remote info: ${{JSON.stringify(summary.rinfo)}}`);
+}}
 "#,
                 ),
             );
@@ -6418,15 +6425,6 @@ console.log(JSON.stringify(summary));
 
             server.join().expect("join udp server");
             assert_eq!(exit_code, Some(0), "stderr: {stderr}");
-            assert!(stdout.contains("\"message\":\"pong\""), "stdout: {stdout}");
-            assert!(
-                stdout.contains("\"address\":{\"address\":\"127.0.0.1\""),
-                "stdout: {stdout}"
-            );
-            assert!(
-                stdout.contains(&format!("\"port\":{port}")),
-                "stdout: {stdout}"
-            );
         }
 
         #[test]

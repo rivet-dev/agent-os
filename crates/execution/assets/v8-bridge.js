@@ -15924,6 +15924,36 @@ ${headerLines}\r
     }
     return createDgramMessageBuffer(value);
   }
+  function normalizeDgramBridgeResult(value) {
+    if (typeof value !== "string") {
+      return value;
+    }
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
+  function decodeDgramBridgeBytes(value) {
+    if (Buffer.isBuffer(value)) {
+      return Buffer.from(value);
+    }
+    if (value instanceof Uint8Array) {
+      return Buffer.from(value);
+    }
+    if (typeof value === "string") {
+      return Buffer.from(value, "base64");
+    }
+    if (value && typeof value === "object") {
+      if (value.__type === "Buffer" && typeof value.data === "string") {
+        return Buffer.from(value.data, "base64");
+      }
+      if (value.__agentOsType === "bytes" && typeof value.base64 === "string") {
+        return Buffer.from(value.base64, "base64");
+      }
+    }
+    return Buffer.alloc(0);
+  }
   function normalizeDgramBindArgs(args, type) {
     let port;
     let address;
@@ -16023,7 +16053,10 @@ ${headerLines}\r
       }
       const options = normalizeDgramSocketOptions(optionsOrType);
       this._type = options.type;
-      this._socketId = _dgramSocketCreateRaw.applySync(void 0, [this._type]);
+      const result = normalizeDgramBridgeResult(
+        _dgramSocketCreateRaw.applySync(void 0, [{ type: this._type }])
+      );
+      this._socketId = String(result?.socketId ?? result);
       if (listener) {
         this.on("message", listener);
       }
@@ -16051,7 +16084,7 @@ ${headerLines}\r
         throw createDgramAddressError();
       }
       try {
-        return JSON.parse(
+        return normalizeDgramBridgeResult(
           _dgramSocketAddressRaw.applySync(void 0, [this._socketId])
         );
       } catch {
@@ -16300,11 +16333,10 @@ ${headerLines}\r
       }
       this._bindPromise = (async () => {
         try {
-          const resultJson = _dgramSocketBindRaw.applySyncPromise(void 0, [
+          normalizeDgramBridgeResult(_dgramSocketBindRaw.applySyncPromise(void 0, [
             this._socketId,
-            JSON.stringify({ port, address })
-          ]);
-          JSON.parse(resultJson);
+            { port, address }
+          ]));
           this._bound = true;
           this._applyInitialBufferSizes();
           this._syncHandleRef();
@@ -16343,17 +16375,14 @@ ${headerLines}\r
         if (this._closed || typeof _dgramSocketSendRaw === "undefined") {
           return;
         }
-        const bytes = _dgramSocketSendRaw.applySyncPromise(void 0, [
+        const result = normalizeDgramBridgeResult(_dgramSocketSendRaw.applySyncPromise(void 0, [
           this._socketId,
-          JSON.stringify({
-            data: data.toString("base64"),
-            port,
-            address
-          })
-        ]);
+          data,
+          { port, address }
+        ]));
         if (callback) {
           queueMicrotask(() => {
-            callback(null, bytes);
+            callback(null, typeof result?.bytes === "number" ? result.bytes : data.length);
           });
         }
       } catch (error) {
@@ -16378,8 +16407,10 @@ ${headerLines}\r
       this._receiveLoopRunning = true;
       try {
         while (!this._closed && this._bound) {
-          const payload = _dgramSocketRecvRaw.applySync(void 0, [this._socketId]);
-          if (payload === NET_BRIDGE_TIMEOUT_SENTINEL) {
+          const payload = normalizeDgramBridgeResult(
+            _dgramSocketRecvRaw.applySync(void 0, [this._socketId, NET_BRIDGE_POLL_DELAY_MS])
+          );
+          if (payload === NET_BRIDGE_TIMEOUT_SENTINEL || !payload) {
             this._receivePollTimer = setTimeout(() => {
               this._receivePollTimer = null;
               void this._pumpMessages();
@@ -16389,15 +16420,25 @@ ${headerLines}\r
             }
             return;
           }
-          if (!payload) {
-            return;
+          if (payload.type === "message") {
+            const message = decodeDgramBridgeBytes(payload.data);
+            this._emit("message", message, {
+              address: payload.remoteAddress,
+              family: payload.remoteFamily ?? socketFamilyForAddress(payload.remoteAddress),
+              port: payload.remotePort,
+              size: message.length
+            });
+            continue;
           }
-          const message = JSON.parse(payload);
-          this._emit(
-            "message",
-            Buffer.from(message.data, "base64"),
-            message.rinfo
-          );
+          if (payload.type === "error") {
+            const error = new Error(
+              typeof payload.message === "string" ? payload.message : "Agent OS dgram socket error"
+            );
+            if (typeof payload.code === "string" && payload.code.length > 0) {
+              error.code = payload.code;
+            }
+            this._emit("error", error);
+          }
         }
       } catch (error) {
         this._emit("error", error);
@@ -19380,6 +19421,7 @@ ${headerLines}\r
       "buffer",
       "child_process",
       "crypto",
+      "dgram",
       "dns",
       "events",
       "fs",

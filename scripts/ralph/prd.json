@@ -596,7 +596,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes (no dgram-related regressions)"
       ],
       "priority": 40,
-      "passes": false,
+      "passes": true,
       "notes": "Known blocker from US-009a work. The V8 polyfill sends _dgramSocketSendRaw which maps to dgram.send via map_bridge_method. The sidecar has full dgram handlers in execution.rs (lines 516-584). The bug is in the wiring \u2014 either the sync RPC response isn't reaching the V8 isolate correctly, or the guest-to-host port mapping is broken. Debug the full chain: V8 polyfill \u2192 _dgramSocketSendRaw \u2192 v8_ipc \u2192 v8_host event bridge \u2192 JavascriptSyncRpcRequest \u2192 sidecar execution.rs dgram handler \u2192 UdpSocket::send_to \u2192 response back to V8. Check crates/execution/assets/v8-bridge.js dgram section, crates/execution/src/v8_runtime.rs map_bridge_method, and crates/sidecar/src/execution.rs dgram handlers."
     },
     {
