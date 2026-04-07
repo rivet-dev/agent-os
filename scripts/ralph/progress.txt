@@ -31,6 +31,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - `ConfigureVmRequest` callers need to set `module_access_cwd` (or `None` in Rust tests); the sidecar turns that host cwd into the read-only `/root/node_modules` `module_access` mount automatically
 - Live guest stdin has two paths: `AGENT_OS_KEEP_STDIN_OPEN` still uses `"stdin"` / `"stdin_end"` stream events, but TTY-style `_kernelStdinRead` must read the process’s kernel fd `0` pipe so timeout and EOF can be distinguished
 - Guest `crypto` is easiest to validate in two layers for now: execution tests should cover local entropy hooks (`globalThis.crypto.getRandomValues` / `randomUUID`), while sidecar hash/HMAC/KDF coverage should target `service_javascript_crypto_sync_rpc` directly until the guest builtin module exposes `crypto` cleanly in file-based tests
+- Stateful sidecar crypto handlers now live behind `service_javascript_crypto_sync_rpc(&mut ActiveProcess, ...)`; cipher/Diffie-Hellman sessions are per-process state, and AES-GCM `authTagLength` should size the returned auth tag instead of calling `Crypter::set_tag_len()` during encryption
 - Sidecar-initiated callback frames must keep negative request IDs from the first request onward, and current-thread stdio framing must use dedicated OS threads for stdin/stdout so callback-driven mounts can unblock while the main loop waits synchronously
 - Sidecar TCP tests should connect to VM-owned loopback listeners, not arbitrary host `127.0.0.1` ports; guest loopback connections to host-owned ports are blocked unless the port is explicitly exempted
 - TLS-capable TCP sockets must keep the plaintext reader lazy until the first `net.socket_read`; a background clone that reads too early will consume ClientHello bytes and break SNI inspection plus TLS upgrade
@@ -259,4 +260,14 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - The V8 sync bridge still behaves as a single in-flight sync-RPC channel, so HTTP server waits must use stream events or explicit follow-up RPCs instead of a permanently pending bridge Promise
   - Adding a sidecar handler is not enough for guest builtins: `crates/execution/assets/v8-bridge.js` also has to export the module from the builtin loader or `node:http` fails before RPC dispatch
   - On this branch, `cargo test -p agent-os-sidecar -- --test-threads=1 http` is the stable verification target for sidecar HTTP work; the end-to-end V8 HTTP harness remains flaky unless you are explicitly fixing that harness
+---
+## 2026-04-07 09:34:38 PDT - US-033
+- Added the advanced sidecar crypto dispatch and handler coverage in `crates/sidecar/src/execution.rs`, including cipheriv one-shot/stateful flows, signing/verification, asymmetric RSA ops, key-object/key-generation helpers, Diffie-Hellman session handling, and the `crypto.subtle` sync-RPC entry point
+- Expanded `crates/sidecar/tests/service.rs` with focused advanced crypto coverage and updated the existing basic crypto test harness to construct a real `ActiveProcess` for the now-stateful crypto sync RPC surface
+- Preserved the reusable crypto/session guidance in `crates/AGENTS.md`
+- Files changed: `Cargo.lock`, `crates/AGENTS.md`, `crates/sidecar/Cargo.toml`, `crates/sidecar/src/{execution,state}.rs`, `crates/sidecar/tests/service.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - `service_javascript_crypto_sync_rpc` is no longer a pure helper: tests and callers need a real mutable `ActiveProcess` whenever cipher or Diffie-Hellman session methods are in play
+  - In this OpenSSL provider setup, AES-GCM `authTagLength` should control the size of the tag returned by `get_tag()`; calling `Crypter::set_tag_len()` during encryption fails
+  - `cargo test -p agent-os-sidecar -- --test-threads=1 crypto` is still the right focused verification target for sidecar crypto work on this branch
 ---

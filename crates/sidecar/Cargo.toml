@@ -23,6 +23,7 @@ hickory-resolver = "0.26.0-beta.3"
 jsonwebtoken = "8.3.0"
 md-5 = "0.10"
 nix = { version = "0.29", features = ["fs", "process", "signal", "user"] }
+openssl = "0.10"
 pbkdf2 = "0.12"
 rustls = { version = "0.23.37", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-native-certs = "0.8"

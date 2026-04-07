@@ -393,6 +393,31 @@ pub(crate) struct ActiveProcess {
     pub(crate) next_unix_socket_id: usize,
     pub(crate) udp_sockets: BTreeMap<String, ActiveUdpSocket>,
     pub(crate) next_udp_socket_id: usize,
+    pub(crate) cipher_sessions: BTreeMap<u64, ActiveCipherSession>,
+    pub(crate) next_cipher_session_id: u64,
+    pub(crate) diffie_hellman_sessions: BTreeMap<u64, ActiveDiffieHellmanSession>,
+    pub(crate) next_diffie_hellman_session_id: u64,
+}
+
+pub(crate) struct ActiveCipherSession {
+    pub(crate) algorithm: String,
+    pub(crate) auth_tag_len: usize,
+    pub(crate) context: openssl::symm::Crypter,
+}
+
+pub(crate) enum ActiveDiffieHellmanSession {
+    Dh(ActiveDhSession),
+    Ecdh(ActiveEcdhSession),
+}
+
+pub(crate) struct ActiveDhSession {
+    pub(crate) params: openssl::dh::Dh<openssl::pkey::Params>,
+    pub(crate) key_pair: Option<openssl::dh::Dh<openssl::pkey::Private>>,
+}
+
+pub(crate) struct ActiveEcdhSession {
+    pub(crate) curve: String,
+    pub(crate) key_pair: Option<openssl::ec::EcKey<openssl::pkey::Private>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

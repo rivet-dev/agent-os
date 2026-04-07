@@ -685,7 +685,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 crypto passes"
       ],
       "priority": 17,
-      "passes": false,
+      "passes": true,
       "notes": "Lower priority than US-032 (basic crypto). Same pattern \u2014 add match arms to the crypto handler. 17 methods total. The cipheriv family uses stateful cipher contexts (create \u2192 update \u2192 final). Key operations need RSA/EC/Ed25519 support. crypto.subtle is the WebCrypto API subset. Reference: .agent/recovery/secure-exec/nodejs/src/bridge-handlers.ts."
     },
     {

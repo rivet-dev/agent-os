@@ -22,6 +22,7 @@ use crate::service::{
     wasm_error,
 };
 use crate::state::{
+    ActiveCipherSession, ActiveDhSession, ActiveDiffieHellmanSession, ActiveEcdhSession,
     ActiveExecution, ActiveExecutionEvent, ActiveHttpServer, ActiveProcess, ActiveTcpListener,
     ActiveTcpSocket, ActiveTlsState, ActiveTlsStream, ActiveUdpSocket, ActiveUnixListener,
     ActiveUnixSocket,
@@ -65,6 +66,19 @@ use nix::libc;
 use nix::sys::signal::{Signal, kill as send_signal};
 use nix::sys::wait::{Id as WaitId, WaitPidFlag, WaitStatus, waitid as wait_on_child};
 use nix::unistd::Pid;
+use openssl::bn::{BigNum, BigNumContext};
+use openssl::derive::Deriver;
+use openssl::dh::Dh;
+use openssl::ec::{EcGroup, EcKey, EcPoint, PointConversionForm};
+use openssl::hash::MessageDigest;
+use openssl::md::Md;
+use openssl::nid::Nid;
+use openssl::pkcs5;
+use openssl::pkey::{Id as PKeyId, PKey, Params, Private, Public};
+use openssl::rand::rand_bytes;
+use openssl::rsa::{Padding, Rsa};
+use openssl::sign::{Signer, Verifier};
+use openssl::symm::{Cipher, Crypter, Mode};
 use pbkdf2::pbkdf2_hmac;
 use rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
@@ -76,7 +90,7 @@ use rustls::{
     ServerConnection, SignatureScheme,
 };
 use scrypt::{Params as ScryptParams, scrypt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512, digest::Digest};
@@ -220,6 +234,10 @@ impl ActiveProcess {
             next_unix_socket_id: 0,
             udp_sockets: BTreeMap::new(),
             next_udp_socket_id: 0,
+            cipher_sessions: BTreeMap::new(),
+            next_cipher_session_id: 0,
+            diffie_hellman_sessions: BTreeMap::new(),
+            next_diffie_hellman_session_id: 0,
         }
     }
 
@@ -4912,9 +4930,27 @@ where
 {
     match request.method.as_str() {
         "__kernel_stdin_read" => service_javascript_kernel_stdin_sync_rpc(kernel, process, request),
-        "crypto.hashDigest" | "crypto.hmacDigest" | "crypto.pbkdf2" | "crypto.scrypt" => {
-            service_javascript_crypto_sync_rpc(request)
-        }
+        "crypto.hashDigest"
+        | "crypto.hmacDigest"
+        | "crypto.pbkdf2"
+        | "crypto.scrypt"
+        | "crypto.cipheriv"
+        | "crypto.decipheriv"
+        | "crypto.cipherivCreate"
+        | "crypto.cipherivUpdate"
+        | "crypto.cipherivFinal"
+        | "crypto.sign"
+        | "crypto.verify"
+        | "crypto.asymmetricOp"
+        | "crypto.createKeyObject"
+        | "crypto.generateKeyPairSync"
+        | "crypto.generateKeySync"
+        | "crypto.generatePrimeSync"
+        | "crypto.diffieHellman"
+        | "crypto.diffieHellmanGroup"
+        | "crypto.diffieHellmanSessionCreate"
+        | "crypto.diffieHellmanSessionCall"
+        | "crypto.subtle" => service_javascript_crypto_sync_rpc(process, request),
         "dns.lookup" | "dns.resolve" | "dns.resolve4" | "dns.resolve6" => {
             service_javascript_dns_sync_rpc(bridge, vm_id, dns, request)
         }
@@ -4986,6 +5022,7 @@ where
 }
 
 pub(crate) fn service_javascript_crypto_sync_rpc(
+    process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
 ) -> Result<Value, SidecarError> {
     match request.method.as_str() {
@@ -5093,6 +5130,37 @@ pub(crate) fn service_javascript_crypto_sync_rpc(
                 base64::engine::general_purpose::STANDARD.encode(output),
             ))
         }
+        "crypto.cipheriv" => service_javascript_crypto_cipheriv_sync_rpc(request),
+        "crypto.decipheriv" => service_javascript_crypto_decipheriv_sync_rpc(request),
+        "crypto.cipherivCreate" => {
+            service_javascript_crypto_cipheriv_create_sync_rpc(process, request)
+        }
+        "crypto.cipherivUpdate" => {
+            service_javascript_crypto_cipheriv_update_sync_rpc(process, request)
+        }
+        "crypto.cipherivFinal" => {
+            service_javascript_crypto_cipheriv_final_sync_rpc(process, request)
+        }
+        "crypto.sign" => service_javascript_crypto_sign_sync_rpc(request),
+        "crypto.verify" => service_javascript_crypto_verify_sync_rpc(request),
+        "crypto.asymmetricOp" => service_javascript_crypto_asymmetric_op_sync_rpc(request),
+        "crypto.createKeyObject" => service_javascript_crypto_create_key_object_sync_rpc(request),
+        "crypto.generateKeyPairSync" => {
+            service_javascript_crypto_generate_key_pair_sync_rpc(request)
+        }
+        "crypto.generateKeySync" => service_javascript_crypto_generate_key_sync_rpc(request),
+        "crypto.generatePrimeSync" => service_javascript_crypto_generate_prime_sync_rpc(request),
+        "crypto.diffieHellman" => service_javascript_crypto_diffie_hellman_sync_rpc(request),
+        "crypto.diffieHellmanGroup" => {
+            service_javascript_crypto_diffie_hellman_group_sync_rpc(request)
+        }
+        "crypto.diffieHellmanSessionCreate" => {
+            service_javascript_crypto_diffie_hellman_session_create_sync_rpc(process, request)
+        }
+        "crypto.diffieHellmanSessionCall" => {
+            service_javascript_crypto_diffie_hellman_session_call_sync_rpc(process, request)
+        }
+        "crypto.subtle" => service_javascript_crypto_subtle_sync_rpc(request),
         _ => Err(SidecarError::InvalidState(format!(
             "unsupported JavaScript crypto sync RPC method {}",
             request.method
@@ -5171,6 +5239,1557 @@ impl JavascriptCryptoDigestAlgorithm {
             Self::Sha512 => pbkdf2_hmac::<Sha512>(password, salt, iterations, output),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+enum JavascriptCryptoKeyMaterial {
+    Private(PKey<Private>),
+    Public(PKey<Public>),
+    Secret(Vec<u8>),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct JavascriptSerializedSandboxKeyObject {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "asymmetricKeyType")]
+    asymmetric_key_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "asymmetricKeyDetails")]
+    asymmetric_key_details: Option<Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jwk: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct JavascriptDirectKeyInput {
+    key: JavascriptCryptoKeyMaterial,
+    padding: Option<Padding>,
+}
+
+fn service_javascript_crypto_cipheriv_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    service_javascript_crypto_cipheriv_inner(request, false)
+}
+
+fn service_javascript_crypto_decipheriv_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    service_javascript_crypto_cipheriv_inner(request, true)
+}
+
+fn service_javascript_crypto_cipheriv_create_sync_rpc(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let mode = javascript_sync_rpc_arg_str(&request.args, 0, "crypto.cipherivCreate mode")?;
+    let decrypt = mode == "decipher";
+    let algorithm =
+        javascript_sync_rpc_arg_str(&request.args, 1, "crypto.cipherivCreate algorithm")?;
+    let key = javascript_sync_rpc_base64_arg(&request.args, 2, "crypto.cipherivCreate key")?;
+    let iv = javascript_sync_rpc_base64_arg_optional(&request.args, 3, "crypto.cipherivCreate iv")?;
+    let options = javascript_sync_rpc_json_arg_optional(
+        &request.args,
+        4,
+        "crypto.cipherivCreate options",
+    )?;
+    let auth_tag_len = javascript_crypto_requested_aead_tag_len(&algorithm, options.as_ref())?;
+    let context =
+        javascript_crypto_build_cipher_context(&algorithm, &key, iv.as_deref(), decrypt, options.as_ref())?;
+    process.next_cipher_session_id += 1;
+    let session_id = process.next_cipher_session_id;
+    process.cipher_sessions.insert(
+        session_id,
+        ActiveCipherSession {
+            algorithm: algorithm.to_string(),
+            auth_tag_len,
+            context,
+        },
+    );
+    Ok(json!(session_id))
+}
+
+fn service_javascript_crypto_cipheriv_update_sync_rpc(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let session_id =
+        javascript_sync_rpc_arg_u64(&request.args, 0, "crypto.cipherivUpdate session id")?;
+    let data = javascript_sync_rpc_base64_arg(&request.args, 1, "crypto.cipherivUpdate data")?;
+    let session = process.cipher_sessions.get_mut(&session_id).ok_or_else(|| {
+        SidecarError::InvalidState(format!("Cipher session {session_id} not found"))
+    })?;
+    let result = javascript_crypto_cipher_update(&mut session.context, &data)?;
+    Ok(Value::String(
+        base64::engine::general_purpose::STANDARD.encode(result),
+    ))
+}
+
+fn service_javascript_crypto_cipheriv_final_sync_rpc(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let session_id =
+        javascript_sync_rpc_arg_u64(&request.args, 0, "crypto.cipherivFinal session id")?;
+    let mut session = process.cipher_sessions.remove(&session_id).ok_or_else(|| {
+        SidecarError::InvalidState(format!("Cipher session {session_id} not found"))
+    })?;
+    let data = javascript_crypto_cipher_finalize(&mut session.context)?;
+    let mut response = Map::new();
+    response.insert(
+        String::from("data"),
+        Value::String(base64::engine::general_purpose::STANDARD.encode(data)),
+    );
+    if javascript_crypto_is_aead(&session.algorithm) {
+        let mut auth_tag = vec![0_u8; session.auth_tag_len];
+        session
+            .context
+            .get_tag(&mut auth_tag)
+            .map_err(javascript_crypto_openssl_error)?;
+        response.insert(
+            String::from("authTag"),
+            Value::String(base64::engine::general_purpose::STANDARD.encode(auth_tag)),
+        );
+    }
+    Ok(Value::String(
+        serde_json::to_string(&response)
+            .map_err(|error| SidecarError::InvalidState(format!("serialize cipher final response: {error}")))?,
+    ))
+}
+
+fn service_javascript_crypto_sign_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let algorithm = request.args.first().and_then(Value::as_str);
+    let data = javascript_sync_rpc_base64_arg(&request.args, 1, "crypto.sign data")?;
+    let key_json = javascript_sync_rpc_arg_str(&request.args, 2, "crypto.sign key")?;
+    let key_input =
+        javascript_crypto_parse_direct_key_input(key_json, Some("private"), "crypto.sign key")?;
+    let private_key = javascript_crypto_expect_private_key(key_input.key, "crypto.sign key")?;
+    let mut signer = javascript_crypto_new_signer(algorithm, &private_key)?;
+    if let Some(padding) = key_input.padding {
+        signer
+            .set_rsa_padding(padding)
+            .map_err(javascript_crypto_openssl_error)?;
+    }
+    signer
+        .update(&data)
+        .map_err(javascript_crypto_openssl_error)?;
+    Ok(Value::String(
+        base64::engine::general_purpose::STANDARD.encode(
+            signer.sign_to_vec().map_err(javascript_crypto_openssl_error)?,
+        ),
+    ))
+}
+
+fn service_javascript_crypto_verify_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let algorithm = request.args.first().and_then(Value::as_str);
+    let data = javascript_sync_rpc_base64_arg(&request.args, 1, "crypto.verify data")?;
+    let key_json = javascript_sync_rpc_arg_str(&request.args, 2, "crypto.verify key")?;
+    let signature =
+        javascript_sync_rpc_base64_arg(&request.args, 3, "crypto.verify signature")?;
+    let key_input =
+        javascript_crypto_parse_direct_key_input(key_json, Some("public"), "crypto.verify key")?;
+    let public_key = javascript_crypto_expect_public_key(key_input.key, "crypto.verify key")?;
+    let mut verifier = javascript_crypto_new_verifier(algorithm, &public_key)?;
+    if let Some(padding) = key_input.padding {
+        verifier
+            .set_rsa_padding(padding)
+            .map_err(javascript_crypto_openssl_error)?;
+    }
+    verifier
+        .update(&data)
+        .map_err(javascript_crypto_openssl_error)?;
+    Ok(json!(
+        verifier
+            .verify(&signature)
+            .map_err(javascript_crypto_openssl_error)?
+    ))
+}
+
+fn service_javascript_crypto_asymmetric_op_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let operation =
+        javascript_sync_rpc_arg_str(&request.args, 0, "crypto.asymmetricOp operation")?;
+    let key_json = javascript_sync_rpc_arg_str(&request.args, 1, "crypto.asymmetricOp key")?;
+    let data = javascript_sync_rpc_base64_arg(&request.args, 2, "crypto.asymmetricOp data")?;
+    let expect_kind = match operation {
+        "publicEncrypt" | "publicDecrypt" => Some("public"),
+        "privateEncrypt" | "privateDecrypt" => Some("private"),
+        other => {
+            return Err(SidecarError::InvalidState(format!(
+                "Unsupported asymmetric crypto operation: {other}"
+            )));
+        }
+    };
+    let key_input = javascript_crypto_parse_direct_key_input(
+        key_json,
+        expect_kind,
+        "crypto.asymmetricOp key",
+    )?;
+    let padding = key_input.padding.unwrap_or(Padding::PKCS1);
+    let mut output = vec![0_u8; javascript_crypto_rsa_output_size(&key_input.key)?];
+    let written = match (operation, key_input.key) {
+        ("publicEncrypt", JavascriptCryptoKeyMaterial::Public(key))
+        | ("publicDecrypt", JavascriptCryptoKeyMaterial::Public(key)) => {
+            let rsa = key.rsa().map_err(javascript_crypto_openssl_error)?;
+            if operation == "publicEncrypt" {
+                rsa.public_encrypt(&data, &mut output, padding)
+                    .map_err(javascript_crypto_openssl_error)?
+            } else {
+                rsa.public_decrypt(&data, &mut output, padding)
+                    .map_err(javascript_crypto_openssl_error)?
+            }
+        }
+        ("privateEncrypt", JavascriptCryptoKeyMaterial::Private(key))
+        | ("privateDecrypt", JavascriptCryptoKeyMaterial::Private(key)) => {
+            let rsa = key.rsa().map_err(javascript_crypto_openssl_error)?;
+            if operation == "privateEncrypt" {
+                rsa.private_encrypt(&data, &mut output, padding)
+                    .map_err(javascript_crypto_openssl_error)?
+            } else {
+                rsa.private_decrypt(&data, &mut output, padding)
+                    .map_err(javascript_crypto_openssl_error)?
+            }
+        }
+        _ => {
+            return Err(SidecarError::InvalidState(format!(
+                "{operation} requires an RSA {} key",
+                expect_kind.unwrap_or("asymmetric")
+            )));
+        }
+    };
+    output.truncate(written);
+    Ok(Value::String(
+        base64::engine::general_purpose::STANDARD.encode(output),
+    ))
+}
+
+fn service_javascript_crypto_create_key_object_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let operation =
+        javascript_sync_rpc_arg_str(&request.args, 0, "crypto.createKeyObject operation")?;
+    let key_json = javascript_sync_rpc_arg_str(&request.args, 1, "crypto.createKeyObject key")?;
+    let expected = match operation {
+        "createPrivateKey" => Some("private"),
+        "createPublicKey" => Some("public"),
+        other => {
+            return Err(SidecarError::InvalidState(format!(
+                "Unsupported key creation operation: {other}"
+            )));
+        }
+    };
+    let key_input = javascript_crypto_parse_direct_key_input(
+        key_json,
+        expected,
+        "crypto.createKeyObject key",
+    )?;
+    Ok(Value::String(
+        serde_json::to_string(&javascript_crypto_serialize_sandbox_key_object(
+            &key_input.key,
+        )?)
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("serialize crypto key object: {error}"))
+        })?,
+    ))
+}
+
+fn service_javascript_crypto_generate_key_pair_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let key_type =
+        javascript_sync_rpc_arg_str(&request.args, 0, "crypto.generateKeyPairSync type")?;
+    let options = javascript_crypto_parse_serialized_options_arg(
+        &request.args,
+        1,
+        "crypto.generateKeyPairSync options",
+    )?
+    .unwrap_or(Value::Object(Map::new()));
+    let public_encoding = options.get("publicKeyEncoding").cloned();
+    let private_encoding = options.get("privateKeyEncoding").cloned();
+
+    let private_key = match key_type {
+        "rsa" => {
+            let bits = options
+                .get("modulusLength")
+                .and_then(Value::as_u64)
+                .unwrap_or(2048) as u32;
+            let exponent = options
+                .get("publicExponent")
+                .map(|value| javascript_crypto_u32_from_bridge_value(value, "rsa publicExponent"))
+                .transpose()?
+                .unwrap_or(65_537);
+            let exponent = BigNum::from_u32(exponent).map_err(javascript_crypto_openssl_error)?;
+            let rsa =
+                Rsa::generate_with_e(bits, &exponent).map_err(javascript_crypto_openssl_error)?;
+            PKey::from_rsa(rsa).map_err(javascript_crypto_openssl_error)?
+        }
+        "ec" => {
+            let named_curve = options
+                .get("namedCurve")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from(
+                        "crypto.generateKeyPairSync ec requires namedCurve",
+                    ))
+                })?;
+            let group = EcGroup::from_curve_name(
+                javascript_crypto_curve_nid(named_curve)?
+            )
+            .map_err(javascript_crypto_openssl_error)?;
+            let key = EcKey::generate(&group).map_err(javascript_crypto_openssl_error)?;
+            PKey::from_ec_key(key).map_err(javascript_crypto_openssl_error)?
+        }
+        "ed25519" => PKey::generate_ed25519().map_err(javascript_crypto_openssl_error)?,
+        "x25519" => PKey::generate_x25519().map_err(javascript_crypto_openssl_error)?,
+        other => {
+            return Err(SidecarError::InvalidState(format!(
+                "unsupported crypto key pair type {other}"
+            )));
+        }
+    };
+    let public_key = PKey::public_key_from_pem(
+        &private_key
+            .public_key_to_pem()
+            .map_err(javascript_crypto_openssl_error)?,
+    )
+    .map_err(javascript_crypto_openssl_error)?;
+    let response = if public_encoding.is_some() || private_encoding.is_some() {
+        json!({
+            "publicKey": javascript_crypto_serialize_encoded_key_value_public(&public_key, public_encoding.as_ref())?,
+            "privateKey": javascript_crypto_serialize_encoded_key_value_private(&private_key, private_encoding.as_ref())?,
+        })
+    } else {
+        json!({
+            "publicKey": javascript_crypto_serialize_sandbox_key_object(&JavascriptCryptoKeyMaterial::Public(public_key))?,
+            "privateKey": javascript_crypto_serialize_sandbox_key_object(&JavascriptCryptoKeyMaterial::Private(private_key))?,
+        })
+    };
+    Ok(Value::String(
+        serde_json::to_string(&response).map_err(|error| {
+            SidecarError::InvalidState(format!("serialize generated key pair: {error}"))
+        })?,
+    ))
+}
+
+fn service_javascript_crypto_generate_key_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let key_type =
+        javascript_sync_rpc_arg_str(&request.args, 0, "crypto.generateKeySync type")?;
+    let options = javascript_crypto_parse_serialized_options_arg(
+        &request.args,
+        1,
+        "crypto.generateKeySync options",
+    )?
+    .unwrap_or(Value::Object(Map::new()));
+    let bit_length = options
+        .get("length")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            SidecarError::InvalidState(String::from(
+                "crypto.generateKeySync options.length is required",
+            ))
+        })? as usize;
+    let mut raw = vec![0_u8; bit_length.div_ceil(8)];
+    rand_bytes(&mut raw).map_err(javascript_crypto_openssl_error)?;
+    let serialized = match key_type {
+        "hmac" => javascript_crypto_serialize_sandbox_key_object(
+            &JavascriptCryptoKeyMaterial::Secret(raw),
+        )?,
+        "aes" => javascript_crypto_serialize_sandbox_key_object(
+            &JavascriptCryptoKeyMaterial::Secret(raw),
+        )?,
+        other => {
+            return Err(SidecarError::InvalidState(format!(
+                "unsupported crypto.generateKeySync type {other}"
+            )));
+        }
+    };
+    Ok(Value::String(
+        serde_json::to_string(&serialized).map_err(|error| {
+            SidecarError::InvalidState(format!("serialize generated key: {error}"))
+        })?,
+    ))
+}
+
+fn service_javascript_crypto_generate_prime_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let bits =
+        javascript_sync_rpc_arg_u64(&request.args, 0, "crypto.generatePrimeSync size")? as i32;
+    let options = javascript_crypto_parse_serialized_options_arg(
+        &request.args,
+        1,
+        "crypto.generatePrimeSync options",
+    )?
+    .unwrap_or(Value::Object(Map::new()));
+    let safe = options.get("safe").and_then(Value::as_bool).unwrap_or(false);
+    let add = options
+        .get("add")
+        .map(|value| javascript_crypto_bignum_from_bridge_value(value, "prime add"))
+        .transpose()?;
+    let rem = options
+        .get("rem")
+        .map(|value| javascript_crypto_bignum_from_bridge_value(value, "prime rem"))
+        .transpose()?;
+    let mut prime = BigNum::new().map_err(javascript_crypto_openssl_error)?;
+    prime
+        .generate_prime(bits, safe, add.as_deref(), rem.as_deref())
+        .map_err(javascript_crypto_openssl_error)?;
+    let payload = if options.get("bigint").and_then(Value::as_bool).unwrap_or(false) {
+        json!({
+            "__type": "bigint",
+            "value": prime.to_dec_str().map_err(javascript_crypto_openssl_error)?.to_string(),
+        })
+    } else {
+        json!({
+            "__type": "buffer",
+            "value": base64::engine::general_purpose::STANDARD.encode(prime.to_vec()),
+        })
+    };
+    Ok(Value::String(
+        serde_json::to_string(&payload).map_err(|error| {
+            SidecarError::InvalidState(format!("serialize generated prime: {error}"))
+        })?,
+    ))
+}
+
+fn service_javascript_crypto_diffie_hellman_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let options = javascript_sync_rpc_arg_str(&request.args, 0, "crypto.diffieHellman options")?;
+    let parsed: Value = serde_json::from_str(options).map_err(|error| {
+        SidecarError::InvalidState(format!("crypto.diffieHellman options must be valid JSON: {error}"))
+    })?;
+    let private_key = javascript_crypto_parse_key_material_value(
+        parsed.get("privateKey").ok_or_else(|| {
+            SidecarError::InvalidState(String::from("crypto.diffieHellman missing privateKey"))
+        })?,
+        Some("private"),
+        "crypto.diffieHellman privateKey",
+    )?;
+    let public_key = javascript_crypto_parse_key_material_value(
+        parsed.get("publicKey").ok_or_else(|| {
+            SidecarError::InvalidState(String::from("crypto.diffieHellman missing publicKey"))
+        })?,
+        Some("public"),
+        "crypto.diffieHellman publicKey",
+    )?;
+    let private_key = javascript_crypto_expect_private_key(private_key, "crypto.diffieHellman privateKey")?;
+    let public_key = javascript_crypto_expect_public_key(public_key, "crypto.diffieHellman publicKey")?;
+    let mut deriver = Deriver::new(&private_key).map_err(javascript_crypto_openssl_error)?;
+    deriver
+        .set_peer(&public_key)
+        .map_err(javascript_crypto_openssl_error)?;
+    let secret = deriver.derive_to_vec().map_err(javascript_crypto_openssl_error)?;
+    Ok(Value::String(
+        serde_json::to_string(&json!({
+            "__type": "buffer",
+            "value": base64::engine::general_purpose::STANDARD.encode(secret),
+        }))
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("serialize derived secret: {error}"))
+        })?,
+    ))
+}
+
+fn service_javascript_crypto_diffie_hellman_group_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let name =
+        javascript_sync_rpc_arg_str(&request.args, 0, "crypto.diffieHellmanGroup name")?;
+    let params = javascript_crypto_named_dh_group(name)?;
+    let response = json!({
+        "prime": {
+            "__type": "buffer",
+            "value": base64::engine::general_purpose::STANDARD.encode(params.prime_p().to_vec()),
+        },
+        "generator": {
+            "__type": "buffer",
+            "value": base64::engine::general_purpose::STANDARD.encode(params.generator().to_vec()),
+        },
+    });
+    Ok(Value::String(
+        serde_json::to_string(&response).map_err(|error| {
+            SidecarError::InvalidState(format!("serialize diffieHellmanGroup response: {error}"))
+        })?,
+    ))
+}
+
+fn service_javascript_crypto_diffie_hellman_session_create_sync_rpc(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let raw =
+        javascript_sync_rpc_arg_str(&request.args, 0, "crypto.diffieHellmanSessionCreate request")?;
+    let parsed: Value = serde_json::from_str(raw).map_err(|error| {
+        SidecarError::InvalidState(format!(
+            "crypto.diffieHellmanSessionCreate request must be valid JSON: {error}"
+        ))
+    })?;
+    let session = match parsed.get("type").and_then(Value::as_str) {
+        Some("group") => {
+            let name = parsed
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from(
+                        "crypto.diffieHellmanSessionCreate group requires name",
+                    ))
+                })?;
+            ActiveDiffieHellmanSession::Dh(ActiveDhSession {
+                params: javascript_crypto_named_dh_group(name)?,
+                key_pair: None,
+            })
+        }
+        Some("dh") => {
+            let args = parsed
+                .get("args")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from(
+                        "crypto.diffieHellmanSessionCreate dh requires args",
+                    ))
+                })?;
+            let params = javascript_crypto_build_dh_params(args)?;
+            ActiveDiffieHellmanSession::Dh(ActiveDhSession {
+                params,
+                key_pair: None,
+            })
+        }
+        Some("ecdh") => {
+            let curve = parsed
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from(
+                        "crypto.diffieHellmanSessionCreate ecdh requires name",
+                    ))
+                })?;
+            ActiveDiffieHellmanSession::Ecdh(ActiveEcdhSession {
+                curve: curve.to_string(),
+                key_pair: None,
+            })
+        }
+        other => {
+            return Err(SidecarError::InvalidState(format!(
+                "Unsupported Diffie-Hellman session type: {}",
+                other.unwrap_or("<missing>")
+            )));
+        }
+    };
+    process.next_diffie_hellman_session_id += 1;
+    let session_id = process.next_diffie_hellman_session_id;
+    process.diffie_hellman_sessions.insert(session_id, session);
+    Ok(json!(session_id))
+}
+
+fn service_javascript_crypto_diffie_hellman_session_call_sync_rpc(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let session_id =
+        javascript_sync_rpc_arg_u64(&request.args, 0, "crypto.diffieHellmanSessionCall session id")?;
+    let raw =
+        javascript_sync_rpc_arg_str(&request.args, 1, "crypto.diffieHellmanSessionCall request")?;
+    let parsed: Value = serde_json::from_str(raw).map_err(|error| {
+        SidecarError::InvalidState(format!(
+            "crypto.diffieHellmanSessionCall request must be valid JSON: {error}"
+        ))
+    })?;
+    let method = parsed
+        .get("method")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            SidecarError::InvalidState(String::from(
+                "crypto.diffieHellmanSessionCall request missing method",
+            ))
+        })?;
+    let args = parsed
+        .get("args")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let session = process.diffie_hellman_sessions.get_mut(&session_id).ok_or_else(|| {
+        SidecarError::InvalidState(format!(
+            "Diffie-Hellman session {session_id} not found"
+        ))
+    })?;
+    let (result, has_result) = match session {
+        ActiveDiffieHellmanSession::Dh(session) => {
+            javascript_crypto_call_dh_session(session, method, &args)?
+        }
+        ActiveDiffieHellmanSession::Ecdh(session) => {
+            javascript_crypto_call_ecdh_session(session, method, &args)?
+        }
+    };
+    Ok(Value::String(
+        serde_json::to_string(&json!({
+            "result": result,
+            "hasResult": has_result,
+        }))
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("serialize diffie session result: {error}"))
+        })?,
+    ))
+}
+
+fn service_javascript_crypto_subtle_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let raw = javascript_sync_rpc_arg_str(&request.args, 0, "crypto.subtle request")?;
+    let parsed: Value = serde_json::from_str(raw).map_err(|error| {
+        SidecarError::InvalidState(format!("crypto.subtle request must be valid JSON: {error}"))
+    })?;
+    let op = parsed.get("op").and_then(Value::as_str).ok_or_else(|| {
+        SidecarError::InvalidState(String::from("crypto.subtle request missing op"))
+    })?;
+    match op {
+        "digest" => {
+            let algorithm = parsed.get("algorithm").and_then(Value::as_str).ok_or_else(|| {
+                SidecarError::InvalidState(String::from("crypto.subtle.digest missing algorithm"))
+            })?;
+            let data = parsed.get("data").and_then(Value::as_str).ok_or_else(|| {
+                SidecarError::InvalidState(String::from("crypto.subtle.digest missing data"))
+            })?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|error| {
+                    SidecarError::InvalidState(format!(
+                        "crypto.subtle.digest data base64: {error}"
+                    ))
+                })?;
+            let digest = JavascriptCryptoDigestAlgorithm::parse(algorithm)?.digest(&bytes);
+            Ok(Value::String(
+                serde_json::to_string(&json!({
+                    "data": base64::engine::general_purpose::STANDARD.encode(digest),
+                }))
+                .map_err(|error| {
+                    SidecarError::InvalidState(format!("serialize crypto.subtle digest: {error}"))
+                })?,
+            ))
+        }
+        _ => Err(SidecarError::InvalidState(format!(
+            "Unsupported subtle operation: {op}"
+        ))),
+    }
+}
+
+fn service_javascript_crypto_cipheriv_inner(
+    request: &JavascriptSyncRpcRequest,
+    decrypt: bool,
+) -> Result<Value, SidecarError> {
+    let label = if decrypt {
+        "crypto.decipheriv"
+    } else {
+        "crypto.cipheriv"
+    };
+    let algorithm = javascript_sync_rpc_arg_str(&request.args, 0, &format!("{label} algorithm"))?;
+    let key = javascript_sync_rpc_base64_arg(&request.args, 1, &format!("{label} key"))?;
+    let iv = javascript_sync_rpc_base64_arg_optional(&request.args, 2, &format!("{label} iv"))?;
+    let data = javascript_sync_rpc_base64_arg(&request.args, 3, &format!("{label} data"))?;
+    let options =
+        javascript_sync_rpc_json_arg_optional(&request.args, 4, &format!("{label} options"))?;
+    let auth_tag_len = javascript_crypto_requested_aead_tag_len(&algorithm, options.as_ref())?;
+    let mut context =
+        javascript_crypto_build_cipher_context(&algorithm, &key, iv.as_deref(), decrypt, options.as_ref())?;
+    let payload = javascript_crypto_cipher_update(&mut context, &data)?;
+    let final_bytes = javascript_crypto_cipher_finalize(&mut context)?;
+    if decrypt {
+        let mut output = payload;
+        output.extend(final_bytes);
+        return Ok(Value::String(
+            base64::engine::general_purpose::STANDARD.encode(output),
+        ));
+    }
+
+    let mut response = Map::new();
+    let mut encrypted = payload;
+    encrypted.extend(final_bytes);
+    response.insert(
+        String::from("data"),
+        Value::String(base64::engine::general_purpose::STANDARD.encode(encrypted)),
+    );
+    if javascript_crypto_is_aead(&algorithm) {
+        let mut auth_tag = vec![0_u8; auth_tag_len];
+        context
+            .get_tag(&mut auth_tag)
+            .map_err(javascript_crypto_openssl_error)?;
+        response.insert(
+            String::from("authTag"),
+            Value::String(base64::engine::general_purpose::STANDARD.encode(auth_tag)),
+        );
+    }
+    Ok(Value::String(
+        serde_json::to_string(&response)
+            .map_err(|error| SidecarError::InvalidState(format!("serialize {label} response: {error}")))?,
+    ))
+}
+
+fn javascript_sync_rpc_base64_arg_optional(
+    args: &[Value],
+    index: usize,
+    label: &str,
+) -> Result<Option<Vec<u8>>, SidecarError> {
+    if args.get(index).is_none() || args[index].is_null() {
+        return Ok(None);
+    }
+    javascript_sync_rpc_base64_arg(args, index, label).map(Some)
+}
+
+fn javascript_sync_rpc_json_arg_optional(
+    args: &[Value],
+    index: usize,
+    label: &str,
+) -> Result<Option<Value>, SidecarError> {
+    if args.get(index).is_none() || args[index].is_null() {
+        return Ok(None);
+    }
+    let raw = javascript_sync_rpc_arg_str(args, index, label)?;
+    serde_json::from_str(raw)
+        .map(Some)
+        .map_err(|error| SidecarError::InvalidState(format!("{label} must be valid JSON: {error}")))
+}
+
+fn javascript_crypto_parse_direct_key_input(
+    raw: &str,
+    expected: Option<&str>,
+    label: &str,
+) -> Result<JavascriptDirectKeyInput, SidecarError> {
+    let parsed: Value = serde_json::from_str(raw)
+        .map_err(|error| SidecarError::InvalidState(format!("{label} must be valid JSON: {error}")))?;
+    let padding = match parsed.as_object().and_then(|value| value.get("padding")) {
+        Some(value) => javascript_crypto_padding_from_value(value)?,
+        None => None,
+    };
+    Ok(JavascriptDirectKeyInput {
+        key: javascript_crypto_parse_key_material_value(&parsed, expected, label)?,
+        padding,
+    })
+}
+
+fn javascript_crypto_parse_key_material_value(
+    value: &Value,
+    expected: Option<&str>,
+    label: &str,
+) -> Result<JavascriptCryptoKeyMaterial, SidecarError> {
+    if let Some(object) = value.as_object() {
+        if object.get("__type").and_then(Value::as_str) == Some("keyObject") {
+            let serialized = object.get("value").ok_or_else(|| {
+                SidecarError::InvalidState(format!("{label} keyObject is missing a value"))
+            })?;
+            return javascript_crypto_parse_serialized_key_object(serialized, expected, label);
+        }
+        if object.contains_key("type") && (object.contains_key("pem") || object.contains_key("raw")) {
+            return javascript_crypto_parse_serialized_key_object(value, expected, label);
+        }
+        if let Some(source) = object.get("key") {
+            return javascript_crypto_parse_key_source(
+                source,
+                object.get("format").and_then(Value::as_str),
+                object.get("type").and_then(Value::as_str),
+                expected,
+                label,
+            );
+        }
+    }
+    javascript_crypto_parse_key_source(value, None, None, expected, label)
+}
+
+fn javascript_crypto_parse_key_source(
+    source: &Value,
+    format: Option<&str>,
+    kind: Option<&str>,
+    expected: Option<&str>,
+    label: &str,
+) -> Result<JavascriptCryptoKeyMaterial, SidecarError> {
+    match source {
+        Value::String(pem) => javascript_crypto_parse_key_from_pem(pem.as_bytes(), expected, label),
+        Value::Object(object) if object.get("__type").and_then(Value::as_str) == Some("buffer") => {
+            let data = javascript_crypto_decode_bridge_buffer(source, label)?;
+            javascript_crypto_parse_key_from_bytes(&data, format, kind, expected, label)
+        }
+        Value::Object(_) => {
+            if format == Some("jwk") {
+                return Err(SidecarError::InvalidState(format!(
+                    "{label} jwk inputs are not supported yet"
+                )));
+            }
+            Err(SidecarError::InvalidState(format!(
+                "{label} has an unsupported key shape"
+            )))
+        }
+        _ => Err(SidecarError::InvalidState(format!(
+            "{label} has an unsupported key value"
+        ))),
+    }
+}
+
+fn javascript_crypto_parse_key_from_pem(
+    pem: &[u8],
+    expected: Option<&str>,
+    label: &str,
+) -> Result<JavascriptCryptoKeyMaterial, SidecarError> {
+    match expected {
+        Some("private") => PKey::private_key_from_pem(pem)
+            .map(JavascriptCryptoKeyMaterial::Private)
+            .map_err(|error| SidecarError::InvalidState(format!("{label} private key is invalid: {error}"))),
+        Some("public") => PKey::public_key_from_pem(pem)
+            .map(JavascriptCryptoKeyMaterial::Public)
+            .map_err(|error| SidecarError::InvalidState(format!("{label} public key is invalid: {error}"))),
+        _ => PKey::private_key_from_pem(pem)
+            .map(JavascriptCryptoKeyMaterial::Private)
+            .or_else(|_| PKey::public_key_from_pem(pem).map(JavascriptCryptoKeyMaterial::Public))
+            .map_err(|error| SidecarError::InvalidState(format!("{label} PEM key is invalid: {error}"))),
+    }
+}
+
+fn javascript_crypto_parse_key_from_bytes(
+    der: &[u8],
+    format: Option<&str>,
+    kind: Option<&str>,
+    expected: Option<&str>,
+    label: &str,
+) -> Result<JavascriptCryptoKeyMaterial, SidecarError> {
+    match (format.unwrap_or("der"), kind.or(expected)) {
+        ("der", Some("pkcs8")) | ("der", Some("private")) => PKey::private_key_from_der(der)
+            .map(JavascriptCryptoKeyMaterial::Private)
+            .map_err(|error| SidecarError::InvalidState(format!("{label} private key DER is invalid: {error}"))),
+        ("der", Some("spki")) | ("der", Some("public")) => PKey::public_key_from_der(der)
+            .map(JavascriptCryptoKeyMaterial::Public)
+            .map_err(|error| SidecarError::InvalidState(format!("{label} public key DER is invalid: {error}"))),
+        _ => Err(SidecarError::InvalidState(format!(
+            "{label} unsupported key bytes format"
+        ))),
+    }
+}
+
+fn javascript_crypto_parse_serialized_key_object(
+    value: &Value,
+    expected: Option<&str>,
+    label: &str,
+) -> Result<JavascriptCryptoKeyMaterial, SidecarError> {
+    let serialized: JavascriptSerializedSandboxKeyObject = serde_json::from_value(value.clone())
+        .map_err(|error| SidecarError::InvalidState(format!("{label} keyObject is invalid: {error}")))?;
+    match serialized.kind.as_str() {
+        "secret" => {
+            if expected == Some("public") || expected == Some("private") {
+                return Err(SidecarError::InvalidState(format!(
+                    "{label} expected an asymmetric key"
+                )));
+            }
+            Ok(JavascriptCryptoKeyMaterial::Secret(
+                base64::engine::general_purpose::STANDARD
+                    .decode(serialized.raw.unwrap_or_default())
+                    .map_err(|error| {
+                        SidecarError::InvalidState(format!(
+                            "{label} secret key contains invalid base64: {error}"
+                        ))
+                    })?,
+            ))
+        }
+        "private" => {
+            let pem = serialized.pem.ok_or_else(|| {
+                SidecarError::InvalidState(format!("{label} private keyObject is missing pem"))
+            })?;
+            javascript_crypto_parse_key_from_pem(pem.as_bytes(), Some("private"), label)
+        }
+        "public" => {
+            let pem = serialized.pem.ok_or_else(|| {
+                SidecarError::InvalidState(format!("{label} public keyObject is missing pem"))
+            })?;
+            javascript_crypto_parse_key_from_pem(pem.as_bytes(), Some("public"), label)
+        }
+        other => Err(SidecarError::InvalidState(format!(
+            "{label} has unsupported keyObject type {other}"
+        ))),
+    }
+}
+
+fn javascript_crypto_expect_private_key(
+    key: JavascriptCryptoKeyMaterial,
+    label: &str,
+) -> Result<PKey<Private>, SidecarError> {
+    match key {
+        JavascriptCryptoKeyMaterial::Private(key) => Ok(key),
+        _ => Err(SidecarError::InvalidState(format!("{label} requires a private key"))),
+    }
+}
+
+fn javascript_crypto_expect_public_key(
+    key: JavascriptCryptoKeyMaterial,
+    label: &str,
+) -> Result<PKey<Public>, SidecarError> {
+    match key {
+        JavascriptCryptoKeyMaterial::Public(key) => Ok(key),
+        JavascriptCryptoKeyMaterial::Private(key) => {
+            let pem = key.public_key_to_pem().map_err(javascript_crypto_openssl_error)?;
+            PKey::public_key_from_pem(&pem).map_err(javascript_crypto_openssl_error)
+        }
+        _ => Err(SidecarError::InvalidState(format!("{label} requires a public key"))),
+    }
+}
+
+fn javascript_crypto_new_signer<'a>(
+    algorithm: Option<&'a str>,
+    key: &'a PKey<Private>,
+) -> Result<Signer<'a>, SidecarError> {
+    if matches!(key.id(), PKeyId::ED25519 | PKeyId::ED448) || algorithm.is_none() {
+        return Signer::new_without_digest(key).map_err(javascript_crypto_openssl_error);
+    }
+    Signer::new(
+        javascript_crypto_message_digest_from_name(
+            algorithm.ok_or_else(|| {
+                SidecarError::InvalidState(String::from("crypto.sign requires a digest algorithm"))
+            })?,
+        )?,
+        key,
+    )
+    .map_err(javascript_crypto_openssl_error)
+}
+
+fn javascript_crypto_new_verifier<'a>(
+    algorithm: Option<&'a str>,
+    key: &'a PKey<Public>,
+) -> Result<Verifier<'a>, SidecarError> {
+    if matches!(key.id(), PKeyId::ED25519 | PKeyId::ED448) || algorithm.is_none() {
+        return Verifier::new_without_digest(key).map_err(javascript_crypto_openssl_error);
+    }
+    Verifier::new(
+        javascript_crypto_message_digest_from_name(
+            algorithm.ok_or_else(|| {
+                SidecarError::InvalidState(String::from("crypto.verify requires a digest algorithm"))
+            })?,
+        )?,
+        key,
+    )
+    .map_err(javascript_crypto_openssl_error)
+}
+
+fn javascript_crypto_message_digest_from_name(
+    name: &str,
+) -> Result<MessageDigest, SidecarError> {
+    match name.trim().to_ascii_lowercase().replace('-', "").as_str() {
+        "md5" => Ok(MessageDigest::md5()),
+        "sha1" => Ok(MessageDigest::sha1()),
+        "sha256" => Ok(MessageDigest::sha256()),
+        "sha384" => Ok(MessageDigest::sha384()),
+        "sha512" => Ok(MessageDigest::sha512()),
+        other => Err(SidecarError::InvalidState(format!(
+            "unsupported crypto digest algorithm {other}"
+        ))),
+    }
+}
+
+fn javascript_crypto_padding_from_value(
+    value: &Value,
+) -> Result<Option<Padding>, SidecarError> {
+    let Some(number) = value.as_i64() else {
+        return Ok(None);
+    };
+    let padding = match number {
+        1 => Padding::PKCS1,
+        3 => Padding::NONE,
+        4 => Padding::PKCS1_OAEP,
+        6 => Padding::PKCS1_PSS,
+        other => {
+            return Err(SidecarError::InvalidState(format!(
+                "unsupported RSA padding constant {other}"
+            )));
+        }
+    };
+    Ok(Some(padding))
+}
+
+fn javascript_crypto_decode_bridge_buffer(
+    value: &Value,
+    label: &str,
+) -> Result<Vec<u8>, SidecarError> {
+    let base64_value = value
+        .as_object()
+        .filter(|object| object.get("__type").and_then(Value::as_str) == Some("buffer"))
+        .and_then(|object| object.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            SidecarError::InvalidState(format!("{label} must be a serialized bridge buffer"))
+        })?;
+    base64::engine::general_purpose::STANDARD
+        .decode(base64_value)
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("{label} contains invalid base64: {error}"))
+        })
+}
+
+fn javascript_crypto_serialize_sandbox_key_object(
+    key: &JavascriptCryptoKeyMaterial,
+) -> Result<Value, SidecarError> {
+    let serialized = match key {
+        JavascriptCryptoKeyMaterial::Private(key) => JavascriptSerializedSandboxKeyObject {
+            kind: String::from("private"),
+            pem: Some(
+                String::from_utf8(
+                    key.private_key_to_pem_pkcs8()
+                        .map_err(javascript_crypto_openssl_error)?,
+                )
+                .map_err(|error| {
+                    SidecarError::InvalidState(format!("private key PEM is not utf8: {error}"))
+                })?,
+            ),
+            raw: None,
+            asymmetric_key_type: javascript_crypto_pkey_type_name(key.id()),
+            asymmetric_key_details: None,
+            jwk: None,
+        },
+        JavascriptCryptoKeyMaterial::Public(key) => JavascriptSerializedSandboxKeyObject {
+            kind: String::from("public"),
+            pem: Some(
+                String::from_utf8(
+                    key.public_key_to_pem()
+                        .map_err(javascript_crypto_openssl_error)?,
+                )
+                .map_err(|error| {
+                    SidecarError::InvalidState(format!("public key PEM is not utf8: {error}"))
+                })?,
+            ),
+            raw: None,
+            asymmetric_key_type: javascript_crypto_pkey_type_name(key.id()),
+            asymmetric_key_details: None,
+            jwk: None,
+        },
+        JavascriptCryptoKeyMaterial::Secret(raw) => JavascriptSerializedSandboxKeyObject {
+            kind: String::from("secret"),
+            pem: None,
+            raw: Some(base64::engine::general_purpose::STANDARD.encode(raw)),
+            asymmetric_key_type: None,
+            asymmetric_key_details: None,
+            jwk: None,
+        },
+    };
+    serde_json::to_value(serialized)
+        .map_err(|error| SidecarError::InvalidState(format!("serialize key object: {error}")))
+}
+
+fn javascript_crypto_pkey_type_name(id: PKeyId) -> Option<String> {
+    match id {
+        PKeyId::RSA => Some(String::from("rsa")),
+        PKeyId::EC => Some(String::from("ec")),
+        PKeyId::ED25519 => Some(String::from("ed25519")),
+        PKeyId::ED448 => Some(String::from("ed448")),
+        PKeyId::X25519 => Some(String::from("x25519")),
+        PKeyId::X448 => Some(String::from("x448")),
+        PKeyId::DH => Some(String::from("dh")),
+        _ => None,
+    }
+}
+
+fn javascript_crypto_rsa_output_size(
+    key: &JavascriptCryptoKeyMaterial,
+) -> Result<usize, SidecarError> {
+    match key {
+        JavascriptCryptoKeyMaterial::Private(key) => key
+            .rsa()
+            .map(|rsa| rsa.size() as usize)
+            .map_err(javascript_crypto_openssl_error),
+        JavascriptCryptoKeyMaterial::Public(key) => key
+            .rsa()
+            .map(|rsa| rsa.size() as usize)
+            .map_err(javascript_crypto_openssl_error),
+        JavascriptCryptoKeyMaterial::Secret(_) => Err(SidecarError::InvalidState(String::from(
+            "RSA operations require an asymmetric key",
+        ))),
+    }
+}
+
+fn javascript_crypto_parse_serialized_options_arg(
+    args: &[Value],
+    index: usize,
+    label: &str,
+) -> Result<Option<Value>, SidecarError> {
+    let Some(raw) = args.get(index).and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let parsed: Value = serde_json::from_str(raw)
+        .map_err(|error| SidecarError::InvalidState(format!("{label} must be valid JSON: {error}")))?;
+    if parsed.get("hasOptions").and_then(Value::as_bool) == Some(true) {
+        Ok(parsed.get("options").cloned())
+    } else {
+        Ok(None)
+    }
+}
+
+fn javascript_crypto_u32_from_bridge_value(
+    value: &Value,
+    label: &str,
+) -> Result<u32, SidecarError> {
+    if let Some(number) = value.as_u64() {
+        return u32::try_from(number).map_err(|_| {
+            SidecarError::InvalidState(format!("{label} must fit within u32"))
+        });
+    }
+    let bytes = javascript_crypto_decode_bridge_buffer(value, label)?;
+    if bytes.len() > 4 {
+        return Err(SidecarError::InvalidState(format!(
+            "{label} buffer is too large for u32"
+        )));
+    }
+    Ok(bytes
+        .into_iter()
+        .fold(0_u32, |acc, byte| (acc << 8) | u32::from(byte)))
+}
+
+fn javascript_crypto_bignum_from_bridge_value(
+    value: &Value,
+    label: &str,
+) -> Result<BigNum, SidecarError> {
+    if let Some(object) = value.as_object() {
+        if object.get("__type").and_then(Value::as_str) == Some("bigint") {
+            let decimal = object
+                .get("value")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(format!("{label} bigint is missing a value"))
+                })?;
+            return BigNum::from_dec_str(decimal).map_err(javascript_crypto_openssl_error);
+        }
+    }
+    let bytes = javascript_crypto_decode_bridge_buffer(value, label)?;
+    BigNum::from_slice(&bytes).map_err(javascript_crypto_openssl_error)
+}
+
+fn javascript_crypto_curve_nid(name: &str) -> Result<Nid, SidecarError> {
+    match name {
+        "prime256v1" | "P-256" => Ok(Nid::X9_62_PRIME256V1),
+        "secp384r1" | "P-384" => Ok(Nid::SECP384R1),
+        "secp521r1" | "P-521" => Ok(Nid::SECP521R1),
+        "secp256k1" => Ok(Nid::SECP256K1),
+        other => Err(SidecarError::InvalidState(format!(
+            "unsupported EC curve {other}"
+        ))),
+    }
+}
+
+fn javascript_crypto_named_dh_group(name: &str) -> Result<Dh<Params>, SidecarError> {
+    match name {
+        "modp2" => Dh::get_1024_160().map_err(javascript_crypto_openssl_error),
+        "modp14" | "modp15" | "modp16" | "modp17" | "modp18" => {
+            Dh::get_2048_256().map_err(javascript_crypto_openssl_error)
+        }
+        other => Err(SidecarError::InvalidState(format!(
+            "unsupported Diffie-Hellman group {other}"
+        ))),
+    }
+}
+
+fn javascript_crypto_clone_dh_params(params: &Dh<Params>) -> Result<Dh<Params>, SidecarError> {
+    Dh::from_pqg(
+        params
+            .prime_p()
+            .to_owned()
+            .map_err(javascript_crypto_openssl_error)?,
+        params
+            .prime_q()
+            .map(|value| value.to_owned().map_err(javascript_crypto_openssl_error))
+            .transpose()?,
+        params
+            .generator()
+            .to_owned()
+            .map_err(javascript_crypto_openssl_error)?,
+    )
+    .map_err(javascript_crypto_openssl_error)
+}
+
+fn javascript_crypto_build_dh_params(args: &[Value]) -> Result<Dh<Params>, SidecarError> {
+    let Some(first) = args.first() else {
+        return Err(SidecarError::InvalidState(String::from(
+            "Diffie-Hellman session args are required",
+        )));
+    };
+    if let Some(bits) = first.as_u64() {
+        let generator = args
+            .get(1)
+            .map(|value| javascript_crypto_u32_from_bridge_value(value, "Diffie-Hellman generator"))
+            .transpose()?
+            .unwrap_or(2);
+        return Dh::generate_params(bits as u32, generator).map_err(javascript_crypto_openssl_error);
+    }
+    let prime = javascript_crypto_bignum_from_bridge_value(first, "Diffie-Hellman prime")?;
+    let generator = args
+        .get(1)
+        .map(|value| javascript_crypto_bignum_from_bridge_value(value, "Diffie-Hellman generator"))
+        .transpose()?
+        .unwrap_or(BigNum::from_u32(2).map_err(javascript_crypto_openssl_error)?);
+    Dh::from_pqg(prime, None, generator).map_err(javascript_crypto_openssl_error)
+}
+
+fn javascript_crypto_call_dh_session(
+    session: &mut ActiveDhSession,
+    method: &str,
+    args: &[Value],
+) -> Result<(Value, bool), SidecarError> {
+    match method {
+        "verifyError" => Ok((Value::Null, false)),
+        "generateKeys" => {
+            if session.key_pair.is_none() {
+                session.key_pair = Some(
+                    javascript_crypto_clone_dh_params(&session.params)?
+                        .generate_key()
+                        .map_err(javascript_crypto_openssl_error)?,
+                );
+            }
+            let public = session
+                .key_pair
+                .as_ref()
+                .expect("dh key pair")
+                .public_key()
+                .to_vec();
+            Ok((javascript_crypto_bridge_buffer_value(&public), true))
+        }
+        "computeSecret" => {
+            if session.key_pair.is_none() {
+                session.key_pair = Some(
+                    javascript_crypto_clone_dh_params(&session.params)?
+                        .generate_key()
+                        .map_err(javascript_crypto_openssl_error)?,
+                );
+            }
+            let peer = javascript_crypto_bignum_from_bridge_value(
+                args.first().ok_or_else(|| {
+                    SidecarError::InvalidState(String::from("computeSecret requires peer public key"))
+                })?,
+                "Diffie-Hellman peer public key",
+            )?;
+            let secret = session
+                .key_pair
+                .as_ref()
+                .expect("dh key pair")
+                .compute_key(&peer)
+                .map_err(javascript_crypto_openssl_error)?;
+            Ok((javascript_crypto_bridge_buffer_value(&secret), true))
+        }
+        "getPrime" => Ok((
+            javascript_crypto_bridge_buffer_value(&session.params.prime_p().to_vec()),
+            true,
+        )),
+        "getGenerator" => Ok((
+            javascript_crypto_bridge_buffer_value(&session.params.generator().to_vec()),
+            true,
+        )),
+        "getPublicKey" => {
+            if session.key_pair.is_none() {
+                session.key_pair = Some(
+                    javascript_crypto_clone_dh_params(&session.params)?
+                        .generate_key()
+                        .map_err(javascript_crypto_openssl_error)?,
+                );
+            }
+            Ok((
+                javascript_crypto_bridge_buffer_value(
+                    &session
+                        .key_pair
+                        .as_ref()
+                        .expect("dh key pair")
+                        .public_key()
+                        .to_vec(),
+                ),
+                true,
+            ))
+        }
+        "getPrivateKey" => {
+            if session.key_pair.is_none() {
+                session.key_pair = Some(
+                    javascript_crypto_clone_dh_params(&session.params)?
+                        .generate_key()
+                        .map_err(javascript_crypto_openssl_error)?,
+                );
+            }
+            Ok((
+                javascript_crypto_bridge_buffer_value(
+                    &session
+                        .key_pair
+                        .as_ref()
+                        .expect("dh key pair")
+                        .private_key()
+                        .to_vec(),
+                ),
+                true,
+            ))
+        }
+        other => Err(SidecarError::InvalidState(format!(
+            "Unsupported Diffie-Hellman method: {other}"
+        ))),
+    }
+}
+
+fn javascript_crypto_call_ecdh_session(
+    session: &mut ActiveEcdhSession,
+    method: &str,
+    args: &[Value],
+) -> Result<(Value, bool), SidecarError> {
+    let nid = javascript_crypto_curve_nid(&session.curve)?;
+    let group = EcGroup::from_curve_name(nid).map_err(javascript_crypto_openssl_error)?;
+    match method {
+        "verifyError" => Ok((Value::Null, false)),
+        "generateKeys" => {
+            if session.key_pair.is_none() {
+                session.key_pair = Some(EcKey::generate(&group).map_err(javascript_crypto_openssl_error)?);
+            }
+            let mut ctx = BigNumContext::new().map_err(javascript_crypto_openssl_error)?;
+            let bytes = session
+                .key_pair
+                .as_ref()
+                .expect("ecdh key pair")
+                .public_key()
+                .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+                .map_err(javascript_crypto_openssl_error)?;
+            Ok((javascript_crypto_bridge_buffer_value(&bytes), true))
+        }
+        "computeSecret" => {
+            if session.key_pair.is_none() {
+                session.key_pair = Some(EcKey::generate(&group).map_err(javascript_crypto_openssl_error)?);
+            }
+            let peer_bytes = javascript_crypto_decode_bridge_buffer(
+                args.first().ok_or_else(|| {
+                    SidecarError::InvalidState(String::from("computeSecret requires peer public key"))
+                })?,
+                "ECDH peer public key",
+            )?;
+            let mut ctx = BigNumContext::new().map_err(javascript_crypto_openssl_error)?;
+            let peer_point =
+                EcPoint::from_bytes(&group, &peer_bytes, &mut ctx).map_err(javascript_crypto_openssl_error)?;
+            let peer_key =
+                EcKey::from_public_key(&group, &peer_point).map_err(javascript_crypto_openssl_error)?;
+            let private = PKey::from_ec_key(
+                session.key_pair.as_ref().expect("ecdh key pair").to_owned(),
+            )
+            .map_err(javascript_crypto_openssl_error)?;
+            let peer = PKey::from_ec_key(peer_key).map_err(javascript_crypto_openssl_error)?;
+            let mut deriver = Deriver::new(&private).map_err(javascript_crypto_openssl_error)?;
+            deriver.set_peer(&peer).map_err(javascript_crypto_openssl_error)?;
+            let secret = deriver.derive_to_vec().map_err(javascript_crypto_openssl_error)?;
+            Ok((javascript_crypto_bridge_buffer_value(&secret), true))
+        }
+        "getPublicKey" => {
+            if session.key_pair.is_none() {
+                session.key_pair = Some(EcKey::generate(&group).map_err(javascript_crypto_openssl_error)?);
+            }
+            let mut ctx = BigNumContext::new().map_err(javascript_crypto_openssl_error)?;
+            let bytes = session
+                .key_pair
+                .as_ref()
+                .expect("ecdh key pair")
+                .public_key()
+                .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+                .map_err(javascript_crypto_openssl_error)?;
+            Ok((javascript_crypto_bridge_buffer_value(&bytes), true))
+        }
+        "getPrivateKey" => {
+            if session.key_pair.is_none() {
+                session.key_pair = Some(EcKey::generate(&group).map_err(javascript_crypto_openssl_error)?);
+            }
+            Ok((
+                javascript_crypto_bridge_buffer_value(
+                    &session.key_pair.as_ref().expect("ecdh key pair").private_key().to_vec(),
+                ),
+                true,
+            ))
+        }
+        other => Err(SidecarError::InvalidState(format!(
+            "Unsupported Diffie-Hellman method: {other}"
+        ))),
+    }
+}
+
+fn javascript_crypto_serialize_encoded_key_value_public(
+    key: &PKey<Public>,
+    encoding: Option<&Value>,
+) -> Result<Value, SidecarError> {
+    if let Some(encoding) = encoding {
+        let format = encoding
+            .get("format")
+            .and_then(Value::as_str)
+            .unwrap_or("pem");
+        return Ok(match format {
+            "der" => json!({
+                "kind": "buffer",
+                "value": base64::engine::general_purpose::STANDARD
+                    .encode(key.public_key_to_der().map_err(javascript_crypto_openssl_error)?),
+            }),
+            _ => json!({
+                "kind": "string",
+                "value": String::from_utf8(
+                    key.public_key_to_pem().map_err(javascript_crypto_openssl_error)?,
+                )
+                .map_err(|error| SidecarError::InvalidState(format!("public key PEM utf8: {error}")))?,
+            }),
+        });
+    }
+    javascript_crypto_serialize_sandbox_key_object(&JavascriptCryptoKeyMaterial::Public(
+        key.to_owned(),
+    ))
+}
+
+fn javascript_crypto_serialize_encoded_key_value_private(
+    key: &PKey<Private>,
+    encoding: Option<&Value>,
+) -> Result<Value, SidecarError> {
+    if let Some(encoding) = encoding {
+        let format = encoding
+            .get("format")
+            .and_then(Value::as_str)
+            .unwrap_or("pem");
+        return Ok(match format {
+            "der" => json!({
+                "kind": "buffer",
+                "value": base64::engine::general_purpose::STANDARD
+                    .encode(key.private_key_to_der().map_err(javascript_crypto_openssl_error)?),
+            }),
+            _ => json!({
+                "kind": "string",
+                "value": String::from_utf8(
+                    key.private_key_to_pem_pkcs8().map_err(javascript_crypto_openssl_error)?,
+                )
+                .map_err(|error| SidecarError::InvalidState(format!("private key PEM utf8: {error}")))?,
+            }),
+        });
+    }
+    javascript_crypto_serialize_sandbox_key_object(&JavascriptCryptoKeyMaterial::Private(
+        key.to_owned(),
+    ))
+}
+
+fn javascript_crypto_bridge_buffer_value(bytes: &[u8]) -> Value {
+    json!({
+        "__type": "buffer",
+        "value": base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
+fn javascript_crypto_build_cipher_context(
+    algorithm: &str,
+    key: &[u8],
+    iv: Option<&[u8]>,
+    decrypt: bool,
+    options: Option<&Value>,
+) -> Result<Crypter, SidecarError> {
+    let cipher = javascript_crypto_cipher_from_name(algorithm)?;
+    let mode = if decrypt { Mode::Decrypt } else { Mode::Encrypt };
+    let mut context =
+        Crypter::new(cipher, mode, key, iv).map_err(javascript_crypto_openssl_error)?;
+    if let Some(auto_padding) = options
+        .and_then(|value| value.get("autoPadding"))
+        .and_then(Value::as_bool)
+    {
+        context.pad(auto_padding);
+    }
+    if javascript_crypto_is_aead(algorithm) {
+        if let Some(aad) = options
+            .and_then(|value| value.get("aad"))
+            .and_then(Value::as_str)
+        {
+            context
+                .aad_update(
+                    &base64::engine::general_purpose::STANDARD
+                        .decode(aad)
+                        .map_err(|error| {
+                            SidecarError::InvalidState(format!("cipher aad contains invalid base64: {error}"))
+                        })?,
+                )
+                .map_err(javascript_crypto_openssl_error)?;
+        }
+        if decrypt {
+            if let Some(auth_tag) = options
+                .and_then(|value| value.get("authTag"))
+                .and_then(Value::as_str)
+            {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(auth_tag)
+                    .map_err(|error| {
+                        SidecarError::InvalidState(format!("cipher authTag contains invalid base64: {error}"))
+                    })?;
+                context
+                    .set_tag(&decoded)
+                    .map_err(javascript_crypto_openssl_error)?;
+            }
+        }
+    }
+    Ok(context)
+}
+
+fn javascript_crypto_requested_aead_tag_len(
+    algorithm: &str,
+    options: Option<&Value>,
+) -> Result<usize, SidecarError> {
+    if !javascript_crypto_is_aead(algorithm) {
+        return Ok(0);
+    }
+    let requested = options
+        .and_then(|value| value.get("authTagLength"))
+        .and_then(Value::as_u64)
+        .unwrap_or(javascript_crypto_aead_tag_len(algorithm) as u64);
+    usize::try_from(requested).map_err(|_| {
+        SidecarError::InvalidState(String::from(
+            "cipher authTagLength must fit within usize",
+        ))
+    })
+}
+
+fn javascript_crypto_cipher_update(
+    context: &mut Crypter,
+    data: &[u8],
+) -> Result<Vec<u8>, SidecarError> {
+    let mut output = vec![0_u8; data.len() + 32];
+    let written = context
+        .update(data, &mut output)
+        .map_err(javascript_crypto_openssl_error)?;
+    output.truncate(written);
+    Ok(output)
+}
+
+fn javascript_crypto_cipher_finalize(context: &mut Crypter) -> Result<Vec<u8>, SidecarError> {
+    let mut output = vec![0_u8; 32];
+    let written = context
+        .finalize(&mut output)
+        .map_err(javascript_crypto_openssl_error)?;
+    output.truncate(written);
+    Ok(output)
+}
+
+fn javascript_crypto_cipher_from_name(name: &str) -> Result<Cipher, SidecarError> {
+    match name.to_ascii_lowercase().as_str() {
+        "aes-128-cbc" => Ok(Cipher::aes_128_cbc()),
+        "aes-192-cbc" => Ok(Cipher::aes_192_cbc()),
+        "aes-256-cbc" => Ok(Cipher::aes_256_cbc()),
+        "aes-128-ctr" => Ok(Cipher::aes_128_ctr()),
+        "aes-192-ctr" => Ok(Cipher::aes_192_ctr()),
+        "aes-256-ctr" => Ok(Cipher::aes_256_ctr()),
+        "aes-128-gcm" => Ok(Cipher::aes_128_gcm()),
+        "aes-192-gcm" => Ok(Cipher::aes_192_gcm()),
+        "aes-256-gcm" => Ok(Cipher::aes_256_gcm()),
+        other => Err(SidecarError::InvalidState(format!(
+            "unsupported crypto cipher algorithm {other}"
+        ))),
+    }
+}
+
+fn javascript_crypto_is_aead(algorithm: &str) -> bool {
+    algorithm.to_ascii_lowercase().ends_with("-gcm")
+}
+
+fn javascript_crypto_aead_tag_len(_algorithm: &str) -> usize {
+    16
+}
+
+fn javascript_crypto_openssl_error(error: openssl::error::ErrorStack) -> SidecarError {
+    SidecarError::Execution(format!("crypto operation failed: {error}"))
 }
 
 fn service_javascript_kernel_stdin_sync_rpc(
