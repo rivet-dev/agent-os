@@ -3,7 +3,7 @@ import type { Fixture, ToolCall } from "@copilotkit/llmock";
 import { describe, expect, test } from "vitest";
 import opencode from "@rivet-dev/agent-os-opencode";
 import { AgentOs } from "../src/agent-os.js";
-import type { AgentCapabilities, AgentInfo } from "../src/session.js";
+import type { AgentCapabilities, AgentInfo } from "../src/agent-os.js";
 import {
 	createAnthropicFixture,
 	DEFAULT_TEXT_FIXTURE,
@@ -528,7 +528,7 @@ describe.skipIf(registrySkipReason)(
 			}
 		}, 120_000);
 
-		test("supports rawSessionSend() mode changes through the Agent OS session API", async () => {
+		test("supports rawSend() mode changes through the Agent OS session API", async () => {
 			const { mock, url } = await startLlmock([DEFAULT_TEXT_FIXTURE]);
 			const vm = await createOpenCodeVm(url);
 
@@ -565,7 +565,7 @@ describe.skipIf(registrySkipReason)(
 				const { response: planPromptResponse } = await vm.prompt(sessionId, planPrompt);
 				expect(planPromptResponse.error).toBeUndefined();
 
-				const rawBuildResponse = await vm.rawSessionSend(
+				const rawBuildResponse = await vm.rawSend(
 					sessionId,
 					"session/set_mode",
 					{

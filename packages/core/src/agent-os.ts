@@ -10,15 +10,30 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import {
-	sep as hostPathSeparator,
 	join,
 	posix as posixPath,
-	relative as relativeHostPath,
 	resolve as resolveHostPath,
 } from "node:path";
 import { fileURLToPath } from "node:url";
+import type {
+	AgentCapabilities,
+	AgentInfo,
+	GetEventsOptions,
+	PermissionReply,
+	PermissionRequest,
+	PermissionRequestHandler,
+	SequencedEvent,
+	SessionConfigOption,
+	SessionEventHandler,
+	SessionInitData,
+	SessionModeState,
+} from "./agent-session-types.js";
 import { type HostTool, type ToolKit, validateToolkits } from "./host-tools.js";
 import { zodToJsonSchema } from "./host-tools-zod.js";
+import type {
+	JsonRpcNotification,
+	JsonRpcResponse,
+} from "./json-rpc.js";
 import {
 	type ConnectTerminalOptions,
 	createInMemoryFileSystem,
@@ -36,6 +51,26 @@ import {
 } from "./runtime-compat.js";
 
 export type { ConnectTerminalOptions } from "./runtime-compat.js";
+export type {
+	AgentCapabilities,
+	AgentInfo,
+	GetEventsOptions,
+	PermissionReply,
+	PermissionRequest,
+	PermissionRequestHandler,
+	SequencedEvent,
+	SessionConfigOption,
+	SessionEventHandler,
+	SessionInitData,
+	SessionMode,
+	SessionModeState,
+} from "./agent-session-types.js";
+export type {
+	JsonRpcError,
+	JsonRpcNotification,
+	JsonRpcRequest,
+	JsonRpcResponse,
+} from "./json-rpc.js";
 
 /** Process tree node: extends kernel ProcessInfo with child references. */
 export interface ProcessTreeNode extends KernelProcessInfo {
@@ -86,7 +121,6 @@ export interface AgentRegistryEntry {
 	installed: boolean;
 }
 
-import { AcpClient } from "./acp-client.js";
 import { AGENT_CONFIGS, type AgentConfig, type AgentType } from "./agents.js";
 import {
 	getBaseEnvironment,
@@ -121,21 +155,7 @@ import {
 	type SoftwareInput,
 	type SoftwareRoot,
 } from "./packages.js";
-import type { JsonRpcRequest, JsonRpcResponse } from "./protocol.js";
 import { createNodeHostNetworkAdapter } from "./runtime-compat.js";
-import {
-	type AgentCapabilities,
-	type AgentInfo,
-	type GetEventsOptions,
-	type PermissionReply,
-	type PermissionRequestHandler,
-	type SequencedEvent,
-	Session,
-	type SessionConfigOption,
-	type SessionEventHandler,
-	type SessionInitData,
-	type SessionModeState,
-} from "./session.js";
 import {
 	type AgentOsCreateSidecarOptions,
 	type AgentOsSharedSidecarOptions,
@@ -160,10 +180,10 @@ import type {
 	SidecarRegisteredToolDefinition,
 	SidecarRequestFrame,
 	SidecarResponsePayload,
+	SidecarSessionState,
 } from "./sidecar/native-process-client.js";
 import { NativeSidecarProcessClient } from "./sidecar/native-process-client.js";
 import { serializeRootFilesystemForSidecar } from "./sidecar/root-filesystem-descriptors.js";
-import { createStdoutLineIterable } from "./stdout-lines.js";
 
 export type {
 	AgentOsCreateSidecarOptions,
@@ -182,17 +202,26 @@ interface AgentOsVmAdmin extends InProcessSidecarVmAdmin {
 	rootView: VirtualFileSystem;
 	hostMounts: HostMountInfo[];
 	env: Record<string, string>;
+	sidecarClient: NativeSidecarProcessClient;
+	sidecarSession: AuthenticatedSession;
+	sidecarVm: CreatedVm;
 	snapshotRootFilesystem?: () => Promise<RootSnapshotExport>;
 	toolKits: ToolKit[];
 	toolReference: string;
 }
 
-interface AcpTerminalState {
+interface AgentSessionEntry {
 	sessionId: string;
-	pid: number;
-	output: string;
-	truncated: boolean;
-	outputByteLimit: number;
+	agentType: string;
+	processId: string;
+	closed: boolean;
+	modes: SessionModeState | null;
+	configOptions: SessionConfigOption[];
+	capabilities: AgentCapabilities;
+	agentInfo: AgentInfo | null;
+	events: SequencedEvent[];
+	eventHandlers: Set<SessionEventHandler>;
+	permissionHandlers: Set<PermissionRequestHandler>;
 }
 
 export type RootLowerInput =
@@ -364,6 +393,99 @@ export interface SpawnedProcessInfo {
 	args: string[];
 	running: boolean;
 	exitCode: number | null;
+}
+
+const LEGACY_PERMISSION_METHOD = "request/permission";
+const ACP_PERMISSION_METHOD = "session/request_permission";
+
+function toJsonRpcNotification(value: unknown): JsonRpcNotification {
+	if (
+		!value ||
+		typeof value !== "object" ||
+		Array.isArray(value) ||
+		(value as { jsonrpc?: unknown }).jsonrpc !== "2.0" ||
+		typeof (value as { method?: unknown }).method !== "string"
+	) {
+		throw new Error("Invalid JSON-RPC notification from sidecar");
+	}
+	return value as JsonRpcNotification;
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+	return value && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: {};
+}
+
+function cloneSequencedEvents(events: SequencedEvent[]): SequencedEvent[] {
+	return events.map((event) => ({
+		sequenceNumber: event.sequenceNumber,
+		notification: event.notification,
+	}));
+}
+
+function mergeSequencedEvents(
+	current: SequencedEvent[],
+	incoming: SequencedEvent[],
+): SequencedEvent[] {
+	const bySequence = new Map<number, SequencedEvent>();
+	for (const event of current) {
+		bySequence.set(event.sequenceNumber, event);
+	}
+	for (const event of incoming) {
+		bySequence.set(event.sequenceNumber, event);
+	}
+	return [...bySequence.values()].sort(
+		(left, right) => left.sequenceNumber - right.sequenceNumber,
+	);
+}
+
+function toSessionModes(value: unknown): SessionModeState | null {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return null;
+	}
+	return value as SessionModeState;
+}
+
+function toSessionConfigOptions(value: unknown): SessionConfigOption[] {
+	return Array.isArray(value) ? (value as SessionConfigOption[]) : [];
+}
+
+function toAgentCapabilities(value: unknown): AgentCapabilities {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return {};
+	}
+	return value as AgentCapabilities;
+}
+
+function toAgentInfo(value: unknown): AgentInfo | null {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return null;
+	}
+	if (typeof (value as { name?: unknown }).name !== "string") {
+		return null;
+	}
+	return value as AgentInfo;
+}
+
+function sessionEntryFromInit(
+	sessionId: string,
+	agentType: string,
+	initData: SessionInitData,
+): AgentSessionEntry {
+	return {
+		sessionId,
+		agentType,
+		processId: "",
+		closed: false,
+		modes: initData.modes ?? null,
+		configOptions: initData.configOptions ?? [],
+		capabilities: initData.capabilities ?? {},
+		agentInfo: initData.agentInfo ?? null,
+		events: [],
+		eventHandlers: new Set(),
+		permissionHandlers: new Set(),
+	};
 }
 
 function isOverlayMountConfig(
@@ -1272,7 +1394,7 @@ async function registerToolkitsOnSidecar(
 export class AgentOs {
 	#kernel: Kernel;
 	readonly sidecar: AgentOsSidecar;
-	private _sessions = new Map<string, Session>();
+	private _sessions = new Map<string, AgentSessionEntry>();
 	private _processes = new Map<
 		number,
 		{
@@ -1299,11 +1421,13 @@ export class AgentOs {
 	private _toolKits: ToolKit[] = [];
 	private _toolReference = "";
 	private _hostMounts: HostMountInfo[];
-	private _acpTerminals = new Map<string, AcpTerminalState>();
-	private _acpTerminalCounter = 0;
 	private _env: Record<string, string>;
 	private _rootFilesystem: VirtualFileSystem;
 	private _sidecarLease: AgentOsSidecarVmLease<AgentOsVmAdmin> | null = null;
+	private readonly _sidecarClient: NativeSidecarProcessClient;
+	private readonly _sidecarSession: AuthenticatedSession;
+	private readonly _sidecarVm: CreatedVm;
+	private readonly _disposeSidecarEventListener: () => void;
 
 	private constructor(
 		kernel: Kernel,
@@ -1314,6 +1438,9 @@ export class AgentOs {
 		hostMounts: HostMountInfo[],
 		env: Record<string, string>,
 		rootFilesystem: VirtualFileSystem,
+		sidecarClient: NativeSidecarProcessClient,
+		sidecarSession: AuthenticatedSession,
+		sidecarVm: CreatedVm,
 	) {
 		this.#kernel = kernel;
 		this.sidecar = sidecar;
@@ -1323,6 +1450,12 @@ export class AgentOs {
 		this._hostMounts = hostMounts;
 		this._env = env;
 		this._rootFilesystem = rootFilesystem;
+		this._sidecarClient = sidecarClient;
+		this._sidecarSession = sidecarSession;
+		this._sidecarVm = sidecarVm;
+		this._disposeSidecarEventListener = this._sidecarClient.onEvent((event) => {
+			this._handleSidecarEvent(event);
+		});
 		agentOsRuntimeAdmins.set(this, {
 			kernel,
 			rootView: rootFilesystem,
@@ -1410,7 +1543,6 @@ export class AgentOs {
 				const nativeVm = await client.createVm(session, {
 					runtime: "java_script",
 					metadata: {
-						cwd: "/home/user",
 						...Object.fromEntries(
 							Object.entries(env).map(([key, value]) => [`env.${key}`, value]),
 						),
@@ -1477,6 +1609,9 @@ export class AgentOs {
 					hostMounts,
 					kernel,
 					rootView: rootBridge.createRootView(),
+					sidecarClient: client,
+					sidecarSession: session,
+					sidecarVm: nativeVm,
 					snapshotRootFilesystem: async () =>
 						createSnapshotExport(
 							convertSidecarRootSnapshotEntries(
@@ -1532,6 +1667,9 @@ export class AgentOs {
 				vmAdmin.hostMounts,
 				vmAdmin.env,
 				vmAdmin.rootView,
+				vmAdmin.sidecarClient,
+				vmAdmin.sidecarSession,
+				vmAdmin.sidecarVm,
 			);
 			vm._sidecarLease = sidecarLease;
 			vm._toolKits = vmAdmin.toolKits;
@@ -2002,228 +2140,6 @@ export class AgentOs {
 		return null;
 	}
 
-	private _resolveHostPathToVmPath(hostPath: string): string | null {
-		const normalizedHostPath = resolveHostPath(hostPath);
-		for (const mount of this._hostMounts) {
-			if (
-				normalizedHostPath === mount.hostPath ||
-				normalizedHostPath.startsWith(`${mount.hostPath}${hostPathSeparator}`)
-			) {
-				const relativePath = relativeHostPath(
-					mount.hostPath,
-					normalizedHostPath,
-				);
-				if (!relativePath) {
-					return mount.vmPath;
-				}
-				return posixPath.join(
-					mount.vmPath,
-					...relativePath.split(hostPathSeparator).filter(Boolean),
-				);
-			}
-		}
-		return null;
-	}
-
-	private _normalizeClientPathToVmPath(clientPath: string): string {
-		if (!clientPath.startsWith("/")) {
-			throw new Error(`ACP path must be absolute: ${clientPath}`);
-		}
-		return (
-			this._resolveHostPathToVmPath(clientPath) ??
-			posixPath.normalize(clientPath)
-		);
-	}
-
-	private _appendTerminalOutput(
-		terminal: AcpTerminalState,
-		data: Uint8Array,
-	): void {
-		terminal.output += new TextDecoder().decode(data);
-		if (terminal.outputByteLimit <= 0) {
-			terminal.output = "";
-			terminal.truncated = true;
-			return;
-		}
-
-		while (
-			Buffer.byteLength(terminal.output, "utf8") > terminal.outputByteLimit
-		) {
-			terminal.output = terminal.output.slice(1);
-			terminal.truncated = true;
-		}
-	}
-
-	private async _handleInboundAcpRequest(
-		request: JsonRpcRequest,
-	): Promise<{ result?: unknown } | null> {
-		const params =
-			request.params && typeof request.params === "object"
-				? (request.params as Record<string, unknown>)
-				: {};
-
-		switch (request.method) {
-			case "fs/read_text_file": {
-				const path = params.path;
-				if (typeof path !== "string") {
-					throw new Error("fs/read_text_file requires a string path");
-				}
-				const vmPath = this._normalizeClientPathToVmPath(path);
-				const content = new TextDecoder().decode(await this.readFile(vmPath));
-				const startLine = Math.max(
-					1,
-					typeof params.line === "number" ? params.line : 1,
-				);
-				const limit =
-					typeof params.limit === "number" ? params.limit : undefined;
-				const lines = content.split("\n");
-				const sliced = lines.slice(
-					startLine - 1,
-					limit === undefined ? undefined : startLine - 1 + limit,
-				);
-				return { result: { content: sliced.join("\n") } };
-			}
-			case "fs/write_text_file": {
-				const path = params.path;
-				const content = params.content;
-				if (typeof path !== "string" || typeof content !== "string") {
-					throw new Error(
-						"fs/write_text_file requires string path and content",
-					);
-				}
-				await this.writeFile(this._normalizeClientPathToVmPath(path), content);
-				return { result: null };
-			}
-			case "terminal/create": {
-				const command = params.command;
-				if (typeof command !== "string") {
-					throw new Error("terminal/create requires a command");
-				}
-				const args = Array.isArray(params.args)
-					? params.args.filter((arg): arg is string => typeof arg === "string")
-					: [];
-				const env = Array.isArray(params.env)
-					? Object.fromEntries(
-							params.env
-								.map((entry) => {
-									if (
-										!entry ||
-										typeof entry !== "object" ||
-										typeof (entry as { name?: unknown }).name !== "string" ||
-										typeof (entry as { value?: unknown }).value !== "string"
-									) {
-										return null;
-									}
-									return [
-										(entry as { name: string }).name,
-										(entry as { value: string }).value,
-									];
-								})
-								.filter((entry): entry is [string, string] =>
-									Array.isArray(entry),
-								),
-						)
-					: undefined;
-				const cwd =
-					typeof params.cwd === "string"
-						? this._normalizeClientPathToVmPath(params.cwd)
-						: undefined;
-				const outputByteLimit =
-					typeof params.outputByteLimit === "number"
-						? params.outputByteLimit
-						: 1_048_576;
-				const terminalId = `acp-term-${++this._acpTerminalCounter}`;
-				const { pid } = this.spawn(command, args, {
-					cwd,
-					env,
-					onStdout: (data) => {
-						const terminal = this._acpTerminals.get(terminalId);
-						if (terminal) {
-							this._appendTerminalOutput(terminal, data);
-						}
-					},
-					onStderr: (data) => {
-						const terminal = this._acpTerminals.get(terminalId);
-						if (terminal) {
-							this._appendTerminalOutput(terminal, data);
-						}
-					},
-				});
-				this._acpTerminals.set(terminalId, {
-					sessionId:
-						typeof params.sessionId === "string" ? params.sessionId : "",
-					pid,
-					output: "",
-					truncated: false,
-					outputByteLimit,
-				});
-				return { result: { terminalId } };
-			}
-			case "terminal/output": {
-				const terminalId = params.terminalId;
-				if (typeof terminalId !== "string") {
-					throw new Error("terminal/output requires a terminalId");
-				}
-				const terminal = this._acpTerminals.get(terminalId);
-				if (!terminal) {
-					throw new Error(`ACP terminal not found: ${terminalId}`);
-				}
-				const proc = this.getProcess(terminal.pid);
-				return {
-					result: {
-						output: terminal.output,
-						truncated: terminal.truncated,
-						exitStatus:
-							proc.exitCode === null
-								? undefined
-								: { exitCode: proc.exitCode, signal: null },
-					},
-				};
-			}
-			case "terminal/wait_for_exit": {
-				const terminalId = params.terminalId;
-				if (typeof terminalId !== "string") {
-					throw new Error("terminal/wait_for_exit requires a terminalId");
-				}
-				const terminal = this._acpTerminals.get(terminalId);
-				if (!terminal) {
-					throw new Error(`ACP terminal not found: ${terminalId}`);
-				}
-				const exitCode = await this.waitProcess(terminal.pid);
-				return { result: { exitCode, signal: null } };
-			}
-			case "terminal/kill": {
-				const terminalId = params.terminalId;
-				if (typeof terminalId !== "string") {
-					throw new Error("terminal/kill requires a terminalId");
-				}
-				const terminal = this._acpTerminals.get(terminalId);
-				if (!terminal) {
-					throw new Error(`ACP terminal not found: ${terminalId}`);
-				}
-				this.killProcess(terminal.pid);
-				return { result: null };
-			}
-			case "terminal/release": {
-				const terminalId = params.terminalId;
-				if (typeof terminalId !== "string") {
-					throw new Error("terminal/release requires a terminalId");
-				}
-				const terminal = this._acpTerminals.get(terminalId);
-				if (!terminal) {
-					throw new Error(`ACP terminal not found: ${terminalId}`);
-				}
-				if (this.getProcess(terminal.pid).exitCode === null) {
-					this.killProcess(terminal.pid);
-				}
-				this._acpTerminals.delete(terminalId);
-				return { result: null };
-			}
-			default:
-				return null;
-		}
-	}
-
 	/** Returns info about all processes spawned via spawn(). */
 	listProcesses(): SpawnedProcessInfo[] {
 		return [...this._processes.values()].map(({ proc, command, args }) => ({
@@ -2311,7 +2227,7 @@ export class AgentOs {
 	}
 
 	/** Internal helper: retrieve a session or throw. */
-	private _requireSession(sessionId: string): Session {
+	private _requireSession(sessionId: string): AgentSessionEntry {
 		const session = this._sessions.get(sessionId);
 		if (!session) {
 			throw new Error(`Session not found: ${sessionId}`);
@@ -2366,71 +2282,244 @@ export class AgentOs {
 			.filter((entry): entry is AgentRegistryEntry => entry !== null);
 	}
 
-	private _deriveSessionConfigOptions(
-		agentType: string,
-		sessionResult: Record<string, unknown> | undefined,
-	): SessionConfigOption[] {
-		const models =
-			sessionResult?.models && typeof sessionResult.models === "object"
-				? (sessionResult.models as Record<string, unknown>)
-				: null;
-		if (!models) {
-			return [];
-		}
-
-		const currentModelId =
-			typeof models.currentModelId === "string"
-				? models.currentModelId
-				: undefined;
-		const allowedValues = Array.isArray(models.availableModels)
-			? models.availableModels.reduce<Array<{ id: string; label?: string }>>(
-					(acc, model) => {
-						if (!model || typeof model !== "object") {
-							return acc;
-						}
-						const modelId = (model as { modelId?: unknown }).modelId;
-						const name = (model as { name?: unknown }).name;
-						if (typeof modelId !== "string") {
-							return acc;
-						}
-						acc.push({
-							id: modelId,
-							label: typeof name === "string" ? name : undefined,
-						});
-						return acc;
-					},
-					[],
-				)
-			: [];
-
-		if (!currentModelId && allowedValues.length === 0) {
-			return [];
-		}
-
-		return [
-			{
-				id: "model",
-				category: "model",
-				label: "Model",
-				description:
-					agentType === "opencode"
-						? "Available models reported by OpenCode. Model switching must be configured before createSession() because ACP session/set_config_option is not implemented."
-						: undefined,
-				currentValue: currentModelId,
-				allowedValues,
-				readOnly: agentType === "opencode",
-			},
-		];
+	private _syncSessionState(
+		session: AgentSessionEntry,
+		state: Pick<
+			SidecarSessionState,
+			| "processId"
+			| "closed"
+			| "modes"
+			| "configOptions"
+			| "agentCapabilities"
+			| "agentInfo"
+			| "events"
+		>,
+	): void {
+		session.processId = state.processId;
+		session.closed = state.closed;
+		session.modes = toSessionModes(state.modes);
+		session.configOptions = toSessionConfigOptions(state.configOptions);
+		session.capabilities = toAgentCapabilities(state.agentCapabilities);
+		session.agentInfo = toAgentInfo(state.agentInfo);
+		session.events = mergeSequencedEvents(
+			session.events,
+			state.events.map((event) => ({
+				sequenceNumber: event.sequenceNumber,
+				notification: toJsonRpcNotification(event.notification),
+			})),
+		);
 	}
 
-	/**
-	 * Spawn an ACP-compatible coding agent inside the VM and return a Session.
-	 *
-	 * 1. Resolves the adapter binary from mounted node_modules
-	 * 2. Spawns it with streaming stdin and stdout capture
-	 * 3. Sends initialize + session/new
-	 * 4. Returns a Session for prompt/cancel/close
-	 */
+	private _applySessionUpdate(
+		session: AgentSessionEntry,
+		notification: JsonRpcNotification,
+	): void {
+		if (notification.method !== "session/update") {
+			return;
+		}
+
+		const params = toRecord(notification.params);
+		const update = toRecord(params.update ?? params);
+		const sessionUpdate = update.sessionUpdate;
+
+		if (
+			sessionUpdate === "current_mode_update" &&
+			typeof update.currentModeId === "string" &&
+			session.modes
+		) {
+			session.modes = {
+				...session.modes,
+				currentModeId: update.currentModeId,
+			};
+		}
+
+		if (
+			(sessionUpdate === "config_option_update" ||
+				sessionUpdate === "config_options_update") &&
+			Array.isArray(update.configOptions)
+		) {
+			session.configOptions = update.configOptions as SessionConfigOption[];
+		}
+	}
+
+	private _recordSessionNotification(
+		session: AgentSessionEntry,
+		sequenceNumber: number,
+		notification: JsonRpcNotification,
+	): void {
+		session.events = mergeSequencedEvents(session.events, [
+			{ sequenceNumber, notification },
+		]);
+		this._applySessionUpdate(session, notification);
+
+		if (notification.method === "session/update") {
+			for (const handler of session.eventHandlers) {
+				handler(notification);
+			}
+		}
+
+		if (
+			notification.method === LEGACY_PERMISSION_METHOD ||
+			notification.method === ACP_PERMISSION_METHOD
+		) {
+			const params = toRecord(notification.params);
+			const permissionId = params.permissionId;
+			if (typeof permissionId === "string" || typeof permissionId === "number") {
+				const request: PermissionRequest = {
+					permissionId: String(permissionId),
+					description:
+						typeof params.description === "string"
+							? params.description
+							: undefined,
+					params,
+				};
+				for (const handler of session.permissionHandlers) {
+					handler(request);
+				}
+			}
+		}
+	}
+
+	private _handleSidecarEvent(
+		event: Parameters<NativeSidecarProcessClient["onEvent"]>[0] extends (
+			event: infer T,
+		) => void
+			? T
+			: never,
+	): void {
+		if (event.payload.type !== "structured") {
+			return;
+		}
+		if (event.payload.name !== "acp.session_event") {
+			return;
+		}
+
+		const sessionId = event.payload.detail.session_id;
+		const session = sessionId ? this._sessions.get(sessionId) : undefined;
+		if (!session) {
+			return;
+		}
+
+		const sequenceNumber = Number(event.payload.detail.sequence_number);
+		if (!Number.isInteger(sequenceNumber)) {
+			return;
+		}
+
+		const notificationText = event.payload.detail.notification;
+		if (typeof notificationText !== "string") {
+			return;
+		}
+
+		try {
+			this._recordSessionNotification(
+				session,
+				sequenceNumber,
+				toJsonRpcNotification(JSON.parse(notificationText)),
+			);
+		} catch {
+			// Ignore malformed event payloads from the sidecar.
+		}
+	}
+
+	private _unsupportedConfigResponse(
+		agentType: string,
+		category: string,
+	): JsonRpcResponse {
+		const message =
+			agentType === "opencode" && category === "model"
+				? "OpenCode reports available models, but model switching must be configured before createSession() because ACP session/set_config_option is not implemented."
+				: `The ${category} config option is read-only for ${agentType} sessions.`;
+		return {
+			jsonrpc: "2.0",
+			id: null,
+			error: {
+				code: -32601,
+				message,
+			},
+		};
+	}
+
+	private async _sendSessionRequest(
+		sessionId: string,
+		method: string,
+		params?: Record<string, unknown>,
+	): Promise<JsonRpcResponse> {
+		const session = this._requireSession(sessionId);
+		const response = await this._sidecarClient.sessionRequest(
+			this._sidecarSession,
+			this._sidecarVm,
+			{
+			sessionId,
+			method,
+			params,
+			},
+		);
+		if (!response.error) {
+			if (
+				method === "session/set_mode" &&
+				typeof params?.modeId === "string" &&
+				session.modes
+			) {
+				session.modes = {
+					...session.modes,
+					currentModeId: params.modeId,
+				};
+			}
+			if (
+				method === "session/set_config_option" &&
+				typeof params?.configId === "string" &&
+				typeof params?.value === "string"
+			) {
+				const nextValue = params.value;
+				session.configOptions = session.configOptions.map((option) =>
+					option.id === params.configId
+						? { ...option, currentValue: nextValue }
+						: option,
+				);
+			}
+		}
+		return response;
+	}
+
+	private async _setSessionConfigByCategory(
+		sessionId: string,
+		category: string,
+		value: string,
+	): Promise<JsonRpcResponse> {
+		const session = this._requireSession(sessionId);
+		const option = session.configOptions.find((entry) => entry.category === category);
+		if (option?.readOnly) {
+			return this._unsupportedConfigResponse(session.agentType, category);
+		}
+		return this._sendSessionRequest(sessionId, "session/set_config_option", {
+			configId: option?.id ?? category,
+			value,
+		});
+	}
+
+	private _removeSession(sessionId: string): void {
+		this._sessions.delete(sessionId);
+	}
+
+	private async _closeSessionInternal(sessionId: string): Promise<void> {
+		this._requireSession(sessionId);
+		this._removeSession(sessionId);
+		await this._sidecarClient.closeAgentSession(
+			this._sidecarSession,
+			this._sidecarVm,
+			sessionId,
+		);
+	}
+
+	private async _hydrateSessionState(session: AgentSessionEntry): Promise<void> {
+		const state = await this._sidecarClient.getSessionState(
+			this._sidecarSession,
+			this._sidecarVm,
+			session.sessionId,
+		);
+		this._syncSessionState(session, state);
+	}
+
 	async createSession(
 		agentType: AgentType | string,
 		options?: CreateSessionOptions,
@@ -2440,12 +2529,7 @@ export class AgentOs {
 			throw new Error(`Unknown agent type: ${agentType}`);
 		}
 
-		// Generate tool reference from VM-level toolkits. This is always
-		// injected into the agent prompt, even when skipOsInstructions is true.
 		const toolReference = this._toolReference || undefined;
-
-		// Prepare OS instructions injection. When skipOsInstructions is true,
-		// the base OS instructions are skipped but tool docs are still injected.
 		let extraArgs: string[] = [];
 		let extraEnv: Record<string, string> = {};
 		if (config.prepareInstructions) {
@@ -2465,12 +2549,10 @@ export class AgentOs {
 			}
 		}
 
-		// Create stdout line iterable wired via onStdout callback
-		const { iterable, onStdout } = createStdoutLineIterable();
 		const launchArgs = [...(config.launchArgs ?? []), ...extraArgs];
 		let launchEnv = { ...config.defaultEnv, ...extraEnv, ...options?.env };
 		const sessionCwd = options?.cwd ?? "/home/user";
-		const binPath = this._resolveAdapterBin(config.acpAdapter);
+		const adapterEntrypoint = this._resolveAdapterBin(config.acpAdapter);
 		if (
 			(agentType === "pi" || agentType === "pi-cli") &&
 			!launchEnv.PI_ACP_PI_COMMAND
@@ -2480,113 +2562,42 @@ export class AgentOs {
 				PI_ACP_PI_COMMAND: this._resolvePackageBin(config.agentPackage, "pi"),
 			};
 		}
-		const pid = this.spawn("node", [binPath, ...launchArgs], {
-			streamStdin: true,
-			onStdout,
-			env: launchEnv,
-			cwd: options?.cwd,
-		}).pid;
 
-		const proc = this._processes.get(pid)!.proc;
-		const client = new AcpClient(proc, iterable, {
-			requestHandler: (request) => this._handleInboundAcpRequest(request),
-		});
-
-		let initResponse: JsonRpcResponse;
-		let sessionResponse: JsonRpcResponse;
-		try {
-			initResponse = await client.request("initialize", {
-				protocolVersion: 1,
-				clientCapabilities: {
-					fs: {
-						readTextFile: true,
-						writeTextFile: true,
-					},
-					terminal: true,
-				},
-			});
-			if (initResponse.error) {
-				throw new Error(`ACP initialize failed: ${initResponse.error.message}`);
-			}
-
-			sessionResponse = await client.request("session/new", {
+		const created = await this._sidecarClient.createSession(
+			this._sidecarSession,
+			this._sidecarVm,
+			{
+				agentType: String(agentType),
+				runtime: "java_script",
+				adapterEntrypoint,
+				args: launchArgs,
+				env: launchEnv,
 				cwd: sessionCwd,
 				mcpServers: options?.mcpServers ?? [],
-			});
-			if (sessionResponse.error) {
-				throw new Error(
-					`ACP session/new failed: ${sessionResponse.error.message}`,
-				);
-			}
+			},
+		);
+
+		const initData: SessionInitData = {
+			modes: toSessionModes(created.modes) ?? undefined,
+			configOptions: toSessionConfigOptions(created.configOptions),
+			capabilities: toAgentCapabilities(created.agentCapabilities),
+			agentInfo: toAgentInfo(created.agentInfo) ?? undefined,
+		};
+		const session = sessionEntryFromInit(
+			created.sessionId,
+			String(agentType),
+			initData,
+		);
+		this._sessions.set(created.sessionId, session);
+
+		try {
+			await this._hydrateSessionState(session);
 		} catch (error) {
-			client.close();
+			this._removeSession(created.sessionId);
 			throw error;
 		}
 
-		const sessionId = (sessionResponse.result as { sessionId: string })
-			.sessionId;
-
-		// Extract initialize-scoped metadata, then allow session/new to
-		// override with session-scoped modes/config options when present.
-		const initResult = initResponse.result as
-			| Record<string, unknown>
-			| undefined;
-		const sessionResult = sessionResponse.result as
-			| Record<string, unknown>
-			| undefined;
-		const initData: SessionInitData = {};
-		if (initResult) {
-			if (initResult.modes) {
-				initData.modes = initResult.modes as SessionInitData["modes"];
-			}
-			if (initResult.configOptions) {
-				initData.configOptions =
-					initResult.configOptions as SessionInitData["configOptions"];
-			}
-			if (initResult.agentCapabilities) {
-				initData.capabilities =
-					initResult.agentCapabilities as SessionInitData["capabilities"];
-			}
-			if (initResult.agentInfo) {
-				initData.agentInfo =
-					initResult.agentInfo as SessionInitData["agentInfo"];
-			}
-		}
-		if (sessionResult) {
-			if (sessionResult.modes) {
-				initData.modes = sessionResult.modes as SessionInitData["modes"];
-			}
-			if (sessionResult.configOptions) {
-				initData.configOptions =
-					sessionResult.configOptions as SessionInitData["configOptions"];
-			}
-		}
-		const derivedConfigOptions = this._deriveSessionConfigOptions(
-			agentType,
-			sessionResult,
-		);
-		if (derivedConfigOptions.length > 0) {
-			initData.configOptions = [
-				...(initData.configOptions ?? []),
-				...derivedConfigOptions,
-			];
-		}
-
-		const session = new Session(client, sessionId, agentType, initData, () => {
-			for (const [terminalId, terminal] of this._acpTerminals) {
-				if (terminal.sessionId !== sessionId) {
-					continue;
-				}
-				if (this.getProcess(terminal.pid).exitCode === null) {
-					this.killProcess(terminal.pid);
-				}
-				this._acpTerminals.delete(terminalId);
-			}
-			this._sessions.delete(sessionId);
-		});
-		this._sessions.set(sessionId, session);
-
-		return { sessionId };
+		return { sessionId: created.sessionId };
 	}
 
 	/**
@@ -2661,150 +2672,151 @@ export class AgentOs {
 	 * a graceful shutdown sequence.
 	 */
 	async destroySession(sessionId: string): Promise<void> {
-		const session = this._sessions.get(sessionId);
-		if (!session) {
-			throw new Error(`Session not found: ${sessionId}`);
-		}
-
-		// Attempt graceful cancel before closing (ignore errors)
+		this._requireSession(sessionId);
 		try {
-			await session.cancel();
+			await this.cancelSession(sessionId);
 		} catch {
-			// No pending work or already closed — ignore
+			// Ignore cancellation failures during teardown.
 		}
-
-		session.close();
+		await this._closeSessionInternal(sessionId);
 	}
 
 	// ── Flat session API (ID-based) ───────────────────────────────
 
-	/** Send a prompt to the agent and wait for the final response.
-	 *  Returns the raw JSON-RPC response and the accumulated agent text. */
 	async prompt(sessionId: string, text: string): Promise<PromptResult> {
-		const session = this._requireSession(sessionId);
-
-		// Collect streamed text while the prompt is running
+		this._requireSession(sessionId);
 		let agentText = "";
 		const handler: SessionEventHandler = (event) => {
-			const params = event.params as Record<string, unknown> | undefined;
-			const update = params?.update as Record<string, unknown> | undefined;
+			const params = toRecord(event.params);
+			const update = toRecord(params.update);
 			if (update?.sessionUpdate === "agent_message_chunk") {
-				const content = update.content as { text?: string } | undefined;
-				if (content?.text) agentText += content.text;
+				const content = toRecord(update.content);
+				if (typeof content.text === "string") {
+					agentText += content.text;
+				}
 			}
 		};
-		session.onSessionEvent(handler);
+		const unsubscribe = this.onSessionEvent(sessionId, handler);
 
 		try {
-			const response = await session.prompt(text);
+			const response = await this._sendSessionRequest(sessionId, "session/prompt", {
+				prompt: [{ type: "text", text }],
+			});
 			return { response, text: agentText };
 		} finally {
-			session.removeSessionEventHandler(handler);
+			unsubscribe();
 		}
 	}
 
 	/** Cancel ongoing agent work for a session. */
 	async cancelSession(sessionId: string): Promise<JsonRpcResponse> {
-		return this._requireSession(sessionId).cancel();
+		return this._sendSessionRequest(sessionId, "session/cancel");
 	}
 
-	/** Kill the agent process and clear event history for a session. */
 	closeSession(sessionId: string): void {
-		this._requireSession(sessionId).close();
+		this._requireSession(sessionId);
+		void this._closeSessionInternal(sessionId);
 	}
 
-	/** Returns the sequenced event history for a session. */
 	getSessionEvents(
 		sessionId: string,
 		options?: GetEventsOptions,
 	): SequencedEvent[] {
-		return this._requireSession(sessionId).getSequencedEvents(options);
+		let events = cloneSequencedEvents(this._requireSession(sessionId).events);
+		if (options?.since !== undefined) {
+			events = events.filter((event) => event.sequenceNumber > options.since!);
+		}
+		if (options?.method !== undefined) {
+			events = events.filter(
+				(event) => event.notification.method === options.method,
+			);
+		}
+		return events;
 	}
 
-	/** Respond to a permission request from an agent. */
 	async respondPermission(
 		sessionId: string,
 		permissionId: string,
 		reply: PermissionReply,
 	): Promise<JsonRpcResponse> {
-		return this._requireSession(sessionId).respondPermission(
+		return this._sendSessionRequest(sessionId, LEGACY_PERMISSION_METHOD, {
 			permissionId,
 			reply,
-		);
+		});
 	}
 
-	/** Set the session mode (e.g., "plan", "normal"). */
 	async setSessionMode(
 		sessionId: string,
 		modeId: string,
 	): Promise<JsonRpcResponse> {
-		return this._requireSession(sessionId).setMode(modeId);
+		return this._sendSessionRequest(sessionId, "session/set_mode", {
+			modeId,
+		});
 	}
 
-	/** Returns available modes from the agent's reported capabilities. */
 	getSessionModes(sessionId: string): SessionModeState | null {
-		return this._requireSession(sessionId).getModes();
+		return this._requireSession(sessionId).modes;
 	}
 
-	/** Set the model for a session. */
 	async setSessionModel(
 		sessionId: string,
 		model: string,
 	): Promise<JsonRpcResponse> {
-		return this._requireSession(sessionId).setModel(model);
+		return this._setSessionConfigByCategory(sessionId, "model", model);
 	}
 
-	/** Set the thought/reasoning level for a session. */
 	async setSessionThoughtLevel(
 		sessionId: string,
 		level: string,
 	): Promise<JsonRpcResponse> {
-		return this._requireSession(sessionId).setThoughtLevel(level);
+		return this._setSessionConfigByCategory(sessionId, "thought_level", level);
 	}
 
-	/** Returns available config options for a session. */
 	getSessionConfigOptions(sessionId: string): SessionConfigOption[] {
-		return this._requireSession(sessionId).getConfigOptions();
+		return [...this._requireSession(sessionId).configOptions];
 	}
 
-	/** Returns the agent's capability flags for a session. */
 	getSessionCapabilities(sessionId: string): AgentCapabilities | null {
 		const caps = this._requireSession(sessionId).capabilities;
 		return Object.keys(caps).length > 0 ? caps : null;
 	}
 
-	/** Returns agent identity information for a session. */
 	getSessionAgentInfo(sessionId: string): AgentInfo | null {
 		return this._requireSession(sessionId).agentInfo;
 	}
 
-	/** Send an arbitrary JSON-RPC request to a session's agent. */
 	async rawSessionSend(
 		sessionId: string,
 		method: string,
 		params?: Record<string, unknown>,
 	): Promise<JsonRpcResponse> {
-		return this._requireSession(sessionId).rawSend(method, params);
+		return this._sendSessionRequest(sessionId, method, params);
 	}
 
-	/** Subscribe to session/update notifications for a session. Returns an unsubscribe function. */
+	async rawSend(
+		sessionId: string,
+		method: string,
+		params?: Record<string, unknown>,
+	): Promise<JsonRpcResponse> {
+		return this.rawSessionSend(sessionId, method, params);
+	}
+
 	onSessionEvent(sessionId: string, handler: SessionEventHandler): () => void {
 		const session = this._requireSession(sessionId);
-		session.onSessionEvent(handler);
+		session.eventHandlers.add(handler);
 		return () => {
-			session.removeSessionEventHandler(handler);
+			session.eventHandlers.delete(handler);
 		};
 	}
 
-	/** Subscribe to permission requests for a session. Returns an unsubscribe function. */
 	onPermissionRequest(
 		sessionId: string,
 		handler: PermissionRequestHandler,
 	): () => void {
 		const session = this._requireSession(sessionId);
-		session.onPermissionRequest(handler);
+		session.permissionHandlers.add(handler);
 		return () => {
-			session.removePermissionRequestHandler(handler);
+			session.permissionHandlers.delete(handler);
 		};
 	}
 
@@ -2831,27 +2843,18 @@ export class AgentOs {
 	}
 
 	async dispose(): Promise<void> {
-		// Cancel all cron jobs first
 		this._cronManager.dispose();
 
-		// Close all active sessions before disposing the kernel
-		for (const session of [...this._sessions.values()]) {
-			session.close();
+		for (const sessionId of [...this._sessions.keys()]) {
+			await this._closeSessionInternal(sessionId).catch(() => {});
 		}
-		this._sessions.clear();
 
-		// Kill all tracked shells
 		for (const [id, entry] of this._shells) {
 			entry.handle.kill();
 		}
 		this._shells.clear();
 
-		for (const terminal of this._acpTerminals.values()) {
-			if (this.getProcess(terminal.pid).exitCode === null) {
-				this.killProcess(terminal.pid);
-			}
-		}
-		this._acpTerminals.clear();
+		this._disposeSidecarEventListener();
 
 		const sidecarLease = this._sidecarLease;
 		this._sidecarLease = null;

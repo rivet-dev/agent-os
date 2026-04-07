@@ -522,7 +522,7 @@
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
       "priority": 36,
-      "passes": false,
+      "passes": true,
       "notes": "Step 6 (TypeScript side). Depends on US-022, US-023, US-024. Check index.ts for re-exports from session.ts, acp-client.ts, protocol.ts. Split existing pi-acp-adapter.test.ts and pi-sdk-adapter.test.ts: protocol tests -> Rust, e2e agent tests stay TypeScript."
     },
     {

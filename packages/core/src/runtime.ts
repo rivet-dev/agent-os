@@ -2207,7 +2207,6 @@ class NativeKernel implements Kernel {
 		const vm = await client.createVm(session, {
 			runtime: "java_script",
 			metadata: {
-				cwd: this.cwd,
 				...Object.fromEntries(
 					Object.entries(this.env).map(([key, value]) => [`env.${key}`, value]),
 				),

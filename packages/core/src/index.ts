@@ -22,9 +22,9 @@ export type {
 	VirtualFileSystem,
 	VirtualStat,
 } from "./runtime-compat.js";
-export type { NotificationHandler } from "./acp-client.js";
-export { AcpClient } from "./acp-client.js";
 export type {
+	AgentCapabilities,
+	AgentInfo,
 	AgentOsOptions,
 	AgentRegistryEntry,
 	AgentOsSidecarConfig,
@@ -36,6 +36,14 @@ export type {
 	ConnectTerminalOptions,
 	CreateSessionOptions,
 	DirEntry,
+	GetEventsOptions,
+	JsonRpcError,
+	JsonRpcNotification,
+	JsonRpcRequest,
+	JsonRpcResponse,
+	PermissionReply,
+	PermissionRequest,
+	PermissionRequestHandler,
 	OverlayMountConfig,
 	McpServerConfig,
 	McpServerConfigLocal,
@@ -50,6 +58,12 @@ export type {
 	ReaddirRecursiveOptions,
 	RootFilesystemConfig,
 	RootLowerInput,
+	SequencedEvent,
+	SessionConfigOption,
+	SessionEventHandler,
+	SessionInitData,
+	SessionMode,
+	SessionModeState,
 	SessionInfo,
 	SpawnedProcessInfo,
 } from "./agent-os.js";
@@ -110,30 +124,3 @@ export {
 	MAX_TOOL_DESCRIPTION_LENGTH,
 } from "./host-tools.js";
 export { getOsInstructions } from "./os-instructions.js";
-export type {
-	JsonRpcError,
-	JsonRpcNotification,
-	JsonRpcRequest,
-	JsonRpcResponse,
-} from "./protocol.js";
-export {
-	deserializeMessage,
-	isResponse,
-	serializeMessage,
-} from "./protocol.js";
-export type {
-	AgentCapabilities,
-	AgentInfo,
-	GetEventsOptions,
-	PermissionReply,
-	PermissionRequest,
-	PermissionRequestHandler,
-	SequencedEvent,
-	Session,
-	SessionConfigOption,
-	SessionEventHandler,
-	SessionInitData,
-	SessionMode,
-	SessionModeState,
-} from "./session.js";
-export { createStdoutLineIterable } from "./stdout-lines.js";

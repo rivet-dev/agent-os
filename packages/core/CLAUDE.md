@@ -49,6 +49,7 @@ Each agent type needs:
   - Use low timeouts for test commands (60000ms max).
 - **Always verify related tests pass before considering work done.**
 - **All tests run inside the VM** -- network servers, file I/O, agent processes.
+- Session tests that need launch argv or OS-instruction assertions should inspect `getSessionAgentInfo(sessionId)` from sidecar state instead of spying on `kernel.spawn`; `createSession()` now launches through sidecar RPCs.
 - Network tests: write a server script file, run it with `node` inside the VM, then `vm.fetch()` against it.
 - Agent tests must be run sequentially in layers:
   1. PI headless mode (spawn pi directly, verify output)

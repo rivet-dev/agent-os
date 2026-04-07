@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { JsonRpcNotification, JsonRpcResponse } from "../json-rpc.js";
 
 const PROTOCOL_SCHEMA = {
 	name: "agent-os-sidecar",
@@ -165,6 +166,30 @@ type RequestPayload =
 			metadata: Record<string, string>;
 			root_filesystem: WireRootFilesystemDescriptor;
 			permissions?: WirePermissionsPolicy;
+	  }
+	| {
+			type: "create_session";
+			agent_type: string;
+			runtime?: GuestRuntimeKind;
+			adapter_entrypoint: string;
+			args: string[];
+			env: Record<string, string>;
+			cwd: string;
+			mcp_servers: unknown[];
+	  }
+	| {
+			type: "session_request";
+			session_id: string;
+			method: string;
+			params?: unknown;
+	  }
+	| {
+			type: "get_session_state";
+			session_id: string;
+	  }
+	| {
+			type: "close_agent_session";
+			session_id: string;
 	  }
 	| {
 			type: "configure_vm";
@@ -341,6 +366,11 @@ interface EventFrame {
 				type: "process_exited";
 				process_id: string;
 				exit_code: number;
+		  }
+		| {
+				type: "structured";
+				name: string;
+				detail: Record<string, string>;
 		  };
 }
 
@@ -372,6 +402,38 @@ interface ResponseFrame {
 		| {
 				type: "vm_created";
 				vm_id: string;
+		  }
+		| {
+				type: "session_created";
+				session_id: string;
+				modes?: unknown;
+				config_options: unknown[];
+				agent_capabilities?: unknown;
+				agent_info?: unknown;
+		  }
+		| {
+				type: "session_rpc";
+				session_id: string;
+				response: unknown;
+		  }
+		| {
+				type: "session_state";
+				session_id: string;
+				agent_type: string;
+				process_id: string;
+				closed: boolean;
+				modes?: unknown;
+				config_options: unknown[];
+				agent_capabilities?: unknown;
+				agent_info?: unknown;
+				events: Array<{
+					sequence_number: number;
+					notification: unknown;
+				}>;
+		  }
+		| {
+				type: "agent_session_closed";
+				session_id: string;
 		  }
 		| {
 				type: "vm_configured";
@@ -522,6 +584,31 @@ export interface CreatedVm {
 	vmId: string;
 }
 
+export interface SidecarSequencedNotification {
+	sequenceNumber: number;
+	notification: JsonRpcNotification;
+}
+
+export interface SidecarSessionCreated {
+	sessionId: string;
+	modes?: unknown;
+	configOptions: unknown[];
+	agentCapabilities?: unknown;
+	agentInfo?: unknown;
+}
+
+export interface SidecarSessionState {
+	sessionId: string;
+	agentType: string;
+	processId: string;
+	closed: boolean;
+	modes?: unknown;
+	configOptions: unknown[];
+	agentCapabilities?: unknown;
+	agentInfo?: unknown;
+	events: SidecarSequencedNotification[];
+}
+
 export interface SidecarMountPluginDescriptor {
 	id: string;
 	config?: Record<string, unknown>;
@@ -602,6 +689,7 @@ type WireProjectedModuleDescriptor = {
 export class NativeSidecarProcessClient {
 	private readonly child: ChildProcessWithoutNullStreams;
 	private readonly bufferedEvents: EventFrame[] = [];
+	private readonly eventListeners = new Set<(event: EventFrame) => void>();
 	private readonly stderrChunks: Buffer[] = [];
 	private readonly frameTimeoutMs: number;
 	private stdoutBuffer = Buffer.alloc(0);
@@ -672,6 +760,13 @@ export class NativeSidecarProcessClient {
 
 	setSidecarRequestHandler(handler: SidecarRequestHandler | null): void {
 		this.sidecarRequestHandler = handler;
+	}
+
+	onEvent(handler: (event: EventFrame) => void): () => void {
+		this.eventListeners.add(handler);
+		return () => {
+			this.eventListeners.delete(handler);
+		};
 	}
 
 	async authenticateAndOpenSession(
@@ -752,6 +847,144 @@ export class NativeSidecarProcessClient {
 		return {
 			vmId: response.payload.vm_id,
 		};
+	}
+
+	async createSession(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+		options: {
+			agentType: string;
+			runtime?: GuestRuntimeKind;
+			adapterEntrypoint: string;
+			args?: string[];
+			env?: Record<string, string>;
+			cwd: string;
+			mcpServers?: unknown[];
+		},
+	): Promise<SidecarSessionCreated> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload: {
+				type: "create_session",
+				agent_type: options.agentType,
+				...(options.runtime ? { runtime: options.runtime } : {}),
+				adapter_entrypoint: options.adapterEntrypoint,
+				args: options.args ?? [],
+				env: options.env ?? {},
+				cwd: options.cwd,
+				mcp_servers: options.mcpServers ?? [],
+			},
+		});
+		if (response.payload.type !== "session_created") {
+			throw new Error(
+				`unexpected create_session response: ${response.payload.type}`,
+			);
+		}
+		return {
+			sessionId: response.payload.session_id,
+			modes: response.payload.modes,
+			configOptions: response.payload.config_options ?? [],
+			agentCapabilities: response.payload.agent_capabilities,
+			agentInfo: response.payload.agent_info,
+		};
+	}
+
+	async sessionRequest(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+		options: {
+			sessionId: string;
+			method: string;
+			params?: unknown;
+		},
+	): Promise<JsonRpcResponse> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload: {
+				type: "session_request",
+				session_id: options.sessionId,
+				method: options.method,
+				...(options.params !== undefined ? { params: options.params } : {}),
+			},
+		});
+		if (response.payload.type !== "session_rpc") {
+			throw new Error(
+				`unexpected session_request response: ${response.payload.type}`,
+			);
+		}
+		return toJsonRpcResponse(response.payload.response);
+	}
+
+	async getSessionState(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+		sessionId: string,
+	): Promise<SidecarSessionState> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload: {
+				type: "get_session_state",
+				session_id: sessionId,
+			},
+		});
+		if (response.payload.type !== "session_state") {
+			throw new Error(
+				`unexpected get_session_state response: ${response.payload.type}`,
+			);
+		}
+		return {
+			sessionId: response.payload.session_id,
+			agentType: response.payload.agent_type,
+			processId: response.payload.process_id,
+			closed: response.payload.closed,
+			modes: response.payload.modes,
+			configOptions: response.payload.config_options ?? [],
+			agentCapabilities: response.payload.agent_capabilities,
+			agentInfo: response.payload.agent_info,
+			events: (response.payload.events ?? []).map((event) => ({
+				sequenceNumber: event.sequence_number,
+				notification: toJsonRpcNotification(event.notification),
+			})),
+		};
+	}
+
+	async closeAgentSession(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+		sessionId: string,
+	): Promise<void> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload: {
+				type: "close_agent_session",
+				session_id: sessionId,
+			},
+		});
+		if (response.payload.type !== "agent_session_closed") {
+			throw new Error(
+				`unexpected close_agent_session response: ${response.payload.type}`,
+			);
+		}
 	}
 
 	async configureVm(
@@ -1800,6 +2033,13 @@ export class NativeSidecarProcessClient {
 	}
 
 	private dispatchEvent(event: EventFrame): void {
+		for (const listener of this.eventListeners) {
+			try {
+				listener(event);
+			} catch {
+				// Event listeners are best-effort observers and must not break framing.
+			}
+		}
 		for (const waiter of this.eventWaiters) {
 			if (!waiter.matcher(event)) {
 				continue;
@@ -2029,4 +2269,37 @@ function toWireProjectedModuleDescriptor(
 		package_name: descriptor.packageName,
 		entrypoint: descriptor.entrypoint,
 	};
+}
+
+function toJsonRpcRecord(value: unknown): JsonRpcResponse | Record<string, unknown> {
+	if (value && typeof value === "object" && !Array.isArray(value)) {
+		return value as JsonRpcResponse | Record<string, unknown>;
+	}
+	throw new Error("sidecar returned invalid JSON-RPC payload");
+}
+
+function toJsonRpcNotification(value: unknown): JsonRpcNotification {
+	const notification = toJsonRpcRecord(value);
+	if (
+		notification.jsonrpc !== "2.0" ||
+		!("method" in notification) ||
+		typeof notification.method !== "string"
+	) {
+		throw new Error("sidecar returned invalid JSON-RPC notification");
+	}
+	return notification as unknown as JsonRpcNotification;
+}
+
+function toJsonRpcResponse(value: unknown): JsonRpcResponse {
+	const response = toJsonRpcRecord(value);
+	if (
+		response.jsonrpc !== "2.0" ||
+		!("id" in response) ||
+		(typeof response.id !== "number" &&
+			typeof response.id !== "string" &&
+			response.id !== null)
+	) {
+		throw new Error("sidecar returned invalid JSON-RPC response");
+	}
+	return response as JsonRpcResponse;
 }

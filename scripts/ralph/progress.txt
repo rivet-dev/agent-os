@@ -11,6 +11,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Session launch/instruction tests in `packages/core` should assert against sidecar session metadata such as `getSessionAgentInfo(sessionId).argv`; `createSession()` no longer goes through a directly spyable kernel `spawn()`
 - ACP compatibility logic in `crates/sidecar/src/acp/` must preserve the TypeScript edge-case bundle together: dedupe repeated inbound request IDs, shim `session/request_permission` vs `request/permission`, normalize permission option IDs, and fall back from cancel requests to a notification on `-32601`
 - ACP `CreateSession` in `crates/sidecar/src/service.rs` must force `AGENT_OS_KEEP_STDIN_OPEN=1` for adapter processes and keep a process-scoped stdout buffer until `session/new` returns the ACP `sessionId`, because handshake fragments can arrive before an `AcpSessionState` exists
 - ACP terminal helpers should stay internal to `AcpSessionState`: skip their process IDs in `pump_process_events()`, buffer output and exit state on the ACP session, and drain or kill them before removing the ACP session so public process events stay clean
@@ -403,4 +404,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - ACP terminal processes need their own session-local state (`output`, truncation, exit code, release state) because `vm.active_processes` drops exited processes before later `terminal/output` calls can inspect them
   - If an ACP-owned process is internal implementation detail, skip it in `pump_process_events()` and intercept any queued envelopes before they become public `process_output` or `process_exited` events
   - `close_agent_session()` must drain and terminate ACP terminal processes before removing the ACP session, otherwise released internal terminals can leak or surface stray events after the session is gone
+---
+## 2026-04-07 14:39:59 PDT - US-025
+- Deleted the legacy TypeScript ACP/session helper stack from `packages/core`, kept shared session and JSON-RPC types in standalone modules, and finished the flat `AgentOs` session flow around sidecar `create_session`, `session_request`, `get_session_state`, and `close_agent_session`
+- Restored the documented `rawSend(sessionId, method, params)` compatibility wrapper on top of the sidecar RPC path, updated the session test imports/calls to the flat API surface, and refreshed `packages/core/AGENTS.md` plus `README.md` to match the new sidecar-owned session model
+- Files changed: `packages/core/{AGENTS.md,README.md}`, `packages/core/src/{acp-client.ts,agent-os.ts,agent-session-types.ts,index.ts,json-rpc.ts,protocol.ts,runtime.ts,session.ts,stdout-lines.ts,sidecar/native-process-client.ts}`, `packages/core/tests/{acp-protocol.test.ts,agent-os-events.test.ts,claude-sdk-adapter.test.ts,claude-session.test.ts,codex-session.test.ts,helpers/flat-process-handle.ts,opencode-acp.test.ts,opencode-session.test.ts,os-instructions.test.ts,session-cancel.test.ts,session-capabilities.test.ts,session-comprehensive.test.ts,session-events.test.ts,session-lifecycle.test.ts,session-mcp.test.ts,session-mock-e2e.test.ts,session.test.ts}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Session launch assertions should read `getSessionAgentInfo(sessionId)` from sidecar state rather than spying on `kernel.spawn`, because `createSession()` now goes through sidecar RPCs
+  - When deleting a large API wrapper module like `session.ts`, keep shared wire/session types in small standalone files (`json-rpc.ts`, `agent-session-types.ts`) so the public export surface can survive the migration cleanly
+  - Preserve documented flat-session compatibility helpers like `rawSend(sessionId, ...)` while the repo still has callers or docs on the old name, even if the new internal helper is `rawSessionSend()`
 ---

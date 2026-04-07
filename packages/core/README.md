@@ -141,7 +141,7 @@ await vm.dispose();
 | `getConfigOptions` | `getConfigOptions(): SessionConfigOption[]` | Get available config options |
 | `getEvents` | `getEvents(options?: GetEventsOptions): JsonRpcNotification[]` | Get event history |
 | `getSequencedEvents` | `getSequencedEvents(options?: GetEventsOptions): SequencedEvent[]` | Get event history with sequence numbers |
-| `rawSend` | `rawSend(method: string, params?: Record<string, unknown>): Promise<JsonRpcResponse>` | Send an arbitrary ACP request |
+| `rawSend` | `rawSend(sessionId: string, method: string, params?: Record<string, unknown>): Promise<JsonRpcResponse>` | Send an arbitrary ACP request |
 
 **Session properties:** `sessionId`, `agentType`, `capabilities`, `agentInfo`, `closed`
 

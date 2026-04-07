@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { resolve } from "node:path";
-import type { KernelSpawnOptions, ManagedProcess } from "../src/runtime-compat.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/agent-os.js";
 import { AGENT_CONFIGS } from "../src/agents.js";
@@ -324,16 +323,8 @@ process.stdin.on('data', (chunk) => {
 });
 `;
 
-/** Captured spawn call info for kernel.spawn spy. */
-interface SpawnCapture {
-	command: string;
-	args: string[];
-	options: KernelSpawnOptions | undefined;
-}
-
 describe("createSession OS instructions integration", () => {
 	let vm: AgentOs;
-	let spawnCaptures: SpawnCapture[];
 	let hostWorkspaceDir: string;
 
 	beforeEach(async () => {
@@ -352,19 +343,6 @@ describe("createSession OS instructions integration", () => {
 				},
 			],
 		});
-		spawnCaptures = [];
-
-		// Spy on kernel.spawn to capture args while delegating to the real impl
-		const kernel = getAgentOsKernel(vm);
-		const origSpawn = kernel.spawn.bind(kernel);
-		kernel.spawn = (
-			command: string,
-			args: string[],
-			options?: KernelSpawnOptions,
-		): ManagedProcess => {
-			spawnCaptures.push({ command, args, options });
-			return origSpawn(command, args, options);
-		};
 	});
 
 	afterEach(async () => {
@@ -398,14 +376,14 @@ describe("createSession OS instructions integration", () => {
 
 		try {
 			const { sessionId } = await vm.createSession("pi");
+			const agentInfo = vm.getSessionAgentInfo(sessionId) as {
+				argv?: string[];
+			};
+			const argv = agentInfo.argv ?? [];
 
-			// Verify kernel.spawn was called with --append-system-prompt in args
-			expect(spawnCaptures.length).toBeGreaterThan(0);
-			const spawnCall = spawnCaptures[0];
-			expect(spawnCall.args).toContain("--append-system-prompt");
-			// The instruction text follows --append-system-prompt
-			const argIdx = spawnCall.args.indexOf("--append-system-prompt");
-			const instructionsArg = spawnCall.args[argIdx + 1];
+			expect(argv).toContain("--append-system-prompt");
+			const argIdx = argv.indexOf("--append-system-prompt");
+			const instructionsArg = argv[argIdx + 1];
 			expect(instructionsArg).toBeTruthy();
 			expect(instructionsArg.length).toBeGreaterThan(0);
 
@@ -458,11 +436,12 @@ describe("createSession OS instructions integration", () => {
 			const { sessionId } = await vm.createSession("pi", {
 				skipOsInstructions: true,
 			});
+			const agentInfo = vm.getSessionAgentInfo(sessionId) as {
+				argv?: string[];
+			};
+			const argv = agentInfo.argv ?? [];
 
-			// Verify kernel.spawn was NOT called with --append-system-prompt
-			expect(spawnCaptures.length).toBeGreaterThan(0);
-			const spawnCall = spawnCaptures[0];
-			expect(spawnCall.args).not.toContain("--append-system-prompt");
+			expect(argv).not.toContain("--append-system-prompt");
 
 			vm.closeSession(sessionId);
 		} finally {
@@ -504,13 +483,14 @@ describe("createSession OS instructions integration", () => {
 			const { sessionId } = await vm.createSession("pi", {
 				additionalInstructions: additionalText,
 			});
+			const agentInfo = vm.getSessionAgentInfo(sessionId) as {
+				argv?: string[];
+			};
+			const argv = agentInfo.argv ?? [];
 
-			// Verify the --append-system-prompt value contains additional text
-			expect(spawnCaptures.length).toBeGreaterThan(0);
-			const spawnCall = spawnCaptures[0];
-			const argIdx = spawnCall.args.indexOf("--append-system-prompt");
+			const argIdx = argv.indexOf("--append-system-prompt");
 			expect(argIdx).toBeGreaterThan(-1);
-			const instructionsArg = spawnCall.args[argIdx + 1];
+			const instructionsArg = argv[argIdx + 1];
 			expect(instructionsArg).toContain(additionalText);
 
 			vm.closeSession(sessionId);

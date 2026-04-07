@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import codex from "@rivet-dev/agent-os-codex-agent";
 import { AgentOs } from "../src/agent-os.js";
-import type { AgentCapabilities, AgentInfo } from "../src/session.js";
+import type { AgentCapabilities, AgentInfo } from "../src/agent-os.js";
 import {
 	type ResponsesFixture,
 	startResponsesMock,
@@ -422,7 +422,7 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 		expect(modelOption?.currentValue).toBe("gpt-5.4");
 		expect(thoughtOption?.currentValue).toBe("high");
 
-		const rawResponse = await runtime.vm.rawSessionSend(
+		const rawResponse = await runtime.vm.rawSend(
 			sessionId,
 			"session/set_mode",
 			{

@@ -11,7 +11,7 @@ import {
 } from "vitest";
 import claude from "@rivet-dev/agent-os-claude";
 import { AgentOs } from "../src/agent-os.js";
-import type { AgentCapabilities, AgentInfo } from "../src/session.js";
+import type { AgentCapabilities, AgentInfo } from "../src/agent-os.js";
 import {
 	createAnthropicFixture,
 	startLlmock,
@@ -531,7 +531,7 @@ describe.skipIf(registrySkipReason)("full createSession('claude')", () => {
 		}
 	}, 120_000);
 
-	test("createSession('claude') supports rawSessionSend() for supported ACP methods", async () => {
+	test("createSession('claude') supports rawSend() for supported ACP methods", async () => {
 		let sessionId: string | undefined;
 
 		try {
@@ -544,7 +544,7 @@ describe.skipIf(registrySkipReason)("full createSession('claude')", () => {
 			});
 			sessionId = session.sessionId;
 
-			const response = await vm.rawSessionSend(sessionId, "session/set_mode", {
+			const response = await vm.rawSend(sessionId, "session/set_mode", {
 				modeId: "plan",
 			});
 			expect(response.error).toBeUndefined();
