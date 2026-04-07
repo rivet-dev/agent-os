@@ -15,6 +15,8 @@ mod plugins;
 mod protocol;
 #[path = "../src/state.rs"]
 mod state;
+#[path = "../src/tools.rs"]
+mod tools;
 #[path = "../src/vm.rs"]
 mod vm;
 

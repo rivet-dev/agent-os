@@ -2959,13 +2959,28 @@ fn resolve_execute_request(
             "execute requires either command or entrypoint",
         ))
     })?;
-    let guest_cwd = resolve_guest_execution_cwd(vm, payload.cwd.as_deref());
-    let host_cwd = resolve_vm_guest_path_to_host(vm, &guest_cwd);
+    let (guest_cwd, host_cwd, allow_host_path_overrides) =
+        resolve_execution_cwds(vm, payload.cwd.as_deref());
     let mut env = vm.guest_env.clone();
     env.extend(payload.env.clone());
 
+    let requested_host_entrypoint = resolve_host_entrypoint_within_vm_host_cwd(vm, &entrypoint);
+    if requested_host_entrypoint.is_some() && !allow_host_path_overrides {
+        let requested_cwd = payload.cwd.as_deref().unwrap_or(guest_cwd.as_str());
+        return Err(SidecarError::InvalidState(format!(
+            "execution cwd {requested_cwd} is outside sandbox root {}",
+            vm.host_cwd.to_string_lossy()
+        )));
+    }
+    let host_entrypoint_override = allow_host_path_overrides
+        .then(|| resolve_host_entrypoint_within_vm_host_cwd(vm, &entrypoint))
+        .flatten();
+
     if runtime == GuestRuntimeKind::JavaScript {
-        let guest_entrypoint = guest_entrypoint_for_specifier(&guest_cwd, &entrypoint);
+        let guest_entrypoint = host_entrypoint_override
+            .as_ref()
+            .map(|(guest_entrypoint, _)| guest_entrypoint.clone())
+            .or_else(|| guest_entrypoint_for_specifier(&guest_cwd, &entrypoint));
         prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
     }
 
@@ -2979,7 +2994,9 @@ fn resolve_execute_request(
             .chain(payload.args.iter().cloned())
             .collect(),
         runtime,
-        entrypoint,
+        entrypoint: host_entrypoint_override
+            .map(|(_, host_entrypoint)| host_entrypoint)
+            .unwrap_or(entrypoint),
         execution_args: payload.args.clone(),
         env,
         guest_cwd,
@@ -2996,8 +3013,8 @@ fn resolve_command_execution(
     cwd: Option<&str>,
     explicit_wasm_permission_tier: Option<WasmPermissionTier>,
 ) -> Result<ResolvedChildProcessExecution, SidecarError> {
-    let guest_cwd = resolve_guest_execution_cwd(vm, cwd);
-    let host_cwd = resolve_vm_guest_path_to_host(vm, &guest_cwd);
+    let (guest_cwd, host_cwd, allow_host_path_overrides) =
+        resolve_execution_cwds(vm, cwd);
     let mut env = vm.guest_env.clone();
     env.extend(extra_env.clone());
 
@@ -3020,14 +3037,34 @@ fn resolve_command_execution(
                     None,
                 )
             } else {
-                let guest_entrypoint = guest_entrypoint_for_specifier(&guest_cwd, entrypoint_specifier);
-                let entrypoint = guest_entrypoint.as_ref().map_or_else(
-                    || entrypoint_specifier.clone(),
-                    |guest_entrypoint| {
-                        resolve_vm_guest_path_to_host(vm, guest_entrypoint)
-                            .to_string_lossy()
-                            .into_owned()
+                let requested_host_entrypoint =
+                    resolve_host_entrypoint_within_vm_host_cwd(vm, entrypoint_specifier);
+                if requested_host_entrypoint.is_some() && !allow_host_path_overrides {
+                    let requested_cwd = cwd.unwrap_or(guest_cwd.as_str());
+                    return Err(SidecarError::InvalidState(format!(
+                        "execution cwd {requested_cwd} is outside sandbox root {}",
+                        vm.host_cwd.to_string_lossy()
+                    )));
+                }
+                let host_entrypoint_override = allow_host_path_overrides
+                    .then(|| resolve_host_entrypoint_within_vm_host_cwd(vm, entrypoint_specifier))
+                    .flatten();
+                let guest_entrypoint = host_entrypoint_override
+                    .as_ref()
+                    .map(|(guest_entrypoint, _)| guest_entrypoint.clone())
+                    .or_else(|| guest_entrypoint_for_specifier(&guest_cwd, entrypoint_specifier));
+                let entrypoint = host_entrypoint_override.map_or_else(
+                    || {
+                        guest_entrypoint.as_ref().map_or_else(
+                            || entrypoint_specifier.clone(),
+                            |guest_entrypoint| {
+                                resolve_vm_guest_path_to_host(vm, guest_entrypoint)
+                                    .to_string_lossy()
+                                    .into_owned()
+                            },
+                        )
                     },
+                    |(_, host_entrypoint)| host_entrypoint,
                 );
                 (entrypoint, args.iter().skip(1).cloned().collect(), guest_entrypoint)
             };
@@ -3050,14 +3087,33 @@ fn resolve_command_execution(
     }
 
     if command.ends_with(".js") || command.ends_with(".mjs") || command.ends_with(".cjs") {
-        let guest_entrypoint = guest_entrypoint_for_specifier(&guest_cwd, command);
-        let entrypoint = guest_entrypoint.as_ref().map_or_else(
-            || command.to_owned(),
-            |guest_entrypoint| {
-                resolve_vm_guest_path_to_host(vm, guest_entrypoint)
-                    .to_string_lossy()
-                    .into_owned()
+        let requested_host_entrypoint = resolve_host_entrypoint_within_vm_host_cwd(vm, command);
+        if requested_host_entrypoint.is_some() && !allow_host_path_overrides {
+            let requested_cwd = cwd.unwrap_or(guest_cwd.as_str());
+            return Err(SidecarError::InvalidState(format!(
+                "execution cwd {requested_cwd} is outside sandbox root {}",
+                vm.host_cwd.to_string_lossy()
+            )));
+        }
+        let host_entrypoint_override = allow_host_path_overrides
+            .then(|| resolve_host_entrypoint_within_vm_host_cwd(vm, command))
+            .flatten();
+        let guest_entrypoint = host_entrypoint_override
+            .as_ref()
+            .map(|(guest_entrypoint, _)| guest_entrypoint.clone())
+            .or_else(|| guest_entrypoint_for_specifier(&guest_cwd, command));
+        let entrypoint = host_entrypoint_override.map_or_else(
+            || {
+                guest_entrypoint.as_ref().map_or_else(
+                    || command.to_owned(),
+                    |guest_entrypoint| {
+                        resolve_vm_guest_path_to_host(vm, guest_entrypoint)
+                            .to_string_lossy()
+                            .into_owned()
+                    },
+                )
             },
+            |(_, host_entrypoint)| host_entrypoint,
         );
         prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
 
@@ -3114,6 +3170,33 @@ fn resolve_guest_execution_cwd(vm: &VmState, value: Option<&str>) -> String {
     value.map(normalize_path).unwrap_or_else(|| vm.guest_cwd.clone())
 }
 
+fn resolve_execution_cwds(vm: &VmState, value: Option<&str>) -> (String, PathBuf, bool) {
+    if let Some(raw_cwd) = value {
+        let normalized_vm_host_cwd = normalize_host_path(&vm.host_cwd);
+        let requested_host_cwd = normalize_host_path(Path::new(raw_cwd));
+        if path_is_within_root(&requested_host_cwd, &normalized_vm_host_cwd) {
+            let relative = requested_host_cwd
+                .strip_prefix(&normalized_vm_host_cwd)
+                .unwrap_or_else(|_| Path::new(""));
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let guest_cwd = if relative.is_empty() {
+                String::from("/")
+            } else {
+                normalize_path(&format!("/{relative}"))
+            };
+            return (guest_cwd, requested_host_cwd, true);
+        }
+    }
+
+    let guest_cwd = resolve_guest_execution_cwd(vm, value);
+    let host_cwd = if value.is_none() {
+        vm.host_cwd.clone()
+    } else {
+        resolve_vm_guest_path_to_host(vm, &guest_cwd)
+    };
+    (guest_cwd, host_cwd, value.is_none())
+}
+
 fn resolve_vm_guest_path_to_host(vm: &VmState, guest_path: &str) -> PathBuf {
     host_mount_path_for_guest_path(vm, guest_path)
         .unwrap_or_else(|| shadow_path_for_guest(vm, guest_path))
@@ -3142,6 +3225,37 @@ fn resolve_path_like_guest_specifier(cwd: &str, specifier: &str) -> String {
 
 fn guest_entrypoint_for_specifier(cwd: &str, specifier: &str) -> Option<String> {
     is_path_like_specifier(specifier).then(|| resolve_path_like_guest_specifier(cwd, specifier))
+}
+
+fn resolve_host_entrypoint_within_vm_host_cwd(
+    vm: &VmState,
+    specifier: &str,
+) -> Option<(String, String)> {
+    let candidate = Path::new(specifier);
+    if !candidate.is_absolute() {
+        return None;
+    }
+
+    let normalized_entrypoint = normalize_host_path(candidate);
+    let normalized_host_cwd = normalize_host_path(&vm.host_cwd);
+    if !path_is_within_root(&normalized_entrypoint, &normalized_host_cwd) {
+        return None;
+    }
+
+    let relative = normalized_entrypoint
+        .strip_prefix(&normalized_host_cwd)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let guest_entrypoint = if relative.is_empty() {
+        String::from("/")
+    } else {
+        normalize_path(&format!("/{relative}"))
+    };
+    Some((
+        guest_entrypoint,
+        normalized_entrypoint.to_string_lossy().into_owned(),
+    ))
 }
 
 fn prepare_javascript_runtime_env(
@@ -3423,7 +3537,10 @@ fn load_javascript_entrypoint_source(
     };
     let normalized_entrypoint = normalize_host_path(&host_entrypoint);
     let sandbox_root = normalize_host_path(&vm.cwd);
-    if !path_is_within_root(&normalized_entrypoint, &sandbox_root) {
+    let host_cwd = normalize_host_path(&vm.host_cwd);
+    if !path_is_within_root(&normalized_entrypoint, &sandbox_root)
+        && !path_is_within_root(&normalized_entrypoint, &host_cwd)
+    {
         return None;
     }
 

@@ -4,6 +4,7 @@
 
 pub(crate) mod bootstrap;
 pub(crate) mod bridge;
+pub mod acp;
 pub(crate) mod execution;
 pub(crate) mod filesystem;
 pub(crate) mod plugins;

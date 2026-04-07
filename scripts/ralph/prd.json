@@ -455,7 +455,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 33,
-      "passes": false,
+      "passes": true,
       "notes": "Step 6 part 1. See spec 'ACP in Rust - Complexity Acknowledgment'. ALL edge cases are compatibility workarounds for real agent behaviors \u2014 port faithfully from acp-client.ts (564 lines), do NOT simplify or omit any. Read the existing TypeScript acp-client.ts at packages/core/src/acp-client.ts to understand each edge case."
     },
     {

@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
@@ -67,9 +67,8 @@ where
 
         self.next_vm_id += 1;
         let vm_id = format!("vm-{}", self.next_vm_id);
-        let guest_cwd = resolve_guest_cwd(payload.metadata.get("cwd"));
         let cwd = create_vm_shadow_root(&vm_id)?;
-        let host_cwd = shadow_path_for_guest(&cwd, &guest_cwd);
+        let (guest_cwd, host_cwd) = resolve_vm_cwds(payload.metadata.get("cwd"), &cwd)?;
         fs::create_dir_all(&host_cwd)
             .map_err(|error| SidecarError::Io(format!("failed to create VM cwd: {error}")))?;
         let resource_limits = parse_resource_limits(&payload.metadata)?;
@@ -790,6 +789,23 @@ fn resolve_guest_cwd(value: Option<&String>) -> String {
     value
         .map(|path| normalize_guest_path(path))
         .unwrap_or_else(|| String::from("/"))
+}
+
+fn resolve_vm_cwds(
+    metadata_cwd: Option<&String>,
+    shadow_root: &Path,
+) -> Result<(String, PathBuf), SidecarError> {
+    if let Some(raw_cwd) = metadata_cwd {
+        let candidate = PathBuf::from(raw_cwd);
+        if candidate.is_absolute() || raw_cwd.starts_with('.') {
+            let resolved_host_cwd = resolve_host_path(Some(raw_cwd))?;
+            return Ok((String::from("/"), resolved_host_cwd));
+        }
+    }
+
+    let guest_cwd = resolve_guest_cwd(metadata_cwd);
+    let host_cwd = shadow_path_for_guest(shadow_root, &guest_cwd);
+    Ok((guest_cwd, host_cwd))
 }
 
 fn resolve_host_path(value: Option<&String>) -> Result<PathBuf, SidecarError> {

@@ -11,6 +11,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- ACP compatibility logic in `crates/sidecar/src/acp/` must preserve the TypeScript edge-case bundle together: dedupe repeated inbound request IDs, shim `session/request_permission` vs `request/permission`, normalize permission option IDs, and fall back from cancel requests to a notification on `-32601`
 - Host tool registration is now split: TypeScript converts Zod schemas to JSON Schema, validates sidecar callback payloads, and runs `tool.execute()`, while the sidecar owns CLI parsing, `agentos` command dispatch, and prompt-markdown generation
 - Packages/core permissions should stay camelCase and JSON-serializable in TypeScript; only the native sidecar wire payload translates `childProcess` to `child_process`
 - Partial declarative permission objects must leave unspecified domains unset so Rust can apply deny-by-default per domain; only an omitted top-level permissions object should expand to allow-all
@@ -66,6 +67,15 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - lib.rs re-exports through service.rs which re-exports from state.rs: lib.rs → service.rs `pub use crate::state::*` → state.rs
   - HostFilesystem, ScopedHostFilesystem, MountPluginContext, MemoryMountPlugin, JsBridgeMountPlugin were NOT moved to state.rs — they are bridge/plugin types that will go to bridge.rs (US-003) and plugins/ (US-006)
   - security_hardening tests are flaky in parallel due to Node import cache races — not a regression
+---
+## 2026-04-07 11:59:31 PDT - US-022
+- Added a new Rust ACP module under `crates/sidecar/src/acp/` with a JSON-RPC 2.0 NDJSON codec plus an async ACP client that correlates requests, tracks recent activity for timeout diagnostics, deduplicates repeated inbound permission requests, shims legacy permission methods and option IDs, falls back from cancel requests to notifications on `-32601`, and applies a 50ms exit-drain grace period before rejecting pending work
+- Added focused ACP integration coverage under `crates/sidecar/tests/acp/` and `crates/sidecar/tests/acp_integration.rs`, then fixed the follow-on sidecar execution path so host-path-compatible `cwd` handling still passes the crash-isolation and hardening suites during the full package run
+- Files changed: `crates/AGENTS.md`, `crates/sidecar/src/{acp/client.rs,acp/json_rpc.rs,acp/mod.rs,execution.rs,lib.rs,vm.rs}`, `crates/sidecar/tests/{acp/client.rs,acp/json_rpc.rs,acp/mod.rs,acp_integration.rs,service.rs}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Keep the ACP compatibility workarounds as one bundle; removing any of the duplicate-ID handling, permission shims, option normalization, cancel fallback, timeout diagnostics, or exit-drain logic will break real agents that rely on legacy or noisy stdio behavior
+  - `ExecuteRequest.cwd` can only map to a host path when the entrypoint itself resolves through a host-side runtime mapping; otherwise absolute host cwd values must still reject with `invalid_state` to preserve VM isolation
+  - `cargo test -p agent-os-sidecar` is green for this story, but `tests/service.rs` can legitimately spend over 60 seconds in the TLS upgrade case before finishing cleanly
 ---
 
 ## 2026-04-06 - US-002
