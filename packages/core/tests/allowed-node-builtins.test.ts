@@ -93,4 +93,55 @@ describe("NativeSidecarKernelProxy execute payloads", () => {
 			},
 		});
 	});
+
+	test("exec forwards shell commands to the guest sh driver without TypeScript parsing", async () => {
+		fixtureRoot = mkdtempSync(join(tmpdir(), "agent-os-shell-exec-"));
+		const { client, execute } = createMockClient();
+
+		proxy = new NativeSidecarKernelProxy({
+			client,
+			session: {
+				connectionId: "conn-1",
+				sessionId: "session-1",
+			} as AuthenticatedSession,
+			vm: { vmId: "vm-1" } as CreatedVm,
+			env: { HOME: "/workspace" },
+			cwd: "/workspace",
+			localMounts: [],
+			commandGuestPaths: new Map([["sh", "/__agentos/commands/000/sh"]]),
+		});
+
+		await expect(proxy.exec("node /workspace/entry.mjs --flag")).resolves
+			.toMatchObject({
+				exitCode: 1,
+			});
+		expect(execute).toHaveBeenCalledTimes(1);
+		expect(execute.mock.calls[0]?.[2]).toMatchObject({
+			command: "sh",
+			args: ["-c", "node /workspace/entry.mjs --flag"],
+			cwd: "/workspace",
+		});
+	});
+
+	test("exec rejects when the guest shell command is unavailable", async () => {
+		fixtureRoot = mkdtempSync(join(tmpdir(), "agent-os-shell-missing-"));
+		const { client } = createMockClient();
+
+		proxy = new NativeSidecarKernelProxy({
+			client,
+			session: {
+				connectionId: "conn-1",
+				sessionId: "session-1",
+			} as AuthenticatedSession,
+			vm: { vmId: "vm-1" } as CreatedVm,
+			env: { HOME: "/workspace" },
+			cwd: "/workspace",
+			localMounts: [],
+			commandGuestPaths: new Map(),
+		});
+
+		await expect(proxy.exec("node /workspace/entry.mjs")).rejects.toThrow(
+			"native sidecar exec requires guest shell command 'sh'",
+		);
+	});
 });

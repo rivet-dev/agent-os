@@ -40,6 +40,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - TLS-capable TCP sockets must keep the plaintext reader lazy until the first `net.socket_read`; a background clone that reads too early will consume ClientHello bytes and break SNI inspection plus TLS upgrade
 - Sidecar service tests that poll `net.server_accept` or `net.socket_read` should sleep briefly between timeout sentinels; tight retry loops can race local loopback delivery in this harness
 - Native sidecar execution requests should stay unresolved in TypeScript; Rust owns command lookup, guest-path→host-path mapping, shadow materialization, and `AGENT_OS_*` runtime env assembly before starting JS/WASM runtimes
+- Native sidecar `exec()` should stay a thin `sh -c` wrapper over guest commands; do not reintroduce TypeScript tokenization or `node` special-casing in `native-kernel-proxy.ts`
 
 ## 2026-04-06 - US-001
 - Extracted shared state types from service.rs into new state.rs module (~450 lines)
@@ -331,4 +332,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Command-based JS/WASM execution must resolve guest-visible entrypoints to host paths before creating V8/WASM runtime contexts; guest paths in sidecar/kernel state are not directly readable by those host-side runtimes
   - `ResponsePayload::Rejected` is the public error surface for invalid execute requests like unknown commands; service tests should assert on the rejected payload instead of expecting `dispatch_blocking()` itself to fail
   - Focused `cargo test -p agent-os-sidecar --test service command_resolution` plus compile-only `--no-run` passes for touched test binaries are the safe verification path here; the repo still warns against a bare sidecar package test run
+---
+## 2026-04-07 11:01:49 PDT - US-018
+- Removed the last TypeScript-side exec command parsing from `NativeSidecarKernelProxy` so native sidecar `exec()` now always forwards `sh -c <command>` when the guest shell exists and otherwise fails fast instead of tokenizing commands locally
+- Added focused `packages/core` coverage that locks in shell-forwarding behavior and the missing-shell failure case for the native sidecar proxy
+- Files changed: `packages/core/AGENTS.md`, `packages/core/src/sidecar/native-kernel-proxy.ts`, `packages/core/tests/allowed-node-builtins.test.ts`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Native sidecar `exec()` should remain a shell wrapper only; `spawn(command, args)` is the API that forwards unresolved commands to Rust for real command resolution
+  - Proxy-level execute payload tests are a good seam for this area because they verify the TypeScript wire payload without depending on registry WASM binaries
+  - Scoped verification for this story is stable with `pnpm --dir packages/core exec tsc --noEmit` and `pnpm --dir packages/core exec vitest run tests/allowed-node-builtins.test.ts tests/wasm-permission-tiers.test.ts tests/execute.test.ts`
 ---

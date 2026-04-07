@@ -372,7 +372,7 @@
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
       "priority": 29,
-      "passes": false,
+      "passes": true,
       "notes": "Step 4 (TypeScript side). Depends on US-017. After this, native-kernel-proxy.ts should be significantly smaller (filesystem view dispatch + socket cache remaining)."
     },
     {

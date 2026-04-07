@@ -177,7 +177,7 @@ export class NativeSidecarKernelProxy {
 	private readonly session: AuthenticatedSession;
 	private readonly vm: CreatedVm;
 	private readonly localMounts: LocalCompatMount[];
-	private readonly commandGuestPaths: Map<string, string>;
+	private readonly commandDrivers: Map<string, string>;
 	private readonly onDispose: (() => Promise<void>) | undefined;
 	private readonly trackedProcesses = new Map<number, TrackedProcessEntry>();
 	private readonly trackedProcessesById = new Map<
@@ -205,9 +205,9 @@ export class NativeSidecarKernelProxy {
 		this.localMounts = [...options.localMounts].sort(
 			(left, right) => right.path.length - left.path.length,
 		);
-		this.commandGuestPaths = new Map(options.commandGuestPaths);
+		this.commandDrivers = buildCommandMap(options.commandGuestPaths);
 		this.onDispose = options.onDispose;
-		this.commands = buildCommandMap(this.commandGuestPaths);
+		this.commands = this.commandDrivers;
 		this.vfs = this.createFilesystemView(true);
 		this.rootView = this.createFilesystemView(false);
 		this.eventPump = this.runEventPump();
@@ -227,9 +227,8 @@ export class NativeSidecarKernelProxy {
 	registerCommandGuestPaths(
 		commandGuestPaths: ReadonlyMap<string, string>,
 	): void {
-		for (const [name, guestPath] of commandGuestPaths) {
-			this.commandGuestPaths.set(name, guestPath);
-			(this.commands as Map<string, string>).set(name, "wasmvm");
+		for (const name of commandGuestPaths.keys()) {
+			this.commandDrivers.set(name, "wasmvm");
 		}
 	}
 
@@ -265,11 +264,15 @@ export class NativeSidecarKernelProxy {
 		command: string,
 		options?: KernelExecOptions,
 	): Promise<KernelExecResult> {
+		if (!this.commands.has("sh")) {
+			throw new Error(
+				`native sidecar exec requires guest shell command 'sh': ${command}`,
+			);
+		}
+
 		const stdoutChunks: Uint8Array[] = [];
 		const stderrChunks: Uint8Array[] = [];
-
-		const parsed = this.resolveExecCommand(command);
-		const proc = this.spawn(parsed.command, parsed.args, {
+		const proc = this.spawn("sh", ["-c", command], {
 			...options,
 			onStdout: (chunk) => {
 				stdoutChunks.push(chunk);
@@ -895,30 +898,6 @@ export class NativeSidecarKernelProxy {
 		}
 	}
 
-	private resolveExecCommand(command: string): {
-		command: string;
-		args: string[];
-	} {
-		if (this.commandGuestPaths.has("sh")) {
-			return {
-				command: "sh",
-				args: ["-c", command],
-			};
-		}
-
-		const tokens = tokenizeCommand(command);
-		if (tokens.length >= 2 && tokens[0] === "node") {
-			return {
-				command: "node",
-				args: tokens.slice(1),
-			};
-		}
-
-		throw new Error(
-			`native sidecar exec requires a shell command driver: ${command}`,
-		);
-	}
-
 	private createFilesystemView(includeLocalMounts: boolean): VirtualFileSystem {
 		return {
 			readFile: (path) =>
@@ -1317,7 +1296,7 @@ export class NativeSidecarKernelProxy {
 
 function buildCommandMap(
 	commandGuestPaths: ReadonlyMap<string, string>,
-): ReadonlyMap<string, string> {
+): Map<string, string> {
 	const commands = new Map<string, string>([
 		["node", "node"],
 		["npm", "node"],
@@ -1412,51 +1391,6 @@ function socketLookupKey(
 		port: request.port ?? null,
 		path: request.path ?? null,
 	});
-}
-
-function tokenizeCommand(command: string): string[] {
-	const tokens: string[] = [];
-	let current = "";
-	let quote: "'" | '"' | null = null;
-	let escaping = false;
-
-	for (const char of command) {
-		if (escaping) {
-			current += char;
-			escaping = false;
-			continue;
-		}
-		if (char === "\\") {
-			escaping = true;
-			continue;
-		}
-		if (quote) {
-			if (char === quote) {
-				quote = null;
-				continue;
-			}
-			current += char;
-			continue;
-		}
-		if (char === "'" || char === '"') {
-			quote = char;
-			continue;
-		}
-		if (/\s/.test(char)) {
-			if (current.length > 0) {
-				tokens.push(current);
-				current = "";
-			}
-			continue;
-		}
-		current += char;
-	}
-
-	if (current.length > 0) {
-		tokens.push(current);
-	}
-
-	return tokens;
 }
 
 function readHostProcesses(): HostProcessRow[] {
