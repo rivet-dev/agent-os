@@ -113,7 +113,10 @@ impl<B> HostFilesystem<B> {
     }
 
     fn bridge_path_not_found(op: &'static str, path: &str) -> VfsError {
-        VfsError::new("ENOENT", format!("no such file or directory, {op} '{path}'"))
+        VfsError::new(
+            "ENOENT",
+            format!("no such file or directory, {op} '{path}'"),
+        )
     }
 
     fn link_state_error() -> VfsError {

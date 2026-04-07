@@ -82,7 +82,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Step 0a. Largest extraction (~4,000 lines) but purely mechanical — cut functions, move to new file, update imports. handle_javascript_sync_rpc_request is the cross-cutting dispatch hub that delegates to domain modules."
     },
     {
