@@ -10,8 +10,9 @@ static V8_INIT: Once = Once::new();
 #[repr(align(16))]
 struct AlignedBytes<const N: usize>([u8; N]);
 
-static ICU_COMMON_DATA: AlignedBytes<{ include_bytes!(concat!(env!("OUT_DIR"), "/icudtl.dat")).len() }> =
-    AlignedBytes(*include_bytes!(concat!(env!("OUT_DIR"), "/icudtl.dat")));
+static ICU_COMMON_DATA: AlignedBytes<
+    { include_bytes!(concat!(env!("OUT_DIR"), "/icudtl.dat")).len() },
+> = AlignedBytes(*include_bytes!(concat!(env!("OUT_DIR"), "/icudtl.dat")));
 
 #[derive(Default)]
 pub struct PromiseRejectState {

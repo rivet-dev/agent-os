@@ -23,16 +23,16 @@ use crate::service::{
 };
 use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
-    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError,
-    DEFAULT_JAVASCRIPT_NET_BACKLOG, DnsResolutionSource, EXECUTION_DRIVER_NAME,
-    EXECUTION_SANDBOX_ROOT_ENV, JAVASCRIPT_COMMAND, JavascriptSocketFamily,
-    JavascriptSocketPathContext, JavascriptTcpListenerEvent, JavascriptTcpSocketEvent,
-    JavascriptUdpFamily, JavascriptUdpSocketEvent, JavascriptUnixListenerEvent,
-    LOOPBACK_EXEMPT_PORTS_ENV, NetworkResourceCounts, PYTHON_COMMAND, PendingTcpSocket,
-    PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution,
-    ResolvedTcpConnectAddr, SharedBridge, SidecarKernel, SocketQueryKind,
+    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError, DnsResolutionSource,
+    JavascriptSocketFamily, JavascriptSocketPathContext, JavascriptTcpListenerEvent,
+    JavascriptTcpSocketEvent, JavascriptUdpFamily, JavascriptUdpSocketEvent,
+    JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket, PendingUnixSocket,
+    ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution, ResolvedTcpConnectAddr,
+    SharedBridge, SidecarKernel, SocketQueryKind, VmDnsConfig, VmListenPolicy, VmState,
+    DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
+    JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND,
     VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
-    VM_LISTEN_PORT_MIN_METADATA_KEY, VmDnsConfig, VmListenPolicy, VmState, WASM_COMMAND,
+    VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -41,25 +41,27 @@ use agent_os_execution::wasm::{
     WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV,
 };
 use agent_os_execution::{
-    CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest, JavascriptExecutionEvent, JavascriptSyncRpcRequest,
-    NodeSignalDispositionAction, NodeSignalHandlerRegistration,
-    PythonExecutionEvent, PythonVfsRpcRequest, PythonVfsRpcResponsePayload,
-    StartJavascriptExecutionRequest, StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecutionEvent, WasmPermissionTier as ExecutionWasmPermissionTier,
+    CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
+    JavascriptExecutionEvent, JavascriptSyncRpcRequest, NodeSignalDispositionAction,
+    NodeSignalHandlerRegistration, PythonExecutionEvent, PythonVfsRpcRequest,
+    PythonVfsRpcResponsePayload, StartJavascriptExecutionRequest, StartPythonExecutionRequest,
+    StartWasmExecutionRequest, WasmExecutionEvent,
+    WasmPermissionTier as ExecutionWasmPermissionTier,
 };
 use agent_os_kernel::kernel::{KernelProcessHandle, SpawnOptions};
 use agent_os_kernel::permissions::NetworkOperation;
 use agent_os_kernel::process_table::{SIGKILL, SIGTERM};
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use base64::Engine;
-use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::TokioResolver;
 use nix::libc;
-use nix::sys::signal::{Signal, kill as send_signal};
-use nix::sys::wait::{Id as WaitId, WaitPidFlag, WaitStatus, waitid as wait_on_child};
+use nix::sys::signal::{kill as send_signal, Signal};
+use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
@@ -75,6 +77,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use url::Url;
 
 impl ActiveProcess {
     pub(crate) fn new(
@@ -923,18 +926,11 @@ where
 
         let execution = match payload.runtime {
             GuestRuntimeKind::JavaScript => {
-                // Read the entrypoint file from the VFS so the V8 isolate
-                // can execute it directly without module loading bridge calls.
-                let entrypoint_path = if payload.entrypoint.starts_with('/') {
-                    payload.entrypoint.clone()
-                } else {
-                    format!("{}/{}", cwd.display(), payload.entrypoint)
-                };
-                let inline_code = vm
-                    .kernel
-                    .read_file(&entrypoint_path)
-                    .ok()
-                    .and_then(|bytes| String::from_utf8(bytes).ok());
+                // Prefer guest VFS source when the entrypoint is available there,
+                // but fall back to the VM's host root for fixture-style executions
+                // that only provide a host cwd plus relative/absolute host paths.
+                let inline_code =
+                    load_javascript_entrypoint_source(vm, &cwd, &payload.entrypoint, &env);
 
                 let context =
                     self.javascript_engine
@@ -1231,7 +1227,16 @@ where
             SidecarError::InvalidState(format!("VM {vm_id} has no active process {process_id}"))
         })?;
 
-        signal_runtime_process(process.execution.child_pid(), signal)?;
+        match &process.execution {
+            ActiveExecution::Javascript(execution) if execution.child_pid() == 0 => {
+                if signal != 0 {
+                    execution
+                        .terminate()
+                        .map_err(|error| SidecarError::Execution(error.to_string()))?;
+                }
+            }
+            _ => signal_runtime_process(process.execution.child_pid(), signal)?,
+        }
         emit_security_audit_event(
             &self.bridge,
             vm_id,
@@ -1392,6 +1397,37 @@ where
         }
     }
 
+    pub(crate) fn drain_process_events_blocking(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+    ) -> Result<Vec<ActiveExecutionEvent>, SidecarError> {
+        let mut events = Vec::new();
+
+        loop {
+            let event = {
+                let Some(vm) = self.vms.get_mut(vm_id) else {
+                    break;
+                };
+                let Some(process) = vm.active_processes.get_mut(process_id) else {
+                    break;
+                };
+                match process.execution.poll_event_blocking(Duration::ZERO) {
+                    Ok(event) => event,
+                    Err(SidecarError::Execution(_)) => None,
+                    Err(other) => return Err(other),
+                }
+            };
+
+            let Some(event) = event else {
+                break;
+            };
+            events.push(event);
+        }
+
+        Ok(events)
+    }
+
     pub(crate) fn handle_python_vfs_rpc_request(
         &mut self,
         vm_id: &str,
@@ -1409,13 +1445,38 @@ where
     ) -> Result<ResolvedChildProcessExecution, SidecarError> {
         let mut runtime_env = vm.guest_env.clone();
         runtime_env.extend(request.options.internal_bootstrap_env.clone());
-        let guest_cwd = normalize_path(request.options.cwd.as_deref().unwrap_or("/"));
-        let host_cwd = host_runtime_path_for_guest_path_with_env(
-            vm,
-            &runtime_env,
-            &guest_cwd,
-            parent_host_cwd,
-        )
+        let (guest_cwd, host_cwd_override) = request
+            .options
+            .cwd
+            .as_deref()
+            .map(|cwd| {
+                let normalized_parent_host_cwd = normalize_host_path(parent_host_cwd);
+                let requested_host_cwd = normalize_host_path(Path::new(cwd));
+                if path_is_within_root(&requested_host_cwd, &normalized_parent_host_cwd) {
+                    let relative = requested_host_cwd
+                        .strip_prefix(&normalized_parent_host_cwd)
+                        .unwrap_or_else(|_| Path::new(""));
+                    let relative = relative.to_string_lossy().replace('\\', "/");
+                    let guest_cwd = if relative.is_empty() {
+                        String::from("/")
+                    } else {
+                        normalize_path(&format!("/{relative}"))
+                    };
+                    (guest_cwd, Some(requested_host_cwd))
+                } else {
+                    (normalize_path(cwd), None)
+                }
+            })
+            .unwrap_or_else(|| (String::from("/"), None));
+        let host_cwd = host_cwd_override
+        .or_else(|| {
+            host_runtime_path_for_guest_path_with_env(
+                vm,
+                &runtime_env,
+                &guest_cwd,
+                parent_host_cwd,
+            )
+        })
         .unwrap_or_else(|| {
             let candidate = PathBuf::from(&guest_cwd);
             if candidate.is_absolute() {
@@ -1428,7 +1489,15 @@ where
         env.extend(request.options.env.clone());
 
         let (command, process_args) = if request.options.shell {
-            if vm.command_guest_paths.contains_key("sh") {
+            if !command_requires_shell(&request.command) {
+                let tokens = tokenize_shell_free_command(&request.command);
+                let Some((command, args)) = tokens.split_first() else {
+                    return Err(SidecarError::InvalidState(String::from(
+                        "child_process shell command must not be empty",
+                    )));
+                };
+                (command.clone(), args.to_vec())
+            } else if vm.command_guest_paths.contains_key("sh") {
                 (
                     String::from("sh"),
                     vec![String::from("-c"), request.command.clone()],
@@ -1445,7 +1514,6 @@ where
         } else {
             (request.command.clone(), request.args.clone())
         };
-
         if matches!(command.as_str(), "node" | "npm" | "npx") {
             let Some(entrypoint_specifier) = process_args.first() else {
                 return Err(SidecarError::InvalidState(format!(
@@ -1554,7 +1622,6 @@ where
                 .expect("process should still exist");
             self.resolve_javascript_child_process_execution(vm, &parent.host_cwd, &request)?
         };
-
         let (parent_kernel_pid, child_process_id) = {
             let vm = self.vms.get_mut(vm_id).expect("VM should exist");
             let process = vm
@@ -1602,17 +1669,12 @@ where
                             bootstrap_module: None,
                             compile_cache_root: Some(self.cache_root.join("node-compile-cache")),
                         });
-                // Read entrypoint from VFS for inline V8 execution
-                let entrypoint_path = if resolved.entrypoint.starts_with('/') {
-                    resolved.entrypoint.clone()
-                } else {
-                    format!("{}/{}", resolved.host_cwd.display(), resolved.entrypoint)
-                };
-                let inline_code = vm
-                    .kernel
-                    .read_file(&entrypoint_path)
-                    .ok()
-                    .and_then(|bytes| String::from_utf8(bytes).ok());
+                let inline_code = load_javascript_entrypoint_source(
+                    vm,
+                    &resolved.host_cwd,
+                    &resolved.entrypoint,
+                    &execution_env,
+                );
 
                 let execution = self
                     .javascript_engine
@@ -1670,6 +1732,95 @@ where
             "pid": kernel_pid,
             "command": resolved.command,
             "args": resolved.process_args,
+        }))
+    }
+
+    pub(crate) fn spawn_javascript_child_process_sync(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        request: JavascriptChildProcessSpawnRequest,
+        max_buffer: Option<usize>,
+    ) -> Result<Value, SidecarError> {
+        let spawned = self.spawn_javascript_child_process(vm_id, process_id, request)?;
+        let child_process_id = spawned
+            .get("childId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                SidecarError::InvalidState(String::from(
+                    "child_process.spawn_sync response is missing childId",
+                ))
+            })?
+            .to_owned();
+
+        let max_buffer = max_buffer.unwrap_or(1024 * 1024);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut exit_code = 0_i32;
+        let mut max_buffer_exceeded = false;
+        let mut kill_sent = false;
+
+        loop {
+            let event =
+                self.poll_javascript_child_process(vm_id, process_id, &child_process_id, 50)?;
+            if event.is_null() {
+                continue;
+            }
+
+            match event.get("type").and_then(Value::as_str) {
+                Some("stdout") => {
+                    let chunk = javascript_sync_rpc_bytes_arg(
+                        &[event.get("data").cloned().unwrap_or(Value::Null)],
+                        0,
+                        "child_process.spawn_sync stdout",
+                    )?;
+                    stdout.extend_from_slice(&chunk);
+                    if stdout.len() > max_buffer && !kill_sent {
+                        max_buffer_exceeded = true;
+                        self.kill_javascript_child_process(
+                            vm_id,
+                            process_id,
+                            &child_process_id,
+                            "SIGTERM",
+                        )?;
+                        kill_sent = true;
+                    }
+                }
+                Some("stderr") => {
+                    let chunk = javascript_sync_rpc_bytes_arg(
+                        &[event.get("data").cloned().unwrap_or(Value::Null)],
+                        0,
+                        "child_process.spawn_sync stderr",
+                    )?;
+                    stderr.extend_from_slice(&chunk);
+                    if stderr.len() > max_buffer && !kill_sent {
+                        max_buffer_exceeded = true;
+                        self.kill_javascript_child_process(
+                            vm_id,
+                            process_id,
+                            &child_process_id,
+                            "SIGTERM",
+                        )?;
+                        kill_sent = true;
+                    }
+                }
+                Some("exit") => {
+                    exit_code = event
+                        .get("exitCode")
+                        .and_then(Value::as_i64)
+                        .map(|value| value as i32)
+                        .unwrap_or(1);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        Ok(json!({
+            "stdout": String::from_utf8_lossy(&stdout),
+            "stderr": String::from_utf8_lossy(&stderr),
+            "code": exit_code,
+            "maxBufferExceeded": max_buffer_exceeded,
         }))
     }
 
@@ -1958,6 +2109,47 @@ fn resolve_execution_cwd(vm: &VmState, value: Option<&str>) -> Result<PathBuf, S
     }
 
     Ok(normalized)
+}
+
+fn load_javascript_entrypoint_source(
+    vm: &mut VmState,
+    host_cwd: &Path,
+    entrypoint: &str,
+    env: &BTreeMap<String, String>,
+) -> Option<String> {
+    let mut read_guest_file = |path: &str| {
+        vm.kernel
+            .read_file(path)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    };
+
+    if let Some(source) = env
+        .get("AGENT_OS_GUEST_ENTRYPOINT")
+        .filter(|path| path.starts_with('/'))
+        .and_then(|path| read_guest_file(path))
+    {
+        return Some(source);
+    }
+
+    if entrypoint.starts_with('/') {
+        if let Some(source) = read_guest_file(entrypoint) {
+            return Some(source);
+        }
+    }
+
+    let host_entrypoint = if Path::new(entrypoint).is_absolute() {
+        PathBuf::from(entrypoint)
+    } else {
+        host_cwd.join(entrypoint)
+    };
+    let normalized_entrypoint = normalize_host_path(&host_entrypoint);
+    let sandbox_root = normalize_host_path(&vm.cwd);
+    if !path_is_within_root(&normalized_entrypoint, &sandbox_root) {
+        return None;
+    }
+
+    fs::read_to_string(&normalized_entrypoint).ok()
 }
 
 // extract_guest_env moved to crate::vm
@@ -2769,6 +2961,34 @@ fn tokenize_shell_free_command(command: &str) -> Vec<String> {
         .filter(|segment| !segment.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+fn command_requires_shell(command: &str) -> bool {
+    command.chars().any(|ch| {
+        matches!(
+            ch,
+            '|'
+                | '&'
+                | ';'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '$'
+                | '`'
+                | '*'
+                | '?'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '~'
+                | '\''
+                | '"'
+                | '\\'
+                | '\n'
+        )
+    })
 }
 
 fn host_mount_path_for_guest_path(vm: &VmState, guest_path: &str) -> Option<PathBuf> {
@@ -3784,6 +4004,7 @@ where
         "dns.lookup" | "dns.resolve" | "dns.resolve4" | "dns.resolve6" => {
             service_javascript_dns_sync_rpc(bridge, vm_id, dns, request)
         }
+        "net.fetch" => service_javascript_fetch_sync_rpc(bridge, vm_id, request),
         "net.connect"
         | "net.listen"
         | "net.poll"
@@ -3824,6 +4045,95 @@ where
         }
         _ => service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request),
     }
+}
+
+fn service_javascript_fetch_sync_rpc<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let resource = javascript_sync_rpc_arg_str(&request.args, 0, "net.fetch resource")?;
+    if let Some(response) = build_data_url_fetch_response(resource)? {
+        return Ok(response);
+    }
+
+    Url::parse(resource)
+        .map_err(|error| SidecarError::Execution(format!("ERR_INVALID_URL: {error}")))?;
+
+    if let Err(error) = bridge.require_network_access(vm_id, NetworkOperation::Fetch, resource) {
+        return Err(match error {
+            SidecarError::Execution(_) => SidecarError::Execution(format!(
+                "ERR_ACCESS_DENIED: blocked outbound network access to {resource}"
+            )),
+            other => other,
+        });
+    }
+
+    Err(SidecarError::Execution(format!(
+        "ERR_ACCESS_DENIED: blocked outbound network access to {resource}"
+    )))
+}
+
+fn build_data_url_fetch_response(resource: &str) -> Result<Option<Value>, SidecarError> {
+    let Some(payload) = resource.strip_prefix("data:") else {
+        return Ok(None);
+    };
+    let (metadata, body) = payload.split_once(',').ok_or_else(|| {
+        SidecarError::Execution(String::from(
+            "ERR_INVALID_URL: malformed data URL missing comma separator",
+        ))
+    })?;
+    let metadata = metadata.trim();
+    let is_base64 = metadata
+        .split(';')
+        .any(|segment| segment.eq_ignore_ascii_case("base64"));
+    let content_type = metadata
+        .split(';')
+        .find(|segment| !segment.is_empty() && !segment.eq_ignore_ascii_case("base64"))
+        .unwrap_or("text/plain;charset=US-ASCII");
+
+    let response = if is_base64 {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .map_err(|error| {
+                SidecarError::Execution(format!("ERR_INVALID_URL: invalid data URL body: {error}"))
+            })?;
+        json!({
+            "ok": true,
+            "status": 200,
+            "statusText": "OK",
+            "headers": {
+                "content-type": content_type,
+                "x-body-encoding": "base64",
+            },
+            "body": base64::engine::general_purpose::STANDARD.encode(bytes),
+            "url": resource,
+            "redirected": false,
+        })
+    } else {
+        json!({
+            "ok": true,
+            "status": 200,
+            "statusText": "OK",
+            "headers": {
+                "content-type": content_type,
+            },
+            "body": body,
+            "url": resource,
+            "redirected": false,
+        })
+    };
+
+    serde_json::to_string(&response)
+        .map(Value::String)
+        .map(Some)
+        .map_err(|error| {
+            SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}"))
+        })
 }
 
 fn service_javascript_dns_sync_rpc<B>(
@@ -4541,6 +4851,10 @@ fn signal_number_from_name(signal: &str) -> Option<i32> {
 }
 
 pub(crate) fn runtime_child_is_alive(child_pid: u32) -> Result<bool, SidecarError> {
+    if child_pid == 0 {
+        return Ok(false);
+    }
+
     let wait_flags = WaitPidFlag::WNOHANG
         | WaitPidFlag::WNOWAIT
         | WaitPidFlag::WEXITED
@@ -4561,6 +4875,10 @@ pub(crate) fn runtime_child_is_alive(child_pid: u32) -> Result<bool, SidecarErro
 }
 
 pub(crate) fn signal_runtime_process(child_pid: u32, signal: i32) -> Result<(), SidecarError> {
+    if child_pid == 0 {
+        return Ok(());
+    }
+
     if !runtime_child_is_alive(child_pid)? {
         return Ok(());
     }

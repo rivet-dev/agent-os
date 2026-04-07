@@ -47,10 +47,9 @@ impl V8RuntimeHost {
                 )
             })?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "V8 runtime stdout not captured"))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "V8 runtime stdout not captured")
+        })?;
         let socket_path = read_socket_path(stdout)?;
         let stream = connect_with_retry(&socket_path, Duration::from_secs(5))?;
 
@@ -317,8 +316,12 @@ fn read_socket_path(stdout: std::process::ChildStdout) -> io::Result<String> {
             }
         }
     }
-    String::from_utf8(line)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid socket path: {e}")))
+    String::from_utf8(line).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid socket path: {e}"),
+        )
+    })
 }
 
 fn connect_with_retry(socket_path: &str, timeout: Duration) -> io::Result<UnixStream> {

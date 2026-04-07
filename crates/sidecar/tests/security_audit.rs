@@ -2,10 +2,10 @@ mod support;
 
 use agent_os_bridge::StructuredEventRecord;
 use agent_os_sidecar::protocol::{
-    BootstrapRootFilesystemRequest, ConfigureVmRequest, ExecuteRequest, GuestFilesystemCallRequest,
-    GuestFilesystemOperation, GuestRuntimeKind, KillProcessRequest, MountDescriptor,
-    MountPluginDescriptor, OwnershipScope, PermissionDescriptor, PermissionMode, RequestPayload,
-    ResponsePayload, RootFilesystemEntry, RootFilesystemEntryKind,
+    BootstrapRootFilesystemRequest, ConfigureVmRequest, ExecuteRequest, FsPermissionRuleSet,
+    GuestFilesystemCallRequest, GuestFilesystemOperation, GuestRuntimeKind, KillProcessRequest,
+    MountDescriptor, MountPluginDescriptor, OwnershipScope, PermissionMode, PermissionsPolicy,
+    RequestPayload, ResponsePayload, RootFilesystemEntry, RootFilesystemEntryKind,
 };
 use support::{
     assert_node_available, authenticate, authenticate_with_token, collect_process_output,
@@ -80,16 +80,21 @@ fn filesystem_permission_denials_emit_security_audit_events() {
             RequestPayload::ConfigureVm(ConfigureVmRequest {
                 mounts: Vec::new(),
                 software: Vec::new(),
-                permissions: vec![
-                    PermissionDescriptor {
-                        capability: String::from("fs"),
-                        mode: PermissionMode::Allow,
-                    },
-                    PermissionDescriptor {
-                        capability: String::from("fs.read"),
-                        mode: PermissionMode::Deny,
-                    },
-                ],
+                permissions: Some(PermissionsPolicy {
+                    fs: Some(agent_os_sidecar::protocol::FsPermissionScope::Rules(
+                        FsPermissionRuleSet {
+                            default: Some(PermissionMode::Allow),
+                            rules: vec![agent_os_sidecar::protocol::FsPermissionRule {
+                                mode: PermissionMode::Deny,
+                                operations: vec![String::from("read")],
+                                paths: Vec::new(),
+                            }],
+                        },
+                    )),
+                    network: None,
+                    child_process: None,
+                    env: None,
+                }),
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
                 command_permissions: Default::default(),
@@ -206,7 +211,7 @@ fn mount_operations_emit_security_audit_events() {
                     },
                 }],
                 software: Vec::new(),
-                permissions: Vec::new(),
+                permissions: None,
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
                 command_permissions: Default::default(),
@@ -221,7 +226,7 @@ fn mount_operations_emit_security_audit_events() {
             RequestPayload::ConfigureVm(ConfigureVmRequest {
                 mounts: Vec::new(),
                 software: Vec::new(),
-                permissions: Vec::new(),
+                permissions: None,
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
                 command_permissions: Default::default(),

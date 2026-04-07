@@ -2914,6 +2914,11 @@ var __bridge = (() => {
       rationale: "Host child_process bridge reference."
     },
     {
+      name: "_childProcessPoll",
+      classification: "hardened",
+      rationale: "Host child_process bridge reference."
+    },
+    {
       name: "_childProcessStdinWrite",
       classification: "hardened",
       rationale: "Host child_process bridge reference."
@@ -3407,6 +3412,7 @@ var __bridge = (() => {
     unregister: "kernelHandleUnregister",
     list: "kernelHandleList"
   };
+  var _activeHandles = /* @__PURE__ */ new Map();
   var _waitResolvers = [];
   function _registerHandle2(id, description) {
     try {
@@ -3419,9 +3425,15 @@ var __bridge = (() => {
       }
       throw error;
     }
+    _activeHandles.set(id, description);
   }
   function _unregisterHandle2(id) {
-    const remaining = bridgeDispatchSync(HANDLE_DISPATCH.unregister, id);
+    _activeHandles.delete(id);
+    let remaining = _activeHandles.size;
+    try {
+      bridgeDispatchSync(HANDLE_DISPATCH.unregister, id);
+    } catch {
+    }
     if (remaining === 0 && _waitResolvers.length > 0) {
       const resolvers = _waitResolvers;
       _waitResolvers = [];
@@ -3460,7 +3472,7 @@ var __bridge = (() => {
     });
   }
   function _getActiveHandles() {
-    return bridgeDispatchSync(HANDLE_DISPATCH.list);
+    return Array.from(_activeHandles.values());
   }
   exposeCustomGlobal("_registerHandle", _registerHandle2);
   exposeCustomGlobal("_unregisterHandle", _unregisterHandle2);
@@ -5197,6 +5209,81 @@ var __bridge = (() => {
   function toPathString(path) {
     return normalizePathLike(path);
   }
+  function getBridgeSyncFn(name) {
+    return typeof globalThis !== "undefined" ? globalThis[name] : void 0;
+  }
+  function createBridgeSyncFacade(name) {
+    return {
+      applySync(_thisArg, args) {
+        const fn = getBridgeSyncFn(name);
+        if (typeof fn === "function") {
+          return fn(...(args || []));
+        }
+        if (fn && typeof fn.applySync === "function") {
+          return fn.applySync(_thisArg, args);
+        }
+        return void 0;
+      },
+      applySyncPromise(_thisArg, args) {
+        const fn = getBridgeSyncFn(name);
+        if (typeof fn === "function") {
+          return fn(...(args || []));
+        }
+        if (fn && typeof fn.applySync === "function") {
+          return fn.applySync(_thisArg, args);
+        }
+        if (fn && typeof fn.applySyncPromise === "function") {
+          return fn.applySyncPromise(_thisArg, args);
+        }
+        return void 0;
+      }
+    };
+  }
+  var _fs = {
+    readFile: createBridgeSyncFacade("_fsReadFile"),
+    writeFile: createBridgeSyncFacade("_fsWriteFile"),
+    readFileBinary: createBridgeSyncFacade("_fsReadFileBinary"),
+    writeFileBinary: createBridgeSyncFacade("_fsWriteFileBinary"),
+    readDir: createBridgeSyncFacade("_fsReadDir"),
+    mkdir: createBridgeSyncFacade("_fsMkdir"),
+    rmdir: createBridgeSyncFacade("_fsRmdir"),
+    exists: createBridgeSyncFacade("_fsExists"),
+    stat: createBridgeSyncFacade("_fsStat"),
+    unlink: createBridgeSyncFacade("_fsUnlink"),
+    rename: createBridgeSyncFacade("_fsRename"),
+    chmod: createBridgeSyncFacade("_fsChmod"),
+    chown: createBridgeSyncFacade("_fsChown"),
+    link: createBridgeSyncFacade("_fsLink"),
+    symlink: createBridgeSyncFacade("_fsSymlink"),
+    readlink: createBridgeSyncFacade("_fsReadlink"),
+    lstat: createBridgeSyncFacade("_fsLstat"),
+    truncate: createBridgeSyncFacade("_fsTruncate"),
+    utimes: createBridgeSyncFacade("_fsUtimes")
+  };
+  function decodeBridgeJson(value) {
+    return typeof value === "string" ? JSON.parse(value) : value;
+  }
+  function joinDirEntryPath(dirPath, entryName) {
+    if (dirPath === "/") {
+      return `/${entryName}`;
+    }
+    return dirPath.endsWith("/") ? `${dirPath}${entryName}` : `${dirPath}/${entryName}`;
+  }
+  function normalizeReaddirEntries(entries, dirPath, withFileTypes) {
+    if (!Array.isArray(entries)) {
+      return [];
+    }
+    if (!withFileTypes) {
+      return entries.map((entry) => typeof entry === "string" ? entry : entry?.name);
+    }
+    return entries.map((entry) => {
+      if (typeof entry === "string") {
+        const stat = fs.statSync(joinDirEntryPath(dirPath, entry));
+        return new Dirent(entry, stat.isDirectory(), dirPath);
+      }
+      return new Dirent(entry.name, entry.isDirectory, dirPath);
+    });
+  }
   var fs = {
     // Constants
     constants: {
@@ -5262,7 +5349,7 @@ var __bridge = (() => {
       const encoding = typeof options === "string" ? options : options?.encoding;
       try {
         if (encoding) {
-          const content = _fs.readFile.applySyncPromise(void 0, [pathStr]);
+          const content = _fs.readFile.applySyncPromise(void 0, [pathStr, encoding]);
           return content;
         } else {
           const base64Content = _fs.readFileBinary.applySyncPromise(void 0, [pathStr]);
@@ -5329,11 +5416,8 @@ var __bridge = (() => {
         }
         throw err;
       }
-      const entries = JSON.parse(entriesJson);
-      if (options?.withFileTypes) {
-        return entries.map((e) => new Dirent(e.name, e.isDirectory, rawPath));
-      }
-      return entries.map((e) => e.name);
+      const entries = decodeBridgeJson(entriesJson);
+      return normalizeReaddirEntries(entries, rawPath, options?.withFileTypes);
     },
     mkdirSync(path, options) {
       const rawPath = normalizePathLike(path);
@@ -5402,13 +5486,13 @@ var __bridge = (() => {
         }
         throw err;
       }
-      const stat = JSON.parse(statJson);
+      const stat = decodeBridgeJson(statJson);
       return new Stats(stat);
     },
     lstatSync(path, _options) {
       const pathStr = normalizePathLike(path);
       const statJson = bridgeCall(() => _fs.lstat.applySyncPromise(void 0, [pathStr]), "lstat", pathStr);
-      const stat = JSON.parse(statJson);
+      const stat = decodeBridgeJson(statJson);
       return new Stats(stat);
     },
     unlinkSync(path) {
@@ -5563,7 +5647,7 @@ var __bridge = (() => {
         if (msg.includes("EBADF")) throw createFsError("EBADF", "EBADF: bad file descriptor, fstat", "fstat");
         throw e;
       }
-      return new Stats(JSON.parse(raw));
+      return new Stats(decodeBridgeJson(raw));
     },
     ftruncateSync(fd, len) {
       normalizeFdInteger(fd);
@@ -6633,6 +6717,7 @@ var __bridge = (() => {
   _globReadDir = (dir) => fs.readdirSync(dir);
   _globStat = (path) => fs.statSync(path);
   var fs_default = fs;
+  exposeCustomGlobal("_fsModule", fs_default);
 
   // .agent/recovery/secure-exec/nodejs/src/bridge/os.ts
   var config = {
@@ -6903,6 +6988,18 @@ var __bridge = (() => {
     spawnSync: () => spawnSync
   });
   var childProcessInstances = /* @__PURE__ */ new Map();
+  function normalizeChildProcessSessionId(payload) {
+    if (!payload || typeof payload !== "object") {
+      return null;
+    }
+    if (typeof payload.sessionId === "string" && payload.sessionId.length > 0) {
+      return payload.sessionId;
+    }
+    if (typeof payload.sessionId === "number" && Number.isFinite(payload.sessionId)) {
+      return payload.sessionId;
+    }
+    return null;
+  }
   function routeChildProcessEvent(sessionId, type, data) {
     const child = childProcessInstances.get(sessionId);
     if (!child) return;
@@ -6946,12 +7043,12 @@ var __bridge = (() => {
       }
       return null;
     })();
-    const sessionId = typeof payload?.sessionId === "number" ? payload.sessionId : Number(payload?.sessionId);
-    if (!Number.isFinite(sessionId)) {
+    const sessionId = normalizeChildProcessSessionId(payload);
+    if (sessionId == null) {
       return;
     }
     if (eventTypeOrSessionId === "child_stdout" || eventTypeOrSessionId === "child_stderr") {
-      const encoded = typeof payload?.dataBase64 === "string" ? payload.dataBase64 : typeof payload?.data === "string" ? payload.data : "";
+      const encoded = typeof payload?.dataBase64 === "string" ? payload.dataBase64 : typeof payload?.data === "string" ? payload.data : payload?.data?.__agentOsType === "bytes" && typeof payload?.data?.base64 === "string" ? payload.data.base64 : "";
       const bytes = typeof Buffer !== "undefined" ? Buffer.from(encoded, "base64") : new Uint8Array(
         atob(encoded).split("").map((char) => char.charCodeAt(0))
       );
@@ -6968,6 +7065,40 @@ var __bridge = (() => {
     }
   };
   exposeCustomGlobal("_childProcessDispatch", childProcessDispatch);
+  function scheduleChildProcessPoll(sessionId, delayMs = 0) {
+    const child = childProcessInstances.get(sessionId);
+    if (!child || typeof _childProcessPoll === "undefined" || child._pollScheduled) {
+      return;
+    }
+    child._pollScheduled = true;
+    setTimeout(() => {
+      child._pollScheduled = false;
+      if (!childProcessInstances.has(sessionId)) {
+        return;
+      }
+      const next = _childProcessPoll.applySync(void 0, [sessionId, 0]);
+      if (!next || typeof next !== "object") {
+        scheduleChildProcessPoll(sessionId, 5);
+        return;
+      }
+      if (next.type === "stdout" || next.type === "stderr") {
+        const payload = { sessionId };
+        if (typeof next.data === "string") {
+          payload.data = next.data;
+        } else if (next.data?.__agentOsType === "bytes" && typeof next.data.base64 === "string") {
+          payload.dataBase64 = next.data.base64;
+        }
+        childProcessDispatch(`child_${next.type}`, payload);
+        scheduleChildProcessPoll(sessionId, 0);
+        return;
+      }
+      if (next.type === "exit") {
+        childProcessDispatch("child_exit", { sessionId, code: next.exitCode });
+        return;
+      }
+      scheduleChildProcessPoll(sessionId, 0);
+    }, delayMs);
+  }
   function hasOutputListeners(stream, event) {
     return (stream._listeners[event]?.length ?? 0) > 0 || (stream._onceListeners[event]?.length ?? 0) > 0;
   }
@@ -7012,6 +7143,7 @@ var __bridge = (() => {
     exitCode = null;
     signalCode = null;
     connected = false;
+    _pollScheduled = false;
     spawnfile = "";
     spawnargs = [];
     stdin;
@@ -7302,9 +7434,9 @@ var __bridge = (() => {
       callback = options;
       options = {};
     }
-    const child = spawn("bash", ["-c", command], { shell: false });
-    child.spawnargs = ["bash", "-c", command];
-    child.spawnfile = "bash";
+    const child = spawn(command, [], { ...options, shell: true });
+    child.spawnargs = [command];
+    child.spawnfile = command;
     const maxBuffer = options?.maxBuffer ?? 1024 * 1024;
     let stdout = "";
     let stderr = "";
@@ -7372,13 +7504,14 @@ var __bridge = (() => {
     if (typeof _childProcessSpawnSync === "undefined") {
       throw new Error("child_process.execSync requires CommandExecutor to be configured");
     }
+    const effectiveCwd = opts.cwd ?? (typeof process !== "undefined" ? process.cwd() : "/");
     const maxBuffer = opts.maxBuffer ?? 1024 * 1024;
     const jsonResult = _childProcessSpawnSync.applySyncPromise(void 0, [
-      "bash",
-      JSON.stringify(["-c", command]),
-      JSON.stringify({ cwd: opts.cwd, env: opts.env, maxBuffer })
+      command,
+      JSON.stringify([]),
+      JSON.stringify({ cwd: effectiveCwd, env: opts.env, maxBuffer, shell: true })
     ]);
-    const result = JSON.parse(jsonResult);
+    const result = typeof jsonResult === "string" ? JSON.parse(jsonResult) : jsonResult;
     if (result.maxBufferExceeded) {
       const err = new Error("stdout maxBuffer length exceeded");
       err.code = "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
@@ -7413,11 +7546,12 @@ var __bridge = (() => {
     child.spawnargs = [command, ...argsArray];
     if (typeof _childProcessSpawnStart !== "undefined") {
       const effectiveCwd = opts.cwd ?? (typeof process !== "undefined" ? process.cwd() : "/");
-      const sessionId = _childProcessSpawnStart.applySync(void 0, [
+      const spawnResult = _childProcessSpawnStart.applySync(void 0, [
         command,
         JSON.stringify(argsArray),
-        JSON.stringify({ cwd: effectiveCwd, env: opts.env })
+        JSON.stringify({ cwd: effectiveCwd, env: opts.env, shell: opts.shell === true })
       ]);
+      const sessionId = typeof spawnResult === "object" && spawnResult !== null ? spawnResult.childId : spawnResult;
       childProcessInstances.set(sessionId, child);
       if (typeof _registerHandle === "function") {
         _registerHandle(`child:${sessionId}`, `child_process: ${command} ${argsArray.join(" ")}`);
@@ -7442,8 +7576,9 @@ var __bridge = (() => {
         child.signalCode = typeof signal === "string" ? signal : "SIGTERM";
         return true;
       };
-      child.pid = Number(sessionId) || -1;
+      child.pid = typeof spawnResult === "object" && spawnResult !== null ? Number(spawnResult.pid) || -1 : Number(sessionId) || -1;
       setTimeout(() => child.emit("spawn"), 0);
+      scheduleChildProcessPoll(sessionId, 0);
       return child;
     }
     const err = new Error(
@@ -7481,9 +7616,9 @@ var __bridge = (() => {
       const jsonResult = _childProcessSpawnSync.applySyncPromise(void 0, [
         command,
         JSON.stringify(argsArray),
-        JSON.stringify({ cwd: effectiveCwd, env: opts.env, maxBuffer })
+        JSON.stringify({ cwd: effectiveCwd, env: opts.env, maxBuffer, shell: opts.shell === true })
       ]);
-      const result = JSON.parse(jsonResult);
+      const result = typeof jsonResult === "string" ? JSON.parse(jsonResult) : jsonResult;
       const stdoutBuf = typeof Buffer !== "undefined" ? Buffer.from(result.stdout) : result.stdout;
       const stderrBuf = typeof Buffer !== "undefined" ? Buffer.from(result.stderr) : result.stderr;
       if (result.maxBufferExceeded) {
@@ -7720,6 +7855,17 @@ var __bridge = (() => {
   function createFetchHeaders(headers) {
     return new Headers(serializeFetchHeaders(headers));
   }
+  function applyBridgeErrorCode(error) {
+    const normalized = error instanceof Error ? error : new Error(String(error));
+    if (normalized.code) {
+      return normalized;
+    }
+    const match = String(normalized.message || "").match(/\b(ERR_[A-Z0-9_]+|E[A-Z0-9_]+):/);
+    if (match) {
+      normalized.code = match[1];
+    }
+    return normalized;
+  }
   async function fetch(input, options = {}) {
     if (typeof _networkFetchRaw === "undefined") {
       console.error("fetch requires NetworkAdapter to be configured");
@@ -7747,9 +7893,14 @@ var __bridge = (() => {
       _registerHandle?.(handleId, `fetch ${resolvedUrl}`);
     }
     try {
-      const responseJson = await _networkFetchRaw.apply(void 0, [resolvedUrl, optionsJson], {
-        result: { promise: true }
-      });
+      let responseJson;
+      try {
+        responseJson = await _networkFetchRaw.apply(void 0, [resolvedUrl, optionsJson], {
+          result: { promise: true }
+        });
+      } catch (error) {
+        throw applyBridgeErrorCode(error);
+      }
       const response = JSON.parse(responseJson);
       const bodyEncoding = response.headers?.["x-body-encoding"] ?? null;
       const responseBody = response.body ?? "";
@@ -12492,7 +12643,7 @@ ${headerLines}\r
       try {
         const statJson = _fs.stat.applySyncPromise(void 0, [path]);
         const bodyBase64 = _fs.readFileBinary.applySyncPromise(void 0, [path]);
-        const stat = createHttp2BridgeStat(JSON.parse(statJson));
+        const stat = createHttp2BridgeStat(decodeBridgeJson(statJson));
         const callbackOptions = {
           offset: normalizedOptions.offset,
           length: normalizedOptions.length ?? Math.max(0, stat.size - normalizedOptions.offset)
@@ -17333,9 +17484,12 @@ ${headerLines}\r
   function ensureLiveStdinStarted() {
     if (_stdinLiveStarted) return;
     if (!_getStdinIsTTY() && !_getStreamStdin()) return;
-    if (typeof _kernelStdinRead === "undefined") return;
     _stdinLiveStarted = true;
     syncLiveStdinHandle(!_stdin.paused);
+    if (_getStreamStdin()) {
+      return;
+    }
+    if (typeof _kernelStdinRead === "undefined") return;
     void (async () => {
       try {
         while (!getStdinEnded()) {
@@ -17363,6 +17517,21 @@ ${headerLines}\r
       _stdinLiveBuffer += _stdinLiveDecoder.decode();
       finishLiveStdin();
     })();
+  }
+  function stdinDispatch(eventType, payload) {
+    if (eventType === "stdin_end") {
+      finishLiveStdin();
+      return;
+    }
+    if (eventType !== "stdin" || getStdinEnded()) {
+      return;
+    }
+    const chunk = typeof payload === "string" ? payload : payload == null ? "" : import_buffer2.Buffer.from(payload).toString("utf8");
+    if (!chunk) {
+      return;
+    }
+    _stdinLiveBuffer += chunk;
+    flushLiveStdinBuffer();
   }
   var _stdin = {
     readable: true,
@@ -17465,6 +17634,7 @@ ${headerLines}\r
       }
     }
   };
+  exposeCustomGlobal("_stdinDispatch", stdinDispatch);
   function hrtime(prev) {
     const now = getNowMs();
     const seconds = Math.floor(now / 1e3);
@@ -17562,7 +17732,7 @@ ${headerLines}\r
         err.path = dir;
         throw err;
       }
-      const parsed = JSON.parse(statJson);
+      const parsed = decodeBridgeJson(statJson);
       if (!parsed.isDirectory) {
         const err = new Error(`ENOTDIR: not a directory, chdir '${dir}'`);
         err.code = "ENOTDIR";
@@ -17780,10 +17950,14 @@ ${headerLines}\r
       _emit("warning", { message: msg, name: "Warning" });
     },
     binding(_name) {
-      throw new Error("process.binding is not supported in sandbox");
+      const error = new Error("process.binding is not supported in sandbox");
+      error.code = "ERR_ACCESS_DENIED";
+      throw error;
     },
     _linkedBinding(_name) {
-      throw new Error("process._linkedBinding is not supported in sandbox");
+      const error = new Error("process._linkedBinding is not supported in sandbox");
+      error.code = "ERR_ACCESS_DENIED";
+      throw error;
     },
     dlopen() {
       throw new Error("process.dlopen is not supported");
@@ -18615,7 +18789,16 @@ ${headerLines}\r
       return resolved;
     };
     resolve.paths = resolvePaths;
+    const rejectRestrictedBuiltin = function(request) {
+      const normalized = String(request).replace(/^node:/, "");
+      if (normalized === "http") {
+        const error = new Error(`node:${normalized} is not available in the Agent OS guest runtime`);
+        error.code = "ERR_ACCESS_DENIED";
+        throw error;
+      }
+    };
     const requireFn = function(request) {
+      rejectRestrictedBuiltin(request);
       return _requireFrom(request, dirname);
     };
     requireFn.resolve = resolve;
@@ -18671,7 +18854,10 @@ ${headerLines}\r
         "__dirname",
         content
       );
-      const moduleRequire = (request) => _requireFrom(request, this.path);
+      const moduleRequire = (request) => {
+        rejectRestrictedBuiltin(request);
+        return _requireFrom(request, this.path);
+      };
       moduleRequire.resolve = (request) => {
         const resolved = _resolveModule.applySyncPromise(void 0, [
           request,
@@ -18690,13 +18876,15 @@ ${headerLines}\r
     }
     static _extensions = {
       ".js": function(module, filename) {
-        const fs2 = _requireFrom("fs", "/");
-        const content = fs2.readFileSync(filename, "utf8");
+        const content = typeof _loadFile !== "undefined" ? _loadFile.applySyncPromise(void 0, [
+          filename
+        ]) : _requireFrom("fs", "/").readFileSync(filename, "utf8");
         module._compile(content, filename);
       },
       ".json": function(module, filename) {
-        const fs2 = _requireFrom("fs", "/");
-        const content = fs2.readFileSync(filename, "utf8");
+        const content = typeof _loadFile !== "undefined" ? _loadFile.applySyncPromise(void 0, [
+          filename
+        ]) : _requireFrom("fs", "/").readFileSync(filename, "utf8");
         module.exports = JSON.parse(content);
       },
       ".node": function() {
@@ -18810,6 +18998,77 @@ ${headerLines}\r
     SourceMap
   };
   exposeCustomGlobal("_moduleModule", moduleModule);
+  function normalizeBuiltinRequest(request) {
+    return String(request).replace(/^node:/, "");
+  }
+  function rejectRestrictedBuiltinRequest(request) {
+    const normalized = normalizeBuiltinRequest(request);
+    if (normalized === "http") {
+      const error = new Error(`node:${normalized} is not available in the Agent OS guest runtime`);
+      error.code = "ERR_ACCESS_DENIED";
+      throw error;
+    }
+    return normalized;
+  }
+  function loadBuiltinModule(request) {
+    const normalized = rejectRestrictedBuiltinRequest(request);
+    switch (normalized) {
+      case "fs":
+        return _fsModule;
+      case "os":
+        return _osModule;
+      case "child_process":
+        return _childProcessModule;
+      case "dns":
+        return _dnsModule;
+      case "net":
+        return _netModule;
+      case "tls":
+        return _tlsModule;
+      case "dgram":
+        return _dgramModule;
+      case "https":
+        return _httpsModule;
+      case "module":
+        return _moduleModule;
+      default: {
+        const error = new Error(`Cannot find module '${request}'`);
+        error.code = "MODULE_NOT_FOUND";
+        throw error;
+      }
+    }
+  }
+  function requireFrom(request, parentDir) {
+    const parentPath = typeof parentDir === "string" ? parentDir : "/";
+    if (Module.isBuiltin(request)) {
+      return loadBuiltinModule(request);
+    }
+    const resolved = _resolveModule.applySyncPromise(void 0, [
+      request,
+      parentPath
+    ]);
+    if (resolved === null) {
+      const error = new Error(`Cannot find module '${request}'`);
+      error.code = "MODULE_NOT_FOUND";
+      throw error;
+    }
+    if (Object.prototype.hasOwnProperty.call(_moduleCache, resolved)) {
+      return _moduleCache[resolved].exports;
+    }
+    const module = new Module(resolved, { path: parentPath });
+    _moduleCache[resolved] = module;
+    try {
+      const extension = resolved.endsWith(".json") ? ".json" : ".js";
+      const loader = Module._extensions[extension] ?? Module._extensions[".js"];
+      loader(module, resolved);
+      module.loaded = true;
+      return module.exports;
+    } catch (error) {
+      delete _moduleCache[resolved];
+      throw error;
+    }
+  }
+  exposeCustomGlobal("_requireFrom", requireFrom);
   var module_default = moduleModule;
 
   // .agent/recovery/secure-exec/nodejs/src/bridge/index.ts

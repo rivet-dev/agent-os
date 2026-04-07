@@ -8,10 +8,10 @@ use std::thread;
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::execution;
-use crate::ipc::ExecutionError;
-use crate::host_call::{CallIdRouter, SharedCallIdCounter};
 #[cfg(not(test))]
 use crate::host_call::{BridgeCallContext, ChannelFrameSender};
+use crate::host_call::{CallIdRouter, SharedCallIdCounter};
+use crate::ipc::ExecutionError;
 use crate::ipc_binary::BinaryFrame;
 #[cfg(not(test))]
 use crate::ipc_binary::{self, ExecutionErrorBin};
@@ -451,8 +451,8 @@ fn session_thread(
                                 &pending as *const bridge::PendingPromises,
                                 &session_buffers
                                     as *const std::cell::RefCell<bridge::SessionBuffers>,
-                                &SYNC_BRIDGE_FNS,
-                                &ASYNC_BRIDGE_FNS,
+                                SYNC_BRIDGE_FNS,
+                                ASYNC_BRIDGE_FNS,
                             );
                         }
 
@@ -550,27 +550,27 @@ fn session_thread(
                         // are visible yet — the module body may have registered
                         // timers, stdin listeners, or child_process handles that
                         // need event loop pumping to deliver their callbacks.
-                        let should_enter_event_loop =
-                            pending.len() > 0
+                        let should_enter_event_loop = pending.len() > 0
                             || execution::has_pending_module_evaluation()
                             || execution::has_pending_script_evaluation()
                             || !deferred_queue.lock().unwrap().is_empty();
                         let event_loop_status = if should_enter_event_loop {
-                                let scope = &mut v8::HandleScope::new(iso);
-                                let ctx = v8::Local::new(scope, &exec_context);
-                                let scope = &mut v8::ContextScope::new(scope, ctx);
-                                run_event_loop(
-                                    scope,
-                                    &rx,
-                                    &pending,
-                                    maybe_abort_rx.as_ref(),
-                                    Some(&deferred_queue),
-                                )
-                            } else {
-                                EventLoopStatus::Completed
-                            };
+                            let scope = &mut v8::HandleScope::new(iso);
+                            let ctx = v8::Local::new(scope, &exec_context);
+                            let scope = &mut v8::ContextScope::new(scope, ctx);
+                            run_event_loop(
+                                scope,
+                                &rx,
+                                &pending,
+                                maybe_abort_rx.as_ref(),
+                                Some(&deferred_queue),
+                            )
+                        } else {
+                            EventLoopStatus::Completed
+                        };
 
-                        let mut terminated = matches!(event_loop_status, EventLoopStatus::Terminated);
+                        let mut terminated =
+                            matches!(event_loop_status, EventLoopStatus::Terminated);
                         if let EventLoopStatus::Failed(next_code, next_error) = event_loop_status {
                             code = next_code;
                             error = Some(next_error);
@@ -605,13 +605,18 @@ fn session_thread(
                                 let key = v8::String::new(scope, "_waitForActiveHandles").unwrap();
                                 if let Some(func) = global.get(scope, key.into()) {
                                     if func.is_function() {
-                                        let func = v8::Local::<v8::Function>::try_from(func).unwrap();
+                                        let func =
+                                            v8::Local::<v8::Function>::try_from(func).unwrap();
                                         let recv = v8::undefined(scope).into();
                                         if let Some(result) = func.call(scope, recv, &[]) {
                                             if result.is_promise() {
-                                                let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+                                                let promise =
+                                                    v8::Local::<v8::Promise>::try_from(result)
+                                                        .unwrap();
                                                 if promise.state() == v8::PromiseState::Pending {
-                                                    execution::set_pending_script_evaluation(scope, promise);
+                                                    execution::set_pending_script_evaluation(
+                                                        scope, promise,
+                                                    );
                                                 }
                                             }
                                         }
@@ -638,7 +643,9 @@ fn session_thread(
                                 if matches!(event_loop_status, EventLoopStatus::Terminated) {
                                     terminated = true;
                                 }
-                                if let EventLoopStatus::Failed(next_code, next_error) = event_loop_status {
+                                if let EventLoopStatus::Failed(next_code, next_error) =
+                                    event_loop_status
+                                {
                                     code = next_code;
                                     error = Some(next_error);
                                 }
@@ -740,20 +747,42 @@ fn session_thread(
 ///
 /// Sync functions block V8 while the host processes the call (applySync/applySyncPromise).
 /// Async functions return a Promise to V8, resolved when the host responds (apply).
-pub(crate) const SYNC_BRIDGE_FNS: [&str; 34] = [
+pub(crate) const SYNC_BRIDGE_FNS: &[&str] = &[
     // Console
     "_log",
     "_error",
     // Module loading (syncPromise — host resolves async, Rust blocks)
+    "_loadPolyfill",
     "_resolveModule",
     "_loadFile",
-    "_loadPolyfill",
     // Sync module loading (bypass _loadPolyfill dispatch, used by CJS require)
     "_resolveModuleSync",
     "_loadFileSync",
+    "_batchResolveModules",
     // Crypto
     "_cryptoRandomFill",
     "_cryptoRandomUUID",
+    "_cryptoHashDigest",
+    "_cryptoHmacDigest",
+    "_cryptoPbkdf2",
+    "_cryptoScrypt",
+    "_cryptoCipheriv",
+    "_cryptoDecipheriv",
+    "_cryptoCipherivCreate",
+    "_cryptoCipherivUpdate",
+    "_cryptoCipherivFinal",
+    "_cryptoSign",
+    "_cryptoVerify",
+    "_cryptoAsymmetricOp",
+    "_cryptoCreateKeyObject",
+    "_cryptoGenerateKeyPairSync",
+    "_cryptoGenerateKeySync",
+    "_cryptoGeneratePrimeSync",
+    "_cryptoDiffieHellman",
+    "_cryptoDiffieHellmanGroup",
+    "_cryptoDiffieHellmanSessionCreate",
+    "_cryptoDiffieHellmanSessionCall",
+    "_cryptoSubtle",
     // Filesystem (all syncPromise)
     "_fsReadFile",
     "_fsWriteFile",
@@ -776,14 +805,60 @@ pub(crate) const SYNC_BRIDGE_FNS: [&str; 34] = [
     "_fsUtimes",
     // Child process (sync)
     "_childProcessSpawnStart",
+    "_childProcessPoll",
     "_childProcessStdinWrite",
     "_childProcessStdinClose",
     "_childProcessKill",
     "_childProcessSpawnSync",
+    // HTTP/2 and network bridge operations with sync or syncPromise semantics
+    "_networkHttp2ServerListenRaw",
+    "_networkHttp2SessionConnectRaw",
+    "_networkHttp2SessionRequestRaw",
+    "_networkHttp2SessionSettingsRaw",
+    "_networkHttp2SessionSetLocalWindowSizeRaw",
+    "_networkHttp2SessionGoawayRaw",
+    "_networkHttp2SessionCloseRaw",
+    "_networkHttp2SessionDestroyRaw",
+    "_networkHttp2ServerPollRaw",
+    "_networkHttp2SessionPollRaw",
+    "_networkHttp2StreamRespondRaw",
+    "_networkHttp2StreamPushStreamRaw",
+    "_networkHttp2StreamWriteRaw",
+    "_networkHttp2StreamEndRaw",
+    "_networkHttp2StreamCloseRaw",
+    "_networkHttp2StreamPauseRaw",
+    "_networkHttp2StreamResumeRaw",
+    "_networkHttp2StreamRespondWithFileRaw",
+    "_networkHttp2ServerRespondRaw",
     "_networkHttpServerRespondRaw",
+    "_upgradeSocketWriteRaw",
+    "_upgradeSocketEndRaw",
+    "_upgradeSocketDestroyRaw",
+    "_netSocketConnectRaw",
+    "_netSocketReadRaw",
+    "_netSocketSetNoDelayRaw",
+    "_netSocketSetKeepAliveRaw",
+    "_netSocketWriteRaw",
+    "_netSocketEndRaw",
+    "_netSocketDestroyRaw",
+    "_netSocketUpgradeTlsRaw",
+    "_netSocketGetTlsClientHelloRaw",
+    "_netSocketTlsQueryRaw",
+    "_tlsGetCiphersRaw",
+    "_netServerListenRaw",
+    "_netServerAcceptRaw",
+    "_dgramSocketCreateRaw",
+    "_dgramSocketBindRaw",
+    "_dgramSocketRecvRaw",
+    "_dgramSocketSendRaw",
+    "_dgramSocketCloseRaw",
+    "_dgramSocketAddressRaw",
+    "_dgramSocketSetBufferSizeRaw",
+    "_dgramSocketGetBufferSizeRaw",
+    "_ptySetRawMode",
 ];
 
-pub(crate) const ASYNC_BRIDGE_FNS: [&str; 12] = [
+pub(crate) const ASYNC_BRIDGE_FNS: &[&str] = &[
     // Module loading (async)
     "_dynamicImport",
     // Timer
@@ -796,9 +871,11 @@ pub(crate) const ASYNC_BRIDGE_FNS: [&str; 12] = [
     "_networkHttpServerListenRaw",
     "_networkHttpServerCloseRaw",
     "_networkHttpServerWaitRaw",
+    "_networkHttp2ServerCloseRaw",
     "_networkHttp2ServerWaitRaw",
     "_networkHttp2SessionWaitRaw",
     "_netSocketWaitConnectRaw",
+    "_netServerCloseRaw",
 ];
 
 /// Run the session event loop: dispatch incoming messages to V8.
@@ -865,7 +942,9 @@ pub(crate) fn run_event_loop(
         if pending.len() == 0
             && !execution::pending_module_evaluation_needs_wait(scope)
             && !execution::pending_script_evaluation_needs_wait(scope)
-            && deferred.map(|dq| dq.lock().unwrap().is_empty()).unwrap_or(true)
+            && deferred
+                .map(|dq| dq.lock().unwrap().is_empty())
+                .unwrap_or(true)
         {
             break;
         }
@@ -907,7 +986,9 @@ pub(crate) fn run_event_loop(
             if pending.len() == 0
                 && !execution::pending_module_evaluation_needs_wait(scope)
                 && !execution::pending_script_evaluation_needs_wait(scope)
-                && deferred.map(|dq| dq.lock().unwrap().is_empty()).unwrap_or(true)
+                && deferred
+                    .map(|dq| dq.lock().unwrap().is_empty())
+                    .unwrap_or(true)
             {
                 return EventLoopStatus::Completed;
             }
@@ -1066,7 +1147,7 @@ impl crate::host_call::ResponseReceiver for ChannelResponseReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     /// Helper to create a SessionManager for tests
     fn test_manager(max: usize) -> SessionManager {
@@ -1074,6 +1155,92 @@ mod tests {
         let router: CallIdRouter = Arc::new(Mutex::new(HashMap::new()));
         let snap_cache = Arc::new(SnapshotCache::new(4));
         SessionManager::new(max, tx, router, snap_cache)
+    }
+
+    #[test]
+    fn bridge_contract_globals_are_registered() {
+        let registered = SYNC_BRIDGE_FNS
+            .iter()
+            .chain(ASYNC_BRIDGE_FNS.iter())
+            .copied()
+            .collect::<HashSet<_>>();
+
+        for expected in [
+            "_batchResolveModules",
+            "_cryptoHashDigest",
+            "_cryptoHmacDigest",
+            "_cryptoPbkdf2",
+            "_cryptoScrypt",
+            "_cryptoCipheriv",
+            "_cryptoDecipheriv",
+            "_cryptoCipherivCreate",
+            "_cryptoCipherivUpdate",
+            "_cryptoCipherivFinal",
+            "_cryptoSign",
+            "_cryptoVerify",
+            "_cryptoAsymmetricOp",
+            "_cryptoCreateKeyObject",
+            "_cryptoGenerateKeyPairSync",
+            "_cryptoGenerateKeySync",
+            "_cryptoGeneratePrimeSync",
+            "_cryptoDiffieHellman",
+            "_cryptoDiffieHellmanGroup",
+            "_cryptoDiffieHellmanSessionCreate",
+            "_cryptoDiffieHellmanSessionCall",
+            "_cryptoSubtle",
+            "_networkHttp2ServerListenRaw",
+            "_networkHttp2ServerCloseRaw",
+            "_networkHttp2ServerWaitRaw",
+            "_networkHttp2SessionConnectRaw",
+            "_networkHttp2SessionRequestRaw",
+            "_networkHttp2SessionSettingsRaw",
+            "_networkHttp2SessionSetLocalWindowSizeRaw",
+            "_networkHttp2SessionGoawayRaw",
+            "_networkHttp2SessionCloseRaw",
+            "_networkHttp2SessionDestroyRaw",
+            "_networkHttp2SessionWaitRaw",
+            "_networkHttp2ServerPollRaw",
+            "_networkHttp2SessionPollRaw",
+            "_networkHttp2StreamRespondRaw",
+            "_networkHttp2StreamPushStreamRaw",
+            "_networkHttp2StreamWriteRaw",
+            "_networkHttp2StreamEndRaw",
+            "_networkHttp2StreamCloseRaw",
+            "_networkHttp2StreamPauseRaw",
+            "_networkHttp2StreamResumeRaw",
+            "_networkHttp2StreamRespondWithFileRaw",
+            "_networkHttp2ServerRespondRaw",
+            "_upgradeSocketWriteRaw",
+            "_upgradeSocketEndRaw",
+            "_upgradeSocketDestroyRaw",
+            "_netSocketConnectRaw",
+            "_netSocketReadRaw",
+            "_netSocketSetNoDelayRaw",
+            "_netSocketSetKeepAliveRaw",
+            "_netSocketWriteRaw",
+            "_netSocketEndRaw",
+            "_netSocketDestroyRaw",
+            "_netSocketUpgradeTlsRaw",
+            "_netSocketGetTlsClientHelloRaw",
+            "_netSocketTlsQueryRaw",
+            "_tlsGetCiphersRaw",
+            "_netServerListenRaw",
+            "_netServerAcceptRaw",
+            "_netServerCloseRaw",
+            "_dgramSocketCreateRaw",
+            "_dgramSocketBindRaw",
+            "_dgramSocketRecvRaw",
+            "_dgramSocketSendRaw",
+            "_dgramSocketCloseRaw",
+            "_dgramSocketAddressRaw",
+            "_dgramSocketSetBufferSizeRaw",
+            "_dgramSocketGetBufferSizeRaw",
+        ] {
+            assert!(
+                registered.contains(expected),
+                "missing bridge global registration for {expected}"
+            );
+        }
     }
 
     #[test]

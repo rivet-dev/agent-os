@@ -40,7 +40,7 @@ fn authenticate_ignores_client_connection_hints_and_preserves_existing_owners() 
                     cwd.to_string_lossy().into_owned(),
                 )]),
                 root_filesystem: Default::default(),
-                permissions: Vec::new(),
+                permissions: None,
             }),
         ))
         .expect("dispatch cross-connection create_vm");

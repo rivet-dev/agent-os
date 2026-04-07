@@ -63,7 +63,7 @@ pub enum BinaryFrame {
     BridgeResponse {
         session_id: String,
         call_id: u64,
-        status: u8,       // 0 = success, 1 = error, 2 = raw binary
+        status: u8, // 0 = success, 1 = error, 2 = raw binary
         payload: Vec<u8>,
     },
     StreamEvent {

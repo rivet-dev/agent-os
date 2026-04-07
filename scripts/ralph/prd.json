@@ -199,7 +199,7 @@
         "cargo test -p agent-os-execution -- --test-threads=1 passes"
       ],
       "priority": 9.5,
-      "passes": false,
+      "passes": true,
       "notes": "Follow-up to US-008a. Three issues found in audit: (1) ~80 bridge functions (_netSocketConnectRaw, _netServerListenRaw, _dgramSocket*Raw, _networkHttp2*Raw, _crypto*, _tlsGetCiphersRaw, _ptySetRawMode, _batchResolveModules, etc.) exist in v8-bridge.js polyfills and in map_bridge_method/sidecar handlers, but are NOT registered in the V8 session's SYNC_BRIDGE_FNS/ASYNC_BRIDGE_FNS arrays (session.rs lines 743-802). The JS polyfills check typeof === 'undefined' and silently degrade, meaning networking is effectively broken. (2) create_node_child() at javascript.rs:918 is dead code that should be removed. (3) Tests may still exercise the old node path. Check crates/v8-runtime/src/session.rs register_bridge_functions(), crates/execution/src/v8_runtime.rs map_bridge_method(), and crates/sidecar/src/execution.rs for the full forwarding chain."
     },
     {

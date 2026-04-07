@@ -17,19 +17,21 @@ use crate::filesystem::{
 };
 use crate::protocol::{
     AuthenticatedResponse, BoundUdpSnapshotResponse, CloseStdinRequest, DisposeReason, EventFrame,
-    EventPayload, ExecuteRequest, FindBoundUdpRequest, FindListenerRequest, GetSignalStateRequest,
-    GetZombieTimerCountRequest, GuestFilesystemCallRequest, GuestRuntimeKind,
-    JavascriptChildProcessSpawnRequest, JavascriptDgramBindRequest,
-    JavascriptDgramCreateSocketRequest, JavascriptDgramSendRequest, JavascriptDnsLookupRequest,
-    JavascriptDnsResolveRequest, JavascriptNetConnectRequest, JavascriptNetListenRequest,
-    KillProcessRequest, ListenerSnapshotResponse, OpenSessionRequest, OwnershipScope,
-    ProcessExitedEvent, ProcessKilledResponse, ProcessOutputEvent, ProcessStartedResponse,
-    ProtocolSchema, RejectedResponse, RequestFrame, RequestId, RequestPayload, ResponseFrame,
-    ResponsePayload, SessionOpenedResponse, SidecarRequestFrame, SidecarRequestPayload,
-    SidecarResponseFrame, SidecarResponseTracker, SidecarResponseTrackerError,
-    SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse, SocketStateEntry,
-    StdinClosedResponse, StdinWrittenResponse, StreamChannel, VmLifecycleEvent, VmLifecycleState,
-    WasmPermissionTier, WriteStdinRequest, ZombieTimerCountResponse,
+    EventPayload, ExecuteRequest, FindBoundUdpRequest, FindListenerRequest, FsPermissionScope,
+    GetSignalStateRequest, GetZombieTimerCountRequest, GuestFilesystemCallRequest,
+    GuestRuntimeKind, JavascriptChildProcessSpawnOptions, JavascriptChildProcessSpawnRequest,
+    JavascriptDgramBindRequest, JavascriptDgramCreateSocketRequest, JavascriptDgramSendRequest,
+    JavascriptDnsLookupRequest, JavascriptDnsResolveRequest, JavascriptNetConnectRequest,
+    JavascriptNetListenRequest, KillProcessRequest, ListenerSnapshotResponse, OpenSessionRequest,
+    OwnershipScope, PatternPermissionRule, PatternPermissionScope, PermissionMode,
+    PermissionsPolicy, ProcessExitedEvent, ProcessKilledResponse, ProcessOutputEvent,
+    ProcessStartedResponse, ProtocolSchema, RejectedResponse, RequestFrame, RequestId,
+    RequestPayload, ResponseFrame, ResponsePayload, SessionOpenedResponse, SidecarRequestFrame,
+    SidecarRequestPayload, SidecarResponseFrame, SidecarResponseTracker,
+    SidecarResponseTrackerError, SignalDispositionAction, SignalHandlerRegistration,
+    SignalStateResponse, SocketStateEntry, StdinClosedResponse, StdinWrittenResponse,
+    StreamChannel, VmLifecycleEvent, VmLifecycleState, WasmPermissionTier, WriteStdinRequest,
+    ZombieTimerCountResponse,
 };
 use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
@@ -108,6 +110,61 @@ pub use crate::state::{DispatchResult, NativeSidecarConfig, SidecarError};
 
 // SharedBridge struct and Clone impl moved to crate::state
 
+#[derive(Debug, Default, Deserialize)]
+struct LegacyJavascriptChildProcessSpawnOptions {
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    shell: bool,
+    #[serde(default, rename = "maxBuffer")]
+    max_buffer: Option<usize>,
+}
+
+fn parse_javascript_child_process_spawn_request(
+    vm: &VmState,
+    args: &[Value],
+) -> Result<(JavascriptChildProcessSpawnRequest, Option<usize>), SidecarError> {
+    if let Some(value) = args.first().cloned() {
+        if let Ok(request) = serde_json::from_value::<JavascriptChildProcessSpawnRequest>(value) {
+            return Ok((request, None));
+        }
+    }
+
+    let command = javascript_sync_rpc_arg_str(args, 0, "child_process.spawn command")?.to_owned();
+    let raw_args = javascript_sync_rpc_arg_str(args, 1, "child_process.spawn args")?;
+    let raw_options = javascript_sync_rpc_arg_str(args, 2, "child_process.spawn options")?;
+
+    let parsed_args = serde_json::from_str::<Vec<String>>(raw_args).map_err(|error| {
+        SidecarError::InvalidState(format!("invalid child_process.spawn args payload: {error}"))
+    })?;
+    let parsed_options =
+        serde_json::from_str::<LegacyJavascriptChildProcessSpawnOptions>(raw_options).map_err(
+            |error| {
+                SidecarError::InvalidState(format!(
+                    "invalid child_process.spawn options payload: {error}"
+                ))
+            },
+        )?;
+
+    Ok((
+        JavascriptChildProcessSpawnRequest {
+            command,
+            args: parsed_args,
+            options: JavascriptChildProcessSpawnOptions {
+                cwd: parsed_options.cwd,
+                env: parsed_options.env,
+                internal_bootstrap_env: sanitize_javascript_child_process_internal_bootstrap_env(
+                    &vm.guest_env,
+                ),
+                shell: parsed_options.shell,
+            },
+        },
+        parsed_options.max_buffer,
+    ))
+}
+
 impl<B> SharedBridge<B> {
     fn new(bridge: B) -> Self {
         Self {
@@ -173,9 +230,12 @@ where
         path: &str,
         access: FilesystemAccess,
     ) -> PermissionDecision {
-        if let Some(decision) =
-            self.static_permission_decision(vm_id, filesystem_permission_capability(access), "fs")
-        {
+        if let Some(decision) = self.static_permission_decision(
+            vm_id,
+            filesystem_permission_capability(access),
+            "fs",
+            Some(path),
+        ) {
             return decision;
         }
         match self.with_mut(|bridge| {
@@ -195,9 +255,12 @@ where
         vm_id: &str,
         request: &CommandAccessRequest,
     ) -> PermissionDecision {
-        if let Some(decision) =
-            self.static_permission_decision(vm_id, "child_process.spawn", "child_process")
-        {
+        if let Some(decision) = self.static_permission_decision(
+            vm_id,
+            "child_process.spawn",
+            "child_process",
+            Some(&request.command),
+        ) {
             return decision;
         }
         match self.with_mut(|bridge| {
@@ -223,6 +286,7 @@ where
             vm_id,
             environment_permission_capability(request.op),
             "env",
+            Some(&request.key),
         ) {
             return decision;
         }
@@ -251,6 +315,7 @@ where
             vm_id,
             network_permission_capability(request.op),
             "network",
+            Some(&request.resource),
         ) {
             return decision;
         }
@@ -300,17 +365,14 @@ where
     pub(crate) fn set_vm_permissions(
         &self,
         vm_id: &str,
-        permissions: &[crate::protocol::PermissionDescriptor],
+        permissions: &PermissionsPolicy,
     ) -> Result<(), SidecarError> {
         let mut stored = self.permissions.lock().map_err(|_| {
             SidecarError::Bridge(String::from(
                 "native sidecar permission policy lock poisoned",
             ))
         })?;
-        stored.insert(
-            vm_id.to_owned(),
-            normalize_permission_descriptors(permissions),
-        );
+        stored.insert(vm_id.to_owned(), permissions.clone());
         Ok(())
     }
 
@@ -329,59 +391,182 @@ where
         vm_id: &str,
         capability: &str,
         domain: &str,
+        resource: Option<&str>,
     ) -> Option<PermissionDecision> {
         let stored = self.permissions.lock().ok()?;
         let permissions = stored.get(vm_id)?;
-        let mode = permissions
-            .get(capability)
-            .or_else(|| permissions.get(domain))
-            .cloned()
-            .unwrap_or(crate::protocol::PermissionMode::Deny);
+        let mode = evaluate_permissions_policy(permissions, domain, capability, resource);
         Some(permission_mode_to_kernel_decision(mode, capability))
     }
 }
 
-fn default_allow_all_permissions() -> BTreeMap<String, crate::protocol::PermissionMode> {
-    BTreeMap::from([
-        (String::from("fs"), crate::protocol::PermissionMode::Allow),
-        (
-            String::from("network"),
-            crate::protocol::PermissionMode::Allow,
+fn evaluate_permissions_policy(
+    permissions: &PermissionsPolicy,
+    domain: &str,
+    capability: &str,
+    resource: Option<&str>,
+) -> PermissionMode {
+    match domain {
+        "fs" => evaluate_fs_permission_scope(
+            permissions.fs.as_ref(),
+            capability_operation(capability, domain),
+            resource,
         ),
-        (
-            String::from("child_process"),
-            crate::protocol::PermissionMode::Allow,
+        "network" => evaluate_pattern_permission_scope(
+            permissions.network.as_ref(),
+            capability_operation(capability, domain),
+            resource,
         ),
-        (String::from("env"), crate::protocol::PermissionMode::Allow),
-    ])
+        "child_process" => evaluate_pattern_permission_scope(
+            permissions.child_process.as_ref(),
+            capability_operation(capability, domain),
+            resource,
+        ),
+        "env" => evaluate_pattern_permission_scope(
+            permissions.env.as_ref(),
+            capability_operation(capability, domain),
+            resource,
+        ),
+        _ => PermissionMode::Deny,
+    }
 }
 
-fn normalize_permission_descriptors(
-    permissions: &[crate::protocol::PermissionDescriptor],
-) -> BTreeMap<String, crate::protocol::PermissionMode> {
-    if permissions.is_empty() {
-        return default_allow_all_permissions();
+fn evaluate_fs_permission_scope(
+    scope: Option<&FsPermissionScope>,
+    operation: &str,
+    resource: Option<&str>,
+) -> PermissionMode {
+    match scope {
+        Some(FsPermissionScope::Mode(mode)) => mode.clone(),
+        Some(FsPermissionScope::Rules(rules)) => {
+            let mut mode = rules.default.clone().unwrap_or(PermissionMode::Deny);
+            for rule in &rules.rules {
+                if fs_rule_matches(rule, operation, resource) {
+                    mode = rule.mode.clone();
+                }
+            }
+            mode
+        }
+        None => PermissionMode::Deny,
+    }
+}
+
+fn evaluate_pattern_permission_scope(
+    scope: Option<&PatternPermissionScope>,
+    operation: &str,
+    resource: Option<&str>,
+) -> PermissionMode {
+    match scope {
+        Some(PatternPermissionScope::Mode(mode)) => mode.clone(),
+        Some(PatternPermissionScope::Rules(rules)) => {
+            let mut mode = rules.default.clone().unwrap_or(PermissionMode::Deny);
+            for rule in &rules.rules {
+                if pattern_rule_matches(rule, operation, resource) {
+                    mode = rule.mode.clone();
+                }
+            }
+            mode
+        }
+        None => PermissionMode::Deny,
+    }
+}
+
+fn fs_rule_matches(
+    rule: &crate::protocol::FsPermissionRule,
+    operation: &str,
+    resource: Option<&str>,
+) -> bool {
+    let operations_match = rule.operations.is_empty()
+        || rule
+            .operations
+            .iter()
+            .any(|candidate| candidate == operation);
+    let paths_match = rule.paths.is_empty()
+        || resource
+            .is_some_and(|path| rule.paths.iter().any(|pattern| glob_matches(pattern, path)));
+    operations_match && paths_match
+}
+
+fn pattern_rule_matches(
+    rule: &PatternPermissionRule,
+    operation: &str,
+    resource: Option<&str>,
+) -> bool {
+    let operations_match = rule.operations.is_empty()
+        || rule
+            .operations
+            .iter()
+            .any(|candidate| candidate == operation);
+    let patterns_match = rule.patterns.is_empty()
+        || resource.is_some_and(|value| {
+            rule.patterns
+                .iter()
+                .any(|pattern| glob_matches(pattern, value))
+        });
+    operations_match && patterns_match
+}
+
+fn capability_operation<'a>(capability: &'a str, domain: &str) -> &'a str {
+    capability
+        .strip_prefix(domain)
+        .and_then(|value| value.strip_prefix('.'))
+        .unwrap_or("")
+}
+
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let mut pattern_index = 0usize;
+    let mut value_index = 0usize;
+    let mut star_pattern_index = None;
+    let mut star_value_index = 0usize;
+
+    while value_index < value.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == value[value_index])
+        {
+            pattern_index += 1;
+            value_index += 1;
+            continue;
+        }
+
+        if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+                pattern_index += 1;
+            }
+            if pattern_index == pattern.len() {
+                return true;
+            }
+            star_pattern_index = Some(pattern_index);
+            star_value_index = value_index;
+            continue;
+        }
+
+        let Some(saved_pattern_index) = star_pattern_index else {
+            return false;
+        };
+        star_value_index += 1;
+        value_index = star_value_index;
+        pattern_index = saved_pattern_index;
     }
 
-    let mut normalized = BTreeMap::new();
-    for permission in permissions {
-        normalized.insert(permission.capability.clone(), permission.mode.clone());
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
     }
-    normalized
+
+    pattern_index == pattern.len()
 }
 
 fn permission_mode_to_kernel_decision(
-    mode: crate::protocol::PermissionMode,
+    mode: PermissionMode,
     capability: &str,
 ) -> PermissionDecision {
     match mode {
-        crate::protocol::PermissionMode::Allow => PermissionDecision::allow(),
-        crate::protocol::PermissionMode::Ask => {
+        PermissionMode::Allow => PermissionDecision::allow(),
+        PermissionMode::Ask => {
             PermissionDecision::deny(format!("permission prompt required for {capability}"))
         }
-        crate::protocol::PermissionMode::Deny => {
-            PermissionDecision::deny(format!("blocked by {capability} policy"))
-        }
+        PermissionMode::Deny => PermissionDecision::deny(format!("blocked by {capability} policy")),
     }
 }
 
@@ -808,7 +993,43 @@ where
         &mut self,
         envelope: ProcessEventEnvelope,
     ) -> Result<Option<EventFrame>, SidecarError> {
-        self.handle_execution_event(&envelope.vm_id, &envelope.process_id, envelope.event)
+        let ProcessEventEnvelope {
+            connection_id,
+            session_id,
+            vm_id,
+            process_id,
+            event,
+        } = envelope;
+
+        if matches!(event, ActiveExecutionEvent::Exited(_)) {
+            let trailing = self
+                .drain_process_events_blocking(&vm_id, &process_id)?
+                .into_iter()
+                .filter(|event| !matches!(event, ActiveExecutionEvent::Exited(_)))
+                .collect::<Vec<_>>();
+
+            if !trailing.is_empty() {
+                self.pending_process_events.push_front(ProcessEventEnvelope {
+                    connection_id: connection_id.clone(),
+                    session_id: session_id.clone(),
+                    vm_id: vm_id.clone(),
+                    process_id: process_id.clone(),
+                    event,
+                });
+                for event in trailing.into_iter().rev() {
+                    self.pending_process_events.push_front(ProcessEventEnvelope {
+                        connection_id: connection_id.clone(),
+                        session_id: session_id.clone(),
+                        vm_id: vm_id.clone(),
+                        process_id: process_id.clone(),
+                        event,
+                    });
+                }
+                return Ok(None);
+            }
+        }
+
+        self.handle_execution_event(&vm_id, &process_id, event)
     }
 
     // try_poll_event moved to crate::execution
@@ -995,25 +1216,20 @@ where
     ) -> Result<(), SidecarError> {
         let response: Result<Value, SidecarError> = match request.method.as_str() {
             "child_process.spawn" => {
-                let payload = request
-                    .args
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| {
-                        SidecarError::InvalidState(String::from(
-                            "child_process.spawn requires a request payload",
-                        ))
-                    })
-                    .and_then(|value| {
-                        serde_json::from_value::<JavascriptChildProcessSpawnRequest>(value).map_err(
-                            |error| {
-                                SidecarError::InvalidState(format!(
-                                    "invalid child_process.spawn payload: {error}"
-                                ))
-                            },
-                        )
-                    })?;
+                let vm = self.vms.get(vm_id).expect("VM should exist");
+                let (payload, _) = parse_javascript_child_process_spawn_request(vm, &request.args)?;
                 self.spawn_javascript_child_process(vm_id, process_id, payload)
+            }
+            "child_process.spawn_sync" => {
+                let vm = self.vms.get(vm_id).expect("VM should exist");
+                let (payload, max_buffer) =
+                    parse_javascript_child_process_spawn_request(vm, &request.args)?;
+                self.spawn_javascript_child_process_sync(
+                    vm_id,
+                    process_id,
+                    payload,
+                    max_buffer,
+                )
             }
             "child_process.poll" => {
                 let child_process_id =

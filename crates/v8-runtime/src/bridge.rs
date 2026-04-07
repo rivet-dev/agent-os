@@ -175,7 +175,9 @@ fn v8_to_cbor(scope: &mut v8::HandleScope, value: v8::Local<v8::Value>) -> cibor
         for i in 0..len {
             let key = names.get_index(scope, i).unwrap();
             let key_str = key.to_rust_string_lossy(scope);
-            let val = obj.get(scope, key).unwrap_or_else(|| v8::undefined(scope).into());
+            let val = obj
+                .get(scope, key)
+                .unwrap_or_else(|| v8::undefined(scope).into());
             entries.push((ciborium::Value::Text(key_str), v8_to_cbor(scope, val)));
         }
         return ciborium::Value::Map(entries);
@@ -200,9 +202,7 @@ fn cbor_to_v8<'s>(
             }
         }
         ciborium::Value::Float(f) => v8::Number::new(scope, *f).into(),
-        ciborium::Value::Text(s) => {
-            v8::String::new(scope, s).unwrap().into()
-        }
+        ciborium::Value::Text(s) => v8::String::new(scope, s).unwrap().into(),
         ciborium::Value::Bytes(b) => {
             let len = b.len();
             let ab = v8::ArrayBuffer::new(scope, len);
@@ -247,8 +247,7 @@ pub fn serialize_cbor_value(
 ) -> Result<Vec<u8>, String> {
     let cbor_val = v8_to_cbor(scope, value);
     let mut buf = Vec::new();
-    ciborium::into_writer(&cbor_val, &mut buf)
-        .map_err(|e| format!("CBOR encode failed: {}", e))?;
+    ciborium::into_writer(&cbor_val, &mut buf).map_err(|e| format!("CBOR encode failed: {}", e))?;
     Ok(buf)
 }
 
@@ -257,8 +256,8 @@ pub fn deserialize_cbor_value<'s>(
     scope: &mut v8::HandleScope<'s>,
     data: &[u8],
 ) -> Result<v8::Local<'s, v8::Value>, String> {
-    let cbor_val: ciborium::Value = ciborium::from_reader(data)
-        .map_err(|e| format!("CBOR decode failed: {}", e))?;
+    let cbor_val: ciborium::Value =
+        ciborium::from_reader(data).map_err(|e| format!("CBOR decode failed: {}", e))?;
     Ok(cbor_to_v8(scope, &cbor_val))
 }
 
@@ -373,6 +372,7 @@ pub fn register_sync_bridge_fns(
             .data(external.into())
             .build(scope);
         let func = template.get_function(scope).unwrap();
+        attach_bridge_function_aliases(scope, func, &["applySync", "applySyncPromise"]);
 
         let key = v8::String::new(scope, method_name).unwrap();
         global.set(scope, key.into(), func.into());
@@ -496,12 +496,46 @@ pub fn register_async_bridge_fns(
             .data(external.into())
             .build(scope);
         let func = template.get_function(scope).unwrap();
+        attach_bridge_function_aliases(scope, func, &["apply"]);
 
         let key = v8::String::new(scope, method_name).unwrap();
         global.set(scope, key.into(), func.into());
     }
 
     AsyncBridgeFnStore { _data: data }
+}
+
+fn attach_bridge_function_aliases<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    func: v8::Local<'s, v8::Function>,
+    aliases: &[&str],
+) {
+    let func_object = func.to_object(scope).unwrap();
+    for alias in aliases {
+        let key = v8::String::new(scope, alias).unwrap();
+        let Some(wrapper) = build_bridge_apply_wrapper(scope, func) else {
+            continue;
+        };
+        let _ = func_object.set(scope, key.into(), wrapper.into());
+    }
+}
+
+fn build_bridge_apply_wrapper<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    func: v8::Local<'s, v8::Function>,
+) -> Option<v8::Local<'s, v8::Function>> {
+    let source = v8::String::new(
+        scope,
+        "(function (fn) { return function (_thisArg, args) { return fn(...(Array.isArray(args) ? args : [])); }; })",
+    )?;
+    let script = v8::Script::compile(scope, source, None)?;
+    let factory = script.run(scope)?;
+    let factory = v8::Local::<v8::Function>::try_from(factory).ok()?;
+    let argv = [func.into()];
+    let receiver = v8::undefined(scope).into();
+    factory
+        .call(scope, receiver, &argv)
+        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
 }
 
 /// V8 FunctionTemplate callback for async promise-returning bridge calls.
@@ -663,6 +697,12 @@ pub fn resolve_pending_promise(
     if let Some(err_msg) = error {
         let msg = v8::String::new(scope, &err_msg).unwrap();
         let exc = v8::Exception::error(scope, msg);
+        if let Some(code) = bridge_error_code(&err_msg) {
+            let exc_object = exc.to_object(scope).unwrap();
+            let code_key = v8::String::new(scope, "code").unwrap();
+            let code_value = v8::String::new(scope, code).unwrap();
+            let _ = exc_object.set(scope, code_key.into(), code_value.into());
+        }
         resolver.reject(scope, exc);
     } else if let Some(result_bytes) = result {
         // Try V8 deserialization in a TryCatch scope; fallback to raw binary
@@ -698,4 +738,15 @@ pub fn resolve_pending_promise(
     scope.perform_microtask_checkpoint();
 
     Ok(())
+}
+
+fn bridge_error_code(message: &str) -> Option<&str> {
+    let (code, _) = message.split_once(':')?;
+    if code.len() < 2 || !code.starts_with('E') {
+        return None;
+    }
+    code[1..]
+        .bytes()
+        .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        .then_some(code)
 }

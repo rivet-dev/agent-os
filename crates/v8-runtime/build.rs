@@ -43,11 +43,16 @@ fn find_v8_icu_data(v8_version: &str) -> PathBuf {
     ];
 
     let entries = fs::read_dir(&registry_src).unwrap_or_else(|error| {
-        panic!("failed to read cargo registry src {}: {}", registry_src.display(), error)
+        panic!(
+            "failed to read cargo registry src {}: {}",
+            registry_src.display(),
+            error
+        )
     });
 
     for entry in entries {
-        let entry = entry.unwrap_or_else(|error| panic!("failed to inspect cargo registry entry: {}", error));
+        let entry = entry
+            .unwrap_or_else(|error| panic!("failed to inspect cargo registry entry: {}", error));
         let crate_root = entry.path().join(format!("v8-{}", v8_version));
         for relative in candidates {
             let candidate = crate_root.join(relative);
@@ -65,7 +70,8 @@ fn find_v8_icu_data(v8_version: &str) -> PathBuf {
 }
 
 fn main() {
-    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set"));
+    let manifest_dir =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set"));
     let lock_path = manifest_dir.join("Cargo.lock");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set"));
 

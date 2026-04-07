@@ -1,3 +1,5 @@
+#![cfg(feature = "legacy-js-tests")]
+
 use agent_os_execution::{
     CreateJavascriptContextRequest, JavascriptExecutionEngine, JavascriptExecutionEvent,
     StartJavascriptExecutionRequest,
@@ -5,6 +7,7 @@ use agent_os_execution::{
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -33,6 +36,34 @@ struct NodeWarmupMetrics {
     asset_root: String,
 }
 
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set_path(key: &'static str, value: &Path) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => unsafe {
+                std::env::set_var(self.key, value);
+            },
+            None => unsafe {
+                std::env::remove_var(self.key);
+            },
+        }
+    }
+}
+
 fn assert_node_available() {
     let binary = std::env::var("AGENT_OS_NODE_BINARY").unwrap_or_else(|_| String::from("node"));
     let output = Command::new(binary)
@@ -44,6 +75,19 @@ fn assert_node_available() {
 
 fn write_fixture(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write fixture");
+}
+
+fn write_fake_node_binary(path: &Path, log_path: &Path) {
+    let script = format!(
+        "#!/bin/sh\nset -eu\nprintf 'guest-node-invoked\\n' >> \"{}\"\nexit 99\n",
+        log_path.display()
+    );
+    fs::write(path, script).expect("write fake node binary");
+    let mut permissions = fs::metadata(path)
+        .expect("fake node metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("chmod fake node binary");
 }
 
 fn collect_files(root: &Path) -> Vec<PathBuf> {
@@ -173,6 +217,7 @@ fn run_javascript_execution(
             argv,
             env,
             cwd: cwd.to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -196,6 +241,55 @@ fn javascript_contexts_preserve_vm_and_bootstrap_configuration() {
     assert_eq!(context.vm_id, "vm-js");
     assert_eq!(context.bootstrap_module.as_deref(), Some("./bootstrap.mjs"));
     assert_eq!(context.compile_cache_dir, None);
+}
+
+#[test]
+fn javascript_execution_uses_v8_runtime_without_spawning_guest_node_binary() {
+    let temp = tempdir().expect("create temp dir");
+    let fake_node_path = temp.path().join("fake-node.sh");
+    let log_path = temp.path().join("node.log");
+    write_fake_node_binary(&fake_node_path, &log_path);
+    let _node_binary = EnvVarGuard::set_path("AGENT_OS_NODE_BINARY", &fake_node_path);
+
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+console.log("v8-runtime");
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: None,
+        })
+        .expect("start JavaScript execution");
+
+    assert_eq!(execution.child_pid(), 0, "guest JS should run inside V8");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(
+        String::from_utf8(result.stdout)
+            .expect("stdout utf8")
+            .trim_end_matches('\n'),
+        "v8-runtime"
+    );
+    assert!(
+        !log_path.exists(),
+        "guest JavaScript execution should not invoke the host node binary"
+    );
 }
 
 #[test]
@@ -246,6 +340,7 @@ console.error(`stderr:${process.argv.slice(2).join(",")}`);
             ],
             env: BTreeMap::from([(String::from("VISIBLE_TEST_ENV"), String::from("ok"))]),
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -319,6 +414,7 @@ process.stdin.on("end", () => {
             argv: vec![String::from("./entry.mjs")],
             env: BTreeMap::from([(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"))]),
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -406,6 +502,7 @@ console.log(JSON.stringify({ stat, lstat, contents, raw, entries, missing, linkT
                 String::from("1"),
             )]),
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -616,6 +713,7 @@ console.log(
             argv: vec![String::from("./entry.mjs")],
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -900,6 +998,7 @@ console.log(
             argv: vec![String::from("./entry.mjs")],
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -2061,6 +2160,7 @@ console.log(`missing:${missing}`);
             argv: vec![String::from("./entry.mjs")],
             env,
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -2995,6 +3095,7 @@ console.log(JSON.stringify({
             argv: vec![String::from("./entry.mjs")],
             env,
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -3157,6 +3258,7 @@ spawnSync('node', ['./child.mjs'], {
             argv: vec![String::from("./entry.mjs")],
             env,
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -3285,6 +3387,7 @@ console.log(JSON.stringify(summary));
             argv: vec![String::from("./entry.mjs")],
             env,
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -3465,6 +3568,7 @@ console.log(JSON.stringify(summary));
             argv: vec![String::from("./entry.mjs")],
             env,
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -3669,6 +3773,7 @@ console.log(JSON.stringify(summary));
             argv: vec![String::from("./entry.mjs")],
             env,
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -3810,6 +3915,7 @@ console.log(JSON.stringify(summary));
             argv: vec![String::from("./entry.mjs")],
             env,
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -3993,6 +4099,7 @@ console.log(JSON.stringify(summary));
             argv: vec![String::from("./entry.mjs")],
             env,
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -4187,6 +4294,7 @@ console.log(JSON.stringify({
             argv: vec![String::from("./entry.mjs")],
             env,
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -4312,6 +4420,7 @@ console.log(JSON.stringify({
             argv: vec![String::from("./entry.mjs")],
             env,
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 
@@ -4415,6 +4524,7 @@ console.log(JSON.stringify({
             argv: vec![String::from("./entry.mjs")],
             env,
             cwd: temp.path().to_path_buf(),
+            inline_code: None,
         })
         .expect("start JavaScript execution");
 

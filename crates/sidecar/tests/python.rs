@@ -178,7 +178,7 @@ fn create_vm_with_root_filesystem(
                     cwd.to_string_lossy().into_owned(),
                 )]),
                 root_filesystem,
-                permissions: Vec::new(),
+                permissions: None,
             }),
         ))
         .expect("create sidecar VM");
@@ -885,7 +885,7 @@ fn workspace_files_are_shared_between_javascript_and_python_runtimes() {
     let mut sidecar = new_sidecar("cross-runtime-workspace");
     let workspace_host_dir = temp_dir("cross-runtime-workspace-host");
     let cwd = workspace_host_dir.clone();
-    let js_entry = workspace_host_dir.join("cross-runtime.mjs");
+    let js_entry = workspace_host_dir.join("cross-runtime.cjs");
     let connection_id = authenticate(&mut sidecar, "conn-cross-runtime");
     let session_id = open_session(&mut sidecar, 2, &connection_id);
     let (vm_id, _) = create_vm(
@@ -900,20 +900,22 @@ fn workspace_files_are_shared_between_javascript_and_python_runtimes() {
     write_fixture(
         &js_entry,
         r#"
-import fs from 'node:fs/promises';
+const fs = require('node:fs');
 
 const mode = process.argv[2];
 
 if (mode === 'write') {
-  await fs.writeFile('/workspace/from-js.txt', 'from js', 'utf8');
-  console.log(JSON.stringify({
-    entries: (await fs.readdir('/workspace')).sort(),
-  }));
+  fs.writeFileSync('/workspace/from-js.txt', Buffer.from('from js'));
+  const result = JSON.stringify({
+    entries: fs.readdirSync('/workspace').sort(),
+  });
+  fs.writeFileSync('/workspace/js-write-result.json', Buffer.from(result));
 } else if (mode === 'read') {
-  console.log(JSON.stringify({
-    fromPython: await fs.readFile('/workspace/from-python.txt', 'utf8'),
-    entries: (await fs.readdir('/workspace')).sort(),
-  }));
+  const result = JSON.stringify({
+    fromPython: fs.readFileSync('/workspace/from-python.txt', 'utf8'),
+    entries: fs.readdirSync('/workspace').sort(),
+  });
+  fs.writeFileSync('/workspace/js-read-result.json', Buffer.from(result));
 } else {
   throw new Error(`unknown mode: ${mode}`);
 }
@@ -950,7 +952,7 @@ if (mode === 'write') {
                     },
                 }],
                 software: Vec::new(),
-                permissions: Vec::new(),
+                permissions: None,
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
                 command_permissions: BTreeMap::new(),
@@ -1010,11 +1012,14 @@ if (mode === 'write') {
         js_write_stderr.is_empty(),
         "unexpected stderr from JavaScript write execution: {js_write_stderr}"
     );
-    let js_write: Value =
-        serde_json::from_str(js_write_stdout.trim()).expect("parse JavaScript write JSON");
+    let js_write: Value = serde_json::from_str(
+        &std::fs::read_to_string(workspace_host_dir.join("js-write-result.json"))
+            .expect("read JavaScript write JSON"),
+    )
+    .expect("parse JavaScript write JSON");
     assert_eq!(
         js_write["entries"],
-        serde_json::json!(["cross-runtime.mjs", "from-js.txt"])
+        serde_json::json!(["cross-runtime.cjs", "from-js.txt"])
     );
 
     execute_inline_python(
@@ -1061,7 +1066,12 @@ print(json.dumps({
     assert_eq!(python_result["fromJs"], "from js");
     assert_eq!(
         python_result["entries"],
-        serde_json::json!(["cross-runtime.mjs", "from-js.txt", "from-python.txt"])
+        serde_json::json!([
+            "cross-runtime.cjs",
+            "from-js.txt",
+            "from-python.txt",
+            "js-write-result.json"
+        ])
     );
 
     execute_javascript_with_env(
@@ -1091,12 +1101,20 @@ print(json.dumps({
         js_read_stderr.is_empty(),
         "unexpected stderr from JavaScript read execution: {js_read_stderr}"
     );
-    let js_read: Value =
-        serde_json::from_str(js_read_stdout.trim()).expect("parse JavaScript read JSON");
+    let js_read: Value = serde_json::from_str(
+        &std::fs::read_to_string(workspace_host_dir.join("js-read-result.json"))
+            .expect("read JavaScript read JSON"),
+    )
+    .expect("parse JavaScript read JSON");
     assert_eq!(js_read["fromPython"], "from python");
     assert_eq!(
         js_read["entries"],
-        serde_json::json!(["cross-runtime.mjs", "from-js.txt", "from-python.txt"])
+        serde_json::json!([
+            "cross-runtime.cjs",
+            "from-js.txt",
+            "from-python.txt",
+            "js-write-result.json"
+        ])
     );
 }
 

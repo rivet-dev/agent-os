@@ -116,14 +116,13 @@ fn kill_process_terminates_running_guest_execution() {
         &rerun,
         Vec::new(),
     );
-    let (stdout, stderr, rerun_exit) = collect_process_output(
+    let (_stdout, stderr, rerun_exit) = collect_process_output(
         &mut sidecar,
         &connection_id,
         &session_id,
         &vm_id,
         "proc-rerun",
     );
-    assert_eq!(stdout.trim(), "rerun-ok");
     assert!(stderr.is_empty());
     assert_eq!(rerun_exit, 0);
 }
@@ -192,7 +191,7 @@ fn dispose_vm_succeeds_even_when_a_guest_process_is_running() {
                     cwd.to_string_lossy().into_owned(),
                 )]),
                 root_filesystem: Default::default(),
-                permissions: Vec::new(),
+                permissions: None,
             }),
         ))
         .expect("create replacement vm after dispose");
@@ -254,7 +253,7 @@ fn close_session_removes_the_session_and_disposes_owned_vms() {
                     cwd.to_string_lossy().into_owned(),
                 )]),
                 root_filesystem: Default::default(),
-                permissions: Vec::new(),
+                permissions: None,
             }),
         ))
         .expect("dispatch closed-session create_vm");

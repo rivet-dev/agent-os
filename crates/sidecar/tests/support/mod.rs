@@ -161,7 +161,7 @@ pub fn create_vm_with_metadata(
                 runtime,
                 metadata,
                 root_filesystem: Default::default(),
-                permissions: Vec::new(),
+                permissions: None,
             }),
         ))
         .expect("create sidecar VM");
@@ -237,38 +237,44 @@ pub fn collect_process_output_with_timeout(
     let deadline = Instant::now() + timeout;
     let mut stdout = String::new();
     let mut stderr = String::new();
+    let mut exit = None;
 
     loop {
         let event = sidecar
             .poll_event_blocking(&ownership, Duration::from_millis(100))
             .expect("poll sidecar event");
-        let Some(event) = event else {
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for process events"
+        if let Some(event) = event {
+            assert_eq!(
+                event.ownership,
+                OwnershipScope::vm(connection_id, session_id, vm_id)
             );
-            continue;
-        };
 
-        assert_eq!(
-            event.ownership,
-            OwnershipScope::vm(connection_id, session_id, vm_id)
-        );
-
-        match event.payload {
-            EventPayload::ProcessOutput(ProcessOutputEvent {
-                process_id: event_process_id,
-                channel,
-                chunk,
-            }) if event_process_id == process_id => match channel {
-                agent_os_sidecar::protocol::StreamChannel::Stdout => stdout.push_str(&chunk),
-                agent_os_sidecar::protocol::StreamChannel::Stderr => stderr.push_str(&chunk),
-            },
-            EventPayload::ProcessExited(exited) if exited.process_id == process_id => {
-                return (stdout, stderr, exited.exit_code);
+            match event.payload {
+                EventPayload::ProcessOutput(ProcessOutputEvent {
+                    process_id: event_process_id,
+                    channel,
+                    chunk,
+                }) if event_process_id == process_id => match channel {
+                    agent_os_sidecar::protocol::StreamChannel::Stdout => stdout.push_str(&chunk),
+                    agent_os_sidecar::protocol::StreamChannel::Stderr => stderr.push_str(&chunk),
+                },
+                EventPayload::ProcessExited(exited) if exited.process_id == process_id => {
+                    exit = Some((exited.exit_code, Instant::now()));
+                }
+                _ => {}
             }
-            _ => {}
         }
+
+        if let Some((exit_code, seen_at)) = exit {
+            if Instant::now().duration_since(seen_at) >= Duration::from_millis(200) {
+                return (stdout, stderr, exit_code);
+            }
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for process events"
+        );
     }
 }
 

@@ -22,12 +22,12 @@ use nix::unistd::pipe2;
 use serde::Deserialize;
 use serde_json::{from_str, json, Value};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::os::fd::OwnedFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{
     mpsc::{self, Receiver, SyncSender, TrySendError},
@@ -257,6 +257,307 @@ pub struct JavascriptExecutionResult {
     pub stderr: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuestPathMapping {
+    guest_path: String,
+    host_path: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuestPathMappingWire {
+    #[serde(rename = "guestPath")]
+    guest_path: String,
+    #[serde(rename = "hostPath")]
+    host_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ModuleResolveMode {
+    Require,
+    Import,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LocalModuleResolutionCache {
+    resolve_results: HashMap<(String, String, ModuleResolveMode), Option<String>>,
+    package_json_results: HashMap<String, Option<LocalPackageJson>>,
+    exists_results: HashMap<String, bool>,
+    stat_results: HashMap<String, Option<bool>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LocalBridgeState {
+    translator: GuestPathTranslator,
+    resolution_cache: LocalModuleResolutionCache,
+    handle_descriptions: HashMap<String, String>,
+    next_timer_id: u64,
+    timers: HashMap<u64, bool>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GuestPathTranslator {
+    implicit_guest_cwd: String,
+    implicit_host_cwd: PathBuf,
+    mappings: Vec<GuestPathMapping>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct LocalPackageJson {
+    #[serde(default)]
+    main: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "type")]
+    package_type: Option<String>,
+    #[serde(default)]
+    exports: Option<Value>,
+    #[serde(default)]
+    imports: Option<Value>,
+}
+
+impl GuestPathTranslator {
+    fn from_request(request: &StartJavascriptExecutionRequest) -> Self {
+        let implicit_guest_cwd = request
+            .env
+            .get("HOME")
+            .filter(|value| value.starts_with('/'))
+            .cloned()
+            .unwrap_or_else(|| String::from("/root"));
+        let mut mappings = parse_guest_path_mappings(request)
+            .into_iter()
+            .filter(|mapping| mapping.guest_path.starts_with('/'))
+            .collect::<Vec<_>>();
+
+        if !mappings
+            .iter()
+            .any(|mapping| mapping.host_path == request.cwd && mapping.guest_path == implicit_guest_cwd)
+        {
+            mappings.push(GuestPathMapping {
+                guest_path: implicit_guest_cwd.clone(),
+                host_path: request.cwd.clone(),
+            });
+        }
+
+        mappings.sort_by(|left, right| {
+            right.host_path
+                .components()
+                .count()
+                .cmp(&left.host_path.components().count())
+                .then_with(|| right.guest_path.len().cmp(&left.guest_path.len()))
+        });
+
+        Self {
+            implicit_guest_cwd,
+            implicit_host_cwd: request.cwd.clone(),
+            mappings,
+        }
+    }
+
+    fn guest_cwd(&self) -> &str {
+        &self.implicit_guest_cwd
+    }
+
+    fn resolve_host_entrypoint(&self, cwd: &Path, entrypoint: &str) -> PathBuf {
+        if entrypoint == "-e" || entrypoint == "--eval" {
+            return PathBuf::from(entrypoint);
+        }
+
+        let path = Path::new(entrypoint);
+        if path.is_absolute() {
+            self.guest_to_host(entrypoint)
+                .unwrap_or_else(|| path.to_path_buf())
+        } else {
+            cwd.join(path)
+        }
+    }
+
+    fn host_to_guest_string(&self, host_path: &Path) -> String {
+        if !host_path.is_absolute() {
+            return normalize_guest_path(&host_path.to_string_lossy());
+        }
+
+        for mapping in &self.mappings {
+            if let Ok(stripped) = host_path.strip_prefix(&mapping.host_path) {
+                return join_guest_path(
+                    &mapping.guest_path,
+                    &stripped.to_string_lossy().replace('\\', "/"),
+                );
+            }
+        }
+
+        if let Ok(stripped) = host_path.strip_prefix(&self.implicit_host_cwd) {
+            return join_guest_path(
+                &self.implicit_guest_cwd,
+                &stripped.to_string_lossy().replace('\\', "/"),
+            );
+        }
+
+        let basename = host_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("unknown");
+        join_guest_path("/unknown", basename)
+    }
+
+    fn guest_to_host(&self, guest_path: &str) -> Option<PathBuf> {
+        let normalized = normalize_guest_path(guest_path);
+
+        for mapping in &self.mappings {
+            if let Some(suffix) = strip_guest_prefix(&normalized, &mapping.guest_path) {
+                return Some(join_host_path(&mapping.host_path, suffix));
+            }
+        }
+
+        if let Some(suffix) = strip_guest_prefix(&normalized, &self.implicit_guest_cwd) {
+            return Some(join_host_path(&self.implicit_host_cwd, suffix));
+        }
+
+        let path = PathBuf::from(&normalized);
+        if path.is_absolute() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+}
+
+fn parse_guest_path_mappings(request: &StartJavascriptExecutionRequest) -> Vec<GuestPathMapping> {
+    request
+        .env
+        .get(NODE_GUEST_PATH_MAPPINGS_ENV)
+        .and_then(|value| serde_json::from_str::<Vec<GuestPathMappingWire>>(value).ok())
+        .into_iter()
+        .flatten()
+        .map(|mapping| GuestPathMapping {
+            guest_path: normalize_guest_path(&mapping.guest_path),
+            host_path: PathBuf::from(mapping.host_path),
+        })
+        .collect()
+}
+
+fn normalize_guest_path(path: &str) -> String {
+    let mut segments = Vec::new();
+    let absolute = path.starts_with('/');
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    if !absolute {
+        return segments.join("/");
+    }
+    if segments.is_empty() {
+        String::from("/")
+    } else {
+        format!("/{}", segments.join("/"))
+    }
+}
+
+fn join_guest_path(base: &str, suffix: &str) -> String {
+    if suffix.is_empty() || suffix == "." {
+        return normalize_guest_path(base);
+    }
+    let trimmed = suffix.trim_start_matches('/');
+    normalize_guest_path(&format!("{}/{}", base.trim_end_matches('/'), trimmed))
+}
+
+fn strip_guest_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    if path == prefix {
+        return Some("");
+    }
+    path.strip_prefix(prefix)
+        .and_then(|suffix| suffix.strip_prefix('/'))
+}
+
+fn join_host_path(base: &Path, suffix: &str) -> PathBuf {
+    if suffix.is_empty() {
+        return base.to_path_buf();
+    }
+    let mut joined = base.to_path_buf();
+    for segment in suffix.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            joined.pop();
+        } else {
+            joined.push(segment);
+        }
+    }
+    joined
+}
+
+fn translate_v8_bridge_value_to_legacy(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(translate_v8_bridge_value_to_legacy)
+                .collect(),
+        ),
+        Value::Object(map)
+            if map.get("__type").and_then(Value::as_str) == Some("Buffer") =>
+        {
+            json!({
+                "__agentOsType": "bytes",
+                "base64": map.get("data").cloned().unwrap_or(Value::String(String::new())),
+            })
+        }
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), translate_v8_bridge_value_to_legacy(value)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn translate_request_args_for_legacy(method: &str, args: &[Value]) -> Vec<Value> {
+    let mut translated = args
+        .iter()
+        .map(translate_v8_bridge_value_to_legacy)
+        .collect::<Vec<_>>();
+
+    if matches!(method, "fs.writeFileSync" | "fs.promises.writeFile") {
+        if let Some(Value::String(data)) = translated.get(1) {
+            translated[1] = json!({
+                "__agentOsType": "bytes",
+                "base64": data,
+            });
+        }
+    }
+
+    translated
+}
+
+fn translate_legacy_bridge_value_to_v8(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(translate_legacy_bridge_value_to_v8)
+                .collect(),
+        ),
+        Value::Object(map)
+            if map.get("__agentOsType").and_then(Value::as_str) == Some("bytes") =>
+        {
+            json!({
+                "__type": "Buffer",
+                "data": map.get("base64").cloned().unwrap_or(Value::String(String::new())),
+            })
+        }
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), translate_legacy_bridge_value_to_v8(value)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 #[derive(Debug)]
 pub enum JavascriptExecutionError {
     EmptyArgv,
@@ -271,6 +572,7 @@ pub enum JavascriptExecutionError {
     ExpiredSyncRpcRequest(u64),
     RpcChannel(String),
     RpcResponse(String),
+    Terminate(std::io::Error),
     StdinClosed,
     Stdin(std::io::Error),
     EventChannelClosed,
@@ -332,6 +634,7 @@ impl fmt::Display for JavascriptExecutionError {
                     "failed to reply to guest JavaScript sync RPC request: {message}"
                 )
             }
+            Self::Terminate(err) => write!(f, "failed to terminate guest JavaScript runtime: {err}"),
             Self::StdinClosed => f.write_str("guest JavaScript stdin is already closed"),
             Self::Stdin(err) => write!(f, "failed to write guest stdin: {err}"),
             Self::EventChannelClosed => {
@@ -404,6 +707,14 @@ impl JavascriptExecution {
         Ok(())
     }
 
+    pub fn terminate(&self) -> Result<(), JavascriptExecutionError> {
+        if let Some(session) = &self.v8_session {
+            return session.terminate().map_err(JavascriptExecutionError::Terminate);
+        }
+
+        Ok(())
+    }
+
     pub fn respond_sync_rpc_success(
         &mut self,
         id: u64,
@@ -419,7 +730,8 @@ impl JavascriptExecution {
 
         // V8 bridge response path
         if let Some(session) = &self.v8_session {
-            let payload = v8_runtime::json_to_cbor_payload(&result)
+            let payload = translate_legacy_bridge_value_to_v8(&result);
+            let payload = v8_runtime::json_to_cbor_payload(&payload)
                 .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()))?;
             session
                 .send_bridge_response(id, 0, payload)
@@ -685,18 +997,44 @@ impl JavascriptExecutionEngine {
             .map_err(JavascriptExecutionError::Spawn)?;
 
         // Build user code: prefer inline code, fall back to entrypoint-based
-        let entrypoint = &request.argv[0];
-        let user_code = request
-            .inline_code
-            .clone()
-            .unwrap_or_else(|| build_v8_user_code(entrypoint, &request.env));
+        let translator = GuestPathTranslator::from_request(&request);
+        let host_entrypoint = translator.resolve_host_entrypoint(&request.cwd, &request.argv[0]);
+        let guest_entrypoint = if request.argv[0] == "-e" || request.argv[0] == "--eval" {
+            request.argv[0].clone()
+        } else {
+            translator.host_to_guest_string(&host_entrypoint)
+        };
+        let process_argv = std::iter::once(String::from("node"))
+            .chain(std::iter::once(guest_entrypoint.clone()))
+            .chain(request.argv.iter().skip(1).cloned())
+            .collect::<Vec<_>>();
+        let use_module_mode = request.inline_code.is_none()
+            && matches!(
+                host_entrypoint.extension().and_then(|ext| ext.to_str()),
+                Some("mjs" | "mts")
+            );
+        let user_code = if let Some(inline_code) = request.inline_code.clone() {
+            inline_code
+        } else if use_module_mode {
+            fs::read_to_string(&host_entrypoint)
+                .map_err(JavascriptExecutionError::PrepareImportCache)?
+        } else {
+            build_v8_user_code(&guest_entrypoint, &request.env)
+        };
+        let user_code = prepend_v8_runtime_shim(
+            user_code,
+            &guest_entrypoint,
+            &process_argv,
+            translator.guest_cwd(),
+            &request.env,
+        );
 
         // Execute bridge code + user code in the V8 isolate
         v8_host
             .send_frame(&BinaryFrame::Execute {
                 session_id: session_id.clone(),
-                mode: 0, // exec (CJS)
-                file_path: entrypoint.clone(),
+                mode: if use_module_mode { 1 } else { 0 },
+                file_path: guest_entrypoint.clone(),
                 bridge_code: V8RuntimeHost::bridge_code().to_owned(),
                 post_restore_script: String::new(),
                 user_code,
@@ -716,6 +1054,10 @@ impl JavascriptExecutionEngine {
             pending_sync_rpc.clone(),
             sync_rpc_timeout,
             v8_session.clone(),
+            LocalBridgeState {
+                translator,
+                ..Default::default()
+            },
         );
 
         Ok(JavascriptExecution {
@@ -839,6 +1181,7 @@ fn set_pending_sync_rpc_state(
     Ok(())
 }
 
+#[cfg(feature = "legacy-js-tests")]
 fn prewarm_node_import_path(
     import_cache: &NodeImportCache,
     context: &JavascriptContext,
@@ -915,6 +1258,7 @@ fn prewarm_node_import_path(
     ))
 }
 
+#[cfg(feature = "legacy-js-tests")]
 fn create_node_child(
     import_cache: &NodeImportCache,
     context: &JavascriptContext,
@@ -1032,6 +1376,7 @@ fn create_node_child(
     Ok((child, sync_rpc_request_reader, sync_rpc_response_writer))
 }
 
+#[cfg(feature = "legacy-js-tests")]
 fn configure_node_sandbox(
     command: &mut Command,
     import_cache: &NodeImportCache,
@@ -1100,6 +1445,7 @@ fn configure_node_sandbox(
     Ok(())
 }
 
+#[cfg(feature = "legacy-js-tests")]
 fn inherited_node_permission_enabled(env: &BTreeMap<String, String>, key: &str) -> Option<bool> {
     env.get(key).and_then(|value| match value.as_str() {
         "1" | "true" => Some(true),
@@ -1108,6 +1454,7 @@ fn inherited_node_permission_enabled(env: &BTreeMap<String, String>, key: &str) 
     })
 }
 
+#[cfg(feature = "legacy-js-tests")]
 fn parse_env_path_list(env: &BTreeMap<String, String>, key: &str) -> Vec<PathBuf> {
     env.get(key)
         .and_then(|value| from_str::<Vec<String>>(value).ok())
@@ -1117,6 +1464,7 @@ fn parse_env_path_list(env: &BTreeMap<String, String>, key: &str) -> Vec<PathBuf
         .collect()
 }
 
+#[cfg(feature = "legacy-js-tests")]
 fn configure_node_command(
     command: &mut Command,
     import_cache: &NodeImportCache,
@@ -1140,6 +1488,7 @@ fn configure_node_command(
     Ok(())
 }
 
+#[cfg(feature = "legacy-js-tests")]
 fn warmup_marker_contents() -> String {
     [
         env!("CARGO_PKG_NAME"),
@@ -1153,6 +1502,7 @@ fn warmup_marker_contents() -> String {
     .join("\n")
 }
 
+#[cfg(feature = "legacy-js-tests")]
 fn warmup_metrics_line(
     debug_enabled: bool,
     executed: bool,
@@ -1383,6 +1733,84 @@ fn build_v8_user_code(entrypoint: &str, env: &BTreeMap<String, String>) -> Strin
     }
 }
 
+fn resolve_v8_entrypoint(cwd: &Path, entrypoint: &str) -> String {
+    if entrypoint == "-e" || entrypoint == "--eval" {
+        return entrypoint.to_owned();
+    }
+
+    let path = Path::new(entrypoint);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    resolved.to_string_lossy().into_owned()
+}
+
+fn prepend_v8_runtime_shim(
+    user_code: String,
+    entrypoint: &str,
+    argv: &[String],
+    cwd: &str,
+    env: &BTreeMap<String, String>,
+) -> String {
+    let argv_json =
+        serde_json::to_string(argv).unwrap_or_else(|_| String::from("[\"node\"]"));
+    let entry_json =
+        serde_json::to_string(entrypoint).unwrap_or_else(|_| String::from("\"/<entry>\""));
+    let cwd_json = serde_json::to_string(cwd).unwrap_or_else(|_| String::from("\"/\""));
+    let env_json = serde_json::to_string(env).unwrap_or_else(|_| String::from("{}"));
+
+    format!(
+        r#"(function () {{
+  const nextArgv = {argv_json};
+  const entryFile = {entry_json};
+  const nextCwd = {cwd_json};
+  const nextEnv = {env_json};
+  const visibleEnv = Object.fromEntries(
+    Object.entries(nextEnv).filter(([key]) => !key.startsWith("AGENT_OS_"))
+  );
+
+  if (typeof process !== "undefined") {{
+    process.argv = nextArgv;
+    process.argv0 = nextArgv[0] || "node";
+    process.env = {{
+      ...(process.env || {{}}),
+      ...visibleEnv,
+    }};
+    const nextPid = Number(nextEnv.AGENT_OS_VIRTUAL_PROCESS_PID);
+    if (Number.isFinite(nextPid) && nextPid > 0) {{
+      process.pid = nextPid;
+    }}
+    const nextPpid = Number(nextEnv.AGENT_OS_VIRTUAL_PROCESS_PPID);
+    if (Number.isFinite(nextPpid) && nextPpid >= 0) {{
+      process.ppid = nextPpid;
+    }}
+    if (typeof nextEnv.AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH === "string" && nextEnv.AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH.length > 0) {{
+      process.execPath = nextEnv.AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH;
+    }}
+    process.cwd = () => nextCwd;
+    process._cwd = nextCwd;
+    if (typeof process.getBuiltinModule !== "function") {{
+      process.getBuiltinModule = function(specifier) {{
+        return globalThis.require ? globalThis.require(specifier) : undefined;
+      }};
+    }}
+  }}
+
+  globalThis.__runtimeStreamStdin = nextEnv.AGENT_OS_KEEP_STDIN_OPEN === "1";
+
+  if (
+    typeof globalThis.require === "undefined" &&
+    typeof globalThis._moduleModule?.createRequire === "function"
+  ) {{
+    globalThis.require = globalThis._moduleModule.createRequire(entryFile);
+  }}
+}})();
+{user_code}"#
+    )
+}
+
 /// Spawn a V8 event bridge thread that converts V8 BinaryFrame messages
 /// into JavascriptExecutionEvent for the sidecar event loop.
 ///
@@ -1394,6 +1822,7 @@ fn spawn_v8_event_bridge(
     pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
     _sync_rpc_timeout: Duration,
     v8_session: V8SessionHandle,
+    mut local_bridge: LocalBridgeState,
 ) -> UnboundedReceiver<JavascriptExecutionEvent> {
     let (sender, receiver) = unbounded_channel();
 
@@ -1411,7 +1840,8 @@ fn spawn_v8_event_bridge(
                         .unwrap_or_default();
 
                     // Check if this is an internal bridge call we handle locally
-                    if let Some(response) = handle_internal_bridge_call(&method, &args) {
+                    if let Some(response) = local_bridge.handle_internal_bridge_call(&method, &args)
+                    {
                         // Respond directly to the V8 isolate
                         let cbor_payload = v8_runtime::json_to_cbor_payload(&response)
                             .unwrap_or_default();
@@ -1461,7 +1891,7 @@ fn spawn_v8_event_bridge(
                         JavascriptSyncRpcRequest {
                             id: call_id,
                             method: sidecar_method.to_owned(),
-                            args,
+                            args: translate_request_args_for_legacy(sidecar_method, &args),
                         },
                     ))
                 }
@@ -1506,92 +1936,617 @@ fn spawn_v8_event_bridge(
 
 /// Handle internal bridge calls that don't need to go to the sidecar.
 /// Returns Some(response) if handled locally, None if it should be forwarded.
-fn handle_internal_bridge_call(method: &str, args: &[Value]) -> Option<Value> {
-    match method {
-        // Module resolution: simple path joining for relative specifiers
-        "_resolveModule" | "_resolveModuleSync" => {
-            let specifier = args.first().and_then(Value::as_str).unwrap_or("");
-            let parent = args.get(1).and_then(Value::as_str).unwrap_or("/");
+impl LocalBridgeState {
+    fn handle_internal_bridge_call(&mut self, method: &str, args: &[Value]) -> Option<Value> {
+        match method {
+            "_resolveModule" | "_resolveModuleSync" => {
+                let specifier = args.first().and_then(Value::as_str).unwrap_or("");
+                let parent = args.get(1).and_then(Value::as_str).unwrap_or("/");
+                let mode = match args.get(2).and_then(Value::as_str) {
+                    Some("import") => ModuleResolveMode::Import,
+                    Some("require") => ModuleResolveMode::Require,
+                    _ if method == "_resolveModule" => ModuleResolveMode::Import,
+                    _ => ModuleResolveMode::Require,
+                };
+                Some(
+                    self.resolve_module(specifier, parent, mode)
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                )
+            }
+            "_loadFile" | "_loadFileSync" => Some(
+                self.load_file(args.first().and_then(Value::as_str).unwrap_or(""))
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
+            ),
+            "_batchResolveModules" => Some(self.batch_resolve_modules(args)),
+            "_loadPolyfill" => Some(self.handle_polyfill_dispatch(args)),
+            "_cryptoRandomFill" => {
+                let size = args.first().and_then(Value::as_u64).unwrap_or(16) as usize;
+                let mut bytes = vec![0u8; size];
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                for (i, byte) in bytes.iter_mut().enumerate() {
+                    *byte = ((seed >> (i % 16 * 8)) & 0xFF) as u8 ^ (i as u8);
+                }
+                Some(json!({ "__type": "Buffer", "data": v8_runtime::base64_encode_pub(&bytes) }))
+            }
+            "_cryptoRandomUUID" => {
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                Some(Value::String(format!(
+                    "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+                    (seed >> 96) as u32,
+                    (seed >> 80) as u16,
+                    (seed >> 64) as u16 & 0x0FFF,
+                    ((seed >> 48) as u16 & 0x3FFF) | 0x8000,
+                    seed as u64 & 0xFFFFFFFFFFFF,
+                )))
+            }
+            "_scheduleTimer" => Some(json!(0)),
+            "_kernelStdinRead" => Some(Value::Null),
+            "_ptySetRawMode" => Some(Value::Null),
+            _ => None,
+        }
+    }
 
-            if specifier.starts_with('.') {
-                // Relative path - resolve against parent directory
-                let parent_dir = if parent.contains('/') {
-                    parent.rsplit_once('/').map_or("/", |(dir, _)| dir)
+    fn handle_polyfill_dispatch(&mut self, args: &[Value]) -> Value {
+        let Some(dispatch) = args.first().and_then(Value::as_str) else {
+            return Value::String(String::new());
+        };
+        if !dispatch.starts_with("__bd:") {
+            return Value::String(String::new());
+        }
+        let (dispatch_method, payload_json) = dispatch
+            .strip_prefix("__bd:")
+            .and_then(|value| value.split_once(':'))
+            .unwrap_or(("", "[]"));
+        let payload = serde_json::from_str::<Value>(payload_json).unwrap_or_else(|_| json!([]));
+        let args = payload.as_array().cloned().unwrap_or_default();
+        let result = match dispatch_method {
+            "kernelHandleRegister" => {
+                if let (Some(id), Some(description)) = (
+                    args.first().and_then(Value::as_str),
+                    args.get(1).and_then(Value::as_str),
+                ) {
+                    self.handle_descriptions
+                        .insert(id.to_owned(), description.to_owned());
+                }
+                Value::Null
+            }
+            "kernelHandleUnregister" => {
+                if let Some(id) = args.first().and_then(Value::as_str) {
+                    self.handle_descriptions.remove(id);
+                }
+                Value::Null
+            }
+            "kernelHandleList" => Value::Array(
+                self.handle_descriptions
+                    .iter()
+                    .map(|(id, description)| {
+                        json!({
+                            "id": id,
+                            "description": description,
+                        })
+                    })
+                    .collect(),
+            ),
+            "kernelTimerCreate" => {
+                self.next_timer_id += 1;
+                self.timers.insert(self.next_timer_id, false);
+                json!(self.next_timer_id)
+            }
+            "kernelTimerArm" => Value::Null,
+            "kernelTimerClear" => {
+                if let Some(timer_id) = args.first().and_then(Value::as_u64) {
+                    self.timers.remove(&timer_id);
+                }
+                Value::Null
+            }
+            _ => json!({
+                "__bd_error": {
+                    "name": "Error",
+                    "message": format!("No handler: {dispatch_method}"),
+                }
+            }),
+        };
+
+        if dispatch_method.starts_with("kernel") {
+            Value::String(serde_json::to_string(&json!({ "__bd_result": result })).unwrap_or_else(
+                |_| String::from("{\"__bd_result\":null}"),
+            ))
+        } else {
+            Value::String(serde_json::to_string(&json!({
+                "__bd_error": {
+                    "name": "Error",
+                    "message": format!("No handler: {dispatch_method}"),
+                }
+            }))
+            .unwrap_or_else(|_| String::from("{\"__bd_error\":{\"name\":\"Error\",\"message\":\"dispatch failed\"}}")))
+        }
+    }
+
+    fn batch_resolve_modules(&mut self, args: &[Value]) -> Value {
+        let requests = args
+            .first()
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Value::Array(
+            requests
+                .into_iter()
+                .map(|request| {
+                    let pair = request.as_array().cloned().unwrap_or_default();
+                    let specifier = pair.first().and_then(Value::as_str).unwrap_or("");
+                    let referrer = pair.get(1).and_then(Value::as_str).unwrap_or("/");
+                    self.resolve_module(specifier, referrer, ModuleResolveMode::Import)
+                        .and_then(|resolved| {
+                            self.load_file(&resolved).map(|source| {
+                                json!({
+                                    "resolved": resolved,
+                                    "source": source,
+                                })
+                            })
+                        })
+                        .unwrap_or(Value::Null)
+                })
+                .collect(),
+        )
+    }
+
+    fn resolve_module(
+        &mut self,
+        specifier: &str,
+        from_dir: &str,
+        mode: ModuleResolveMode,
+    ) -> Option<String> {
+        let normalized_from = normalize_module_resolve_context(from_dir);
+        let cache_key = (
+            specifier.to_owned(),
+            normalized_from.clone(),
+            mode,
+        );
+        if let Some(cached) = self.resolution_cache.resolve_results.get(&cache_key) {
+            return cached.clone();
+        }
+
+        let resolved = if let Some(builtin) = normalize_builtin_specifier(specifier) {
+            Some(builtin)
+        } else if specifier.starts_with('/') {
+            self.resolve_path(specifier, mode)
+        } else if specifier.starts_with("./")
+            || specifier.starts_with("../")
+            || specifier == "."
+            || specifier == ".."
+        {
+            self.resolve_path(&join_guest_path(&normalized_from, specifier), mode)
+        } else if specifier.starts_with('#') {
+            self.resolve_package_imports(specifier, &normalized_from, mode)
+        } else {
+            self.resolve_node_modules(specifier, &normalized_from, mode)
+        };
+
+        self.resolution_cache
+            .resolve_results
+            .insert(cache_key, resolved.clone());
+        resolved
+    }
+
+    fn load_file(&mut self, path: &str) -> Option<String> {
+        let bare = path.trim_start_matches("node:");
+        if is_builtin_specifier(path) {
+            return Some(build_builtin_module_wrapper(bare));
+        }
+
+        let host_path = self.translator.guest_to_host(path)?;
+        fs::read_to_string(host_path).ok()
+    }
+
+    fn resolve_package_imports(
+        &mut self,
+        request: &str,
+        from_dir: &str,
+        mode: ModuleResolveMode,
+    ) -> Option<String> {
+        let mut dir = normalize_guest_path(from_dir);
+        loop {
+            let pkg_json_path = join_guest_path(&dir, "package.json");
+            if let Some(pkg_json) = self.read_package_json(&pkg_json_path) {
+                if let Some(imports) = &pkg_json.imports {
+                    if let Some(target) = resolve_imports_target(imports, request, mode) {
+                        let target_path = if target.starts_with('/') {
+                            target
+                        } else {
+                            join_guest_path(&dir, &target)
+                        };
+                        return self.resolve_path(&target_path, mode);
+                    }
+                    return None;
+                }
+            }
+            if dir == "/" {
+                break;
+            }
+            dir = dirname_guest_path(&dir);
+        }
+        None
+    }
+
+    fn resolve_node_modules(
+        &mut self,
+        request: &str,
+        from_dir: &str,
+        mode: ModuleResolveMode,
+    ) -> Option<String> {
+        let (package_name, subpath) = split_package_request(request)?;
+        let mut dir = normalize_guest_path(from_dir);
+        loop {
+            for package_dir in node_modules_candidate_dirs(&dir, package_name) {
+                if let Some(entry) = self.resolve_package_entry_from_dir(&package_dir, subpath, mode)
+                {
+                    return Some(entry);
+                }
+            }
+            if dir == "/" {
+                break;
+            }
+            dir = dirname_guest_path(&dir);
+        }
+
+        self.resolve_package_entry_from_dir(
+            &join_guest_path("/node_modules", package_name),
+            subpath,
+            mode,
+        )
+    }
+
+    fn resolve_package_entry_from_dir(
+        &mut self,
+        package_dir: &str,
+        subpath: &str,
+        mode: ModuleResolveMode,
+    ) -> Option<String> {
+        let package_json_path = join_guest_path(package_dir, "package.json");
+        let pkg_json = self.read_package_json(&package_json_path);
+        if pkg_json.is_none() && !self.cached_exists(package_dir) {
+            return None;
+        }
+
+        if let Some(pkg_json) = pkg_json.as_ref() {
+            if let Some(exports) = &pkg_json.exports {
+                let exports_subpath = if subpath.is_empty() {
+                    String::from(".")
                 } else {
-                    "/"
+                    format!("./{subpath}")
                 };
-                let resolved = if parent_dir == "/" || parent_dir.is_empty() {
-                    format!("/{}", specifier.trim_start_matches("./"))
-                } else {
-                    format!("{}/{}", parent_dir, specifier.trim_start_matches("./"))
-                };
-                Some(Value::String(resolved))
-            } else if specifier.starts_with('/') {
-                // Absolute path
-                Some(Value::String(specifier.to_owned()))
+                let exports_target = resolve_exports_target(
+                    exports,
+                    &exports_subpath,
+                    mode,
+                )?;
+                let target_path = join_guest_path(package_dir, &exports_target);
+                return self.resolve_path(&target_path, mode).or(Some(target_path));
+            }
+        }
+
+        if !subpath.is_empty() {
+            return self.resolve_path(&join_guest_path(package_dir, subpath), mode);
+        }
+
+        let entry_field = pkg_json
+            .as_ref()
+            .and_then(|pkg_json| pkg_json.main.as_deref())
+            .unwrap_or("index.js");
+        let entry_path = join_guest_path(package_dir, entry_field);
+        self.resolve_path(&entry_path, mode)
+            .or_else(|| self.resolve_path(&join_guest_path(package_dir, "index"), mode))
+    }
+
+    fn resolve_path(&mut self, base_path: &str, mode: ModuleResolveMode) -> Option<String> {
+        if self.cached_stat(base_path) == Some(false) {
+            return Some(normalize_guest_path(base_path));
+        }
+
+        for extension in [".js", ".json", ".mjs", ".cjs"] {
+            let candidate = format!("{}{}", normalize_guest_path(base_path), extension);
+            if self.cached_exists(&candidate) {
+                return Some(candidate);
+            }
+        }
+
+        if self.cached_stat(base_path) == Some(true) {
+            let pkg_json_path = join_guest_path(base_path, "package.json");
+            if let Some(pkg_json) = self.read_package_json(&pkg_json_path) {
+                if let Some(main) = pkg_json.main.as_deref() {
+                    let entry_path = join_guest_path(base_path, main);
+                    if entry_path != normalize_guest_path(base_path) {
+                        if let Some(entry) = self.resolve_path(&entry_path, mode) {
+                            return Some(entry);
+                        }
+                    }
+                }
+                if mode == ModuleResolveMode::Import
+                    && pkg_json.package_type.as_deref() == Some("module")
+                    && self.cached_exists(&join_guest_path(base_path, "index.js"))
+                {
+                    return Some(join_guest_path(base_path, "index.js"));
+                }
+            }
+
+            for extension in [".js", ".json", ".mjs", ".cjs"] {
+                let index_path = join_guest_path(base_path, &format!("index{extension}"));
+                if self.cached_exists(&index_path) {
+                    return Some(index_path);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn read_package_json(&mut self, guest_path: &str) -> Option<LocalPackageJson> {
+        if let Some(cached) = self
+            .resolution_cache
+            .package_json_results
+            .get(guest_path)
+            .cloned()
+        {
+            return cached;
+        }
+
+        let parsed = self
+            .translator
+            .guest_to_host(guest_path)
+            .and_then(|host_path| fs::read_to_string(host_path).ok())
+            .and_then(|contents| serde_json::from_str::<LocalPackageJson>(&contents).ok());
+        self.resolution_cache
+            .package_json_results
+            .insert(guest_path.to_owned(), parsed.clone());
+        parsed
+    }
+
+    fn cached_exists(&mut self, guest_path: &str) -> bool {
+        if let Some(cached) = self.resolution_cache.exists_results.get(guest_path) {
+            return *cached;
+        }
+        let exists = self
+            .translator
+            .guest_to_host(guest_path)
+            .map(|host_path| host_path.exists())
+            .unwrap_or(false);
+        self.resolution_cache
+            .exists_results
+            .insert(guest_path.to_owned(), exists);
+        exists
+    }
+
+    fn cached_stat(&mut self, guest_path: &str) -> Option<bool> {
+        if let Some(cached) = self.resolution_cache.stat_results.get(guest_path) {
+            return *cached;
+        }
+        let result = self
+            .translator
+            .guest_to_host(guest_path)
+            .and_then(|host_path| fs::metadata(host_path).ok())
+            .map(|metadata| metadata.is_dir());
+        self.resolution_cache
+            .stat_results
+            .insert(guest_path.to_owned(), result);
+        result
+    }
+}
+
+fn normalize_module_resolve_context(path: &str) -> String {
+    let normalized = normalize_guest_path(path);
+    if normalized.ends_with(".js")
+        || normalized.ends_with(".mjs")
+        || normalized.ends_with(".cjs")
+        || normalized.ends_with(".json")
+        || normalized.ends_with(".ts")
+        || normalized.ends_with(".mts")
+        || normalized.ends_with(".cts")
+    {
+        dirname_guest_path(&normalized)
+    } else {
+        normalized
+    }
+}
+
+fn dirname_guest_path(path: &str) -> String {
+    let normalized = normalize_guest_path(path);
+    if normalized == "/" {
+        return normalized;
+    }
+    normalized
+        .rsplit_once('/')
+        .map(|(parent, _)| {
+            if parent.is_empty() {
+                String::from("/")
             } else {
-                // Bare specifier - return error to indicate not found
-                Some(Value::Null)
+                parent.to_owned()
+            }
+        })
+        .unwrap_or_else(|| String::from("/"))
+}
+
+fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
+    let bare = specifier.trim_start_matches("node:");
+    match bare {
+        "child_process" | "crypto" | "dgram" | "dns" | "events" | "fs" | "fs/promises"
+        | "http" | "http2" | "https" | "module" | "net" | "os" | "path" | "process"
+        | "stream" | "tls" | "tty" | "url" | "util" | "zlib" => {
+            Some(format!("node:{bare}"))
+        }
+        _ => None,
+    }
+}
+
+fn is_builtin_specifier(specifier: &str) -> bool {
+    normalize_builtin_specifier(specifier).is_some()
+}
+
+fn build_builtin_module_wrapper(module_name: &str) -> String {
+    let default_target = format!(
+        "globalThis._requireFrom({}, \"/\")",
+        serde_json::to_string(&format!("node:{module_name}")).unwrap_or_else(|_| format!("\"node:{module_name}\""))
+    );
+    let mut exports = builtin_named_exports(module_name)
+        .into_iter()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    exports.sort_unstable();
+
+    let mut source = format!("const _m = {default_target};\nexport default _m;\n");
+    for name in exports {
+        source.push_str(&format!("export const {name} = _m[\"{name}\"];\n"));
+    }
+    source
+}
+
+fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
+    match module_name {
+        "events" => &["EventEmitter", "once"],
+        "fs" => &["constants", "promises", "readFileSync"],
+        "fs/promises" => &["access", "open", "readFile", "writeFile"],
+        "http" => &["Agent", "METHODS", "STATUS_CODES", "createServer", "request"],
+        "http2" => &["connect", "createServer", "createSecureServer"],
+        "https" => &["Agent", "createServer", "request"],
+        "net" => &["Socket", "Server", "connect", "createConnection", "createServer"],
+        "os" => &["EOL", "availableParallelism", "cpus", "homedir", "hostname", "tmpdir"],
+        "path" => &["basename", "dirname", "join", "resolve", "sep"],
+        "tls" => &["TLSSocket", "Server", "connect", "createSecureContext", "createServer", "getCiphers"],
+        "url" => &["URL", "fileURLToPath", "pathToFileURL"],
+        _ => &[],
+    }
+}
+
+fn split_package_request(request: &str) -> Option<(&str, &str)> {
+    if request.starts_with('@') {
+        let mut parts = request.splitn(3, '/');
+        let scope = parts.next()?;
+        let name = parts.next()?;
+        let package_name = &request[..scope.len() + 1 + name.len()];
+        let subpath = parts.next().unwrap_or("");
+        Some((package_name, subpath))
+    } else {
+        request
+            .split_once('/')
+            .map(|(package, subpath)| (package, subpath))
+            .or(Some((request, "")))
+    }
+}
+
+fn node_modules_candidate_dirs(dir: &str, package_name: &str) -> Vec<String> {
+    let mut candidates = HashSet::new();
+    candidates.insert(join_guest_path(dir, &format!("node_modules/{package_name}")));
+    candidates.insert(join_guest_path(
+        dir,
+        &format!("node_modules/.pnpm/node_modules/{package_name}"),
+    ));
+    if dir == "/node_modules" || dir.ends_with("/node_modules") {
+        candidates.insert(join_guest_path(dir, package_name));
+    }
+    if let Some(index) = dir.rfind("/node_modules/") {
+        let root = &dir[..index + "/node_modules".len()];
+        candidates.insert(join_guest_path(
+            root,
+            &format!(".pnpm/node_modules/{package_name}"),
+        ));
+    }
+    let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+    candidates.sort();
+    candidates
+}
+
+fn resolve_exports_target(
+    exports_field: &Value,
+    subpath: &str,
+    mode: ModuleResolveMode,
+) -> Option<String> {
+    match exports_field {
+        Value::String(value) => (subpath == ".").then(|| value.clone()),
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| resolve_exports_target(value, subpath, mode)),
+        Value::Object(record) => {
+            if subpath == "." && !record.keys().any(|key| key.starts_with("./")) {
+                return resolve_conditional_target(record, mode);
+            }
+            if let Some(value) = record.get(subpath) {
+                return resolve_exports_target(value, ".", mode);
+            }
+            for (key, value) in record {
+                if let Some((prefix, suffix)) = key.split_once('*') {
+                    if subpath.starts_with(prefix) && subpath.ends_with(suffix) {
+                        let wildcard = &subpath[prefix.len()..subpath.len() - suffix.len()];
+                        let resolved = resolve_exports_target(value, ".", mode)?;
+                        return Some(resolved.replace('*', wildcard));
+                    }
+                }
+            }
+            if subpath == "." {
+                record
+                    .get(".")
+                    .and_then(|value| resolve_exports_target(value, ".", mode))
+            } else {
+                None
             }
         }
+        _ => None,
+    }
+}
 
-        // File loading: map to fs.readFileSync by returning the path
-        // (the actual loading is done via fs.readFileSync in the sidecar)
-        "_loadFile" | "_loadFileSync" => None, // Forward to sidecar as fs.readFileSync
-
-        // Polyfill loading: return empty for now
-        "_loadPolyfill" => Some(Value::String(String::new())),
-
-        // Batch module resolution
-        "_batchResolveModules" => {
-            // Return empty results for now
-            Some(json!({}))
-        }
-
-        // Crypto random fill
-        "_cryptoRandomFill" => {
-            let size = args
-                .first()
-                .and_then(Value::as_u64)
-                .unwrap_or(16) as usize;
-            // Simple random bytes using timestamp-based entropy
-            let mut bytes = vec![0u8; size];
-            let seed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            for (i, byte) in bytes.iter_mut().enumerate() {
-                *byte = ((seed >> (i % 16 * 8)) & 0xFF) as u8 ^ (i as u8);
+fn resolve_conditional_target(
+    record: &serde_json::Map<String, Value>,
+    mode: ModuleResolveMode,
+) -> Option<String> {
+    let order: &[&str] = match mode {
+        ModuleResolveMode::Import => &["import", "node", "module", "default", "require"],
+        ModuleResolveMode::Require => &["require", "node", "default", "import", "module"],
+    };
+    for key in order {
+        if let Some(value) = record.get(*key) {
+            if let Some(resolved) = resolve_exports_target(value, ".", mode) {
+                return Some(resolved);
             }
-            Some(json!({ "__type": "Buffer", "data": v8_runtime::base64_encode_pub(&bytes) }))
         }
+    }
+    record
+        .values()
+        .find_map(|value| resolve_exports_target(value, ".", mode))
+}
 
-        // Crypto random UUID
-        "_cryptoRandomUUID" => {
-            let seed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            Some(Value::String(format!(
-                "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-                (seed >> 96) as u32,
-                (seed >> 80) as u16,
-                (seed >> 64) as u16 & 0x0FFF,
-                ((seed >> 48) as u16 & 0x3FFF) | 0x8000,
-                seed as u64 & 0xFFFFFFFFFFFF,
-            )))
+fn resolve_imports_target(
+    imports_field: &Value,
+    specifier: &str,
+    mode: ModuleResolveMode,
+) -> Option<String> {
+    match imports_field {
+        Value::String(value) => Some(value.clone()),
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| resolve_imports_target(value, specifier, mode)),
+        Value::Object(record) => {
+            if let Some(value) = record.get(specifier) {
+                return resolve_exports_target(value, ".", mode);
+            }
+            for (key, value) in record {
+                if let Some((prefix, suffix)) = key.split_once('*') {
+                    if specifier.starts_with(prefix) && specifier.ends_with(suffix) {
+                        let wildcard =
+                            &specifier[prefix.len()..specifier.len() - suffix.len()];
+                        let resolved = resolve_exports_target(value, ".", mode)?;
+                        return Some(resolved.replace('*', wildcard));
+                    }
+                }
+            }
+            None
         }
-
-        // Timer scheduling - respond with timer ID
-        "_scheduleTimer" => Some(json!(0)),
-
-        // Kernel stdin read - return empty
-        "_kernelStdinRead" => Some(Value::Null),
-
-        // PTY raw mode - no-op
-        "_ptySetRawMode" => Some(Value::Null),
-
-        // Not an internal call
         _ => None,
     }
 }

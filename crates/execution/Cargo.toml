@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Native execution plane scaffold for Agent OS"
 
+[features]
+legacy-js-tests = []
+
 [dependencies]
 agent-os-bridge = { path = "../bridge" }
 ciborium = "0.2"

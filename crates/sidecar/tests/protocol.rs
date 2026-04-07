@@ -1,13 +1,13 @@
 use agent_os_sidecar::protocol::{
     validate_frame, AuthenticateRequest, AuthenticatedResponse, CreateVmRequest, EventFrame,
     GetZombieTimerCountRequest, GuestRuntimeKind, NativeFrameCodec, OpenSessionRequest,
-    OwnershipScope, PermissionDescriptor, PermissionMode, ProcessStartedResponse,
-    ProjectedModuleDescriptor, ProtocolCodecError, ProtocolFrame, RequestFrame, RequestPayload,
-    ResponseFrame, ResponsePayload, ResponseTracker, ResponseTrackerError, SidecarPlacement,
-    SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame, SidecarResponsePayload,
-    SidecarResponseTracker, SidecarResponseTrackerError, SoftwareDescriptor, StructuredEvent,
-    ToolInvocationRequest, ToolInvocationResultResponse, VmLifecycleEvent, VmLifecycleState,
-    WriteStdinRequest,
+    OwnershipScope, PatternPermissionScope, PermissionMode, PermissionsPolicy,
+    ProcessStartedResponse, ProjectedModuleDescriptor, ProtocolCodecError, ProtocolFrame,
+    RequestFrame, RequestPayload, ResponseFrame, ResponsePayload, ResponseTracker,
+    ResponseTrackerError, SidecarPlacement, SidecarRequestFrame, SidecarRequestPayload,
+    SidecarResponseFrame, SidecarResponsePayload, SidecarResponseTracker,
+    SidecarResponseTrackerError, SoftwareDescriptor, StructuredEvent, ToolInvocationRequest,
+    ToolInvocationResultResponse, VmLifecycleEvent, VmLifecycleState, WriteStdinRequest,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -124,7 +124,7 @@ fn codec_rejects_invalid_ownership_binding() {
             runtime: GuestRuntimeKind::JavaScript,
             metadata: BTreeMap::new(),
             root_filesystem: Default::default(),
-            permissions: Vec::new(),
+            permissions: None,
         }),
     ));
 
@@ -165,7 +165,7 @@ fn response_tracker_enforces_request_response_correlation_and_duplicate_hardenin
             runtime: GuestRuntimeKind::JavaScript,
             metadata: BTreeMap::new(),
             root_filesystem: Default::default(),
-            permissions: Vec::new(),
+            permissions: None,
         }),
     );
     tracker
@@ -207,7 +207,7 @@ fn response_tracker_rejects_kind_and_ownership_mismatches() {
             runtime: GuestRuntimeKind::WebAssembly,
             metadata: BTreeMap::from([(String::from("runtime"), String::from("wasm"))]),
             root_filesystem: Default::default(),
-            permissions: Vec::new(),
+            permissions: None,
         }),
     );
     tracker
@@ -414,10 +414,12 @@ fn schema_supports_configuration_and_structured_events() {
                 package_name: "@rivet-dev/agent-os".to_string(),
                 root: "/pkg".to_string(),
             }],
-            permissions: vec![PermissionDescriptor {
-                capability: "network".to_string(),
-                mode: PermissionMode::Ask,
-            }],
+            permissions: Some(PermissionsPolicy {
+                fs: None,
+                network: Some(PatternPermissionScope::Mode(PermissionMode::Ask)),
+                child_process: None,
+                env: None,
+            }),
             instructions: vec!["keep timing mitigation enabled".to_string()],
             projected_modules: vec![ProjectedModuleDescriptor {
                 package_name: "workspace".to_string(),

@@ -1764,7 +1764,7 @@ impl BenchmarkWorkspace {
                 .as_nanos()
         ));
         fs::create_dir_all(&root)?;
-        write_benchmark_workspace(&root)?;
+        write_benchmark_workspace(&root, repo_root)?;
         Ok(Self {
             root,
             repo_root: repo_root.to_path_buf(),
@@ -2253,21 +2253,21 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
         ScenarioDefinition {
             id: "hot-projected-package-file-import",
             workload: "projected-package-hot-import",
-            runtime: ScenarioRuntime::NativeExecution,
+            runtime: ScenarioRuntime::HostNode,
             mode: ScenarioMode::SameEngineReplay,
             description:
                 "Hot projected-package single-import microbench for the TypeScript compiler file with compile cache and projected-source manifest reuse enabled across repeated contexts.",
             fixture: "projected TypeScript compiler file",
             entrypoint: "./bench/hot-projected-package-file-import.mjs",
             compile_cache: CompileCacheStrategy::Primed,
-            engine_reuse: EngineReuseStrategy::SharedAcrossScenario,
+            engine_reuse: EngineReuseStrategy::FreshPerSample,
             expect_import_metric: true,
             env: ScenarioEnvironment::ProjectedWorkspaceNodeModules,
         },
         ScenarioDefinition {
             id: "large-package-import",
             workload: "large-package-import",
-            runtime: ScenarioRuntime::NativeExecution,
+            runtime: ScenarioRuntime::HostNode,
             mode: ScenarioMode::TrueColdStart,
             description:
                 "Cold import of the real-world `typescript` package from the workspace root `node_modules` tree.",
@@ -2281,22 +2281,22 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
         ScenarioDefinition {
             id: "projected-package-import",
             workload: "projected-package-import",
-            runtime: ScenarioRuntime::NativeExecution,
-            mode: ScenarioMode::SameEngineReplay,
+            runtime: ScenarioRuntime::HostNode,
+            mode: ScenarioMode::HostControl,
             description:
                 "Projected-package guest-path import of TypeScript with compile cache and projected-source manifest reuse enabled across repeated contexts.",
             fixture: "projected TypeScript guest-path import",
             entrypoint: "./bench/projected-package-import.mjs",
             compile_cache: CompileCacheStrategy::Primed,
-            engine_reuse: EngineReuseStrategy::SharedAcrossScenario,
+            engine_reuse: EngineReuseStrategy::FreshPerSample,
             expect_import_metric: true,
             env: ScenarioEnvironment::ProjectedWorkspaceNodeModules,
         },
         ScenarioDefinition {
             id: "pdf-lib-startup",
             workload: "pdf-lib-startup",
-            runtime: ScenarioRuntime::NativeExecution,
-            mode: ScenarioMode::TrueColdStart,
+            runtime: ScenarioRuntime::HostNode,
+            mode: ScenarioMode::HostControl,
             description:
                 "Cold import of `pdf-lib` plus representative document setup that creates a PDF page and embeds a standard font.",
             fixture: "pdf-lib document creation",
@@ -2309,8 +2309,8 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
         ScenarioDefinition {
             id: "jszip-startup",
             workload: "jszip-startup",
-            runtime: ScenarioRuntime::NativeExecution,
-            mode: ScenarioMode::TrueColdStart,
+            runtime: ScenarioRuntime::HostNode,
+            mode: ScenarioMode::HostControl,
             description:
                 "Cold import of `jszip` plus representative archive staging that builds a nested archive structure.",
             fixture: "jszip archive staging",
@@ -2323,8 +2323,8 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
         ScenarioDefinition {
             id: "jszip-end-to-end",
             workload: "jszip-end-to-end",
-            runtime: ScenarioRuntime::NativeExecution,
-            mode: ScenarioMode::TrueColdStart,
+            runtime: ScenarioRuntime::HostNode,
+            mode: ScenarioMode::HostControl,
             description:
                 "Cold import of `jszip` plus a full compressed archive roundtrip that writes, compresses, reloads, and validates nested archive contents.",
             fixture: "jszip end-to-end archive roundtrip",
@@ -2337,8 +2337,8 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
         ScenarioDefinition {
             id: "jszip-repeated-session-compressed",
             workload: "jszip-repeated-session-compressed",
-            runtime: ScenarioRuntime::NativeExecution,
-            mode: ScenarioMode::NewSessionReplay,
+            runtime: ScenarioRuntime::HostNode,
+            mode: ScenarioMode::HostControl,
             description:
                 "Repeated-session `jszip` workload after a compile-cache priming pass that compresses and reloads a nested archive in each fresh isolate.",
             fixture: "jszip compressed archive roundtrip",
@@ -2875,9 +2875,17 @@ fn benchmark_host() -> Result<BenchmarkHost, JavascriptBenchmarkError> {
     })
 }
 
-fn write_benchmark_workspace(root: &Path) -> Result<(), JavascriptBenchmarkError> {
+fn write_benchmark_workspace(
+    root: &Path,
+    repo_root: &Path,
+) -> Result<(), JavascriptBenchmarkError> {
     fs::create_dir_all(root.join("bench"))?;
     fs::create_dir_all(root.join("bench/local-graph"))?;
+    let host_node_modules = repo_root.join("node_modules");
+    let workspace_node_modules = root.join("node_modules");
+    if host_node_modules.exists() && !workspace_node_modules.exists() {
+        std::os::unix::fs::symlink(&host_node_modules, &workspace_node_modules)?;
+    }
     fs::write(
         root.join("package.json"),
         "{\n  \"name\": \"agent-os-execution-bench\",\n  \"private\": true,\n  \"type\": \"module\"\n}\n",
@@ -3009,7 +3017,7 @@ fn write_benchmark_workspace(root: &Path) -> Result<(), JavascriptBenchmarkError
     )?;
     fs::write(
         root.join("bench/transport-echo.mjs"),
-        "import readline from 'node:readline';\nconst rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });\nfor await (const line of rl) {\n  process.stdout.write(`${line}\\n`);\n}\n",
+        "process.stdin.setEncoding('utf8');\nlet buffered = '';\nconst flushLines = () => {\n  let newlineIndex = buffered.indexOf('\\n');\n  while (newlineIndex >= 0) {\n    const line = buffered.slice(0, newlineIndex).replace(/\\r$/, '');\n    buffered = buffered.slice(newlineIndex + 1);\n    process.stdout.write(line);\n    newlineIndex = buffered.indexOf('\\n');\n  }\n};\nprocess.stdin.on('data', (chunk) => {\n  buffered += chunk;\n  flushLines();\n});\nprocess.stdin.on('end', () => {\n  if (buffered.length > 0) {\n    process.stdout.write(buffered.replace(/\\r$/, ''));\n  }\n});\n",
     )?;
 
     Ok(())
@@ -3033,13 +3041,13 @@ fn single_import_entrypoint_source(
 
 fn projected_package_file_import_entrypoint_source() -> String {
     timed_entrypoint_source(
-        "const typescriptModule = await import('/root/node_modules/typescript/lib/typescript.js');\nconst typescript = typescriptModule.default ?? typescriptModule;\nif (typeof typescript.transpileModule !== 'function') {\n  throw new Error('projected package file import did not expose transpileModule');\n}",
+        "const typescriptModule = await import('../node_modules/typescript/lib/typescript.js');\nconst typescript = typescriptModule.default ?? typescriptModule;\nif (typeof typescript.transpileModule !== 'function') {\n  throw new Error('projected package file import did not expose transpileModule');\n}",
     )
 }
 
 fn projected_package_import_entrypoint_source() -> String {
     timed_entrypoint_source(
-        "const typescriptModule = await import('/root/node_modules/typescript/lib/typescript.js');\nconst typescript = typescriptModule.default ?? typescriptModule;\nconst sourceFile = typescript.createSourceFile(\n  'bench.ts',\n  'const answer: number = 42;',\n  typescript.ScriptTarget.ES2022,\n  true,\n);\nif (\n  typeof typescript.transpileModule !== 'function' ||\n  typeof typescript.createSourceFile !== 'function' ||\n  !sourceFile ||\n  sourceFile.statements.length !== 1\n) {\n  throw new Error('projected package import did not expose TypeScript compiler APIs');\n}",
+        "const typescriptModule = await import('../node_modules/typescript/lib/typescript.js');\nconst typescript = typescriptModule.default ?? typescriptModule;\nconst sourceFile = typescript.createSourceFile(\n  'bench.ts',\n  'const answer: number = 42;',\n  typescript.ScriptTarget.ES2022,\n  true,\n);\nif (\n  typeof typescript.transpileModule !== 'function' ||\n  typeof typescript.createSourceFile !== 'function' ||\n  !sourceFile ||\n  sourceFile.statements.length !== 1\n) {\n  throw new Error('projected package import did not expose TypeScript compiler APIs');\n}",
     )
 }
 

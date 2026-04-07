@@ -678,10 +678,7 @@ fn set_pending_module_evaluation(
     });
 }
 
-pub fn set_pending_script_evaluation(
-    scope: &mut v8::HandleScope,
-    promise: v8::Local<v8::Promise>,
-) {
+pub fn set_pending_script_evaluation(scope: &mut v8::HandleScope, promise: v8::Local<v8::Promise>) {
     PENDING_SCRIPT_EVALUATION.with(|cell| {
         *cell.borrow_mut() = Some(PendingScriptEvaluation {
             promise: v8::Global::new(scope, promise),
@@ -931,8 +928,7 @@ pub fn execute_module(
 
         // Instantiate (calls resolve callback for each import — mostly cache hits now)
         let inst_result = module.instantiate_module(tc, module_resolve_callback);
-        if inst_result.is_none()
-        {
+        if inst_result.is_none() {
             clear_module_state();
             return match tc.exception() {
                 Some(e) => {
@@ -1117,7 +1113,7 @@ fn prefetch_module_imports(
                 }
 
                 // Detect CJS and wrap in ESM shim if needed
-                let is_cjs = is_likely_cjs(source_code);
+                let is_cjs = is_likely_cjs(source_code, resolved_path);
                 let effective_source = if is_cjs {
                     let exports = extract_cjs_export_names(source_code);
                     let mut shim = format!(
@@ -1132,7 +1128,7 @@ fn prefetch_module_imports(
                     }
                     shim
                 } else {
-                    source_code.clone()
+                    add_esm_runtime_prelude(source_code)
                 };
 
                 // Compile the module
@@ -1174,12 +1170,10 @@ fn prefetch_module_imports(
                         state
                             .module_cache
                             .insert(resolved_path.clone(), global.clone());
-                        state
-                            .module_cache
-                            .insert(
-                                module_request_cache_key(&batch[i].0, &batch[i].1),
-                                global.clone(),
-                            );
+                        state.module_cache.insert(
+                            module_request_cache_key(&batch[i].0, &batch[i].1),
+                            global.clone(),
+                        );
                     }
                 });
 
@@ -1236,10 +1230,11 @@ fn resolve_or_compile_module<'s>(
     // CJS modules use module.exports/exports which isn't valid ESM syntax.
     // Real Node.js wraps CJS in a default+named export shim. We do the same
     // by generating: `const _m = globalThis._requireFrom(path, "/"); export default _m; export const {named1, named2, ...} = _m;`
-    let source_code = if is_likely_cjs(&raw_source) {
+    let source_code = if is_likely_cjs(&raw_source, &resolved_path) {
         // Extract potential named exports by scanning for common patterns
         let exports = extract_cjs_export_names(&raw_source);
-        let mut shim = format!(
+        let mut shim =
+            format!(
             "const _cjsModule = globalThis._requireFrom({}, \"/\");\nexport default _cjsModule;\n",
             format!("\"{}\"", resolved_path.replace('\\', "\\\\").replace('"', "\\\""))
         );
@@ -1254,7 +1249,7 @@ fn resolve_or_compile_module<'s>(
         }
         shim
     } else {
-        raw_source
+        add_esm_runtime_prelude(&raw_source)
     };
 
     let resource = v8::String::new(scope, &resolved_path)?;
@@ -3065,7 +3060,10 @@ mod tests {
                 crate::session::run_event_loop(scope, &rx, &pending, None, None)
             };
 
-            assert!(completed, "event loop should complete normally");
+            assert!(
+                matches!(completed, crate::session::EventLoopStatus::Completed),
+                "event loop should complete normally"
+            );
             assert_eq!(pending.len(), 0);
             assert_eq!(
                 eval(&mut iso, &ctx, "_eventLoopResult"),
@@ -3141,7 +3139,10 @@ mod tests {
                 crate::session::run_event_loop(scope, &rx, &pending, None, None)
             };
 
-            assert!(completed);
+            assert!(matches!(
+                completed,
+                crate::session::EventLoopStatus::Completed
+            ));
             assert_eq!(pending.len(), 0);
             assert_eq!(eval(&mut iso, &ctx, "_r1"), "fetch-result");
             assert_eq!(eval(&mut iso, &ctx, "_r2"), "dns-result");
@@ -3193,7 +3194,10 @@ mod tests {
                 crate::session::run_event_loop(scope, &rx, &pending, None, None)
             };
 
-            assert!(!completed, "event loop should return false on termination");
+            assert!(
+                matches!(completed, crate::session::EventLoopStatus::Terminated),
+                "event loop should return terminated status on termination"
+            );
             // Promise is still pending (not resolved)
             assert_eq!(pending.len(), 1);
 
@@ -3242,7 +3246,10 @@ mod tests {
                 crate::session::run_event_loop(scope, &rx, &pending, None, None)
             };
 
-            assert!(!completed, "event loop should return false on shutdown");
+            assert!(
+                matches!(completed, crate::session::EventLoopStatus::Terminated),
+                "event loop should return terminated status on shutdown"
+            );
         }
 
         // --- Part 35: Event loop — exits immediately when no pending promises ---
@@ -3261,7 +3268,10 @@ mod tests {
                 crate::session::run_event_loop(scope, &rx, &pending, None, None)
             };
 
-            assert!(completed);
+            assert!(matches!(
+                completed,
+                crate::session::EventLoopStatus::Completed
+            ));
         }
 
         // --- Part 36: Event loop — StreamEvent dispatches to V8 callback ---
@@ -3337,7 +3347,10 @@ mod tests {
                 crate::session::run_event_loop(scope, &rx, &pending, None, None)
             };
 
-            assert!(completed);
+            assert!(matches!(
+                completed,
+                crate::session::EventLoopStatus::Completed
+            ));
             assert_eq!(pending.len(), 0);
 
             // Verify stream event was dispatched
@@ -3493,7 +3506,10 @@ mod tests {
                 crate::session::run_event_loop(scope, &rx, &pending, None, None)
             };
 
-            assert!(completed);
+            assert!(matches!(
+                completed,
+                crate::session::EventLoopStatus::Completed
+            ));
             assert_eq!(eval(&mut iso, &ctx, "_childEvents.length"), "2");
             assert_eq!(eval(&mut iso, &ctx, "_childEvents[0].type"), "child_stderr");
             assert_eq!(eval(&mut iso, &ctx, "_childEvents[0].data"), "error output");
@@ -3573,7 +3589,10 @@ mod tests {
                 crate::session::run_event_loop(scope, &rx, &pending, None, None)
             };
 
-            assert!(completed);
+            assert!(matches!(
+                completed,
+                crate::session::EventLoopStatus::Completed
+            ));
             assert_eq!(eval(&mut iso, &ctx, "_httpEvents.length"), "1");
             assert_eq!(eval(&mut iso, &ctx, "_httpEvents[0].type"), "http_request");
             assert_eq!(eval(&mut iso, &ctx, "_httpEvents[0].data.method"), "GET");
@@ -3649,7 +3668,10 @@ mod tests {
                 crate::session::run_event_loop(scope, &rx, &pending, None, None)
             };
 
-            assert!(completed);
+            assert!(matches!(
+                completed,
+                crate::session::EventLoopStatus::Completed
+            ));
             // Unknown event should NOT have dispatched to any handler
             assert!(eval_bool(&mut iso, &ctx, "_anyDispatched === false"));
         }
@@ -3718,7 +3740,10 @@ mod tests {
                 crate::session::run_event_loop(scope, &rx, &pending, None, None)
             };
 
-            assert!(completed);
+            assert!(matches!(
+                completed,
+                crate::session::EventLoopStatus::Completed
+            ));
         }
 
         // --- Part 42: StreamEvent microtasks flushed after dispatch ---
@@ -3923,7 +3948,10 @@ mod tests {
                 crate::session::run_event_loop(scope, &cmd_rx, &pending, Some(&abort_rx), None)
             };
 
-            assert!(!completed, "event loop should have been terminated");
+            assert!(
+                matches!(completed, crate::session::EventLoopStatus::Terminated),
+                "event loop should have been terminated"
+            );
             assert!(guard.timed_out(), "timeout should have fired");
 
             guard.cancel();
@@ -5194,7 +5222,14 @@ mod tests {
 
 /// Detect if source code is likely CommonJS (not ESM).
 /// Checks for module.exports, exports.X, or require() patterns without ESM import/export.
-fn is_likely_cjs(source: &str) -> bool {
+fn is_likely_cjs(source: &str, resolved_path: &str) -> bool {
+    let normalized_path = resolved_path.to_ascii_lowercase();
+    if normalized_path.ends_with(".mjs") || normalized_path.ends_with(".mts") {
+        return false;
+    }
+    if normalized_path.ends_with(".cjs") || normalized_path.ends_with(".cts") {
+        return true;
+    }
     // If it has ESM syntax, it's not CJS
     if source.contains("export ") || source.contains("import ") {
         // Check for actual ESM: `export default`, `export {`, `export const`, `import {`, `import "`, `import(`
@@ -5251,6 +5286,16 @@ fn extract_cjs_export_names(source: &str) -> Vec<String> {
     let mut result: Vec<String> = names.into_iter().collect();
     result.sort();
     result
+}
+
+fn add_esm_runtime_prelude(source: &str) -> String {
+    if !source.contains("require(") {
+        return source.to_owned();
+    }
+
+    format!(
+        "const require = globalThis._moduleModule.createRequire(import.meta.url);\n{source}"
+    )
 }
 
 fn is_valid_js_ident(s: &str) -> bool {

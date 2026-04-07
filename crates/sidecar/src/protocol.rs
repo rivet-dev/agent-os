@@ -327,6 +327,83 @@ pub enum PermissionMode {
     Deny,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsPermissionRule {
+    pub mode: PermissionMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatternPermissionRule {
+    pub mode: PermissionMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patterns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsPermissionRuleSet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<PermissionMode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<FsPermissionRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatternPermissionRuleSet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<PermissionMode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<PatternPermissionRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FsPermissionScope {
+    Mode(PermissionMode),
+    Rules(FsPermissionRuleSet),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PatternPermissionScope {
+    Mode(PermissionMode),
+    Rules(PatternPermissionRuleSet),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionsPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs: Option<FsPermissionScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<PatternPermissionScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_process: Option<PatternPermissionScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<PatternPermissionScope>,
+}
+
+impl PermissionsPolicy {
+    pub fn allow_all() -> Self {
+        Self {
+            fs: Some(FsPermissionScope::Mode(PermissionMode::Allow)),
+            network: Some(PatternPermissionScope::Mode(PermissionMode::Allow)),
+            child_process: Some(PatternPermissionScope::Mode(PermissionMode::Allow)),
+            env: Some(PatternPermissionScope::Mode(PermissionMode::Allow)),
+        }
+    }
+}
+
+impl Default for PermissionsPolicy {
+    fn default() -> Self {
+        Self::allow_all()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RootFilesystemEntryKind {
@@ -385,8 +462,8 @@ pub struct CreateVmRequest {
     pub metadata: BTreeMap<String, String>,
     #[serde(default)]
     pub root_filesystem: RootFilesystemDescriptor,
-    #[serde(default)]
-    pub permissions: Vec<PermissionDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<PermissionsPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -442,7 +519,8 @@ pub struct RootFilesystemEntry {
 pub struct ConfigureVmRequest {
     pub mounts: Vec<MountDescriptor>,
     pub software: Vec<SoftwareDescriptor>,
-    pub permissions: Vec<PermissionDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<PermissionsPolicy>,
     pub instructions: Vec<String>,
     pub projected_modules: Vec<ProjectedModuleDescriptor>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -498,12 +576,6 @@ pub struct MountPluginDescriptor {
 pub struct SoftwareDescriptor {
     pub package_name: String,
     pub root: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PermissionDescriptor {
-    pub capability: String,
-    pub mode: PermissionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

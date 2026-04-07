@@ -32,7 +32,7 @@ pub fn create_snapshot(bridge_code: &str) -> Result<v8::StartupData, String> {
         let scope = &mut v8::ContextScope::new(scope, context);
 
         // Register stub bridge functions so the IIFE can reference them
-        register_stub_bridge_fns(scope, &SYNC_BRIDGE_FNS, &ASYNC_BRIDGE_FNS);
+        register_stub_bridge_fns(scope, SYNC_BRIDGE_FNS, ASYNC_BRIDGE_FNS);
 
         // Inject default config globals for bridge IIFE setup
         inject_snapshot_defaults(scope);
@@ -562,6 +562,7 @@ mod tests {
                 Box::new(receiver),
                 "test-session".to_string(),
                 call_id_router,
+                Arc::new(std::sync::atomic::AtomicU64::new(1)),
             );
             let session_buffers = RefCell::new(SessionBuffers::new());
             let pending = PendingPromises::new();
@@ -665,7 +666,7 @@ mod tests {
                 let scope = &mut v8::ContextScope::new(scope, context);
 
                 // Register all 38 bridge functions as stubs (no External data)
-                register_stub_bridge_fns(scope, &SYNC_BRIDGE_FNS, &ASYNC_BRIDGE_FNS);
+                register_stub_bridge_fns(scope, SYNC_BRIDGE_FNS, ASYNC_BRIDGE_FNS);
 
                 // Simulate bridge IIFE: reference all bridge functions, set up
                 // closures and getter facade, but never call any bridge function
@@ -674,7 +675,7 @@ mod tests {
                         // Verify bridge functions exist (like ivm-compat shim)
                         var syncKeys = ['_log', '_error', '_resolveModule', '_loadFile',
                             '_cryptoRandomFill', '_fsReadFile', '_fsWriteFile',
-                            '_childProcessSpawnStart', '_childProcessSpawnSync'];
+                            '_childProcessSpawnStart', '_childProcessPoll', '_childProcessSpawnSync'];
                         var asyncKeys = ['_dynamicImport', '_scheduleTimer',
                             '_networkFetchRaw', '_networkHttpServerListenRaw'];
 
@@ -755,7 +756,7 @@ mod tests {
                         '_fsExists', '_fsStat', '_fsUnlink', '_fsRename', '_fsChmod',
                         '_fsChown', '_fsLink', '_fsSymlink', '_fsReadlink', '_fsLstat',
                         '_fsTruncate', '_fsUtimes', '_childProcessSpawnStart',
-                        '_childProcessStdinWrite', '_childProcessStdinClose',
+                        '_childProcessPoll', '_childProcessStdinWrite', '_childProcessStdinClose',
                         '_childProcessKill', '_childProcessSpawnSync'];
                     for (var i = 0; i < syncFns.length; i++) {
                         if (typeof globalThis[syncFns[i]] !== 'function') {
@@ -944,6 +945,7 @@ mod tests {
                 Box::new(receiver),
                 "test-session".to_string(),
                 call_id_router,
+                Arc::new(std::sync::atomic::AtomicU64::new(1)),
             );
             let session_buffers = RefCell::new(SessionBuffers::new());
             let pending = PendingPromises::new();

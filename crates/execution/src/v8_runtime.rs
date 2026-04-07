@@ -298,8 +298,12 @@ fn read_socket_path(stdout: std::process::ChildStdout) -> io::Result<String> {
             }
         }
     }
-    String::from_utf8(line)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid socket path: {e}")))
+    String::from_utf8(line).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid socket path: {e}"),
+        )
+    })
 }
 
 fn connect_with_retry(socket_path: &str, timeout: Duration) -> io::Result<UnixStream> {
@@ -357,6 +361,7 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
 
         // Child process operations
         "_childProcessSpawnStart" => ("child_process.spawn", false),
+        "_childProcessPoll" => ("child_process.poll", false),
         "_childProcessStdinWrite" => ("child_process.write_stdin", false),
         "_childProcessStdinClose" => ("child_process.close_stdin", false),
         "_childProcessKill" => ("child_process.kill", false),
@@ -377,6 +382,27 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
         // Crypto operations (handled by the sidecar or locally)
         "_cryptoRandomFill" => ("crypto.randomFill", false),
         "_cryptoRandomUUID" => ("crypto.randomUUID", false),
+        "_cryptoHashDigest" => ("crypto.hashDigest", false),
+        "_cryptoHmacDigest" => ("crypto.hmacDigest", false),
+        "_cryptoPbkdf2" => ("crypto.pbkdf2", false),
+        "_cryptoScrypt" => ("crypto.scrypt", false),
+        "_cryptoCipheriv" => ("crypto.cipheriv", false),
+        "_cryptoDecipheriv" => ("crypto.decipheriv", false),
+        "_cryptoCipherivCreate" => ("crypto.cipherivCreate", false),
+        "_cryptoCipherivUpdate" => ("crypto.cipherivUpdate", false),
+        "_cryptoCipherivFinal" => ("crypto.cipherivFinal", false),
+        "_cryptoSign" => ("crypto.sign", false),
+        "_cryptoVerify" => ("crypto.verify", false),
+        "_cryptoAsymmetricOp" => ("crypto.asymmetricOp", false),
+        "_cryptoCreateKeyObject" => ("crypto.createKeyObject", false),
+        "_cryptoGenerateKeyPairSync" => ("crypto.generateKeyPairSync", false),
+        "_cryptoGenerateKeySync" => ("crypto.generateKeySync", false),
+        "_cryptoGeneratePrimeSync" => ("crypto.generatePrimeSync", false),
+        "_cryptoDiffieHellman" => ("crypto.diffieHellman", false),
+        "_cryptoDiffieHellmanGroup" => ("crypto.diffieHellmanGroup", false),
+        "_cryptoDiffieHellmanSessionCreate" => ("crypto.diffieHellmanSessionCreate", false),
+        "_cryptoDiffieHellmanSessionCall" => ("crypto.diffieHellmanSessionCall", false),
+        "_cryptoSubtle" => ("crypto.subtle", false),
 
         // Timer scheduling
         "_scheduleTimer" => ("__schedule_timer", false),
@@ -391,12 +417,47 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
         "_networkHttpServerCloseRaw" => ("net.server_close", false),
         "_networkHttpServerRespondRaw" => ("net.http_respond", false),
         "_networkHttpServerWaitRaw" => ("net.server_poll", false),
+        "_networkHttp2ServerListenRaw" => ("net.http2_server_listen", false),
+        "_networkHttp2ServerCloseRaw" => ("net.http2_server_close", false),
+        "_networkHttp2ServerWaitRaw" => ("net.http2_server_wait", false),
+        "_networkHttp2SessionConnectRaw" => ("net.http2_session_connect", false),
+        "_networkHttp2SessionRequestRaw" => ("net.http2_session_request", false),
+        "_networkHttp2SessionSettingsRaw" => ("net.http2_session_settings", false),
+        "_networkHttp2SessionSetLocalWindowSizeRaw" => {
+            ("net.http2_session_set_local_window_size", false)
+        }
+        "_networkHttp2SessionGoawayRaw" => ("net.http2_session_goaway", false),
+        "_networkHttp2SessionCloseRaw" => ("net.http2_session_close", false),
+        "_networkHttp2SessionDestroyRaw" => ("net.http2_session_destroy", false),
+        "_networkHttp2SessionWaitRaw" => ("net.http2_session_wait", false),
+        "_networkHttp2ServerPollRaw" => ("net.http2_server_poll", false),
+        "_networkHttp2SessionPollRaw" => ("net.http2_session_poll", false),
+        "_networkHttp2StreamRespondRaw" => ("net.http2_stream_respond", false),
+        "_networkHttp2StreamPushStreamRaw" => ("net.http2_stream_push_stream", false),
+        "_networkHttp2StreamWriteRaw" => ("net.http2_stream_write", false),
+        "_networkHttp2StreamEndRaw" => ("net.http2_stream_end", false),
+        "_networkHttp2StreamCloseRaw" => ("net.http2_stream_close", false),
+        "_networkHttp2StreamPauseRaw" => ("net.http2_stream_pause", false),
+        "_networkHttp2StreamResumeRaw" => ("net.http2_stream_resume", false),
+        "_networkHttp2StreamRespondWithFileRaw" => {
+            ("net.http2_stream_respond_with_file", false)
+        }
+        "_networkHttp2ServerRespondRaw" => ("net.http2_server_respond", false),
+        "_upgradeSocketWriteRaw" => ("net.upgrade_socket_write", false),
+        "_upgradeSocketEndRaw" => ("net.upgrade_socket_end", false),
+        "_upgradeSocketDestroyRaw" => ("net.upgrade_socket_destroy", false),
         "_netSocketConnectRaw" => ("net.connect", false),
         "_netSocketWaitConnectRaw" => ("net.socket_wait_connect", false),
         "_netSocketReadRaw" => ("net.socket_read", false),
+        "_netSocketSetNoDelayRaw" => ("net.socket_set_no_delay", false),
+        "_netSocketSetKeepAliveRaw" => ("net.socket_set_keep_alive", false),
         "_netSocketWriteRaw" => ("net.write", false),
         "_netSocketEndRaw" => ("net.shutdown", false),
         "_netSocketDestroyRaw" => ("net.destroy", false),
+        "_netSocketUpgradeTlsRaw" => ("net.socket_upgrade_tls", false),
+        "_netSocketGetTlsClientHelloRaw" => ("net.socket_get_tls_client_hello", false),
+        "_netSocketTlsQueryRaw" => ("net.socket_tls_query", false),
+        "_tlsGetCiphersRaw" => ("tls.get_ciphers", false),
         "_netServerListenRaw" => ("net.listen", false),
         "_netServerAcceptRaw" => ("net.server_accept", false),
         "_netServerCloseRaw" => ("net.server_close", false),
@@ -407,6 +468,9 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
         "_dgramSocketRecvRaw" => ("dgram.poll", false),
         "_dgramSocketSendRaw" => ("dgram.send", false),
         "_dgramSocketCloseRaw" => ("dgram.close", false),
+        "_dgramSocketAddressRaw" => ("dgram.address", false),
+        "_dgramSocketSetBufferSizeRaw" => ("dgram.setBufferSize", false),
+        "_dgramSocketGetBufferSizeRaw" => ("dgram.getBufferSize", false),
 
         // PTY
         "_ptySetRawMode" => ("__pty_set_raw_mode", false),
@@ -416,19 +480,43 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::map_bridge_method;
+
+    #[test]
+    fn audited_bridge_methods_map_to_named_handlers() {
+        for method in [
+            "_cryptoHashDigest",
+            "_cryptoSubtle",
+            "_networkHttp2ServerListenRaw",
+            "_networkHttp2SessionConnectRaw",
+            "_networkHttp2StreamRespondRaw",
+            "_upgradeSocketWriteRaw",
+            "_netSocketSetNoDelayRaw",
+            "_netSocketUpgradeTlsRaw",
+            "_tlsGetCiphersRaw",
+            "_dgramSocketAddressRaw",
+            "_dgramSocketSetBufferSizeRaw",
+        ] {
+            let (mapped, _) = map_bridge_method(method);
+            assert_ne!(mapped, method, "missing bridge-method mapping for {method}");
+        }
+    }
+}
+
 /// Deserialize a CBOR payload into a JSON array of arguments.
 /// The V8 bridge serializes bridge call args as a CBOR array.
 pub fn cbor_payload_to_json_args(payload: &[u8]) -> io::Result<Vec<Value>> {
     if payload.is_empty() {
         return Ok(vec![]);
     }
-    let cbor_value: ciborium::value::Value =
-        ciborium::de::from_reader(payload).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("failed to deserialize CBOR bridge call payload: {e}"),
-            )
-        })?;
+    let cbor_value: ciborium::value::Value = ciborium::de::from_reader(payload).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to deserialize CBOR bridge call payload: {e}"),
+        )
+    })?;
     match cbor_to_json(cbor_value) {
         Value::Array(arr) => Ok(arr),
         single => Ok(vec![single]),

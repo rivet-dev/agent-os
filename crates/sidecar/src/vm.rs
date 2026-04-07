@@ -63,8 +63,9 @@ where
         let cwd = resolve_cwd(payload.metadata.get("cwd"))?;
         let resource_limits = parse_resource_limits(&payload.metadata)?;
         let dns = parse_vm_dns_config(&payload.metadata)?;
+        let permissions_policy = payload.permissions.clone().unwrap_or_default();
         self.bridge
-            .set_vm_permissions(&vm_id, &payload.permissions)?;
+            .set_vm_permissions(&vm_id, &permissions_policy)?;
         let permissions = bridge_permissions(self.bridge.clone(), &vm_id);
         let guest_env = filter_env(&vm_id, &extract_guest_env(&payload.metadata), &permissions);
         let loaded_snapshot = self.bridge.with_mut(|bridge| {
@@ -228,17 +229,20 @@ where
             ))
             .map_err(kernel_error)?;
         vm.command_permissions = payload.command_permissions.clone();
+        let configured_permissions = payload
+            .permissions
+            .clone()
+            .unwrap_or_else(|| vm.configuration.permissions.clone());
         vm.configuration = VmConfiguration {
             mounts: payload.mounts.clone(),
             software: payload.software.clone(),
-            permissions: payload.permissions.clone(),
+            permissions: configured_permissions.clone(),
             instructions: payload.instructions.clone(),
             projected_modules: payload.projected_modules.clone(),
             command_permissions: payload.command_permissions.clone(),
         };
-        if !payload.permissions.is_empty() {
-            self.bridge
-                .set_vm_permissions(&vm_id, &payload.permissions)?;
+        if let Some(permissions) = payload.permissions.as_ref() {
+            self.bridge.set_vm_permissions(&vm_id, permissions)?;
         }
 
         Ok(DispatchResult {

@@ -1083,7 +1083,12 @@ where
             };
             let decision = if request.op == FsOperation::MountSensitive {
                 filesystem_bridge
-                    .static_permission_decision(&filesystem_vm_id, policy, "fs")
+                    .static_permission_decision(
+                        &filesystem_vm_id,
+                        policy,
+                        "fs",
+                        Some(&request.path),
+                    )
                     .unwrap_or_else(PermissionDecision::allow)
             } else {
                 filesystem_bridge.filesystem_decision(&filesystem_vm_id, &request.path, access)

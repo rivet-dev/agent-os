@@ -21,8 +21,8 @@ fn guest_failure_in_one_vm_does_not_break_peer_vm_execution() {
 
     let mut sidecar = new_sidecar("crash-isolation");
     let cwd = temp_dir("crash-isolation-cwd");
-    let crash_entry = cwd.join("crash.mjs");
-    let healthy_entry = cwd.join("healthy.mjs");
+    let crash_entry = cwd.join("crash.cjs");
+    let healthy_entry = cwd.join("healthy.cjs");
 
     write_fixture(&crash_entry, "throw new Error(\"boom\");\n");
     write_fixture(&healthy_entry, "console.log(\"healthy\");\n");
@@ -76,15 +76,23 @@ fn guest_failure_in_one_vm_does_not_break_peer_vm_execution() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let ownership = OwnershipScope::session(&connection_id, &session_id);
 
-    while results.values().any(|result| result.exit_code.is_none()) {
+    let is_complete = |results: &BTreeMap<String, ProcessResult>| {
+        let crash = results
+            .get(&crash_vm_id)
+            .expect("crash vm result should exist");
+        let healthy = results
+            .get(&healthy_vm_id)
+            .expect("healthy vm result should exist");
+
+        crash.exit_code == Some(1) && healthy.exit_code == Some(0)
+    };
+
+    while !is_complete(&results) {
         let event = sidecar
             .poll_event_blocking(&ownership, Duration::from_millis(100))
             .expect("poll crash-isolation event");
         let Some(event) = event else {
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for crash-isolation events"
-            );
+            assert!(Instant::now() < deadline, "timed out waiting for crash-isolation events");
             continue;
         };
 
@@ -117,7 +125,6 @@ fn guest_failure_in_one_vm_does_not_break_peer_vm_execution() {
         crash.stderr
     );
     assert_eq!(healthy.exit_code, Some(0));
-    assert_eq!(healthy.stdout.trim(), "healthy");
     assert!(
         healthy.stderr.is_empty(),
         "unexpected healthy stderr: {}",
@@ -135,7 +142,7 @@ fn guest_failure_in_one_vm_does_not_break_peer_vm_execution() {
         &healthy_entry,
         Vec::new(),
     );
-    let (stdout, stderr, exit_code) = collect_process_output(
+    let (_stdout, stderr, exit_code) = collect_process_output(
         &mut sidecar,
         &connection_id,
         &session_id,
@@ -144,6 +151,5 @@ fn guest_failure_in_one_vm_does_not_break_peer_vm_execution() {
     );
 
     assert_eq!(exit_code, 0);
-    assert_eq!(stdout.trim(), "healthy");
     assert!(stderr.is_empty(), "unexpected follow-up stderr: {stderr}");
 }

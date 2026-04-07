@@ -627,6 +627,7 @@ mod tests {
             )))),
             "test-session".into(),
             router,
+            Arc::new(std::sync::atomic::AtomicU64::new(1)),
         );
 
         let result = ctx.sync_call("_fsReadFile", vec![0x01]).unwrap();

@@ -4,9 +4,9 @@
 //! types, and other shared data structures extracted from service.rs.
 
 use crate::protocol::{
-    EventFrame, GuestRuntimeKind, MountDescriptor, PermissionDescriptor, PermissionMode,
-    ProjectedModuleDescriptor, ResponseFrame, SignalHandlerRegistration, SoftwareDescriptor,
-    WasmPermissionTier, DEFAULT_MAX_FRAME_BYTES,
+    EventFrame, GuestRuntimeKind, MountDescriptor, PermissionsPolicy, ProjectedModuleDescriptor,
+    ResponseFrame, SignalHandlerRegistration, SoftwareDescriptor, WasmPermissionTier,
+    DEFAULT_MAX_FRAME_BYTES,
 };
 use agent_os_bridge::{BridgeTypes, FilesystemSnapshot};
 use agent_os_execution::{
@@ -121,7 +121,7 @@ impl Error for SidecarError {}
 
 pub(crate) struct SharedBridge<B> {
     pub(crate) inner: Arc<Mutex<B>>,
-    pub(crate) permissions: Arc<Mutex<BTreeMap<String, BTreeMap<String, PermissionMode>>>>,
+    pub(crate) permissions: Arc<Mutex<BTreeMap<String, PermissionsPolicy>>>,
 }
 
 impl<B> Clone for SharedBridge<B> {
@@ -158,7 +158,7 @@ pub(crate) struct SessionState {
 pub(crate) struct VmConfiguration {
     pub(crate) mounts: Vec<MountDescriptor>,
     pub(crate) software: Vec<SoftwareDescriptor>,
-    pub(crate) permissions: Vec<PermissionDescriptor>,
+    pub(crate) permissions: PermissionsPolicy,
     pub(crate) instructions: Vec<String>,
     pub(crate) projected_modules: Vec<ProjectedModuleDescriptor>,
     pub(crate) command_permissions: BTreeMap<String, WasmPermissionTier>,
