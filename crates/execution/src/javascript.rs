@@ -17,6 +17,7 @@ use crate::runtime_support::{
 use crate::v8_host::{V8RuntimeHost, V8SessionHandle};
 use crate::v8_ipc::BinaryFrame;
 use crate::v8_runtime;
+use getrandom::getrandom;
 use nix::fcntl::OFlag;
 use nix::unistd::pipe2;
 use serde::Deserialize;
@@ -1996,30 +1997,39 @@ impl LocalBridgeState {
             "_cryptoRandomFill" => {
                 let size = args.first().and_then(Value::as_u64).unwrap_or(16) as usize;
                 let mut bytes = vec![0u8; size];
-                let seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-                for (i, byte) in bytes.iter_mut().enumerate() {
-                    *byte = ((seed >> (i % 16 * 8)) & 0xFF) as u8 ^ (i as u8);
+                if getrandom(&mut bytes).is_err() {
+                    return Some(LocalBridgeCallResult::Immediate(Value::Null));
                 }
-                Some(LocalBridgeCallResult::Immediate(json!({
-                    "__type": "Buffer",
-                    "data": v8_runtime::base64_encode_pub(&bytes)
-                })))
+                Some(LocalBridgeCallResult::Immediate(Value::String(
+                    v8_runtime::base64_encode_pub(&bytes),
+                )))
             }
             "_cryptoRandomUUID" => {
-                let seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
+                let mut bytes = [0u8; 16];
+                if getrandom(&mut bytes).is_err() {
+                    return Some(LocalBridgeCallResult::Immediate(Value::Null));
+                }
+                bytes[6] = (bytes[6] & 0x0f) | 0x40;
+                bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
                 Some(LocalBridgeCallResult::Immediate(Value::String(format!(
-                    "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-                    (seed >> 96) as u32,
-                    (seed >> 80) as u16,
-                    (seed >> 64) as u16 & 0x0FFF,
-                    ((seed >> 48) as u16 & 0x3FFF) | 0x8000,
-                    seed as u64 & 0xFFFFFFFFFFFF,
+                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    bytes[0],
+                    bytes[1],
+                    bytes[2],
+                    bytes[3],
+                    bytes[4],
+                    bytes[5],
+                    bytes[6],
+                    bytes[7],
+                    bytes[8],
+                    bytes[9],
+                    bytes[10],
+                    bytes[11],
+                    bytes[12],
+                    bytes[13],
+                    bytes[14],
+                    bytes[15],
                 ))))
             }
             "_scheduleTimer" => {

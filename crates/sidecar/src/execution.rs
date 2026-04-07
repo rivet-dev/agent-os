@@ -56,12 +56,18 @@ use base64::Engine;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
+use hmac::{Hmac, Mac};
+use md5::Md5;
 use nix::libc;
 use nix::sys::signal::{kill as send_signal, Signal};
 use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use pbkdf2::pbkdf2_hmac;
+use scrypt::{scrypt, Params as ScryptParams};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha1::Sha1;
+use sha2::{digest::Digest, Sha256, Sha512};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
@@ -81,6 +87,28 @@ use url::Url;
 
 const DEFAULT_KERNEL_STDIN_READ_MAX_BYTES: usize = 64 * 1024;
 const DEFAULT_KERNEL_STDIN_READ_TIMEOUT_MS: u64 = 100;
+const DEFAULT_SCRYPT_COST: u64 = 16_384;
+const DEFAULT_SCRYPT_BLOCK_SIZE: u32 = 8;
+const DEFAULT_SCRYPT_PARALLELIZATION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JavascriptCryptoDigestAlgorithm {
+    Md5,
+    Sha1,
+    Sha256,
+    Sha512,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct JavascriptScryptOptions {
+    #[serde(alias = "N")]
+    cost: Option<u64>,
+    #[serde(alias = "r")]
+    block_size: Option<u32>,
+    #[serde(alias = "p")]
+    parallelization: Option<u32>,
+}
 
 impl ActiveProcess {
     pub(crate) fn new(
@@ -4002,6 +4030,19 @@ pub(crate) fn javascript_sync_rpc_bytes_value(bytes: &[u8]) -> Value {
     })
 }
 
+fn javascript_sync_rpc_base64_arg(
+    args: &[Value],
+    index: usize,
+    label: &str,
+) -> Result<Vec<u8>, SidecarError> {
+    let value = javascript_sync_rpc_arg_str(args, index, label)?;
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("{label} contains invalid base64: {error}"))
+        })
+}
+
 pub(crate) fn service_javascript_sync_rpc<B>(
     bridge: &SharedBridge<B>,
     vm_id: &str,
@@ -4019,6 +4060,9 @@ where
 {
     match request.method.as_str() {
         "__kernel_stdin_read" => service_javascript_kernel_stdin_sync_rpc(kernel, process, request),
+        "crypto.hashDigest" | "crypto.hmacDigest" | "crypto.pbkdf2" | "crypto.scrypt" => {
+            service_javascript_crypto_sync_rpc(request)
+        }
         "dns.lookup" | "dns.resolve" | "dns.resolve4" | "dns.resolve6" => {
             service_javascript_dns_sync_rpc(bridge, vm_id, dns, request)
         }
@@ -4062,6 +4106,194 @@ where
                 .map_err(kernel_error)
         }
         _ => service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request),
+    }
+}
+
+pub(crate) fn service_javascript_crypto_sync_rpc(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    match request.method.as_str() {
+        "crypto.hashDigest" => {
+            let algorithm = javascript_crypto_digest_algorithm(
+                &request.args,
+                0,
+                "crypto.hashDigest algorithm",
+            )?;
+            let data = javascript_sync_rpc_base64_arg(&request.args, 1, "crypto.hashDigest data")?;
+            Ok(Value::String(
+                base64::engine::general_purpose::STANDARD.encode(algorithm.digest(&data)),
+            ))
+        }
+        "crypto.hmacDigest" => {
+            let algorithm = javascript_crypto_digest_algorithm(
+                &request.args,
+                0,
+                "crypto.hmacDigest algorithm",
+            )?;
+            let key = javascript_sync_rpc_base64_arg(&request.args, 1, "crypto.hmacDigest key")?;
+            let data = javascript_sync_rpc_base64_arg(&request.args, 2, "crypto.hmacDigest data")?;
+            Ok(Value::String(
+                base64::engine::general_purpose::STANDARD.encode(algorithm.hmac(&key, &data)?),
+            ))
+        }
+        "crypto.pbkdf2" => {
+            let password =
+                javascript_sync_rpc_base64_arg(&request.args, 0, "crypto.pbkdf2 password")?;
+            let salt = javascript_sync_rpc_base64_arg(&request.args, 1, "crypto.pbkdf2 salt")?;
+            let iterations =
+                javascript_sync_rpc_arg_u32(&request.args, 2, "crypto.pbkdf2 iterations")?;
+            if iterations == 0 {
+                return Err(SidecarError::InvalidState(String::from(
+                    "crypto.pbkdf2 iterations must be greater than zero",
+                )));
+            }
+            let key_len = usize::try_from(javascript_sync_rpc_arg_u64(
+                &request.args,
+                3,
+                "crypto.pbkdf2 key length",
+            )?)
+            .map_err(|_| {
+                SidecarError::InvalidState(String::from(
+                    "crypto.pbkdf2 key length must fit within usize",
+                ))
+            })?;
+            let algorithm =
+                javascript_crypto_digest_algorithm(&request.args, 4, "crypto.pbkdf2 digest")?;
+            let mut output = vec![0u8; key_len];
+            algorithm.pbkdf2(&password, &salt, iterations, &mut output);
+            Ok(Value::String(
+                base64::engine::general_purpose::STANDARD.encode(output),
+            ))
+        }
+        "crypto.scrypt" => {
+            let password =
+                javascript_sync_rpc_base64_arg(&request.args, 0, "crypto.scrypt password")?;
+            let salt = javascript_sync_rpc_base64_arg(&request.args, 1, "crypto.scrypt salt")?;
+            let key_len = usize::try_from(javascript_sync_rpc_arg_u64(
+                &request.args,
+                2,
+                "crypto.scrypt key length",
+            )?)
+            .map_err(|_| {
+                SidecarError::InvalidState(String::from(
+                    "crypto.scrypt key length must fit within usize",
+                ))
+            })?;
+            let options_json =
+                javascript_sync_rpc_arg_str(&request.args, 3, "crypto.scrypt options")?;
+            let options: JavascriptScryptOptions =
+                serde_json::from_str(options_json).map_err(|error| {
+                    SidecarError::InvalidState(format!(
+                        "crypto.scrypt options must be valid JSON: {error}"
+                    ))
+                })?;
+            let cost = options.cost.unwrap_or(DEFAULT_SCRYPT_COST);
+            if cost == 0 || !cost.is_power_of_two() {
+                return Err(SidecarError::InvalidState(String::from(
+                    "crypto.scrypt cost must be a positive power of two",
+                )));
+            }
+            let log_n = u8::try_from(cost.ilog2()).map_err(|_| {
+                SidecarError::InvalidState(String::from(
+                    "crypto.scrypt cost exceeds supported parameter range",
+                ))
+            })?;
+            let params = ScryptParams::new(
+                log_n,
+                options.block_size.unwrap_or(DEFAULT_SCRYPT_BLOCK_SIZE),
+                options
+                    .parallelization
+                    .unwrap_or(DEFAULT_SCRYPT_PARALLELIZATION),
+                key_len,
+            )
+            .map_err(|error| {
+                SidecarError::InvalidState(format!("crypto.scrypt options are invalid: {error}"))
+            })?;
+            let mut output = vec![0u8; key_len];
+            scrypt(&password, &salt, &params, &mut output).map_err(|error| {
+                SidecarError::Execution(format!("crypto.scrypt failed: {error}"))
+            })?;
+            Ok(Value::String(
+                base64::engine::general_purpose::STANDARD.encode(output),
+            ))
+        }
+        _ => Err(SidecarError::InvalidState(format!(
+            "unsupported JavaScript crypto sync RPC method {}",
+            request.method
+        ))),
+    }
+}
+
+fn javascript_crypto_digest_algorithm(
+    args: &[Value],
+    index: usize,
+    label: &str,
+) -> Result<JavascriptCryptoDigestAlgorithm, SidecarError> {
+    JavascriptCryptoDigestAlgorithm::parse(javascript_sync_rpc_arg_str(args, index, label)?)
+}
+
+impl JavascriptCryptoDigestAlgorithm {
+    fn parse(value: &str) -> Result<Self, SidecarError> {
+        match value.trim().to_ascii_lowercase().replace('-', "").as_str() {
+            "md5" => Ok(Self::Md5),
+            "sha1" => Ok(Self::Sha1),
+            "sha256" => Ok(Self::Sha256),
+            "sha512" => Ok(Self::Sha512),
+            _ => Err(SidecarError::InvalidState(format!(
+                "unsupported crypto digest algorithm {value}"
+            ))),
+        }
+    }
+
+    fn digest(self, data: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Md5 => Md5::digest(data).to_vec(),
+            Self::Sha1 => Sha1::digest(data).to_vec(),
+            Self::Sha256 => Sha256::digest(data).to_vec(),
+            Self::Sha512 => Sha512::digest(data).to_vec(),
+        }
+    }
+
+    fn hmac(self, key: &[u8], data: &[u8]) -> Result<Vec<u8>, SidecarError> {
+        match self {
+            Self::Md5 => {
+                let mut mac = Hmac::<Md5>::new_from_slice(key).map_err(|error| {
+                    SidecarError::InvalidState(format!("invalid HMAC key: {error}"))
+                })?;
+                mac.update(data);
+                Ok(mac.finalize().into_bytes().to_vec())
+            }
+            Self::Sha1 => {
+                let mut mac = Hmac::<Sha1>::new_from_slice(key).map_err(|error| {
+                    SidecarError::InvalidState(format!("invalid HMAC key: {error}"))
+                })?;
+                mac.update(data);
+                Ok(mac.finalize().into_bytes().to_vec())
+            }
+            Self::Sha256 => {
+                let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|error| {
+                    SidecarError::InvalidState(format!("invalid HMAC key: {error}"))
+                })?;
+                mac.update(data);
+                Ok(mac.finalize().into_bytes().to_vec())
+            }
+            Self::Sha512 => {
+                let mut mac = Hmac::<Sha512>::new_from_slice(key).map_err(|error| {
+                    SidecarError::InvalidState(format!("invalid HMAC key: {error}"))
+                })?;
+                mac.update(data);
+                Ok(mac.finalize().into_bytes().to_vec())
+            }
+        }
+    }
+
+    fn pbkdf2(self, password: &[u8], salt: &[u8], iterations: u32, output: &mut [u8]) {
+        match self {
+            Self::Md5 => pbkdf2_hmac::<Md5>(password, salt, iterations, output),
+            Self::Sha1 => pbkdf2_hmac::<Sha1>(password, salt, iterations, output),
+            Self::Sha256 => pbkdf2_hmac::<Sha256>(password, salt, iterations, output),
+            Self::Sha512 => pbkdf2_hmac::<Sha512>(password, salt, iterations, output),
+        }
     }
 }
 

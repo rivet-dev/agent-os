@@ -1,6 +1,6 @@
 use agent_os_execution::{
-    CreateJavascriptContextRequest, JavascriptExecutionEngine, JavascriptExecutionEvent,
-    StartJavascriptExecutionRequest,
+    v8_runtime::map_bridge_method, CreateJavascriptContextRequest, JavascriptExecutionEngine,
+    JavascriptExecutionEvent, StartJavascriptExecutionRequest,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -310,4 +310,67 @@ fn javascript_execution_v8_schedule_timer_bridge_resolves() {
 
     let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn javascript_execution_v8_crypto_random_sources_use_local_secure_bridge() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.js")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+const first = new Uint8Array(32);
+const second = new Uint8Array(32);
+globalThis.crypto.getRandomValues(first);
+globalThis.crypto.getRandomValues(second);
+
+if (first.every((value) => value === 0)) {
+  throw new Error("first random buffer was all zero");
+}
+if (second.every((value) => value === 0)) {
+  throw new Error("second random buffer was all zero");
+}
+if (Buffer.from(first).equals(Buffer.from(second))) {
+  throw new Error("random buffers repeated");
+}
+
+const uuid = globalThis.crypto.randomUUID();
+if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid)) {
+  throw new Error(`invalid uuid: ${uuid}`);
+}
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    assert_eq!(result.exit_code, 0);
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn javascript_execution_v8_crypto_basic_operations_emit_expected_sync_rpcs() {
+    assert_eq!(
+        map_bridge_method("_cryptoHashDigest"),
+        ("crypto.hashDigest", false)
+    );
+    assert_eq!(
+        map_bridge_method("_cryptoHmacDigest"),
+        ("crypto.hmacDigest", false)
+    );
+    assert_eq!(map_bridge_method("_cryptoPbkdf2"), ("crypto.pbkdf2", false));
+    assert_eq!(map_bridge_method("_cryptoScrypt"), ("crypto.scrypt", false));
 }

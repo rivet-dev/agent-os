@@ -667,7 +667,7 @@
         "cargo test -p agent-os-execution -- --test-threads=1 crypto passes"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "CRITICAL for agents \u2014 API auth uses HMAC/hashing. randomFill (javascript.rs:1964) and randomUUID (javascript.rs:1976) are LOCAL stubs in LocalBridgeState \u2014 fix in-place with proper crypto. The other 4 methods fall through to sidecar as crypto.hashDigest etc. via map_bridge_method but the sidecar has NO crypto.* match arms. Add a new service_javascript_crypto_sync_rpc handler in execution.rs. Use ring or openssl crate for implementations. Reference: .agent/recovery/secure-exec/nodejs/src/bridge-handlers.ts (6,405 lines)."
     },
     {

@@ -2854,6 +2854,127 @@ await new Promise(() => {});
         }
 
         #[test]
+        fn javascript_crypto_basic_sync_rpcs_round_trip_through_sidecar() {
+            fn decode_hex(input: &str) -> Vec<u8> {
+                input
+                    .as_bytes()
+                    .chunks_exact(2)
+                    .map(|chunk| {
+                        u8::from_str_radix(std::str::from_utf8(chunk).expect("hex utf8"), 16)
+                            .expect("hex byte")
+                    })
+                    .collect()
+            }
+
+            fn decode_base64_response(value: Value) -> Vec<u8> {
+                base64::engine::general_purpose::STANDARD
+                    .decode(value.as_str().expect("crypto response string"))
+                    .expect("crypto response base64")
+            }
+
+            let sha256 =
+                crate::execution::service_javascript_crypto_sync_rpc(&JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("crypto.hashDigest"),
+                    args: vec![json!("sha256"), json!("YWdlbnQtb3M=")],
+                })
+                .expect("hashDigest response");
+            assert_eq!(
+                decode_base64_response(sha256),
+                decode_hex("c242c43a13eb523ec02bb1de36d3d467947790e3f005eb7a9cefff357ca54101")
+            );
+
+            let sha512 =
+                crate::execution::service_javascript_crypto_sync_rpc(&JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("crypto.hashDigest"),
+                    args: vec![json!("sha512"), json!("YWdlbnQtb3M=")],
+                })
+                .expect("hashDigest response");
+            assert_eq!(
+                decode_base64_response(sha512),
+                decode_hex(
+                    "9a2983f6cda25d03276e1d2e4bbeff3dee90d4f549a9f4ea4894569998382be6323a7dd86bcef6f83c1b66ab5d9656da1fde2d1682438cdbe58af61fa5de0bb5",
+                )
+            );
+
+            let sha1 =
+                crate::execution::service_javascript_crypto_sync_rpc(&JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("crypto.hashDigest"),
+                    args: vec![json!("sha1"), json!("YWdlbnQtb3M=")],
+                })
+                .expect("hashDigest response");
+            assert_eq!(
+                decode_base64_response(sha1),
+                decode_hex("1d43407501651ea75bc63085f352f99bdcc6e364")
+            );
+
+            let md5 =
+                crate::execution::service_javascript_crypto_sync_rpc(&JavascriptSyncRpcRequest {
+                    id: 4,
+                    method: String::from("crypto.hashDigest"),
+                    args: vec![json!("md5"), json!("YWdlbnQtb3M=")],
+                })
+                .expect("hashDigest response");
+            assert_eq!(
+                decode_base64_response(md5),
+                decode_hex("43e0189b46f53703cf6cb1e6e93ff10d")
+            );
+
+            let hmac =
+                crate::execution::service_javascript_crypto_sync_rpc(&JavascriptSyncRpcRequest {
+                    id: 5,
+                    method: String::from("crypto.hmacDigest"),
+                    args: vec![
+                        json!("sha256"),
+                        json!("YnJpZGdlLWtleQ=="),
+                        json!("YWdlbnQtb3M="),
+                    ],
+                })
+                .expect("hmacDigest response");
+            assert_eq!(
+                decode_base64_response(hmac),
+                decode_hex("c24fdd6215522cb3e716855135a1dec9402a3b13be243892c2192d17c57db3a3")
+            );
+
+            let pbkdf2 =
+                crate::execution::service_javascript_crypto_sync_rpc(&JavascriptSyncRpcRequest {
+                    id: 6,
+                    method: String::from("crypto.pbkdf2"),
+                    args: vec![
+                        json!("aHVudGVyMg=="),
+                        json!("YWdlbnQtb3Mtc2FsdA=="),
+                        json!(1000),
+                        json!(32),
+                        json!("sha256"),
+                    ],
+                })
+                .expect("pbkdf2 response");
+            assert_eq!(
+                decode_base64_response(pbkdf2),
+                decode_hex("8e97a9f68ca2ebf44885a7a82d1ec3185cf2d6dcfde51a90278f793f9e57f0e8")
+            );
+
+            let scrypt =
+                crate::execution::service_javascript_crypto_sync_rpc(&JavascriptSyncRpcRequest {
+                    id: 7,
+                    method: String::from("crypto.scrypt"),
+                    args: vec![
+                        json!("aHVudGVyMg=="),
+                        json!("YWdlbnQtb3Mtc2FsdA=="),
+                        json!(32),
+                        json!(r#"{"cost":16384,"blockSize":8,"parallelization":1}"#),
+                    ],
+                })
+                .expect("scrypt response");
+            assert_eq!(
+                decode_base64_response(scrypt),
+                decode_hex("1d0e6ac5c075c16c94c156480f725eb1c041e531fbb7f61f294f1d4fa50c14d9")
+            );
+        }
+
+        #[test]
         #[ignore = "V8 sidecar TCP integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_net_rpc_connects_to_host_tcp_server() {
             assert_node_available();
