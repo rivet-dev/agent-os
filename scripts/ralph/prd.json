@@ -718,7 +718,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 tls passes"
       ],
       "priority": 15,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-034 (TCP advanced). These 4 methods are mapped in v8_runtime.rs but have no sidecar handler. TLS upgrade wraps an existing connected socket with a TLS layer. Use rustls or native-tls. The sidecar needs to track TLS state per socket. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/network.ts (11,149 lines)."
     },
     {

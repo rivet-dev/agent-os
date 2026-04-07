@@ -32,6 +32,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Guest `crypto` is easiest to validate in two layers for now: execution tests should cover local entropy hooks (`globalThis.crypto.getRandomValues` / `randomUUID`), while sidecar hash/HMAC/KDF coverage should target `service_javascript_crypto_sync_rpc` directly until the guest builtin module exposes `crypto` cleanly in file-based tests
 - Sidecar-initiated callback frames must keep negative request IDs from the first request onward, and current-thread stdio framing must use dedicated OS threads for stdin/stdout so callback-driven mounts can unblock while the main loop waits synchronously
 - Sidecar TCP tests should connect to VM-owned loopback listeners, not arbitrary host `127.0.0.1` ports; guest loopback connections to host-owned ports are blocked unless the port is explicitly exempted
+- TLS-capable TCP sockets must keep the plaintext reader lazy until the first `net.socket_read`; a background clone that reads too early will consume ClientHello bytes and break SNI inspection plus TLS upgrade
 
 ## 2026-04-06 - US-001
 - Extracted shared state types from service.rs into new state.rs module (~450 lines)
@@ -234,9 +235,18 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Added the missing sidecar TCP sync-RPC match arms for `net.socket_wait_connect`, `net.socket_read`, `net.socket_set_no_delay`, `net.socket_set_keep_alive`, and `net.server_accept`, including V8-bridge-compatible timeout and JSON payload shapes
 - Extended TCP socket handling with direct socket-info serialization plus `TCP_NODELAY` / `SO_KEEPALIVE` configuration, and kept Unix socket wait/accept payloads consistent by storing local/remote paths on active Unix sockets
 - Added focused service coverage for wait-connect info, bridge-style socket reads plus socket options, and server-accept timeout/accept flows using VM-owned listeners so the tests respect loopback ownership rules
-- Files changed: `Cargo.lock`, `crates/AGENTS.md`, `crates/sidecar/Cargo.toml`, `crates/sidecar/src/{execution,state}.rs`, `crates/sidecar/tests/service.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- Files changed: `Cargo.lock`, `crates/CLAUDE.md`, `crates/sidecar/Cargo.toml`, `crates/sidecar/src/{execution,state}.rs`, `crates/sidecar/tests/service.rs`, `scripts/ralph/{prd.json,progress.txt}`
 - **Learnings for future iterations:**
   - `net.socket_read` and `net.server_accept` should mirror the V8 bridge contract exactly: timeout is the `"__secure_exec_net_timeout__"` sentinel, EOF is `null`, and structured socket metadata is returned as a JSON string payload
   - TCP socket-option coverage is easiest to assert from sidecar tests by inspecting the live `TcpStream` (`nodelay()` plus `socket2::SockRef::keepalive()`) after the sync RPC runs
   - Loopback networking tests need VM-owned listeners rather than standalone host listeners, otherwise the sidecar correctly rejects the guest connect with SSRF/ownership protection
+---
+## 2026-04-07 08:51:45 PDT - US-035
+- Added sidecar TLS sync-RPC handling for `net.socket_upgrade_tls`, `net.socket_get_tls_client_hello`, `net.socket_tls_query`, and `tls.get_ciphers`, backed by rustls client/server upgrades, TLS session state tracking, client-hello parsing, and cipher/protocol/certificate query serialization
+- Delayed the raw TCP reader until the first explicit `net.socket_read` so accepted and just-connected sockets can be inspected and upgraded without consuming handshake bytes, and expanded the sidecar service tests to cover client TLS upgrade/query plus server-side client-hello inspection and TLS upgrade
+- Files changed: `Cargo.lock`, `crates/AGENTS.md`, `crates/sidecar/Cargo.toml`, `crates/sidecar/src/{execution,state}.rs`, `crates/sidecar/tests/service.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - TLS upgrade on bridged TCP sockets depends on preserving the raw handshake bytes; if a background reader is needed, start it lazily after the first explicit socket read instead of when the socket is created
+  - Service-level TLS polling in this harness is timing-sensitive; short sleeps between timeout retries keep `net.server_accept`, client-hello parsing, and TLS payload reads deterministic without changing the sidecar RPC contract
+  - The static PEM fixture in `service.rs` can age out, so host-side TLS test clients should use an explicit verifier strategy instead of depending on wall-clock-valid certificates
 ---

@@ -23,7 +23,9 @@ use crate::service::{
 };
 use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
-    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError,
+    ActiveTlsState, ActiveTlsStream, ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket,
+    BridgeError, JavascriptTlsBridgeOptions, JavascriptTlsClientHello, JavascriptTlsDataValue,
+    JavascriptTlsMaterial,
     DEFAULT_JAVASCRIPT_NET_BACKLOG, DnsResolutionSource, EXECUTION_DRIVER_NAME,
     EXECUTION_SANDBOX_ROOT_ENV, JAVASCRIPT_COMMAND, JavascriptSocketFamily,
     JavascriptSocketPathContext, JavascriptTcpListenerEvent, JavascriptTcpSocketEvent,
@@ -63,6 +65,15 @@ use nix::sys::signal::{Signal, kill as send_signal};
 use nix::sys::wait::{Id as WaitId, WaitPidFlag, WaitStatus, waitid as wait_on_child};
 use nix::unistd::Pid;
 use pbkdf2::pbkdf2_hmac;
+use rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use rustls::crypto::aws_lc_rs;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::{
+    ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, ServerConfig,
+    ServerConnection, SignatureScheme,
+};
 use scrypt::{Params as ScryptParams, scrypt};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -72,7 +83,7 @@ use socket2::{SockRef, TcpKeepalive};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
     UdpSocket,
@@ -89,6 +100,8 @@ use url::Url;
 const DEFAULT_KERNEL_STDIN_READ_MAX_BYTES: usize = 64 * 1024;
 const DEFAULT_KERNEL_STDIN_READ_TIMEOUT_MS: u64 = 100;
 const JAVASCRIPT_NET_TIMEOUT_SENTINEL: &str = "__secure_exec_net_timeout__";
+const TCP_SOCKET_POLL_TIMEOUT: Duration = Duration::from_millis(100);
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_SCRYPT_COST: u64 = 16_384;
 const DEFAULT_SCRYPT_BLOCK_SIZE: u32 = 8;
 const DEFAULT_SCRYPT_PARALLELIZATION: u32 = 1;
@@ -110,6 +123,46 @@ struct JavascriptScryptOptions {
     block_size: Option<u32>,
     #[serde(alias = "p")]
     parallelization: Option<u32>,
+}
+
+#[derive(Debug)]
+struct InsecureTlsVerifier {
+    supported_schemes: Vec<SignatureScheme>,
+}
+
+impl ServerCertVerifier for InsecureTlsVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.supported_schemes.clone()
+    }
 }
 
 impl ActiveProcess {
@@ -230,26 +283,30 @@ impl ActiveTcpSocket {
         guest_remote_addr: SocketAddr,
     ) -> Result<Self, SidecarError> {
         let read_stream = stream.try_clone().map_err(sidecar_net_error)?;
+        read_stream
+            .set_read_timeout(Some(TCP_SOCKET_POLL_TIMEOUT))
+            .map_err(sidecar_net_error)?;
         let stream = Arc::new(Mutex::new(stream));
+        let pending_read_stream = Arc::new(Mutex::new(Some(read_stream)));
         let (sender, events) = mpsc::channel();
+        let tls_mode = Arc::new(AtomicBool::new(false));
+        let tls_stream = Arc::new(Mutex::new(None));
+        let tls_state = Arc::new(Mutex::new(None));
         let saw_local_shutdown = Arc::new(AtomicBool::new(false));
         let saw_remote_end = Arc::new(AtomicBool::new(false));
         let close_notified = Arc::new(AtomicBool::new(false));
-        spawn_tcp_socket_reader(
-            read_stream,
-            sender.clone(),
-            Arc::clone(&saw_local_shutdown),
-            Arc::clone(&saw_remote_end),
-            Arc::clone(&close_notified),
-        );
 
         Ok(Self {
             stream,
+            pending_read_stream,
             events,
             event_sender: sender,
             guest_local_addr,
             guest_remote_addr,
             listener_id,
+            tls_mode,
+            tls_stream,
+            tls_state,
             saw_local_shutdown,
             saw_remote_end,
             close_notified,
@@ -257,11 +314,34 @@ impl ActiveTcpSocket {
     }
 
     fn poll(&mut self, wait: Duration) -> Result<Option<JavascriptTcpSocketEvent>, SidecarError> {
+        self.ensure_tcp_reader()?;
         match self.events.recv_timeout(wait) {
             Ok(event) => Ok(Some(event)),
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => Ok(None),
         }
+    }
+
+    fn ensure_tcp_reader(&self) -> Result<(), SidecarError> {
+        if self.tls_mode.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let read_stream = self
+            .pending_read_stream
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("TCP socket reader lock poisoned")))?
+            .take();
+        if let Some(read_stream) = read_stream {
+            spawn_tcp_socket_reader(
+                read_stream,
+                self.event_sender.clone(),
+                Arc::clone(&self.tls_mode),
+                Arc::clone(&self.saw_local_shutdown),
+                Arc::clone(&self.saw_remote_end),
+                Arc::clone(&self.close_notified),
+            );
+        }
+        Ok(())
     }
 
     fn socket_info(&self) -> Value {
@@ -306,7 +386,208 @@ impl ActiveTcpSocket {
         Ok(())
     }
 
+    fn upgrade_tls(&self, options: JavascriptTlsBridgeOptions) -> Result<(), SidecarError> {
+        if self.tls_mode.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        let client_hello = if options.is_server {
+            self.peek_tls_client_hello()?
+        } else {
+            None
+        };
+
+        self.pending_read_stream
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("TCP socket reader lock poisoned")))?
+            .take();
+
+        let tls_stream = {
+            let stream = self
+                .stream
+                .lock()
+                .map_err(|_| SidecarError::InvalidState(String::from("TCP socket lock poisoned")))?;
+            let cloned = stream.try_clone().map_err(sidecar_net_error)?;
+            drop(stream);
+
+            if options.is_server {
+                ActiveTlsStream::Server(build_server_tls_stream(cloned, &options)?)
+            } else {
+                ActiveTlsStream::Client(build_client_tls_stream(cloned, &options)?)
+            }
+        };
+
+        let tls_state = ActiveTlsState {
+            authorized: true,
+            authorization_error: None,
+            client_hello,
+            local_certificates: tls_local_certificates(&options)?,
+            session_reused: false,
+        };
+
+        self.tls_mode.store(true, Ordering::SeqCst);
+        {
+            let mut state = self
+                .tls_state
+                .lock()
+                .map_err(|_| SidecarError::InvalidState(String::from("TLS state lock poisoned")))?;
+            *state = Some(tls_state);
+        }
+        {
+            let mut stream = self
+                .tls_stream
+                .lock()
+                .map_err(|_| SidecarError::InvalidState(String::from("TLS stream lock poisoned")))?;
+            *stream = Some(tls_stream);
+        }
+
+        spawn_tls_socket_reader(
+            Arc::clone(&self.tls_stream),
+            self.event_sender.clone(),
+            Arc::clone(&self.saw_local_shutdown),
+            Arc::clone(&self.saw_remote_end),
+            Arc::clone(&self.close_notified),
+        );
+        Ok(())
+    }
+
+    fn peek_tls_client_hello(&self) -> Result<Option<JavascriptTlsClientHello>, SidecarError> {
+        let stream = self
+            .stream
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("TCP socket lock poisoned")))?;
+        let mut buffer = vec![0_u8; 16 * 1024];
+        let bytes = match stream.peek(&mut buffer) {
+            Ok(0) => return Ok(None),
+            Ok(bytes) => bytes,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(sidecar_net_error(error)),
+        };
+
+        let mut acceptor = rustls::server::Acceptor::default();
+        let mut cursor = Cursor::new(&buffer[..bytes]);
+        acceptor.read_tls(&mut cursor).map_err(sidecar_net_error)?;
+        let Some(accepted) = acceptor.accept().map_err(|(error, _)| {
+            SidecarError::Execution(format!("failed to parse TLS client hello: {error}"))
+        })? else {
+            return Ok(None);
+        };
+        let client_hello = accepted.client_hello();
+        let alpn_protocols = client_hello.alpn().map(|protocols| {
+            protocols
+                .filter_map(|protocol| String::from_utf8(protocol.to_vec()).ok())
+                .collect::<Vec<_>>()
+        });
+        Ok(Some(JavascriptTlsClientHello {
+            servername: client_hello.server_name().map(str::to_owned),
+            alpn_protocols,
+        }))
+    }
+
+    fn tls_client_hello_json(&self) -> Result<Value, SidecarError> {
+        if let Some(client_hello) = self
+            .tls_state
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("TLS state lock poisoned")))?
+            .as_ref()
+            .and_then(|state| state.client_hello.clone())
+        {
+            return javascript_net_json_string(
+                serde_json::to_value(client_hello).map_err(|error| {
+                    SidecarError::InvalidState(format!(
+                        "failed to serialize TLS client hello: {error}"
+                    ))
+                })?,
+                "net.socket_get_tls_client_hello",
+            );
+        }
+
+        javascript_net_json_string(
+            serde_json::to_value(self.peek_tls_client_hello()?.unwrap_or_default()).map_err(
+                |error| {
+                    SidecarError::InvalidState(format!(
+                        "failed to serialize TLS client hello: {error}"
+                    ))
+                },
+            )?,
+            "net.socket_get_tls_client_hello",
+        )
+    }
+
+    fn tls_query(&self, query: &str, detailed: bool) -> Result<Value, SidecarError> {
+        let state = self
+            .tls_state
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("TLS state lock poisoned")))?
+            .clone();
+        let mut tls_stream = self
+            .tls_stream
+            .lock()
+            .map_err(|_| SidecarError::InvalidState(String::from("TLS stream lock poisoned")))?;
+        let Some(stream) = tls_stream.as_mut() else {
+            return javascript_net_json_string(
+                tls_bridge_undefined_value(),
+                "net.socket_tls_query",
+            );
+        };
+
+        let payload = match query {
+            "getSession" => tls_bridge_undefined_value(),
+            "isSessionReused" => Value::Bool(
+                state
+                    .as_ref()
+                    .is_some_and(|tls_state| tls_state.session_reused),
+            ),
+            "getPeerCertificate" => {
+                let certificate = stream
+                    .peer_certificates()
+                    .and_then(|certificates| certificates.first())
+                    .map(|certificate| tls_certificate_bridge_value(certificate.as_ref(), detailed));
+                certificate.unwrap_or_else(tls_bridge_undefined_value)
+            }
+            "getCertificate" => state
+                .as_ref()
+                .and_then(|tls_state| tls_state.local_certificates.first())
+                .map(|certificate| tls_certificate_bridge_value(certificate, detailed))
+                .unwrap_or_else(tls_bridge_undefined_value),
+            "getProtocol" => stream
+                .protocol_version()
+                .map(tls_protocol_name)
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+            "getCipher" => stream
+                .negotiated_cipher_suite()
+                .map(tls_cipher_bridge_value)
+                .unwrap_or_else(tls_bridge_undefined_value),
+            other => {
+                return Err(SidecarError::InvalidState(format!(
+                    "unsupported TLS query {other}"
+                )));
+            }
+        };
+        javascript_net_json_string(payload, "net.socket_tls_query")
+    }
+
     fn write_all(&self, contents: &[u8]) -> Result<usize, SidecarError> {
+        if self.tls_mode.load(Ordering::SeqCst) {
+            let mut tls_stream = self
+                .tls_stream
+                .lock()
+                .map_err(|_| SidecarError::InvalidState(String::from("TLS stream lock poisoned")))?;
+            let stream = tls_stream.as_mut().ok_or_else(|| {
+                SidecarError::InvalidState(String::from("TLS stream missing for upgraded socket"))
+            })?;
+            stream.write_all(contents)?;
+            return Ok(contents.len());
+        }
+
         let mut stream = self
             .stream
             .lock()
@@ -316,6 +597,16 @@ impl ActiveTcpSocket {
     }
 
     fn shutdown_write(&self) -> Result<(), SidecarError> {
+        if self.tls_mode.load(Ordering::SeqCst) {
+            if let Some(stream) = self
+                .tls_stream
+                .lock()
+                .map_err(|_| SidecarError::InvalidState(String::from("TLS stream lock poisoned")))?
+                .as_mut()
+            {
+                let _ = stream.send_close_notify();
+            }
+        }
         let stream = self
             .stream
             .lock()
@@ -335,11 +626,78 @@ impl ActiveTcpSocket {
     }
 
     fn close(&self) -> Result<(), SidecarError> {
+        if self.tls_mode.load(Ordering::SeqCst) {
+            if let Some(stream) = self
+                .tls_stream
+                .lock()
+                .map_err(|_| SidecarError::InvalidState(String::from("TLS stream lock poisoned")))?
+                .as_mut()
+            {
+                let _ = stream.send_close_notify();
+            }
+        }
         let stream = self
             .stream
             .lock()
             .map_err(|_| SidecarError::InvalidState(String::from("TCP socket lock poisoned")))?;
         stream.shutdown(Shutdown::Both).map_err(sidecar_net_error)
+    }
+}
+
+impl ActiveTlsStream {
+    fn write_all(&mut self, contents: &[u8]) -> Result<(), SidecarError> {
+        match self {
+            Self::Client(stream) => {
+                stream.write_all(contents).map_err(sidecar_net_error)?;
+                stream.flush().map_err(sidecar_net_error)
+            }
+            Self::Server(stream) => {
+                stream.write_all(contents).map_err(sidecar_net_error)?;
+                stream.flush().map_err(sidecar_net_error)
+            }
+        }
+    }
+
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Client(stream) => stream.read(buffer),
+            Self::Server(stream) => stream.read(buffer),
+        }
+    }
+
+    fn send_close_notify(&mut self) -> Result<(), SidecarError> {
+        match self {
+            Self::Client(stream) => {
+                stream.conn.send_close_notify();
+                let _ = stream.conn.complete_io(&mut stream.sock);
+            }
+            Self::Server(stream) => {
+                stream.conn.send_close_notify();
+                let _ = stream.conn.complete_io(&mut stream.sock);
+            }
+        }
+        Ok(())
+    }
+
+    fn peer_certificates(&self) -> Option<&[CertificateDer<'static>]> {
+        match self {
+            Self::Client(stream) => stream.conn.peer_certificates(),
+            Self::Server(stream) => stream.conn.peer_certificates(),
+        }
+    }
+
+    fn negotiated_cipher_suite(&self) -> Option<rustls::SupportedCipherSuite> {
+        match self {
+            Self::Client(stream) => stream.conn.negotiated_cipher_suite(),
+            Self::Server(stream) => stream.conn.negotiated_cipher_suite(),
+        }
+    }
+
+    fn protocol_version(&self) -> Option<rustls::ProtocolVersion> {
+        match self {
+            Self::Client(stream) => stream.conn.protocol_version(),
+            Self::Server(stream) => stream.conn.protocol_version(),
+        }
     }
 }
 
@@ -3806,9 +4164,285 @@ fn sidecar_net_error(error: std::io::Error) -> SidecarError {
     SidecarError::Execution(message)
 }
 
+fn tls_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(aws_lc_rs::default_provider())
+}
+
+fn tls_local_certificates(
+    options: &JavascriptTlsBridgeOptions,
+) -> Result<Vec<Vec<u8>>, SidecarError> {
+    let Some(certificates) = options.cert.as_ref() else {
+        return Ok(Vec::new());
+    };
+    tls_material_entries(certificates)
+}
+
+fn tls_material_entries(material: &JavascriptTlsMaterial) -> Result<Vec<Vec<u8>>, SidecarError> {
+    match material {
+        JavascriptTlsMaterial::Single(entry) => tls_data_value(entry).map(|value| vec![value]),
+        JavascriptTlsMaterial::Many(entries) => entries.iter().map(tls_data_value).collect(),
+    }
+}
+
+fn tls_data_value(value: &JavascriptTlsDataValue) -> Result<Vec<u8>, SidecarError> {
+    match value {
+        JavascriptTlsDataValue::Buffer { data } => base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|error| {
+                SidecarError::InvalidState(format!("TLS material contains invalid base64: {error}"))
+            }),
+        JavascriptTlsDataValue::String { data } => Ok(data.as_bytes().to_vec()),
+    }
+}
+
+fn tls_certificates_from_material(
+    material: &JavascriptTlsMaterial,
+) -> Result<Vec<CertificateDer<'static>>, SidecarError> {
+    let mut certificates = Vec::new();
+    for entry in tls_material_entries(material)? {
+        let mut reader = std::io::BufReader::new(Cursor::new(entry.clone()));
+        let parsed = rustls_pemfile::certs(&mut reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sidecar_net_error)?;
+        if parsed.is_empty() {
+            certificates.push(CertificateDer::from(entry));
+        } else {
+            certificates.extend(parsed);
+        }
+    }
+    if certificates.is_empty() {
+        return Err(SidecarError::InvalidState(String::from(
+            "TLS certificate material did not contain any certificates",
+        )));
+    }
+    Ok(certificates)
+}
+
+fn tls_private_key_from_material(
+    material: &JavascriptTlsMaterial,
+) -> Result<PrivateKeyDer<'static>, SidecarError> {
+    for entry in tls_material_entries(material)? {
+        let mut reader = std::io::BufReader::new(Cursor::new(entry));
+        if let Some(key) = rustls_pemfile::private_key(&mut reader).map_err(sidecar_net_error)? {
+            return Ok(key);
+        }
+    }
+    Err(SidecarError::InvalidState(String::from(
+        "TLS private key material did not contain a supported key",
+    )))
+}
+
+fn tls_root_store(options: &JavascriptTlsBridgeOptions) -> Result<RootCertStore, SidecarError> {
+    let mut roots = RootCertStore::empty();
+    if let Some(ca) = options.ca.as_ref() {
+        for certificate in tls_certificates_from_material(ca)? {
+            roots.add(certificate).map_err(|error| {
+                SidecarError::InvalidState(format!("failed to add TLS CA certificate: {error}"))
+            })?;
+        }
+        return Ok(roots);
+    }
+
+    for certificate in rustls_native_certs::load_native_certs().certs {
+        roots.add(certificate).map_err(|error| {
+            SidecarError::InvalidState(format!(
+                "failed to add native TLS certificate to root store: {error}"
+            ))
+        })?;
+    }
+    Ok(roots)
+}
+
+fn build_client_tls_stream(
+    stream: TcpStream,
+    options: &JavascriptTlsBridgeOptions,
+) -> Result<rustls::StreamOwned<ClientConnection, TcpStream>, SidecarError> {
+    let provider = tls_provider();
+    let builder = ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|error| SidecarError::InvalidState(format!("invalid TLS protocol config: {error}")))?;
+
+    let mut config = if options.reject_unauthorized == Some(false) {
+        let verifier = Arc::new(InsecureTlsVerifier {
+            supported_schemes: provider
+                .signature_verification_algorithms
+                .supported_schemes(),
+        });
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth()
+    } else {
+        builder
+            .with_root_certificates(tls_root_store(options)?)
+            .with_no_client_auth()
+    };
+
+    if let Some(protocols) = options.alpn_protocols.as_ref() {
+        config.alpn_protocols = protocols.iter().map(|protocol| protocol.as_bytes().to_vec()).collect();
+    }
+
+    let server_name = options
+        .servername
+        .clone()
+        .unwrap_or_else(|| String::from("localhost"));
+    let server_name = ServerName::try_from(server_name)
+        .map_err(|_| SidecarError::InvalidState(String::from("invalid TLS servername")))?;
+    stream
+        .set_read_timeout(Some(TLS_HANDSHAKE_TIMEOUT))
+        .map_err(sidecar_net_error)?;
+    stream
+        .set_write_timeout(Some(TLS_HANDSHAKE_TIMEOUT))
+        .map_err(sidecar_net_error)?;
+    let mut tls_stream = rustls::StreamOwned::new(
+        ClientConnection::new(Arc::new(config), server_name)
+            .map_err(|error| SidecarError::Execution(format!("failed to start TLS client: {error}")))?,
+        stream,
+    );
+    while tls_stream.conn.is_handshaking() {
+        tls_stream
+            .conn
+            .complete_io(&mut tls_stream.sock)
+            .map_err(sidecar_net_error)?;
+    }
+    tls_stream
+        .sock
+        .set_read_timeout(Some(TCP_SOCKET_POLL_TIMEOUT))
+        .map_err(sidecar_net_error)?;
+    tls_stream
+        .sock
+        .set_write_timeout(None)
+        .map_err(sidecar_net_error)?;
+    Ok(tls_stream)
+}
+
+fn build_server_tls_stream(
+    stream: TcpStream,
+    options: &JavascriptTlsBridgeOptions,
+) -> Result<rustls::StreamOwned<ServerConnection, TcpStream>, SidecarError> {
+    let certificates = tls_certificates_from_material(options.cert.as_ref().ok_or_else(|| {
+        SidecarError::InvalidState(String::from("TLS server upgrade requires a certificate"))
+    })?)?;
+    let key = tls_private_key_from_material(options.key.as_ref().ok_or_else(|| {
+        SidecarError::InvalidState(String::from("TLS server upgrade requires a private key"))
+    })?)?;
+
+    let mut config = ServerConfig::builder_with_provider(tls_provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|error| SidecarError::InvalidState(format!("invalid TLS protocol config: {error}")))?
+        .with_no_client_auth()
+        .with_single_cert(certificates, key)
+        .map_err(|error| SidecarError::InvalidState(format!("invalid TLS server config: {error}")))?;
+
+    if let Some(protocols) = options.alpn_protocols.as_ref() {
+        config.alpn_protocols = protocols.iter().map(|protocol| protocol.as_bytes().to_vec()).collect();
+    }
+
+    stream
+        .set_read_timeout(Some(TLS_HANDSHAKE_TIMEOUT))
+        .map_err(sidecar_net_error)?;
+    stream
+        .set_write_timeout(Some(TLS_HANDSHAKE_TIMEOUT))
+        .map_err(sidecar_net_error)?;
+    let mut tls_stream = rustls::StreamOwned::new(
+        ServerConnection::new(Arc::new(config))
+            .map_err(|error| SidecarError::Execution(format!("failed to start TLS server: {error}")))?,
+        stream,
+    );
+    while tls_stream.conn.is_handshaking() {
+        tls_stream
+            .conn
+            .complete_io(&mut tls_stream.sock)
+            .map_err(sidecar_net_error)?;
+    }
+    tls_stream
+        .sock
+        .set_read_timeout(Some(TCP_SOCKET_POLL_TIMEOUT))
+        .map_err(sidecar_net_error)?;
+    tls_stream
+        .sock
+        .set_write_timeout(None)
+        .map_err(sidecar_net_error)?;
+    Ok(tls_stream)
+}
+
+fn tls_protocol_name(version: rustls::ProtocolVersion) -> String {
+    match version {
+        rustls::ProtocolVersion::TLSv1_2 => String::from("TLSv1.2"),
+        rustls::ProtocolVersion::TLSv1_3 => String::from("TLSv1.3"),
+        other => other
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{other:?}")),
+    }
+}
+
+fn tls_cipher_bridge_value(suite: rustls::SupportedCipherSuite) -> Value {
+    tls_bridge_object(vec![
+        (
+            "name",
+            suite
+                .suite()
+                .as_str()
+                .map(|value| Value::String(value.to_owned()))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "standardName",
+            suite
+                .suite()
+                .as_str()
+                .map(|value| Value::String(value.to_owned()))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "version",
+            Value::String(if suite.tls13().is_some() {
+                String::from("TLSv1.3")
+            } else {
+                String::from("TLSv1.2")
+            }),
+        ),
+    ])
+}
+
+fn tls_certificate_bridge_value(certificate: &[u8], detailed: bool) -> Value {
+    let mut fields = vec![("raw", tls_bridge_buffer_value(certificate))];
+    if detailed {
+        fields.push(("issuerCertificate", tls_bridge_undefined_value()));
+    }
+    tls_bridge_object(fields)
+}
+
+fn tls_bridge_buffer_value(bytes: &[u8]) -> Value {
+    json!({
+        "type": "buffer",
+        "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
+fn tls_bridge_object(entries: Vec<(&str, Value)>) -> Value {
+    let value = entries
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect::<serde_json::Map<String, Value>>();
+    json!({
+        "type": "object",
+        "id": 1,
+        "value": value,
+    })
+}
+
+fn tls_bridge_undefined_value() -> Value {
+    json!({
+        "type": "undefined",
+    })
+}
+
 fn spawn_tcp_socket_reader(
     stream: TcpStream,
     sender: Sender<JavascriptTcpSocketEvent>,
+    tls_mode: Arc<AtomicBool>,
     saw_local_shutdown: Arc<AtomicBool>,
     saw_remote_end: Arc<AtomicBool>,
     close_notified: Arc<AtomicBool>,
@@ -3817,6 +4451,9 @@ fn spawn_tcp_socket_reader(
         let mut stream = stream;
         let mut buffer = vec![0_u8; 64 * 1024];
         loop {
+            if tls_mode.load(Ordering::SeqCst) {
+                break;
+            }
             match stream.read(&mut buffer) {
                 Ok(0) => {
                     saw_remote_end.store(true, Ordering::SeqCst);
@@ -3837,6 +4474,80 @@ fn spawn_tcp_socket_reader(
                     {
                         break;
                     }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    let code = io_error_code(&error);
+                    let _ = sender.send(JavascriptTcpSocketEvent::Error {
+                        code,
+                        message: error.to_string(),
+                    });
+                    if !close_notified.swap(true, Ordering::SeqCst) {
+                        let _ = sender.send(JavascriptTcpSocketEvent::Close { had_error: true });
+                    }
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn spawn_tls_socket_reader(
+    tls_stream: Arc<Mutex<Option<ActiveTlsStream>>>,
+    sender: Sender<JavascriptTcpSocketEvent>,
+    saw_local_shutdown: Arc<AtomicBool>,
+    saw_remote_end: Arc<AtomicBool>,
+    close_notified: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        let mut buffer = vec![0_u8; 64 * 1024];
+        loop {
+            let read_result = {
+                let mut guard = match tls_stream.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return,
+                };
+                let Some(stream) = guard.as_mut() else {
+                    return;
+                };
+                stream.read(&mut buffer)
+            };
+
+            match read_result {
+                Ok(0) => {
+                    saw_remote_end.store(true, Ordering::SeqCst);
+                    let _ = sender.send(JavascriptTcpSocketEvent::End);
+                    if saw_local_shutdown.load(Ordering::SeqCst)
+                        && !close_notified.swap(true, Ordering::SeqCst)
+                    {
+                        let _ = sender.send(JavascriptTcpSocketEvent::Close { had_error: false });
+                    }
+                    break;
+                }
+                Ok(bytes_read) => {
+                    if sender
+                        .send(JavascriptTcpSocketEvent::Data(
+                            buffer[..bytes_read].to_vec(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
                 }
                 Err(error) => {
                     let code = io_error_code(&error);
@@ -4167,13 +4878,17 @@ where
         | "net.socket_read"
         | "net.socket_set_no_delay"
         | "net.socket_set_keep_alive"
+        | "net.socket_upgrade_tls"
+        | "net.socket_get_tls_client_hello"
+        | "net.socket_tls_query"
         | "net.server_poll"
         | "net.server_accept"
         | "net.server_connections"
         | "net.write"
         | "net.shutdown"
         | "net.destroy"
-        | "net.server_close" => service_javascript_net_sync_rpc(
+        | "net.server_close"
+        | "tls.get_ciphers" => service_javascript_net_sync_rpc(
             bridge,
             vm_id,
             dns,
@@ -5091,6 +5806,58 @@ where
             }
             Ok(Value::Null)
         }
+        "net.socket_upgrade_tls" => {
+            let socket_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "net.socket_upgrade_tls socket id")?;
+            let options_json = javascript_sync_rpc_arg_str(
+                &request.args,
+                1,
+                "net.socket_upgrade_tls options",
+            )?;
+            let options: JavascriptTlsBridgeOptions =
+                serde_json::from_str(options_json).map_err(|error| {
+                    SidecarError::InvalidState(format!(
+                        "net.socket_upgrade_tls options must be valid JSON: {error}"
+                    ))
+                })?;
+            let socket = process.tcp_sockets.get(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "unknown TCP socket {socket_id} for TLS upgrade"
+                ))
+            })?;
+            socket.upgrade_tls(options)?;
+            Ok(Value::Null)
+        }
+        "net.socket_get_tls_client_hello" => {
+            let socket_id = javascript_sync_rpc_arg_str(
+                &request.args,
+                0,
+                "net.socket_get_tls_client_hello socket id",
+            )?;
+            let socket = process.tcp_sockets.get(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "unknown TCP socket {socket_id} for TLS client hello query"
+                ))
+            })?;
+            socket.tls_client_hello_json()
+        }
+        "net.socket_tls_query" => {
+            let socket_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "net.socket_tls_query socket id")?;
+            let query =
+                javascript_sync_rpc_arg_str(&request.args, 1, "net.socket_tls_query query")?;
+            let detailed = request
+                .args
+                .get(2)
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let socket = process.tcp_sockets.get(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "unknown TCP socket {socket_id} for TLS query"
+                ))
+            })?;
+            socket.tls_query(query, detailed)
+        }
         "net.server_poll" => {
             let listener_id =
                 javascript_sync_rpc_arg_str(&request.args, 0, "net.server_poll listener id")?;
@@ -5390,6 +6157,21 @@ where
                 Ok(Value::Null)
             }
         }
+        "tls.get_ciphers" => javascript_net_json_string(
+            Value::Array(
+                tls_provider()
+                    .cipher_suites
+                    .iter()
+                    .filter_map(|suite| {
+                        suite
+                            .suite()
+                            .as_str()
+                            .map(|value| Value::String(value.to_owned()))
+                    })
+                    .collect(),
+            ),
+            "tls.get_ciphers",
+        ),
         _ => Err(SidecarError::InvalidState(format!(
             "unsupported JavaScript net sync RPC method {}",
             request.method

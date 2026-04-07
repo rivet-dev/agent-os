@@ -52,11 +52,20 @@ mod service {
         };
         use base64::Engine;
         use bridge_support::RecordingBridge;
+        use rustls::client::danger::{
+            HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+        };
+        use rustls::crypto::aws_lc_rs;
+        use rustls::pki_types::{CertificateDer, ServerName};
+        use rustls::{
+            ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, ServerConfig,
+            ServerConnection, SignatureScheme,
+        };
         use serde_json::{Value, json};
         use socket2::SockRef;
         use std::collections::BTreeMap;
         use std::fs;
-        use std::io::{Read, Write};
+        use std::io::{BufReader, Read, Write};
         use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
         use std::path::{Path, PathBuf};
         use std::process::Command;
@@ -866,6 +875,104 @@ ykAheWCsAteSEWVc0w==\n\
             )
         }
 
+        fn tls_test_certificates() -> Vec<rustls::pki_types::CertificateDer<'static>> {
+            rustls_pemfile::certs(&mut BufReader::new(TLS_TEST_CERT_PEM.as_bytes()))
+                .collect::<Result<Vec<_>, _>>()
+                .expect("parse TLS test certificate")
+        }
+
+        fn tls_test_private_key() -> rustls::pki_types::PrivateKeyDer<'static> {
+            rustls_pemfile::private_key(&mut BufReader::new(TLS_TEST_KEY_PEM.as_bytes()))
+                .expect("parse TLS test private key")
+                .expect("TLS test private key")
+        }
+
+        fn tls_test_server_config(alpn: &[&str]) -> Arc<ServerConfig> {
+            let mut config = ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()
+                .expect("TLS server protocol versions")
+                .with_no_client_auth()
+                .with_single_cert(tls_test_certificates(), tls_test_private_key())
+                .expect("build TLS test server config");
+            config.alpn_protocols = alpn
+                .iter()
+                .map(|protocol| protocol.as_bytes().to_vec())
+                .collect();
+            Arc::new(config)
+        }
+
+        #[derive(Debug)]
+        struct TestInsecureTlsVerifier {
+            supported_schemes: Vec<SignatureScheme>,
+        }
+
+        impl ServerCertVerifier for TestInsecureTlsVerifier {
+            fn verify_server_cert(
+                &self,
+                _end_entity: &CertificateDer<'_>,
+                _intermediates: &[CertificateDer<'_>],
+                _server_name: &ServerName<'_>,
+                _ocsp_response: &[u8],
+                _now: rustls::pki_types::UnixTime,
+            ) -> Result<ServerCertVerified, rustls::Error> {
+                Ok(ServerCertVerified::assertion())
+            }
+
+            fn verify_tls12_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+
+            fn verify_tls13_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+
+            fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+                self.supported_schemes.clone()
+            }
+        }
+
+        fn tls_test_client_config(
+            trust_test_cert: bool,
+            alpn: &[&str],
+        ) -> Arc<ClientConfig> {
+            let provider = Arc::new(aws_lc_rs::default_provider());
+            let builder = ClientConfig::builder_with_provider(provider.clone())
+                .with_safe_default_protocol_versions()
+                .expect("TLS client protocol versions");
+            let mut config = if trust_test_cert {
+                let mut roots = RootCertStore::empty();
+                for certificate in tls_test_certificates() {
+                    roots.add(certificate).expect("add TLS test certificate");
+                }
+                builder.with_root_certificates(roots).with_no_client_auth()
+            } else {
+                let verifier = Arc::new(TestInsecureTlsVerifier {
+                    supported_schemes: provider
+                        .signature_verification_algorithms
+                        .supported_schemes(),
+                });
+                builder
+                    .dangerous()
+                    .with_custom_certificate_verifier(verifier)
+                    .with_no_client_auth()
+            };
+            config.alpn_protocols = alpn
+                .iter()
+                .map(|protocol| protocol.as_bytes().to_vec())
+                .collect();
+            Arc::new(config)
+        }
+
         #[test]
         fn javascript_net_socket_wait_connect_reports_tcp_socket_info() {
             assert_node_available();
@@ -1224,6 +1331,473 @@ ykAheWCsAteSEWVc0w==\n\
                 },
             )
             .expect("close listener");
+        }
+
+        #[test]
+        fn javascript_tls_client_upgrade_query_and_cipher_list_work() {
+            assert_node_available();
+
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind TLS listener");
+            let port = listener.local_addr().expect("listener address").port();
+            let server = thread::spawn(move || {
+                let config = tls_test_server_config(&["http/1.1"]);
+                let (stream, _) = listener.accept().expect("accept TLS client");
+                let mut stream = rustls::StreamOwned::new(
+                    ServerConnection::new(config).expect("create TLS server connection"),
+                    stream,
+                );
+                while stream.conn.is_handshaking() {
+                    stream
+                        .conn
+                        .complete_io(&mut stream.sock)
+                        .expect("complete TLS server handshake");
+                }
+                assert_eq!(stream.conn.alpn_protocol(), Some(b"http/1.1".as_slice()));
+
+                let mut payload = [0_u8; 4];
+                stream.read_exact(&mut payload).expect("read client payload");
+                assert_eq!(&payload, b"ping");
+                stream.write_all(b"pong").expect("write TLS server response");
+                stream.flush().expect("flush TLS server response");
+            });
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm_with_metadata(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+                BTreeMap::from([(
+                    format!("env.{LOOPBACK_EXEMPT_PORTS_ENV}"),
+                    serde_json::to_string(&vec![port.to_string()]).expect("serialize exempt ports"),
+                )]),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-tls-client-rpc-cwd");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-tls-client",
+                "[\"net\",\"tls\"]",
+            );
+
+            let ciphers = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-client",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("tls.get_ciphers"),
+                    args: Vec::new(),
+                },
+            )
+            .expect("list TLS ciphers");
+            let ciphers: Value =
+                serde_json::from_str(ciphers.as_str().expect("cipher JSON")).expect("parse ciphers");
+            assert!(
+                ciphers
+                    .as_array()
+                    .is_some_and(|entries| !entries.is_empty()),
+                "ciphers: {ciphers}"
+            );
+
+            let connect = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-client",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("net.connect"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": port,
+                    })],
+                },
+            )
+            .expect("connect to host TLS server");
+            let socket_id = connect["socketId"].as_str().expect("socket id").to_string();
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-client",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("net.socket_upgrade_tls"),
+                    args: vec![
+                        json!(socket_id.clone()),
+                        json!(serde_json::to_string(&json!({
+                            "isServer": false,
+                            "servername": "localhost",
+                            "rejectUnauthorized": false,
+                            "ALPNProtocols": ["http/1.1"],
+                        }))
+                        .expect("serialize client TLS options")),
+                    ],
+                },
+            )
+            .expect("upgrade client socket to TLS");
+
+            let protocol = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-client",
+                JavascriptSyncRpcRequest {
+                    id: 4,
+                    method: String::from("net.socket_tls_query"),
+                    args: vec![json!(socket_id.clone()), json!("getProtocol")],
+                },
+            )
+            .expect("query TLS protocol");
+            let protocol: Value = serde_json::from_str(
+                protocol.as_str().expect("TLS protocol query JSON"),
+            )
+            .expect("parse TLS protocol");
+            assert!(
+                protocol == Value::String(String::from("TLSv1.3"))
+                    || protocol == Value::String(String::from("TLSv1.2")),
+                "protocol: {protocol}"
+            );
+
+            let cipher = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-client",
+                JavascriptSyncRpcRequest {
+                    id: 5,
+                    method: String::from("net.socket_tls_query"),
+                    args: vec![json!(socket_id.clone()), json!("getCipher")],
+                },
+            )
+            .expect("query TLS cipher");
+            let cipher: Value =
+                serde_json::from_str(cipher.as_str().expect("TLS cipher query JSON"))
+                    .expect("parse TLS cipher");
+            assert_eq!(cipher["type"], Value::from("object"));
+
+            let peer_certificate = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-client",
+                JavascriptSyncRpcRequest {
+                    id: 6,
+                    method: String::from("net.socket_tls_query"),
+                    args: vec![json!(socket_id.clone()), json!("getPeerCertificate"), Value::Bool(true)],
+                },
+            )
+            .expect("query TLS peer certificate");
+            let peer_certificate: Value = serde_json::from_str(
+                peer_certificate
+                    .as_str()
+                    .expect("TLS peer certificate query JSON"),
+            )
+            .expect("parse TLS peer certificate");
+            assert_eq!(peer_certificate["type"], Value::from("object"));
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-client",
+                JavascriptSyncRpcRequest {
+                    id: 7,
+                    method: String::from("net.write"),
+                    args: vec![json!(socket_id.clone()), json!("ping")],
+                },
+            )
+            .expect("write TLS client payload");
+
+            let payload = (0..30)
+                .find_map(|attempt| {
+                    let value = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-tls-client",
+                        JavascriptSyncRpcRequest {
+                            id: 20 + attempt,
+                            method: String::from("net.socket_read"),
+                            args: vec![json!(socket_id.clone())],
+                        },
+                    )
+                    .expect("read TLS client payload");
+                    if value == Value::from("__secure_exec_net_timeout__") {
+                        thread::sleep(Duration::from_millis(10));
+                        None
+                    } else {
+                        Some(value)
+                    }
+                })
+                .expect("eventually receive TLS response");
+            assert_eq!(payload, Value::from("cG9uZw=="));
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-client",
+                JavascriptSyncRpcRequest {
+                    id: 99,
+                    method: String::from("net.destroy"),
+                    args: vec![json!(socket_id)],
+                },
+            )
+            .expect("destroy TLS client socket");
+
+            server.join().expect("join TLS server");
+        }
+
+        #[test]
+        fn javascript_tls_server_client_hello_and_server_upgrade_work() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-tls-server-rpc-cwd");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-tls-server",
+                "[\"net\",\"tls\"]",
+            );
+
+            let listen = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-server",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 0,
+                        "backlog": 1,
+                    })],
+                },
+            )
+            .expect("listen through sidecar net RPC");
+            let server_id = listen["serverId"].as_str().expect("server id").to_string();
+            let host_port = {
+                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                vm.active_processes
+                    .get("proc-js-tls-server")
+                    .and_then(|process| process.tcp_listeners.get(&server_id))
+                    .expect("sidecar tcp listener")
+                    .local_addr()
+                    .port()
+            };
+
+            let client = thread::spawn(move || {
+                let config = tls_test_client_config(false, &["h2", "http/1.1"]);
+                let stream =
+                    TcpStream::connect(("127.0.0.1", host_port)).expect("connect to TLS server");
+                let server_name =
+                    ServerName::try_from("localhost").expect("TLS test server name");
+                let mut stream = rustls::StreamOwned::new(
+                    ClientConnection::new(config, server_name)
+                        .expect("create TLS client connection"),
+                    stream,
+                );
+                while stream.conn.is_handshaking() {
+                    stream
+                        .conn
+                        .complete_io(&mut stream.sock)
+                        .expect("complete TLS client handshake");
+                }
+                assert_eq!(stream.conn.alpn_protocol(), Some(b"h2".as_slice()));
+                stream.write_all(b"ping").expect("write TLS client payload");
+                stream.flush().expect("flush TLS client payload");
+                let mut response = [0_u8; 4];
+                stream.read_exact(&mut response).expect("read TLS server response");
+                assert_eq!(&response, b"pong");
+            });
+
+            let accepted = (0..30)
+                .find_map(|attempt| {
+                    let value = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-tls-server",
+                        JavascriptSyncRpcRequest {
+                            id: 10 + attempt,
+                            method: String::from("net.server_accept"),
+                            args: vec![json!(server_id.clone())],
+                        },
+                    )
+                    .expect("accept TLS client");
+                    if value == Value::from("__secure_exec_net_timeout__") {
+                        thread::sleep(Duration::from_millis(10));
+                        None
+                    } else {
+                        Some(value)
+                    }
+                })
+                .expect("eventually accept TLS client");
+            let accepted: Value =
+                serde_json::from_str(accepted.as_str().expect("accepted payload string"))
+                    .expect("parse accepted payload");
+            let socket_id = accepted["socketId"].as_str().expect("accepted socket id").to_string();
+
+            let client_hello = (0..30)
+                .find_map(|attempt| {
+                    let value = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-tls-server",
+                        JavascriptSyncRpcRequest {
+                            id: 50 + attempt,
+                            method: String::from("net.socket_get_tls_client_hello"),
+                            args: vec![json!(socket_id.clone())],
+                        },
+                    )
+                    .expect("get TLS client hello");
+                    let parsed: Value = serde_json::from_str(
+                        value.as_str().expect("TLS client hello JSON"),
+                    )
+                    .expect("parse TLS client hello");
+                    if parsed["servername"] == Value::from("localhost") {
+                        Some(parsed)
+                    } else {
+                        thread::sleep(Duration::from_millis(10));
+                        None
+                    }
+                })
+                .expect("eventually parse TLS client hello");
+            assert_eq!(client_hello["servername"], Value::from("localhost"));
+            assert!(
+                client_hello["ALPNProtocols"]
+                    .as_array()
+                    .is_some_and(|protocols| protocols.contains(&Value::from("h2"))),
+                "client hello: {client_hello}"
+            );
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-server",
+                JavascriptSyncRpcRequest {
+                    id: 80,
+                    method: String::from("net.socket_upgrade_tls"),
+                    args: vec![
+                        json!(socket_id.clone()),
+                        json!(serde_json::to_string(&json!({
+                            "isServer": true,
+                            "key": { "kind": "string", "data": TLS_TEST_KEY_PEM },
+                            "cert": { "kind": "string", "data": TLS_TEST_CERT_PEM },
+                            "ALPNProtocols": ["h2"],
+                        }))
+                        .expect("serialize server TLS options")),
+                    ],
+                },
+            )
+            .expect("upgrade accepted socket to TLS");
+
+            let certificate = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-server",
+                JavascriptSyncRpcRequest {
+                    id: 81,
+                    method: String::from("net.socket_tls_query"),
+                    args: vec![json!(socket_id.clone()), json!("getCertificate")],
+                },
+            )
+            .expect("query local TLS certificate");
+            let certificate: Value =
+                serde_json::from_str(certificate.as_str().expect("TLS certificate JSON"))
+                    .expect("parse TLS certificate");
+            assert_eq!(certificate["type"], Value::from("object"));
+
+            let protocol = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-server",
+                JavascriptSyncRpcRequest {
+                    id: 82,
+                    method: String::from("net.socket_tls_query"),
+                    args: vec![json!(socket_id.clone()), json!("getProtocol")],
+                },
+            )
+            .expect("query TLS protocol");
+            let protocol: Value =
+                serde_json::from_str(protocol.as_str().expect("TLS protocol JSON"))
+                    .expect("parse TLS protocol");
+            assert!(
+                protocol == Value::String(String::from("TLSv1.3"))
+                    || protocol == Value::String(String::from("TLSv1.2")),
+                "protocol: {protocol}"
+            );
+
+            let payload = (0..30)
+                .find_map(|attempt| {
+                    let value = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-tls-server",
+                        JavascriptSyncRpcRequest {
+                            id: 90 + attempt,
+                            method: String::from("net.socket_read"),
+                            args: vec![json!(socket_id.clone())],
+                        },
+                    )
+                    .expect("read TLS server payload");
+                    if value == Value::from("__secure_exec_net_timeout__") {
+                        thread::sleep(Duration::from_millis(10));
+                        None
+                    } else {
+                        Some(value)
+                    }
+                })
+                .expect("eventually receive TLS client payload");
+            assert_eq!(payload, Value::from("cGluZw=="));
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-server",
+                JavascriptSyncRpcRequest {
+                    id: 120,
+                    method: String::from("net.write"),
+                    args: vec![json!(socket_id.clone()), json!("pong")],
+                },
+            )
+            .expect("write TLS server payload");
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-server",
+                JavascriptSyncRpcRequest {
+                    id: 121,
+                    method: String::from("net.destroy"),
+                    args: vec![json!(socket_id)],
+                },
+            )
+            .expect("destroy accepted TLS socket");
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-server",
+                JavascriptSyncRpcRequest {
+                    id: 122,
+                    method: String::from("net.server_close"),
+                    args: vec![json!(server_id)],
+                },
+            )
+            .expect("close TLS listener");
+
+            client.join().expect("join TLS client");
         }
 
         #[test]

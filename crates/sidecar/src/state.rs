@@ -17,6 +17,8 @@ use agent_os_execution::{
 use agent_os_kernel::kernel::{KernelProcessHandle, KernelVm};
 use agent_os_kernel::mount_table::MountTable;
 use agent_os_kernel::root_fs::{RootFileSystem, RootFilesystemMode, RootFilesystemSnapshot};
+use rustls::{ClientConnection, ServerConnection, StreamOwned};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -433,14 +435,79 @@ pub(crate) enum JavascriptTcpSocketEvent {
 #[derive(Debug)]
 pub(crate) struct ActiveTcpSocket {
     pub(crate) stream: Arc<Mutex<TcpStream>>,
+    pub(crate) pending_read_stream: Arc<Mutex<Option<TcpStream>>>,
     pub(crate) events: Receiver<JavascriptTcpSocketEvent>,
     pub(crate) event_sender: Sender<JavascriptTcpSocketEvent>,
     pub(crate) guest_local_addr: SocketAddr,
     pub(crate) guest_remote_addr: SocketAddr,
     pub(crate) listener_id: Option<String>,
+    pub(crate) tls_mode: Arc<AtomicBool>,
+    pub(crate) tls_stream: Arc<Mutex<Option<ActiveTlsStream>>>,
+    pub(crate) tls_state: Arc<Mutex<Option<ActiveTlsState>>>,
     pub(crate) saw_local_shutdown: Arc<AtomicBool>,
     pub(crate) saw_remote_end: Arc<AtomicBool>,
     pub(crate) close_notified: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+pub(crate) enum ActiveTlsStream {
+    Client(StreamOwned<ClientConnection, TcpStream>),
+    Server(StreamOwned<ServerConnection, TcpStream>),
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct JavascriptTlsClientHello {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) servername: Option<String>,
+    #[serde(
+        rename = "ALPNProtocols",
+        alias = "ALPNProtocols",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) alpn_protocols: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct JavascriptTlsBridgeOptions {
+    pub(crate) is_server: bool,
+    pub(crate) servername: Option<String>,
+    pub(crate) reject_unauthorized: Option<bool>,
+    pub(crate) request_cert: Option<bool>,
+    pub(crate) session: Option<String>,
+    pub(crate) key: Option<JavascriptTlsMaterial>,
+    pub(crate) cert: Option<JavascriptTlsMaterial>,
+    pub(crate) ca: Option<JavascriptTlsMaterial>,
+    pub(crate) passphrase: Option<String>,
+    pub(crate) ciphers: Option<String>,
+    #[serde(alias = "ALPNProtocols")]
+    pub(crate) alpn_protocols: Option<Vec<String>>,
+    pub(crate) min_version: Option<String>,
+    pub(crate) max_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum JavascriptTlsMaterial {
+    Single(JavascriptTlsDataValue),
+    Many(Vec<JavascriptTlsDataValue>),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(crate) enum JavascriptTlsDataValue {
+    Buffer { data: String },
+    String { data: String },
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ActiveTlsState {
+    pub(crate) authorized: bool,
+    pub(crate) authorization_error: Option<String>,
+    pub(crate) client_hello: Option<JavascriptTlsClientHello>,
+    pub(crate) local_certificates: Vec<Vec<u8>>,
+    pub(crate) session_reused: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
