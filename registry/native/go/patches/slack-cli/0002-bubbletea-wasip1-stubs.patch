@@ -1,0 +1,24 @@
+--- /dev/null
++++ b/vendor/charm.land/bubbletea/v2/signals_wasip1.go
+@@ -0,0 +1,7 @@
++//go:build wasip1
++
++package tea
++
++func (p *Program) listenForResize(done chan struct{}) {
++	close(done)
++}
+--- /dev/null
++++ b/vendor/charm.land/bubbletea/v2/tty_wasip1.go
+@@ -0,0 +1,11 @@
++//go:build wasip1
++
++package tea
++
++const suspendSupported = false
++
++func suspendProcess() {}
++
++func (p *Program) initInput() error {
++	return nil
++}

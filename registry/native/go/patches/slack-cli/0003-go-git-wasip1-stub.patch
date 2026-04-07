@@ -1,0 +1,10 @@
+--- /dev/null
++++ b/vendor/github.com/go-git/go-git/v5/worktree_wasip1.go
+@@ -0,0 +1,7 @@
++//go:build wasip1
++
++package git
++
++func isSymlinkWindowsNonAdmin(err error) bool {
++	return false
++}

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { AgentOs } from "../src/index.js";
 import curlPackage from "@rivet-dev/agent-os-curl";
+import slackCliPackage from "@rivet-dev/agent-os-slack-cli";
 import {
 	REGISTRY_SOFTWARE,
 	registrySkipReason,
@@ -802,5 +803,35 @@ server.listen(0, "0.0.0.0", () => {
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout.trim()).toBe("30");
 		});
+	});
+});
+
+// ── slack-cli (Go WASM, separate build) ──────────────────────────────
+
+const slackCliSkipReason = existsSync(slackCliPackage.commandDir)
+	? false
+	: "slack-cli WASM binary not available (run: cd registry && make build-wasm-go copy-wasm)";
+
+describe.skipIf(slackCliSkipReason)("slack-cli", () => {
+	let vm: AgentOs;
+
+	beforeEach(async () => {
+		vm = await AgentOs.create({ software: [...REGISTRY_SOFTWARE, slackCliPackage] });
+	});
+
+	afterEach(async () => {
+		await vm.dispose();
+	});
+
+	test("slack version prints version info", async () => {
+		const r = await vm.exec("slack version");
+		expect(r.exitCode).toBe(0);
+		expect(r.stdout).toMatch(/slack/i);
+	});
+
+	test("slack help prints usage", async () => {
+		const r = await vm.exec("slack help");
+		expect(r.exitCode).toBe(0);
+		expect(r.stdout).toContain("slack");
 	});
 });
