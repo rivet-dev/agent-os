@@ -1265,22 +1265,26 @@ ykAheWCsAteSEWVc0w==\n\
             )
             .expect("enable SO_KEEPALIVE");
 
-            let accepted = (0..20)
-                .find_map(|attempt| {
-                    let value = call_javascript_sync_rpc(
-                        &mut sidecar,
-                        &vm_id,
-                        "proc-js-net-read",
-                        JavascriptSyncRpcRequest {
-                            id: 5 + attempt,
-                            method: String::from("net.server_accept"),
-                            args: vec![json!(server_id.clone())],
-                        },
-                    )
-                    .expect("accept connected client");
-                    (value != Value::from("__secure_exec_net_timeout__")).then_some(value)
-                })
-                .expect("eventually accept connected client");
+            let mut accepted = None;
+            for attempt in 0..20 {
+                let value = call_javascript_sync_rpc(
+                    &mut sidecar,
+                    &vm_id,
+                    "proc-js-net-read",
+                    JavascriptSyncRpcRequest {
+                        id: 5 + attempt,
+                        method: String::from("net.server_accept"),
+                        args: vec![json!(server_id.clone())],
+                    },
+                )
+                .expect("accept connected client");
+                if value != Value::from("__secure_exec_net_timeout__") {
+                    accepted = Some(value);
+                    break;
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let accepted = accepted.expect("eventually accept connected client");
             let accepted: Value =
                 serde_json::from_str(accepted.as_str().expect("accepted payload string"))
                     .expect("parse accepted payload");
@@ -1326,40 +1330,48 @@ ykAheWCsAteSEWVc0w==\n\
             )
             .expect("shutdown server write half");
 
-            let payload = (0..20)
-                .find_map(|attempt| {
-                    let value = call_javascript_sync_rpc(
-                        &mut sidecar,
-                        &vm_id,
-                        "proc-js-net-read",
-                        JavascriptSyncRpcRequest {
-                            id: 10 + attempt,
-                            method: String::from("net.socket_read"),
-                            args: vec![json!(socket_id.clone())],
-                        },
-                    )
-                    .expect("read bridged socket chunk");
-                    (value != Value::from("__secure_exec_net_timeout__")).then_some(value)
-                })
-                .expect("eventually receive bridged socket data");
+            let mut payload = None;
+            for attempt in 0..20 {
+                let value = call_javascript_sync_rpc(
+                    &mut sidecar,
+                    &vm_id,
+                    "proc-js-net-read",
+                    JavascriptSyncRpcRequest {
+                        id: 10 + attempt,
+                        method: String::from("net.socket_read"),
+                        args: vec![json!(socket_id.clone())],
+                    },
+                )
+                .expect("read bridged socket chunk");
+                if value != Value::from("__secure_exec_net_timeout__") {
+                    payload = Some(value);
+                    break;
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let payload = payload.expect("eventually receive bridged socket data");
             assert_eq!(payload, Value::from("cGluZw=="));
 
-            let end = (0..20)
-                .find_map(|attempt| {
-                    let value = call_javascript_sync_rpc(
-                        &mut sidecar,
-                        &vm_id,
-                        "proc-js-net-read",
-                        JavascriptSyncRpcRequest {
-                            id: 40 + attempt,
-                            method: String::from("net.socket_read"),
-                            args: vec![json!(socket_id.clone())],
-                        },
-                    )
-                    .expect("read bridged socket end");
-                    (value != Value::from("__secure_exec_net_timeout__")).then_some(value)
-                })
-                .expect("eventually receive bridged socket EOF");
+            let mut end = None;
+            for attempt in 0..20 {
+                let value = call_javascript_sync_rpc(
+                    &mut sidecar,
+                    &vm_id,
+                    "proc-js-net-read",
+                    JavascriptSyncRpcRequest {
+                        id: 40 + attempt,
+                        method: String::from("net.socket_read"),
+                        args: vec![json!(socket_id.clone())],
+                    },
+                )
+                .expect("read bridged socket end");
+                if value != Value::from("__secure_exec_net_timeout__") {
+                    end = Some(value);
+                    break;
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let end = end.expect("eventually receive bridged socket EOF");
             assert_eq!(end, Value::Null);
 
             call_javascript_sync_rpc(
@@ -1395,6 +1407,345 @@ ykAheWCsAteSEWVc0w==\n\
                 },
             )
             .expect("close listener");
+        }
+
+        #[test]
+        fn javascript_net_upgrade_socket_aliases_use_tcp_socket_state() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-upgrade-socket-cwd");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-upgrade-socket",
+                "[\"net\"]",
+            );
+
+            let listen = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-upgrade-socket",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 0,
+                        "backlog": 1,
+                    })],
+                },
+            )
+            .expect("listen through sidecar net RPC");
+            let server_id = listen["serverId"].as_str().expect("server id").to_string();
+            let guest_port = listen["localPort"]
+                .as_u64()
+                .and_then(|value| u16::try_from(value).ok())
+                .expect("guest listener port");
+
+            let connect = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-upgrade-socket",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("net.connect"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": guest_port,
+                    })],
+                },
+            )
+            .expect("connect to vm-owned listener");
+            let client_socket_id = connect["socketId"].as_str().expect("socket id").to_string();
+
+            let accepted = (0..20)
+                .find_map(|attempt| {
+                    let value = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-upgrade-socket",
+                        JavascriptSyncRpcRequest {
+                            id: 10 + attempt,
+                            method: String::from("net.server_accept"),
+                            args: vec![json!(server_id.clone())],
+                        },
+                    )
+                    .expect("accept connected client");
+                    (value != Value::from("__secure_exec_net_timeout__")).then_some(value)
+                })
+                .expect("eventually accept connected client");
+            let accepted: Value =
+                serde_json::from_str(accepted.as_str().expect("accepted payload string"))
+                    .expect("parse accepted payload");
+            let server_socket_id = accepted["socketId"]
+                .as_str()
+                .expect("accepted socket id")
+                .to_string();
+
+            let written = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-upgrade-socket",
+                JavascriptSyncRpcRequest {
+                    id: 50,
+                    method: String::from("net.upgrade_socket_write"),
+                    args: vec![
+                        json!(server_socket_id.clone()),
+                        json!(base64::engine::general_purpose::STANDARD.encode("ping")),
+                    ],
+                },
+            )
+            .expect("write upgrade socket payload");
+            assert_eq!(written, Value::from(4));
+
+            let mut payload = None;
+            for attempt in 0..20 {
+                let value = call_javascript_sync_rpc(
+                    &mut sidecar,
+                    &vm_id,
+                    "proc-js-upgrade-socket",
+                    JavascriptSyncRpcRequest {
+                        id: 60 + attempt,
+                        method: String::from("net.socket_read"),
+                        args: vec![json!(client_socket_id.clone())],
+                    },
+                )
+                .expect("read upgrade socket payload");
+                if value != Value::from("__secure_exec_net_timeout__") {
+                    payload = Some(value);
+                    break;
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let payload = payload.expect("eventually receive upgrade socket data");
+            assert_eq!(payload, Value::from("cGluZw=="));
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-upgrade-socket",
+                JavascriptSyncRpcRequest {
+                    id: 80,
+                    method: String::from("net.upgrade_socket_end"),
+                    args: vec![json!(server_socket_id.clone())],
+                },
+            )
+            .expect("end upgrade socket");
+
+            let mut end = None;
+            for attempt in 0..20 {
+                let value = call_javascript_sync_rpc(
+                    &mut sidecar,
+                    &vm_id,
+                    "proc-js-upgrade-socket",
+                    JavascriptSyncRpcRequest {
+                        id: 90 + attempt,
+                        method: String::from("net.socket_read"),
+                        args: vec![json!(client_socket_id.clone())],
+                    },
+                )
+                .expect("read upgrade socket EOF");
+                if value != Value::from("__secure_exec_net_timeout__") {
+                    end = Some(value);
+                    break;
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let end = end.expect("eventually receive upgrade socket EOF");
+            assert_eq!(end, Value::Null);
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-upgrade-socket",
+                JavascriptSyncRpcRequest {
+                    id: 120,
+                    method: String::from("net.upgrade_socket_destroy"),
+                    args: vec![json!(client_socket_id)],
+                },
+            )
+            .expect("destroy client upgrade socket");
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-upgrade-socket",
+                JavascriptSyncRpcRequest {
+                    id: 121,
+                    method: String::from("net.upgrade_socket_destroy"),
+                    args: vec![json!(server_socket_id)],
+                },
+            )
+            .expect("destroy accepted upgrade socket");
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-upgrade-socket",
+                JavascriptSyncRpcRequest {
+                    id: 122,
+                    method: String::from("net.server_close"),
+                    args: vec![json!(server_id)],
+                },
+            )
+            .expect("close listener");
+        }
+
+        #[test]
+        fn javascript_dgram_address_and_buffer_size_sync_rpcs_work() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-js-dgram-options-cwd");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-dgram-options",
+                "[\"dgram\"]",
+            );
+
+            let socket = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-dgram-options",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("dgram.createSocket"),
+                    args: vec![json!({ "type": "udp4" })],
+                },
+            )
+            .expect("create udp socket");
+            let socket_id = socket["socketId"]
+                .as_str()
+                .expect("udp socket id")
+                .to_string();
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-dgram-options",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("dgram.bind"),
+                    args: vec![
+                        json!(socket_id.clone()),
+                        json!({
+                            "address": "127.0.0.1",
+                            "port": 0,
+                        }),
+                    ],
+                },
+            )
+            .expect("bind udp socket");
+
+            let address = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-dgram-options",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("dgram.address"),
+                    args: vec![json!(socket_id.clone())],
+                },
+            )
+            .expect("get udp socket address");
+            let address: Value =
+                serde_json::from_str(address.as_str().expect("address payload string"))
+                    .expect("parse address payload");
+            assert_eq!(address["address"], Value::from("127.0.0.1"));
+            assert_eq!(address["family"], Value::from("IPv4"));
+            assert!(
+                address["port"].as_u64().is_some_and(|port| port > 0),
+                "socket address: {address}"
+            );
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-dgram-options",
+                JavascriptSyncRpcRequest {
+                    id: 4,
+                    method: String::from("dgram.setBufferSize"),
+                    args: vec![json!(socket_id.clone()), json!("recv"), json!(4096)],
+                },
+            )
+            .expect("set recv buffer size");
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-dgram-options",
+                JavascriptSyncRpcRequest {
+                    id: 5,
+                    method: String::from("dgram.setBufferSize"),
+                    args: vec![json!(socket_id.clone()), json!("send"), json!(2048)],
+                },
+            )
+            .expect("set send buffer size");
+
+            let recv_size = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-dgram-options",
+                JavascriptSyncRpcRequest {
+                    id: 6,
+                    method: String::from("dgram.getBufferSize"),
+                    args: vec![json!(socket_id.clone()), json!("recv")],
+                },
+            )
+            .expect("get recv buffer size");
+            assert!(
+                recv_size.as_u64().is_some_and(|size| size >= 4096),
+                "recv buffer size: {recv_size}"
+            );
+
+            let send_size = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-dgram-options",
+                JavascriptSyncRpcRequest {
+                    id: 7,
+                    method: String::from("dgram.getBufferSize"),
+                    args: vec![json!(socket_id.clone()), json!("send")],
+                },
+            )
+            .expect("get send buffer size");
+            assert!(
+                send_size.as_u64().is_some_and(|size| size >= 2048),
+                "send buffer size: {send_size}"
+            );
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-dgram-options",
+                JavascriptSyncRpcRequest {
+                    id: 8,
+                    method: String::from("dgram.close"),
+                    args: vec![json!(socket_id)],
+                },
+            )
+            .expect("close udp socket");
         }
 
         #[test]
@@ -1946,22 +2297,26 @@ ykAheWCsAteSEWVc0w==\n\
                     .expect("connect to sidecar listener");
             });
 
-            let accepted = (0..20)
-                .find_map(|attempt| {
-                    let value = call_javascript_sync_rpc(
-                        &mut sidecar,
-                        &vm_id,
-                        "proc-js-server-accept",
-                        JavascriptSyncRpcRequest {
-                            id: 10 + attempt,
-                            method: String::from("net.server_accept"),
-                            args: vec![json!(server_id.clone())],
-                        },
-                    )
-                    .expect("accept pending connection");
-                    (value != Value::from("__secure_exec_net_timeout__")).then_some(value)
-                })
-                .expect("eventually accept pending TCP connection");
+            let mut accepted = None;
+            for attempt in 0..20 {
+                let value = call_javascript_sync_rpc(
+                    &mut sidecar,
+                    &vm_id,
+                    "proc-js-server-accept",
+                    JavascriptSyncRpcRequest {
+                        id: 10 + attempt,
+                        method: String::from("net.server_accept"),
+                        args: vec![json!(server_id.clone())],
+                    },
+                )
+                .expect("accept pending connection");
+                if value != Value::from("__secure_exec_net_timeout__") {
+                    accepted = Some(value);
+                    break;
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let accepted = accepted.expect("eventually accept pending TCP connection");
             let parsed: Value =
                 serde_json::from_str(accepted.as_str().expect("accepted payload string"))
                     .expect("parse accepted payload");

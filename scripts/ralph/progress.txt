@@ -36,6 +36,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Sidecar-initiated callback frames must keep negative request IDs from the first request onward, and current-thread stdio framing must use dedicated OS threads for stdin/stdout so callback-driven mounts can unblock while the main loop waits synchronously
 - Sidecar TCP tests should connect to VM-owned loopback listeners, not arbitrary host `127.0.0.1` ports; guest loopback connections to host-owned ports are blocked unless the port is explicitly exempted
 - TLS-capable TCP sockets must keep the plaintext reader lazy until the first `net.socket_read`; a background clone that reads too early will consume ClientHello bytes and break SNI inspection plus TLS upgrade
+- Sidecar service tests that poll `net.server_accept` or `net.socket_read` should sleep briefly between timeout sentinels; tight retry loops can race local loopback delivery in this harness
 
 ## 2026-04-06 - US-001
 - Extracted shared state types from service.rs into new state.rs module (~450 lines)
@@ -289,4 +290,14 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - **Learnings for future iterations:**
   - When a story’s code has already landed but the PRD status is stale, re-run the story’s scoped acceptance commands before flipping `passes` so the bookkeeping stays trustworthy
   - For PTY raw-mode changes on this branch, `cargo test -p agent-os-sidecar -- --test-threads=1 pty` is the focused acceptance command to use before broader test sweeps
+---
+## 2026-04-07 09:56:09 PDT - US-038
+- Added the missing sidecar JavaScript sync-RPC handlers for `net.upgrade_socket_write`, `net.upgrade_socket_end`, `net.upgrade_socket_destroy`, `dgram.address`, `dgram.setBufferSize`, and `dgram.getBufferSize`
+- Extended `ActiveUdpSocket` with bound-socket access plus recv/send buffer-size getters and setters, and added focused service coverage for the new UDP metadata/buffer operations and upgrade-socket aliases
+- Hardened the existing TCP service accept/read tests with short sleeps between timeout retries so the full single-threaded sidecar suite stays green in this harness
+- Files changed: `crates/sidecar/src/execution.rs`, `crates/sidecar/tests/service.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - `dgram.address` must return a JSON string payload, not a raw object, because the V8 bridge calls `JSON.parse(_dgramSocketAddressRaw.applySync(...))`
+  - Upgrade-socket write RPCs carry base64-encoded payload strings from the V8 bridge, so the sidecar handler must decode base64 instead of reusing the plain-text `net.write` path
+  - Sidecar service tests that wait on local TCP accept/read events are more reliable with a short sleep between timeout sentinel polls than with a tight zero-delay retry loop
 ---

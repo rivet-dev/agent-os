@@ -317,7 +317,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 26,
-      "passes": false,
+      "passes": true,
       "notes": "Step 3 (Rust side). WaitProcess MUST be a blocking RPC \u2014 if process already exited, return exit code immediately. This avoids the race condition of event-based waitProcess. See spec 'API Changes'."
     },
     {

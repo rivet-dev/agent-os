@@ -1026,6 +1026,12 @@ impl ActiveUdpSocket {
         self.guest_local_addr
     }
 
+    fn socket(&self) -> Result<&UdpSocket, SidecarError> {
+        self.socket
+            .as_ref()
+            .ok_or_else(|| SidecarError::Execution(String::from("EBADF: bad file descriptor")))
+    }
+
     fn bind(
         &mut self,
         host: Option<&str>,
@@ -1091,10 +1097,7 @@ impl ActiveUdpSocket {
     }
 
     fn poll(&self, wait: Duration) -> Result<Option<JavascriptUdpSocketEvent>, SidecarError> {
-        let socket = self
-            .socket
-            .as_ref()
-            .ok_or_else(|| SidecarError::InvalidState(String::from("UDP socket is not bound")))?;
+        let socket = self.socket()?;
         let deadline = Instant::now() + wait;
         let mut buffer = vec![0_u8; 64 * 1024];
 
@@ -1125,6 +1128,30 @@ impl ActiveUdpSocket {
     fn close(&mut self) {
         self.socket.take();
         self.guest_local_addr = None;
+    }
+
+    fn set_buffer_size(&self, which: &str, size: usize) -> Result<(), SidecarError> {
+        let socket = self.socket()?;
+        let socket = SockRef::from(socket);
+        match which {
+            "recv" => socket.set_recv_buffer_size(size).map_err(sidecar_net_error),
+            "send" => socket.set_send_buffer_size(size).map_err(sidecar_net_error),
+            other => Err(SidecarError::InvalidState(format!(
+                "unsupported UDP buffer size kind {other}"
+            ))),
+        }
+    }
+
+    fn get_buffer_size(&self, which: &str) -> Result<usize, SidecarError> {
+        let socket = self.socket()?;
+        let socket = SockRef::from(socket);
+        match which {
+            "recv" => socket.recv_buffer_size().map_err(sidecar_net_error),
+            "send" => socket.send_buffer_size().map_err(sidecar_net_error),
+            other => Err(SidecarError::InvalidState(format!(
+                "unsupported UDP buffer size kind {other}"
+            ))),
+        }
     }
 }
 
@@ -4999,6 +5026,9 @@ where
         | "net.server_poll"
         | "net.server_accept"
         | "net.server_connections"
+        | "net.upgrade_socket_write"
+        | "net.upgrade_socket_end"
+        | "net.upgrade_socket_destroy"
         | "net.write"
         | "net.shutdown"
         | "net.destroy"
@@ -5014,18 +5044,23 @@ where
             resource_limits,
             network_counts,
         ),
-        "dgram.createSocket" | "dgram.bind" | "dgram.send" | "dgram.poll" | "dgram.close" => {
-            service_javascript_dgram_sync_rpc(
-                bridge,
-                vm_id,
-                dns,
-                socket_paths,
-                process,
-                request,
-                resource_limits,
-                network_counts,
-            )
-        }
+        "dgram.createSocket"
+        | "dgram.bind"
+        | "dgram.send"
+        | "dgram.poll"
+        | "dgram.close"
+        | "dgram.address"
+        | "dgram.setBufferSize"
+        | "dgram.getBufferSize" => service_javascript_dgram_sync_rpc(
+            bridge,
+            vm_id,
+            dns,
+            socket_paths,
+            process,
+            request,
+            resource_limits,
+            network_counts,
+        ),
         "process.umask" => {
             let new_mask = javascript_sync_rpc_arg_u32_optional(&request.args, 0, "process umask")?;
             kernel
@@ -7563,6 +7598,52 @@ where
             socket.close();
             Ok(Value::Null)
         }
+        "dgram.address" => {
+            let socket_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "dgram.address socket id")?;
+            let socket = process.udp_sockets.get(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
+            })?;
+            let local_addr = socket.local_addr().ok_or_else(|| {
+                SidecarError::Execution(String::from("EBADF: bad file descriptor"))
+            })?;
+            javascript_net_json_string(
+                json!({
+                    "address": local_addr.ip().to_string(),
+                    "port": local_addr.port(),
+                    "family": socket_addr_family(&local_addr),
+                }),
+                "dgram.address",
+            )
+        }
+        "dgram.setBufferSize" => {
+            let socket_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "dgram.setBufferSize socket id")?;
+            let which =
+                javascript_sync_rpc_arg_str(&request.args, 1, "dgram.setBufferSize buffer kind")?;
+            let size = javascript_sync_rpc_arg_u64(&request.args, 2, "dgram.setBufferSize size")?;
+            let size = usize::try_from(size).map_err(|_| {
+                SidecarError::InvalidState(String::from(
+                    "dgram.setBufferSize size must fit within usize",
+                ))
+            })?;
+            let socket = process.udp_sockets.get(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
+            })?;
+            socket.set_buffer_size(which, size)?;
+            Ok(Value::Null)
+        }
+        "dgram.getBufferSize" => {
+            let socket_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "dgram.getBufferSize socket id")?;
+            let which =
+                javascript_sync_rpc_arg_str(&request.args, 1, "dgram.getBufferSize buffer kind")?;
+            let socket = process.udp_sockets.get(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
+            })?;
+            let size = socket.get_buffer_size(which)?;
+            Ok(json!(size))
+        }
         other => Err(SidecarError::InvalidState(format!(
             "unsupported JavaScript dgram sync RPC method {other}"
         ))),
@@ -8259,6 +8340,45 @@ where
                 })?;
                 Ok(json!(listener.active_connection_count()))
             }
+        }
+        "net.upgrade_socket_write" => {
+            let socket_id = javascript_sync_rpc_arg_str(
+                &request.args,
+                0,
+                "net.upgrade_socket_write socket id",
+            )?;
+            let chunk =
+                javascript_sync_rpc_base64_arg(&request.args, 1, "net.upgrade_socket_write chunk")?;
+            let socket = process.tcp_sockets.get(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown TCP socket {socket_id}"))
+            })?;
+            socket.write_all(&chunk).map(|written| json!(written))
+        }
+        "net.upgrade_socket_end" => {
+            let socket_id =
+                javascript_sync_rpc_arg_str(&request.args, 0, "net.upgrade_socket_end socket id")?;
+            let socket = process.tcp_sockets.get(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown TCP socket {socket_id}"))
+            })?;
+            socket.shutdown_write()?;
+            Ok(Value::Null)
+        }
+        "net.upgrade_socket_destroy" => {
+            let socket_id = javascript_sync_rpc_arg_str(
+                &request.args,
+                0,
+                "net.upgrade_socket_destroy socket id",
+            )?;
+            let socket = process.tcp_sockets.remove(socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown TCP socket {socket_id}"))
+            })?;
+            if let Some(listener_id) = socket.listener_id.as_deref() {
+                if let Some(listener) = process.tcp_listeners.get_mut(listener_id) {
+                    listener.release_connection(socket_id);
+                }
+            }
+            let _ = socket.close();
+            Ok(Value::Null)
         }
         "net.write" => {
             let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "net.write socket id")?;
