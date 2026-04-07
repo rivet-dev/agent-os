@@ -1,5 +1,4 @@
-use crate::NativeSidecarBridge;
-use crate::bridge::{MountPluginContext, build_mount_plugin_registry};
+use crate::bridge::{build_mount_plugin_registry, MountPluginContext};
 pub(crate) use crate::execution::{
     build_javascript_socket_path_context, error_code, format_dns_resource, format_tcp_resource,
     ignore_stale_javascript_sync_rpc_response, javascript_sync_rpc_arg_str,
@@ -25,10 +24,12 @@ use crate::protocol::{
     JavascriptDnsResolveRequest, JavascriptNetConnectRequest, JavascriptNetListenRequest,
     KillProcessRequest, ListenerSnapshotResponse, OpenSessionRequest, OwnershipScope,
     ProcessExitedEvent, ProcessKilledResponse, ProcessOutputEvent, ProcessStartedResponse,
-    ProtocolSchema, RejectedResponse, RequestFrame, RequestPayload, ResponseFrame, ResponsePayload,
-    SessionOpenedResponse, SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse,
-    SocketStateEntry, StdinClosedResponse, StdinWrittenResponse, StreamChannel, VmLifecycleEvent,
-    VmLifecycleState, WasmPermissionTier, WriteStdinRequest, ZombieTimerCountResponse,
+    ProtocolSchema, RejectedResponse, RequestFrame, RequestId, RequestPayload, ResponseFrame,
+    ResponsePayload, SessionOpenedResponse, SidecarRequestFrame, SidecarRequestPayload,
+    SidecarResponseFrame, SidecarResponseTracker, SidecarResponseTrackerError,
+    SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse, SocketStateEntry,
+    StdinClosedResponse, StdinWrittenResponse, StreamChannel, VmLifecycleEvent, VmLifecycleState,
+    WasmPermissionTier, WriteStdinRequest, ZombieTimerCountResponse,
 };
 use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
@@ -43,6 +44,7 @@ use crate::state::{
     VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
     VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
 };
+use crate::NativeSidecarBridge;
 use agent_os_bridge::{
     CommandPermissionRequest, EnvironmentAccess, EnvironmentPermissionRequest, FilesystemAccess,
     FilesystemPermissionRequest, LifecycleEventRecord, LifecycleState, LogLevel, LogRecord,
@@ -71,16 +73,16 @@ use agent_os_kernel::resource_accounting::ResourceLimits;
 // root_fs types moved to crate::vm
 use agent_os_kernel::vfs::VfsError;
 use base64::Engine;
-use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::TokioResolver;
 use nix::libc;
-use nix::sys::signal::{Signal, kill as send_signal};
-use nix::sys::wait::{Id as WaitId, WaitPidFlag, WaitStatus, waitid as wait_on_child};
+use nix::sys::signal::{kill as send_signal, Signal};
+use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use serde::Deserialize;
-use serde_json::Value;
 use serde_json::json;
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::fs;
@@ -96,7 +98,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::time;
 
 // Constants and type aliases moved to crate::state
@@ -513,12 +515,16 @@ pub struct NativeSidecar<B> {
     pub(crate) next_connection_id: usize,
     pub(crate) next_session_id: usize,
     pub(crate) next_vm_id: usize,
+    pub(crate) next_sidecar_request_id: RequestId,
     pub(crate) connections: BTreeMap<String, ConnectionState>,
     pub(crate) sessions: BTreeMap<String, SessionState>,
     pub(crate) vms: BTreeMap<String, VmState>,
     pub(crate) process_event_sender: UnboundedSender<ProcessEventEnvelope>,
     pub(crate) process_event_receiver: Option<UnboundedReceiver<ProcessEventEnvelope>>,
     pub(crate) pending_process_events: VecDeque<ProcessEventEnvelope>,
+    pub(crate) pending_sidecar_responses: SidecarResponseTracker,
+    pub(crate) outbound_sidecar_requests: VecDeque<SidecarRequestFrame>,
+    pub(crate) completed_sidecar_responses: BTreeMap<RequestId, SidecarResponseFrame>,
 }
 
 impl<B> fmt::Debug for NativeSidecar<B> {
@@ -581,12 +587,16 @@ where
             next_connection_id: 0,
             next_session_id: 0,
             next_vm_id: 0,
+            next_sidecar_request_id: -1,
             connections: BTreeMap::new(),
             sessions: BTreeMap::new(),
             vms: BTreeMap::new(),
             process_event_sender,
             process_event_receiver: Some(process_event_receiver),
             pending_process_events: VecDeque::new(),
+            pending_sidecar_responses: SidecarResponseTracker::default(),
+            outbound_sidecar_requests: VecDeque::new(),
+            completed_sidecar_responses: BTreeMap::new(),
         })
     }
 
@@ -1221,6 +1231,12 @@ where
         format!("conn-{}", self.next_connection_id)
     }
 
+    fn allocate_sidecar_request_id(&mut self) -> RequestId {
+        let request_id = self.next_sidecar_request_id;
+        self.next_sidecar_request_id -= 1;
+        request_id
+    }
+
     pub(crate) fn session_scope_for(
         &self,
         ownership: &OwnershipScope,
@@ -1256,7 +1272,7 @@ where
 
     fn response_with_ownership(
         &self,
-        request_id: u64,
+        request_id: RequestId,
         ownership: OwnershipScope,
         payload: ResponsePayload,
     ) -> ResponseFrame {
@@ -1284,6 +1300,40 @@ where
                 message: message.to_owned(),
             }),
         )
+    }
+
+    pub fn queue_sidecar_request(
+        &mut self,
+        ownership: OwnershipScope,
+        payload: SidecarRequestPayload,
+    ) -> Result<RequestId, SidecarError> {
+        let request_id = self.allocate_sidecar_request_id();
+        let request = SidecarRequestFrame::new(request_id, ownership, payload);
+        self.pending_sidecar_responses
+            .register_request(&request)
+            .map_err(sidecar_response_tracker_error)?;
+        self.outbound_sidecar_requests.push_back(request);
+        Ok(request_id)
+    }
+
+    pub fn pop_sidecar_request(&mut self) -> Option<SidecarRequestFrame> {
+        self.outbound_sidecar_requests.pop_front()
+    }
+
+    pub fn accept_sidecar_response(
+        &mut self,
+        response: SidecarResponseFrame,
+    ) -> Result<(), SidecarError> {
+        self.pending_sidecar_responses
+            .accept_response(&response)
+            .map_err(sidecar_response_tracker_error)?;
+        self.completed_sidecar_responses
+            .insert(response.request_id, response);
+        Ok(())
+    }
+
+    pub fn take_sidecar_response(&mut self, request_id: RequestId) -> Option<SidecarResponseFrame> {
+        self.completed_sidecar_responses.remove(&request_id)
     }
 
     pub(crate) fn vm_lifecycle_event(
@@ -1319,6 +1369,12 @@ where
 
         Ok(())
     }
+}
+
+fn sidecar_response_tracker_error(error: SidecarResponseTrackerError) -> SidecarError {
+    SidecarError::InvalidState(format!(
+        "invalid sidecar response correlation state: {error}"
+    ))
 }
 
 fn map_bridge_permission(decision: agent_os_bridge::PermissionDecision) -> PermissionDecision {

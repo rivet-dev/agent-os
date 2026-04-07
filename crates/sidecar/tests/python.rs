@@ -4,7 +4,7 @@ use agent_os_sidecar::protocol::{
     BootstrapRootFilesystemRequest, CloseStdinRequest, ConfigureVmRequest, CreateVmRequest,
     EventPayload, ExecuteRequest, GuestFilesystemCallRequest, GuestFilesystemOperation,
     GuestRuntimeKind, KillProcessRequest, MountDescriptor, MountPluginDescriptor, OwnershipScope,
-    RequestPayload, ResponsePayload, RootFilesystemDescriptor, RootFilesystemEntry,
+    RequestId, RequestPayload, ResponsePayload, RootFilesystemDescriptor, RootFilesystemEntry,
     RootFilesystemEntryEncoding, RootFilesystemEntryKind, RootFilesystemMode, StreamChannel,
     WriteStdinRequest,
 };
@@ -27,7 +27,7 @@ struct ProcessResult {
 
 fn execute_inline_python(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     vm_id: &str,
@@ -48,7 +48,7 @@ fn execute_inline_python(
 
 fn execute_inline_python_with_env(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     vm_id: &str,
@@ -70,7 +70,7 @@ fn execute_inline_python_with_env(
 
 fn execute_python_entrypoint(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     vm_id: &str,
@@ -91,7 +91,7 @@ fn execute_python_entrypoint(
 
 fn execute_python_entrypoint_with_env(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     vm_id: &str,
@@ -125,7 +125,7 @@ fn execute_python_entrypoint_with_env(
 
 fn execute_javascript_with_env(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     vm_id: &str,
@@ -160,7 +160,7 @@ fn execute_javascript_with_env(
 
 fn create_vm_with_root_filesystem(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     runtime: GuestRuntimeKind,
@@ -191,7 +191,7 @@ fn create_vm_with_root_filesystem(
 
 fn bootstrap_root_filesystem(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     vm_id: &str,
@@ -215,7 +215,7 @@ fn bootstrap_root_filesystem(
 
 fn guest_filesystem_call(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     vm_id: &str,
@@ -237,7 +237,7 @@ fn guest_filesystem_call(
 
 fn guest_write_file_utf8(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     vm_id: &str,
@@ -273,7 +273,7 @@ fn guest_write_file_utf8(
 
 fn guest_read_file_utf8(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     vm_id: &str,
@@ -310,7 +310,7 @@ fn guest_read_file_utf8(
 
 fn write_process_stdin(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     vm_id: &str,
@@ -339,7 +339,7 @@ fn write_process_stdin(
 
 fn close_process_stdin(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     vm_id: &str,
@@ -365,7 +365,7 @@ fn close_process_stdin(
 
 fn kill_process(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     vm_id: &str,

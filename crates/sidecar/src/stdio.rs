@@ -66,6 +66,8 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
         }
     });
 
+    flush_sidecar_requests(&mut sidecar, &mut writer).await?;
+
     loop {
         tokio::select! {
             maybe_frame = stdin_rx.recv() => {
@@ -88,10 +90,15 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
                         for event in dispatch.events {
                             writer.write_frame(&ProtocolFrame::Event(event)).await?;
                         }
+                        flush_sidecar_requests(&mut sidecar, &mut writer).await?;
+                    }
+                    ProtocolFrame::SidecarResponse(response) => {
+                        sidecar.accept_sidecar_response(response)?;
+                        flush_sidecar_requests(&mut sidecar, &mut writer).await?;
                     }
                     other => {
                         return Err(format!(
-                            "expected request frame on stdin, received {}",
+                            "expected request or sidecar_response frame on stdin, received {}",
                             frame_kind(&other)
                         ).into());
                     }
@@ -117,6 +124,7 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
                         break;
                     }
                 }
+                flush_sidecar_requests(&mut sidecar, &mut writer).await?;
             }
             _ = event_pump.tick() => {
                 for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
@@ -124,6 +132,7 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
                         let _ = event_ready_tx.send(());
                     }
                 }
+                flush_sidecar_requests(&mut sidecar, &mut writer).await?;
             }
         }
     }
@@ -227,7 +236,21 @@ fn frame_kind(frame: &ProtocolFrame) -> &'static str {
         ProtocolFrame::Request(_) => "request",
         ProtocolFrame::Response(_) => "response",
         ProtocolFrame::Event(_) => "event",
+        ProtocolFrame::SidecarRequest(_) => "sidecar_request",
+        ProtocolFrame::SidecarResponse(_) => "sidecar_response",
     }
+}
+
+async fn flush_sidecar_requests(
+    sidecar: &mut NativeSidecar<LocalBridge>,
+    writer: &mut SharedWriter<BufWriter<tokio_io::Stdout>>,
+) -> Result<(), Box<dyn Error>> {
+    while let Some(request) = sidecar.pop_sidecar_request() {
+        writer
+            .write_frame(&ProtocolFrame::SidecarRequest(request))
+            .await?;
+    }
+    Ok(())
 }
 
 fn default_compile_cache_root() -> PathBuf {

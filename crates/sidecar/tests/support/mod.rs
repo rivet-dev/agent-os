@@ -5,8 +5,8 @@ mod bridge_support;
 
 use agent_os_sidecar::protocol::{
     AuthenticateRequest, CreateVmRequest, EventPayload, ExecuteRequest, GuestRuntimeKind,
-    OpenSessionRequest, OwnershipScope, ProcessOutputEvent, RequestFrame, RequestPayload,
-    ResponsePayload, SidecarPlacement,
+    OpenSessionRequest, OwnershipScope, ProcessOutputEvent, RequestFrame, RequestId,
+    RequestPayload, ResponsePayload, SidecarPlacement,
 };
 use agent_os_sidecar::{DispatchResult, NativeSidecar, NativeSidecarConfig};
 pub use bridge_support::RecordingBridge;
@@ -62,7 +62,7 @@ pub fn new_sidecar_with_auth_token(
     .expect("create native sidecar")
 }
 
-pub fn request(id: u64, ownership: OwnershipScope, payload: RequestPayload) -> RequestFrame {
+pub fn request(id: RequestId, ownership: OwnershipScope, payload: RequestPayload) -> RequestFrame {
     RequestFrame::new(id, ownership, payload)
 }
 
@@ -83,7 +83,7 @@ pub fn authenticate(sidecar: &mut NativeSidecar<RecordingBridge>, connection_hin
 
 pub fn authenticate_with_token(
     sidecar: &mut NativeSidecar<RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_hint: &str,
     auth_token: &str,
 ) -> DispatchResult {
@@ -101,7 +101,7 @@ pub fn authenticate_with_token(
 
 pub fn open_session(
     sidecar: &mut NativeSidecar<RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
 ) -> String {
     let result = sidecar
@@ -123,7 +123,7 @@ pub fn open_session(
 
 pub fn create_vm(
     sidecar: &mut NativeSidecar<RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     runtime: GuestRuntimeKind,
@@ -142,7 +142,7 @@ pub fn create_vm(
 
 pub fn create_vm_with_metadata(
     sidecar: &mut NativeSidecar<RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     runtime: GuestRuntimeKind,
@@ -175,7 +175,7 @@ pub fn create_vm_with_metadata(
 
 pub fn execute(
     sidecar: &mut NativeSidecar<RecordingBridge>,
-    request_id: u64,
+    request_id: RequestId,
     connection_id: &str,
     session_id: &str,
     vm_id: &str,

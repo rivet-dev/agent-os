@@ -8,6 +8,7 @@ pub const PROTOCOL_NAME: &str = "agent-os-sidecar";
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_COMPLETED_RESPONSE_CAP: usize = 10_000;
+pub type RequestId = i64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolSchema {
@@ -80,18 +81,20 @@ pub enum ProtocolFrame {
     Request(RequestFrame),
     Response(ResponseFrame),
     Event(EventFrame),
+    SidecarRequest(SidecarRequestFrame),
+    SidecarResponse(SidecarResponseFrame),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestFrame {
     pub schema: ProtocolSchema,
-    pub request_id: u64,
+    pub request_id: RequestId,
     pub ownership: OwnershipScope,
     pub payload: RequestPayload,
 }
 
 impl RequestFrame {
-    pub fn new(request_id: u64, ownership: OwnershipScope, payload: RequestPayload) -> Self {
+    pub fn new(request_id: RequestId, ownership: OwnershipScope, payload: RequestPayload) -> Self {
         Self {
             schema: ProtocolSchema::current(),
             request_id,
@@ -104,13 +107,59 @@ impl RequestFrame {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResponseFrame {
     pub schema: ProtocolSchema,
-    pub request_id: u64,
+    pub request_id: RequestId,
     pub ownership: OwnershipScope,
     pub payload: ResponsePayload,
 }
 
 impl ResponseFrame {
-    pub fn new(request_id: u64, ownership: OwnershipScope, payload: ResponsePayload) -> Self {
+    pub fn new(request_id: RequestId, ownership: OwnershipScope, payload: ResponsePayload) -> Self {
+        Self {
+            schema: ProtocolSchema::current(),
+            request_id,
+            ownership,
+            payload,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SidecarRequestFrame {
+    pub schema: ProtocolSchema,
+    pub request_id: RequestId,
+    pub ownership: OwnershipScope,
+    pub payload: SidecarRequestPayload,
+}
+
+impl SidecarRequestFrame {
+    pub fn new(
+        request_id: RequestId,
+        ownership: OwnershipScope,
+        payload: SidecarRequestPayload,
+    ) -> Self {
+        Self {
+            schema: ProtocolSchema::current(),
+            request_id,
+            ownership,
+            payload,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SidecarResponseFrame {
+    pub schema: ProtocolSchema,
+    pub request_id: RequestId,
+    pub ownership: OwnershipScope,
+    pub payload: SidecarResponsePayload,
+}
+
+impl SidecarResponseFrame {
+    pub fn new(
+        request_id: RequestId,
+        ownership: OwnershipScope,
+        payload: SidecarResponsePayload,
+    ) -> Self {
         Self {
             schema: ProtocolSchema::current(),
             request_id,
@@ -186,6 +235,20 @@ pub enum ResponsePayload {
     PersistenceState(PersistenceStateResponse),
     PersistenceFlushed(PersistenceFlushedResponse),
     Rejected(RejectedResponse),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SidecarRequestPayload {
+    ToolInvocation(ToolInvocationRequest),
+    JsBridgeCall(JsBridgeCallRequest),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SidecarResponsePayload {
+    ToolInvocationResult(ToolInvocationResultResponse),
+    JsBridgeResult(JsBridgeResultResponse),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -540,6 +603,22 @@ pub struct PersistenceFlushRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolInvocationRequest {
+    pub invocation_id: String,
+    pub tool_key: String,
+    pub input: Value,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsBridgeCallRequest {
+    pub call_id: String,
+    pub mount_id: String,
+    pub operation: String,
+    pub args: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthenticatedResponse {
     pub sidecar_id: String,
     pub connection_id: String,
@@ -714,6 +793,24 @@ pub struct PersistenceFlushedResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolInvocationResultResponse {
+    pub invocation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsBridgeResultResponse {
+    pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RejectedResponse {
     pub code: String,
     pub message: String,
@@ -818,9 +915,17 @@ impl Default for NativeFrameCodec {
 
 #[derive(Debug)]
 pub struct ResponseTracker {
-    pending: HashMap<u64, PendingRequest>,
-    completed: HashSet<u64>,
-    completed_order: VecDeque<u64>,
+    pending: HashMap<RequestId, PendingRequest>,
+    completed: HashSet<RequestId>,
+    completed_order: VecDeque<RequestId>,
+    completed_cap: usize,
+}
+
+#[derive(Debug)]
+pub struct SidecarResponseTracker {
+    pending: HashMap<RequestId, PendingSidecarRequest>,
+    completed: HashSet<RequestId>,
+    completed_order: VecDeque<RequestId>,
     completed_cap: usize,
 }
 
@@ -906,6 +1011,91 @@ impl Default for ResponseTracker {
     }
 }
 
+impl SidecarResponseTracker {
+    pub fn with_completed_cap(completed_cap: usize) -> Self {
+        Self {
+            pending: HashMap::new(),
+            completed: HashSet::new(),
+            completed_order: VecDeque::new(),
+            completed_cap: completed_cap.max(1),
+        }
+    }
+
+    pub fn completed_count(&self) -> usize {
+        self.completed.len()
+    }
+
+    pub fn register_request(
+        &mut self,
+        request: &SidecarRequestFrame,
+    ) -> Result<(), SidecarResponseTrackerError> {
+        if self.pending.contains_key(&request.request_id)
+            || self.completed.contains(&request.request_id)
+        {
+            return Err(SidecarResponseTrackerError::DuplicateRequestId {
+                request_id: request.request_id,
+            });
+        }
+
+        self.pending.insert(
+            request.request_id,
+            PendingSidecarRequest {
+                ownership: request.ownership.clone(),
+                expected_response: request.payload.expected_response(),
+            },
+        );
+        Ok(())
+    }
+
+    pub fn accept_response(
+        &mut self,
+        response: &SidecarResponseFrame,
+    ) -> Result<(), SidecarResponseTrackerError> {
+        if self.completed.contains(&response.request_id) {
+            return Err(SidecarResponseTrackerError::DuplicateResponse {
+                request_id: response.request_id,
+            });
+        }
+
+        let pending = self.pending.remove(&response.request_id).ok_or(
+            SidecarResponseTrackerError::UnmatchedResponse {
+                request_id: response.request_id,
+            },
+        )?;
+
+        if pending.ownership != response.ownership {
+            return Err(SidecarResponseTrackerError::OwnershipMismatch {
+                request_id: response.request_id,
+                expected: pending.ownership,
+                actual: response.ownership.clone(),
+            });
+        }
+
+        if !pending.expected_response.matches(&response.payload) {
+            return Err(SidecarResponseTrackerError::ResponseKindMismatch {
+                request_id: response.request_id,
+                expected: pending.expected_response.as_str().to_string(),
+                actual: response.payload.kind_name().to_string(),
+            });
+        }
+
+        self.completed.insert(response.request_id);
+        self.completed_order.push_back(response.request_id);
+        while self.completed.len() > self.completed_cap {
+            if let Some(evicted) = self.completed_order.pop_front() {
+                self.completed.remove(&evicted);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for SidecarResponseTracker {
+    fn default() -> Self {
+        Self::with_completed_cap(DEFAULT_COMPLETED_RESPONSE_CAP)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolCodecError {
     TruncatedFrame {
@@ -924,6 +1114,10 @@ pub enum ProtocolCodecError {
         version: u16,
     },
     InvalidRequestId,
+    InvalidRequestDirection {
+        request_id: RequestId,
+        expected: RequestDirection,
+    },
     EmptyOwnershipField {
         field: &'static str,
     },
@@ -954,6 +1148,13 @@ impl fmt::Display for ProtocolCodecError {
                 "unsupported protocol schema {name}@{version}; expected {PROTOCOL_NAME}@{PROTOCOL_VERSION}",
             ),
             Self::InvalidRequestId => write!(f, "protocol request identifiers must be non-zero"),
+            Self::InvalidRequestDirection {
+                request_id,
+                expected,
+            } => write!(
+                f,
+                "protocol request id {request_id} must be {expected}",
+            ),
             Self::EmptyOwnershipField { field } => {
                 write!(f, "protocol ownership field `{field}` cannot be empty")
             }
@@ -975,21 +1176,21 @@ impl Error for ProtocolCodecError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponseTrackerError {
     DuplicateRequestId {
-        request_id: u64,
+        request_id: RequestId,
     },
     UnmatchedResponse {
-        request_id: u64,
+        request_id: RequestId,
     },
     DuplicateResponse {
-        request_id: u64,
+        request_id: RequestId,
     },
     OwnershipMismatch {
-        request_id: u64,
+        request_id: RequestId,
         expected: OwnershipScope,
         actual: OwnershipScope,
     },
     ResponseKindMismatch {
-        request_id: u64,
+        request_id: RequestId,
         expected: String,
         actual: String,
     },
@@ -1033,6 +1234,70 @@ impl fmt::Display for ResponseTrackerError {
 
 impl Error for ResponseTrackerError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidecarResponseTrackerError {
+    DuplicateRequestId {
+        request_id: RequestId,
+    },
+    UnmatchedResponse {
+        request_id: RequestId,
+    },
+    DuplicateResponse {
+        request_id: RequestId,
+    },
+    OwnershipMismatch {
+        request_id: RequestId,
+        expected: OwnershipScope,
+        actual: OwnershipScope,
+    },
+    ResponseKindMismatch {
+        request_id: RequestId,
+        expected: String,
+        actual: String,
+    },
+}
+
+impl fmt::Display for SidecarResponseTrackerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateRequestId { request_id } => {
+                write!(f, "sidecar request id {request_id} is already tracked")
+            }
+            Self::UnmatchedResponse { request_id } => {
+                write!(
+                    f,
+                    "sidecar response id {request_id} does not match any pending request"
+                )
+            }
+            Self::DuplicateResponse { request_id } => {
+                write!(
+                    f,
+                    "sidecar response id {request_id} has already been completed"
+                )
+            }
+            Self::OwnershipMismatch {
+                request_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "sidecar response id {request_id} used ownership {:?}, expected {:?}",
+                actual, expected
+            ),
+            Self::ResponseKindMismatch {
+                request_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "sidecar response id {request_id} carried {actual}, expected {expected}",
+            ),
+        }
+    }
+}
+
+impl Error for SidecarResponseTrackerError {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnershipRequirement {
     Any,
@@ -1054,10 +1319,31 @@ impl fmt::Display for OwnershipRequirement {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestDirection {
+    Host,
+    Sidecar,
+}
+
+impl fmt::Display for RequestDirection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Host => write!(f, "positive"),
+            Self::Sidecar => write!(f, "negative"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingRequest {
     ownership: OwnershipScope,
     expected_response: ExpectedResponseKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingSidecarRequest {
+    ownership: OwnershipScope,
+    expected_response: ExpectedSidecarResponseKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1082,6 +1368,12 @@ enum ExpectedResponseKind {
     PermissionDecision,
     PersistenceState,
     PersistenceFlushed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpectedSidecarResponseKind {
+    ToolInvocationResult,
+    JsBridgeResult,
 }
 
 impl ExpectedResponseKind {
@@ -1115,6 +1407,19 @@ impl ExpectedResponseKind {
             ResponsePayload::Rejected(_) => true,
             _ => payload.kind_name() == self.as_str(),
         }
+    }
+}
+
+impl ExpectedSidecarResponseKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ToolInvocationResult => "tool_invocation_result",
+            Self::JsBridgeResult => "js_bridge_result",
+        }
+    }
+
+    fn matches(self, payload: &SidecarResponsePayload) -> bool {
+        payload.kind_name() == self.as_str()
     }
 }
 
@@ -1165,6 +1470,19 @@ impl RequestPayload {
             Self::PermissionRequest(_) => ExpectedResponseKind::PermissionDecision,
             Self::PersistenceLoad(_) => ExpectedResponseKind::PersistenceState,
             Self::PersistenceFlush(_) => ExpectedResponseKind::PersistenceFlushed,
+        }
+    }
+}
+
+impl SidecarRequestPayload {
+    fn ownership_requirement(&self) -> OwnershipRequirement {
+        OwnershipRequirement::Vm
+    }
+
+    fn expected_response(&self) -> ExpectedSidecarResponseKind {
+        match self {
+            Self::ToolInvocation(_) => ExpectedSidecarResponseKind::ToolInvocationResult,
+            Self::JsBridgeCall(_) => ExpectedSidecarResponseKind::JsBridgeResult,
         }
     }
 }
@@ -1222,6 +1540,19 @@ impl ResponsePayload {
     }
 }
 
+impl SidecarResponsePayload {
+    fn ownership_requirement(&self) -> OwnershipRequirement {
+        OwnershipRequirement::Vm
+    }
+
+    fn kind_name(&self) -> &'static str {
+        match self {
+            Self::ToolInvocationResult(_) => "tool_invocation_result",
+            Self::JsBridgeResult(_) => "js_bridge_result",
+        }
+    }
+}
+
 impl EventPayload {
     fn ownership_requirement(&self) -> OwnershipRequirement {
         match self {
@@ -1238,14 +1569,14 @@ pub fn validate_frame(frame: &ProtocolFrame) -> Result<(), ProtocolCodecError> {
         ProtocolFrame::Request(request) => validate_request(request),
         ProtocolFrame::Response(response) => validate_response(response),
         ProtocolFrame::Event(event) => validate_event(event),
+        ProtocolFrame::SidecarRequest(request) => validate_sidecar_request(request),
+        ProtocolFrame::SidecarResponse(response) => validate_sidecar_response(response),
     }
 }
 
 fn validate_request(request: &RequestFrame) -> Result<(), ProtocolCodecError> {
     validate_schema(&request.schema)?;
-    if request.request_id == 0 {
-        return Err(ProtocolCodecError::InvalidRequestId);
-    }
+    validate_request_id_direction(request.request_id, RequestDirection::Host)?;
 
     validate_ownership(&request.ownership)?;
     validate_requirement(request.payload.ownership_requirement(), &request.ownership)?;
@@ -1260,10 +1591,27 @@ fn validate_request(request: &RequestFrame) -> Result<(), ProtocolCodecError> {
 
 fn validate_response(response: &ResponseFrame) -> Result<(), ProtocolCodecError> {
     validate_schema(&response.schema)?;
-    if response.request_id == 0 {
-        return Err(ProtocolCodecError::InvalidRequestId);
-    }
+    validate_request_id_direction(response.request_id, RequestDirection::Host)?;
 
+    validate_ownership(&response.ownership)?;
+    validate_requirement(
+        response.payload.ownership_requirement(),
+        &response.ownership,
+    )?;
+    Ok(())
+}
+
+fn validate_sidecar_request(request: &SidecarRequestFrame) -> Result<(), ProtocolCodecError> {
+    validate_schema(&request.schema)?;
+    validate_request_id_direction(request.request_id, RequestDirection::Sidecar)?;
+    validate_ownership(&request.ownership)?;
+    validate_requirement(request.payload.ownership_requirement(), &request.ownership)?;
+    Ok(())
+}
+
+fn validate_sidecar_response(response: &SidecarResponseFrame) -> Result<(), ProtocolCodecError> {
+    validate_schema(&response.schema)?;
+    validate_request_id_direction(response.request_id, RequestDirection::Sidecar)?;
     validate_ownership(&response.ownership)?;
     validate_requirement(
         response.payload.ownership_requirement(),
@@ -1320,6 +1668,28 @@ fn validate_non_empty(field: &'static str, value: &str) -> Result<(), ProtocolCo
     }
 
     Ok(())
+}
+
+fn validate_request_id_direction(
+    request_id: RequestId,
+    direction: RequestDirection,
+) -> Result<(), ProtocolCodecError> {
+    if request_id == 0 {
+        return Err(ProtocolCodecError::InvalidRequestId);
+    }
+
+    let matches_direction = match direction {
+        RequestDirection::Host => request_id > 0,
+        RequestDirection::Sidecar => request_id < 0,
+    };
+    if matches_direction {
+        Ok(())
+    } else {
+        Err(ProtocolCodecError::InvalidRequestDirection {
+            request_id,
+            expected: direction,
+        })
+    }
 }
 
 fn validate_requirement(

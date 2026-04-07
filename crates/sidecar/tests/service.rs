@@ -106,7 +106,7 @@ ykAheWCsAteSEWVc0w==\n\
 -----END CERTIFICATE-----\n";
 
         fn request(
-            request_id: u64,
+            request_id: agent_os_sidecar::protocol::RequestId,
             ownership: OwnershipScope,
             payload: RequestPayload,
         ) -> RequestFrame {
@@ -277,6 +277,7 @@ ykAheWCsAteSEWVc0w==\n\
                         allowed_node_builtins.to_owned(),
                     )]),
                     cwd: cwd.to_path_buf(),
+                    inline_code: None,
                 })
                 .expect("start fake javascript execution");
 
@@ -379,6 +380,7 @@ ykAheWCsAteSEWVc0w==\n\
                         allowed_node_builtins.to_owned(),
                     )]),
                     cwd: cwd.to_path_buf(),
+                    inline_code: None,
                 })
                 .expect("start fake javascript execution");
 
@@ -1887,6 +1889,7 @@ await new Promise(() => {});
                         String::from("1"),
                     )]),
                     cwd: cwd.clone(),
+                    inline_code: None,
                 })
                 .expect("start fake javascript execution");
 
@@ -2221,6 +2224,7 @@ console.log(
                     ),
                 )]),
                 cwd: cwd.clone(),
+                inline_code: None,
             })
             .expect("start fake javascript execution");
 
@@ -2388,6 +2392,7 @@ await new Promise(() => {});
                     ),
                 )]),
                 cwd: cwd.clone(),
+                inline_code: None,
             })
             .expect("start fake javascript execution");
 
@@ -2636,6 +2641,7 @@ console.log(JSON.stringify(summary));
                     ),
                 )]),
                 cwd: cwd.clone(),
+                inline_code: None,
             })
             .expect("start fake javascript execution");
 
@@ -2764,6 +2770,7 @@ console.log(JSON.stringify({ lookup, resolve4 }));
                     ),
                 )]),
                 cwd: cwd.clone(),
+                inline_code: None,
             })
             .expect("start fake javascript execution");
 
@@ -2943,6 +2950,7 @@ process.exit(0);
                     ),
                 )]),
                 cwd: cwd.clone(),
+                inline_code: None,
             })
             .expect("start fake javascript execution");
 
@@ -3149,6 +3157,7 @@ console.log(JSON.stringify({{ lookup, resolved, socketSummary }}));
                     ),
                 )]),
                 cwd: cwd.clone(),
+                inline_code: None,
             })
             .expect("start fake javascript execution");
 
@@ -3589,6 +3598,7 @@ console.log(JSON.stringify(summary));
                     ),
                 )]),
                 cwd: cwd.clone(),
+                inline_code: None,
             })
             .expect("start fake javascript execution");
 
@@ -3782,6 +3792,7 @@ console.log(JSON.stringify(summary));
                     ),
                 )]),
                 cwd: cwd.clone(),
+                inline_code: None,
             })
             .expect("start fake javascript execution");
 
@@ -3966,6 +3977,7 @@ console.log(JSON.stringify(summary));
                     ),
                 )]),
                 cwd: cwd.clone(),
+                inline_code: None,
             })
             .expect("start fake javascript execution");
 
@@ -4235,6 +4247,7 @@ console.log(JSON.stringify(summary));
                     ),
                 )]),
                 cwd: cwd.clone(),
+                inline_code: None,
             })
             .expect("start fake javascript execution");
 
@@ -4968,6 +4981,7 @@ console.log(JSON.stringify(summary));
                     ),
                 )]),
                 cwd: cwd.clone(),
+                inline_code: None,
             })
             .expect("start fake javascript execution");
 
@@ -5606,6 +5620,7 @@ console.log(JSON.stringify({
                     ),
                 )]),
                 cwd: cwd.clone(),
+                inline_code: None,
             })
             .expect("start fake javascript execution");
 

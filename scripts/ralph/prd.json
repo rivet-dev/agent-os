@@ -180,7 +180,7 @@
         "pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts passes (5 pre-existing failures are acceptable)"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "Step 0b continued. See spec 'Wire Protocol' section for SidecarRequestPayload and SidecarResponsePayload enums. native-process-client.ts is at packages/core/src/sidecar/native-process-client.ts (1,593 lines). This bidirectional capability is used by tool invocations (US-020) and JS-bridge mounts (US-012)."
     },
     {

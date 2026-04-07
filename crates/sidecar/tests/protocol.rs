@@ -4,7 +4,10 @@ use agent_os_sidecar::protocol::{
     OwnershipScope, PermissionDescriptor, PermissionMode, ProcessStartedResponse,
     ProjectedModuleDescriptor, ProtocolCodecError, ProtocolFrame, RequestFrame, RequestPayload,
     ResponseFrame, ResponsePayload, ResponseTracker, ResponseTrackerError, SidecarPlacement,
-    SoftwareDescriptor, StructuredEvent, VmLifecycleEvent, VmLifecycleState, WriteStdinRequest,
+    SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame, SidecarResponsePayload,
+    SidecarResponseTracker, SidecarResponseTrackerError, SoftwareDescriptor, StructuredEvent,
+    ToolInvocationRequest, ToolInvocationResultResponse, VmLifecycleEvent, VmLifecycleState,
+    WriteStdinRequest,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -77,6 +80,39 @@ fn codec_round_trips_vm_scoped_events_and_responses() {
         response
     );
     assert_eq!(codec.decode(&codec.encode(&event).unwrap()).unwrap(), event);
+}
+
+#[test]
+fn codec_round_trips_sidecar_request_and_response_frames() {
+    let codec = NativeFrameCodec::default();
+    let request = ProtocolFrame::SidecarRequest(SidecarRequestFrame::new(
+        -7,
+        OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+        SidecarRequestPayload::ToolInvocation(ToolInvocationRequest {
+            invocation_id: "invoke-1".to_string(),
+            tool_key: "toolkit:tool".to_string(),
+            input: json!({ "prompt": "ping" }),
+            timeout_ms: 5_000,
+        }),
+    ));
+    let response = ProtocolFrame::SidecarResponse(SidecarResponseFrame::new(
+        -7,
+        OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+        SidecarResponsePayload::ToolInvocationResult(ToolInvocationResultResponse {
+            invocation_id: "invoke-1".to_string(),
+            result: Some(json!({ "ok": true })),
+            error: None,
+        }),
+    ));
+
+    assert_eq!(
+        codec.decode(&codec.encode(&request).unwrap()).unwrap(),
+        request
+    );
+    assert_eq!(
+        codec.decode(&codec.encode(&response).unwrap()).unwrap(),
+        response
+    );
 }
 
 #[test]
@@ -243,7 +279,7 @@ fn response_tracker_accepts_zombie_timer_count_responses() {
 fn response_tracker_caps_completed_entries() {
     let mut tracker = ResponseTracker::with_completed_cap(3);
 
-    for request_id in 0..10 {
+    for request_id in 1..=10 {
         let request = RequestFrame::new(
             request_id,
             OwnershipScope::connection("conn-1"),
@@ -274,6 +310,87 @@ fn response_tracker_caps_completed_entries() {
     }
 
     assert_eq!(tracker.completed_count(), 3);
+}
+
+#[test]
+fn sidecar_response_tracker_enforces_request_response_correlation() {
+    let mut tracker = SidecarResponseTracker::default();
+    let request = SidecarRequestFrame::new(
+        -9,
+        OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+        SidecarRequestPayload::ToolInvocation(ToolInvocationRequest {
+            invocation_id: "invoke-1".to_string(),
+            tool_key: "toolkit:tool".to_string(),
+            input: json!({ "value": 1 }),
+            timeout_ms: 1_000,
+        }),
+    );
+    tracker
+        .register_request(&request)
+        .expect("register sidecar request");
+
+    tracker
+        .accept_response(&SidecarResponseFrame::new(
+            -9,
+            OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+            SidecarResponsePayload::ToolInvocationResult(ToolInvocationResultResponse {
+                invocation_id: "invoke-1".to_string(),
+                result: Some(json!({ "ok": true })),
+                error: None,
+            }),
+        ))
+        .expect("accept sidecar response");
+
+    assert_eq!(
+        tracker.accept_response(&SidecarResponseFrame::new(
+            -9,
+            OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+            SidecarResponsePayload::ToolInvocationResult(ToolInvocationResultResponse {
+                invocation_id: "invoke-1".to_string(),
+                result: None,
+                error: Some("duplicate".to_string()),
+            }),
+        )),
+        Err(SidecarResponseTrackerError::DuplicateResponse { request_id: -9 }),
+    );
+}
+
+#[test]
+fn codec_rejects_request_id_direction_mismatches() {
+    let host_response = ProtocolFrame::Response(ResponseFrame::new(
+        -1,
+        OwnershipScope::connection("conn-1"),
+        ResponsePayload::Authenticated(AuthenticatedResponse {
+            sidecar_id: "sidecar-1".to_string(),
+            connection_id: "conn-1".to_string(),
+            max_frame_bytes: 1024,
+        }),
+    ));
+    assert_eq!(
+        validate_frame(&host_response),
+        Err(ProtocolCodecError::InvalidRequestDirection {
+            request_id: -1,
+            expected: agent_os_sidecar::protocol::RequestDirection::Host,
+        }),
+    );
+
+    let sidecar_request = ProtocolFrame::SidecarRequest(SidecarRequestFrame::new(
+        1,
+        OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+        SidecarRequestPayload::ToolInvocation(ToolInvocationRequest {
+            invocation_id: "invoke-2".to_string(),
+            tool_key: "toolkit:tool".to_string(),
+            input: json!({}),
+            timeout_ms: 100,
+        }),
+    ));
+    assert_eq!(
+        validate_frame(&sidecar_request),
+        Err(ProtocolCodecError::InvalidRequestDirection {
+            request_id: 1,
+            expected: agent_os_sidecar::protocol::RequestDirection::Sidecar,
+        }),
+    );
 }
 
 #[test]

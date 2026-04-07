@@ -229,6 +229,36 @@ type RequestPayload =
 			type: "get_zombie_timer_count";
 	  };
 
+export type SidecarRequestPayload =
+	| {
+			type: "tool_invocation";
+			invocation_id: string;
+			tool_key: string;
+			input: unknown;
+			timeout_ms: number;
+	  }
+	| {
+			type: "js_bridge_call";
+			call_id: string;
+			mount_id: string;
+			operation: string;
+			args: unknown;
+	  };
+
+export type SidecarResponsePayload =
+	| {
+			type: "tool_invocation_result";
+			invocation_id: string;
+			result?: unknown;
+			error?: string;
+	  }
+	| {
+			type: "js_bridge_result";
+			call_id: string;
+			result?: unknown;
+			error?: string;
+	  };
+
 interface RequestFrame {
 	frame_type: "request";
 	schema: typeof PROTOCOL_SCHEMA;
@@ -257,6 +287,14 @@ interface EventFrame {
 				process_id: string;
 				exit_code: number;
 		  };
+}
+
+export interface SidecarRequestFrame {
+	frame_type: "sidecar_request";
+	schema: typeof PROTOCOL_SCHEMA;
+	request_id: number;
+	ownership: OwnershipScope;
+	payload: SidecarRequestPayload;
 }
 
 interface ResponseFrame {
@@ -367,7 +405,24 @@ interface ResponseFrame {
 		  };
 }
 
-type ProtocolFrame = RequestFrame | ResponseFrame | EventFrame;
+interface SidecarResponseFrame {
+	frame_type: "sidecar_response";
+	schema: typeof PROTOCOL_SCHEMA;
+	request_id: number;
+	ownership: OwnershipScope;
+	payload: SidecarResponsePayload;
+}
+
+type ProtocolFrame =
+	| RequestFrame
+	| ResponseFrame
+	| EventFrame
+	| SidecarRequestFrame
+	| SidecarResponseFrame;
+
+export type SidecarRequestHandler = (
+	request: SidecarRequestFrame,
+) => Promise<SidecarResponsePayload> | SidecarResponsePayload;
 
 export interface NativeSidecarSpawnOptions {
 	cwd: string;
@@ -457,6 +512,7 @@ export class NativeSidecarProcessClient {
 		timer: ReturnType<typeof setTimeout>;
 	}>();
 	private nextRequestId = 1;
+	private sidecarRequestHandler: SidecarRequestHandler | null = null;
 
 	private constructor(
 		child: ChildProcessWithoutNullStreams,
@@ -503,6 +559,10 @@ export class NativeSidecarProcessClient {
 			child,
 			options.frameTimeoutMs ?? 60_000,
 		);
+	}
+
+	setSidecarRequestHandler(handler: SidecarRequestHandler | null): void {
+		this.sidecarRequestHandler = handler;
 	}
 
 	async authenticateAndOpenSession(
@@ -571,7 +631,9 @@ export class NativeSidecarProcessClient {
 				runtime: options.runtime,
 				metadata: options.metadata ?? {},
 				root_filesystem: toWireRootFilesystemDescriptor(options.rootFilesystem),
-				permissions: (options.permissions ?? []).map(toWirePermissionDescriptor),
+				permissions: (options.permissions ?? []).map(
+					toWirePermissionDescriptor,
+				),
 			},
 		});
 		if (response.payload.type !== "vm_created") {
@@ -1129,14 +1191,16 @@ export class NativeSidecarProcessClient {
 		return {
 			processId: response.payload.process_id,
 			handlers: new Map(
-				Object.entries(response.payload.handlers).map(([signal, registration]) => [
-					Number(signal),
-					{
-						action: registration.action,
-						mask: [...registration.mask],
-						flags: registration.flags,
-					},
-				]),
+				Object.entries(response.payload.handlers).map(
+					([signal, registration]) => [
+						Number(signal),
+						{
+							action: registration.action,
+							mask: [...registration.mask],
+							flags: registration.flags,
+						},
+					],
+				),
 			),
 		};
 	}
@@ -1356,7 +1420,11 @@ export class NativeSidecarProcessClient {
 		});
 	}
 
-	private tryTakeFrame(): ResponseFrame | EventFrame | null {
+	private tryTakeFrame():
+		| ResponseFrame
+		| EventFrame
+		| SidecarRequestFrame
+		| null {
 		if (this.stdoutBuffer.length < 4) {
 			return null;
 		}
@@ -1368,7 +1436,10 @@ export class NativeSidecarProcessClient {
 
 		const payload = this.stdoutBuffer.subarray(4, 4 + declaredLength);
 		this.stdoutBuffer = this.stdoutBuffer.subarray(4 + declaredLength);
-		return JSON.parse(payload.toString("utf8")) as ResponseFrame | EventFrame;
+		return JSON.parse(payload.toString("utf8")) as
+			| ResponseFrame
+			| EventFrame
+			| SidecarRequestFrame;
 	}
 
 	private drainFrames(): void {
@@ -1384,7 +1455,47 @@ export class NativeSidecarProcessClient {
 				}
 				continue;
 			}
+			if (frame.frame_type === "sidecar_request") {
+				void this.dispatchSidecarRequest(frame);
+				continue;
+			}
 			this.dispatchEvent(frame);
+		}
+	}
+
+	private async dispatchSidecarRequest(
+		request: SidecarRequestFrame,
+	): Promise<void> {
+		let payload: SidecarResponsePayload;
+		try {
+			if (!this.sidecarRequestHandler) {
+				throw new Error(
+					`no sidecar request handler registered for ${request.payload.type}`,
+				);
+			}
+			payload = await this.sidecarRequestHandler(request);
+			if (!isMatchingSidecarResponsePayload(request.payload, payload)) {
+				throw new Error(
+					`sidecar handler returned ${payload.type} for ${request.payload.type}`,
+				);
+			}
+		} catch (error) {
+			payload = errorSidecarResponsePayload(request.payload, error);
+		}
+
+		try {
+			await this.writeFrame({
+				frame_type: "sidecar_response",
+				schema: PROTOCOL_SCHEMA,
+				request_id: request.request_id,
+				ownership: request.ownership,
+				payload,
+			});
+		} catch (error) {
+			const normalized =
+				error instanceof Error ? error : new Error(String(error));
+			this.stdoutClosedError = normalized;
+			this.rejectPending(normalized);
 		}
 	}
 
@@ -1444,6 +1555,39 @@ function decodeGuestFilesystemContent(
 	}
 
 	return Buffer.from(response.content, "utf8");
+}
+
+function isMatchingSidecarResponsePayload(
+	request: SidecarRequestPayload,
+	response: SidecarResponsePayload,
+): boolean {
+	switch (request.type) {
+		case "tool_invocation":
+			return response.type === "tool_invocation_result";
+		case "js_bridge_call":
+			return response.type === "js_bridge_result";
+	}
+}
+
+function errorSidecarResponsePayload(
+	request: SidecarRequestPayload,
+	error: unknown,
+): SidecarResponsePayload {
+	const message = error instanceof Error ? error.message : String(error);
+	switch (request.type) {
+		case "tool_invocation":
+			return {
+				type: "tool_invocation_result",
+				invocation_id: request.invocation_id,
+				error: message,
+			};
+		case "js_bridge_call":
+			return {
+				type: "js_bridge_result",
+				call_id: request.call_id,
+				error: message,
+			};
+	}
 }
 
 function toSidecarSocketStateEntry(entry: {

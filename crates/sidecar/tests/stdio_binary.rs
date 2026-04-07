@@ -4,7 +4,7 @@ use agent_os_sidecar::protocol::{
     AuthenticateRequest, ConfigureVmRequest, CreateVmRequest, EventPayload, ExecuteRequest,
     GuestFilesystemCallRequest, GuestFilesystemOperation, GuestRuntimeKind, MountDescriptor,
     MountPluginDescriptor, NativeFrameCodec, OpenSessionRequest, OwnershipScope, ProtocolFrame,
-    RequestFrame, RequestPayload, ResponseFrame, ResponsePayload, SidecarPlacement,
+    RequestFrame, RequestId, RequestPayload, ResponseFrame, ResponsePayload, SidecarPlacement,
     SnapshotRootFilesystemRequest, StreamChannel,
 };
 use serde_json::json;
@@ -40,7 +40,7 @@ fn read_frame(stdout: &mut ChildStdout, codec: &NativeFrameCodec) -> ProtocolFra
 fn recv_response(
     stdout: &mut ChildStdout,
     codec: &NativeFrameCodec,
-    request_id: u64,
+    request_id: RequestId,
     events: &mut Vec<EventPayload>,
 ) -> ResponseFrame {
     loop {

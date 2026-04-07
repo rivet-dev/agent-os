@@ -138,3 +138,20 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - The sidecar should read entrypoint files from VFS and pass as `inline_code` to avoid module loading bridge calls that require the sidecar's async event loop
   - The `crash_isolation` test exposes a fundamental limitation: V8 sync bridge calls block the isolate until the host responds, but synchronous `dispatch()` calls can't pump events while blocked
 ---
+
+## 2026-04-07 - US-009
+- Verified and validated bidirectional frame support in wire protocol and TypeScript client — all implementation was already in place from prior iterations
+- Fixed 15 `StartJavascriptExecutionRequest` initializers in `crates/sidecar/tests/service.rs` missing `inline_code: None` field added by US-008a
+- Rust protocol (protocol.rs): `SidecarRequestFrame`, `SidecarResponseFrame`, `SidecarRequestPayload` (ToolInvocation, JsBridgeCall), `SidecarResponsePayload` (ToolInvocationResult, JsBridgeResult), `SidecarResponseTracker`, request ID direction validation (positive=host, negative=sidecar), frame validation for both new frame types
+- Rust sidecar (service.rs): `queue_sidecar_request()`, `pop_sidecar_request()`, `accept_sidecar_response()`, `take_sidecar_response()`, `allocate_sidecar_request_id()` starting at -1 and decrementing, `outbound_sidecar_requests` queue, `completed_sidecar_responses` map, `pending_sidecar_responses` tracker
+- Rust sidecar (stdio.rs): `flush_sidecar_requests()` writes outbound sidecar requests, `SidecarResponse` branch in `tokio::select!` loop accepts responses and flushes further requests
+- TypeScript client (native-process-client.ts): `SidecarRequestFrame`/`SidecarResponseFrame` interfaces, `SidecarRequestHandler` callback type, `setSidecarRequestHandler()`, `dispatchSidecarRequest()` dispatches to handler and writes response, `tryTakeFrame()` parses sidecar_request, `drainFrames()` routes sidecar_request to dispatch, `isMatchingSidecarResponsePayload()` and `errorSidecarResponsePayload()` helper functions
+- New Rust integration test: `crates/sidecar/tests/bidirectional_frames.rs` — tests queue/pop/accept/take lifecycle
+- New TypeScript integration test: "dispatches sidecar_request frames to the registered handler" — spawns a fake sidecar that sends a sidecar_request, verifies TS client dispatches and sends response
+- Files changed: `crates/sidecar/tests/service.rs` (inline_code fix), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- All other changes (protocol.rs, service.rs, stdio.rs, native-process-client.ts, test files, CLAUDE.md files) were already present as uncommitted work
+- **Learnings for future iterations:**
+  - When US-008a adds a new required field to a struct, test files that construct that struct also need updating — the service.rs test has 15 instances of StartJavascriptExecutionRequest
+  - The bidirectional frame infrastructure is designed to be extensible: add new variants to SidecarRequestPayload/SidecarResponsePayload and new ExpectedSidecarResponseKind entries to support new callback types
+  - The TypeScript sidecar request handler is a single callback (`setSidecarRequestHandler`) that receives the full frame — it's up to the caller to route by payload type
+---
