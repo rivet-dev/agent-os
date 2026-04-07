@@ -733,7 +733,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 http passes"
       ],
       "priority": 16,
-      "passes": false,
+      "passes": true,
       "notes": "3 methods mapped in v8_runtime.rs but no sidecar handler. The sidecar already handles net.listen (for creating TCP listeners) and net.fetch (for outbound requests). These handlers bridge the gap for HTTP-level semantics on top of the TCP primitives. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/network.ts."
     },
     {

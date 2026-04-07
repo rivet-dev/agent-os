@@ -744,6 +744,23 @@ impl JavascriptExecution {
         Ok(())
     }
 
+    pub fn send_stream_event(
+        &self,
+        event_type: &str,
+        payload: Value,
+    ) -> Result<(), JavascriptExecutionError> {
+        let session = self.v8_session.as_ref().ok_or_else(|| {
+            JavascriptExecutionError::RpcResponse(String::from(
+                "stream events require a V8-backed JavaScript execution",
+            ))
+        })?;
+        let payload = v8_runtime::json_to_cbor_payload(&payload)
+            .map_err(|error| JavascriptExecutionError::RpcResponse(error.to_string()))?;
+        session
+            .send_stream_event(event_type, payload)
+            .map_err(|error| JavascriptExecutionError::RpcResponse(error.to_string()))
+    }
+
     pub fn respond_sync_rpc_success(
         &mut self,
         id: u64,

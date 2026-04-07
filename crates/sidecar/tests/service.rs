@@ -5551,7 +5551,213 @@ console.log(JSON.stringify(summary));
         }
 
         #[test]
-        #[ignore = "V8 sidecar HTTP integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
+        fn javascript_http_listen_and_close_registers_server() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-http-listen");
+            write_fixture(&cwd.join("entry.mjs"), "");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-http-listen",
+                "[]",
+            );
+
+            let listen = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http-listen",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.http_listen"),
+                    args: vec![Value::String(String::from(
+                        "{\"serverId\":7,\"hostname\":\"127.0.0.1\",\"port\":0}",
+                    ))],
+                },
+            )
+            .expect("listen via http bridge");
+
+            let payload: Value =
+                serde_json::from_str(listen.as_str().expect("listen payload string"))
+                    .expect("parse listen payload");
+            assert_eq!(
+                payload["address"]["family"],
+                Value::String(String::from("IPv4"))
+            );
+            assert!(
+                payload["address"]["port"]
+                    .as_u64()
+                    .is_some_and(|port| port > 0),
+                "payload: {payload}"
+            );
+            assert!(
+                sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-http-listen"))
+                    .is_some_and(|process| process.http_servers.contains_key(&7)),
+                "HTTP server was not registered",
+            );
+
+            let close = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http-listen",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("net.http_close"),
+                    args: vec![json!(7)],
+                },
+            )
+            .expect("close http bridge server");
+            assert_eq!(close, Value::Null);
+            assert!(
+                sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-http-listen"))
+                    .is_some_and(|process| process.http_servers.is_empty()),
+                "HTTP server should be removed after close",
+            );
+        }
+
+        #[test]
+        fn javascript_http_request_uses_outbound_adapter() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-http-request");
+            write_fixture(&cwd.join("entry.mjs"), "");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-http-request",
+                "[]",
+            );
+
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind host http listener");
+            let port = listener
+                .local_addr()
+                .expect("listener addr")
+                .port();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept http request");
+                let mut buffer = [0_u8; 4096];
+                let _ = stream.read(&mut buffer).expect("read http request");
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\npong",
+                    )
+                    .expect("write http response");
+                let _ = stream.flush();
+            });
+
+            let response = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http-request",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("net.http_request"),
+                    args: vec![
+                        Value::String(format!("http://127.0.0.1:{port}/health")),
+                        Value::String(String::from(
+                            "{\"method\":\"GET\",\"headers\":{\"accept\":\"text/plain\"}}",
+                        )),
+                    ],
+                },
+            )
+            .expect("outbound http request");
+            server.join().expect("join http server");
+
+            let payload: Value =
+                serde_json::from_str(response.as_str().expect("response payload string"))
+                    .expect("parse response payload");
+            assert_eq!(payload["status"], json!(200));
+            assert_eq!(payload["statusText"], Value::String(String::from("OK")));
+            let body = payload["body"].as_str().expect("base64 body");
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(body)
+                .expect("decode response body");
+            assert_eq!(String::from_utf8(decoded).expect("utf8 response"), "pong");
+        }
+
+        #[test]
+        fn javascript_http_respond_records_pending_response() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-http-respond");
+            write_fixture(&cwd.join("entry.mjs"), "");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-http-respond",
+                "[]",
+            );
+
+            let response_json = String::from(
+                "{\"status\":200,\"headers\":[[\"content-type\",\"text/plain\"]],\"body\":\"cG9uZw==\",\"bodyEncoding\":\"base64\"}",
+            );
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-http-respond")
+                    .expect("javascript process");
+                process.pending_http_requests.insert((7, 9), None);
+            }
+
+            let response = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http-respond",
+                JavascriptSyncRpcRequest {
+                    id: 4,
+                    method: String::from("net.http_respond"),
+                    args: vec![json!(7), json!(9), Value::String(response_json.clone())],
+                },
+            )
+            .expect("record http response");
+            assert_eq!(response, Value::Null);
+            assert_eq!(
+                sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-http-respond"))
+                    .and_then(|process| process.pending_http_requests.get(&(7, 9)))
+                    .cloned(),
+                Some(Some(response_json)),
+            );
+        }
+
+        #[test]
+        #[ignore = "V8 sidecar HTTP integration is flaky in this harness; focused HTTP bridge tests cover the sidecar path"]
         fn javascript_http_rpc_requests_gets_and_serves_over_guest_net() {
             assert_node_available();
 

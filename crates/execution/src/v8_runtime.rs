@@ -413,10 +413,10 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
         // Network operations
         "_networkFetchRaw" => ("net.fetch", false),
         "_networkHttpRequestRaw" => ("net.http_request", false),
-        "_networkHttpServerListenRaw" => ("net.listen", false),
-        "_networkHttpServerCloseRaw" => ("net.server_close", false),
+        "_networkHttpServerListenRaw" => ("net.http_listen", false),
+        "_networkHttpServerCloseRaw" => ("net.http_close", false),
         "_networkHttpServerRespondRaw" => ("net.http_respond", false),
-        "_networkHttpServerWaitRaw" => ("net.server_poll", false),
+        "_networkHttpServerWaitRaw" => ("net.http_wait", false),
         "_networkHttp2ServerListenRaw" => ("net.http2_server_listen", false),
         "_networkHttp2ServerCloseRaw" => ("net.http2_server_close", false),
         "_networkHttp2ServerWaitRaw" => ("net.http2_server_wait", false),

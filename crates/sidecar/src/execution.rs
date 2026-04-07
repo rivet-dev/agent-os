@@ -22,8 +22,9 @@ use crate::service::{
     wasm_error,
 };
 use crate::state::{
-    ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
-    ActiveTlsState, ActiveTlsStream, ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket,
+    ActiveExecution, ActiveExecutionEvent, ActiveHttpServer, ActiveProcess, ActiveTcpListener,
+    ActiveTcpSocket, ActiveTlsState, ActiveTlsStream, ActiveUdpSocket, ActiveUnixListener,
+    ActiveUnixSocket,
     BridgeError, JavascriptTlsBridgeOptions, JavascriptTlsClientHello, JavascriptTlsDataValue,
     JavascriptTlsMaterial,
     DEFAULT_JAVASCRIPT_NET_BACKLOG, DnsResolutionSource, EXECUTION_DRIVER_NAME,
@@ -76,7 +77,7 @@ use rustls::{
 };
 use scrypt::{Params as ScryptParams, scrypt};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512, digest::Digest};
 use socket2::{SockRef, TcpKeepalive};
@@ -102,6 +103,7 @@ const DEFAULT_KERNEL_STDIN_READ_TIMEOUT_MS: u64 = 100;
 const JAVASCRIPT_NET_TIMEOUT_SENTINEL: &str = "__secure_exec_net_timeout__";
 const TCP_SOCKET_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const HTTP_LOOPBACK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_SCRYPT_COST: u64 = 16_384;
 const DEFAULT_SCRYPT_BLOCK_SIZE: u32 = 8;
 const DEFAULT_SCRYPT_PARALLELIZATION: u32 = 1;
@@ -123,6 +125,31 @@ struct JavascriptScryptOptions {
     block_size: Option<u32>,
     #[serde(alias = "p")]
     parallelization: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JavascriptHttpListenRequest {
+    server_id: u64,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    hostname: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct JavascriptHttpRequestOptions {
+    method: Option<String>,
+    headers: BTreeMap<String, Value>,
+    body: Option<String>,
+    reject_unauthorized: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct HttpHeaderCollection {
+    normalized: BTreeMap<String, Vec<String>>,
+    raw_pairs: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -181,6 +208,8 @@ impl ActiveProcess {
             host_cwd: PathBuf::from("/"),
             child_processes: BTreeMap::new(),
             next_child_process_id: 0,
+            http_servers: BTreeMap::new(),
+            pending_http_requests: BTreeMap::new(),
             tcp_listeners: BTreeMap::new(),
             next_tcp_listener_id: 0,
             tcp_sockets: BTreeMap::new(),
@@ -236,7 +265,8 @@ impl ActiveProcess {
 
     pub(crate) fn network_resource_counts(&self) -> NetworkResourceCounts {
         let mut counts = NetworkResourceCounts {
-            sockets: self.tcp_listeners.len()
+            sockets: self.http_servers.len()
+                + self.tcp_listeners.len()
                 + self.tcp_sockets.len()
                 + self.unix_listeners.len()
                 + self.unix_sockets.len()
@@ -1144,6 +1174,21 @@ impl ActiveExecution {
                 .map_err(|error| SidecarError::Execution(error.to_string())),
             _ => Err(SidecarError::InvalidState(String::from(
                 "only Python executions can service Python VFS RPC responses",
+            ))),
+        }
+    }
+
+    pub(crate) fn send_javascript_stream_event(
+        &self,
+        event_type: &str,
+        payload: Value,
+    ) -> Result<(), SidecarError> {
+        match self {
+            Self::Javascript(execution) => execution
+                .send_stream_event(event_type, payload)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            _ => Err(SidecarError::InvalidState(String::from(
+                "only JavaScript executions can receive JavaScript stream events",
             ))),
         }
     }
@@ -4614,6 +4659,9 @@ fn spawn_unix_socket_reader(
 }
 
 fn terminate_child_process_tree(kernel: &mut SidecarKernel, process: &mut ActiveProcess) {
+    process.http_servers.clear();
+    process.pending_http_requests.clear();
+
     let listener_ids = process.tcp_listeners.keys().cloned().collect::<Vec<_>>();
     for listener_id in listener_ids {
         if let Some(listener) = process.tcp_listeners.remove(&listener_id) {
@@ -4871,6 +4919,21 @@ where
             service_javascript_dns_sync_rpc(bridge, vm_id, dns, request)
         }
         "net.fetch" => service_javascript_fetch_sync_rpc(bridge, vm_id, request),
+        "net.http_request"
+        | "net.http_listen"
+        | "net.http_close"
+        | "net.http_wait"
+        | "net.http_respond" => service_javascript_net_sync_rpc(
+            bridge,
+            vm_id,
+            dns,
+            socket_paths,
+            kernel,
+            process,
+            request,
+            resource_limits,
+            network_counts,
+        ),
         "net.connect"
         | "net.listen"
         | "net.poll"
@@ -5271,6 +5334,262 @@ fn build_data_url_fetch_response(resource: &str) -> Result<Option<Value>, Sideca
         .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
 }
 
+fn parse_http_request_options(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<(Url, JavascriptHttpRequestOptions, HttpHeaderCollection), SidecarError> {
+    let resource = javascript_sync_rpc_arg_str(&request.args, 0, "net.http_request resource")?;
+    let url = Url::parse(resource)
+        .map_err(|error| SidecarError::Execution(format!("ERR_INVALID_URL: {error}")))?;
+    let options_json =
+        javascript_sync_rpc_arg_str(&request.args, 1, "net.http_request options payload")?;
+    let options: JavascriptHttpRequestOptions =
+        serde_json::from_str(options_json).map_err(|error| {
+            SidecarError::InvalidState(format!(
+                "net.http_request options must be valid JSON: {error}"
+            ))
+        })?;
+    let headers = parse_http_header_collection(&options.headers, "net.http_request headers")?;
+    Ok((url, options, headers))
+}
+
+fn parse_http_header_collection(
+    headers: &BTreeMap<String, Value>,
+    label: &str,
+) -> Result<HttpHeaderCollection, SidecarError> {
+    let mut normalized = BTreeMap::<String, Vec<String>>::new();
+    let mut raw_pairs = Vec::new();
+
+    for (raw_name, value) in headers {
+        let normalized_name = raw_name.to_ascii_lowercase();
+        let values = match value {
+            Value::String(text) => vec![text.clone()],
+            Value::Array(values) => values
+                .iter()
+                .map(|entry| {
+                    entry.as_str().map(str::to_owned).ok_or_else(|| {
+                        SidecarError::InvalidState(format!(
+                            "{label} header {raw_name} must contain only strings"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            other => {
+                return Err(SidecarError::InvalidState(format!(
+                    "{label} header {raw_name} must be a string or string array, received {other}"
+                )));
+            }
+        };
+        raw_pairs.extend(values.iter().cloned().map(|entry| (raw_name.clone(), entry)));
+        normalized
+            .entry(normalized_name)
+            .or_default()
+            .extend(values.into_iter());
+    }
+
+    Ok(HttpHeaderCollection {
+        normalized,
+        raw_pairs,
+    })
+}
+
+fn http_headers_json(headers: &HttpHeaderCollection) -> Value {
+    let map = headers
+        .normalized
+        .iter()
+        .map(|(name, values)| {
+            let value = if values.len() == 1 {
+                Value::String(values[0].clone())
+            } else {
+                Value::Array(values.iter().cloned().map(Value::String).collect())
+            };
+            (name.clone(), value)
+        })
+        .collect::<Map<String, Value>>();
+    Value::Object(map)
+}
+
+fn http_raw_headers_json(headers: &HttpHeaderCollection) -> Value {
+    Value::Array(
+        headers
+            .raw_pairs
+            .iter()
+            .flat_map(|(name, value)| [Value::String(name.clone()), Value::String(value.clone())])
+            .collect(),
+    )
+}
+
+fn is_loopback_request_host(host: &str) -> bool {
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    matches!(bare, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn serialize_http_loopback_request(
+    url: &Url,
+    options: &JavascriptHttpRequestOptions,
+    headers: &HttpHeaderCollection,
+) -> Result<String, SidecarError> {
+    let body_base64 = options.body.as_ref().map(|body| {
+        base64::engine::general_purpose::STANDARD.encode(body.as_bytes())
+    });
+    serde_json::to_string(&json!({
+        "method": options.method.clone().unwrap_or_else(|| String::from("GET")),
+        "url": http_request_target(url),
+        "headers": http_headers_json(headers),
+        "rawHeaders": http_raw_headers_json(headers),
+        "bodyBase64": body_base64,
+    }))
+    .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
+}
+
+fn http_request_target(url: &Url) -> String {
+    let path = if url.path().is_empty() { "/" } else { url.path() };
+    format!("{path}{}", url.query().map(|query| format!("?{query}")).unwrap_or_default())
+}
+
+fn outbound_http_response_json(
+    url: &Url,
+    response: ureq::Response,
+) -> Result<Value, SidecarError> {
+    let status = response.status();
+    let status_text = response.status_text().to_owned();
+    let mut header_pairs = Vec::new();
+    let mut raw_headers = Vec::new();
+    for raw_name in response.headers_names() {
+        for value in response.all(&raw_name) {
+            header_pairs.push(json!([raw_name.to_ascii_lowercase(), value]));
+            raw_headers.push(Value::String(raw_name.clone()));
+            raw_headers.push(Value::String(value.to_owned()));
+        }
+    }
+    let mut reader = response.into_reader();
+    let mut body = Vec::new();
+    reader
+        .read_to_end(&mut body)
+        .map_err(|error| SidecarError::Execution(format!("failed to read HTTP response: {error}")))?;
+    serde_json::to_string(&json!({
+        "status": status,
+        "statusText": status_text,
+        "headers": header_pairs,
+        "rawHeaders": raw_headers,
+        "body": base64::engine::general_purpose::STANDARD.encode(body),
+        "bodyEncoding": "base64",
+        "url": url.as_str(),
+    }))
+    .map(Value::String)
+    .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
+}
+
+fn issue_outbound_http_request(
+    url: &Url,
+    options: &JavascriptHttpRequestOptions,
+    headers: &HttpHeaderCollection,
+) -> Result<Value, SidecarError> {
+    let method = options.method.as_deref().unwrap_or("GET");
+    let mut request = ureq::request(method, url.as_str());
+    for (name, values) in &headers.normalized {
+        let header_value = values.join(", ");
+        request = request.set(name, &header_value);
+    }
+    let response = match options.body.as_deref() {
+        Some(body) => request.send_string(body),
+        None => request.call(),
+    };
+
+    match response {
+        Ok(response) => outbound_http_response_json(url, response),
+        Err(ureq::Error::Status(_, response)) => outbound_http_response_json(url, response),
+        Err(ureq::Error::Transport(error)) => Err(SidecarError::Execution(format!(
+            "ERR_HTTP_REQUEST_FAILED: {error}"
+        ))),
+    }
+}
+
+fn wait_for_loopback_http_response<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    dns: &VmDnsConfig,
+    socket_paths: &JavascriptSocketPathContext,
+    kernel: &mut SidecarKernel,
+    process: &mut ActiveProcess,
+    resource_limits: &ResourceLimits,
+    request_key: (u64, u64),
+) -> Result<String, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let deadline = Instant::now() + HTTP_LOOPBACK_REQUEST_TIMEOUT;
+    loop {
+        if let Some(response) = process
+            .pending_http_requests
+            .get(&request_key)
+            .and_then(|response| response.clone())
+        {
+            process.pending_http_requests.remove(&request_key);
+            return Ok(response);
+        }
+
+        if Instant::now() >= deadline {
+            process.pending_http_requests.remove(&request_key);
+            return Err(SidecarError::Execution(String::from(
+                "HTTP loopback request timed out waiting for net.http_respond",
+            )));
+        }
+
+        let Some(event) = process
+            .execution
+            .poll_event_blocking(Duration::from_millis(10))
+            .map_err(|error| SidecarError::Execution(error.to_string()))?
+        else {
+            continue;
+        };
+
+        match event {
+            ActiveExecutionEvent::JavascriptSyncRpcRequest(request) => {
+                let network_counts = process.network_resource_counts();
+                let response = service_javascript_sync_rpc(
+                    bridge,
+                    vm_id,
+                    dns,
+                    socket_paths,
+                    kernel,
+                    process,
+                    &request,
+                    resource_limits,
+                    network_counts,
+                );
+                match response {
+                    Ok(result) => process
+                        .execution
+                        .respond_javascript_sync_rpc_success(request.id, result)
+                        .or_else(ignore_stale_javascript_sync_rpc_response)?,
+                    Err(error) => process
+                        .execution
+                        .respond_javascript_sync_rpc_error(
+                            request.id,
+                            "ERR_AGENT_OS_NODE_SYNC_RPC",
+                            error.to_string(),
+                        )
+                        .or_else(ignore_stale_javascript_sync_rpc_response)?,
+                }
+            }
+            ActiveExecutionEvent::Exited(code) => {
+                process.pending_http_requests.remove(&request_key);
+                return Err(SidecarError::Execution(format!(
+                    "HTTP loopback server exited before responding (exit code {code})"
+                )));
+            }
+            ActiveExecutionEvent::Stdout(_)
+            | ActiveExecutionEvent::Stderr(_)
+            | ActiveExecutionEvent::PythonVfsRpcRequest(_)
+            | ActiveExecutionEvent::SignalState { .. } => {}
+        }
+    }
+}
+
 fn service_javascript_dns_sync_rpc<B>(
     bridge: &SharedBridge<B>,
     vm_id: &str,
@@ -5556,6 +5875,142 @@ where
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
     match request.method.as_str() {
+        "net.http_request" => {
+            let (url, options, headers) = parse_http_request_options(request)?;
+            let host = url.host_str().ok_or_else(|| {
+                SidecarError::Execution(String::from("ERR_INVALID_URL: missing host"))
+            })?;
+            let port = url
+                .port_or_known_default()
+                .ok_or_else(|| SidecarError::Execution(String::from("ERR_INVALID_URL: missing port")))?;
+            bridge.require_network_access(
+                vm_id,
+                NetworkOperation::Http,
+                format_tcp_resource(host, port),
+            )?;
+
+            if is_loopback_request_host(host) {
+                if let Some((server_id, request_id, request_json)) = process
+                    .http_servers
+                    .iter_mut()
+                    .find(|(_, server)| server.guest_local_addr.port() == port)
+                    .map(|(server_id, server)| {
+                        server.next_request_id += 1;
+                        let request_id = server.next_request_id;
+                        serialize_http_loopback_request(&url, &options, &headers)
+                            .map(|request_json| (*server_id, request_id, request_json))
+                    })
+                    .transpose()?
+                {
+                    process.pending_http_requests.insert((server_id, request_id), None);
+                    process.execution.send_javascript_stream_event(
+                        "http_request",
+                        json!({
+                            "serverId": server_id,
+                            "requestId": request_id,
+                            "request": request_json,
+                        }),
+                    )?;
+                    let response = wait_for_loopback_http_response(
+                        bridge,
+                        vm_id,
+                        dns,
+                        socket_paths,
+                        kernel,
+                        process,
+                        resource_limits,
+                        (server_id, request_id),
+                    )?;
+                    return Ok(Value::String(response));
+                }
+            }
+
+            issue_outbound_http_request(&url, &options, &headers)
+        }
+        "net.http_listen" => {
+            check_network_resource_limit(
+                resource_limits.max_sockets,
+                network_counts.sockets,
+                1,
+                "socket",
+            )?;
+            let payload_json =
+                javascript_sync_rpc_arg_str(&request.args, 0, "net.http_listen payload")?;
+            let payload: JavascriptHttpListenRequest =
+                serde_json::from_str(payload_json).map_err(|error| {
+                    SidecarError::InvalidState(format!(
+                        "net.http_listen payload must be valid JSON: {error}"
+                    ))
+                })?;
+            let (family, host) = normalize_tcp_listen_host(payload.hostname.as_deref())?;
+            let requested_port = payload.port.unwrap_or(0);
+            bridge.require_network_access(
+                vm_id,
+                NetworkOperation::Listen,
+                format_tcp_resource(host, requested_port),
+            )?;
+            let port = allocate_guest_listen_port(
+                requested_port,
+                family,
+                &socket_paths.used_tcp_guest_ports,
+                socket_paths.listen_policy,
+            )?;
+            let listener =
+                ActiveTcpListener::bind(host, port, Some(DEFAULT_JAVASCRIPT_NET_BACKLOG))?;
+            let guest_local_addr = listener.guest_local_addr();
+            process.http_servers.insert(
+                payload.server_id,
+                ActiveHttpServer {
+                    listener: listener.listener,
+                    guest_local_addr,
+                    next_request_id: 0,
+                },
+            );
+            serde_json::to_string(&json!({
+                "address": {
+                    "address": guest_local_addr.ip().to_string(),
+                    "family": socket_addr_family(&guest_local_addr),
+                    "port": guest_local_addr.port(),
+                }
+            }))
+            .map(Value::String)
+            .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
+        }
+        "net.http_close" => {
+            let server_id = javascript_sync_rpc_arg_u64(&request.args, 0, "net.http_close server id")?;
+            let server = process.http_servers.remove(&server_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown HTTP server {server_id}"))
+            })?;
+            drop(server.listener);
+            process
+                .pending_http_requests
+                .retain(|(pending_server_id, _), _| *pending_server_id != server_id);
+            Ok(Value::Null)
+        }
+        "net.http_wait" => Ok(Value::Null),
+        "net.http_respond" => {
+            let server_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http_respond server id")?;
+            let request_id =
+                javascript_sync_rpc_arg_u64(&request.args, 1, "net.http_respond request id")?;
+            let response_json =
+                javascript_sync_rpc_arg_str(&request.args, 2, "net.http_respond payload")?;
+            serde_json::from_str::<Value>(response_json).map_err(|error| {
+                SidecarError::Execution(format!(
+                    "net.http_respond payload must be valid JSON: {error}"
+                ))
+            })?;
+            let Some(pending) = process
+                .pending_http_requests
+                .get_mut(&(server_id, request_id))
+            else {
+                return Err(SidecarError::InvalidState(format!(
+                    "unknown pending HTTP request {request_id} for server {server_id}"
+                )));
+            };
+            *pending = Some(response_json.to_owned());
+            Ok(Value::Null)
+        }
         "net.connect" => {
             check_network_resource_limit(
                 resource_limits.max_sockets,

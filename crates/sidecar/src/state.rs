@@ -381,6 +381,8 @@ pub(crate) struct ActiveProcess {
     pub(crate) host_cwd: PathBuf,
     pub(crate) child_processes: BTreeMap<String, ActiveProcess>,
     pub(crate) next_child_process_id: usize,
+    pub(crate) http_servers: BTreeMap<u64, ActiveHttpServer>,
+    pub(crate) pending_http_requests: BTreeMap<(u64, u64), Option<String>>,
     pub(crate) tcp_listeners: BTreeMap<String, ActiveTcpListener>,
     pub(crate) next_tcp_listener_id: usize,
     pub(crate) tcp_sockets: BTreeMap<String, ActiveTcpSocket>,
@@ -397,6 +399,13 @@ pub(crate) struct ActiveProcess {
 pub(crate) struct NetworkResourceCounts {
     pub(crate) sockets: usize,
     pub(crate) connections: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct ActiveHttpServer {
+    pub(crate) listener: TcpListener,
+    pub(crate) guest_local_addr: SocketAddr,
+    pub(crate) next_request_id: u64,
 }
 
 // ---------------------------------------------------------------------------

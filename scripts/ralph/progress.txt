@@ -8,6 +8,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - V8 bridge calls use CBOR codec via `SECURE_EXEC_V8_CODEC=cbor` env var; `ciborium` crate handles CBOR↔JSON conversion in the execution crate
 - Internal V8 bridge calls (logging, module resolution, crypto, timers) are handled in the event bridge thread; only kernel operations (fs, net, child_process, dns) go to the sidecar
 - Guest V8 timers split across two host paths in `crates/execution/src/javascript.rs`: `_scheduleTimer` must resolve its async bridge Promise later, while `kernelTimerCreate`/`kernelTimerArm`/`kernelTimerClear` must emit `"timer"` stream events so `setTimeout`/`setInterval` callbacks actually fire
+- The current V8 sync-RPC bridge only tolerates one in-flight request effectively, so long-lived waits like HTTP server close listeners need stream events plus follow-up RPCs instead of a permanently pending sync-bridge Promise
 - The sidecar reads entrypoint files from VFS and passes as `inline_code` to avoid V8 module loading bridge calls in synchronous dispatch
 - Execution crate host-Node compatibility coverage stays behind the `legacy-js-tests` feature; default JavaScript validation should target the V8 isolate path and `crates/execution/tests/javascript_v8.rs`
 - service.rs type definitions use `pub(crate)` fields when extracted to state.rs so impl blocks in service.rs can still access them
@@ -249,4 +250,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - TLS upgrade on bridged TCP sockets depends on preserving the raw handshake bytes; if a background reader is needed, start it lazily after the first explicit socket read instead of when the socket is created
   - Service-level TLS polling in this harness is timing-sensitive; short sleeps between timeout retries keep `net.server_accept`, client-hello parsing, and TLS payload reads deterministic without changing the sidecar RPC contract
   - The static PEM fixture in `service.rs` can age out, so host-side TLS test clients should use an explicit verifier strategy instead of depending on wall-clock-valid certificates
+---
+## 2026-04-07 09:12:53 PDT - US-036
+- Added sidecar HTTP/1 request/listen/respond/close handling, including per-process HTTP server state and pending response tracking so guest `http.createServer()` can exchange request/response payloads through the sidecar
+- Exposed the guest `http` builtin in the V8 bridge, replaced the long-lived HTTP close-wait bridge promise with a non-blocking path that matches the current sync-RPC model, and added focused sidecar HTTP tests while keeping the known-flaky end-to-end V8 HTTP harness ignored
+- Files changed: `crates/execution/CLAUDE.md`, `crates/execution/assets/v8-bridge.js`, `crates/execution/src/javascript.rs`, `crates/execution/src/v8_runtime.rs`, `crates/sidecar/src/execution.rs`, `crates/sidecar/src/state.rs`, `crates/sidecar/tests/service.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - The V8 sync bridge still behaves as a single in-flight sync-RPC channel, so HTTP server waits must use stream events or explicit follow-up RPCs instead of a permanently pending bridge Promise
+  - Adding a sidecar handler is not enough for guest builtins: `crates/execution/assets/v8-bridge.js` also has to export the module from the builtin loader or `node:http` fails before RPC dispatch
+  - On this branch, `cargo test -p agent-os-sidecar -- --test-threads=1 http` is the stable verification target for sidecar HTTP work; the end-to-end V8 HTTP harness remains flaky unless you are explicitly fixing that harness
 ---

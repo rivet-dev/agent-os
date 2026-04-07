@@ -10912,19 +10912,7 @@ ${headerLines}\r
       }
     }
     _startHostCloseWait() {
-      if (this._hostCloseWaitStarted || typeof _networkHttpServerWaitRaw === "undefined") {
-        return;
-      }
       this._hostCloseWaitStarted = true;
-      void _networkHttpServerWaitRaw.apply(void 0, [this._serverId], { result: { promise: true } }).then(() => {
-        if (!this.listening) {
-          return;
-        }
-        debugBridgeNetwork("server close from host", this._serverId);
-        this._completeClose();
-        this._emit("close");
-      }).catch(() => {
-      });
     }
     async _start(port, hostname) {
       if (typeof _networkHttpServerListenRaw === "undefined") {
@@ -19003,16 +18991,13 @@ ${headerLines}\r
   }
   function rejectRestrictedBuiltinRequest(request) {
     const normalized = normalizeBuiltinRequest(request);
-    if (normalized === "http") {
-      const error = new Error(`node:${normalized} is not available in the Agent OS guest runtime`);
-      error.code = "ERR_ACCESS_DENIED";
-      throw error;
-    }
     return normalized;
   }
   function loadBuiltinModule(request) {
     const normalized = rejectRestrictedBuiltinRequest(request);
     switch (normalized) {
+      case "http":
+        return _httpModule;
       case "fs":
         return _fsModule;
       case "os":
