@@ -13,6 +13,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 ## Codebase Patterns
 - ACP compatibility logic in `crates/sidecar/src/acp/` must preserve the TypeScript edge-case bundle together: dedupe repeated inbound request IDs, shim `session/request_permission` vs `request/permission`, normalize permission option IDs, and fall back from cancel requests to a notification on `-32601`
 - ACP `CreateSession` in `crates/sidecar/src/service.rs` must force `AGENT_OS_KEEP_STDIN_OPEN=1` for adapter processes and keep a process-scoped stdout buffer until `session/new` returns the ACP `sessionId`, because handshake fragments can arrive before an `AcpSessionState` exists
+- ACP terminal helpers should stay internal to `AcpSessionState`: skip their process IDs in `pump_process_events()`, buffer output and exit state on the ACP session, and drain or kill them before removing the ACP session so public process events stay clean
 - Host tool registration is now split: TypeScript converts Zod schemas to JSON Schema, validates sidecar callback payloads, and runs `tool.execute()`, while the sidecar owns CLI parsing, `agentos` command dispatch, and prompt-markdown generation
 - Packages/core permissions should stay camelCase and JSON-serializable in TypeScript; only the native sidecar wire payload translates `childProcess` to `child_process`
 - Partial declarative permission objects must leave unspecified domains unset so Rust can apply deny-by-default per domain; only an omitted top-level permissions object should expand to allow-all
@@ -393,4 +394,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - ACP adapter launches from the sidecar must set `AGENT_OS_KEEP_STDIN_OPEN=1`; without it, interactive ACP stdin semantics do not match the TypeScript session path
   - ACP handshake output can arrive before `session/new` returns, so stdout buffering has to exist at the process level first and then transfer into the created `AcpSessionState`
   - Direct Rust unit coverage for `crates/sidecar/src/acp/{compat,session}.rs` is a more stable way to validate the compatibility/state-machine port than long-lived guest-adapter harnesses in the current sidecar runtime
+---
+## 2026-04-07 12:37:46 PDT - US-024
+- Implemented Rust-side ACP inbound request handling for `fs/read_text_file`, `fs/write_text_file`, and the full `terminal/*` lifecycle so ACP adapters now read and write the VM VFS and manage internal terminal processes without bouncing through TypeScript
+- Added ACP terminal session state and cleanup, suppressed ACP-owned terminal processes from the public sidecar event stream, and updated crate guidance with the new internal-terminal pattern
+- Files changed: `crates/CLAUDE.md`, `crates/sidecar/src/{acp/session.rs,execution.rs,service.rs}`, `crates/sidecar/tests/service.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - ACP terminal processes need their own session-local state (`output`, truncation, exit code, release state) because `vm.active_processes` drops exited processes before later `terminal/output` calls can inspect them
+  - If an ACP-owned process is internal implementation detail, skip it in `pump_process_events()` and intercept any queued envelopes before they become public `process_output` or `process_exited` events
+  - `close_agent_session()` must drain and terminate ACP terminal processes before removing the ACP session, otherwise released internal terminals can leak or surface stray events after the session is gone
 ---

@@ -44,7 +44,7 @@ mod service {
             RootFilesystemEntry, RootFilesystemEntryKind, SidecarPlacement, SidecarRequestFrame,
             SidecarRequestPayload, SidecarResponsePayload, WriteStdinRequest,
         };
-        use crate::state::VM_DNS_SERVERS_METADATA_KEY;
+        use crate::state::{ToolExecution, VM_DNS_SERVERS_METADATA_KEY};
         use agent_os_bridge::{FileKind, SymlinkRequest};
         use agent_os_execution::PythonVfsRpcMethod;
         use agent_os_kernel::command_registry::CommandDriver;
@@ -953,6 +953,297 @@ ykAheWCsAteSEWVc0w==\n\
                 &limits,
                 counts,
             )
+        }
+
+        fn create_acp_session_for_tests(
+            sidecar: &mut NativeSidecar<RecordingBridge>,
+            vm_id: &str,
+            cwd: &Path,
+        ) -> String {
+            let process_id = format!("acp-agent-test-{}", sidecar.acp_sessions.len() + 1);
+            let kernel_handle = {
+                let vm = sidecar.vms.get_mut(vm_id).expect("active vm");
+                vm.kernel
+                    .spawn_process(
+                        JAVASCRIPT_COMMAND,
+                        Vec::new(),
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn ACP kernel process")
+            };
+            let vm = sidecar.vms.get_mut(vm_id).expect("active vm");
+            vm.active_processes.insert(
+                process_id.clone(),
+                ActiveProcess::new(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Tool(ToolExecution::default()),
+                )
+                .with_host_cwd(cwd.to_path_buf()),
+            );
+
+            let session_id = format!("acp-session-{}", sidecar.acp_sessions.len() + 1);
+            sidecar.acp_sessions.insert(
+                session_id.clone(),
+                AcpSessionState::new(
+                    session_id.clone(),
+                    String::from(vm_id),
+                    String::from("pi"),
+                    process_id,
+                    &Map::new(),
+                    &Map::new(),
+                ),
+            );
+            session_id
+        }
+
+        #[test]
+        fn acp_inbound_fs_requests_read_and_write_vm_files() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-acp-fs");
+            let acp_session_id = create_acp_session_for_tests(&mut sidecar, &vm_id, &cwd);
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("active vm");
+                vm.kernel
+                    .write_file("/workspace/notes.txt", b"alpha\nbeta\ngamma\n".to_vec())
+                    .expect("seed test file");
+            }
+
+            let read_result = sidecar
+                .handle_inbound_acp_request(
+                    &acp_session_id,
+                    &JsonRpcRequest {
+                        jsonrpc: String::from("2.0"),
+                        id: JsonRpcId::Number(41),
+                        method: String::from("fs/read_text_file"),
+                        params: Some(json!({
+                            "path": "/workspace/notes.txt",
+                            "line": 2,
+                            "limit": 2,
+                        })),
+                    },
+                )
+                .expect("read ACP request")
+                .expect("read ACP result");
+            assert_eq!(read_result, json!({ "content": "beta\ngamma" }));
+
+            let write_result = sidecar
+                .handle_inbound_acp_request(
+                    &acp_session_id,
+                    &JsonRpcRequest {
+                        jsonrpc: String::from("2.0"),
+                        id: JsonRpcId::Number(42),
+                        method: String::from("fs/write_text_file"),
+                        params: Some(json!({
+                            "path": "/workspace/notes.txt",
+                            "content": "rewritten",
+                        })),
+                    },
+                )
+                .expect("write ACP request")
+                .expect("write ACP result");
+            assert_eq!(write_result, Value::Null);
+
+            let bytes = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("active vm");
+                vm.kernel
+                    .read_file("/workspace/notes.txt")
+                    .expect("read rewritten file")
+            };
+            assert_eq!(String::from_utf8(bytes).expect("utf8 file"), "rewritten");
+        }
+
+        #[test]
+        fn acp_inbound_terminal_requests_manage_internal_processes() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-acp-terminal");
+            let acp_session_id = create_acp_session_for_tests(&mut sidecar, &vm_id, &cwd);
+
+            let created = sidecar
+                .handle_inbound_acp_request(
+                    &acp_session_id,
+                    &JsonRpcRequest {
+                        jsonrpc: String::from("2.0"),
+                        id: JsonRpcId::Number(50),
+                        method: String::from("terminal/create"),
+                        params: Some(json!({
+                            "command": "node",
+                            "args": [
+                                "--eval",
+                                "process.stdout.write('hello\\n'); process.stderr.write('oops\\n');",
+                            ],
+                        })),
+                    },
+                )
+                .expect("create terminal")
+                .expect("terminal create result");
+            let short_terminal_id = created["terminalId"]
+                .as_str()
+                .expect("terminal id")
+                .to_owned();
+
+            let wait_result = sidecar
+                .handle_inbound_acp_request(
+                    &acp_session_id,
+                    &JsonRpcRequest {
+                        jsonrpc: String::from("2.0"),
+                        id: JsonRpcId::Number(51),
+                        method: String::from("terminal/wait_for_exit"),
+                        params: Some(json!({ "terminalId": &short_terminal_id })),
+                    },
+                )
+                .expect("wait terminal")
+                .expect("terminal wait result");
+            assert_eq!(wait_result, json!({ "exitCode": 0, "signal": Value::Null }));
+
+            let output_result = sidecar
+                .handle_inbound_acp_request(
+                    &acp_session_id,
+                    &JsonRpcRequest {
+                        jsonrpc: String::from("2.0"),
+                        id: JsonRpcId::Number(52),
+                        method: String::from("terminal/output"),
+                        params: Some(json!({ "terminalId": &short_terminal_id })),
+                    },
+                )
+                .expect("terminal output")
+                .expect("terminal output result");
+            let output = output_result["output"].as_str().expect("terminal output string");
+            assert!(output.contains("hello"));
+            assert!(output.contains("oops"));
+            assert_eq!(output_result["truncated"], Value::Bool(false));
+            assert_eq!(output_result["exitStatus"]["exitCode"], json!(0));
+
+            let release_result = sidecar
+                .handle_inbound_acp_request(
+                    &acp_session_id,
+                    &JsonRpcRequest {
+                        jsonrpc: String::from("2.0"),
+                        id: JsonRpcId::Number(53),
+                        method: String::from("terminal/release"),
+                        params: Some(json!({ "terminalId": &short_terminal_id })),
+                    },
+                )
+                .expect("release terminal")
+                .expect("terminal release result");
+            assert_eq!(release_result, Value::Null);
+            assert!(matches!(
+                sidecar.handle_inbound_acp_request(
+                    &acp_session_id,
+                    &JsonRpcRequest {
+                        jsonrpc: String::from("2.0"),
+                        id: JsonRpcId::Number(54),
+                        method: String::from("terminal/output"),
+                        params: Some(json!({ "terminalId": &short_terminal_id })),
+                    },
+                ),
+                Err(SidecarError::InvalidState(message))
+                    if message == format!("ACP terminal not found: {short_terminal_id}")
+            ));
+
+            let created = sidecar
+                .handle_inbound_acp_request(
+                    &acp_session_id,
+                    &JsonRpcRequest {
+                        jsonrpc: String::from("2.0"),
+                        id: JsonRpcId::Number(55),
+                        method: String::from("terminal/create"),
+                        params: Some(json!({
+                            "command": "node",
+                            "args": [
+                                "--eval",
+                                "setInterval(() => {}, 1000);",
+                            ],
+                        })),
+                    },
+                )
+                .expect("create long-lived terminal")
+                .expect("long-lived terminal result");
+            let long_terminal_id = created["terminalId"]
+                .as_str()
+                .expect("terminal id")
+                .to_owned();
+
+            let kill_result = sidecar
+                .handle_inbound_acp_request(
+                    &acp_session_id,
+                    &JsonRpcRequest {
+                        jsonrpc: String::from("2.0"),
+                        id: JsonRpcId::Number(56),
+                        method: String::from("terminal/kill"),
+                        params: Some(json!({ "terminalId": &long_terminal_id })),
+                    },
+                )
+                .expect("kill terminal")
+                .expect("terminal kill result");
+            assert_eq!(kill_result, Value::Null);
+
+            let wait_result = sidecar
+                .handle_inbound_acp_request(
+                    &acp_session_id,
+                    &JsonRpcRequest {
+                        jsonrpc: String::from("2.0"),
+                        id: JsonRpcId::Number(57),
+                        method: String::from("terminal/wait_for_exit"),
+                        params: Some(json!({ "terminalId": &long_terminal_id })),
+                    },
+                )
+                .expect("wait killed terminal")
+                .expect("killed terminal wait result");
+            assert!(
+                wait_result["exitCode"]
+                    .as_i64()
+                    .expect("exit code should be numeric")
+                    > 0
+            );
+
+            let release_result = sidecar
+                .handle_inbound_acp_request(
+                    &acp_session_id,
+                    &JsonRpcRequest {
+                        jsonrpc: String::from("2.0"),
+                        id: JsonRpcId::Number(58),
+                        method: String::from("terminal/release"),
+                        params: Some(json!({ "terminalId": &long_terminal_id })),
+                    },
+                )
+                .expect("release killed terminal")
+                .expect("release killed terminal result");
+            assert_eq!(release_result, Value::Null);
+
+            let event = sidecar
+                .poll_event_blocking(
+                    &OwnershipScope::session(&connection_id, &session_id),
+                    Duration::from_millis(25),
+                )
+                .expect("poll session events");
+            assert!(event.is_none(), "ACP terminal processes should stay internal");
         }
 
         fn poll_http2_event(

@@ -497,7 +497,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 35,
-      "passes": false,
+      "passes": true,
       "notes": "Step 6 part 3. Depends on US-023. These are requests FROM agent processes TO the sidecar. The sidecar already has VFS and process table \u2014 this is dispatch wiring."
     },
     {

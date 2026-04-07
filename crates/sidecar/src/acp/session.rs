@@ -8,6 +8,49 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Debug, Clone)]
+pub(crate) struct AcpTerminalState {
+    pub(crate) process_id: String,
+    pub(crate) output: String,
+    pub(crate) truncated: bool,
+    pub(crate) output_byte_limit: usize,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) released: bool,
+}
+
+impl AcpTerminalState {
+    pub(crate) fn new(process_id: String, output_byte_limit: usize) -> Self {
+        Self {
+            process_id,
+            output: String::new(),
+            truncated: false,
+            output_byte_limit,
+            exit_code: None,
+            released: false,
+        }
+    }
+
+    pub(crate) fn append_output(&mut self, chunk: &[u8]) {
+        self.output.push_str(&String::from_utf8_lossy(chunk));
+        if self.output_byte_limit == 0 {
+            self.output.clear();
+            self.truncated = true;
+            return;
+        }
+
+        while self.output.len() > self.output_byte_limit {
+            let remove_len = self
+                .output
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(self.output.len());
+            self.output.drain(..remove_len);
+            self.truncated = true;
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct SequencedEvent {
     pub(crate) sequence_number: u64,
     pub(crate) notification: JsonRpcNotification,
@@ -30,6 +73,8 @@ pub(crate) struct AcpSessionState {
     pub(crate) recent_activity: VecDeque<String>,
     pub(crate) pending_permission_requests: BTreeMap<String, PendingPermissionRequest>,
     pub(crate) seen_inbound_request_ids: BTreeSet<JsonRpcId>,
+    pub(crate) terminals: BTreeMap<String, AcpTerminalState>,
+    pub(crate) next_terminal_id: u64,
     pub(crate) closed: bool,
     pub(crate) exit_code: Option<i32>,
     pub(crate) compatibility: AgentCompatibilityKind,
@@ -74,6 +119,8 @@ impl AcpSessionState {
             recent_activity: VecDeque::with_capacity(RECENT_ACTIVITY_LIMIT),
             pending_permission_requests: BTreeMap::new(),
             seen_inbound_request_ids: BTreeSet::new(),
+            terminals: BTreeMap::new(),
+            next_terminal_id: 1,
             closed: false,
             exit_code: None,
             compatibility,
@@ -126,6 +173,12 @@ impl AcpSessionState {
             notification,
         });
         self.next_sequence_number += 1;
+    }
+
+    pub(crate) fn allocate_terminal_id(&mut self) -> String {
+        let terminal_id = format!("acp-term-{}", self.next_terminal_id);
+        self.next_terminal_id += 1;
+        terminal_id
     }
 
     pub(crate) fn apply_request_success(

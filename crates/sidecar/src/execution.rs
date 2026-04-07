@@ -2122,6 +2122,12 @@ where
                 let mut emitted_this_pass = false;
 
                 for process_id in process_ids {
+                    if self
+                        .acp_terminal_owner_for_process(&vm_id, &process_id)
+                        .is_some()
+                    {
+                        continue;
+                    }
                     let event = {
                         let vm = self.vms.get_mut(&vm_id).expect("VM should still exist");
                         let process = vm
