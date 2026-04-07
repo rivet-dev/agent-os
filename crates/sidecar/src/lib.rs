@@ -4,6 +4,7 @@
 
 pub(crate) mod bootstrap;
 pub(crate) mod bridge;
+pub(crate) mod filesystem;
 mod google_drive_plugin;
 mod host_dir_plugin;
 pub mod protocol;

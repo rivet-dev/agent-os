@@ -1,12 +1,11 @@
 //! Root filesystem bootstrap and snapshot helpers extracted from vm.rs.
 
+use crate::filesystem::encode_guest_filesystem_content;
 use crate::protocol::{
     RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryEncoding,
     RootFilesystemEntryKind, RootFilesystemLowerDescriptor, RootFilesystemMode,
 };
-use crate::service::{
-    dirname, encode_guest_filesystem_content, normalize_path, root_filesystem_error, vfs_error,
-};
+use crate::service::{dirname, normalize_path, root_filesystem_error, vfs_error};
 use crate::state::SidecarKernel;
 use crate::SidecarError;
 

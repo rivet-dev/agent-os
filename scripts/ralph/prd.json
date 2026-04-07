@@ -64,7 +64,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Step 0a. Standalone filesystem domain — no cross-cutting dependencies beyond state types."
     },
     {
