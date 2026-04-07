@@ -17,8 +17,8 @@ import {
 	resolve as resolveHostPath,
 } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type ToolKit, validateToolkits } from "./host-tools.js";
-import type { HostToolsServer } from "./host-tools-server.js";
+import { type HostTool, type ToolKit, validateToolkits } from "./host-tools.js";
+import { zodToJsonSchema } from "./host-tools-zod.js";
 import {
 	type ConnectTerminalOptions,
 	createInMemoryFileSystem,
@@ -153,8 +153,14 @@ import {
 	NativeSidecarKernelProxy,
 } from "./sidecar/native-kernel-proxy.js";
 import { serializePermissionsForSidecar } from "./sidecar/permissions.js";
-import { registerToolkitsOnSidecar } from "./sidecar/tool-registration.js";
-import type { RootFilesystemEntry } from "./sidecar/native-process-client.js";
+import type {
+	AuthenticatedSession,
+	CreatedVm,
+	RootFilesystemEntry,
+	SidecarRegisteredToolDefinition,
+	SidecarRequestFrame,
+	SidecarResponsePayload,
+} from "./sidecar/native-process-client.js";
 import { NativeSidecarProcessClient } from "./sidecar/native-process-client.js";
 import { serializeRootFilesystemForSidecar } from "./sidecar/root-filesystem-descriptors.js";
 import { createStdoutLineIterable } from "./stdout-lines.js";
@@ -179,8 +185,6 @@ interface AgentOsVmAdmin extends InProcessSidecarVmAdmin {
 	snapshotRootFilesystem?: () => Promise<RootSnapshotExport>;
 	toolKits: ToolKit[];
 	toolReference: string;
-	toolsServer: HostToolsServer | null;
-	shimFs: ReturnType<typeof createInMemoryFileSystem> | null;
 }
 
 interface AcpTerminalState {
@@ -1129,6 +1133,142 @@ function materializeToolShimDir(toolKits: ToolKit[]): string {
 	return shimDir;
 }
 
+function validationMessage(error: unknown): string {
+	if (
+		typeof error === "object" &&
+		error !== null &&
+		"issues" in error &&
+		Array.isArray((error as { issues?: unknown[] }).issues)
+	) {
+		return (error as { issues: Array<{ message: string; path?: unknown[] }> }).issues
+			.map((issue) => {
+				const path =
+					Array.isArray(issue.path) && issue.path.length > 0
+						? ` at "${issue.path.join(".")}"`
+						: "";
+				return `${issue.message}${path}`;
+			})
+			.join("; ");
+	}
+	return error instanceof Error ? error.message : String(error);
+}
+
+function toolToSidecarDefinition(tool: HostTool): SidecarRegisteredToolDefinition {
+	return {
+		description: tool.description,
+		inputSchema: zodToJsonSchema(tool.inputSchema),
+		...(tool.timeout !== undefined ? { timeoutMs: tool.timeout } : {}),
+		...(tool.examples && tool.examples.length > 0
+			? {
+					examples: tool.examples.map((example) => ({
+						description: example.description,
+						input: example.input,
+					})),
+				}
+			: {}),
+	};
+}
+
+async function handleToolInvocation(
+	request: SidecarRequestFrame,
+	toolMap: ReadonlyMap<string, HostTool>,
+): Promise<SidecarResponsePayload> {
+	const payload = request.payload;
+	if (payload.type !== "tool_invocation") {
+		return {
+			type: "tool_invocation_result",
+			invocation_id: "unknown",
+			error: `unsupported sidecar request type: ${payload.type}`,
+		};
+	}
+
+	const tool = toolMap.get(payload.tool_key);
+	if (!tool) {
+		return {
+			type: "tool_invocation_result",
+			invocation_id: payload.invocation_id,
+			error: `Unknown tool "${payload.tool_key}"`,
+		};
+	}
+
+	const parsed = tool.inputSchema.safeParse(payload.input);
+	if (!parsed.success) {
+		return {
+			type: "tool_invocation_result",
+			invocation_id: payload.invocation_id,
+			error: validationMessage(parsed.error),
+		};
+	}
+
+	try {
+		const result = await Promise.race([
+			Promise.resolve(tool.execute(parsed.data)),
+			new Promise<never>((_, reject) =>
+				setTimeout(
+					() =>
+						reject(
+							new Error(
+								`Tool "${payload.tool_key}" timed out after ${payload.timeout_ms}ms`,
+							),
+						),
+					payload.timeout_ms,
+				),
+			),
+		]);
+		return {
+			type: "tool_invocation_result",
+			invocation_id: payload.invocation_id,
+			result,
+		};
+	} catch (error) {
+		return {
+			type: "tool_invocation_result",
+			invocation_id: payload.invocation_id,
+			error: validationMessage(error),
+		};
+	}
+}
+
+async function registerToolkitsOnSidecar(
+	client: NativeSidecarProcessClient,
+	session: AuthenticatedSession,
+	vm: CreatedVm,
+	toolKits: ToolKit[],
+): Promise<string> {
+	if (toolKits.length === 0) {
+		client.setSidecarRequestHandler(null);
+		return "";
+	}
+
+	const toolMap = new Map<string, HostTool>();
+	for (const toolKit of toolKits) {
+		for (const [toolName, tool] of Object.entries(toolKit.tools)) {
+			toolMap.set(`${toolKit.name}:${toolName}`, tool);
+		}
+	}
+
+	client.setSidecarRequestHandler((request) =>
+		handleToolInvocation(request, toolMap),
+	);
+
+	let promptMarkdown = "";
+	for (const toolKit of toolKits) {
+		const registered = await client.registerToolkit(session, vm, {
+			name: toolKit.name,
+			description: toolKit.description,
+			tools: Object.fromEntries(
+				Object.entries(toolKit.tools).map(([toolName, tool]) => [
+					toolName,
+					toolToSidecarDefinition(tool),
+				]),
+			),
+		});
+		promptMarkdown = registered.promptMarkdown;
+	}
+
+	return promptMarkdown;
+}
+
 export class AgentOs {
 	#kernel: Kernel;
 	readonly sidecar: AgentOsSidecar;
@@ -1156,10 +1296,8 @@ export class AgentOs {
 	private _softwareRoots: SoftwareRoot[];
 	private _softwareAgentConfigs: Map<string, AgentConfig>;
 	private _cronManager!: CronManager;
-	private _toolsServer: HostToolsServer | null = null;
 	private _toolKits: ToolKit[] = [];
 	private _toolReference = "";
-	private _shimFs: ReturnType<typeof createInMemoryFileSystem> | null = null;
 	private _hostMounts: HostMountInfo[];
 	private _acpTerminals = new Map<string, AcpTerminalState>();
 	private _acpTerminalCounter = 0;
@@ -1223,8 +1361,6 @@ export class AgentOs {
 					...NODE_RUNTIME_BOOTSTRAP_COMMANDS,
 				],
 			);
-			let toolsServer: HostToolsServer | null = null;
-			let shimFs: ReturnType<typeof createInMemoryFileSystem> | null = null;
 			let toolReference = "";
 			let rootBridge: NativeSidecarKernelProxy | null = null;
 			let kernel: Kernel | null = null;
@@ -1347,10 +1483,8 @@ export class AgentOs {
 								await snapshotClient.snapshotRootFilesystem(session, nativeVm),
 							),
 						),
-					shimFs,
 					toolKits: toolKits ?? [],
 					toolReference,
-					toolsServer,
 					async dispose() {
 						if (kernel) {
 							const currentKernel = kernel;
@@ -1400,10 +1534,8 @@ export class AgentOs {
 				vmAdmin.rootView,
 			);
 			vm._sidecarLease = sidecarLease;
-			vm._toolsServer = vmAdmin.toolsServer;
 			vm._toolKits = vmAdmin.toolKits;
 			vm._toolReference = vmAdmin.toolReference;
-			vm._shimFs = vmAdmin.shimFs;
 			vm._cronManager = new CronManager(
 				vm,
 				options?.scheduleDriver ?? new TimerScheduleDriver(),
@@ -2723,7 +2855,6 @@ export class AgentOs {
 
 		const sidecarLease = this._sidecarLease;
 		this._sidecarLease = null;
-		this._toolsServer = null;
 		if (sidecarLease) {
 			return sidecarLease.dispose();
 		}

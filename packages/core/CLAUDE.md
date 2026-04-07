@@ -14,6 +14,7 @@
 - **Cron scheduling stays in the TypeScript layer.** The Rust sidecar has no concept of cron jobs. Cron expression parsing, timer management, overlap policies, and job execution dispatch all live in the TypeScript SDK.
 - Native sidecar execution requests should stay unresolved on the TypeScript side. Forward `command`, `args`, `cwd`, and VM config through the wire payload, and let Rust own command lookup, guest-path to host-path mapping, shadow materialization, and `AGENT_OS_*` runtime env assembly.
 - Native sidecar `exec()` should stay a thin `sh -c` wrapper when the guest shell exists. Do not reintroduce TypeScript tokenization or `node` special-casing in `native-kernel-proxy.ts`.
+- Host tool registration is split across the boundary: TypeScript converts Zod schemas to JSON Schema, validates sidecar tool invocations, and runs the local `execute()` callbacks, while the sidecar owns CLI flag parsing, `agentos` command dispatch, and prompt-markdown generation via `register_toolkit`.
 
 ## Agent Sessions (ACP)
 
@@ -62,13 +63,14 @@ Each agent type needs:
 
 See `.agent/specs/test-structure.md` for the full restructuring plan. Target layout:
 
-- `unit/` -- no VM, no sidecar; pure logic (host-tools parsing, descriptors, cron manager, etc.)
+- `unit/` -- no VM, no sidecar; pure logic (host-tools Zod conversion, descriptors, cron manager, etc.)
 - `filesystem/` -- VFS CRUD, overlay, mount, layers, host-dir
 - `process/` -- execution, signals, process tree, flat API wrappers
 - `session/` -- ACP lifecycle, events, capabilities, MCP, cancellation
 - `agents/{pi,claude,opencode,codex}/` -- per-agent adapter tests
 - `wasm/` -- WASM command and permission tier tests
-- `network/` -- connectivity, host-tools server
+- `network/` -- connectivity and fetch behavior inside the VM
+- Host tool command-path coverage belongs with VM-backed sidecar tests such as `tests/sidecar-tool-dispatch.test.ts`, not a standalone TypeScript RPC server suite.
 - `sidecar/` -- sidecar client, native process
 - `cron/` -- cron integration
 

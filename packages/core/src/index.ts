@@ -109,19 +109,6 @@ export {
 	validateToolkits,
 	MAX_TOOL_DESCRIPTION_LENGTH,
 } from "./host-tools.js";
-export { generateToolReference } from "./host-tools-prompt.js";
-export {
-	camelToKebab,
-	getZodDescription,
-	getZodEnumValues,
-	parseArgv,
-} from "./host-tools-argv.js";
-export type { FieldInfo } from "./host-tools-argv.js";
-export {
-	createShimFilesystem,
-	generateMasterShim,
-	generateToolkitShim,
-} from "./host-tools-shims.js";
 export { getOsInstructions } from "./os-instructions.js";
 export type {
 	JsonRpcError,

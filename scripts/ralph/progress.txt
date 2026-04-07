@@ -1,7 +1,17 @@
 # Ralph Progress Log
 Started: Mon Apr  6 01:03:18 PM PDT 2026
 ---
+## 2026-04-07 11:40:27 PDT - US-021
+- Deleted the legacy TypeScript host-tools argv/prompt/server/shim files, added `packages/core/src/host-tools-zod.ts`, and moved toolkit registration plus sidecar tool-invocation handling into `packages/core/src/agent-os.ts`
+- Updated the public export surface to drop the deleted host-tools helpers, refreshed `packages/core/CLAUDE.md` (via the `AGENTS.md` symlink) to match the new sidecar-owned tool flow, and replaced the removed test suites with focused Zod-conversion, sidecar-dispatch, and tool-reference coverage
+- Files changed: `packages/core/src/{agent-os.ts,host-tools-zod.ts,index.ts}`, `packages/core/src/{host-tools-argv.ts,host-tools-prompt.ts,host-tools-server.ts,host-tools-shims.ts,sidecar/tool-registration.ts}` (deleted), `packages/core/tests/{host-tools-zod.test.ts,tool-reference.test.ts}`, `packages/core/tests/{host-tools-argv.test.ts,host-tools-prompt.test.ts,host-tools-server.test.ts,host-tools-shims.test.ts}` (deleted), `packages/core/CLAUDE.md`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Tool-reference assertions should read the VM's stored `_toolReference` or use `prepareInstructions` directly; ACP adapter harnesses add unrelated lifecycle noise when the story is only about toolkit registration
+  - `zod.describe()` metadata is stored on the schema instance in this workspace's Zod version, not in `_def`, so host-tool schema conversion should read both surfaces
+  - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
+---
 ## Codebase Patterns
+- Host tool registration is now split: TypeScript converts Zod schemas to JSON Schema, validates sidecar callback payloads, and runs `tool.execute()`, while the sidecar owns CLI parsing, `agentos` command dispatch, and prompt-markdown generation
 - Packages/core permissions should stay camelCase and JSON-serializable in TypeScript; only the native sidecar wire payload translates `childProcess` to `child_process`
 - Partial declarative permission objects must leave unspecified domains unset so Rust can apply deny-by-default per domain; only an omitted top-level permissions object should expand to allow-all
 - V8 binary discovery: `AGENT_OS_V8_RUNTIME_PATH` env var → alongside current exe (+ parent dirs for test deps/) → `target/{release,debug}/agent-os-v8`

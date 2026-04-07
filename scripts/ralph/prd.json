@@ -433,7 +433,7 @@
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
       "priority": 32,
-      "passes": false,
+      "passes": true,
       "notes": "Step 5 (TypeScript side). Depends on US-020. Check index.ts for re-exports from host-tools-argv.ts, host-tools-prompt.ts, host-tools-shims.ts."
     },
     {
