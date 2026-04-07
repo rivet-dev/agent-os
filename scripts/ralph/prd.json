@@ -581,7 +581,7 @@
         "pnpm build passes"
       ],
       "priority": 39,
-      "passes": false,
+      "passes": true,
       "notes": "Step 7 final. See spec 'Target TypeScript Architecture' for exact file layout. Also update downstream packages within this repo (secure-exec re-exports, registry test helpers, dev-shell). Actor layer in Rivet repo (~/r-aos) needs separate update \u2014 ask user for guidance."
     },
     {

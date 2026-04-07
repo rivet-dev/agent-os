@@ -146,7 +146,7 @@ import {
 	type RootSnapshotExport,
 	type SnapshotLayerHandle,
 } from "./layers.js";
-import { getOsInstructions } from "./os-instructions.js";
+import { type LocalCompatMount, serializeMountConfigForSidecar } from "./js-bridge.js";
 import {
 	type CommandPackageMetadata,
 	processSoftware,
@@ -162,7 +162,6 @@ import {
 	type AgentOsSidecarTransport,
 	type AgentOsSidecarVmBootstrap,
 	type AgentOsSidecarVmHandle,
-	type LocalCompatMount,
 	NativeSidecarProcessClient,
 	NativeSidecarKernelProxy,
 	AuthenticatedSession,
@@ -173,10 +172,21 @@ import {
 	SidecarResponsePayload,
 	SidecarSessionState,
 	createAgentOsSidecarClient,
-	serializeMountConfigForSidecar,
 	serializeRootFilesystemForSidecar,
 } from "./sidecar/rpc-client.js";
 import { serializePermissionsForSidecar } from "./sidecar/permissions.js";
+
+const OS_INSTRUCTIONS_FIXTURE = fileURLToPath(
+	new URL("../fixtures/AGENTOS_SYSTEM_PROMPT.md", import.meta.url),
+);
+
+function buildOsInstructions(additional?: string): string {
+	const base = readFileSync(OS_INSTRUCTIONS_FIXTURE, "utf-8");
+	if (!additional) {
+		return base;
+	}
+	return `${base}\n${additional}`;
+}
 
 export interface AgentOsSharedSidecarOptions {
 	pool?: string;
@@ -1621,7 +1631,7 @@ export class AgentOs {
 				const etcAgentosFs = createInMemoryFileSystem();
 				await etcAgentosFs.writeFile(
 					"instructions.md",
-					getOsInstructions(options?.additionalInstructions),
+					buildOsInstructions(options?.additionalInstructions),
 				);
 				kernel.mountFs("/etc/agentos", etcAgentosFs, { readOnly: true });
 				const snapshotClient = client;

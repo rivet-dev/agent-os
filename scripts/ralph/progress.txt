@@ -11,6 +11,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Public SDK type exports in `packages/core` now belong in `src/types.ts`; keep legacy runtime/kernel implementation helpers behind `src/runtime-compat.ts` and out of the main root export surface
 - `packages/core/src/sidecar/rpc-client.ts` is now the single home for sidecar wire helpers, compat proxy helpers, and sidecar descriptor serializers; keep shared/explicit sidecar pooling and VM lease bookkeeping in `packages/core/src/agent-os.ts`
 - Session launch/instruction tests in `packages/core` should assert against sidecar session metadata such as `getSessionAgentInfo(sessionId).argv`; `createSession()` no longer goes through a directly spyable kernel `spawn()`
 - ACP compatibility logic in `crates/sidecar/src/acp/` must preserve the TypeScript edge-case bundle together: dedupe repeated inbound request IDs, shim `session/request_permission` vs `request/permission`, normalize permission option IDs, and fall back from cancel requests to a notification on `-32601`
@@ -256,6 +257,15 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - `packages/core/src/sidecar/rpc-client.ts` now owns both the framed sidecar client and the remaining host-side compat proxy/descriptor helpers; new sidecar-specific helpers should land there instead of reviving split modules
   - Shared/explicit sidecar pooling is no longer a separate `sidecar/handle.ts` subsystem; `AgentOs.createSidecar()`, `getSharedSidecar()`, and VM lease bookkeeping now live directly in `packages/core/src/agent-os.ts`
   - `pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts` still has pre-existing real-sidecar `ENOENT`/timeout failures on this branch, so use focused sidecar unit/integration files for consolidation work unless you are explicitly fixing that harness
+---
+## 2026-04-07 15:41:58 PDT - US-028
+- Gutted `packages/core/src/runtime.ts` down to type definitions, moved the legacy runtime implementation behind `runtime-compat.ts`, added `src/types.ts` as the public type barrel, and added the missing `src/js-bridge.ts` plus `src/sidecar/process.ts` layout files
+- Deleted `src/os-instructions.ts` by inlining fixture loading into `agent-os.ts`, updated the root `index.ts` to export public types through `types.ts`, refreshed the nearby AGENTS/CLAUDE guidance, and rewired the affected tests to use the new surface
+- Files changed: `packages/core/src/{agent-os.ts,index.ts,runtime.ts,runtime-compat.ts,types.ts,js-bridge.ts,os-instructions.ts}`, `packages/core/src/sidecar/{process.ts,handle.ts}` (rename/delete), `packages/core/src/test/runtime.ts`, `packages/core/tests/{native-sidecar-process.test.ts,os-instructions.test.ts}`, `packages/core/CLAUDE.md`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Public `packages/core` types should be added to `src/types.ts`; if a helper is only needed for legacy kernel/runtime internals, keep it in `src/runtime-compat.ts` instead of exporting it from the root package surface
+  - The `/etc/agentos/instructions.md` bootstrap content now comes straight from the fixture inside `agent-os.ts`; there is no standalone `os-instructions.ts` module left to update
+  - `pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts` still has the known real-sidecar `ENOENT`/timeout failures on this branch, while the changed instruction/mount surfaces pass with focused test runs
 ---
 ## 2026-04-07 07:12:25 PDT - US-031
 - Forwarded V8 `_kernelStdinRead` bridge calls to the sidecar, added sidecar `__kernel_stdin_read` handling against kernel fd `0`, and wired sidecar-managed process stdin writes/closes through both the runtime stream path and a dedicated kernel pipe

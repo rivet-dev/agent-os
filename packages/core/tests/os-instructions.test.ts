@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/agent-os.js";
 import { AGENT_CONFIGS } from "../src/agents.js";
 import { createHostDirBackend } from "../src/host-dir-mount.js";
-import { getOsInstructions } from "../src/os-instructions.js";
 import { getAgentOsKernel } from "../src/test/runtime.js";
 import {
 	REGISTRY_SOFTWARE,
@@ -16,21 +15,33 @@ import {
  * Workspace root has shamefully-hoisted node_modules with pi-acp available.
  */
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
+const OS_INSTRUCTIONS_FIXTURE = resolve(
+	import.meta.dirname,
+	"../fixtures/AGENTOS_SYSTEM_PROMPT.md",
+);
+
+function readOsInstructions(additional?: string): string {
+	const base = fs.readFileSync(OS_INSTRUCTIONS_FIXTURE, "utf-8");
+	if (!additional) {
+		return base;
+	}
+	return `${base}\n${additional}`;
+}
 
 // ── getOsInstructions unit tests ───────────────────────────────────────
 
 describe("getOsInstructions", () => {
 	test("returns non-empty string from fixture", () => {
-		const result = getOsInstructions();
+		const result = readOsInstructions();
 		expect(result).toBeTruthy();
 		expect(typeof result).toBe("string");
 		expect(result.length).toBeGreaterThan(0);
 	});
 
 	test("appends additional text", () => {
-		const base = getOsInstructions();
+		const base = readOsInstructions();
 		const additional = "Custom agent-specific instructions here.";
-		const result = getOsInstructions(additional);
+		const result = readOsInstructions(additional);
 		expect(result).toContain(base);
 		expect(result).toContain(additional);
 		// Additional text comes after base, separated by newline
@@ -59,7 +70,7 @@ describe("/etc/agentos/ setup at boot", () => {
 	test("content matches getOsInstructions() output", async () => {
 		const data = await vm.readFile("/etc/agentos/instructions.md");
 		const content = new TextDecoder().decode(data);
-		const expected = getOsInstructions();
+		const expected = readOsInstructions();
 		expect(content).toBe(expected);
 	});
 
@@ -70,7 +81,7 @@ describe("/etc/agentos/ setup at boot", () => {
 
 		const data = await vm.readFile("/etc/agentos/instructions.md");
 		const content = new TextDecoder().decode(data);
-		const expected = getOsInstructions(additional);
+		const expected = readOsInstructions(additional);
 		expect(content).toBe(expected);
 		expect(content).toContain(additional);
 	});
@@ -123,7 +134,7 @@ describe.skipIf(registrySkipReason)("/etc/agentos/ exec from inside VM", () => {
 	test("exec('cat /etc/agentos/instructions.md') returns the instructions content", async () => {
 		const result = await vm.exec("cat /etc/agentos/instructions.md");
 		expect(result.exitCode).toBe(0);
-		const expected = getOsInstructions();
+		const expected = readOsInstructions();
 		// WasmVM stdout can duplicate lines; use toContain
 		expect(result.stdout).toContain(expected);
 	});

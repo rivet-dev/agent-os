@@ -32,7 +32,7 @@ export {
 	createWasmVmRuntime,
 	DEFAULT_FIRST_PARTY_TIERS,
 	WASMVM_COMMANDS,
-} from "../runtime.js";
+} from "../runtime-compat.js";
 export type {
 	PermissionTier,
 	WasmVmRuntimeOptions,

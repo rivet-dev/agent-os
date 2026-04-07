@@ -15,7 +15,7 @@ import {
 	createInMemoryFileSystem,
 	createKernel,
 	createNodeRuntime,
-} from "../src/runtime.js";
+} from "../src/runtime-compat.js";
 import {
 	NativeSidecarProcessClient,
 	serializeMountConfigForSidecar,
