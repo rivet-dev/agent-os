@@ -17,7 +17,7 @@
         "cargo test -p agent-os-sidecar passes"
       ],
       "priority": 1,
-      "passes": true,
+      "passes": false,
       "notes": "Step 0a \u2014 first extraction. Read .agent/specs/typescript-to-rust-migration.md 'Step 0a: Split service.rs'. IMPORTANT: protocol.rs already exists at crates/sidecar/src/protocol.rs (1,353 lines). Do NOT recreate it \u2014 only move remaining protocol-related types from service.rs into it. Extract state types first because all domain modules depend on them."
     },
     {
@@ -276,7 +276,7 @@
         "pnpm --dir packages/core exec vitest run passes (pre-existing failures acceptable)"
       ],
       "priority": 24,
-      "passes": false,
+      "passes": true,
       "notes": "Must happen BEFORE US-014 (which deletes InMemoryFileSystem). See spec 'Test Structure' section for createTestVm() definition. The helper is ~20-30 lines. The bulk of work is updating imports across 15+ test files."
     },
     {
