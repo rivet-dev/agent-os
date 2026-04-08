@@ -4018,10 +4018,43 @@ function createRpcBackedChildProcessModule(fromGuestDir = '/') {
     spawn(command, args, options) {
       const invocation = normalizeSpawnInvocation(args, options);
       const normalizedOptions = normalizeChildProcessOptions(invocation.options);
-      const child = createSyntheticChildProcess(
-        callSpawn(command, invocation.args, invocation.options),
-        normalizedOptions,
-      );
+      let spawnResult;
+      try {
+        spawnResult = callSpawn(command, invocation.args, invocation.options);
+      } catch (error) {
+        const spawnError = error instanceof Error ? error : new Error(String(error));
+        if (
+          spawnError.code == null &&
+          /command not found:/i.test(String(spawnError.message ?? ''))
+        ) {
+          spawnError.code = 'ENOENT';
+        }
+        const child = Object.create(EventEmitter.prototype);
+        EventEmitter.call(child);
+        child.spawnfile = String(command);
+        child.spawnargs = [String(command), ...invocation.args.map(String)];
+        child.stdin = null;
+        child.stdout = null;
+        child.stderr = null;
+        child.stdio = [null, null, null];
+        child.pid = 0;
+        child.exitCode = null;
+        child.signalCode = null;
+        child.killed = false;
+        child.connected = false;
+        child.kill = () => false;
+        child.ref = () => child;
+        child.unref = () => child;
+        child.disconnect = () => {
+          throw createUnsupportedChildProcessError('child_process.disconnect');
+        };
+        child.send = () => {
+          throw createUnsupportedChildProcessError('child_process.send');
+        };
+        queueMicrotask(() => child.emit('error', spawnError));
+        return child;
+      }
+      const child = createSyntheticChildProcess(spawnResult, normalizedOptions);
       return child;
     },
     spawnSync(command, args, options) {

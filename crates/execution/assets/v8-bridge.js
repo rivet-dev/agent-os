@@ -7318,7 +7318,7 @@ var __bridge = (() => {
       if (!childProcessInstances.has(sessionId)) {
         return;
       }
-      const next = _childProcessPoll.applySync(void 0, [sessionId, 0]);
+      const next = _childProcessPoll.applySync(void 0, [sessionId, 10]);
       if (!next || typeof next !== "object") {
         scheduleChildProcessPoll(sessionId, 5);
         return;
@@ -7787,12 +7787,24 @@ var __bridge = (() => {
     child.spawnfile = command;
     child.spawnargs = [command, ...argsArray];
     if (typeof _childProcessSpawnStart !== "undefined") {
-      const effectiveCwd = opts.cwd ?? (typeof process !== "undefined" ? process.cwd() : "/");
-      const spawnResult = _childProcessSpawnStart.applySync(void 0, [
-        command,
-        JSON.stringify(argsArray),
-        JSON.stringify({ cwd: effectiveCwd, env: opts.env, shell: opts.shell === true })
-      ]);
+      let spawnResult;
+      try {
+        const effectiveCwd = opts.cwd ?? (typeof process !== "undefined" ? process.cwd() : "/");
+        spawnResult = _childProcessSpawnStart.applySync(void 0, [
+          command,
+          JSON.stringify(argsArray),
+          JSON.stringify({ cwd: effectiveCwd, env: opts.env, shell: opts.shell === true })
+        ]);
+      } catch (error) {
+        const spawnError = error instanceof Error ? error : new Error(String(error));
+        if (spawnError.code == null && /command not found:/i.test(String(spawnError.message || ""))) {
+          spawnError.code = "ENOENT";
+        }
+        queueMicrotask(() => {
+          child.emit("error", spawnError);
+        });
+        return child;
+      }
       const sessionId = typeof spawnResult === "object" && spawnResult !== null ? spawnResult.childId : spawnResult;
       childProcessInstances.set(sessionId, child);
       if (typeof _registerHandle === "function") {
@@ -17051,11 +17063,98 @@ ${headerLines}\r
     }
     return toNodeUSVString(init);
   }
+  var NativeURLSearchParams = typeof globalThis.URLSearchParams === "function" ? globalThis.URLSearchParams : class URLSearchParams {
+    constructor(init = "") {
+      this._pairs = [];
+      if (typeof init === "string") {
+        const query = init.replace(/^\?/, "");
+        if (!query) {
+          return;
+        }
+        for (const entry of query.split("&")) {
+          if (!entry) {
+            continue;
+          }
+          const [key, ...rest] = entry.split("=");
+          this._pairs.push([decodeURIComponent(key), decodeURIComponent(rest.join("="))]);
+        }
+        return;
+      }
+      if (Array.isArray(init)) {
+        for (const pair of init) {
+          if (pair == null || pair.length !== 2) {
+            continue;
+          }
+          this._pairs.push([String(pair[0]), String(pair[1])]);
+        }
+        return;
+      }
+      if (init && typeof init === "object") {
+        for (const [key, value] of Object.entries(init)) {
+          this._pairs.push([String(key), String(value)]);
+        }
+      }
+    }
+    append(name, value) {
+      this._pairs.push([String(name), String(value)]);
+    }
+    delete(name) {
+      const key = String(name);
+      this._pairs = this._pairs.filter(([candidate]) => candidate !== key);
+    }
+    get(name) {
+      const key = String(name);
+      const match = this._pairs.find(([candidate]) => candidate === key);
+      return match ? match[1] : null;
+    }
+    getAll(name) {
+      const key = String(name);
+      return this._pairs.filter(([candidate]) => candidate === key).map(([, value]) => value);
+    }
+    has(name) {
+      const key = String(name);
+      return this._pairs.some(([candidate]) => candidate === key);
+    }
+    set(name, value) {
+      const key = String(name);
+      const stringValue = String(value);
+      let replaced = false;
+      this._pairs = this._pairs.filter(([candidate]) => {
+        if (candidate !== key) {
+          return true;
+        }
+        if (!replaced) {
+          replaced = true;
+          return false;
+        }
+        return false;
+      });
+      this._pairs.push([key, stringValue]);
+    }
+    sort() {
+      this._pairs.sort(([left], [right]) => left.localeCompare(right));
+    }
+    entries() {
+      return this._pairs[Symbol.iterator]();
+    }
+    keys() {
+      return this._pairs.map(([key]) => key)[Symbol.iterator]();
+    }
+    values() {
+      return this._pairs.map(([, value]) => value)[Symbol.iterator]();
+    }
+    [Symbol.iterator]() {
+      return this.entries();
+    }
+    toString() {
+      return this._pairs.map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");
+    }
+  };
   function createStandaloneSearchParams(init) {
     if (typeof init === "string") {
-      return new URLSearchParams(init);
+      return new NativeURLSearchParams(init);
     }
-    return init === void 0 ? new URLSearchParams() : new URLSearchParams(init);
+    return init === void 0 ? new NativeURLSearchParams() : new NativeURLSearchParams(init);
   }
   function createCollectionBody(items, options, emptyBody) {
     if (items.length === 0) {
@@ -17363,6 +17462,43 @@ ${headerLines}\r
       enumerable: false
     }
   });
+  var NativeURL = typeof globalThis.URL === "function" ? globalThis.URL : class URL {
+    constructor(url, base) {
+      const baseHref = String(base ? new URL(base).href : "");
+      const raw = String(url ?? "");
+      const full = /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(raw) ? raw : baseHref.replace(/\/[^/]*$/, "/") + raw;
+      const match = full.match(/^(\w+:)\/\/([^/:?#]+)(:\d+)?(.*)$/);
+      this.protocol = match?.[1] || "";
+      this.hostname = match?.[2] || "";
+      this.port = (match?.[3] || "").slice(1);
+      this.pathname = (match?.[4] || "/").split("?")[0].split("#")[0] || "/";
+      this.search = full.includes("?") ? "?" + full.split("?")[1].split("#")[0] : "";
+      this.hash = full.includes("#") ? "#" + full.split("#")[1] : "";
+      this.host = this.hostname + (this.port ? ":" + this.port : "");
+      this.href = this.protocol + "//" + this.host + this.pathname + this.search + this.hash;
+      this.origin = this.protocol + "//" + this.host;
+      this.searchParams = new URLSearchParams(this.search);
+      const syncHrefFromSearchParams = () => {
+        const query = this.searchParams.toString();
+        this.search = query ? `?${query}` : "";
+        this.href = this.protocol + "//" + this.host + this.pathname + this.search + this.hash;
+      };
+      for (const method of ["append", "delete", "set", "sort"]) {
+        const original = this.searchParams[method]?.bind(this.searchParams);
+        if (!original) {
+          continue;
+        }
+        this.searchParams[method] = (...args) => {
+          const result = original(...args);
+          syncHrefFromSearchParams();
+          return result;
+        };
+      }
+    }
+    toString() {
+      return this.href;
+    }
+  };
   var URL2 = class _URL {
     #impl;
     #searchParams;
@@ -17371,7 +17507,7 @@ ${headerLines}\r
         throw createMissingArgsError('The "url" argument must be specified');
       }
       try {
-        this.#impl = arguments.length >= 2 ? new URL2(toNodeUSVString(input), toNodeUSVString(base)) : new URL2(toNodeUSVString(input));
+        this.#impl = arguments.length >= 2 ? new NativeURL(toNodeUSVString(input), toNodeUSVString(base)) : new NativeURL(toNodeUSVString(input));
       } catch {
         throw createInvalidUrlError();
       }
@@ -19567,9 +19703,36 @@ ${headerLines}\r
       }
     };
   }
+  function createBuiltinHmac(algorithm, key) {
+    const chunks = [];
+    const keyBuffer = typeof key === "string" ? import_buffer2.Buffer.from(key) : import_buffer2.Buffer.from(key ?? []);
+    return {
+      update(data, encoding) {
+        const buffer = typeof data === "string" ? import_buffer2.Buffer.from(data, encoding || "utf8") : import_buffer2.Buffer.from(data);
+        chunks.push(buffer);
+        return this;
+      },
+      digest(encoding) {
+        if (typeof _cryptoHmacDigest === "undefined") {
+          throwUnsupportedCryptoApi("createHmac");
+        }
+        const input = chunks.length === 1 ? chunks[0] : import_buffer2.Buffer.concat(chunks);
+        const resultBase64 = _cryptoHmacDigest.applySync(void 0, [
+          String(algorithm),
+          keyBuffer.toString("base64"),
+          input.toString("base64")
+        ]);
+        const result = import_buffer2.Buffer.from(String(resultBase64 || ""), "base64");
+        return encoding ? result.toString(encoding) : result;
+      }
+    };
+  }
   var builtinCryptoModule = {
     createHash(algorithm) {
       return createBuiltinHash(algorithm);
+    },
+    createHmac(algorithm, key) {
+      return createBuiltinHmac(algorithm, key);
     },
     getFips() {
       return 0;
@@ -20098,9 +20261,67 @@ ${headerLines}\r
     }
     return new NativeURL(`file://${absolute}`);
   }
+  function builtinUrlParse(input, parseQueryString = false) {
+    const parsed = new globalThis.URL(String(input ?? ""));
+    const queryString = parsed.search.length > 0 ? parsed.search.slice(1) : null;
+    const auth = parsed.username || parsed.password ? `${decodeURIComponent(parsed.username)}${parsed.password ? `:${decodeURIComponent(parsed.password)}` : ""}` : null;
+    return {
+      href: parsed.href,
+      protocol: parsed.protocol,
+      slashes: true,
+      auth,
+      host: parsed.host,
+      port: parsed.port || null,
+      hostname: parsed.hostname,
+      hash: parsed.hash || null,
+      search: parsed.search || null,
+      query: parseQueryString ? Object.fromEntries(parsed.searchParams.entries()) : queryString,
+      pathname: parsed.pathname,
+      path: `${parsed.pathname}${parsed.search}`
+    };
+  }
+  function builtinUrlFormat(value) {
+    if (value == null) {
+      return "";
+    }
+    if (typeof value === "string") {
+      return value;
+    }
+    if (typeof value.href === "string") {
+      return value.href;
+    }
+    const protocol = typeof value.protocol === "string" ? value.protocol : "http:";
+    const slashes = value.slashes === false ? "" : "//";
+    const auth = typeof value.auth === "string" && value.auth.length > 0 ? `${value.auth}@` : "";
+    const host = typeof value.host === "string" && value.host.length > 0 ? value.host : `${value.hostname ?? ""}${value.port ? `:${value.port}` : ""}`;
+    const pathname = typeof value.pathname === "string" ? value.pathname : typeof value.path === "string" ? value.path : "";
+    let search = "";
+    if (typeof value.search === "string") {
+      search = value.search;
+    } else if (typeof value.query === "string" && value.query.length > 0) {
+      search = value.query.startsWith("?") ? value.query : `?${value.query}`;
+    } else if (value.query && typeof value.query === "object") {
+      const params = new globalThis.URLSearchParams();
+      for (const [key, entry] of Object.entries(value.query)) {
+        if (Array.isArray(entry)) {
+          for (const item of entry) {
+            params.append(key, String(item));
+          }
+        } else if (entry != null) {
+          params.append(key, String(entry));
+        }
+      }
+      const encoded = params.toString();
+      search = encoded ? `?${encoded}` : "";
+    }
+    const hash = typeof value.hash === "string" ? value.hash : "";
+    return `${protocol}${slashes}${auth}${host}${pathname}${search}${hash}`;
+  }
   var builtinUrlModule = {
     URL: globalThis.URL,
+    format: builtinUrlFormat,
     fileURLToPath: builtinFileURLToPath,
+    parse: builtinUrlParse,
     pathToFileURL: builtinPathToFileURL
   };
   function BuiltinStringDecoder(encoding = "utf8") {
@@ -20165,6 +20386,13 @@ ${headerLines}\r
   BuiltinStream.prototype.pipe = function(destination) {
     this.on("data", (chunk) => destination.write?.(chunk));
     this.once("end", () => destination.end?.());
+    queueMicrotask(() => {
+      try {
+        this._read?.();
+      } catch (error) {
+        this.emit("error", error);
+      }
+    });
     return destination;
   };
   function BuiltinReadable() {

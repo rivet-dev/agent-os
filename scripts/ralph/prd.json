@@ -814,9 +814,9 @@
         "Test uses @copilotkit/llmock with ANTHROPIC_API_KEY='mock-key' \u2014 no real API tokens",
         "pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts passes"
       ],
-      "priority": 48,
-      "passes": false,
-      "notes": "CRITICAL: This MUST use the full Pi SDK, not a minimal/stub ACP adapter. The Pi SDK ran successfully inside secure-exec V8 isolates before the Rust migration. If Pi's extension loader or jiti fails in V8, FIX THE V8 COMPATIBILITY \u2014 do NOT bypass the SDK with a minimal adapter that makes direct Anthropic API calls. The adapter at registry/agent/pi/src/adapter.ts should call createAgentSession() from @mariozechner/pi-coding-agent and wire it to ACP over stdio. Reference the working secure-exec implementation at /home/nathan/secure-exec-1/ and the recovery files at .agent/recovery/secure-exec/. Any changes to adapter.ts that remove the Pi SDK dependency or replace it with direct API calls are WRONG. IMPORTANT: If V8 runtime compatibility gaps block the Pi SDK (e.g. performance.now() frozen by timing mitigation, jiti module loader needs Node APIs the polyfills don't support, missing shell binary for bash tool), fix those gaps in the Rust sidecar or V8 bridge \u2014 port whatever is missing from the secure-exec implementation. Check .agent/recovery/secure-exec/ for the original working polyfills and bridge-handlers.ts for how secure-exec handled these cases. This story includes migrating any remaining secure-exec functionality needed to make the full Pi SDK work."
+      "priority": 101,
+      "passes": true,
+      "notes": "SUPERSEDED by US-053. US-053 covers the same E2E test with better prerequisites (US-050 builtin modules, US-051 conformance, US-052 boot probe). Skip this story \u2014 complete US-053 instead."
     },
     {
       "id": "US-042",
@@ -830,7 +830,7 @@
         "If cold start >500ms, investigate V8 startup snapshot prewarming",
         "Benchmark added to scripts/benchmarks/ and runnable via a simple command"
       ],
-      "priority": 49,
+      "priority": 51,
       "passes": false,
       "notes": "Performance validation. The V8 runtime (crates/v8-runtime/) supports snapshot-based session creation via snapshot.rs. Cold start includes V8 isolate creation + v8-bridge.js evaluation. Warm start reuses the snapshot. Measure both. Compare against the old Command::new('node') path baseline if available."
     },
@@ -845,7 +845,7 @@
         "Benchmark added to scripts/benchmarks/ and runnable via a simple command",
         "Results include breakdown: v8-runtime base RSS, per-session delta, v8-bridge.js evaluation overhead"
       ],
-      "priority": 50,
+      "priority": 52,
       "passes": false,
       "notes": "Performance validation. The whole point of V8 isolates was lower memory per session vs spawning full node processes. Use process RSS from /proc/[pid]/status or similar. The existing scripts/benchmarks/pi-entrypoint-memory.bench.ts may be a useful reference for measurement patterns."
     },
@@ -865,7 +865,7 @@
         "Tests verify: guest require.resolve() returns guest-visible paths",
         "cargo test -p agent-os-sidecar --test isolation_audit -- --test-threads=1 passes"
       ],
-      "priority": 51,
+      "priority": 53,
       "passes": false,
       "notes": "Security hardening. The CLAUDE.md rules (crates/CLAUDE.md invariants 1-8) are clear but there's no automated test suite that systematically checks them. Each test should run guest JS code via the V8 engine and assert on the output. Reference: crates/execution/CLAUDE.md 'Virtualization Invariants' section."
     },
@@ -881,7 +881,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 env passes",
         "cargo test -p agent-os-execution -- --test-threads=1 env passes"
       ],
-      "priority": 52,
+      "priority": 54,
       "passes": false,
       "notes": "The old secure-exec had full env virtualization in bridge/process.ts (2,251 lines). The V8 bridge (v8-bridge.js) may already partially handle this via the process polyfill, but it needs verification. Check what guest_env filtering the sidecar does in service.rs and whether the V8 runtime exposes host env to guest code. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/process.ts."
     },
@@ -897,7 +897,7 @@
         "Signal state tracked per-process in kernel process table (not per-V8-isolate)",
         "cargo test -p agent-os-sidecar -- --test-threads=1 signal passes"
       ],
-      "priority": 53,
+      "priority": 55,
       "passes": false,
       "notes": "The kernel already has full signal support in process_table.rs (SIGCHLD, SIGTERM, SIGWINCH, etc.). The gap is wiring guest process.on('SIGTERM') through the V8 bridge to the kernel signal table. The old secure-exec bridge/process.ts had this. The V8 bridge needs a signal registration bridge call and the sidecar needs to deliver signal events to the V8 session."
     },
@@ -912,7 +912,7 @@
         "V8 binary artifact is cached between CI runs to avoid rebuilding rusty_v8 from source",
         "CI passes on the current branch"
       ],
-      "priority": 54,
+      "priority": 56,
       "passes": false,
       "notes": "Operational. crates/v8-runtime/ uses v8 = '130' (rusty_v8) which takes ~5 minutes to build from source. CI should cache the built binary and the rusty_v8 build artifacts. Check if there's an existing CI workflow (.github/workflows/) to extend rather than creating a new one."
     },
@@ -933,7 +933,7 @@
         "Tests use a mock filesystem (in-memory VFS or temp dir) \u2014 no real npm packages needed",
         "cargo test -p agent-os-execution --test module_resolution passes"
       ],
-      "priority": 42,
+      "priority": 44,
       "passes": true,
       "notes": "The module resolver lives in javascript.rs LocalBridgeState (resolve_module, resolve_path, resolve_node_modules, resolve_package_imports, resolve_package_entry_from_dir \u2014 lines 2421-2617). It currently has ZERO tests. This resolver handles all require()/import() calls in V8 guest code. Edge cases in exports maps and pnpm store layouts are the most common failure mode when loading real-world packages like Pi SDK."
     },
@@ -950,7 +950,7 @@
         "cargo test -p agent-os-execution --test module_resolution passes",
         "cargo test -p agent-os-execution -- --test-threads=1 passes"
       ],
-      "priority": 43,
+      "priority": 45,
       "passes": true,
       "notes": "Depends on US-048. Fix whatever the test suite finds. Common issues: wildcard exports not expanded, conditional export priority wrong (should be import > require > default for ESM, require > import > default for CJS), string shorthand exports not handled."
     },
@@ -966,7 +966,7 @@
         "Test passes (even if SDK boot fails) \u2014 it reports failures, doesn't assert success yet",
         "The failure list is documented in .agent/notes/pi-sdk-boot-gaps.md"
       ],
-      "priority": 44,
+      "priority": 46,
       "passes": true,
       "notes": "This is a diagnostic story, not a fix story. The goal is to enumerate exactly what's missing so subsequent stories can fix targeted gaps instead of guessing. Run the test, collect the failure list, write it to a note file. Key Pi SDK deps to watch: @anthropic-ai/sdk (HTTP client), jiti (dynamic TS loading), zod (validation), various stream/event patterns."
     },
@@ -987,7 +987,7 @@
         "Tests verify behavior matches real Node.js (same return values, same error codes)",
         "cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1 passes"
       ],
-      "priority": 45,
+      "priority": 47,
       "passes": false,
       "notes": "Scoped to what Pi SDK actually imports \u2014 NOT the full Node.js test suite. Each test runs guest JS code in a V8 isolate via the sidecar and asserts on output. If a polyfill method is missing or returns wrong values, the test fails with a clear message about what's wrong. Reference the Pi SDK boot probe (US-050) failure list to prioritize which builtins to test first."
     },
@@ -1003,7 +1003,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes",
         "cargo test -p agent-os-execution -- --test-threads=1 passes"
       ],
-      "priority": 46,
+      "priority": 48,
       "passes": false,
       "notes": "Depends on US-050 and US-051. Fix the specific gaps those stories identified. Common fixes: add missing methods to v8-bridge.js polyfills, fix incorrect return value formats, add missing error codes. Reference .agent/recovery/secure-exec/ for how the original JS kernel handled each case. Update .agent/notes/pi-sdk-boot-gaps.md as gaps are closed."
     },
@@ -1019,9 +1019,52 @@
         "All bridge calls exercised: fs, child_process, crypto, timers, stdin",
         "pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts passes"
       ],
-      "priority": 47,
+      "priority": 49,
       "passes": false,
       "notes": "This replaces US-041 as the final Pi E2E story. By this point, US-048-052 have verified module resolution, polyfill conformance, and SDK boot. This story should be straightforward \u2014 just wire the test and verify the lifecycle. If it still fails, the boot probe and conformance tests missed something \u2014 go back and add coverage."
+    },
+    {
+      "id": "US-054",
+      "title": "Comprehensive CJS/ESM interop and edge case test suite",
+      "description": "As a developer, I want thorough tests for every CJS/ESM interop edge case and module resolution gap so we catch regressions before they break real packages like Pi SDK.",
+      "acceptanceCriteria": [
+        "Test file crates/execution/tests/cjs_esm_interop.rs created with 20+ tests",
+        "CJS EXPORT EXTRACTION TESTS: (a) module using Object.assign(module.exports, {...}) \u2014 named exports must be available via ESM import, (b) module using spread: module.exports = {...other, x: 1} \u2014 named exports available, (c) module using computed property names \u2014 graceful degradation (default export works even if named extraction fails), (d) module using exports[variable] = value \u2014 verify behavior, (e) module re-exporting via Object.defineProperties \u2014 verify extraction",
+        "CJS\u2192ESM REVERSE IMPORT TESTS: (a) CJS file calling require() on an ESM-only package (type: module, only .mjs files) \u2014 must either work via dynamic import or throw a clear error, NOT hang, (b) CJS file calling require() on a dual CJS/ESM package \u2014 must get the CJS entry",
+        "CIRCULAR DEPENDENCY TESTS: (a) A requires B, B requires A \u2014 both modules load without infinite loop, partial exports visible, (b) three-module circular chain A\u2192B\u2192C\u2192A \u2014 loads without hang, (c) verify circular resolution uses cache (not re-evaluation)",
+        "DEEP NESTED EXPORTS CONDITIONS: (a) package.json with 3+ levels of nested conditions (e.g., exports.'.'.import.node.default) \u2014 correct target resolved, (b) mixed array + condition nesting \u2014 first valid target selected",
+        "JSON IMPORT TESTS: (a) import data from './data.json' \u2014 returns parsed object, (b) require('./data.json') \u2014 returns parsed object, (c) JSON with comments or trailing commas \u2014 clear error, not hang",
+        "ESM FILES USING require() TESTS: (a) ESM file (.mjs) that calls require() for a CJS dep \u2014 require must be available via createRequire or add_esm_runtime_prelude, (b) ESM file importing CJS default export \u2014 default is module.exports value, (c) ESM file importing CJS named exports \u2014 extracted names available",
+        "BUILTIN MODULE COMPLETENESS TESTS: (a) require('assert').deepStrictEqual is a function, (b) require('assert').throws is a function, (c) require('path').normalize returns correct results for '.', '..', trailing slashes, (d) require('path').resolve works with multiple args, (e) require('path').relative returns correct relative path",
+        "Each test uses real V8 execution via the sidecar test harness or ModuleResolutionTestHarness \u2014 no mocking the resolver itself",
+        "Every test that exercises runtime behavior (not just resolution) runs actual guest JS code in a V8 isolate",
+        "cargo test -p agent-os-execution --test cjs_esm_interop -- --test-threads=1 passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes (no regressions)"
+      ],
+      "priority": 42,
+      "passes": false,
+      "notes": "This test suite covers gaps found in the module resolution audit. The CJS export extraction gap is the highest risk for Pi SDK \u2014 Pi depends on packages that may use Object.assign(module.exports, ...) or other dynamic patterns. Tests MUST use real V8 execution, not mock the resolver. The ModuleResolutionTestHarness from US-048 can handle resolution-only tests; runtime behavior tests need the full sidecar harness from crates/sidecar/tests/. DO NOT weaken tests to match current behavior \u2014 if a test reveals a real gap, mark it as a known failure and create a fix in US-055."
+    },
+    {
+      "id": "US-055",
+      "title": "Fix CJS/ESM interop gaps found by test suite",
+      "description": "As a developer, I want all CJS/ESM interop edge cases working correctly so real-world packages load reliably in V8.",
+      "acceptanceCriteria": [
+        "CJS EXPORT EXTRACTION: Object.assign(module.exports, {...}) pattern produces correct named ESM exports \u2014 test from US-054 passes",
+        "CJS EXPORT EXTRACTION: If pattern-based extraction misses names, fallback to runtime extraction (evaluate CJS module, enumerate Object.keys on module.exports, generate ESM re-exports) \u2014 this is how Node.js handles it",
+        "BUILTIN MODULES: require('assert') returns a complete module with deepStrictEqual, strictEqual, throws, rejects, ok, fail, notStrictEqual \u2014 not a minimal stub",
+        "BUILTIN MODULES: require('path') returns a complete module with normalize, resolve, relative, join, dirname, basename, extname, isAbsolute, sep, delimiter, parse, format \u2014 not a minimal stub",
+        "CIRCULAR DEPENDENCIES: No infinite loops or hangs \u2014 cache-based resolution prevents re-evaluation",
+        "CJS\u2192ESM: require() of ESM-only package either works (via sync evaluation) or throws ERR_REQUIRE_ESM with clear message \u2014 NEVER hangs",
+        "ESM require() PRELUDE: ESM files that use require() get a working createRequire injected",
+        "All tests from US-054 pass with 0 failures",
+        "cargo test -p agent-os-execution --test cjs_esm_interop -- --test-threads=1 passes",
+        "cargo test -p agent-os-execution -- --test-threads=1 passes (no regressions)",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes (no regressions)"
+      ],
+      "priority": 43,
+      "passes": false,
+      "notes": "Depends on US-054 (test suite). Fix whatever the tests reveal. Key implementation areas: (1) CJS export extraction in crates/v8-runtime/src/execution.rs extract_cjs_export_names() \u2014 needs runtime fallback for dynamic patterns. (2) Builtin module objects in crates/execution/assets/v8-bridge.js and crates/execution/src/javascript.rs \u2014 assert and path need complete implementations matching Node.js API surface. (3) Circular dep handling in LocalBridgeState resolution cache. Reference .agent/recovery/secure-exec/nodejs/src/bridge/polyfills.ts for how secure-exec handled complete builtin modules."
     }
   ]
 }

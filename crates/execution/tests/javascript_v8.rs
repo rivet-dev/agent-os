@@ -2,12 +2,13 @@ use agent_os_execution::{
     v8_runtime::map_bridge_method, CreateJavascriptContextRequest, JavascriptExecutionEngine,
     JavascriptExecutionEvent, StartJavascriptExecutionRequest,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -32,6 +33,24 @@ Deleted coverage:
 
 fn write_fixture(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write fixture");
+}
+
+fn run_host_node_json(cwd: &Path, entrypoint: &Path) -> Value {
+    let output = Command::new("node")
+        .arg(entrypoint)
+        .current_dir(cwd)
+        .output()
+        .expect("run host node");
+
+    assert!(
+        output.status.success(),
+        "host node failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    serde_json::from_slice(&output.stdout).expect("parse host JSON")
 }
 
 fn write_fake_node_binary(path: &Path, log_path: &Path) {
@@ -977,6 +996,131 @@ if (typeof basename !== "function" || typeof dirname !== "function" || typeof is
     assert_eq!(result.exit_code, 0);
     let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
+#[ignore = "Guest child_process command resolution is still broken on this branch; sidecar/execution conformance for the remaining builtins is active"]
+fn javascript_execution_v8_child_process_conformance_matches_host_node() {
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import childProcess from "node:child_process";
+import fs from "node:fs";
+
+fs.writeFileSync("async-out.txt", Buffer.from("async:beta-async\n", "utf8"));
+
+const syncPiped = childProcess.spawnSync("/bin/cat", [], {
+  input: Buffer.from("alpha-sync"),
+});
+const syncError = childProcess.spawnSync("/bin/cat", ["definitely-missing-agentos-file"]);
+
+const asyncResult = await new Promise((resolve, reject) => {
+  const child = childProcess.spawn("/bin/cat", ["async-out.txt"], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const timer = setTimeout(() => {
+    reject(new Error("spawn(/bin/cat async-out.txt) did not close within 2s"));
+  }, 2000);
+  const stdout = [];
+  const stderr = [];
+  child.stdout.on("data", (chunk) => {
+    stdout.push(Buffer.from(chunk));
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr.push(Buffer.from(chunk));
+  });
+  child.on("error", reject);
+  child.on("close", (code, signal) => {
+    clearTimeout(timer);
+    resolve({
+      code,
+      signal,
+      stdoutBase64: Buffer.concat(stdout).toString("base64"),
+      stderrBase64: Buffer.concat(stderr).toString("base64"),
+    });
+  });
+});
+
+const asyncErrorResult = await new Promise((resolve, reject) => {
+  const child = childProcess.spawn("/bin/cat", ["definitely-missing-agentos-file"], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const timer = setTimeout(() => {
+    reject(new Error("spawn(/bin/cat missing-file) did not close within 2s"));
+  }, 2000);
+  const stdout = [];
+  const stderr = [];
+  child.stdout.on("data", (chunk) => {
+    stdout.push(Buffer.from(chunk));
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr.push(Buffer.from(chunk));
+  });
+  child.on("error", reject);
+  child.on("close", (code, signal) => {
+    clearTimeout(timer);
+    resolve({
+      code,
+      signal,
+      stdoutBase64: Buffer.concat(stdout).toString("base64"),
+      stderrBase64: Buffer.concat(stderr).toString("base64"),
+    });
+  });
+});
+
+console.log(JSON.stringify({
+  syncPipedStatus: syncPiped.status,
+  syncPipedStdoutBase64: Buffer.from(syncPiped.stdout ?? []).toString("base64"),
+  syncPipedStderrBase64: Buffer.from(syncPiped.stderr ?? []).toString("base64"),
+  syncErrorStatus: syncError.status,
+  syncErrorStdoutBase64: Buffer.from(syncError.stdout ?? []).toString("base64"),
+  syncErrorStderrBase64: Buffer.from(syncError.stderr ?? []).toString("base64"),
+  asyncCode: asyncResult.code,
+  asyncSignal: asyncResult.signal,
+  asyncStdoutBase64: asyncResult.stdoutBase64,
+  asyncStderrBase64: asyncResult.stderrBase64,
+  asyncErrorCode: asyncErrorResult.code,
+  asyncErrorSignal: asyncErrorResult.signal,
+  asyncErrorStdoutBase64: asyncErrorResult.stdoutBase64,
+  asyncErrorStderrBase64: asyncErrorResult.stderrBase64,
+}));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let host = run_host_node_json(temp.path(), &temp.path().join("entry.mjs"));
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: None,
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stdout = String::from_utf8(result.stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+
+    let guest: Value = serde_json::from_str(stdout.trim()).expect("parse guest JSON");
+    assert_eq!(
+        guest,
+        host,
+        "guest child_process result diverged from host Node\nhost: {}\nguest: {}",
+        serde_json::to_string_pretty(&host).expect("pretty host JSON"),
+        serde_json::to_string_pretty(&guest).expect("pretty guest JSON")
+    );
 }
 
 #[test]

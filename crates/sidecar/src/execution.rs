@@ -291,6 +291,7 @@ impl ActiveProcess {
             runtime,
             execution,
             host_cwd: PathBuf::from("/"),
+            pending_execution_events: VecDeque::new(),
             child_processes: BTreeMap::new(),
             next_child_process_id: 0,
             http_servers: BTreeMap::new(),
@@ -2472,47 +2473,63 @@ where
                 )));
             };
 
-            let entrypoint = if is_path_like_specifier(entrypoint_specifier) {
-                let guest_entrypoint = if entrypoint_specifier.starts_with('/') {
-                    normalize_path(entrypoint_specifier)
-                } else if entrypoint_specifier.starts_with("file:") {
-                    normalize_path(entrypoint_specifier.trim_start_matches("file:"))
-                } else {
-                    normalize_path(&format!("{guest_cwd}/{entrypoint_specifier}"))
-                };
-                let host_entrypoint = if entrypoint_specifier.starts_with("./")
-                    || entrypoint_specifier.starts_with("../")
-                {
-                    host_cwd.join(entrypoint_specifier)
-                } else {
-                    host_runtime_path_for_guest_path_with_env(
-                        vm,
-                        &runtime_env,
-                        &guest_entrypoint,
-                        parent_host_cwd,
+            let (entrypoint, execution_args) =
+                if matches!(entrypoint_specifier.as_str(), "-e" | "--eval") {
+                    env.insert(
+                        String::from("AGENT_OS_NODE_EVAL"),
+                        process_args.get(1).cloned().unwrap_or_default(),
+                    );
+                    (
+                        entrypoint_specifier.clone(),
+                        process_args.iter().skip(2).cloned().collect(),
                     )
-                    .unwrap_or_else(|| {
-                        let candidate = PathBuf::from(&guest_entrypoint);
-                        if candidate.is_absolute() {
-                            candidate
-                        } else {
-                            host_cwd.join(&guest_entrypoint)
-                        }
-                    })
+                } else if is_path_like_specifier(entrypoint_specifier) {
+                    let guest_entrypoint = if entrypoint_specifier.starts_with('/') {
+                        normalize_path(entrypoint_specifier)
+                    } else if entrypoint_specifier.starts_with("file:") {
+                        normalize_path(entrypoint_specifier.trim_start_matches("file:"))
+                    } else {
+                        normalize_path(&format!("{guest_cwd}/{entrypoint_specifier}"))
+                    };
+                    let host_entrypoint = if entrypoint_specifier.starts_with("./")
+                        || entrypoint_specifier.starts_with("../")
+                    {
+                        host_cwd.join(entrypoint_specifier)
+                    } else {
+                        host_runtime_path_for_guest_path_with_env(
+                            vm,
+                            &runtime_env,
+                            &guest_entrypoint,
+                            parent_host_cwd,
+                        )
+                        .unwrap_or_else(|| {
+                            let candidate = PathBuf::from(&guest_entrypoint);
+                            if candidate.is_absolute() {
+                                candidate
+                            } else {
+                                host_cwd.join(&guest_entrypoint)
+                            }
+                        })
+                    };
+                    env.entry(String::from("AGENT_OS_GUEST_ENTRYPOINT"))
+                        .or_insert(guest_entrypoint);
+                    (
+                        host_entrypoint.to_string_lossy().into_owned(),
+                        process_args.iter().skip(1).cloned().collect(),
+                    )
+                } else {
+                    (
+                        entrypoint_specifier.clone(),
+                        process_args.iter().skip(1).cloned().collect(),
+                    )
                 };
-                env.entry(String::from("AGENT_OS_GUEST_ENTRYPOINT"))
-                    .or_insert(guest_entrypoint);
-                host_entrypoint.to_string_lossy().into_owned()
-            } else {
-                entrypoint_specifier.clone()
-            };
 
             return Ok(ResolvedChildProcessExecution {
                 command,
                 process_args: process_args.clone(),
                 runtime: GuestRuntimeKind::JavaScript,
                 entrypoint,
-                execution_args: process_args.iter().skip(1).cloned().collect(),
+                execution_args,
                 env,
                 guest_cwd,
                 host_cwd,
@@ -2526,25 +2543,28 @@ where
             )));
         }
 
-        let guest_entrypoint = vm
-            .command_guest_paths
-            .get(&command)
+        let guest_entrypoint = resolve_guest_command_entrypoint(vm, &guest_cwd, &command)
             .ok_or_else(|| SidecarError::InvalidState(format!("command not found: {command}")))?;
         let host_entrypoint = host_runtime_path_for_guest_path_with_env(
             vm,
             &runtime_env,
-            guest_entrypoint,
+            &guest_entrypoint,
             parent_host_cwd,
         )
         .unwrap_or_else(|| {
-            let candidate = PathBuf::from(guest_entrypoint);
+            let candidate = PathBuf::from(&guest_entrypoint);
             if candidate.is_absolute() {
                 candidate
             } else {
-                host_cwd.join(guest_entrypoint)
+                host_cwd.join(&guest_entrypoint)
             }
         });
-        let wasm_permission_tier = vm.command_permissions.get(&command).copied();
+        let wasm_permission_tier = vm.command_permissions.get(&command).copied().or_else(|| {
+            Path::new(&guest_entrypoint)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| vm.command_permissions.get(name).copied())
+        });
 
         Ok(ResolvedChildProcessExecution {
             command,
@@ -2805,9 +2825,13 @@ where
                         "exitCode": 1,
                     }));
                 };
-                child
-                    .execution
-                    .poll_event_blocking(Duration::from_millis(wait_ms))?
+                if let Some(event) = child.pending_execution_events.pop_front() {
+                    Some(event)
+                } else {
+                    child
+                        .execution
+                        .poll_event_blocking(Duration::from_millis(wait_ms))?
+                }
             };
 
             let Some(event) = event else {
@@ -2828,6 +2852,41 @@ where
                     }));
                 }
                 ActiveExecutionEvent::Exited(exit_code) => {
+                    let had_trailing_events = {
+                        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                        let child = vm
+                            .active_processes
+                            .get_mut(process_id)
+                            .expect("process should still exist")
+                            .child_processes
+                            .get_mut(child_process_id)
+                            .expect("child process should still exist");
+                        let deadline = Instant::now() + Duration::from_millis(25);
+                        loop {
+                            let wait = deadline.saturating_duration_since(Instant::now());
+                            let next = child.execution.poll_event_blocking(wait)?;
+                            let Some(next) = next else {
+                                break;
+                            };
+                            if matches!(next, ActiveExecutionEvent::Exited(_)) {
+                                continue;
+                            }
+                            child.pending_execution_events.push_back(next);
+                            if Instant::now() >= deadline {
+                                break;
+                            }
+                        }
+                        if !child.pending_execution_events.is_empty() {
+                            child.pending_execution_events
+                                .push_back(ActiveExecutionEvent::Exited(exit_code));
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if had_trailing_events {
+                        continue;
+                    }
                     let vm = self.vms.get_mut(vm_id).expect("VM should exist");
                     let parent_runtime_pid = vm
                         .active_processes
@@ -3248,16 +3307,12 @@ fn resolve_command_execution(
         });
     }
 
-    let guest_entrypoint = if is_path_like_specifier(command) {
-        Some(resolve_path_like_guest_specifier(&guest_cwd, command))
-    } else {
-        vm.command_guest_paths.get(command).cloned()
-    }
-    .ok_or_else(|| {
-        SidecarError::InvalidState(format!(
-            "command not found on native sidecar path: {command}"
-        ))
-    })?;
+    let guest_entrypoint =
+        resolve_guest_command_entrypoint(vm, &guest_cwd, command).ok_or_else(|| {
+            SidecarError::InvalidState(format!(
+                "command not found on native sidecar path: {command}"
+            ))
+        })?;
     let wasm_permission_tier = explicit_wasm_permission_tier
         .or_else(|| vm.command_permissions.get(command).copied())
         .or_else(|| {
@@ -3345,6 +3400,34 @@ fn resolve_path_like_guest_specifier(cwd: &str, specifier: &str) -> String {
 
 fn guest_entrypoint_for_specifier(cwd: &str, specifier: &str) -> Option<String> {
     is_path_like_specifier(specifier).then(|| resolve_path_like_guest_specifier(cwd, specifier))
+}
+
+fn resolve_guest_command_entrypoint(
+    vm: &VmState,
+    guest_cwd: &str,
+    command: &str,
+) -> Option<String> {
+    if !is_path_like_specifier(command) {
+        return vm.command_guest_paths.get(command).cloned();
+    }
+
+    let normalized = resolve_path_like_guest_specifier(guest_cwd, command);
+    if normalized.starts_with("/bin/")
+        || normalized.starts_with("/usr/bin/")
+        || normalized.starts_with("/usr/local/bin/")
+        || normalized.starts_with("/__agentos/commands/")
+    {
+        if let Some(file_name) = Path::new(&normalized)
+            .file_name()
+            .and_then(|name| name.to_str())
+        {
+            if let Some(guest_entrypoint) = vm.command_guest_paths.get(file_name) {
+                return Some(guest_entrypoint.clone());
+            }
+        }
+    }
+
+    Some(normalized)
 }
 
 fn resolve_host_entrypoint_within_vm_host_cwd(
@@ -6732,7 +6815,7 @@ pub(crate) fn javascript_sync_rpc_option_u32(
     let Some(value) = args.get(index).and_then(|value| {
         if value.is_object() {
             value.get(key)
-        } else if key == "mode" {
+        } else if key == "mode" && value.is_number() {
             Some(value)
         } else {
             None
@@ -8960,8 +9043,7 @@ where
 
     let url = Url::parse(resource)
         .map_err(|error| SidecarError::Execution(format!("ERR_INVALID_URL: {error}")))?;
-    let options_json =
-        javascript_sync_rpc_arg_str(&request.args, 1, "net.fetch options payload")?;
+    let options_json = javascript_sync_rpc_arg_str(&request.args, 1, "net.fetch options payload")?;
     let options: JavascriptHttpRequestOptions =
         serde_json::from_str(options_json).map_err(|error| {
             SidecarError::InvalidState(format!("net.fetch options must be valid JSON: {error}"))
@@ -8977,9 +9059,7 @@ where
                 let ip = host
                     .parse::<IpAddr>()
                     .ok()
-                    .or_else(|| {
-                        (host == "localhost").then_some(IpAddr::V4(Ipv4Addr::LOCALHOST))
-                    })
+                    .or_else(|| (host == "localhost").then_some(IpAddr::V4(Ipv4Addr::LOCALHOST)))
                     .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
                 return Err(blocked_loopback_connect_error(resource, ip, port));
             }
@@ -9215,7 +9295,10 @@ fn outbound_http_response_json(url: &Url, response: ureq::Response) -> Result<Va
     .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
 }
 
-fn outbound_fetch_response_json(url: &Url, response: ureq::Response) -> Result<Value, SidecarError> {
+fn outbound_fetch_response_json(
+    url: &Url,
+    response: ureq::Response,
+) -> Result<Value, SidecarError> {
     let status = response.status();
     let status_text = response.status_text().to_owned();
     let mut normalized_headers = Map::new();
@@ -9224,7 +9307,12 @@ fn outbound_fetch_response_json(url: &Url, response: ureq::Response) -> Result<V
         let value = if values.len() == 1 {
             Value::String(values[0].to_owned())
         } else {
-            Value::Array(values.into_iter().map(|value| Value::String(value.to_owned())).collect())
+            Value::Array(
+                values
+                    .into_iter()
+                    .map(|value| Value::String(value.to_owned()))
+                    .collect(),
+            )
         };
         normalized_headers.insert(raw_name.to_ascii_lowercase(), value);
     }

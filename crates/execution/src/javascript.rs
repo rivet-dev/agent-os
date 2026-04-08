@@ -1238,10 +1238,16 @@ impl JavascriptExecutionEngine {
         } else {
             translator.host_to_guest_string(&host_entrypoint)
         };
-        let process_argv = std::iter::once(String::from("node"))
-            .chain(std::iter::once(guest_entrypoint.clone()))
-            .chain(request.argv.iter().skip(1).cloned())
-            .collect::<Vec<_>>();
+        let process_argv = if matches!(guest_entrypoint.as_str(), "-e" | "--eval") {
+            std::iter::once(String::from("node"))
+                .chain(request.argv.iter().skip(1).cloned())
+                .collect::<Vec<_>>()
+        } else {
+            std::iter::once(String::from("node"))
+                .chain(std::iter::once(guest_entrypoint.clone()))
+                .chain(request.argv.iter().skip(1).cloned())
+                .collect::<Vec<_>>()
+        };
         let use_module_mode = host_entrypoint_uses_module_mode(&host_entrypoint);
         let user_code = if let Some(inline_code) = request.inline_code.clone() {
             strip_javascript_hashbang(&inline_code)
@@ -2641,15 +2647,15 @@ impl LocalBridgeState {
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let file_type = entry.file_type().ok()?;
-                file_type.is_dir().then(|| entry.file_name().to_string_lossy().into_owned())
+                file_type
+                    .is_dir()
+                    .then(|| entry.file_name().to_string_lossy().into_owned())
             })
             .collect::<Vec<_>>();
         entries.sort();
         for entry in entries {
-            let package_dir = join_guest_path(
-                &store_root,
-                &format!("{entry}/node_modules/{package_name}"),
-            );
+            let package_dir =
+                join_guest_path(&store_root, &format!("{entry}/node_modules/{package_name}"));
             if let Some(resolved) = self.resolve_package_entry_from_dir(&package_dir, subpath, mode)
             {
                 return Some(resolved);
@@ -3093,6 +3099,10 @@ function format(pathObject = {}) {
   return dir.endsWith(sep) ? `${dir}${base}` : `${dir}${sep}${base}`;
 }
 
+function normalize(path) {
+  return join(String(path || ""));
+}
+
 const pathModule = {
   basename,
   delimiter,
@@ -3101,6 +3111,7 @@ const pathModule = {
   format,
   isAbsolute,
   join,
+  normalize,
   parse,
   relative,
   resolve,
@@ -3109,7 +3120,7 @@ const pathModule = {
 const posix = pathModule;
 const win32 = pathModule;
 
-export { basename, delimiter, dirname, extname, format, isAbsolute, join, parse, posix, relative, resolve, sep, win32 };
+export { basename, delimiter, dirname, extname, format, isAbsolute, join, normalize, parse, posix, relative, resolve, sep, win32 };
 export default pathModule;
 "#,
         );
@@ -3146,8 +3157,75 @@ function pathToFileURL(path) {
   return new NativeURL(`file://${absolute}`);
 }
 
-export { NativeURL as URL, fileURLToPath, pathToFileURL };
-export default { URL: NativeURL, fileURLToPath, pathToFileURL };
+function parse(input, parseQueryString = false) {
+  const parsed = new NativeURL(String(input ?? ""));
+  const queryString = parsed.search.length > 0 ? parsed.search.slice(1) : null;
+  const auth =
+    parsed.username || parsed.password
+      ? `${decodeURIComponent(parsed.username)}${parsed.password ? `:${decodeURIComponent(parsed.password)}` : ""}`
+      : null;
+  return {
+    href: parsed.href,
+    protocol: parsed.protocol,
+    slashes: true,
+    auth,
+    host: parsed.host,
+    port: parsed.port || null,
+    hostname: parsed.hostname,
+    hash: parsed.hash || null,
+    search: parsed.search || null,
+    query: parseQueryString ? Object.fromEntries(parsed.searchParams.entries()) : queryString,
+    pathname: parsed.pathname,
+    path: `${parsed.pathname}${parsed.search}`,
+  };
+}
+
+function format(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value.href === "string") return value.href;
+
+  const protocol = typeof value.protocol === "string" ? value.protocol : "http:";
+  const slashes = value.slashes === false ? "" : "//";
+  const auth =
+    typeof value.auth === "string" && value.auth.length > 0 ? `${value.auth}@` : "";
+  const host =
+    typeof value.host === "string" && value.host.length > 0
+      ? value.host
+      : `${value.hostname || ""}${value.port ? `:${value.port}` : ""}`;
+  const pathname =
+    typeof value.pathname === "string"
+      ? value.pathname
+      : typeof value.path === "string"
+        ? value.path
+        : "";
+
+  let search = "";
+  if (typeof value.search === "string") {
+    search = value.search;
+  } else if (typeof value.query === "string" && value.query.length > 0) {
+    search = value.query.startsWith("?") ? value.query : `?${value.query}`;
+  } else if (value.query && typeof value.query === "object") {
+    const params = new URLSearchParams();
+    for (const [key, entry] of Object.entries(value.query)) {
+      if (Array.isArray(entry)) {
+        for (const item of entry) {
+          params.append(key, String(item));
+        }
+      } else if (entry != null) {
+        params.append(key, String(entry));
+      }
+    }
+    const encoded = params.toString();
+    search = encoded ? `?${encoded}` : "";
+  }
+
+  const hash = typeof value.hash === "string" ? value.hash : "";
+  return `${protocol}${slashes}${auth}${host}${pathname}${search}${hash}`;
+}
+
+export { NativeURL as URL, fileURLToPath, format, parse, pathToFileURL };
+export default { URL: NativeURL, fileURLToPath, format, parse, pathToFileURL };
 "#,
         );
     }
@@ -3903,22 +3981,8 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "win32",
         ],
         "process" => &[
-            "arch",
-            "argv",
-            "argv0",
-            "cwd",
-            "env",
-            "execPath",
-            "exit",
-            "pid",
-            "platform",
-            "ppid",
-            "stderr",
-            "stdin",
-            "stdout",
-            "umask",
-            "version",
-            "versions",
+            "arch", "argv", "argv0", "cwd", "env", "execPath", "exit", "pid", "platform", "ppid",
+            "stderr", "stdin", "stdout", "umask", "version", "versions",
         ],
         "perf_hooks" => &[
             "PerformanceObserver",
@@ -3939,7 +4003,7 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "getCiphers",
         ],
         "timers/promises" => &["scheduler", "setImmediate", "setInterval", "setTimeout"],
-        "url" => &["URL", "fileURLToPath", "pathToFileURL"],
+        "url" => &["URL", "fileURLToPath", "format", "parse", "pathToFileURL"],
         "util" => &[
             "MIMEType",
             "MIMEParams",

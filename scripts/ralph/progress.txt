@@ -11,6 +11,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Nested JavaScript `child_process` polling in the sidecar must surface queued child stdout/stderr/sync-RPC events before finalizing `Exited`; fast child output otherwise disappears behind the exit event
 - Pi/V8 boot probes in `packages/core` should run one suspicious import or constructor per fresh VM; a timed-out guest JS startup can poison later `node` spawns in the same VM and turn the original issue into generic broken-pipe noise
 - Public SDK type exports in `packages/core` now belong in `src/types.ts`; keep legacy runtime/kernel implementation helpers behind `src/runtime-compat.ts` and out of the main root export surface
 - `packages/core/src/sidecar/rpc-client.ts` is now the single home for sidecar wire helpers, compat proxy helpers, and sidecar descriptor serializers; keep shared/explicit sidecar pooling and VM lease bookkeeping in `packages/core/src/agent-os.ts`
@@ -495,4 +496,14 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Fresh-VM isolation matters for V8 startup diagnostics in `packages/core`; once one guest `node` startup wedges, later probes in the same VM can collapse into misleading transport failures
   - On this branch, the strongest reproducible blockers are timeouts on `@mariozechner/pi-coding-agent`, `@mariozechner/jiti`, `createCodingTools()`, `createAgentSession()`, and `node:fs/promises`, while `@anthropic-ai/sdk`, `zod`, `node:child_process`, and `node:module` already load successfully
   - The first Pi story here is diagnostic only: keep the test passing by reporting structured failures, and move fixes into later stories once the failure list is concrete
+---
+## 2026-04-08 01:11:53 PDT - US-051
+- Added `crates/sidecar/tests/builtin_conformance.rs` coverage for the Pi-SDK-relevant builtin surface (`fs`, `child_process`, `path`, `crypto`, `events`, `stream`, `buffer`, `url`) and got the full sidecar conformance target green against real host Node
+- Fixed V8/sidecar conformance gaps for `fs.mkdirSync` option parsing, `node -e` argv virtualization, fallback `URL`/`URLSearchParams` behavior, and nested JavaScript child-process exit polling so fast child events are not dropped behind `Exited`
+- Recorded the child-process exit-drain rule in `crates/AGENTS.md`
+- Files changed: `crates/AGENTS.md`, `crates/execution/{assets/v8-bridge.js,src/javascript.rs}`, `crates/sidecar/{src/execution.rs,src/state.rs,tests/builtin_conformance.rs}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - `node -e` guest executions should virtualize `process.argv` as `["node", ...extraArgs]`; leaving `"-e"` in argv breaks Node parity checks immediately
+  - The sidecar child-process poll path needs to queue child stdout/stderr/sync-RPC events ahead of `Exited`; otherwise async child output disappears even though the child exits successfully
+  - For builtin conformance, compare child-process semantics (trimmed sync stdout, nonzero status, stdin-pipe success) instead of raw stack text; exact stderr formatting is less stable than the underlying behavior
 ---

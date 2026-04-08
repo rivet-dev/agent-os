@@ -45,6 +45,14 @@ The Rust sidecar kernel was migrated from a working JavaScript kernel (`@secure-
 - `nodejs/src/bridge/process.ts` (2,251 lines) -- virtualized `process` global
 - `nodejs/src/execution-driver.ts` (1,693 lines) -- V8 isolate session lifecycle
 
+## V8 Polyfill and Module System Rules
+
+- **Every Node.js builtin module must be a COMPLETE implementation, not a stub.** If `require('path')` is supported, it must have ALL standard methods (normalize, resolve, relative, join, dirname, basename, extname, isAbsolute, sep, delimiter, parse, format). A module that only implements `join` and `resolve` is a stub — stubs cause silent failures in real packages. If you can't implement a method fully, throw `ERR_NOT_IMPLEMENTED` — never return undefined or silently skip.
+- **CJS export extraction must handle dynamic patterns.** The ESM wrapper for CJS modules extracts named exports via `extract_cjs_export_names()`. This MUST handle: `exports.X = ...`, `Object.defineProperty(exports, ...)`, `Object.assign(module.exports, ...)`, and spread syntax. If static extraction fails, fall back to runtime extraction (evaluate module, enumerate `Object.keys(module.exports)`). Incomplete extraction causes missing named imports that silently break downstream packages.
+- **CJS/ESM interop must never hang.** If `require()` is called on an ESM-only package, throw `ERR_REQUIRE_ESM` immediately — never recurse infinitely or hang. If `import()` is called on a CJS package, wrap it in an ESM shim. Test both directions.
+- **Circular dependencies must terminate.** The module cache must prevent re-evaluation. Test with A→B→A and A→B→C→A chains.
+- **Every polyfill addition needs a conformance test.** When adding a new builtin method or module, add a test that verifies the return value matches real Node.js behavior. Tests go in `crates/execution/tests/` or `crates/sidecar/tests/`.
+
 ## Agent Adapters
 
 - **Agent adapters MUST use the real agent SDK.** Each agent adapter (`registry/agent/*/src/adapter.ts`) must call the agent's SDK directly (e.g., `createAgentSession()` from `@mariozechner/pi-coding-agent`). **NEVER replace an SDK adapter with a minimal/stub adapter that makes direct API calls** (e.g., direct `fetch` to `/v1/messages`). If the SDK doesn't work in V8, fix the V8 compatibility — don't bypass the SDK.

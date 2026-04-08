@@ -389,6 +389,7 @@ pub(crate) struct ActiveProcess {
     pub(crate) runtime: GuestRuntimeKind,
     pub(crate) execution: ActiveExecution,
     pub(crate) host_cwd: PathBuf,
+    pub(crate) pending_execution_events: VecDeque<ActiveExecutionEvent>,
     pub(crate) child_processes: BTreeMap<String, ActiveProcess>,
     pub(crate) next_child_process_id: usize,
     pub(crate) http_servers: BTreeMap<u64, ActiveHttpServer>,
