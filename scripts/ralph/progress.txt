@@ -29,6 +29,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- `AbortSignal` support in `crates/execution/assets/v8-bridge.source.js` needs explicit static helper coverage (`abort`, `timeout`, `any`) even when a native constructor exists; preserving the constructor alone is not enough to guarantee fetch cancellation APIs survive bridge bootstrap.
 - `crates/v8-runtime/src/execution.rs` CJS-to-ESM shims should only evaluate `globalThis._requireFrom(...)` for `Object.keys(module.exports)` fallback when static export extraction finds zero names; doing runtime enumeration unconditionally adds avoidable work and can trigger guest module side effects before import time.
 - Guest CommonJS `require.resolve()` behavior in `crates/execution/assets/v8-bridge.source.js` has two entrypoints to keep aligned: `createRequire()` and the per-module `require` created in `_compile()`. If only one gets `resolve.paths()` or builtin-path updates, packages behave differently depending on which `require` they received.
 - When sidecar-mounted WASM command roots under `/__agentos/commands/*` change, refresh both `vm.command_guest_paths` and `vm.guest_env["PATH"]`; nested guest `child_process.spawn("sh")` / `spawn("grep")` resolution depends on both surfaces staying aligned
@@ -739,4 +740,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Secure HTTP/2 bridge support spans both the RPC payload structs and the session launchers in `crates/sidecar/src/execution.rs`; if one side drops the `tls` payload, the handshake silently falls back to the old cleartext-only path
   - Default ALPN to `h2` for both secure HTTP/2 listeners and TLS clients unless the caller overrides it, or `tokio-rustls` completes TLS but the subsequent `h2` handshake never establishes a session
   - `cargo test -p agent-os-sidecar -- --test-threads=1` is green again on this branch for the sidecar package, even though the service tests still log some non-fatal broken-pipe noise while tearing down IPC writers
+---
+## 2026-04-08 15:42:58 PDT - US-073
+- Added explicit `AbortSignal.abort()`, `AbortSignal.timeout()`, and `AbortSignal.any()` fallbacks in the guest V8 bridge so timeout and composite cancellation APIs remain available even when the runtime only exposes the base constructor surface
+- Added execution-level coverage for the static Abort helpers and sidecar fetch coverage for both `AbortSignal.timeout(...)` and manual `AbortController.abort(...)` cancellation against in-flight undici-backed guest fetch requests, then regenerated the bundled `v8-bridge.js`
+- Files changed: `crates/execution/{assets/v8-bridge.source.js,assets/v8-bridge.js,tests/javascript_v8.rs}`, `crates/sidecar/tests/fetch_via_undici.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - `AbortSignal` static helpers can be missing even when `AbortController`/`AbortSignal` instances already work, so bridge tests need to probe the static API surface separately from basic `signal.aborted` behavior
+  - After editing `crates/execution/assets/v8-bridge.source.js`, regenerate `crates/execution/assets/v8-bridge.js` and rebuild `agent-os-v8` before trusting V8 execution or sidecar integration results
+  - Sidecar fetch-abort assertions should key off rejected promises plus guest signal state, not undici-specific enumerable error fields like `.code`, which can vary across cancellation paths
 ---

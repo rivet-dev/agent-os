@@ -1523,6 +1523,75 @@ if (!(request.signal instanceof AbortSignal)) {
 }
 
 #[test]
+fn javascript_execution_v8_abort_signal_static_helpers_work() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+if (typeof AbortSignal.timeout !== "function") {
+  throw new Error("AbortSignal.timeout missing");
+}
+if (typeof AbortSignal.any !== "function") {
+  throw new Error("AbortSignal.any missing");
+}
+
+const timeoutSignal = AbortSignal.timeout(25);
+let timeoutEventCount = 0;
+timeoutSignal.addEventListener("abort", () => {
+  timeoutEventCount += 1;
+});
+await new Promise((resolve) => setTimeout(resolve, 60));
+if (!timeoutSignal.aborted) {
+  throw new Error("AbortSignal.timeout did not abort");
+}
+if (timeoutEventCount !== 1) {
+  throw new Error(`unexpected timeout event count: ${timeoutEventCount}`);
+}
+if (!timeoutSignal.reason || timeoutSignal.reason.name !== "AbortError") {
+  throw new Error(`unexpected timeout reason: ${String(timeoutSignal.reason?.name ?? timeoutSignal.reason)}`);
+}
+
+const controller = new AbortController();
+const sibling = new AbortController();
+const composite = AbortSignal.any([sibling.signal, controller.signal]);
+let compositeReason;
+composite.addEventListener("abort", () => {
+  compositeReason = composite.reason;
+});
+controller.abort("manual-stop");
+await new Promise((resolve) => setTimeout(resolve, 0));
+if (!composite.aborted) {
+  throw new Error("AbortSignal.any did not abort");
+}
+if (compositeReason !== "manual-stop" || composite.reason !== "manual-stop") {
+  throw new Error(`unexpected composite reason: ${String(composite.reason)}`);
+}
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stdout = String::from_utf8(result.stdout.clone()).expect("stdout utf8");
+    let stderr = String::from_utf8(result.stderr.clone()).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
 fn javascript_execution_v8_schedule_timer_bridge_resolves() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();

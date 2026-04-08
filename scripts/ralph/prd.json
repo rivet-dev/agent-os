@@ -1403,7 +1403,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
       ],
       "priority": 104,
-      "passes": false,
+      "passes": true,
       "notes": "AbortController is partially available via undici but not verified end-to-end. Modern HTTP clients use AbortSignal.timeout() for request timeouts. If this doesn't work, fetch() calls without explicit timeouts can hang forever. The Anthropic SDK (used by Pi) uses AbortSignal for request cancellation."
     },
     {
