@@ -1329,7 +1329,7 @@
         "cargo test -p agent-os-sidecar --test builtin_completeness -- --test-threads=1 passes"
       ],
       "priority": 100,
-      "passes": false,
+      "passes": true,
       "notes": "PREVENTS THE CLASS OF BUG THAT BLOCKED PI FOR WEEKS. The conformance test suite (US-051) only tested builtins that existed \u2014 it never checked for missing ones. This test is the gate: if require('os') returns undefined instead of a real module, this test catches it immediately. Every future polyfill addition or removal must update this test's expected status map."
     },
     {

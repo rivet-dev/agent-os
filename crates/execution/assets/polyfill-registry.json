@@ -13,8 +13,10 @@
         "path/win32",
         "punycode",
         "querystring",
+        "sys",
         "stream",
         "string_decoder",
+        "timers",
         "url",
         "util",
         "zlib"
@@ -52,7 +54,17 @@
     {
       "source": "denied",
       "errorCode": "ERR_ACCESS_DENIED",
-      "names": ["cluster", "inspector", "vm", "v8", "worker_threads"]
+      "names": [
+        "cluster",
+        "domain",
+        "inspector",
+        "repl",
+        "trace_events",
+        "vm",
+        "v8",
+        "wasi",
+        "worker_threads"
+      ]
     }
   ]
 }

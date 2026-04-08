@@ -30,6 +30,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 ---
 ## Codebase Patterns
 - Guest builtin policy has to stay aligned across `crates/execution/assets/polyfill-registry.json`, `crates/execution/src/javascript.rs` builtin normalization/_loadPolyfill handling, `crates/execution/assets/v8-bridge.source.js` `Module.builtinModules` plus `loadBuiltinModule()`, and `crates/execution/src/node_import_cache.rs`; if one layer lags, guests get `MODULE_NOT_FOUND` or host fallthrough instead of the intended deny/stub behavior
+- Guest CommonJS builtin behavior has one more alignment point: `createRequire()` in `crates/execution/assets/v8-bridge.source.js`. If its builtin guard diverges from `Module.builtinModules`/`loadBuiltinModule()`, `require()` can deny modules that `_requireFrom()` and ESM imports allow.
 - Guest `fs.watch` / `fs.watchFile` support should stay as guest-side polling in `crates/execution/assets/v8-bridge.source.js` until the kernel exposes a real notification primitive; keep sidecar coverage focused on observable events, not a new RPC surface
 - Secure HTTP/2 sidecar work spans both the bridge payloads and the session launchers in `crates/sidecar/src/execution.rs`; keep `tls` options threaded through `net.http2_server_listen` / `net.http2_session_connect` and default ALPN to `h2` on both sides or the handshake breaks
 - Queued `crates/v8-runtime` sessions must keep polling their control channel before acquiring a concurrency slot; otherwise `destroy_session()` can deadlock when the max-concurrency queue is full
@@ -38,6 +39,17 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Guest `stream/promises.pipeline()` shims must attach `finished()` before calling `end()` on the destination; otherwise fast in-memory sinks can emit `finish`/`close` before the listener exists and hang the Promise
 - Treat `crates/bridge/bridge-contract.json` as the canonical host-bridge inventory and `crates/execution/assets/polyfill-registry.json` as the canonical `_loadPolyfill` inventory; when bridge globals or runtime-loadable builtins change, update those files together with `crates/v8-runtime/src/session.rs` and `crates/execution/src/javascript.rs`
 - Guest-side CommonJS helpers in `crates/execution/assets/v8-bridge.source.js` must pass explicit `"require"` mode into `_resolveModule`; otherwise dual packages resolve the import branch and `require()` can try to execute ESM as CommonJS
+
+## 2026-04-08 15:19:28 PDT - US-069
+- Added `crates/sidecar/tests/builtin_completeness.rs`, an exhaustive builtin gate that probes every classified guest Node builtin in isolated sidecar/VM runs, enforces a 5s timeout per module, checks the runtime builtin inventory, and verifies each module either loads as a non-empty object/function or throws `ERR_ACCESS_DENIED`
+- Fixed the V8 builtin surfaces so the new gate passes: expanded `polyfill-registry.json` and `normalize_builtin_specifier()` for `sys`, `timers`, and the denied legacy modules; taught `v8-bridge.source.js` about `http2`, `readline`, `sys`, `domain`, `repl`, `trace_events`, and `wasi`; and removed the stale `createRequire()` hard-deny that was still blocking `require("http")`
+- Updated execution-area agent guidance with the extra `createRequire()` alignment rule for future builtin changes
+- Files changed: `crates/execution/{AGENTS.md,assets/polyfill-registry.json,assets/v8-bridge.source.js,assets/v8-bridge.js,src/javascript.rs}`, `crates/sidecar/tests/builtin_completeness.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - The builtin inventory gate should isolate each probe in its own sidecar/VM; shared V8 runtime state can make missing-builtin diagnostics harder to interpret when multiple probes reuse one session
+  - `createRequire()` has a separate builtin-restriction path from `_requireFrom()`, so CommonJS `require()` can drift from import behavior even when `Module.builtinModules` and `loadBuiltinModule()` look correct
+  - The scoped gate pairs well with `cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1`: the completeness test catches missing/denied inventory gaps, while the conformance suite checks that allowed builtins still behave like Node
+---
 - Generated node-import-cache builtin assets need a `NODE_IMPORT_CACHE_ASSET_VERSION` bump in `crates/execution/src/node_import_cache.rs` whenever their source changes, or old `/tmp/agent-os-node-import-cache-*` materializations will keep serving stale code
 - If guest CommonJS must `require("node:...")`, update both `Module.builtinModules` and `loadBuiltinModule()` in `crates/execution/assets/v8-bridge.source.js`; registering only one side leaves `_requireFrom()` recursing or hanging on the builtin
 - Python bridge shims in `crates/execution/assets/runners/python-runner.mjs` must convert JS bridge failures into Python-native exceptions, and Python child-process cwd inheritance should come from sidecar `ActiveProcess.host_cwd`/guest-path mapping rather than Pyodide's internal `/home/pyodide` cwd

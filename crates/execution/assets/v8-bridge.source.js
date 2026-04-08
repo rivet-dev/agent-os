@@ -20828,13 +20828,7 @@ ${headerLines}\r
       return resolved;
     };
     resolve.paths = resolvePaths;
-    const rejectRestrictedBuiltin = function(request) {
-      const normalized = String(request).replace(/^node:/, "");
-      if (normalized === "http") {
-        const error = new Error(`node:${normalized} is not available in the Agent OS guest runtime`);
-        error.code = "ERR_ACCESS_DENIED";
-        throw error;
-      }
+    const rejectRestrictedBuiltin = function(_request) {
     };
     const requireFn = function(request) {
       rejectRestrictedBuiltin(request);
@@ -20959,6 +20953,7 @@ ${headerLines}\r
       "crypto",
       "dgram",
       "diagnostics_channel",
+      "domain",
       "dns",
       "events",
       "fs",
@@ -20978,19 +20973,23 @@ ${headerLines}\r
       "punycode",
       "querystring",
       "readline",
+      "repl",
       "sqlite",
       "stream",
       "stream/consumers",
       "stream/promises",
       "stream/web",
       "string_decoder",
+      "sys",
       "timers",
       "timers/promises",
+      "trace_events",
       "tls",
       "tty",
       "url",
       "util",
       "v8",
+      "wasi",
       "worker_threads",
       "zlib",
       "vm"
@@ -21150,8 +21149,12 @@ ${headerLines}\r
         return builtinCryptoModule;
       case "diagnostics_channel":
         return builtinDiagnosticsChannelModule;
+      case "domain":
+        throw createAccessDeniedBuiltinError(request);
       case "http":
         return _httpModule;
+      case "http2":
+        return _http2Module;
       case "events":
         return builtinEventsStdlibModule;
       case "fs":
@@ -21174,6 +21177,57 @@ ${headerLines}\r
         return builtinPunycodeStdlibModule;
       case "querystring":
         return builtinQuerystringStdlibModule;
+      case "readline":
+        return {
+          createInterface(options = {}) {
+            const output = options.output ?? null;
+            const listeners = new Map();
+            let closed = false;
+            return {
+              on(event, listener) {
+                const current = listeners.get(event) ?? [];
+                current.push(listener);
+                listeners.set(event, current);
+                return this;
+              },
+              once(event, listener) {
+                const wrapped = (...args) => {
+                  this.off(event, wrapped);
+                  listener(...args);
+                };
+                return this.on(event, wrapped);
+              },
+              off(event, listener) {
+                const current = listeners.get(event) ?? [];
+                listeners.set(
+                  event,
+                  current.filter((candidate) => candidate !== listener)
+                );
+                return this;
+              },
+              close() {
+                if (closed) {
+                  return;
+                }
+                closed = true;
+                const current = listeners.get("close") ?? [];
+                for (const listener of current) {
+                  listener();
+                }
+              },
+              question(prompt, callback) {
+                if (output && typeof output.write === "function" && prompt) {
+                  output.write(String(prompt));
+                }
+                if (typeof callback === "function") {
+                  callback("");
+                }
+              }
+            };
+          }
+        };
+      case "repl":
+        throw createAccessDeniedBuiltinError(request);
       case "stream":
         return builtinStreamStdlibModule;
       case "stream/consumers":
@@ -21196,8 +21250,12 @@ ${headerLines}\r
         return builtinTimersModule;
       case "timers/promises":
         return builtinTimersPromisesModule;
+      case "trace_events":
+        throw createAccessDeniedBuiltinError(request);
       case "url":
         return builtinUrlStdlibModule;
+      case "sys":
+        return globalThis.__agentOsBuiltinUtilModule;
       case "util":
         return globalThis.__agentOsBuiltinUtilModule;
       case "child_process":
@@ -21222,6 +21280,8 @@ ${headerLines}\r
         throw createAccessDeniedBuiltinError(request);
       case "module":
         return _moduleModule;
+      case "wasi":
+        throw createAccessDeniedBuiltinError(request);
       case "zlib":
         return globalThis.__agentOsBuiltinZlibModule;
       case "v8":

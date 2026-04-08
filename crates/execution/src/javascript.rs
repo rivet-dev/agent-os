@@ -2911,19 +2911,25 @@ fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
         | "punycode"
         | "querystring"
         | "readline"
+        | "repl"
         | "sqlite"
         | "stream"
         | "stream/consumers"
         | "stream/promises"
         | "stream/web"
         | "string_decoder"
+        | "sys"
+        | "timers"
         | "tls"
         | "timers/promises"
+        | "trace_events"
         | "tty"
         | "url"
         | "util"
+        | "domain"
         | "vm"
         | "v8"
+        | "wasi"
         | "worker_threads"
         | "zlib" => Some(format!("node:{bare}")),
         _ => None,
@@ -4113,6 +4119,30 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
         "readline" => &["createInterface"],
         "sqlite" => &["DatabaseSync", "StatementSync", "constants"],
         "stream/consumers" => &["arrayBuffer", "blob", "buffer", "json", "text"],
+        "sys" => &[
+            "MIMEType",
+            "MIMEParams",
+            "TextDecoder",
+            "TextEncoder",
+            "callbackify",
+            "debug",
+            "deprecate",
+            "format",
+            "inherits",
+            "inspect",
+            "parseArgs",
+            "promisify",
+            "stripVTControlCharacters",
+            "types",
+        ],
+        "timers" => &[
+            "clearImmediate",
+            "clearInterval",
+            "clearTimeout",
+            "setImmediate",
+            "setInterval",
+            "setTimeout",
+        ],
         "tty" => &["ReadStream", "WriteStream", "isatty"],
         "tls" => &[
             "TLSSocket",
