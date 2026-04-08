@@ -8192,6 +8192,26 @@ struct DeniedBuiltinAsset {
 
 const BUILTIN_ASSETS: &[BuiltinAsset] = &[
     BuiltinAsset {
+        name: "assert",
+        module_specifier: "node:assert",
+        init_counter_key: "__agentOsBuiltinAssertInitCount",
+    },
+    BuiltinAsset {
+        name: "buffer",
+        module_specifier: "node:buffer",
+        init_counter_key: "__agentOsBuiltinBufferInitCount",
+    },
+    BuiltinAsset {
+        name: "constants",
+        module_specifier: "node:constants",
+        init_counter_key: "__agentOsBuiltinConstantsInitCount",
+    },
+    BuiltinAsset {
+        name: "events",
+        module_specifier: "node:events",
+        init_counter_key: "__agentOsBuiltinEventsInitCount",
+    },
+    BuiltinAsset {
         name: "fs",
         module_specifier: "node:fs",
         init_counter_key: "__agentOsBuiltinFsInitCount",
@@ -8255,6 +8275,36 @@ const BUILTIN_ASSETS: &[BuiltinAsset] = &[
         name: "os",
         module_specifier: "node:os",
         init_counter_key: "__agentOsBuiltinOsInitCount",
+    },
+    BuiltinAsset {
+        name: "punycode",
+        module_specifier: "node:punycode",
+        init_counter_key: "__agentOsBuiltinPunycodeInitCount",
+    },
+    BuiltinAsset {
+        name: "querystring",
+        module_specifier: "node:querystring",
+        init_counter_key: "__agentOsBuiltinQuerystringInitCount",
+    },
+    BuiltinAsset {
+        name: "stream",
+        module_specifier: "node:stream",
+        init_counter_key: "__agentOsBuiltinStreamInitCount",
+    },
+    BuiltinAsset {
+        name: "string-decoder",
+        module_specifier: "node:string_decoder",
+        init_counter_key: "__agentOsBuiltinStringDecoderInitCount",
+    },
+    BuiltinAsset {
+        name: "util",
+        module_specifier: "node:util",
+        init_counter_key: "__agentOsBuiltinUtilInitCount",
+    },
+    BuiltinAsset {
+        name: "zlib",
+        module_specifier: "node:zlib",
+        init_counter_key: "__agentOsBuiltinZlibInitCount",
     },
 ];
 

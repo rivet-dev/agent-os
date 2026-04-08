@@ -11,6 +11,9 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- `crates/execution/tests/cjs_esm_interop.rs` should keep desired-behavior CJS/ESM gaps as explicit `#[ignore]` tests tied to the follow-up fix story instead of weakening assertions to current runtime behavior
+- Build the V8 stdlib-only builtin bundle from `crates/execution/assets/v8-bridge.source.js` via `packages/core/scripts/build-v8-bridge.mjs`, and keep the heavier assert/util/zlib payload in `v8-bridge-zlib.js` so `v8-bridge.js` stays under the 500KB cap
+- `crates/sidecar/src/vm.rs` must register the runtime-owned execution commands (`node`, `python`, `wasm`) during both `create_vm()` and `configure_vm()`; runtime-based `ExecuteRequest`s can run before any discovered `/__agentos/commands/*` entries are refreshed
 - Nested JavaScript `child_process` polling in the sidecar must surface queued child stdout/stderr/sync-RPC events before finalizing `Exited`; fast child output otherwise disappears behind the exit event
 - Pi/V8 boot probes in `packages/core` should run one suspicious import or constructor per fresh VM; a timed-out guest JS startup can poison later `node` spawns in the same VM and turn the original issue into generic broken-pipe noise
 - Public SDK type exports in `packages/core` now belong in `src/types.ts`; keep legacy runtime/kernel implementation helpers behind `src/runtime-compat.ts` and out of the main root export surface
@@ -506,4 +509,31 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - `node -e` guest executions should virtualize `process.argv` as `["node", ...extraArgs]`; leaving `"-e"` in argv breaks Node parity checks immediately
   - The sidecar child-process poll path needs to queue child stdout/stderr/sync-RPC events ahead of `Exited`; otherwise async child output disappears even though the child exits successfully
   - For builtin conformance, compare child-process semantics (trimmed sync stdout, nonzero status, stdin-pipe success) instead of raw stack text; exact stderr formatting is less stable than the underlying behavior
+---
+## 2026-04-08 01:29:17 PDT - US-054
+- Added `crates/execution/tests/cjs_esm_interop.rs` with 25 CJS/ESM interop cases: 18 active V8/runtime+resolver tests that pass now, plus 7 explicit ignored gap tests for `US-055` covering dynamic CJS export extraction, dual-package `require()` runtime branching, `assert.throws`, and ESM JSON imports
+- Updated `crates/execution/CLAUDE.md` with the rule that unresolved interop gaps stay as strong ignored tests instead of being weakened to current behavior
+- Files changed: `crates/execution/{CLAUDE.md,tests/cjs_esm_interop.rs}`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Keep interop expectations in the real V8 suite even when the runtime is wrong; use `#[ignore = "US-055: ..."]` to park known gaps without losing the target behavior
+  - `ModuleResolutionTestHarness` is enough for deep `exports` condition trees, but dual-package `require()` still needs a real V8 execution test because runtime loading can diverge from resolver output
+  - `cargo test -p agent-os-sidecar -- --test-threads=1` is currently blocked on this branch by pre-existing Python integration failures (`ENOENT: command not found: python` in `crates/sidecar/tests/python.rs`), so `US-054` is not marked complete yet
+---
+## 2026-04-08 02:33:24 PDT - US-056
+- Replaced the V8 bridge's hand-written pure-JS builtin stubs with a bundled `node-stdlib-browser` pipeline rooted at `crates/execution/assets/v8-bridge.source.js`, added `packages/core/scripts/build-v8-bridge.mjs`, split the heavy assert/util/zlib payload into `v8-bridge-zlib.js`, and wired the V8 host to load both bridge assets
+- Registered the new stdlib-backed builtin assets (`assert`, `buffer`, `constants`, `events`, `punycode`, `querystring`, `stream`, `string_decoder`, `util`, `zlib`), expanded builtin normalization/compat shims for `punycode`, `querystring`, `assert.throws`, and `assert.rejects`, and added host-vs-guest conformance coverage for the new stdlib surface
+- Files changed: `CLAUDE.md`, `crates/execution/{AGENTS.md,assets/v8-bridge.js,assets/v8-bridge.source.js,assets/v8-bridge-zlib.js,src/javascript.rs,src/node_import_cache.rs,src/v8_host.rs}`, `crates/sidecar/tests/builtin_conformance.rs`, `packages/core/{package.json,scripts/build-v8-bridge.mjs}`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The canonical source of truth for V8 stdlib-only builtins is `crates/execution/assets/v8-bridge.source.js`; regenerate the checked-in bridge artifacts with `pnpm --dir packages/core build:v8-bridge` instead of editing the minified bundle by hand
+  - Keeping `assert`/`util`/`zlib` in a second bundled asset lets the main `v8-bridge.js` stay under the story's 500KB ceiling while still exposing the full stdlib-backed modules in V8
+  - `cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1` and `cargo test -p agent-os-execution -- --test-threads=1` pass with this bridge swap, but `cargo test -p agent-os-sidecar -- --test-threads=1` is still blocked on the branch's pre-existing Python integration failure (`ENOENT: command not found: python` in `crates/sidecar/tests/python.rs`)
+---
+## 2026-04-08 08:44:44 PDT - US-056
+- Re-ran the `node-stdlib-browser` bridge build/test flow, confirmed `crates/execution/assets/v8-bridge.js` stays under the 500KB cap, and closed the story by getting both `agent-os-execution` and `agent-os-sidecar` fully green
+- Fixed the branch-wide sidecar regression in `crates/sidecar/src/vm.rs` by keeping the runtime-owned execution commands (`node`, `python`, `wasm`) registered during both VM creation and reconfiguration, which restores runtime-based execute paths before any explicit `ConfigureVm`
+- Files changed: `crates/CLAUDE.md` (via `crates/AGENTS.md` symlink), `crates/sidecar/src/vm.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - `ExecuteRequest { runtime: ... }` does not depend on discovered `/__agentos/commands/*` entries, so the execution driver must always seed the runtime-owned command names even on a brand-new VM
+  - A full `cargo test -p agent-os-sidecar -- --test-threads=1` run is now green on this branch again; the earlier Python `ENOENT: command not found: python` failure came from missing runtime command registration, not from the stdlib bridge work
+  - When a story touches the V8 bridge but the package-wide failure shows up in an unrelated runtime suite, check VM command registration before assuming the new bridge code caused it
 ---

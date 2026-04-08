@@ -15,10 +15,12 @@ const ALLOWED_NODE_BUILTINS: &[&str] = &[
     "buffer",
     "child_process",
     "console",
+    "constants",
     "crypto",
     "events",
     "fs",
     "path",
+    "punycode",
     "querystring",
     "stream",
     "string_decoder",
@@ -464,6 +466,88 @@ console.log(JSON.stringify({
   formatted: urlModule.format(parsed),
   parsedPathname: parsed.pathname,
   parsedQuery: parsed.query,
+}));
+"#,
+    );
+}
+
+#[test]
+fn stdlib_polyfill_conformance_matches_host_node() {
+    assert_conformance(
+        "stdlib-polyfills",
+        r#"
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const assert = require("node:assert");
+const constants = require("node:constants");
+const path = require("node:path");
+const punycode = require("node:punycode");
+const querystring = require("node:querystring");
+const stringDecoder = require("node:string_decoder");
+const util = require("node:util");
+const zlib = require("node:zlib");
+
+assert.deepStrictEqual(path.normalize?.("/alpha/../beta"), "/beta");
+assert.notStrictEqual(1, 2);
+assert.strictEqual(typeof assert.fail, "function");
+
+let throwsCode = null;
+assert.throws(
+  () => {
+    const error = new TypeError("boom");
+    error.code = "ERR_BOOM";
+    throw error;
+  },
+  (error) => {
+    throwsCode = error?.code ?? null;
+    return true;
+  },
+);
+
+let rejectsCode = null;
+await assert.rejects(
+  Promise.reject(Object.assign(new Error("reject"), { code: "ERR_REJECT" })),
+  (error) => {
+    rejectsCode = error?.code ?? null;
+    return true;
+  },
+);
+
+const decoder = new stringDecoder.StringDecoder("utf8");
+const textBytes = Buffer.from("Grüße", "utf8");
+const decoded =
+  decoder.write(textBytes.subarray(0, 4)) +
+  decoder.end(textBytes.subarray(4));
+
+const formatted = util.format("value:%s count:%d json:%j", "alpha", 7, { ok: true });
+const promisified = await util.promisify((value, callback) => callback(null, value.toUpperCase()))("beta");
+const encodedLength = new util.TextEncoder().encode("Grüße").length;
+const decodedText = new util.TextDecoder().decode(textBytes);
+
+const deflated = zlib.deflateSync(Buffer.from("agent-os", "utf8"));
+const inflated = zlib.inflateSync(deflated).toString("utf8");
+
+console.log(JSON.stringify({
+  constants: {
+    fOk: constants.F_OK ?? null,
+    oRdOnly: constants.O_RDONLY ?? null,
+    rOk: constants.R_OK ?? null,
+  },
+  decoded,
+  decodedText,
+  deflatedBase64: deflated.toString("base64"),
+  encodedLength,
+  formatted,
+  inflated,
+  isArrayBufferView: util.types.isArrayBufferView(textBytes),
+  promisified,
+  punycodeAscii: punycode.toASCII("mañana.com"),
+  punycodeUnicode: punycode.toUnicode("xn--maana-pta.com"),
+  querystringParsed: querystring.parse("a=1&b=x&b=y"),
+  querystringStringified: querystring.stringify({ a: 1, b: ["x", "y"] }),
+  rejectsCode,
+  throwsCode,
 }));
 "#,
     );

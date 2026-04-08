@@ -17,7 +17,11 @@ const V8_RUNTIME_PATH_ENV: &str = "AGENT_OS_V8_RUNTIME_PATH";
 /// Default binary name.
 const V8_BINARY_NAME: &str = "agent-os-v8";
 /// Pre-bundled polyfill bridge code.
-const V8_BRIDGE_CODE: &str = include_str!("../assets/v8-bridge.js");
+const V8_BRIDGE_CODE: &str = concat!(
+    include_str!("../assets/v8-bridge.js"),
+    "\n",
+    include_str!("../assets/v8-bridge-zlib.js")
+);
 
 /// Manages a V8 runtime child process with session multiplexing.
 pub struct V8RuntimeHost {

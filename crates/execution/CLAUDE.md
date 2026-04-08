@@ -95,6 +95,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 ## Runner Script Assets
 
 - Execution-host runner scripts materialized by `NodeImportCache` should live as checked-in assets under `crates/execution/assets/runners/` and be loaded via `include_str!`.
+- The stdlib-backed V8 bridge bundle should be generated from `crates/execution/assets/v8-bridge.source.js` via `pnpm --dir packages/core build:v8-bridge`; keep the heavier assert/util/zlib payload in `v8-bridge-zlib.js` so the main `v8-bridge.js` stays below the 500KB cap.
 - When testing import-cache temp-root cleanup, use a dedicated `NodeImportCache::new_in(...)` base dir so the one-time sweep stays isolated to that root.
 - Active JavaScript/Python/WASM executions must hold a `NodeImportCache` cleanup guard until the child exits; otherwise dropping the engine can delete `timing-bootstrap.mjs` and related assets while the host runtime is still importing them.
 - Host-Node compatibility coverage should stay behind the `legacy-js-tests` feature. Default validation for JavaScript execution must target the V8 isolate path and its `javascript_v8.rs` tests.
@@ -109,6 +110,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 
 - `node_import_cache.rs` has to patch `Module._resolveFilename` and the guest-facing `Module._cache` / `require.cache` view together; wrapping only `createGuestRequire()` does not constrain local `require()` inside already-loaded `.cjs` modules.
 - Resolver-only coverage for `javascript.rs` should use `javascript::ModuleResolutionTestHarness` with a temp-dir fixture instead of booting a V8 isolate; mapping `/root` plus `/root/node_modules` is enough to exercise exports/imports and pnpm `.pnpm` layouts.
+- `crates/execution/tests/cjs_esm_interop.rs` is the desired-behavior matrix for CJS/ESM/runtime edge cases. If an interop gap is deferred to a follow-up story, keep the strong assertion in place and mark that test `#[ignore = "US-055: ..."]` instead of weakening it to match current behavior.
 
 ## Guest `process` Hardening
 

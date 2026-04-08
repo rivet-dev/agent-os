@@ -2871,6 +2871,8 @@ fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
         | "path/win32"
         | "perf_hooks"
         | "process"
+        | "punycode"
+        | "querystring"
         | "readline"
         | "sqlite"
         | "stream"
@@ -2949,6 +2951,58 @@ function match(actual, expected, message) {
   }
 }
 
+function matchesExpectedError(error, expected) {
+  if (expected == null) return true;
+  if (expected instanceof RegExp) {
+    return expected.test(String(error?.message ?? error));
+  }
+  if (typeof expected === "function") {
+    if (error instanceof expected) return true;
+    return expected(error) === true;
+  }
+  if (typeof expected === "object") {
+    return Object.entries(expected).every(([key, value]) => serialize(error?.[key]) === serialize(value));
+  }
+  return false;
+}
+
+function throws(fn, expected, message) {
+  if (typeof fn !== "function") {
+    fail(message ?? "assert.throws requires a function");
+  }
+
+  try {
+    fn();
+  } catch (error) {
+    if (!matchesExpectedError(error, expected)) {
+      throw error;
+    }
+    return error;
+  }
+
+  fail(message ?? "Missing expected exception");
+}
+
+async function rejects(promiseOrFn, expected, message) {
+  let promise;
+  if (typeof promiseOrFn === "function") {
+    promise = promiseOrFn();
+  } else {
+    promise = promiseOrFn;
+  }
+
+  try {
+    await promise;
+  } catch (error) {
+    if (!matchesExpectedError(error, expected)) {
+      throw error;
+    }
+    return error;
+  }
+
+  fail(message ?? "Missing expected rejection");
+}
+
 function ifError(error) {
   if (error != null) {
     throw error;
@@ -2970,8 +3024,10 @@ Object.assign(assert, {
   notEqual,
   notStrictEqual,
   ok,
+  rejects,
   strict: assert,
   strictEqual,
+  throws,
 });
 
 export {
@@ -2986,8 +3042,10 @@ export {
   notEqual,
   notStrictEqual,
   ok,
+  rejects,
   assert as strict,
   strictEqual,
+  throws,
 };
 "#,
         );

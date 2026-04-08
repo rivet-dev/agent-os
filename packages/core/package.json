@@ -40,6 +40,7 @@
 		"check-types": "tsc --noEmit",
 		"build": "tsc",
 		"build:base-filesystem": "node ./scripts/build-base-filesystem.mjs",
+		"build:v8-bridge": "node ./scripts/build-v8-bridge.mjs",
 		"snapshot:alpine-defaults": "node ./scripts/snapshot-alpine-defaults.mjs",
 		"test": "vitest run"
 	},

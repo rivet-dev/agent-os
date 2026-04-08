@@ -814,7 +814,7 @@
         "Test uses @copilotkit/llmock with ANTHROPIC_API_KEY='mock-key' \u2014 no real API tokens",
         "pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts passes"
       ],
-      "priority": 101,
+      "priority": 103,
       "passes": true,
       "notes": "SUPERSEDED by US-053. US-053 covers the same E2E test with better prerequisites (US-050 builtin modules, US-051 conformance, US-052 boot probe). Skip this story \u2014 complete US-053 instead."
     },
@@ -830,7 +830,7 @@
         "If cold start >500ms, investigate V8 startup snapshot prewarming",
         "Benchmark added to scripts/benchmarks/ and runnable via a simple command"
       ],
-      "priority": 51,
+      "priority": 53,
       "passes": false,
       "notes": "Performance validation. The V8 runtime (crates/v8-runtime/) supports snapshot-based session creation via snapshot.rs. Cold start includes V8 isolate creation + v8-bridge.js evaluation. Warm start reuses the snapshot. Measure both. Compare against the old Command::new('node') path baseline if available."
     },
@@ -845,7 +845,7 @@
         "Benchmark added to scripts/benchmarks/ and runnable via a simple command",
         "Results include breakdown: v8-runtime base RSS, per-session delta, v8-bridge.js evaluation overhead"
       ],
-      "priority": 52,
+      "priority": 54,
       "passes": false,
       "notes": "Performance validation. The whole point of V8 isolates was lower memory per session vs spawning full node processes. Use process RSS from /proc/[pid]/status or similar. The existing scripts/benchmarks/pi-entrypoint-memory.bench.ts may be a useful reference for measurement patterns."
     },
@@ -865,7 +865,7 @@
         "Tests verify: guest require.resolve() returns guest-visible paths",
         "cargo test -p agent-os-sidecar --test isolation_audit -- --test-threads=1 passes"
       ],
-      "priority": 53,
+      "priority": 55,
       "passes": false,
       "notes": "Security hardening. The CLAUDE.md rules (crates/CLAUDE.md invariants 1-8) are clear but there's no automated test suite that systematically checks them. Each test should run guest JS code via the V8 engine and assert on the output. Reference: crates/execution/CLAUDE.md 'Virtualization Invariants' section."
     },
@@ -881,7 +881,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 env passes",
         "cargo test -p agent-os-execution -- --test-threads=1 env passes"
       ],
-      "priority": 54,
+      "priority": 56,
       "passes": false,
       "notes": "The old secure-exec had full env virtualization in bridge/process.ts (2,251 lines). The V8 bridge (v8-bridge.js) may already partially handle this via the process polyfill, but it needs verification. Check what guest_env filtering the sidecar does in service.rs and whether the V8 runtime exposes host env to guest code. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/process.ts."
     },
@@ -897,7 +897,7 @@
         "Signal state tracked per-process in kernel process table (not per-V8-isolate)",
         "cargo test -p agent-os-sidecar -- --test-threads=1 signal passes"
       ],
-      "priority": 55,
+      "priority": 57,
       "passes": false,
       "notes": "The kernel already has full signal support in process_table.rs (SIGCHLD, SIGTERM, SIGWINCH, etc.). The gap is wiring guest process.on('SIGTERM') through the V8 bridge to the kernel signal table. The old secure-exec bridge/process.ts had this. The V8 bridge needs a signal registration bridge call and the sidecar needs to deliver signal events to the V8 session."
     },
@@ -912,7 +912,7 @@
         "V8 binary artifact is cached between CI runs to avoid rebuilding rusty_v8 from source",
         "CI passes on the current branch"
       ],
-      "priority": 56,
+      "priority": 58,
       "passes": false,
       "notes": "Operational. crates/v8-runtime/ uses v8 = '130' (rusty_v8) which takes ~5 minutes to build from source. CI should cache the built binary and the rusty_v8 build artifacts. Check if there's an existing CI workflow (.github/workflows/) to extend rather than creating a new one."
     },
@@ -933,7 +933,7 @@
         "Tests use a mock filesystem (in-memory VFS or temp dir) \u2014 no real npm packages needed",
         "cargo test -p agent-os-execution --test module_resolution passes"
       ],
-      "priority": 44,
+      "priority": 46,
       "passes": true,
       "notes": "The module resolver lives in javascript.rs LocalBridgeState (resolve_module, resolve_path, resolve_node_modules, resolve_package_imports, resolve_package_entry_from_dir \u2014 lines 2421-2617). It currently has ZERO tests. This resolver handles all require()/import() calls in V8 guest code. Edge cases in exports maps and pnpm store layouts are the most common failure mode when loading real-world packages like Pi SDK."
     },
@@ -950,7 +950,7 @@
         "cargo test -p agent-os-execution --test module_resolution passes",
         "cargo test -p agent-os-execution -- --test-threads=1 passes"
       ],
-      "priority": 45,
+      "priority": 47,
       "passes": true,
       "notes": "Depends on US-048. Fix whatever the test suite finds. Common issues: wildcard exports not expanded, conditional export priority wrong (should be import > require > default for ESM, require > import > default for CJS), string shorthand exports not handled."
     },
@@ -966,7 +966,7 @@
         "Test passes (even if SDK boot fails) \u2014 it reports failures, doesn't assert success yet",
         "The failure list is documented in .agent/notes/pi-sdk-boot-gaps.md"
       ],
-      "priority": 46,
+      "priority": 48,
       "passes": true,
       "notes": "This is a diagnostic story, not a fix story. The goal is to enumerate exactly what's missing so subsequent stories can fix targeted gaps instead of guessing. Run the test, collect the failure list, write it to a note file. Key Pi SDK deps to watch: @anthropic-ai/sdk (HTTP client), jiti (dynamic TS loading), zod (validation), various stream/event patterns."
     },
@@ -987,7 +987,7 @@
         "Tests verify behavior matches real Node.js (same return values, same error codes)",
         "cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1 passes"
       ],
-      "priority": 47,
+      "priority": 49,
       "passes": false,
       "notes": "Scoped to what Pi SDK actually imports \u2014 NOT the full Node.js test suite. Each test runs guest JS code in a V8 isolate via the sidecar and asserts on output. If a polyfill method is missing or returns wrong values, the test fails with a clear message about what's wrong. Reference the Pi SDK boot probe (US-050) failure list to prioritize which builtins to test first."
     },
@@ -1003,7 +1003,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes",
         "cargo test -p agent-os-execution -- --test-threads=1 passes"
       ],
-      "priority": 48,
+      "priority": 50,
       "passes": false,
       "notes": "Depends on US-050 and US-051. Fix the specific gaps those stories identified. Common fixes: add missing methods to v8-bridge.js polyfills, fix incorrect return value formats, add missing error codes. Reference .agent/recovery/secure-exec/ for how the original JS kernel handled each case. Update .agent/notes/pi-sdk-boot-gaps.md as gaps are closed."
     },
@@ -1019,7 +1019,7 @@
         "All bridge calls exercised: fs, child_process, crypto, timers, stdin",
         "pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts passes"
       ],
-      "priority": 49,
+      "priority": 51,
       "passes": false,
       "notes": "This replaces US-041 as the final Pi E2E story. By this point, US-048-052 have verified module resolution, polyfill conformance, and SDK boot. This story should be straightforward \u2014 just wire the test and verify the lifecycle. If it still fails, the boot probe and conformance tests missed something \u2014 go back and add coverage."
     },
@@ -1041,7 +1041,7 @@
         "cargo test -p agent-os-execution --test cjs_esm_interop -- --test-threads=1 passes",
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes (no regressions)"
       ],
-      "priority": 42,
+      "priority": 44,
       "passes": false,
       "notes": "This test suite covers gaps found in the module resolution audit. The CJS export extraction gap is the highest risk for Pi SDK \u2014 Pi depends on packages that may use Object.assign(module.exports, ...) or other dynamic patterns. Tests MUST use real V8 execution, not mock the resolver. The ModuleResolutionTestHarness from US-048 can handle resolution-only tests; runtime behavior tests need the full sidecar harness from crates/sidecar/tests/. DO NOT weaken tests to match current behavior \u2014 if a test reveals a real gap, mark it as a known failure and create a fix in US-055."
     },
@@ -1062,9 +1062,70 @@
         "cargo test -p agent-os-execution -- --test-threads=1 passes (no regressions)",
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes (no regressions)"
       ],
-      "priority": 43,
+      "priority": 45,
       "passes": false,
       "notes": "Depends on US-054 (test suite). Fix whatever the tests reveal. Key implementation areas: (1) CJS export extraction in crates/v8-runtime/src/execution.rs extract_cjs_export_names() \u2014 needs runtime fallback for dynamic patterns. (2) Builtin module objects in crates/execution/assets/v8-bridge.js and crates/execution/src/javascript.rs \u2014 assert and path need complete implementations matching Node.js API surface. (3) Circular dep handling in LocalBridgeState resolution cache. Reference .agent/recovery/secure-exec/nodejs/src/bridge/polyfills.ts for how secure-exec handled complete builtin modules."
+    },
+    {
+      "id": "US-056",
+      "title": "Replace hand-written polyfill stubs with node-stdlib-browser",
+      "description": "As a developer, I want the V8 bridge to use node-stdlib-browser (already in package.json) for pure-JS builtin polyfills instead of incomplete hand-written stubs. This is how secure-exec did it.",
+      "acceptanceCriteria": [
+        "v8-bridge.js builtin module polyfills for path, assert, util, events, stream, buffer, url, querystring, string_decoder, punycode, constants, zlib use node-stdlib-browser implementations",
+        "Build process bundles node-stdlib-browser polyfills into v8-bridge.js via esbuild (same approach as secure-exec's bundlePolyfill())",
+        "require('path').normalize, .resolve, .relative, .join, .dirname, .basename, .extname, .isAbsolute, .sep, .delimiter, .parse, .format ALL work correctly \u2014 not stubs",
+        "require('assert').deepStrictEqual, .strictEqual, .throws, .rejects, .ok, .fail, .notStrictEqual ALL work \u2014 not stubs",
+        "require('util').promisify, .inspect, .types, .TextEncoder, .TextDecoder, .format ALL work \u2014 not stubs",
+        "require('url').URL constructor works (WHATWG), url.parse and url.format work (legacy)",
+        "require('events').EventEmitter works with on, once, emit, removeListener, removeAllListeners",
+        "require('stream') provides Readable, Writable, Transform, Duplex, pipeline, finished",
+        "require('buffer').Buffer works with from, alloc, toString, concat, slice",
+        "Kernel-backed modules (fs, net, child_process, dns, http, os, crypto) remain custom bridge implementations \u2014 NOT replaced by node-stdlib-browser",
+        "v8-bridge.js bundle size stays under 500KB (node-stdlib-browser adds ~200KB)",
+        "All existing cargo test -p agent-os-execution and cargo test -p agent-os-sidecar tests pass (no regressions)",
+        "cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1 passes"
+      ],
+      "priority": 42,
+      "passes": true,
+      "notes": "CRITICAL FIX. node-stdlib-browser is ALREADY in packages/core/package.json (v1.3.1) but not wired into v8-bridge.js. Secure-exec used it for all pure-JS builtins and only wrote custom code for kernel-backed modules. The current V8 bridge hand-writes stubs for path, assert, util, url, etc. \u2014 they're incomplete and cause Pi SDK to fail. The fix is: (1) add node-stdlib-browser to the v8-bridge.js build pipeline, (2) for each pure-JS builtin, replace the hand-written stub with the node-stdlib-browser version, (3) keep kernel-backed modules (fs, net, child_process, dns, http, crypto) as custom bridge implementations. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/polyfills.ts for how secure-exec registered these. Also add web-streams-polyfill (v4.2.0) for stream/web support like secure-exec did."
+    },
+    {
+      "id": "US-057",
+      "title": "Replace _networkFetchRaw with undici over kernel TCP sockets",
+      "description": "As a developer, I want fetch() in V8 guest code to use undici (the real Node.js HTTP client) running over kernel-backed TCP sockets instead of a high-level _networkFetchRaw bridge call that bypasses the network stack.",
+      "acceptanceCriteria": [
+        "Guest fetch() uses undici's fetch implementation, NOT a custom _networkFetchRaw bridge call",
+        "undici runs inside the V8 guest, making TCP connections via the kernel socket table (net.connect bridge calls)",
+        "HTTP request/response lifecycle goes through the kernel network stack: undici \u2192 net.connect \u2192 kernel socket table \u2192 host network adapter",
+        "DNS resolution for fetch() goes through the kernel DNS resolver (dns.lookup bridge), not host DNS",
+        "fetch() respects kernel network permissions \u2014 denied hosts/ports return network errors",
+        "Loopback connections (127.0.0.1) stay in-kernel like any other TCP connection",
+        "HTTPS/TLS fetch() uses the kernel TLS upgrade path (net.socket_upgrade_tls)",
+        "The old _networkFetchRaw bridge call is removed from SYNC_BRIDGE_FNS/ASYNC_BRIDGE_FNS",
+        "Guest code cannot bypass the kernel network stack via fetch()",
+        "fetch() works with streaming responses (ReadableStream body)",
+        "All existing fetch-related tests pass",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
+      ],
+      "priority": 43,
+      "passes": false,
+      "notes": "ARCHITECTURAL FIX. The current _networkFetchRaw is a high-level bridge call that delegates the entire HTTP request to the host, bypassing the kernel network stack. This means fetch() doesn't go through kernel permissions, kernel DNS, or kernel socket table. In contrast, net.connect, http.request, etc. properly use kernel TCP sockets. The fix is to run undici inside the guest V8 isolate, where it makes TCP connections via the kernel socket bridge (same as net.connect). This matches how real Node.js works \u2014 fetch() is implemented by undici which uses net.connect internally. undici is already in pnpm-lock.yaml (v7.24.6). Bundle it into v8-bridge.js and configure it to use the kernel net polyfill for TCP."
+    },
+    {
+      "id": "US-058",
+      "title": "Add formal bridge contract and restore _loadPolyfill mechanism",
+      "description": "As a developer, I want a formal bridge contract definition and the ability to load polyfills on-demand like secure-exec had, instead of everything hardcoded in v8-bridge.js.",
+      "acceptanceCriteria": [
+        "Bridge contract formally defined in a TypeScript or JSON schema file listing all bridge function names, their calling convention (sync/async/syncPromise), and argument/return types",
+        "_loadPolyfill bridge function restored \u2014 guest code can request polyfills by name at runtime",
+        "Polyfill registry maps module names to their polyfill source (node-stdlib-browser, custom bridge, or denied)",
+        "Bridge contract includes version field for compatibility tracking",
+        "cargo test -p agent-os-execution -- --test-threads=1 passes",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
+      ],
+      "priority": 48,
+      "passes": false,
+      "notes": "Lower priority than US-056/057. Secure-exec had a formal TypeScript bridge contract (bridge-contract.ts) with explicit calling conventions and versioning. The current V8 bridge lost this \u2014 contracts are implicit in code. This story restores the formal contract for maintainability. The _loadPolyfill mechanism allows on-demand polyfill loading instead of bundling everything upfront."
     }
   ]
 }

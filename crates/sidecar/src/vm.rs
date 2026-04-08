@@ -22,6 +22,7 @@ use crate::service::{
 use crate::state::{
     BridgeError, VmConfiguration, VmDnsConfig, VmLayer, VmLayerStore, VmOverlayLayer, VmState,
     DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME, JAVASCRIPT_COMMAND,
+    PYTHON_COMMAND, WASM_COMMAND,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -94,11 +95,15 @@ where
             agent_os_kernel::mount_table::MountTable::new(root_filesystem),
             config,
         );
+        let command_guest_paths = discover_command_guest_paths(&mut kernel);
+        let mut execution_commands = vec![
+            String::from(JAVASCRIPT_COMMAND),
+            String::from(PYTHON_COMMAND),
+            String::from(WASM_COMMAND),
+        ];
+        execution_commands.extend(command_guest_paths.keys().cloned());
         kernel
-            .register_driver(CommandDriver::new(
-                EXECUTION_DRIVER_NAME,
-                [JAVASCRIPT_COMMAND],
-            ))
+            .register_driver(CommandDriver::new(EXECUTION_DRIVER_NAME, execution_commands))
             .map_err(kernel_error)?;
         kernel
             .root_filesystem_mut()
@@ -134,7 +139,7 @@ where
                 loaded_snapshot,
                 configuration: VmConfiguration::default(),
                 layers: VmLayerStore::default(),
-                command_guest_paths: BTreeMap::new(),
+                command_guest_paths,
                 command_permissions: BTreeMap::new(),
                 toolkits: BTreeMap::new(),
                 active_processes: BTreeMap::new(),
@@ -234,7 +239,11 @@ where
             },
         )?;
         vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);
-        let mut execution_commands = vec![String::from(JAVASCRIPT_COMMAND)];
+        let mut execution_commands = vec![
+            String::from(JAVASCRIPT_COMMAND),
+            String::from(PYTHON_COMMAND),
+            String::from(WASM_COMMAND),
+        ];
         execution_commands.extend(vm.command_guest_paths.keys().cloned());
         vm.kernel
             .register_driver(CommandDriver::new(
