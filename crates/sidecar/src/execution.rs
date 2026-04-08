@@ -2085,11 +2085,20 @@ where
             {
                 signal_runtime_process(execution.child_pid(), signal)?;
             }
+            ActiveExecution::Javascript(execution)
+                if execution.uses_shared_v8_runtime() && signal == SIGKILL =>
+            {
+                execution
+                    .terminate()
+                    .map_err(|error| SidecarError::Execution(error.to_string()))?;
+            }
             ActiveExecution::Javascript(execution) if execution.uses_shared_v8_runtime() => {
                 if signal != 0 {
-                    execution
-                        .terminate()
-                        .map_err(|error| SidecarError::Execution(error.to_string()))?;
+                    if !dispatch_v8_process_signal(process, signal)? {
+                        execution
+                            .terminate()
+                            .map_err(|error| SidecarError::Execution(error.to_string()))?;
+                    }
                 }
             }
             ActiveExecution::Javascript(execution) if execution.child_pid() == 0 => {}
@@ -2880,7 +2889,8 @@ where
                             }
                         }
                         if !child.pending_execution_events.is_empty() {
-                            child.pending_execution_events
+                            child
+                                .pending_execution_events
                                 .push_back(ActiveExecutionEvent::Exited(exit_code));
                             true
                         } else {
@@ -2897,6 +2907,15 @@ where
                         .expect("process should still exist")
                         .execution
                         .child_pid();
+                    let parent_uses_v8_signal_bridge = vm
+                        .active_processes
+                        .get(process_id)
+                        .is_some_and(|process| match &process.execution {
+                            ActiveExecution::Javascript(execution) => {
+                                execution.uses_shared_v8_runtime()
+                            }
+                            _ => false,
+                        });
                     let should_signal_parent = vm
                         .signal_states
                         .get(process_id)
@@ -2914,7 +2933,15 @@ where
                     child.kernel_handle.finish(exit_code);
                     let _ = vm.kernel.wait_and_reap(child.kernel_pid);
                     if should_signal_parent {
-                        signal_runtime_process(parent_runtime_pid, libc::SIGCHLD)?;
+                        if parent_uses_v8_signal_bridge {
+                            let parent = vm
+                                .active_processes
+                                .get(process_id)
+                                .expect("process should still exist");
+                            dispatch_v8_process_signal(parent, libc::SIGCHLD)?;
+                        } else {
+                            signal_runtime_process(parent_runtime_pid, libc::SIGCHLD)?;
+                        }
                     }
                     return Ok(json!({
                         "type": "exit",
@@ -12522,6 +12549,32 @@ where
     }
 }
 
+fn signal_name_for_stream_event(signal: i32) -> Option<&'static str> {
+    match signal {
+        libc::SIGHUP => Some("SIGHUP"),
+        libc::SIGINT => Some("SIGINT"),
+        libc::SIGTERM => Some("SIGTERM"),
+        libc::SIGCHLD => Some("SIGCHLD"),
+        libc::SIGWINCH => Some("SIGWINCH"),
+        _ => None,
+    }
+}
+
+fn dispatch_v8_process_signal(process: &ActiveProcess, signal: i32) -> Result<bool, SidecarError> {
+    let Some(signal_name) = signal_name_for_stream_event(signal) else {
+        return Ok(false);
+    };
+    process.execution.send_javascript_stream_event(
+        "signal",
+        json!({
+            "signal": signal_name,
+            "number": signal,
+            "action": "default",
+        }),
+    )?;
+    Ok(true)
+}
+
 pub(crate) fn parse_signal(signal: &str) -> Result<i32, SidecarError> {
     let trimmed = signal.trim();
     if trimmed.is_empty() {
@@ -12532,7 +12585,15 @@ pub(crate) fn parse_signal(signal: &str) -> Result<i32, SidecarError> {
 
     if let Ok(value) = trimmed.parse::<i32>() {
         return match value {
-            0 | libc::SIGINT | SIGKILL | SIGTERM | libc::SIGCONT | libc::SIGSTOP => Ok(value),
+            0
+            | libc::SIGHUP
+            | libc::SIGINT
+            | SIGKILL
+            | SIGTERM
+            | libc::SIGCONT
+            | libc::SIGSTOP
+            | libc::SIGWINCH
+            | libc::SIGCHLD => Ok(value),
             _ => Err(SidecarError::InvalidState(format!(
                 "unsupported kill_process signal {signal}"
             ))),
@@ -12549,11 +12610,14 @@ pub(crate) fn parse_signal(signal: &str) -> Result<i32, SidecarError> {
 
 fn signal_number_from_name(signal: &str) -> Option<i32> {
     match signal {
+        "HUP" => Some(libc::SIGHUP),
         "INT" => Some(libc::SIGINT),
         "KILL" => Some(SIGKILL),
         "TERM" => Some(SIGTERM),
         "CONT" => Some(libc::SIGCONT),
         "STOP" => Some(libc::SIGSTOP),
+        "WINCH" => Some(libc::SIGWINCH),
+        "CHLD" => Some(libc::SIGCHLD),
         _ => None,
     }
 }

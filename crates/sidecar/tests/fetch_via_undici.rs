@@ -1,6 +1,7 @@
 mod support;
 
 use agent_os_sidecar::protocol::GuestRuntimeKind;
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
@@ -9,7 +10,6 @@ use support::{
     assert_node_available, authenticate, collect_process_output_with_timeout, execute, new_sidecar,
     open_session, temp_dir, write_fixture,
 };
-use std::collections::BTreeMap;
 
 #[test]
 fn javascript_fetch_uses_guest_undici_over_kernel_tcp_socket() {
@@ -132,21 +132,18 @@ console.log(JSON.stringify({{
     );
     let server_result = server.join();
 
-    assert_eq!(
-        exit_code, 0,
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert_eq!(exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stderr.trim().is_empty(), "unexpected stderr:\n{stderr}");
     let json_line = stdout
         .lines()
         .rev()
         .find(|line| !line.trim().is_empty())
         .expect("stdout json line");
-    let payload: serde_json::Value =
-        serde_json::from_str(json_line).expect("parse fetch result");
+    let payload: serde_json::Value = serde_json::from_str(json_line).expect("parse fetch result");
     assert_eq!(payload["status"], 200);
     assert_eq!(payload["body"], "hello world");
     assert_eq!(payload["contentType"], "text/plain");
     assert_eq!(payload["hasReader"], true);
-    server_result.unwrap_or_else(|_| panic!("server thread failed\nstdout:\n{stdout}\nstderr:\n{stderr}"));
+    server_result
+        .unwrap_or_else(|_| panic!("server thread failed\nstdout:\n{stdout}\nstderr:\n{stderr}"));
 }

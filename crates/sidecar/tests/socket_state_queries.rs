@@ -49,6 +49,163 @@ fn wait_for_process_output(
 }
 
 #[test]
+fn v8_signal_delivery_routes_kill_process_and_process_kill() {
+    assert_node_available();
+
+    let mut sidecar = new_sidecar("v8-signal-routing");
+    let cwd = temp_dir("v8-signal-routing-cwd");
+    let entry = cwd.join("signal-routing.mjs");
+
+    write_fixture(
+        &entry,
+        [
+            "let sigtermCount = 0;",
+            "process.on('SIGHUP', () => {});",
+            "process.on('SIGWINCH', () => {});",
+            "process.on('SIGTERM', () => {",
+            "  sigtermCount += 1;",
+            "  console.log(`sigterm:${sigtermCount}`);",
+            "  if (sigtermCount === 1) {",
+            "    process.kill(process.pid, 'SIGTERM');",
+            "    return;",
+            "  }",
+            "  process.exit(0);",
+            "});",
+            "console.log('signal-handlers-ready');",
+            "setInterval(() => {}, 25);",
+        ]
+        .join("\n"),
+    );
+
+    let connection_id = authenticate(&mut sidecar, "conn-v8-signal-routing");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let (vm_id, _) = create_vm_with_metadata(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::JavaScript,
+        &cwd,
+        BTreeMap::new(),
+    );
+
+    execute(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "signal-routing",
+        GuestRuntimeKind::JavaScript,
+        &entry,
+        Vec::new(),
+    );
+
+    wait_for_process_output(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "signal-routing",
+        "signal-handlers-ready",
+    );
+
+    let ownership = OwnershipScope::vm(&connection_id, &session_id, &vm_id);
+    let registration_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let signal_state = sidecar
+            .dispatch_blocking(request(
+                5,
+                ownership.clone(),
+                RequestPayload::GetSignalState(GetSignalStateRequest {
+                    process_id: String::from("signal-routing"),
+                }),
+            ))
+            .expect("query V8 signal state");
+        let ready = match signal_state.response.payload {
+            ResponsePayload::SignalState(snapshot) => {
+                snapshot.handlers.get(&(libc::SIGTERM as u32))
+                    == Some(&agent_os_sidecar::protocol::SignalHandlerRegistration {
+                        action: SignalDispositionAction::User,
+                        mask: vec![],
+                        flags: 0,
+                    })
+                    && snapshot.handlers.get(&(libc::SIGHUP as u32))
+                        == Some(&agent_os_sidecar::protocol::SignalHandlerRegistration {
+                            action: SignalDispositionAction::User,
+                            mask: vec![],
+                            flags: 0,
+                        })
+                    && snapshot.handlers.get(&(libc::SIGWINCH as u32))
+                        == Some(&agent_os_sidecar::protocol::SignalHandlerRegistration {
+                            action: SignalDispositionAction::User,
+                            mask: vec![],
+                            flags: 0,
+                        })
+            }
+            other => panic!("unexpected signal state response: {other:?}"),
+        };
+        if ready {
+            break;
+        }
+        let _ = sidecar
+            .poll_event_blocking(&ownership, Duration::from_millis(25))
+            .expect("pump V8 signal registration events");
+        assert!(
+            Instant::now() < registration_deadline,
+            "timed out waiting for V8 signal registrations"
+        );
+    }
+
+    sidecar
+        .dispatch_blocking(request(
+            6,
+            ownership.clone(),
+            RequestPayload::KillProcess(KillProcessRequest {
+                process_id: String::from("signal-routing"),
+                signal: String::from("SIGTERM"),
+            }),
+        ))
+        .expect("deliver SIGTERM to V8 guest");
+
+    let event_deadline = Instant::now() + Duration::from_secs(10);
+    let mut saw_first_sigterm = false;
+    let mut saw_second_sigterm = false;
+    let mut exit_code = None;
+
+    while exit_code.is_none() {
+        let event = sidecar
+            .poll_event_blocking(&ownership, Duration::from_millis(100))
+            .expect("poll V8 signal events");
+        let Some(event) = event else {
+            assert!(
+                Instant::now() < event_deadline,
+                "timed out waiting for V8 signal delivery"
+            );
+            continue;
+        };
+
+        match event.payload {
+            EventPayload::ProcessOutput(output) if output.process_id == "signal-routing" => {
+                saw_first_sigterm |= output.chunk.contains("sigterm:1");
+                saw_second_sigterm |= output.chunk.contains("sigterm:2");
+            }
+            EventPayload::ProcessExited(exited) if exited.process_id == "signal-routing" => {
+                exit_code = Some(exited.exit_code);
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_first_sigterm, "expected control-plane SIGTERM delivery");
+    assert!(
+        saw_second_sigterm,
+        "expected guest process.kill(SIGTERM) delivery"
+    );
+    assert_eq!(exit_code, Some(0));
+}
+
+#[test]
 #[ignore = "V8 sidecar socket-state output delivery is flaky in this harness; execution-layer tests cover the V8 bridge path"]
 fn sidecar_queries_listener_udp_and_signal_state() {
     assert_node_available();

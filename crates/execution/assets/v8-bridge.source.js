@@ -18165,6 +18165,7 @@ ${headerLines}\r
     Object.entries(_signalNumbers).map(([name, num]) => [num, name])
   );
   var _ignoredSelfSignals = /* @__PURE__ */ new Set(["SIGWINCH", "SIGCHLD", "SIGCONT", "SIGURG"]);
+  var _trackedProcessSignalEvents = /* @__PURE__ */ new Set(["SIGHUP", "SIGINT", "SIGTERM", "SIGWINCH", "SIGCHLD"]);
   function _resolveSignal(signal) {
     if (signal === void 0 || signal === null) return 15;
     if (typeof signal === "number") return signal;
@@ -18172,10 +18173,60 @@ ${headerLines}\r
     if (num !== void 0) return num;
     throw new Error("Unknown signal: " + signal);
   }
+  function _isTrackedProcessSignalEventName(eventName) {
+    return typeof eventName === "string" && _trackedProcessSignalEvents.has(eventName);
+  }
   var _processListeners = {};
   var _processOnceListeners = {};
   var _processMaxListeners = 10;
   var _processMaxListenersWarned = /* @__PURE__ */ new Set();
+  function _listenerCountForEvent(event) {
+    return (_processListeners[event] || []).length + (_processOnceListeners[event] || []).length;
+  }
+  function _syncGuestProcessSignalState(eventName) {
+    if (!_isTrackedProcessSignalEventName(eventName) || typeof _processSignalState === "undefined") {
+      return;
+    }
+    const signal = _signalNumbers[eventName];
+    if (typeof signal !== "number") {
+      return;
+    }
+    const action = _listenerCountForEvent(eventName) > 0 ? "user" : "default";
+    try {
+      _processSignalState.applySyncPromise(void 0, [signal, action, JSON.stringify([]), 0]);
+    } catch {
+    }
+  }
+  function _syncAllGuestProcessSignalStates() {
+    for (const eventName of _trackedProcessSignalEvents) {
+      _syncGuestProcessSignalState(eventName);
+    }
+  }
+  function _deliverProcessSignal(signal, action = "default") {
+    const sigNum = _resolveSignal(signal);
+    if (sigNum === 0) {
+      return true;
+    }
+    const sigName = _signalNamesByNumber[sigNum] ?? `SIG${sigNum}`;
+    if (action === "ignore") {
+      return true;
+    }
+    if (_emit(sigName, sigName)) {
+      return true;
+    }
+    if (_ignoredSelfSignals.has(sigName)) {
+      return true;
+    }
+    return process2.exit(128 + sigNum);
+  }
+  function signalDispatch(eventType, payload) {
+    if (eventType !== "signal" || payload === null || typeof payload !== "object") {
+      return;
+    }
+    const signal = payload.signal ?? payload.number;
+    const action = typeof payload.action === "string" ? payload.action : "default";
+    _deliverProcessSignal(signal, action);
+  }
   function _addListener(event, listener, once = false) {
     const target = once ? _processOnceListeners : _processListeners;
     if (!target[event]) {
@@ -18192,6 +18243,7 @@ ${headerLines}\r
         }
       }
     }
+    _syncGuestProcessSignalState(event);
     return process2;
   }
   function _removeListener(event, listener) {
@@ -18203,6 +18255,7 @@ ${headerLines}\r
       const idx = _processOnceListeners[event].indexOf(listener);
       if (idx !== -1) _processOnceListeners[event].splice(idx, 1);
     }
+    _syncGuestProcessSignalState(event);
     return process2;
   }
   function _emit(event, ...args) {
@@ -18686,6 +18739,7 @@ ${headerLines}\r
     }
   };
   exposeCustomGlobal("_stdinDispatch", stdinDispatch);
+  exposeCustomGlobal("_signalDispatch", signalDispatch);
   function hrtime(prev) {
     const now = getNowMs();
     const seconds = Math.floor(now / 1e3);
@@ -18896,6 +18950,17 @@ ${headerLines}\r
       };
     },
     kill(pid, signal) {
+      const sigNum = _resolveSignal(signal);
+      const sigName = _signalNamesByNumber[sigNum] ?? `SIG${sigNum}`;
+      if (typeof _processKill !== "undefined") {
+        const rawResult = _processKill.applySyncPromise(void 0, [pid, sigName]);
+        if (pid === process2.pid) {
+          const result = typeof rawResult === "string" ? JSON.parse(rawResult) : rawResult;
+          const action = result && typeof result === "object" && typeof result.action === "string" ? result.action : "default";
+          return _deliverProcessSignal(sigNum, action);
+        }
+        return true;
+      }
       if (pid !== process2.pid) {
         const err = new Error("Operation not permitted");
         err.code = "EPERM";
@@ -18903,18 +18968,7 @@ ${headerLines}\r
         err.syscall = "kill";
         throw err;
       }
-      const sigNum = _resolveSignal(signal);
-      if (sigNum === 0) {
-        return true;
-      }
-      const sigName = _signalNamesByNumber[sigNum] ?? `SIG${sigNum}`;
-      if (_emit(sigName, sigName)) {
-        return true;
-      }
-      if (_ignoredSelfSignals.has(sigName)) {
-        return true;
-      }
-      return process2.exit(128 + sigNum);
+      return _deliverProcessSignal(sigNum, "default");
     },
     // EventEmitter methods
     on(event, listener) {
@@ -18932,11 +18986,13 @@ ${headerLines}\r
       if (event) {
         delete _processListeners[event];
         delete _processOnceListeners[event];
+        _syncGuestProcessSignalState(event);
       } else {
         Object.keys(_processListeners).forEach((k) => delete _processListeners[k]);
         Object.keys(_processOnceListeners).forEach(
           (k) => delete _processOnceListeners[k]
         );
+        _syncAllGuestProcessSignalStates();
       }
       return process2;
     },
@@ -18953,13 +19009,14 @@ ${headerLines}\r
       ];
     },
     listenerCount(event) {
-      return (_processListeners[event] || []).length + (_processOnceListeners[event] || []).length;
+      return _listenerCountForEvent(event);
     },
     prependListener(event, listener) {
       if (!_processListeners[event]) {
         _processListeners[event] = [];
       }
       _processListeners[event].unshift(listener);
+      _syncGuestProcessSignalState(event);
       return process2;
     },
     prependOnceListener(event, listener) {
@@ -18967,6 +19024,7 @@ ${headerLines}\r
         _processOnceListeners[event] = [];
       }
       _processOnceListeners[event].unshift(listener);
+      _syncGuestProcessSignalState(event);
       return process2;
     },
     eventNames() {

@@ -1083,7 +1083,6 @@ if (typeof basename !== "function" || typeof dirname !== "function" || typeof is
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-
 #[test]
 #[ignore = "Guest child_process command resolution is still broken on this branch; sidecar/execution conformance for the remaining builtins is active"]
 fn javascript_execution_v8_child_process_conformance_matches_host_node() {

@@ -1306,12 +1306,12 @@ where
         };
         let initialize_response = match self
             .send_acp_request_and_collect(
-            &vm_id,
-            &process_id,
-            &payload.agent_type,
-            None,
-            initialize,
-        )
+                &vm_id,
+                &process_id,
+                &payload.agent_type,
+                None,
+                initialize,
+            )
             .await
         {
             Ok((response, response_events)) => {
@@ -1343,12 +1343,12 @@ where
         };
         let session_response = match self
             .send_acp_request_and_collect(
-            &vm_id,
-            &process_id,
-            &payload.agent_type,
-            None,
-            session_new,
-        )
+                &vm_id,
+                &process_id,
+                &payload.agent_type,
+                None,
+                session_new,
+            )
             .await
         {
             Ok((response, response_events)) => {
@@ -1480,12 +1480,12 @@ where
 
         let (mut response, mut events) = self
             .send_acp_request_and_collect(
-            &vm_id,
-            &process_id,
-            &agent_type,
-            Some(&payload.session_id),
-            outbound,
-        )
+                &vm_id,
+                &process_id,
+                &agent_type,
+                Some(&payload.session_id),
+                outbound,
+            )
             .await?;
         if payload.method == ACP_CANCEL_METHOD && is_cancel_method_not_found(&response) {
             let notification = JsonRpcNotification {
@@ -1736,6 +1736,124 @@ where
                 let signal =
                     javascript_sync_rpc_arg_str(&request.args, 1, "child_process.kill signal")?;
                 self.kill_javascript_child_process(vm_id, process_id, child_process_id, signal)?;
+                Ok(Value::Null)
+            }
+            "process.kill" => {
+                let target_pid =
+                    javascript_sync_rpc_arg_u32(&request.args, 0, "process.kill target pid")?;
+                let signal = javascript_sync_rpc_arg_str(&request.args, 1, "process.kill signal")?;
+                let parsed_signal = parse_signal(signal)?;
+                enum ProcessKillTarget {
+                    SelfProcess(SignalDispositionAction),
+                    Child(String),
+                    TopLevel(String),
+                }
+                let target = {
+                    let vm = self.vms.get(vm_id).expect("VM should exist");
+                    let caller = vm
+                        .active_processes
+                        .get(process_id)
+                        .expect("process should still exist");
+                    if caller.kernel_pid == target_pid {
+                        let action = vm
+                            .signal_states
+                            .get(process_id)
+                            .and_then(|handlers| handlers.get(&(parsed_signal as u32)))
+                            .map(|registration| registration.action)
+                            .unwrap_or(SignalDispositionAction::Default);
+                        Some(ProcessKillTarget::SelfProcess(action))
+                    } else if let Some((child_process_id, _)) = caller
+                        .child_processes
+                        .iter()
+                        .find(|(_, child)| child.kernel_pid == target_pid)
+                    {
+                        Some(ProcessKillTarget::Child(child_process_id.clone()))
+                    } else {
+                        vm.active_processes
+                            .iter()
+                            .find(|(_, process)| process.kernel_pid == target_pid)
+                            .map(|(target_process_id, _)| {
+                                ProcessKillTarget::TopLevel(target_process_id.clone())
+                            })
+                    }
+                };
+                match target {
+                    Some(ProcessKillTarget::SelfProcess(action)) => Ok(json!({
+                        "self": true,
+                        "action": match action {
+                            SignalDispositionAction::Default => "default",
+                            SignalDispositionAction::Ignore => "ignore",
+                            SignalDispositionAction::User => "user",
+                        },
+                    })),
+                    Some(ProcessKillTarget::Child(child_process_id)) => {
+                        self.kill_javascript_child_process(
+                            vm_id,
+                            process_id,
+                            &child_process_id,
+                            signal,
+                        )?;
+                        Ok(Value::Null)
+                    }
+                    Some(ProcessKillTarget::TopLevel(target_process_id)) => {
+                        self.kill_process_internal(vm_id, &target_process_id, signal)?;
+                        Ok(Value::Null)
+                    }
+                    None => Err(SidecarError::InvalidState(format!(
+                        "unknown process pid {target_pid}"
+                    ))),
+                }
+            }
+            "process.signal_state" => {
+                let signal =
+                    javascript_sync_rpc_arg_u32(&request.args, 0, "process.signal_state signal")?;
+                let action =
+                    javascript_sync_rpc_arg_str(&request.args, 1, "process.signal_state action")?;
+                let mask_json =
+                    javascript_sync_rpc_arg_str(&request.args, 2, "process.signal_state mask")?;
+                let flags =
+                    javascript_sync_rpc_arg_u32(&request.args, 3, "process.signal_state flags")?;
+                let mask: Vec<u32> = serde_json::from_str(mask_json).map_err(|error| {
+                    SidecarError::InvalidState(format!(
+                        "process.signal_state mask must be valid JSON: {error}"
+                    ))
+                })?;
+                let action = match action.trim().to_ascii_lowercase().as_str() {
+                    "default" => SignalDispositionAction::Default,
+                    "ignore" => SignalDispositionAction::Ignore,
+                    "user" => SignalDispositionAction::User,
+                    other => {
+                        return Err(SidecarError::InvalidState(format!(
+                            "unsupported process.signal_state action {other}"
+                        )));
+                    }
+                };
+                let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                if action == SignalDispositionAction::Default && mask.is_empty() && flags == 0 {
+                    let remove_process_entry = vm
+                        .signal_states
+                        .get_mut(process_id)
+                        .map(|handlers| {
+                            handlers.remove(&signal);
+                            handlers.is_empty()
+                        })
+                        .unwrap_or(false);
+                    if remove_process_entry {
+                        vm.signal_states.remove(process_id);
+                    }
+                } else {
+                    vm.signal_states
+                        .entry(process_id.to_owned())
+                        .or_default()
+                        .insert(
+                            signal,
+                            SignalHandlerRegistration {
+                                action,
+                                mask,
+                                flags,
+                            },
+                        );
+                }
                 Ok(Value::Null)
             }
             _ => {

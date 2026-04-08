@@ -9,6 +9,7 @@
 /// - "http_request" → _httpServerDispatch
 /// - "http2" → _http2Dispatch
 /// - "stdin", "stdin_end" → _stdinDispatch
+/// - "signal" → _signalDispatch
 /// - "timer" → _timerDispatch
 pub fn dispatch_stream_event(scope: &mut v8::HandleScope, event_type: &str, payload: &[u8]) {
     // Look up the dispatch function on the global object
@@ -20,6 +21,7 @@ pub fn dispatch_stream_event(scope: &mut v8::HandleScope, event_type: &str, payl
         "http_request" => "_httpServerDispatch",
         "http2" => "_http2Dispatch",
         "stdin" | "stdin_end" => "_stdinDispatch",
+        "signal" => "_signalDispatch",
         "timer" => "_timerDispatch",
         _ => return, // Unknown event type — ignore
     };

@@ -103,7 +103,10 @@ where
         ];
         execution_commands.extend(command_guest_paths.keys().cloned());
         kernel
-            .register_driver(CommandDriver::new(EXECUTION_DRIVER_NAME, execution_commands))
+            .register_driver(CommandDriver::new(
+                EXECUTION_DRIVER_NAME,
+                execution_commands,
+            ))
             .map_err(kernel_error)?;
         kernel
             .root_filesystem_mut()
@@ -701,16 +704,18 @@ fn append_module_access_symlink_mounts(
     for entry in fs::read_dir(node_modules_root)
         .map_err(|error| SidecarError::Io(format!("failed to read module_access root: {error}")))?
     {
-        let entry = entry
-            .map_err(|error| SidecarError::Io(format!("failed to inspect module_access root: {error}")))?;
+        let entry = entry.map_err(|error| {
+            SidecarError::Io(format!("failed to inspect module_access root: {error}"))
+        })?;
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
         if name.starts_with('.') {
             continue;
         }
         let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| SidecarError::Io(format!("failed to stat module_access entry: {error}")))?;
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            SidecarError::Io(format!("failed to stat module_access entry: {error}"))
+        })?;
         if metadata.file_type().is_symlink() {
             append_module_access_symlink_mount(
                 mounts,
@@ -722,9 +727,9 @@ fn append_module_access_symlink_mounts(
         if !metadata.is_dir() || !name.starts_with('@') {
             continue;
         }
-        for scoped_entry in fs::read_dir(&path)
-            .map_err(|error| SidecarError::Io(format!("failed to read module_access scope: {error}")))?
-        {
+        for scoped_entry in fs::read_dir(&path).map_err(|error| {
+            SidecarError::Io(format!("failed to read module_access scope: {error}"))
+        })? {
             let scoped_entry = scoped_entry.map_err(|error| {
                 SidecarError::Io(format!("failed to inspect module_access scope: {error}"))
             })?;
@@ -734,7 +739,9 @@ fn append_module_access_symlink_mounts(
             }
             let scoped_path = scoped_entry.path();
             let scoped_metadata = fs::symlink_metadata(&scoped_path).map_err(|error| {
-                SidecarError::Io(format!("failed to stat module_access scoped entry: {error}"))
+                SidecarError::Io(format!(
+                    "failed to stat module_access scoped entry: {error}"
+                ))
             })?;
             if scoped_metadata.file_type().is_symlink() {
                 append_module_access_symlink_mount(

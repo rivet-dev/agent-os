@@ -371,6 +371,8 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
         "_childProcessStdinClose" => ("child_process.close_stdin", false),
         "_childProcessKill" => ("child_process.kill", false),
         "_childProcessSpawnSync" => ("child_process.spawn_sync", false),
+        "_processKill" => ("process.kill", false),
+        "_processSignalState" => ("process.signal_state", false),
 
         // DNS operations
         "_networkDnsLookupRaw" => ("dns.lookup", false),

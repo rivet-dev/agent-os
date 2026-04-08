@@ -10,6 +10,15 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Removing a bridge call means updating all three surfaces together: `map_bridge_method()` in execution, `SYNC_BRIDGE_FNS`/`ASYNC_BRIDGE_FNS` in `crates/v8-runtime`, and the snapshot tests that assert stub registration
   - `cargo test -p agent-os-sidecar -- --test-threads=1` is still blocked on this branch by unrelated `builtin_conformance` failures in `buffer`, `stdlib-polyfills`, and `url`, so use the focused fetch test plus `cargo test -p agent-os-execution --test javascript_v8` to validate this fetch story without conflating it with those pending conformance stories
 ---
+## 2026-04-08 14:06:42 PDT - US-046
+- Ported guest process signal tracking into the V8 bridge so `process.on(...)`/`removeListener(...)` synchronize signal registrations to the sidecar, signal stream events dispatch back into guest handlers, and `process.kill(pid, signal)` routes through sidecar process management for both self-signals and child/runtime targets
+- Added sidecar signal-state RPC handling plus V8 delivery paths for `SIGINT`, `SIGTERM`, `SIGHUP`, `SIGWINCH`, and `SIGCHLD`, then covered the flow with a focused V8 sidecar integration test that exercises both control-plane `KillProcess` delivery and guest `process.kill(process.pid, ...)`
+- Files changed: `crates/execution/assets/{v8-bridge.source.js,v8-bridge.js}`, `crates/execution/src/v8_runtime.rs`, `crates/execution/tests/javascript_v8.rs`, `crates/sidecar/src/{execution.rs,service.rs,vm.rs}`, `crates/sidecar/tests/{builtin_conformance.rs,fetch_via_undici.rs,socket_state_queries.rs}`, `crates/v8-runtime/src/{execution.rs,session.rs,stream.rs}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - V8 guest signal support spans four layers together: `v8-bridge.source.js` listener bookkeeping, `crates/v8-runtime/src/session.rs` bridge global registration, `crates/execution/src/v8_runtime.rs` method mapping, and sidecar `process.kill`/`process.signal_state` sync RPC handlers
+  - Sidecar tests that wait on guest-side bridge registration need to keep pumping sidecar events while polling state; a plain sleep loop can miss JS sync RPC registration work that only progresses when `poll_event_blocking()` runs
+  - For V8/shared runtimes, nonfatal signals should be delivered as runtime stream events instead of terminating the host process directly; keep direct host signaling only for cases like signal `0`, `SIGSTOP`, `SIGCONT`, or `SIGKILL`
+---
 ## 2026-04-07 11:40:27 PDT - US-021
 - Deleted the legacy TypeScript host-tools argv/prompt/server/shim files, added `packages/core/src/host-tools-zod.ts`, and moved toolkit registration plus sidecar tool-invocation handling into `packages/core/src/agent-os.ts`
 - Updated the public export surface to drop the deleted host-tools helpers, refreshed `packages/core/CLAUDE.md` (via the `AGENTS.md` symlink) to match the new sidecar-owned tool flow, and replaced the removed test suites with focused Zod-conversion, sidecar-dispatch, and tool-reference coverage

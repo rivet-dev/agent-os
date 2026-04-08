@@ -5386,7 +5386,10 @@ fn extract_runtime_cjs_export_names(
 }
 
 fn quoted_module_path(resolved_path: &str) -> String {
-    format!("\"{}\"", resolved_path.replace('\\', "\\\\").replace('"', "\\\""))
+    format!(
+        "\"{}\"",
+        resolved_path.replace('\\', "\\\\").replace('"', "\\\"")
+    )
 }
 
 fn is_likely_cjs(source: &str, resolved_path: &str) -> bool {
@@ -5493,7 +5496,8 @@ fn add_esm_runtime_prelude(source: &str) -> String {
         && !source.contains("var require =")
         && !source.contains("function require(")
     {
-        prelude.push_str("const require = globalThis._moduleModule.createRequire(import.meta.url);\n");
+        prelude
+            .push_str("const require = globalThis._moduleModule.createRequire(import.meta.url);\n");
     }
 
     for (name, triggers) in [

@@ -898,7 +898,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 signal passes"
       ],
       "priority": 57,
-      "passes": false,
+      "passes": true,
       "notes": "The kernel already has full signal support in process_table.rs (SIGCHLD, SIGTERM, SIGWINCH, etc.). The gap is wiring guest process.on('SIGTERM') through the V8 bridge to the kernel signal table. The old secure-exec bridge/process.ts had this. The V8 bridge needs a signal registration bridge call and the sidecar needs to deliver signal events to the V8 session."
     },
     {

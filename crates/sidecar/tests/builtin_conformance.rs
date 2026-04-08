@@ -743,12 +743,10 @@ process.exit(0);
     assert_eq!(result["os"]["platform"], "linux");
     assert_eq!(result["os"]["arch"], "x64");
     assert_eq!(result["os"]["type"], "Linux");
-    assert!(
-        result["os"]["homedir"]
-            .as_str()
-            .expect("os.homedir string")
-            .starts_with('/')
-    );
+    assert!(result["os"]["homedir"]
+        .as_str()
+        .expect("os.homedir string")
+        .starts_with('/'));
     assert_eq!(result["os"]["tmpdir"], "/tmp");
     assert_eq!(result["os"]["userInfoHomedir"], result["os"]["homedir"]);
     assert_eq!(result["os"]["eol"], "\n");
@@ -757,12 +755,10 @@ process.exit(0);
     assert_eq!(result["os"]["totalmem"], 1_073_741_824u64);
     assert_eq!(result["os"]["freemem"], 536_870_912u64);
     assert_eq!(result["os"]["hasSignals"], true);
-    assert!(
-        result["os"]["networkInterfaceKeys"]
-            .as_array()
-            .expect("network interfaces array")
-            .is_empty()
-    );
+    assert!(result["os"]["networkInterfaceKeys"]
+        .as_array()
+        .expect("network interfaces array")
+        .is_empty());
     assert_eq!(result["perf"]["hasNow"], true);
     assert_eq!(result["perf"]["hasObserver"], true);
     assert_eq!(result["perf"]["measureDurationFinite"], true);

@@ -813,6 +813,8 @@ pub(crate) const SYNC_BRIDGE_FNS: &[&str] = &[
     "_childProcessStdinClose",
     "_childProcessKill",
     "_childProcessSpawnSync",
+    "_processKill",
+    "_processSignalState",
     // HTTP/2 and network bridge operations with sync or syncPromise semantics
     "_networkHttp2ServerListenRaw",
     "_networkHttp2SessionConnectRaw",
