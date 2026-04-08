@@ -1144,7 +1144,7 @@
         "cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1 passes"
       ],
       "priority": 104,
-      "passes": false,
+      "passes": true,
       "notes": "Found in audit: 12 Node.js builtins are recognized but have NO polyfill. os, tty, perf_hooks, and zlib are the most commonly used by real packages (Pi SDK deps use os.homedir, chalk uses tty.isatty, timers/promises used by modern async code). Use node-stdlib-browser for zlib. Use kernel _osConfig for os. Stub tty with isatty() returning false. perf_hooks can return Date.now() based performance."
     },
     {

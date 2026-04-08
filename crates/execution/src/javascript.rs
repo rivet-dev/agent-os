@@ -3765,59 +3765,11 @@ export default streamModule;
 
     if module_name == "stream/promises" {
         return String::from(
-            r#"async function pipeline(source, destination) {
-  const readable =
-    source && typeof source[Symbol.asyncIterator] === "function"
-      ? source
-      : source && typeof source.getReader === "function"
-        ? {
-            async *[Symbol.asyncIterator]() {
-              const reader = source.getReader();
-              try {
-                while (true) {
-                  const { value, done } = await reader.read();
-                  if (done) break;
-                  yield Buffer.from(value ?? []);
-                }
-              } finally {
-                reader.releaseLock?.();
-              }
-            },
-          }
-        : null;
+            r#"const _m = globalThis._requireFrom("node:stream/promises", "/");
 
-  if (readable == null) {
-    throw new TypeError("pipeline source must be async iterable or a WHATWG ReadableStream");
-  }
-  if (!destination || typeof destination.write !== "function") {
-    throw new TypeError("pipeline destination must provide write()");
-  }
-
-  for await (const chunk of readable) {
-    await new Promise((resolve, reject) => {
-      try {
-        destination.write(chunk, (error) => (error ? reject(error) : resolve()));
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-
-  if (typeof destination.end === "function") {
-    await new Promise((resolve, reject) => {
-      try {
-        destination.end((error) => (error ? reject(error) : resolve()));
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-
-  return destination;
-}
-
-export { pipeline };
-export default { pipeline };
+export default _m;
+export const finished = _m.finished;
+export const pipeline = _m.pipeline;
 "#,
         );
     }
@@ -4119,12 +4071,16 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "availableParallelism",
             "cpus",
             "endianness",
+            "freemem",
             "homedir",
             "hostname",
+            "networkInterfaces",
             "platform",
             "release",
+            "totalmem",
             "tmpdir",
             "type",
+            "userInfo",
         ],
         "path" | "path/posix" | "path/win32" => &[
             "basename",
@@ -4164,6 +4120,7 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "createServer",
             "getCiphers",
         ],
+        "stream/promises" => &["finished", "pipeline"],
         "timers/promises" => &["scheduler", "setImmediate", "setInterval", "setTimeout"],
         "url" => &["URL", "fileURLToPath", "format", "parse", "pathToFileURL"],
         "util" => &[

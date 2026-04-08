@@ -19,12 +19,15 @@ const ALLOWED_NODE_BUILTINS: &[&str] = &[
     "crypto",
     "events",
     "fs",
+    "module",
     "path",
+    "perf_hooks",
     "punycode",
     "querystring",
     "stream",
     "string_decoder",
     "timers",
+    "tty",
     "url",
     "util",
     "zlib",
@@ -116,6 +119,16 @@ fn assert_conformance(case_name: &str, script: &str) {
         serde_json::to_string_pretty(&host).expect("pretty host JSON"),
         serde_json::to_string_pretty(&guest).expect("pretty guest JSON")
     );
+}
+
+fn run_guest_script(case_name: &str, script: &str) -> Value {
+    assert_node_available();
+
+    let cwd = temp_dir(&format!("builtin-guest-{case_name}"));
+    let entrypoint = cwd.join("entry.mjs");
+    write_fixture(&entrypoint, script);
+
+    run_guest_probe(case_name, &cwd, &entrypoint)
 }
 
 #[test]
@@ -551,4 +564,231 @@ console.log(JSON.stringify({
 }));
 "#,
     );
+}
+
+#[test]
+fn extended_builtin_polyfills_work_in_guest_v8() {
+    let result = run_guest_script(
+        "extended-builtins",
+        r#"
+import os from "node:os";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const moduleBuiltin = require("node:module");
+const perfHooks = require("node:perf_hooks");
+const streamConsumers = require("node:stream/consumers");
+const streamPromises = require("node:stream/promises");
+const timersPromises = require("node:timers/promises");
+const tty = require("node:tty");
+const zlib = require("node:zlib");
+
+perfHooks.performance.clearMarks?.();
+perfHooks.performance.clearMeasures?.();
+perfHooks.performance.mark("start");
+await timersPromises.setTimeout(5);
+perfHooks.performance.mark("end");
+const measure = perfHooks.performance.measure("delta", "start", "end");
+
+const immediateValue = await timersPromises.setImmediate("tick");
+const timeoutValue = await timersPromises.setTimeout(1, "done");
+const intervalValues = [];
+const interval = timersPromises.setInterval(1, "pulse");
+intervalValues.push((await interval.next()).value);
+intervalValues.push((await interval.next()).value);
+await interval.return();
+
+function createSink() {
+  const listeners = new Map();
+  return {
+    chunks: [],
+    write(chunk, callback) {
+      this.chunks.push(Buffer.from(chunk).toString("utf8"));
+      callback?.(null);
+    },
+    end(callback) {
+      queueMicrotask(() => {
+        for (const handler of listeners.get("finish") ?? []) handler();
+        for (const handler of listeners.get("close") ?? []) handler();
+        callback?.(null);
+      });
+    },
+    once(event, handler) {
+      const entries = listeners.get(event) ?? [];
+      listeners.set(event, [...entries, handler]);
+      return this;
+    },
+    off(event, handler) {
+      const entries = listeners.get(event) ?? [];
+      listeners.set(
+        event,
+        entries.filter((candidate) => candidate !== handler),
+      );
+      return this;
+    },
+  };
+}
+
+const pipelineWritable = createSink();
+await streamPromises.pipeline(
+  (async function* () {
+    yield Buffer.from("left");
+    yield Buffer.from("+");
+    yield Buffer.from("right");
+  })(),
+  pipelineWritable,
+);
+
+const finishedWritable = createSink();
+const finishedResult = streamPromises.finished(finishedWritable).then(() => "resolved");
+finishedWritable.end();
+
+function makeAsyncStream(chunks) {
+  return (async function* () {
+    for (const chunk of chunks) {
+      yield chunk;
+    }
+  })();
+}
+
+const textValue = await streamConsumers.text(
+  makeAsyncStream([
+    Buffer.from("he"),
+    Buffer.from("llo"),
+  ]),
+);
+const jsonValue = await streamConsumers.json(
+  makeAsyncStream([Buffer.from('{"ok":true,"count":2}')]),
+);
+const arrayBufferValue = await streamConsumers.arrayBuffer(
+  makeAsyncStream([Buffer.from("AB")]),
+);
+const blobValue = await streamConsumers.blob(
+  makeAsyncStream([Buffer.from("blob")]),
+);
+const bufferValue = await streamConsumers.buffer(
+  makeAsyncStream([Buffer.from("buf")]),
+);
+
+const deflated = zlib.deflateSync(Buffer.from("agent-os", "utf8"));
+const inflated = zlib.inflateSync(deflated).toString("utf8");
+
+process.stdout.write(`${JSON.stringify({
+  moduleBuiltinHasCreateRequire:
+    typeof moduleBuiltin.createRequire === "function",
+  moduleBuiltinHasBuiltinModules:
+    Array.isArray(moduleBuiltin.builtinModules),
+  moduleBuiltinHasStreamPromises:
+    moduleBuiltin.builtinModules.includes("stream/promises"),
+  os: {
+    arch: os.arch(),
+    availableParallelism: os.availableParallelism(),
+    cpusLength: os.cpus().length,
+    eol: os.EOL,
+    freemem: os.freemem(),
+    hasSignals: typeof os.constants?.signals?.SIGTERM === "number",
+    homedir: os.homedir(),
+    hostname: os.hostname(),
+    networkInterfaceKeys: Object.keys(os.networkInterfaces()),
+    platform: os.platform(),
+    release: os.release(),
+    tmpdir: os.tmpdir(),
+    totalmem: os.totalmem(),
+    type: os.type(),
+    userInfoHomedir: os.userInfo().homedir,
+  },
+  perf: {
+    entriesByName: perfHooks.performance.getEntriesByName?.("delta", "measure")?.length ?? 0,
+    hasNow: typeof perfHooks.performance.now === "function",
+    hasObserver: typeof perfHooks.PerformanceObserver === "function",
+    measureDurationFinite: Number.isFinite(measure.duration),
+  },
+  streamConsumers: {
+    arrayBufferLength: arrayBufferValue.byteLength,
+    blobText: await blobValue.text(),
+    bufferText: bufferValue.toString("utf8"),
+    jsonCount: jsonValue.count,
+    jsonOk: jsonValue.ok,
+    textValue,
+  },
+  streamPromises: {
+    finishedResult: await finishedResult,
+    pipelineText: pipelineWritable.chunks.join(""),
+  },
+  timersPromises: {
+    immediateValue,
+    intervalValues,
+    timeoutValue,
+  },
+  tty: {
+    isatty0: tty.isatty(0),
+    isatty1: tty.isatty(1),
+    isatty2: tty.isatty(2),
+    readStreamType: typeof tty.ReadStream,
+    writeStreamType: typeof tty.WriteStream,
+  },
+  zlib: {
+    createDeflateType: typeof zlib.createDeflate,
+    createInflateType: typeof zlib.createInflate,
+    inflated,
+  },
+})}\n`);
+process.exit(0);
+"#,
+    );
+
+    assert_eq!(result["moduleBuiltinHasCreateRequire"], true);
+    assert_eq!(result["moduleBuiltinHasBuiltinModules"], true);
+    assert_eq!(result["moduleBuiltinHasStreamPromises"], true);
+    assert_eq!(result["os"]["platform"], "linux");
+    assert_eq!(result["os"]["arch"], "x64");
+    assert_eq!(result["os"]["type"], "Linux");
+    assert!(
+        result["os"]["homedir"]
+            .as_str()
+            .expect("os.homedir string")
+            .starts_with('/')
+    );
+    assert_eq!(result["os"]["tmpdir"], "/tmp");
+    assert_eq!(result["os"]["userInfoHomedir"], result["os"]["homedir"]);
+    assert_eq!(result["os"]["eol"], "\n");
+    assert_eq!(result["os"]["availableParallelism"], 1);
+    assert_eq!(result["os"]["cpusLength"], 1);
+    assert_eq!(result["os"]["totalmem"], 1_073_741_824u64);
+    assert_eq!(result["os"]["freemem"], 536_870_912u64);
+    assert_eq!(result["os"]["hasSignals"], true);
+    assert!(
+        result["os"]["networkInterfaceKeys"]
+            .as_array()
+            .expect("network interfaces array")
+            .is_empty()
+    );
+    assert_eq!(result["perf"]["hasNow"], true);
+    assert_eq!(result["perf"]["hasObserver"], true);
+    assert_eq!(result["perf"]["measureDurationFinite"], true);
+    assert_eq!(result["perf"]["entriesByName"], 1);
+    assert_eq!(result["timersPromises"]["immediateValue"], "tick");
+    assert_eq!(result["timersPromises"]["timeoutValue"], "done");
+    assert_eq!(
+        result["timersPromises"]["intervalValues"]
+            .as_array()
+            .expect("interval values"),
+        &vec![Value::from("pulse"), Value::from("pulse")]
+    );
+    assert_eq!(result["streamPromises"]["pipelineText"], "left+right");
+    assert_eq!(result["streamPromises"]["finishedResult"], "resolved");
+    assert_eq!(result["streamConsumers"]["textValue"], "hello");
+    assert_eq!(result["streamConsumers"]["jsonOk"], true);
+    assert_eq!(result["streamConsumers"]["jsonCount"], 2);
+    assert_eq!(result["streamConsumers"]["arrayBufferLength"], 2);
+    assert_eq!(result["streamConsumers"]["blobText"], "blob");
+    assert_eq!(result["streamConsumers"]["bufferText"], "buf");
+    assert_eq!(result["tty"]["readStreamType"], "function");
+    assert_eq!(result["tty"]["writeStreamType"], "function");
+    assert_eq!(result["tty"]["isatty0"], false);
+    assert_eq!(result["tty"]["isatty1"], false);
+    assert_eq!(result["tty"]["isatty2"], false);
+    assert_eq!(result["zlib"]["createDeflateType"], "function");
+    assert_eq!(result["zlib"]["createInflateType"], "function");
+    assert_eq!(result["zlib"]["inflated"], "agent-os");
 }

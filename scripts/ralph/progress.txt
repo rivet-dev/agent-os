@@ -20,6 +20,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Guest `stream/promises.pipeline()` shims must attach `finished()` before calling `end()` on the destination; otherwise fast in-memory sinks can emit `finish`/`close` before the listener exists and hang the Promise
 - Treat `crates/bridge/bridge-contract.json` as the canonical host-bridge inventory and `crates/execution/assets/polyfill-registry.json` as the canonical `_loadPolyfill` inventory; when bridge globals or runtime-loadable builtins change, update those files together with `crates/v8-runtime/src/session.rs` and `crates/execution/src/javascript.rs`
 - Guest-side CommonJS helpers in `crates/execution/assets/v8-bridge.source.js` must pass explicit `"require"` mode into `_resolveModule`; otherwise dual packages resolve the import branch and `require()` can try to execute ESM as CommonJS
 - Generated node-import-cache builtin assets need a `NODE_IMPORT_CACHE_ASSET_VERSION` bump in `crates/execution/src/node_import_cache.rs` whenever their source changes, or old `/tmp/agent-os-node-import-cache-*` materializations will keep serving stale code
@@ -608,4 +609,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Inline builtin wrappers in `crates/execution/src/javascript.rs` cannot `_requireFrom()` the same builtin subpath they implement; `node:fs/promises` must be derived from `node:fs` or it loops back into module resolution
   - Jiti’s import path proves that CommonJS builtin support is two-part: `Module.builtinModules` membership without a matching `loadBuiltinModule()` case still leaves `require("node:v8")` hanging
   - Pi boot probes are now a strong acceptance test, not a diagnostics-only report; if they start timing out again, use one-off VM probes for the first dependency in the chain before re-running the full suite
+---
+## 2026-04-08 12:40:26 PDT - US-059
+- Added the missing guest builtin coverage for `module`, `perf_hooks`, `tty`, `stream/consumers`, `stream/promises`, and `timers/promises`, expanded the V8 CommonJS builtin registry to include builtin subpaths, and widened the default sidecar allowlist so those builtins are available in normal VM launches
+- Regenerated `crates/execution/assets/v8-bridge.js`, added a focused guest-only builtin conformance probe for the new modules, and validated the story with `cargo build -p agent-os-v8-runtime`, `cargo test -p agent-os-execution --test javascript_v8 -- --test-threads=1`, and `cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1`
+- Files changed: `crates/execution/{assets/v8-bridge.source.js,assets/v8-bridge.js,src/javascript.rs}`, `crates/sidecar/{src/execution.rs,tests/builtin_conformance.rs}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Guest CommonJS builtin subpaths need both `Module.builtinModules` membership and a matching `loadBuiltinModule()` case in `crates/execution/assets/v8-bridge.source.js`; fixing only one side still breaks `require("node:stream/promises")`-style imports
+  - `stream/promises.pipeline()` must subscribe to `finished()` before calling `end()` on the destination, otherwise fast in-memory sinks can emit `finish`/`close` before the listener is attached and the Promise hangs forever
+  - Rebuild `agent-os-v8` after changing `crates/execution/assets/v8-bridge.source.js`; sidecar V8 tests can keep exercising a stale runtime binary even after `v8-bridge.js` is regenerated
 ---

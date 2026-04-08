@@ -19,6 +19,10 @@ import undiciGlobalModule from "undici/lib/global.js";
 import undiciHeadersModule from "undici/lib/web/fetch/headers.js";
 import undiciRequestModule from "undici/lib/web/fetch/request.js";
 import undiciResponseModule from "undici/lib/web/fetch/response.js";
+import undiciWebidlModule from "undici/lib/web/webidl/index.js";
+
+const NativeAbortControllerGlobal = globalThis.AbortController;
+const NativeAbortSignalGlobal = globalThis.AbortSignal;
 
 const EarlyBufferGlobal =
   bufferStdlibModuleNs.Buffer ??
@@ -31,6 +35,10 @@ if (typeof EarlyBufferGlobal === "function") {
 const EarlyUtilTypes =
   utilStdlibModuleNs.types ??
   utilStdlibModuleNs.default?.types;
+const EarlyStructuredClone =
+  globalThis.structuredClone ??
+  utilStdlibModuleNs.structuredClone ??
+  utilStdlibModuleNs.default?.structuredClone;
 if (EarlyUtilTypes && typeof EarlyUtilTypes.isProxy !== "function") {
   EarlyUtilTypes.isProxy = () => false;
 } else if (EarlyUtilTypes) {
@@ -2553,7 +2561,7 @@ var __bridge = (() => {
   var Event = PatchedEvent;
   var CustomEvent = PatchedCustomEvent;
   var EventTarget = PatchedEventTarget;
-  var AbortSignal = class extends EventTarget {
+  var AbortSignal = typeof NativeAbortSignalGlobal === "function" ? NativeAbortSignalGlobal : class extends EventTarget {
     constructor() {
       super();
       this.aborted = false;
@@ -2565,7 +2573,7 @@ var __bridge = (() => {
       }
     }
   };
-  var AbortController = class {
+  var AbortController = typeof NativeAbortControllerGlobal === "function" ? NativeAbortControllerGlobal : class {
     constructor() {
       this.signal = new AbortSignal();
     }
@@ -2578,7 +2586,7 @@ var __bridge = (() => {
       this.signal.dispatchEvent(new Event("abort"));
     }
   };
-  var WritableStream = class {
+  var FallbackWritableStream = class {
     constructor(sink = {}) {
       this._sink = sink;
     }
@@ -2596,7 +2604,7 @@ var __bridge = (() => {
       };
     }
   };
-  var ReadableStream = class {
+  var FallbackReadableStream = class {
     constructor(source = {}) {
       this._queue = [];
       this._pending = [];
@@ -2670,10 +2678,46 @@ var __bridge = (() => {
   defineGlobal("EventTarget", EventTarget);
   defineGlobal("AbortSignal", AbortSignal);
   defineGlobal("AbortController", AbortController);
-  defineGlobal("ReadableStream", typeof WebReadableStream === "function" ? WebReadableStream : ReadableStream);
-  defineGlobal("WritableStream", typeof WebWritableStream === "function" ? WebWritableStream : WritableStream);
+  if (typeof globalThis.structuredClone !== "function") {
+    defineGlobal(
+      "structuredClone",
+      typeof EarlyStructuredClone === "function"
+        ? EarlyStructuredClone
+        : (value) => JSON.parse(JSON.stringify(value))
+    );
+  }
+  defineGlobal("ReadableStream", typeof WebReadableStream === "function" ? WebReadableStream : FallbackReadableStream);
+  defineGlobal("WritableStream", typeof WebWritableStream === "function" ? WebWritableStream : FallbackWritableStream);
   if (typeof WebTransformStream === "function") {
     defineGlobal("TransformStream", WebTransformStream);
+  }
+  const undiciWebidl = undiciWebidlModule?.webidl ?? undiciWebidlModule;
+  if (undiciWebidl?.is) {
+    undiciWebidl.is.ReadableStream = (value) =>
+      value != null &&
+      (value instanceof globalThis.ReadableStream ||
+        typeof value.getReader === "function");
+    undiciWebidl.is.AbortSignal = (value) =>
+      value != null &&
+      (value instanceof globalThis.AbortSignal ||
+        (typeof value.aborted === "boolean" &&
+          typeof value.addEventListener === "function"));
+  }
+  if (undiciWebidl?.converters?.AbortSignal) {
+    undiciWebidl.converters.AbortSignal = (value, ...args) => {
+      if (
+        value != null &&
+        (value instanceof globalThis.AbortSignal ||
+          (typeof value.aborted === "boolean" &&
+            typeof value.addEventListener === "function"))
+      ) {
+        return value;
+      }
+      return undiciWebidl.interfaceConverter(
+        undiciWebidl.is.AbortSignal,
+        "AbortSignal"
+      )(value, ...args);
+    };
   }
 
   // .agent/recovery/secure-exec/shared/global-exposure.ts
@@ -8124,6 +8168,14 @@ var __bridge = (() => {
     const normalized = { ...options };
     if (Object.prototype.hasOwnProperty.call(normalized, "headers")) {
       normalized.headers = serializeFetchHeaders(normalized.headers);
+    }
+    if (
+      normalized.body != null &&
+      normalized.duplex == null &&
+      String(normalized.method ?? "GET").toUpperCase() !== "GET" &&
+      String(normalized.method ?? "GET").toUpperCase() !== "HEAD"
+    ) {
+      normalized.duplex = "half";
     }
     return normalized;
   }
@@ -19065,15 +19117,328 @@ ${headerLines}\r
     return void 0;
   }
   var builtinTtyModule = {
-    ReadStream: TtyReadStream,
-    WriteStream: TtyWriteStream,
+    ReadStream: class ReadStream {
+      constructor(fd) {
+        return TtyReadStream(fd);
+      }
+    },
+    WriteStream: class WriteStream {
+      constructor(fd) {
+        return TtyWriteStream(fd);
+      }
+    },
     isatty: ttyIsatty
   };
-  var builtinPerformance = typeof performance !== "undefined" && performance && typeof performance.now === "function" ? performance : {
-    now() {
-      return getNowMs();
+  var builtinPerformance = (() => {
+    const marks = /* @__PURE__ */ new Map();
+    const measures = [];
+    const perf = typeof performance !== "undefined" && performance && typeof performance.now === "function" ? performance : {
+      now() {
+        return getNowMs();
+      },
+      timeOrigin: Date.now() - getNowMs()
+    };
+    if (typeof perf.mark !== "function") {
+      perf.mark = function(name) {
+        const entry = {
+          name: String(name ?? ""),
+          entryType: "mark",
+          startTime: perf.now(),
+          duration: 0
+        };
+        const entries = marks.get(entry.name) ?? [];
+        entries.push(entry);
+        marks.set(entry.name, entries);
+        return entry;
+      };
+    }
+    if (typeof perf.measure !== "function") {
+      perf.measure = function(name, startMarkOrOptions, endMark) {
+        const normalizedName = String(name ?? "");
+        let startTime = 0;
+        let endTimeMs = perf.now();
+        if (typeof startMarkOrOptions === "string") {
+          const startEntries = marks.get(startMarkOrOptions);
+          if (startEntries?.length) {
+            startTime = startEntries[startEntries.length - 1].startTime;
+          }
+          if (typeof endMark === "string") {
+            const endEntries = marks.get(endMark);
+            if (endEntries?.length) {
+              endTimeMs = endEntries[endEntries.length - 1].startTime;
+            }
+          }
+        } else if (startMarkOrOptions && typeof startMarkOrOptions === "object") {
+          if (typeof startMarkOrOptions.start === "number") {
+            startTime = startMarkOrOptions.start;
+          } else if (typeof startMarkOrOptions.startMark === "string") {
+            const startEntries = marks.get(startMarkOrOptions.startMark);
+            if (startEntries?.length) {
+              startTime = startEntries[startEntries.length - 1].startTime;
+            }
+          }
+          if (typeof startMarkOrOptions.end === "number") {
+            endTimeMs = startMarkOrOptions.end;
+          } else if (typeof startMarkOrOptions.endMark === "string") {
+            const endEntries = marks.get(startMarkOrOptions.endMark);
+            if (endEntries?.length) {
+              endTimeMs = endEntries[endEntries.length - 1].startTime;
+            }
+          }
+        }
+        const entry = {
+          name: normalizedName,
+          entryType: "measure",
+          startTime,
+          duration: Math.max(0, endTimeMs - startTime)
+        };
+        measures.push(entry);
+        return entry;
+      };
+    }
+    if (typeof perf.getEntriesByName !== "function") {
+      perf.getEntriesByName = function(name, type = void 0) {
+        const normalizedName = String(name ?? "");
+        const markEntries = marks.get(normalizedName) ?? [];
+        const combined = [...markEntries, ...measures.filter((entry) => entry.name === normalizedName)];
+        if (typeof type === "string") {
+          return combined.filter((entry) => entry.entryType === type);
+        }
+        return combined;
+      };
+    }
+    if (typeof perf.clearMarks !== "function") {
+      perf.clearMarks = function(name = void 0) {
+        if (typeof name === "undefined") {
+          marks.clear();
+          return;
+        }
+        marks.delete(String(name));
+      };
+    }
+    if (typeof perf.clearMeasures !== "function") {
+      perf.clearMeasures = function(name = void 0) {
+        if (typeof name === "undefined") {
+          measures.length = 0;
+          return;
+        }
+        const normalizedName = String(name);
+        for (let index = measures.length - 1; index >= 0; index -= 1) {
+          if (measures[index]?.name === normalizedName) {
+            measures.splice(index, 1);
+          }
+        }
+      };
+    }
+    return perf;
+  })();
+  async function collectReadableChunks(input) {
+    if (input && typeof input[Symbol.asyncIterator] === "function") {
+      const chunks = [];
+      for await (const chunk of input) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk ?? []));
+      }
+      return chunks;
+    }
+    if (input && typeof input.getReader === "function") {
+      const reader = input.getReader();
+      const chunks = [];
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          chunks.push(Buffer.from(value ?? []));
+        }
+      } finally {
+        reader.releaseLock?.();
+      }
+      return chunks;
+    }
+    throw new TypeError("expected an async iterable or WHATWG ReadableStream");
+  }
+  function createBuiltinBlob(buffer, type = "") {
+    return {
+      size: buffer.byteLength,
+      type,
+      async arrayBuffer() {
+        return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+      },
+      stream() {
+        return new ReadableStream({
+          start(controller) {
+            controller.enqueue(buffer);
+            controller.close();
+          }
+        });
+      },
+      async text() {
+        return buffer.toString("utf8");
+      }
+    };
+  }
+  var builtinStreamConsumersModule = {
+    async arrayBuffer(stream) {
+      const chunks = await collectReadableChunks(stream);
+      const buffer = Buffer.concat(chunks);
+      return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
     },
-    timeOrigin: Date.now() - getNowMs()
+    async blob(stream) {
+      return createBuiltinBlob(await builtinStreamConsumersModule.buffer(stream));
+    },
+    async buffer(stream) {
+      return Buffer.concat(await collectReadableChunks(stream));
+    },
+    async json(stream) {
+      return JSON.parse(await builtinStreamConsumersModule.text(stream));
+    },
+    async text(stream) {
+      return (await builtinStreamConsumersModule.buffer(stream)).toString("utf8");
+    }
+  };
+  var builtinStreamPromisesModule = {
+    finished(stream) {
+      return new Promise((resolve, reject) => {
+        if (!stream || typeof stream !== "object") {
+          reject(new TypeError("finished() expects a stream"));
+          return;
+        }
+        const cleanup = [];
+        const add = (eventName, handler) => {
+          stream?.once?.(eventName, handler);
+          cleanup.push(() => stream?.off?.(eventName, handler));
+        };
+        const settle = (callback) => (value) => {
+          while (cleanup.length > 0) {
+            cleanup.pop()?.();
+          }
+          callback(value);
+        };
+        add("finish", settle(resolve));
+        add("end", settle(resolve));
+        add("close", settle(resolve));
+        add("error", settle(reject));
+      });
+    },
+    async pipeline(source, destination) {
+      const readable =
+        source && typeof source[Symbol.asyncIterator] === "function"
+          ? source
+          : source && typeof source.getReader === "function"
+            ? {
+                async *[Symbol.asyncIterator]() {
+                  const reader = source.getReader();
+                  try {
+                    while (true) {
+                      const { value, done } = await reader.read();
+                      if (done) break;
+                      yield Buffer.from(value ?? []);
+                    }
+                  } finally {
+                    reader.releaseLock?.();
+                  }
+                }
+              }
+            : null;
+      if (readable == null) {
+        throw new TypeError("pipeline source must be async iterable or a WHATWG ReadableStream");
+      }
+      if (!destination || typeof destination.write !== "function") {
+        throw new TypeError("pipeline destination must provide write()");
+      }
+      for await (const chunk of readable) {
+        await new Promise((resolve, reject) => {
+          try {
+            destination.write(chunk, (error) => error ? reject(error) : resolve());
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+      const completion = builtinStreamPromisesModule.finished(destination);
+      if (typeof destination.end === "function") {
+        await new Promise((resolve, reject) => {
+          try {
+            destination.end((error) => error ? reject(error) : resolve());
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+      await completion;
+      return destination;
+    }
+  };
+  var builtinTimersPromisesModule = {
+    scheduler: {
+      wait(delay = 0, options = void 0) {
+        return builtinTimersPromisesModule.setTimeout(delay, void 0, options);
+      },
+      yield() {
+        return builtinTimersPromisesModule.setImmediate();
+      }
+    },
+    setImmediate(value = void 0, options = void 0) {
+      if (options?.signal?.aborted) {
+        return Promise.reject(options.signal.reason ?? new Error("The operation was aborted"));
+      }
+      return new Promise((resolve, reject) => {
+        const onAbort = () => reject(options.signal.reason ?? new Error("The operation was aborted"));
+        options?.signal?.addEventListener?.("abort", onAbort, { once: true });
+        globalThis.setImmediate?.(() => {
+          options?.signal?.removeEventListener?.("abort", onAbort);
+          resolve(value);
+        }) ?? globalThis.setTimeout?.(() => {
+          options?.signal?.removeEventListener?.("abort", onAbort);
+          resolve(value);
+        }, 0);
+      });
+    },
+    setInterval(delay = 1, value = void 0, options = void 0) {
+      let active = true;
+      const signal = options?.signal;
+      if (signal?.aborted) {
+        active = false;
+      }
+      return {
+        [Symbol.asyncIterator]() {
+          return this;
+        },
+        async next() {
+          if (!active) {
+            return { done: true, value: void 0 };
+          }
+          try {
+            const intervalValue = await builtinTimersPromisesModule.setTimeout(delay, value, { signal });
+            return active ? { done: false, value: intervalValue } : { done: true, value: void 0 };
+          } catch (error) {
+            active = false;
+            throw error;
+          }
+        },
+        async return() {
+          active = false;
+          return { done: true, value: void 0 };
+        }
+      };
+    },
+    setTimeout(delay = 1, value = void 0, options = void 0) {
+      if (options?.signal?.aborted) {
+        return Promise.reject(options.signal.reason ?? new Error("The operation was aborted"));
+      }
+      return new Promise((resolve, reject) => {
+        const timer = globalThis.setTimeout?.(() => {
+          options?.signal?.removeEventListener?.("abort", onAbort);
+          resolve(value);
+        }, delay ?? 0);
+        const onAbort = () => {
+          if (typeof globalThis.clearTimeout === "function") {
+            globalThis.clearTimeout(timer);
+          }
+          reject(options.signal.reason ?? new Error("The operation was aborted"));
+        };
+        options?.signal?.addEventListener?.("abort", onAbort, { once: true });
+      });
+    }
   };
   var builtinPerfHooksModule = {
     PerformanceObserver: class {
@@ -20096,35 +20461,47 @@ ${headerLines}\r
     }
     static builtinModules = [
       "assert",
+      "async_hooks",
       "buffer",
       "child_process",
       "constants",
       "crypto",
       "dgram",
+      "diagnostics_channel",
       "dns",
       "events",
       "fs",
+      "fs/promises",
       "http",
+      "http2",
       "https",
+      "module",
       "net",
       "os",
       "path",
+      "path/posix",
+      "path/win32",
       "perf_hooks",
       "process",
       "punycode",
       "querystring",
+      "readline",
       "sqlite",
       "stream",
+      "stream/consumers",
+      "stream/promises",
+      "stream/web",
       "string_decoder",
       "timers",
+      "timers/promises",
       "tls",
       "tty",
       "url",
       "util",
       "v8",
+      "worker_threads",
       "zlib",
-      "vm",
-      "module"
+      "vm"
     ];
     static isBuiltin(moduleName) {
       const name = moduleName.replace(/^node:/, "");
@@ -20312,10 +20689,16 @@ ${headerLines}\r
         return builtinEventsStdlibModule;
       case "fs":
         return _fsModule;
+      case "fs/promises":
+        return _fsModule.promises;
       case "os":
         return _osModule;
       case "path":
         return builtinPathStdlibModule;
+      case "path/posix":
+        return builtinPathStdlibModule.posix;
+      case "path/win32":
+        return builtinPathStdlibModule.win32;
       case "perf_hooks":
         return builtinPerfHooksModule;
       case "process":
@@ -20326,10 +20709,26 @@ ${headerLines}\r
         return builtinQuerystringStdlibModule;
       case "stream":
         return builtinStreamStdlibModule;
+      case "stream/consumers":
+        return builtinStreamConsumersModule;
+      case "stream/promises":
+        return builtinStreamPromisesModule;
       case "string_decoder":
         return builtinStringDecoderStdlibModule;
+      case "stream/web":
+        return {
+          ReadableStream: globalThis.ReadableStream,
+          WritableStream: globalThis.WritableStream,
+          TransformStream: globalThis.TransformStream,
+          TextEncoderStream: globalThis.TextEncoderStream,
+          TextDecoderStream: globalThis.TextDecoderStream,
+          CompressionStream: globalThis.CompressionStream,
+          DecompressionStream: globalThis.DecompressionStream
+        };
       case "timers":
         return builtinTimersModule;
+      case "timers/promises":
+        return builtinTimersPromisesModule;
       case "url":
         return builtinUrlStdlibModule;
       case "util":
