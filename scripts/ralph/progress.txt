@@ -31,6 +31,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 ## Codebase Patterns
 - Guest builtin policy has to stay aligned across `crates/execution/assets/polyfill-registry.json`, `crates/execution/src/javascript.rs` builtin normalization/_loadPolyfill handling, `crates/execution/assets/v8-bridge.source.js` `Module.builtinModules` plus `loadBuiltinModule()`, and `crates/execution/src/node_import_cache.rs`; if one layer lags, guests get `MODULE_NOT_FOUND` or host fallthrough instead of the intended deny/stub behavior
 - Guest `fs.watch` / `fs.watchFile` support should stay as guest-side polling in `crates/execution/assets/v8-bridge.source.js` until the kernel exposes a real notification primitive; keep sidecar coverage focused on observable events, not a new RPC surface
+- Secure HTTP/2 sidecar work spans both the bridge payloads and the session launchers in `crates/sidecar/src/execution.rs`; keep `tls` options threaded through `net.http2_server_listen` / `net.http2_session_connect` and default ALPN to `h2` on both sides or the handshake breaks
 - Queued `crates/v8-runtime` sessions must keep polling their control channel before acquiring a concurrency slot; otherwise `destroy_session()` can deadlock when the max-concurrency queue is full
 - The `crates/v8-runtime` snapshot suite currently has to run in isolation: keep `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main unit-test binary and run `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately
 - Pi SDK E2E tests should configure llmock in both places: write the Anthropic provider override to `~/.pi/agent/models.json` inside the VM and pass `ANTHROPIC_BASE_URL` in the session env, because ACP-driven tool turns can still consult the env-configured base URL
@@ -672,4 +673,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Denied builtins still need to remain visible to the guest module system as builtins; otherwise `require('node:...')` falls back to `MODULE_NOT_FOUND` instead of the intended `ERR_ACCESS_DENIED`
   - Compatibility builtins like `diagnostics_channel` and `async_hooks` should stay as small local stubs in both the V8 bridge and the import-cache assets rather than falling through to host modules
   - After changing `crates/execution/assets/v8-bridge.source.js`, rebuild `crates/execution/assets/v8-bridge.js` before trusting V8 execution tests; stale generated bundles can make a correct source edit look broken
+---
+## 2026-04-08 14:47:23 PDT - US-062
+- Implemented TLS-backed HTTP/2 client and server startup in the sidecar bridge by threading `tls` payloads through the HTTP/2 listen/connect RPCs and performing the handshake with `tokio-rustls` before starting each h2 session
+- Replaced the remaining stub HTTP/2/HTTP wait paths with real dispatch loops, taught `net.http2_server_respond` to record pending responses, and added secure HTTP/2 round-trip coverage in `crates/sidecar/tests/service.rs`
+- Files changed: `Cargo.lock`, `crates/sidecar/Cargo.toml`, `crates/sidecar/src/{execution.rs,state.rs}`, `crates/sidecar/tests/service.rs`, `crates/CLAUDE.md`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Secure HTTP/2 bridge support spans both the RPC payload structs and the session launchers in `crates/sidecar/src/execution.rs`; if one side drops the `tls` payload, the handshake silently falls back to the old cleartext-only path
+  - Default ALPN to `h2` for both secure HTTP/2 listeners and TLS clients unless the caller overrides it, or `tokio-rustls` completes TLS but the subsequent `h2` handshake never establishes a session
+  - `cargo test -p agent-os-sidecar -- --test-threads=1` is green again on this branch for the sidecar package, even though the service tests still log some non-fatal broken-pipe noise while tearing down IPC writers
 ---

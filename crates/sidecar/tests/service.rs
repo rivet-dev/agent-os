@@ -8055,6 +8055,259 @@ console.log(JSON.stringify(summary));
         }
 
         #[test]
+        fn javascript_http2_secure_listen_connect_request_and_respond_round_trip() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-http2-secure-round-trip");
+            write_fixture(&cwd.join("entry.mjs"), "");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-http2-secure",
+                "[\"buffer\",\"stream\",\"tls\"]",
+            );
+
+            let listen = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-secure",
+                JavascriptSyncRpcRequest {
+                    id: 20,
+                    method: String::from("net.http2_server_listen"),
+                    args: vec![Value::String(
+                        json!({
+                            "serverId": 33,
+                            "secure": true,
+                            "host": "127.0.0.1",
+                            "port": 0,
+                            "backlog": 8,
+                            "settings": {},
+                            "tls": {
+                                "isServer": true,
+                                "key": { "kind": "string", "data": TLS_TEST_KEY_PEM },
+                                "cert": { "kind": "string", "data": TLS_TEST_CERT_PEM },
+                                "ALPNProtocols": ["h2"],
+                            }
+                        })
+                        .to_string(),
+                    )],
+                },
+            )
+            .expect("listen via secure http2 bridge");
+            let listen_payload: Value =
+                serde_json::from_str(listen.as_str().expect("listen payload"))
+                    .expect("parse http2 listen payload");
+            let port = listen_payload["address"]["port"]
+                .as_u64()
+                .expect("http2 secure listen port") as u16;
+
+            let connect = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-secure",
+                JavascriptSyncRpcRequest {
+                    id: 21,
+                    method: String::from("net.http2_session_connect"),
+                    args: vec![Value::String(
+                        json!({
+                            "authority": format!("https://127.0.0.1:{port}"),
+                            "protocol": "https:",
+                            "host": "127.0.0.1",
+                            "port": port,
+                            "settings": {},
+                            "tls": {
+                                "servername": "localhost",
+                                "rejectUnauthorized": false,
+                                "ALPNProtocols": ["h2"],
+                            }
+                        })
+                        .to_string(),
+                    )],
+                },
+            )
+            .expect("connect via secure http2 bridge");
+            let connect_payload: Value =
+                serde_json::from_str(connect.as_str().expect("connect payload"))
+                    .expect("parse secure http2 connect payload");
+            let client_session_id = connect_payload["sessionId"]
+                .as_u64()
+                .expect("client session id");
+
+            let server_session = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-secure",
+                "net.http2_server_poll",
+                33,
+                "serverSession",
+            );
+            let server_session_id = server_session["extraNumber"]
+                .as_u64()
+                .or_else(|| server_session["id"].as_u64())
+                .unwrap_or_default();
+            assert!(server_session_id > 0, "event: {server_session}");
+
+            let stream_id = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-secure",
+                JavascriptSyncRpcRequest {
+                    id: 22,
+                    method: String::from("net.http2_session_request"),
+                    args: vec![
+                        json!(client_session_id),
+                        Value::String(String::from("{\":method\":\"GET\",\":path\":\"/secure\"}")),
+                        Value::String(String::from("{\"endStream\":true}")),
+                    ],
+                },
+            )
+            .expect("issue secure http2 request")
+            .as_u64()
+            .expect("client stream id");
+
+            let server_stream = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-secure",
+                "net.http2_server_poll",
+                33,
+                "serverStream",
+            );
+            let server_stream_id = server_stream["data"]
+                .as_str()
+                .expect("server stream data")
+                .parse::<u64>()
+                .expect("server stream id");
+
+            let respond = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-secure",
+                JavascriptSyncRpcRequest {
+                    id: 23,
+                    method: String::from("net.http2_stream_respond"),
+                    args: vec![
+                        json!(server_stream_id),
+                        Value::String(String::from(
+                            "{\":status\":200,\"content-type\":\"text/plain\"}",
+                        )),
+                    ],
+                },
+            )
+            .expect("respond over secure http2");
+            assert_eq!(respond, Value::Null);
+
+            let ended = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-secure",
+                JavascriptSyncRpcRequest {
+                    id: 24,
+                    method: String::from("net.http2_stream_end"),
+                    args: vec![
+                        json!(server_stream_id),
+                        json!(base64::engine::general_purpose::STANDARD.encode("secure-pong")),
+                    ],
+                },
+            )
+            .expect("end secure http2 stream");
+            assert_eq!(ended, Value::Bool(true));
+
+            let response_headers = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-secure",
+                "net.http2_session_poll",
+                client_session_id,
+                "clientResponseHeaders",
+            );
+            assert_eq!(response_headers["id"].as_u64(), Some(stream_id));
+
+            let response_data = poll_http2_event(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-secure",
+                "net.http2_session_poll",
+                client_session_id,
+                "clientData",
+            );
+            let body = base64::engine::general_purpose::STANDARD
+                .decode(response_data["data"].as_str().expect("response body"))
+                .expect("decode secure http2 body");
+            assert_eq!(
+                String::from_utf8(body).expect("utf8 secure http2 body"),
+                "secure-pong"
+            );
+
+            let session_state: Value = serde_json::from_str(
+                connect_payload["state"].as_str().expect("session state payload"),
+            )
+            .expect("parse secure session state");
+            assert_eq!(session_state["encrypted"], json!(true));
+            assert_eq!(session_state["socket"]["encrypted"], json!(true));
+        }
+
+        #[test]
+        fn javascript_http2_server_respond_records_pending_response() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-http2-respond");
+            write_fixture(&cwd.join("entry.mjs"), "");
+            start_fake_javascript_process(&mut sidecar, &vm_id, &cwd, "proc-js-http2-respond", "[]");
+
+            let response_json = String::from(
+                "{\"status\":200,\"headers\":[[\"content-type\",\"text/plain\"]],\"body\":\"c2VjdXJlLXBvbmc=\",\"bodyEncoding\":\"base64\"}",
+            );
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-http2-respond")
+                    .expect("javascript process");
+                process.pending_http_requests.insert((33, 44), None);
+            }
+
+            let response = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-http2-respond",
+                JavascriptSyncRpcRequest {
+                    id: 25,
+                    method: String::from("net.http2_server_respond"),
+                    args: vec![json!(33), json!(44), Value::String(response_json.clone())],
+                },
+            )
+            .expect("record http2 response");
+            assert_eq!(response, Value::Bool(true));
+            assert_eq!(
+                sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("proc-js-http2-respond"))
+                    .and_then(|process| process.pending_http_requests.get(&(33, 44)))
+                    .cloned(),
+                Some(Some(response_json)),
+            );
+        }
+
+        #[test]
         #[ignore = "V8 sidecar HTTP integration is flaky in this harness; focused HTTP bridge tests cover the sidecar path"]
         fn javascript_http_rpc_requests_gets_and_serves_over_guest_net() {
             assert_node_available();

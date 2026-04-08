@@ -1198,7 +1198,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
       ],
       "priority": 107,
-      "passes": false,
+      "passes": true,
       "notes": "Found in audit: 4 HTTP/2 handlers are stubs returning Ok(Value::Null). HTTP/2 over TLS is not supported (only cleartext h2c). These are lower priority but needed for packages that use HTTP/2 (gRPC, modern HTTP clients)."
     },
     {

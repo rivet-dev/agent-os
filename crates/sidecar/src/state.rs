@@ -489,6 +489,7 @@ pub(crate) struct ActiveHttp2Server {
     pub(crate) actual_local_addr: SocketAddr,
     pub(crate) guest_local_addr: SocketAddr,
     pub(crate) secure: bool,
+    pub(crate) tls: Option<JavascriptTlsBridgeOptions>,
     pub(crate) closed: Arc<AtomicBool>,
 }
 

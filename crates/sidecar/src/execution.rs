@@ -114,13 +114,16 @@ use std::net::{
 };
 use std::os::unix::net::{SocketAddr as UnixSocketAddr, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 use url::Url;
 
 const DEFAULT_KERNEL_STDIN_READ_MAX_BYTES: usize = 64 * 1024;
@@ -133,6 +136,11 @@ const DEFAULT_SCRYPT_COST: u64 = 16_384;
 const DEFAULT_SCRYPT_BLOCK_SIZE: u32 = 8;
 const DEFAULT_SCRYPT_PARALLELIZATION: u32 = 1;
 const SQLITE_JS_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
+
+trait Http2AsyncIo: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T> Http2AsyncIo for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
 const DEFAULT_ALLOWED_NODE_BUILTINS: &[&str] = &[
     "assert",
     "buffer",
@@ -209,6 +217,7 @@ struct JavascriptHttp2ServerListenRequest {
     backlog: Option<u32>,
     timeout: Option<u64>,
     settings: BTreeMap<String, Value>,
+    tls: Option<JavascriptTlsBridgeOptions>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -219,6 +228,7 @@ struct JavascriptHttp2SessionConnectRequest {
     host: Option<String>,
     port: Option<u16>,
     settings: BTreeMap<String, Value>,
+    tls: Option<JavascriptTlsBridgeOptions>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -5548,36 +5558,7 @@ fn build_client_tls_stream(
     stream: TcpStream,
     options: &JavascriptTlsBridgeOptions,
 ) -> Result<rustls::StreamOwned<ClientConnection, TcpStream>, SidecarError> {
-    let provider = tls_provider();
-    let builder = ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .map_err(|error| {
-            SidecarError::InvalidState(format!("invalid TLS protocol config: {error}"))
-        })?;
-
-    let mut config = if options.reject_unauthorized == Some(false) {
-        let verifier = Arc::new(InsecureTlsVerifier {
-            supported_schemes: provider
-                .signature_verification_algorithms
-                .supported_schemes(),
-        });
-        builder
-            .dangerous()
-            .with_custom_certificate_verifier(verifier)
-            .with_no_client_auth()
-    } else {
-        builder
-            .with_root_certificates(tls_root_store(options)?)
-            .with_no_client_auth()
-    };
-
-    if let Some(protocols) = options.alpn_protocols.as_ref() {
-        config.alpn_protocols = protocols
-            .iter()
-            .map(|protocol| protocol.as_bytes().to_vec())
-            .collect();
-    }
-
+    let config = build_client_tls_config(options)?;
     let server_name = options
         .servername
         .clone()
@@ -5613,27 +5594,29 @@ fn build_client_tls_stream(
     Ok(tls_stream)
 }
 
-fn build_server_tls_stream(
-    stream: TcpStream,
-    options: &JavascriptTlsBridgeOptions,
-) -> Result<rustls::StreamOwned<ServerConnection, TcpStream>, SidecarError> {
-    let certificates = tls_certificates_from_material(options.cert.as_ref().ok_or_else(|| {
-        SidecarError::InvalidState(String::from("TLS server upgrade requires a certificate"))
-    })?)?;
-    let key = tls_private_key_from_material(options.key.as_ref().ok_or_else(|| {
-        SidecarError::InvalidState(String::from("TLS server upgrade requires a private key"))
-    })?)?;
-
-    let mut config = ServerConfig::builder_with_provider(tls_provider())
+fn build_client_tls_config(options: &JavascriptTlsBridgeOptions) -> Result<ClientConfig, SidecarError> {
+    let provider = tls_provider();
+    let builder = ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .map_err(|error| {
             SidecarError::InvalidState(format!("invalid TLS protocol config: {error}"))
-        })?
-        .with_no_client_auth()
-        .with_single_cert(certificates, key)
-        .map_err(|error| {
-            SidecarError::InvalidState(format!("invalid TLS server config: {error}"))
         })?;
+
+    let mut config = if options.reject_unauthorized == Some(false) {
+        let verifier = Arc::new(InsecureTlsVerifier {
+            supported_schemes: provider
+                .signature_verification_algorithms
+                .supported_schemes(),
+        });
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth()
+    } else {
+        builder
+            .with_root_certificates(tls_root_store(options)?)
+            .with_no_client_auth()
+    };
 
     if let Some(protocols) = options.alpn_protocols.as_ref() {
         config.alpn_protocols = protocols
@@ -5641,7 +5624,14 @@ fn build_server_tls_stream(
             .map(|protocol| protocol.as_bytes().to_vec())
             .collect();
     }
+    Ok(config)
+}
 
+fn build_server_tls_stream(
+    stream: TcpStream,
+    options: &JavascriptTlsBridgeOptions,
+) -> Result<rustls::StreamOwned<ServerConnection, TcpStream>, SidecarError> {
+    let config = build_server_tls_config(options)?;
     stream
         .set_read_timeout(Some(TLS_HANDSHAKE_TIMEOUT))
         .map_err(sidecar_net_error)?;
@@ -5669,6 +5659,34 @@ fn build_server_tls_stream(
         .set_write_timeout(None)
         .map_err(sidecar_net_error)?;
     Ok(tls_stream)
+}
+
+fn build_server_tls_config(options: &JavascriptTlsBridgeOptions) -> Result<ServerConfig, SidecarError> {
+    let certificates = tls_certificates_from_material(options.cert.as_ref().ok_or_else(|| {
+        SidecarError::InvalidState(String::from("TLS server upgrade requires a certificate"))
+    })?)?;
+    let key = tls_private_key_from_material(options.key.as_ref().ok_or_else(|| {
+        SidecarError::InvalidState(String::from("TLS server upgrade requires a private key"))
+    })?)?;
+
+    let mut config = ServerConfig::builder_with_provider(tls_provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("invalid TLS protocol config: {error}"))
+        })?
+        .with_no_client_auth()
+        .with_single_cert(certificates, key)
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("invalid TLS server config: {error}"))
+        })?;
+
+    if let Some(protocols) = options.alpn_protocols.as_ref() {
+        config.alpn_protocols = protocols
+            .iter()
+            .map(|protocol| protocol.as_bytes().to_vec())
+            .collect();
+    }
+    Ok(config)
 }
 
 fn tls_protocol_name(version: rustls::ProtocolVersion) -> String {
@@ -9805,6 +9823,74 @@ fn http2_socket_snapshot(local_addr: SocketAddr, remote_addr: SocketAddr) -> Htt
     }
 }
 
+fn http2_wait_result(kind: &str, id: u64) -> Value {
+    json!({
+        "kind": kind,
+        "id": id,
+    })
+}
+
+fn is_http2_terminal_event(event: &Http2BridgeEvent, is_server: bool, id: u64) -> bool {
+    if is_server {
+        event.kind == "serverClose" && event.id == id
+    } else {
+        event.kind == "sessionClose" && event.id == id
+    }
+}
+
+fn dispatch_http2_wait_loop(
+    process: &ActiveProcess,
+    id: u64,
+    is_server: bool,
+) -> Result<Value, SidecarError> {
+    loop {
+        if let Some(event) = wait_for_http2_event(&process.http2.shared, id, is_server, 50) {
+            let payload = serde_json::to_value(&event).map_err(|error| {
+                SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}"))
+            })?;
+            process
+                .execution
+                .send_javascript_stream_event("http2", payload.clone())?;
+            if is_http2_terminal_event(&event, is_server, id) {
+                return Ok(payload);
+            }
+            continue;
+        }
+
+        let exists = process
+            .http2
+            .shared
+            .lock()
+            .map(|state| {
+                if is_server {
+                    state.servers.contains_key(&id)
+                } else {
+                    state.sessions.contains_key(&id)
+                }
+            })
+            .unwrap_or(false);
+        if !exists {
+            return Ok(if is_server {
+                http2_wait_result("serverClose", id)
+            } else {
+                http2_wait_result("sessionClose", id)
+            });
+        }
+    }
+}
+
+fn dispatch_http_wait_loop(process: &ActiveProcess, server_id: u64) -> Result<Value, SidecarError> {
+    loop {
+        if !process.http_servers.contains_key(&server_id) {
+            return Ok(json!({
+                "kind": "serverClose",
+                "id": server_id,
+            }));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn http2_settings_from_value(settings: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
     settings.clone()
 }
@@ -10008,6 +10094,7 @@ fn spawn_http2_client_session(
     shared: Arc<Mutex<crate::state::Http2SharedState>>,
     session_id: u64,
     remote_addr: SocketAddr,
+    tls: Option<JavascriptTlsBridgeOptions>,
     snapshot: Arc<Mutex<Http2SessionSnapshot>>,
     mut command_rx: UnboundedReceiver<Http2SessionCommand>,
 ) {
@@ -10073,6 +10160,13 @@ fn spawn_http2_client_session(
             {
                 let mut snapshot_guard = snapshot.lock().expect("http2 snapshot lock");
                 snapshot_guard.socket = http2_socket_snapshot(local_addr, remote_addr);
+                if let Some(options) = tls.as_ref() {
+                    snapshot_guard.encrypted = true;
+                    snapshot_guard.alpn_protocol = Some(String::from("h2"));
+                    snapshot_guard.socket.encrypted = true;
+                    snapshot_guard.socket.servername = options.servername.clone();
+                    snapshot_guard.socket.alpn_protocol = Some(String::from("h2"));
+                }
                 snapshot_guard.state = http2_runtime_snapshot();
             }
             if let Ok(snapshot_json) =
@@ -10090,7 +10184,68 @@ fn spawn_http2_client_session(
                 );
             }
 
-            let (mut sender, connection) = match client::handshake(stream).await {
+            let io: Pin<Box<dyn Http2AsyncIo>> = if let Some(options) = tls.as_ref() {
+                let server_name = match ServerName::try_from(
+                    options
+                        .servername
+                        .clone()
+                        .unwrap_or_else(|| String::from("localhost")),
+                ) {
+                    Ok(server_name) => server_name,
+                    Err(_) => {
+                        push_http2_session_event(
+                            &shared,
+                            session_id,
+                            Http2BridgeEvent {
+                                kind: String::from("sessionError"),
+                                id: session_id,
+                                data: Some(http2_error_payload("invalid TLS servername")),
+                                ..Http2BridgeEvent::default()
+                            },
+                        );
+                        remove_http2_session_resources(&shared, session_id);
+                        return;
+                    }
+                };
+                let connector = match build_client_tls_config(options) {
+                    Ok(config) => TlsConnector::from(Arc::new(config)),
+                    Err(error) => {
+                        push_http2_session_event(
+                            &shared,
+                            session_id,
+                            Http2BridgeEvent {
+                                kind: String::from("sessionError"),
+                                id: session_id,
+                                data: Some(http2_error_payload(error.to_string())),
+                                ..Http2BridgeEvent::default()
+                            },
+                        );
+                        remove_http2_session_resources(&shared, session_id);
+                        return;
+                    }
+                };
+                match connector.connect(server_name, stream).await {
+                    Ok(tls_stream) => Box::pin(tls_stream),
+                    Err(error) => {
+                        push_http2_session_event(
+                            &shared,
+                            session_id,
+                            Http2BridgeEvent {
+                                kind: String::from("sessionError"),
+                                id: session_id,
+                                data: Some(http2_error_payload(error.to_string())),
+                                ..Http2BridgeEvent::default()
+                            },
+                        );
+                        remove_http2_session_resources(&shared, session_id);
+                        return;
+                    }
+                }
+            } else {
+                Box::pin(stream)
+            };
+
+            let (mut sender, connection) = match client::handshake(io).await {
                 Ok(parts) => parts,
                 Err(error) => {
                     push_http2_session_event(
@@ -10436,6 +10591,7 @@ fn spawn_http2_server_session(
     server_id: u64,
     session_id: u64,
     stream: TcpStream,
+    tls: Option<JavascriptTlsBridgeOptions>,
     snapshot: Arc<Mutex<Http2SessionSnapshot>>,
     mut command_rx: UnboundedReceiver<Http2SessionCommand>,
 ) {
@@ -10530,6 +10686,12 @@ fn spawn_http2_server_session(
             {
                 let mut snapshot_guard = snapshot.lock().expect("http2 snapshot lock");
                 snapshot_guard.socket = http2_socket_snapshot(local_addr, remote_addr);
+                if tls.is_some() {
+                    snapshot_guard.encrypted = true;
+                    snapshot_guard.alpn_protocol = Some(String::from("h2"));
+                    snapshot_guard.socket.encrypted = true;
+                    snapshot_guard.socket.alpn_protocol = Some(String::from("h2"));
+                }
                 snapshot_guard.state = http2_runtime_snapshot();
             }
             if let Ok(snapshot_json) =
@@ -10539,7 +10701,11 @@ fn spawn_http2_server_session(
                     &shared,
                     server_id,
                     Http2BridgeEvent {
-                        kind: String::from("serverConnection"),
+                        kind: String::from(if tls.is_some() {
+                            "serverSecureConnection"
+                        } else {
+                            "serverConnection"
+                        }),
                         id: server_id,
                         data: Some(serde_json::to_string(&http2_socket_snapshot(local_addr, remote_addr)).unwrap_or_default()),
                         ..Http2BridgeEvent::default()
@@ -10558,7 +10724,46 @@ fn spawn_http2_server_session(
                 );
             }
 
-            let mut connection = match server::handshake(stream).await {
+            let io: Pin<Box<dyn Http2AsyncIo>> = if let Some(options) = tls.as_ref() {
+                let acceptor = match build_server_tls_config(options) {
+                    Ok(config) => TlsAcceptor::from(Arc::new(config)),
+                    Err(error) => {
+                        push_http2_server_event(
+                            &shared,
+                            server_id,
+                            Http2BridgeEvent {
+                                kind: String::from("serverStreamError"),
+                                id: session_id,
+                                data: Some(http2_error_payload(error.to_string())),
+                                ..Http2BridgeEvent::default()
+                            },
+                        );
+                        remove_http2_session_resources(&shared, session_id);
+                        return;
+                    }
+                };
+                match acceptor.accept(stream).await {
+                    Ok(tls_stream) => Box::pin(tls_stream),
+                    Err(error) => {
+                        push_http2_server_event(
+                            &shared,
+                            server_id,
+                            Http2BridgeEvent {
+                                kind: String::from("serverStreamError"),
+                                id: session_id,
+                                data: Some(http2_error_payload(error.to_string())),
+                                ..Http2BridgeEvent::default()
+                            },
+                        );
+                        remove_http2_session_resources(&shared, session_id);
+                        return;
+                    }
+                }
+            } else {
+                Box::pin(stream)
+            };
+
+            let mut connection = match server::handshake(io).await {
                 Ok(connection) => connection,
                 Err(error) => {
                     push_http2_server_event(
@@ -11073,10 +11278,10 @@ fn spawn_http2_server_accept_loop(
             match listener.accept() {
                 Ok((stream, _)) => {
                     let (command_tx, command_rx) = unbounded_channel();
-                    let (guest_local_addr, secure) = {
+                    let (guest_local_addr, secure, tls) = {
                         let state = shared.lock().expect("http2 shared state");
                         let server = state.servers.get(&server_id).expect("http2 server state");
-                        (server.guest_local_addr, server.secure)
+                        (server.guest_local_addr, server.secure, server.tls.clone())
                     };
                     let (local_addr, remote_addr) = match (stream.local_addr(), stream.peer_addr())
                     {
@@ -11123,6 +11328,7 @@ fn spawn_http2_server_accept_loop(
                         server_id,
                         session_id,
                         stream,
+                        tls,
                         session_snapshot,
                         command_rx,
                     );
@@ -11243,11 +11449,6 @@ where
                 "socket",
             )?;
             let payload = parse_http2_server_listen_payload(request)?;
-            if payload.secure {
-                return Err(SidecarError::Unsupported(String::from(
-                    "HTTP/2 secure servers are not supported yet in the sidecar bridge",
-                )));
-            }
             let (family, bind_host, guest_host) =
                 normalize_tcp_listen_host(payload.host.as_deref())?;
             let requested_port = payload.port.unwrap_or(0);
@@ -11274,7 +11475,14 @@ where
                     ActiveHttp2Server {
                         actual_local_addr: listener.local_addr(),
                         guest_local_addr,
-                        secure: false,
+                        secure: payload.secure,
+                        tls: payload.tls.clone().map(|mut tls| {
+                            tls.is_server = payload.secure;
+                            if payload.secure && tls.alpn_protocols.is_none() {
+                                tls.alpn_protocols = Some(vec![String::from("h2")]);
+                            }
+                            tls
+                        }),
                         closed: Arc::clone(&closed),
                     },
                 );
@@ -11310,7 +11518,11 @@ where
                 None => Ok(Value::Null),
             }
         }
-        "net.http2_server_wait" => Ok(Value::Null),
+        "net.http2_server_wait" => {
+            let server_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_server_wait server id")?;
+            dispatch_http2_wait_loop(process, server_id, true)
+        }
         "net.http2_server_close" => {
             let server_id =
                 javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_server_close server id")?;
@@ -11335,7 +11547,35 @@ where
             );
             Ok(Value::Null)
         }
-        "net.http2_server_respond" => Ok(Value::Null),
+        "net.http2_server_respond" => {
+            let server_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "net.http2_server_respond server id",
+            )?;
+            let request_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                1,
+                "net.http2_server_respond request id",
+            )?;
+            let response_json = javascript_sync_rpc_arg_str(
+                &request.args,
+                2,
+                "net.http2_server_respond payload",
+            )?;
+            serde_json::from_str::<Value>(response_json).map_err(|error| {
+                SidecarError::Execution(format!(
+                    "net.http2_server_respond payload must be valid JSON: {error}"
+                ))
+            })?;
+            let Some(pending) = process.pending_http_requests.get_mut(&(server_id, request_id)) else {
+                return Err(SidecarError::InvalidState(format!(
+                    "unknown pending HTTP/2 request {request_id} for server {server_id}"
+                )));
+            };
+            *pending = Some(response_json.to_owned());
+            Ok(Value::Bool(true))
+        }
         "net.http2_session_connect" => {
             check_network_resource_limit(
                 resource_limits.max_sockets,
@@ -11363,11 +11603,7 @@ where
                     "invalid HTTP/2 authority {authority:?}: {error}"
                 ))
             })?;
-            if url.scheme() == "https" || payload.protocol.as_deref() == Some("https:") {
-                return Err(SidecarError::Unsupported(String::from(
-                    "HTTP/2 TLS clients are not supported yet in the sidecar bridge",
-                )));
-            }
+            let secure = url.scheme() == "https" || payload.protocol.as_deref() == Some("https:");
             let host = payload
                 .host
                 .as_deref()
@@ -11400,17 +11636,28 @@ where
             };
             let (command_tx, command_rx) = unbounded_channel();
             let snapshot = Arc::new(Mutex::new(Http2SessionSnapshot {
-                encrypted: false,
-                alpn_protocol: Some(String::from("h2c")),
+                encrypted: secure,
+                alpn_protocol: Some(String::from(if secure { "h2" } else { "h2c" })),
                 local_settings: http2_settings_from_value(&payload.settings),
                 remote_settings: BTreeMap::new(),
                 state: http2_runtime_snapshot(),
                 socket: Http2SocketSnapshot {
+                    encrypted: secure,
                     remote_address: Some(resolved.guest_remote_addr.ip().to_string()),
                     remote_port: Some(resolved.guest_remote_addr.port()),
                     remote_family: Some(
                         socket_addr_family(&resolved.guest_remote_addr).to_string(),
                     ),
+                    servername: if secure {
+                        payload
+                            .tls
+                            .as_ref()
+                            .and_then(|tls| tls.servername.clone())
+                            .or_else(|| Some(host.to_string()))
+                    } else {
+                        None
+                    },
+                    alpn_protocol: Some(String::from(if secure { "h2" } else { "h2c" })),
                     ..Http2SocketSnapshot::default()
                 },
                 ..Http2SessionSnapshot::default()
@@ -11424,7 +11671,7 @@ where
                     session_id,
                     ActiveHttp2Session {
                         server_id: None,
-                        secure: false,
+                        secure,
                         command_tx,
                         snapshot: Arc::clone(&snapshot),
                     },
@@ -11436,6 +11683,16 @@ where
                 Arc::clone(&process.http2.shared),
                 session_id,
                 resolved.actual_addr,
+                if secure {
+                    Some(payload.tls.unwrap_or(JavascriptTlsBridgeOptions {
+                        is_server: false,
+                        servername: Some(host.to_string()),
+                        alpn_protocols: Some(vec![String::from("h2")]),
+                        ..JavascriptTlsBridgeOptions::default()
+                    }))
+                } else {
+                    None
+                },
                 Arc::clone(&snapshot),
                 command_rx,
             );
@@ -11564,7 +11821,14 @@ where
                 None => Ok(Value::Null),
             }
         }
-        "net.http2_session_wait" => Ok(Value::Null),
+        "net.http2_session_wait" => {
+            let session_id = javascript_sync_rpc_arg_u64(
+                &request.args,
+                0,
+                "net.http2_session_wait session id",
+            )?;
+            dispatch_http2_wait_loop(process, session_id, false)
+        }
         "net.http2_stream_respond" => {
             let stream_id = javascript_sync_rpc_arg_u64(
                 &request.args,
@@ -11855,7 +12119,11 @@ where
                 .retain(|(pending_server_id, _), _| *pending_server_id != server_id);
             Ok(Value::Null)
         }
-        "net.http_wait" => Ok(Value::Null),
+        "net.http_wait" => {
+            let server_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http_wait server id")?;
+            dispatch_http_wait_loop(process, server_id)
+        }
         "net.http_respond" => {
             let server_id =
                 javascript_sync_rpc_arg_u64(&request.args, 0, "net.http_respond server id")?;
