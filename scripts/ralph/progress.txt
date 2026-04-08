@@ -40,6 +40,17 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Guest-side CommonJS helpers in `crates/execution/assets/v8-bridge.source.js` must pass explicit `"require"` mode into `_resolveModule`; otherwise dual packages resolve the import branch and `require()` can try to execute ESM as CommonJS
 - Generated node-import-cache builtin assets need a `NODE_IMPORT_CACHE_ASSET_VERSION` bump in `crates/execution/src/node_import_cache.rs` whenever their source changes, or old `/tmp/agent-os-node-import-cache-*` materializations will keep serving stale code
 - If guest CommonJS must `require("node:...")`, update both `Module.builtinModules` and `loadBuiltinModule()` in `crates/execution/assets/v8-bridge.source.js`; registering only one side leaves `_requireFrom()` recursing or hanging on the builtin
+- Python bridge shims in `crates/execution/assets/runners/python-runner.mjs` must convert JS bridge failures into Python-native exceptions, and Python child-process cwd inheritance should come from sidecar `ActiveProcess.host_cwd`/guest-path mapping rather than Pyodide's internal `/home/pyodide` cwd
+
+## 2026-04-08 15:10:34 PDT - US-063
+- Implemented Python-side kernel RPC shims for `urllib`, `requests`, DNS lookups, and `subprocess.run`, then extended the Python VFS RPC protocol plus sidecar dispatch so Pyodide can issue HTTP, DNS, and child-process requests through the kernel network stack and process table
+- Added sidecar coverage for Python DNS/HTTP success cases, `requests.get`, network permission failures, Node subprocess execution, and subprocess permission failures, and tightened the filesystem-only test/service fixtures for the expanded Python RPC enum
+- Files changed: `crates/execution/{AGENTS.md,assets/runners/python-runner.mjs,src/python.rs,tests/python.rs}`, `crates/sidecar/{src/execution.rs,src/filesystem.rs,tests/python.rs,tests/service.rs}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Python bridge shims need to catch JS bridge exceptions explicitly or permission failures surface as `JsException` instead of Python-native errors in guest code
+  - Python subprocess cwd inheritance has to use the sidecar VM/process cwd mapping; Pyodide's own `os.getcwd()` points at `/home/pyodide`, which does not map to workspace files for nested Node entrypoints
+  - `cargo test -p agent-os-sidecar --test python -- --test-threads=1` is the right acceptance command for Python runtime stories here; it covered all 19 Python sidecar tests after the network/subprocess bridge work
+---
 
 ## 2026-04-08 14:32:03 PDT - US-061
 - Implemented polling-backed `fs.watch`, `fs.watchFile`, `fs.unwatchFile`, and `fs.promises.watch` in the V8 bridge, plus completed `WriteStream` option handling so `start` and `highWaterMark` work for text writes without truncating existing content

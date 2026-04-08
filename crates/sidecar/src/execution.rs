@@ -7,9 +7,10 @@ use crate::filesystem::{
 use crate::protocol::{
     BoundUdpSnapshotResponse, CloseStdinRequest, EventFrame, EventPayload, ExecuteRequest,
     FindBoundUdpRequest, FindListenerRequest, GetSignalStateRequest, GetZombieTimerCountRequest,
-    GuestRuntimeKind, JavascriptChildProcessSpawnRequest, JavascriptDgramBindRequest,
-    JavascriptDgramCreateSocketRequest, JavascriptDgramSendRequest, JavascriptDnsLookupRequest,
-    JavascriptDnsResolveRequest, JavascriptNetConnectRequest, JavascriptNetListenRequest,
+    GuestRuntimeKind, JavascriptChildProcessSpawnOptions, JavascriptChildProcessSpawnRequest,
+    JavascriptDgramBindRequest, JavascriptDgramCreateSocketRequest,
+    JavascriptDgramSendRequest, JavascriptDnsLookupRequest, JavascriptDnsResolveRequest,
+    JavascriptNetConnectRequest, JavascriptNetListenRequest,
     KillProcessRequest, ListenerSnapshotResponse, OwnershipScope, ProcessExitedEvent,
     ProcessKilledResponse, ProcessOutputEvent, ProcessStartedResponse, RequestFrame,
     ResponsePayload, SidecarRequestPayload, SignalDispositionAction, SignalHandlerRegistration,
@@ -49,9 +50,9 @@ use agent_os_execution::wasm::{
 use agent_os_execution::{
     CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
     JavascriptExecutionEvent, JavascriptSyncRpcRequest, NodeSignalDispositionAction,
-    NodeSignalHandlerRegistration, PythonExecutionEvent, PythonVfsRpcRequest,
-    PythonVfsRpcResponsePayload, StartJavascriptExecutionRequest, StartPythonExecutionRequest,
-    StartWasmExecutionRequest, WasmExecutionEvent,
+    NodeSignalHandlerRegistration, PythonExecutionEvent, PythonVfsRpcMethod,
+    PythonVfsRpcRequest, PythonVfsRpcResponsePayload, StartJavascriptExecutionRequest,
+    StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecutionEvent,
     WasmPermissionTier as ExecutionWasmPermissionTier,
 };
 use agent_os_kernel::kernel::{KernelProcessHandle, SpawnOptions, VirtualProcessOptions};
@@ -2361,7 +2362,287 @@ where
         process_id: &str,
         request: PythonVfsRpcRequest,
     ) -> Result<(), SidecarError> {
-        filesystem_handle_python_vfs_rpc_request(self, vm_id, process_id, request)
+        match request.method {
+            PythonVfsRpcMethod::Read
+            | PythonVfsRpcMethod::Write
+            | PythonVfsRpcMethod::Stat
+            | PythonVfsRpcMethod::ReadDir
+            | PythonVfsRpcMethod::Mkdir => {
+                filesystem_handle_python_vfs_rpc_request(self, vm_id, process_id, request)
+            }
+            PythonVfsRpcMethod::HttpRequest => {
+                self.handle_python_http_rpc_request(vm_id, process_id, request)
+            }
+            PythonVfsRpcMethod::DnsLookup => {
+                self.handle_python_dns_rpc_request(vm_id, process_id, request)
+            }
+            PythonVfsRpcMethod::SubprocessRun => {
+                self.handle_python_subprocess_rpc_request(vm_id, process_id, request)
+            }
+        }
+    }
+
+    fn handle_python_http_rpc_request(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        request: PythonVfsRpcRequest,
+    ) -> Result<(), SidecarError> {
+        let response = (|| {
+            let vm = self.vms.get(vm_id).expect("VM should exist");
+            let process = vm
+                .active_processes
+                .get(process_id)
+                .expect("process should still exist");
+            let url_text = request.url.as_deref().ok_or_else(|| {
+                SidecarError::InvalidState(String::from("python httpRequest requires a url"))
+            })?;
+            let url = Url::parse(url_text)
+                .map_err(|error| SidecarError::Execution(format!("ERR_INVALID_URL: {error}")))?;
+            let host = url.host_str().ok_or_else(|| {
+                SidecarError::Execution(String::from("ERR_INVALID_URL: missing host"))
+            })?;
+            let port = url.port_or_known_default().ok_or_else(|| {
+                SidecarError::Execution(String::from("ERR_INVALID_URL: missing port"))
+            })?;
+            self.bridge.require_network_access(
+                vm_id,
+                NetworkOperation::Http,
+                format_tcp_resource(host, port),
+            )?;
+            let addresses = if host.parse::<IpAddr>().is_ok() {
+                Vec::new()
+            } else {
+                filter_dns_safe_ip_addrs(
+                    resolve_dns_ip_addrs(&self.bridge, vm_id, &vm.dns, host)?,
+                    host,
+                )?
+            };
+            let mut request_url = url.clone();
+            let mut headers = BTreeMap::new();
+            for (name, value) in &request.headers {
+                headers.insert(name.clone(), Value::String(value.clone()));
+            }
+            if url.scheme() == "http" && !addresses.is_empty() {
+                request_url
+                    .set_host(Some(&addresses[0].to_string()))
+                    .map_err(|_| {
+                        SidecarError::Execution(String::from(
+                            "ERR_INVALID_URL: failed to rewrite host for python httpRequest",
+                        ))
+                    })?;
+                headers
+                    .entry(String::from("host"))
+                    .or_insert_with(|| Value::String(host.to_owned()));
+            }
+            let options = JavascriptHttpRequestOptions {
+                method: Some(
+                    request
+                        .http_method
+                        .clone()
+                        .unwrap_or_else(|| String::from("GET")),
+                ),
+                headers,
+                body: request.body_base64.as_deref().map(|body| {
+                    String::from_utf8(
+                        base64::engine::general_purpose::STANDARD
+                            .decode(body)
+                            .unwrap_or_default(),
+                    )
+                    .unwrap_or_default()
+                }),
+                reject_unauthorized: None,
+            };
+            let headers = parse_http_header_collection(&options.headers, "python httpRequest headers")?;
+            let response = issue_outbound_http_request(&request_url, &options, &headers)?;
+            let payload_json = response.as_str().ok_or_else(|| {
+                SidecarError::Execution(String::from(
+                    "python httpRequest returned a non-string response payload",
+                ))
+            })?;
+            let payload: Value = serde_json::from_str(payload_json).map_err(|error| {
+                SidecarError::Execution(format!(
+                    "python httpRequest response must be valid JSON: {error}"
+                ))
+            })?;
+            let header_map = payload
+                .get("headers")
+                .and_then(Value::as_array)
+                .map(|entries| {
+                    let mut normalized = BTreeMap::<String, Vec<String>>::new();
+                    for entry in entries {
+                        let Some(pair) = entry.as_array() else {
+                            continue;
+                        };
+                        let Some(name) = pair.first().and_then(Value::as_str) else {
+                            continue;
+                        };
+                        let Some(value) = pair.get(1).and_then(Value::as_str) else {
+                            continue;
+                        };
+                        normalized
+                            .entry(name.to_owned())
+                            .or_default()
+                            .push(value.to_owned());
+                    }
+                    normalized
+                })
+                .unwrap_or_default();
+            Ok(PythonVfsRpcResponsePayload::Http {
+                status: payload
+                    .get("status")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as u16)
+                    .unwrap_or_default(),
+                reason: payload
+                    .get("statusText")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                url: payload
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or(url_text)
+                    .to_owned(),
+                headers: header_map,
+                body_base64: payload
+                    .get("body")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        })();
+
+        self.respond_python_rpc(vm_id, process_id, request.id, response)
+    }
+
+    fn handle_python_dns_rpc_request(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        request: PythonVfsRpcRequest,
+    ) -> Result<(), SidecarError> {
+        let response = (|| {
+            let vm = self.vms.get(vm_id).expect("VM should exist");
+            let hostname = request.hostname.as_deref().ok_or_else(|| {
+                SidecarError::InvalidState(String::from("python dnsLookup requires a hostname"))
+            })?;
+            self.bridge.require_network_access(
+                vm_id,
+                NetworkOperation::Dns,
+                format_dns_resource(hostname),
+            )?;
+            let mut addresses = filter_dns_safe_ip_addrs(
+                resolve_dns_ip_addrs(&self.bridge, vm_id, &vm.dns, hostname)?,
+                hostname,
+            )?;
+            if let Some(family) = request.family {
+                addresses.retain(|address| match (family, address) {
+                    (4, IpAddr::V4(_)) => true,
+                    (6, IpAddr::V6(_)) => true,
+                    _ => false,
+                });
+            }
+            Ok(PythonVfsRpcResponsePayload::DnsLookup {
+                addresses: addresses.into_iter().map(|address| address.to_string()).collect(),
+            })
+        })();
+
+        self.respond_python_rpc(vm_id, process_id, request.id, response)
+    }
+
+    fn handle_python_subprocess_rpc_request(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        request: PythonVfsRpcRequest,
+    ) -> Result<(), SidecarError> {
+        let command = request.command.clone().ok_or_else(|| {
+            SidecarError::InvalidState(String::from("python subprocessRun requires a command"))
+        })?;
+        let (internal_bootstrap_env, cwd) = {
+            let vm = self.vms.get(vm_id).expect("VM should exist");
+            let process = vm
+                .active_processes
+                .get(process_id)
+                .expect("process should still exist");
+            let cwd = request.cwd.clone().or_else(|| {
+                guest_runtime_path_for_host_path(
+                    &vm.guest_env,
+                    &vm.host_cwd,
+                    &process.host_cwd.to_string_lossy(),
+                )
+            });
+            (
+                sanitize_javascript_child_process_internal_bootstrap_env(&vm.guest_env),
+                cwd,
+            )
+        };
+        let response = self
+            .spawn_javascript_child_process_sync(
+                vm_id,
+                process_id,
+                JavascriptChildProcessSpawnRequest {
+                    command,
+                    args: request.args.clone(),
+                    options: JavascriptChildProcessSpawnOptions {
+                        cwd,
+                        env: request.env.clone(),
+                        internal_bootstrap_env,
+                        shell: request.shell,
+                    },
+                },
+                request.max_buffer,
+            )
+            .and_then(|payload| {
+                Ok(PythonVfsRpcResponsePayload::SubprocessRun {
+                    exit_code: payload
+                        .get("code")
+                        .and_then(Value::as_i64)
+                        .map(|value| value as i32)
+                        .unwrap_or(1),
+                    stdout: payload
+                        .get("stdout")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    stderr: payload
+                        .get("stderr")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    max_buffer_exceeded: payload
+                        .get("maxBufferExceeded")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                })
+            });
+
+        self.respond_python_rpc(vm_id, process_id, request.id, response)
+    }
+
+    fn respond_python_rpc(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        request_id: u64,
+        response: Result<PythonVfsRpcResponsePayload, SidecarError>,
+    ) -> Result<(), SidecarError> {
+        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let process = vm
+            .active_processes
+            .get_mut(process_id)
+            .expect("process should still exist");
+        match response {
+            Ok(payload) => process
+                .execution
+                .respond_python_vfs_rpc_success(request_id, payload),
+            Err(error) => process.execution.respond_python_vfs_rpc_error(
+                request_id,
+                "ERR_AGENT_OS_PYTHON_VFS_RPC",
+                error.to_string(),
+            ),
+        }
     }
 
     fn resolve_javascript_child_process_execution(

@@ -363,6 +363,48 @@ function createPythonVfsRpcBridge() {
     async fsMkdir(path, options = {}) {
       this.fsMkdirSync(path, options);
     },
+    httpRequestSync(url, method = 'GET', headersJson = '{}', bodyBase64 = null) {
+      let headers;
+      try {
+        headers = JSON.parse(headersJson);
+      } catch (error) {
+        throw new Error(`invalid Python httpRequest headers JSON: ${formatError(error)}`);
+      }
+      return JSON.stringify(requestSync('httpRequest', {
+        url,
+        httpMethod: method,
+        headers,
+        bodyBase64,
+      }));
+    },
+    dnsLookupSync(hostname, family = null) {
+      return JSON.stringify(requestSync('dnsLookup', { hostname, family }));
+    },
+    subprocessRunSync(
+      command,
+      argsJson = '[]',
+      cwd = null,
+      envJson = '{}',
+      shell = false,
+      maxBuffer = null,
+    ) {
+      let args;
+      let env;
+      try {
+        args = JSON.parse(argsJson);
+        env = JSON.parse(envJson);
+      } catch (error) {
+        throw new Error(`invalid Python subprocessRun payload JSON: ${formatError(error)}`);
+      }
+      return JSON.stringify(requestSync('subprocessRun', {
+        command,
+        args,
+        cwd,
+        env,
+        shell,
+        maxBuffer,
+      }));
+    },
     dispose() {
       try {
         closeSync(requestFd);
@@ -419,6 +461,278 @@ _agent_os_builtins.__import__ = _agent_os_import
 _agent_os_sys.modules.update(_agent_os_blocked_modules)
 `;
 
+const PYTHON_KERNEL_RPC_SHIMS_SOURCE = String.raw`
+import base64 as _agent_os_base64
+import json as _agent_os_json
+import socket as _agent_os_socket
+import subprocess as _agent_os_subprocess
+import sys as _agent_os_sys
+import types as _agent_os_types
+import urllib.error as _agent_os_urllib_error
+import urllib.request as _agent_os_urllib_request
+from email.message import Message as _AgentOsMessage
+from js import __agentOsPythonVfsRpc as _agent_os_rpc
+
+def _agent_os_raise_from_error(error):
+    if not isinstance(error, dict):
+        raise RuntimeError(str(error))
+    message = str(error.get("message", "Agent OS Python bridge request failed"))
+    if "EACCES:" in message:
+        raise PermissionError(message)
+    if "command not found" in message:
+        raise FileNotFoundError(message)
+    raise OSError(message)
+
+def _agent_os_normalize_family(family):
+    if family in (None, 0):
+        return None
+    if family == _agent_os_socket.AF_INET:
+        return 4
+    if family == _agent_os_socket.AF_INET6:
+        return 6
+    return None
+
+def _agent_os_dns_lookup(hostname, family=None):
+    try:
+        result = _agent_os_json.loads(
+            _agent_os_rpc.dnsLookupSync(hostname, _agent_os_normalize_family(family))
+        )
+    except Exception as error:
+        _agent_os_raise_from_error({"message": str(error)})
+    addresses = result.get("addresses") or []
+    if not addresses:
+        raise OSError(f"Agent OS DNS lookup returned no addresses for {hostname}")
+    return addresses
+
+class _AgentOsHttpResponse:
+    def __init__(self, payload):
+        self.status = int(payload.get("status", 0))
+        self.reason = str(payload.get("reason", ""))
+        self.url = str(payload.get("url", ""))
+        self._body = _agent_os_base64.b64decode(payload.get("bodyBase64", "") or "")
+        headers = payload.get("headers") or {}
+        self.headers = _AgentOsMessage()
+        for name, values in headers.items():
+          for value in values:
+            self.headers.add_header(str(name), str(value))
+
+    def read(self, amt=-1):
+        if amt is None or amt < 0:
+            return self._body
+        return self._body[:amt]
+
+    def getcode(self):
+        return self.status
+
+    def info(self):
+        return self.headers
+
+    def close(self):
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+def _agent_os_extract_request_parts(url_or_request, data=None):
+    if isinstance(url_or_request, _agent_os_urllib_request.Request):
+        request = url_or_request
+        url = request.full_url
+        method = request.get_method()
+        headers = dict(request.header_items())
+        payload = request.data if data is None else data
+    else:
+        url = str(url_or_request)
+        method = "POST" if data is not None else "GET"
+        headers = {}
+        payload = data
+    body_base64 = None
+    if payload is not None:
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        body_base64 = _agent_os_base64.b64encode(payload).decode("ascii")
+    return url, method, headers, body_base64
+
+def _agent_os_http_request(url_or_request, data=None):
+    url, method, headers, body_base64 = _agent_os_extract_request_parts(url_or_request, data)
+    try:
+        payload = _agent_os_json.loads(
+            _agent_os_rpc.httpRequestSync(url, method, _agent_os_json.dumps(headers), body_base64)
+        )
+    except Exception as error:
+        _agent_os_raise_from_error({"message": str(error)})
+    response = _AgentOsHttpResponse(payload)
+    if response.status >= 400:
+        raise _agent_os_urllib_error.HTTPError(
+            url,
+            response.status,
+            response.reason,
+            response.headers,
+            response,
+        )
+    return response
+
+def _agent_os_urlopen(url, data=None, timeout=None, *args, **kwargs):
+    del timeout, args, kwargs
+    return _agent_os_http_request(url, data=data)
+
+_agent_os_urllib_request.urlopen = _agent_os_urlopen
+
+_agent_os_original_getaddrinfo = _agent_os_socket.getaddrinfo
+
+def _agent_os_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if host in (None, "", "0.0.0.0", "::"):
+        return _agent_os_original_getaddrinfo(host, port, family, type, proto, flags)
+    addresses = _agent_os_dns_lookup(host, family)
+    socktype = type or _agent_os_socket.SOCK_STREAM
+    protocol = proto or 0
+    normalized_family = family or _agent_os_socket.AF_INET
+    results = []
+    for address in addresses:
+        entry_family = _agent_os_socket.AF_INET6 if ":" in address else _agent_os_socket.AF_INET
+        if family not in (0, entry_family):
+            continue
+        if entry_family == _agent_os_socket.AF_INET6:
+            sockaddr = (address, port, 0, 0)
+        else:
+            sockaddr = (address, port)
+        results.append((entry_family, socktype, protocol, "", sockaddr))
+    if not results:
+        raise OSError(f"Agent OS DNS lookup returned no matching addresses for {host}")
+    return results
+
+def _agent_os_gethostbyname(host):
+    return _agent_os_dns_lookup(host, _agent_os_socket.AF_INET)[0]
+
+_agent_os_socket.getaddrinfo = _agent_os_getaddrinfo
+_agent_os_socket.gethostbyname = _agent_os_gethostbyname
+
+class _AgentOsRequestsResponse:
+    def __init__(self, payload):
+        self.status_code = int(payload.get("status", 0))
+        self.reason = str(payload.get("reason", ""))
+        self.url = str(payload.get("url", ""))
+        self.headers = {str(name): ", ".join(values) for name, values in (payload.get("headers") or {}).items()}
+        self.content = _agent_os_base64.b64decode(payload.get("bodyBase64", "") or "")
+        self.encoding = "utf-8"
+        self.ok = self.status_code < 400
+
+    @property
+    def text(self):
+        return self.content.decode(self.encoding, errors="replace")
+
+    def json(self):
+        return _agent_os_json.loads(self.text)
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"{self.status_code} {self.reason}")
+
+class _AgentOsRequestsSession:
+    def request(self, method, url, **kwargs):
+        headers = dict(kwargs.get("headers") or {})
+        data = kwargs.get("data")
+        if data is not None and isinstance(data, str):
+            data = data.encode("utf-8")
+        body_base64 = None if data is None else _agent_os_base64.b64encode(data).decode("ascii")
+        try:
+            payload = _agent_os_json.loads(
+                _agent_os_rpc.httpRequestSync(
+                    str(url),
+                    str(method).upper(),
+                    _agent_os_json.dumps(headers),
+                    body_base64,
+                )
+            )
+        except Exception as error:
+            _agent_os_raise_from_error({"message": str(error)})
+        return _AgentOsRequestsResponse(payload)
+
+    def get(self, url, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+def _agent_os_install_requests_module():
+    module = _agent_os_types.ModuleType("requests")
+    session = _AgentOsRequestsSession
+    module.Session = session
+    module.Response = _AgentOsRequestsResponse
+    module.request = lambda method, url, **kwargs: session().request(method, url, **kwargs)
+    module.get = lambda url, **kwargs: session().get(url, **kwargs)
+    module.exceptions = _agent_os_types.SimpleNamespace(RequestException=RuntimeError)
+    _agent_os_sys.modules["requests"] = module
+
+try:
+    import requests as _agent_os_requests
+except ModuleNotFoundError:
+    _agent_os_install_requests_module()
+else:
+    _agent_os_requests.Session = _AgentOsRequestsSession
+    _agent_os_requests.Response = _AgentOsRequestsResponse
+    _agent_os_requests.request = lambda method, url, **kwargs: _AgentOsRequestsSession().request(method, url, **kwargs)
+    _agent_os_requests.get = lambda url, **kwargs: _AgentOsRequestsSession().get(url, **kwargs)
+
+class _AgentOsCompletedProcess:
+    def __init__(self, args, returncode, stdout, stderr):
+        self.args = args
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def _agent_os_subprocess_run(args, *, capture_output=False, check=False, cwd=None, env=None, input=None, shell=False, text=False, encoding="utf-8", errors="strict", stdout=None, stderr=None, timeout=None, **kwargs):
+    del kwargs, stdout, stderr, timeout
+    if isinstance(args, (str, bytes)):
+        command = args.decode("utf-8") if isinstance(args, bytes) else args
+        argv = []
+    else:
+        values = list(args)
+        if not values:
+            raise ValueError("subprocess.run args must not be empty")
+        command = str(values[0])
+        argv = [str(value) for value in values[1:]]
+    merged_env = dict(env or {})
+    if input is not None:
+        raise NotImplementedError("subprocess.run input is not supported in the Agent OS Python runtime")
+    try:
+        payload = _agent_os_json.loads(
+            _agent_os_rpc.subprocessRunSync(
+                command,
+                _agent_os_json.dumps(argv),
+                cwd,
+                _agent_os_json.dumps(merged_env),
+                bool(shell),
+            )
+        )
+    except Exception as error:
+        _agent_os_raise_from_error({"message": str(error)})
+    stdout_bytes = payload.get("stdout", "").encode("utf-8")
+    stderr_bytes = payload.get("stderr", "").encode("utf-8")
+    if text or encoding is not None:
+        stdout_value = stdout_bytes.decode(encoding or "utf-8", errors=errors)
+        stderr_value = stderr_bytes.decode(encoding or "utf-8", errors=errors)
+    else:
+        stdout_value = stdout_bytes
+        stderr_value = stderr_bytes
+    result = _AgentOsCompletedProcess(
+        args,
+        int(payload.get("exitCode", 1)),
+        stdout_value if capture_output else None,
+        stderr_value if capture_output else None,
+    )
+    if check and result.returncode != 0:
+        raise _agent_os_subprocess.CalledProcessError(
+            result.returncode,
+            args,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return result
+
+_agent_os_subprocess.run = _agent_os_subprocess_run
+`;
+
 function hardenProperty(target, key, value) {
   try {
     Object.defineProperty(target, key, {
@@ -445,6 +759,14 @@ function installPythonGuestImportBlocklist(pyodide) {
   }
 
   pyodide.runPython(PYTHON_GUEST_IMPORT_BLOCKLIST_SOURCE);
+}
+
+function installPythonKernelRpcShims(pyodide) {
+  if (typeof pyodide?.runPython !== 'function' || !globalThis.__agentOsPythonVfsRpc) {
+    return;
+  }
+
+  pyodide.runPython(PYTHON_KERNEL_RPC_SHIMS_SOURCE);
 }
 
 function installPythonGuestPreloadHardening() {
@@ -915,6 +1237,7 @@ try {
     await pyodide.loadPackage(preloadPackages);
     packageLoadMs = realPerformance.now() - packageLoadStarted;
   }
+  installPythonKernelRpcShims(pyodide);
   installPythonGuestProcessHardening();
   installPythonGuestImportBlocklist(pyodide);
   const source = process.env[PYTHON_FILE_ENV] != null ? 'file' : 'inline';

@@ -758,6 +758,11 @@ export async function loadPyodide(options) {
                             },
                         )
                         .expect("respond to read_dir"),
+                    PythonVfsRpcMethod::HttpRequest
+                    | PythonVfsRpcMethod::DnsLookup
+                    | PythonVfsRpcMethod::SubprocessRun => {
+                        panic!("unexpected non-filesystem Python RPC: {:?}", request.method)
+                    }
                 }
             }
             Some(PythonExecutionEvent::Exited(code)) => exit_code = Some(code),

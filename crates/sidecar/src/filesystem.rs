@@ -399,6 +399,13 @@ where
                     .mkdir(&path, request.recursive)
                     .map(|()| PythonVfsRpcResponsePayload::Empty)
                     .map_err(kernel_error),
+                PythonVfsRpcMethod::HttpRequest
+                | PythonVfsRpcMethod::DnsLookup
+                | PythonVfsRpcMethod::SubprocessRun => Err(SidecarError::InvalidState(
+                    String::from(
+                        "python non-filesystem RPC reached filesystem dispatcher unexpectedly",
+                    ),
+                )),
             }
         }
         Err(error) => Err(error),

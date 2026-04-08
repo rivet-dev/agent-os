@@ -89,6 +89,9 @@ pub enum PythonVfsRpcMethod {
     Stat,
     ReadDir,
     Mkdir,
+    HttpRequest,
+    DnsLookup,
+    SubprocessRun,
 }
 
 impl PythonVfsRpcMethod {
@@ -99,6 +102,9 @@ impl PythonVfsRpcMethod {
             "fsStat" => Some(Self::Stat),
             "fsReaddir" => Some(Self::ReadDir),
             "fsMkdir" => Some(Self::Mkdir),
+            "httpRequest" => Some(Self::HttpRequest),
+            "dnsLookup" => Some(Self::DnsLookup),
+            "subprocessRun" => Some(Self::SubprocessRun),
             _ => None,
         }
     }
@@ -111,6 +117,18 @@ pub struct PythonVfsRpcRequest {
     pub path: String,
     pub content_base64: Option<String>,
     pub recursive: bool,
+    pub url: Option<String>,
+    pub http_method: Option<String>,
+    pub headers: BTreeMap<String, String>,
+    pub body_base64: Option<String>,
+    pub hostname: Option<String>,
+    pub family: Option<u8>,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: BTreeMap<String, String>,
+    pub shell: bool,
+    pub max_buffer: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +145,22 @@ pub enum PythonVfsRpcResponsePayload {
     Read { content_base64: String },
     Stat { stat: PythonVfsRpcStat },
     ReadDir { entries: Vec<String> },
+    Http {
+        status: u16,
+        reason: String,
+        url: String,
+        headers: BTreeMap<String, Vec<String>>,
+        body_base64: String,
+    },
+    DnsLookup {
+        addresses: Vec<String>,
+    },
+    SubprocessRun {
+        exit_code: i32,
+        stdout: String,
+        stderr: String,
+        max_buffer_exceeded: bool,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,11 +168,36 @@ pub enum PythonVfsRpcResponsePayload {
 struct PythonVfsRpcRequestWire {
     id: u64,
     method: String,
+    #[serde(default)]
     path: String,
     #[serde(default)]
     content_base64: Option<String>,
     #[serde(default)]
     recursive: bool,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default, rename = "httpMethod")]
+    http_method: Option<String>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default, rename = "bodyBase64")]
+    body_base64: Option<String>,
+    #[serde(default)]
+    hostname: Option<String>,
+    #[serde(default)]
+    family: Option<u8>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    shell: bool,
+    #[serde(default, rename = "maxBuffer")]
+    max_buffer: Option<usize>,
 }
 
 struct PythonVfsRpcChannels {
@@ -388,6 +447,33 @@ impl PythonExecution {
             PythonVfsRpcResponsePayload::ReadDir { entries } => {
                 json!({ "entries": entries })
             }
+            PythonVfsRpcResponsePayload::Http {
+                status,
+                reason,
+                url,
+                headers,
+                body_base64,
+            } => json!({
+                "status": status,
+                "reason": reason,
+                "url": url,
+                "headers": headers,
+                "bodyBase64": body_base64,
+            }),
+            PythonVfsRpcResponsePayload::DnsLookup { addresses } => {
+                json!({ "addresses": addresses })
+            }
+            PythonVfsRpcResponsePayload::SubprocessRun {
+                exit_code,
+                stdout,
+                stderr,
+                max_buffer_exceeded,
+            } => json!({
+                "exitCode": exit_code,
+                "stdout": stdout,
+                "stderr": stderr,
+                "maxBufferExceeded": max_buffer_exceeded,
+            }),
         };
 
         write_python_vfs_rpc_response(
@@ -1404,9 +1490,20 @@ fn parse_python_vfs_rpc_request(line: &str) -> Result<PythonVfsRpcRequest, Strin
     let wire: PythonVfsRpcRequestWire = serde_json::from_str(line)
         .map_err(|error| format!("invalid agent-os python vfs rpc request: {error}\n"))?;
     let method = PythonVfsRpcMethod::from_wire(&wire.method).ok_or_else(|| {
+        let subject = if !wire.path.is_empty() {
+            wire.path.clone()
+        } else if let Some(url) = wire.url.clone() {
+            url
+        } else if let Some(hostname) = wire.hostname.clone() {
+            hostname
+        } else if let Some(command) = wire.command.clone() {
+            command
+        } else {
+            String::from("<unknown>")
+        };
         format!(
-            "unsupported agent-os python vfs rpc method {} for path {}\n",
-            wire.method, wire.path
+            "unsupported agent-os python rpc method {} for {}\n",
+            wire.method, subject
         )
     })?;
 
@@ -1416,6 +1513,18 @@ fn parse_python_vfs_rpc_request(line: &str) -> Result<PythonVfsRpcRequest, Strin
         path: wire.path,
         content_base64: wire.content_base64,
         recursive: wire.recursive,
+        url: wire.url,
+        http_method: wire.http_method,
+        headers: wire.headers,
+        body_base64: wire.body_base64,
+        hostname: wire.hostname,
+        family: wire.family,
+        command: wire.command,
+        args: wire.args,
+        cwd: wire.cwd,
+        env: wire.env,
+        shell: wire.shell,
+        max_buffer: wire.max_buffer,
     })
 }
 

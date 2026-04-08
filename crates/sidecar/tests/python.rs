@@ -4,13 +4,16 @@ use agent_os_sidecar::protocol::{
     BootstrapRootFilesystemRequest, CloseStdinRequest, ConfigureVmRequest, CreateVmRequest,
     EventPayload, ExecuteRequest, GuestFilesystemCallRequest, GuestFilesystemOperation,
     GuestRuntimeKind, KillProcessRequest, MountDescriptor, MountPluginDescriptor, OwnershipScope,
-    RequestId, RequestPayload, ResponsePayload, RootFilesystemDescriptor, RootFilesystemEntry,
-    RootFilesystemEntryEncoding, RootFilesystemEntryKind, RootFilesystemMode, StreamChannel,
-    WriteStdinRequest,
+    PatternPermissionScope, PermissionMode, PermissionsPolicy, RequestId, RequestPayload,
+    ResponsePayload, RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryEncoding,
+    RootFilesystemEntryKind, RootFilesystemMode, StreamChannel, WriteStdinRequest,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
+use std::thread;
 use std::time::{Duration, Instant};
 use support::{
     assert_node_available, authenticate, collect_process_output,
@@ -181,6 +184,39 @@ fn create_vm_with_root_filesystem(
                 )]),
                 root_filesystem,
                 permissions: None,
+            }),
+        ))
+        .expect("create sidecar VM");
+
+    match result.response.payload {
+        ResponsePayload::VmCreated(response) => response.vm_id,
+        other => panic!("unexpected vm create response: {other:?}"),
+    }
+}
+
+fn create_vm_with_metadata_and_permissions(
+    sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
+    request_id: RequestId,
+    connection_id: &str,
+    session_id: &str,
+    runtime: GuestRuntimeKind,
+    cwd: &Path,
+    mut metadata: BTreeMap<String, String>,
+    permissions: PermissionsPolicy,
+) -> String {
+    metadata
+        .entry(String::from("cwd"))
+        .or_insert_with(|| cwd.to_string_lossy().into_owned());
+
+    let result = sidecar
+        .dispatch_blocking(support::request(
+            request_id,
+            OwnershipScope::session(connection_id, session_id),
+            RequestPayload::CreateVm(CreateVmRequest {
+                runtime,
+                metadata,
+                root_filesystem: Default::default(),
+                permissions: Some(permissions),
             }),
         ))
         .expect("create sidecar VM");
@@ -1640,5 +1676,394 @@ fn python_runtime_imports_bundled_pandas_without_network() {
     assert!(
         stdout.lines().any(|line| line.trim() == "2.3.3"),
         "expected pandas version in stdout, got: {stdout}"
+    );
+}
+
+#[test]
+fn python_runtime_routes_dns_and_http_through_sidecar_bridge() {
+    assert_node_available();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind http listener");
+    let port = listener.local_addr().expect("listener address").port();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept http client");
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).expect("read http request");
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nhello world",
+            )
+            .expect("write http response");
+    });
+
+    let mut sidecar = new_sidecar("python-network-bridge");
+    let cwd = temp_dir("python-network-bridge-cwd");
+    let connection_id = authenticate(&mut sidecar, "conn-python");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let vm_id = create_vm_with_metadata_and_permissions(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::Python,
+        &cwd,
+        BTreeMap::from([
+            (
+                String::from("env.AGENT_OS_LOOPBACK_EXEMPT_PORTS"),
+                serde_json::to_string(&vec![port.to_string()])
+                    .expect("serialize exempt ports"),
+            ),
+            (
+                String::from("network.dns.override.example.test"),
+                String::from("127.0.0.1"),
+            ),
+        ]),
+        PermissionsPolicy::allow_all(),
+    );
+
+    execute_inline_python(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-network",
+        &format!(
+            r#"
+import json
+import socket
+import urllib.request
+
+lookup = socket.getaddrinfo("example.test", {port}, family=socket.AF_INET, type=socket.SOCK_STREAM)
+with urllib.request.urlopen("http://example.test:{port}/urllib") as response:
+    urllib_status = response.status
+    urllib_body = response.read().decode("utf-8")
+
+print(json.dumps({{
+    "lookup": [entry[4][0] for entry in lookup],
+    "urllib": {{"status": urllib_status, "body": urllib_body}},
+}}))
+"#,
+        ),
+    );
+
+    let (stdout, stderr, exit_code) = collect_process_output_with_timeout(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-network",
+        Duration::from_secs(30),
+    );
+
+    let _ = server;
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse python network JSON");
+    assert_eq!(parsed["lookup"][0], Value::String(String::from("127.0.0.1")));
+    assert_eq!(parsed["urllib"]["status"], Value::from(200));
+    assert_eq!(
+        parsed["urllib"]["body"],
+        Value::String(String::from("hello world"))
+    );
+}
+
+#[test]
+fn python_runtime_routes_requests_through_sidecar_bridge() {
+    assert_node_available();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind requests listener");
+    let port = listener.local_addr().expect("listener address").port();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept requests client");
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).expect("read requests payload");
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nhello world",
+            )
+            .expect("write requests response");
+    });
+
+    let mut sidecar = new_sidecar("python-requests-bridge");
+    let cwd = temp_dir("python-requests-bridge-cwd");
+    let connection_id = authenticate(&mut sidecar, "conn-python");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let vm_id = create_vm_with_metadata_and_permissions(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::Python,
+        &cwd,
+        BTreeMap::from([
+            (
+                String::from("env.AGENT_OS_LOOPBACK_EXEMPT_PORTS"),
+                serde_json::to_string(&vec![port.to_string()])
+                    .expect("serialize exempt ports"),
+            ),
+            (
+                String::from("network.dns.override.example.test"),
+                String::from("127.0.0.1"),
+            ),
+        ]),
+        PermissionsPolicy::allow_all(),
+    );
+
+    execute_inline_python(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-requests",
+        &format!(
+            r#"
+import json
+import requests
+
+response = requests.get("http://example.test:{port}/requests")
+print(json.dumps({{
+    "status": response.status_code,
+    "body": response.text,
+}}))
+"#,
+        ),
+    );
+
+    let (stdout, stderr, exit_code) = collect_process_output_with_timeout(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-requests",
+        Duration::from_secs(30),
+    );
+
+    let _ = server;
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse requests JSON");
+    assert_eq!(parsed["status"], Value::from(200));
+    assert_eq!(
+        parsed["body"],
+        Value::String(String::from("hello world"))
+    );
+}
+
+#[test]
+fn python_runtime_surfaces_network_permission_errors() {
+    assert_node_available();
+
+    let mut sidecar = new_sidecar("python-network-denied");
+    let cwd = temp_dir("python-network-denied-cwd");
+    let connection_id = authenticate(&mut sidecar, "conn-python");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let vm_id = create_vm_with_metadata_and_permissions(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::Python,
+        &cwd,
+        BTreeMap::from([(
+            String::from("network.dns.override.example.test"),
+            String::from("127.0.0.1"),
+        )]),
+        PermissionsPolicy {
+            fs: PermissionsPolicy::allow_all().fs,
+            network: Some(PatternPermissionScope::Mode(PermissionMode::Deny)),
+            child_process: PermissionsPolicy::allow_all().child_process,
+            env: PermissionsPolicy::allow_all().env,
+        },
+    );
+
+    execute_inline_python(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-network-denied",
+        r#"
+import json
+import socket
+import urllib.request
+
+result = {}
+for name, operation in {
+    "dns": lambda: socket.getaddrinfo("example.test", 80),
+    "http": lambda: urllib.request.urlopen("http://example.test:80/"),
+}.items():
+    try:
+        operation()
+        result[name] = {"unexpected": True}
+    except Exception as error:
+        result[name] = {"type": type(error).__name__, "message": str(error)}
+
+print(json.dumps(result))
+"#,
+    );
+
+    let (stdout, stderr, exit_code) = collect_process_output(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-network-denied",
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value =
+        serde_json::from_str(stdout.trim()).expect("parse python network denied JSON");
+    assert_eq!(
+        parsed["dns"]["type"],
+        Value::String(String::from("PermissionError"))
+    );
+    assert!(
+        parsed["dns"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("permission denied")),
+        "stdout: {stdout}"
+    );
+    assert_eq!(
+        parsed["http"]["type"],
+        Value::String(String::from("PermissionError"))
+    );
+}
+
+#[test]
+fn python_runtime_runs_node_subprocesses_through_sidecar_bridge() {
+    assert_node_available();
+
+    let mut sidecar = new_sidecar("python-subprocess-bridge");
+    let cwd = temp_dir("python-subprocess-bridge-cwd");
+    write_fixture(
+        &cwd.join("child.mjs"),
+        "console.log('child-ready')\n",
+    );
+    let connection_id = authenticate(&mut sidecar, "conn-python");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let (vm_id, _) = create_vm(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::Python,
+        &cwd,
+    );
+
+    execute_inline_python(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-subprocess",
+        r#"
+import json
+import subprocess
+
+result = subprocess.run(["node", "./child.mjs"], capture_output=True, text=True, check=True)
+print(json.dumps({
+    "code": result.returncode,
+    "stdout": result.stdout.strip(),
+    "stderr": result.stderr.strip(),
+}))
+"#,
+    );
+
+    let (stdout, stderr, exit_code) = collect_process_output_with_timeout(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-subprocess",
+        Duration::from_secs(30),
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value =
+        serde_json::from_str(stdout.trim()).expect("parse python subprocess JSON");
+    assert_eq!(parsed["code"], Value::from(0));
+    assert_eq!(
+        parsed["stdout"],
+        Value::String(String::from("child-ready"))
+    );
+    assert_eq!(parsed["stderr"], Value::String(String::new()));
+}
+
+#[test]
+fn python_runtime_surfaces_subprocess_permission_errors() {
+    assert_node_available();
+
+    let mut sidecar = new_sidecar("python-subprocess-denied");
+    let cwd = temp_dir("python-subprocess-denied-cwd");
+    let connection_id = authenticate(&mut sidecar, "conn-python");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let vm_id = create_vm_with_metadata_and_permissions(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::Python,
+        &cwd,
+        BTreeMap::new(),
+        PermissionsPolicy {
+            fs: PermissionsPolicy::allow_all().fs,
+            network: PermissionsPolicy::allow_all().network,
+            child_process: Some(PatternPermissionScope::Rules(
+                agent_os_sidecar::protocol::PatternPermissionRuleSet {
+                    default: Some(PermissionMode::Allow),
+                    rules: vec![agent_os_sidecar::protocol::PatternPermissionRule {
+                        mode: PermissionMode::Deny,
+                        operations: Vec::new(),
+                        patterns: vec![String::from("node")],
+                    }],
+                },
+            )),
+            env: PermissionsPolicy::allow_all().env,
+        },
+    );
+
+    execute_inline_python(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-subprocess-denied",
+        r#"
+import json
+import subprocess
+
+try:
+    subprocess.run(["node", "--version"], capture_output=True, text=True, check=True)
+    result = {"unexpected": True}
+except Exception as error:
+    result = {"type": type(error).__name__, "message": str(error)}
+
+print(json.dumps(result))
+"#,
+    );
+
+    let (stdout, stderr, exit_code) = collect_process_output(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-subprocess-denied",
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let parsed: Value =
+        serde_json::from_str(stdout.trim()).expect("parse python subprocess denied JSON");
+    assert_eq!(
+        parsed["type"],
+        Value::String(String::from("PermissionError"))
+    );
+    assert!(
+        parsed["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("permission denied")),
+        "stdout: {stdout}"
     );
 }

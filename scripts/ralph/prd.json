@@ -1215,8 +1215,8 @@
         "Tests in crates/sidecar/tests/python.rs verify network and subprocess access",
         "cargo test -p agent-os-sidecar -- --test-threads=1 python passes"
       ],
-      "priority": 108,
-      "passes": false,
+      "priority": 118,
+      "passes": true,
       "notes": "Currently Python network and subprocess access are COMPLETELY BLOCKED by design. For agents using Python, this needs to be enabled through the kernel stack (same as JS). The VFS RPC bridge already exists \u2014 extend it to handle network and process requests. Reference: the JS execution engine routes net/child_process through kernel bridge calls. Python needs the same bridge endpoints in python-runner.mjs."
     },
     {
@@ -1231,7 +1231,7 @@
         "Common packages work: requests, beautifulsoup4, pyyaml, toml, click",
         "Tests verify micropip installation and import of a third-party package"
       ],
-      "priority": 109,
+      "priority": 119,
       "passes": false,
       "notes": "Currently Python packages are limited to preloaded numpy/pandas. micropip is Pyodide's package manager that can install pure-Python wheels. This requires network access through the kernel (US-063). Packages are installed into Pyodide's in-memory filesystem."
     },
@@ -1246,7 +1246,7 @@
         "Benchmark added to scripts/benchmarks/ measuring cold vs warm Python startup",
         "cargo test -p agent-os-execution -- --test-threads=1 python_prewarm passes"
       ],
-      "priority": 110,
+      "priority": 120,
       "passes": false,
       "notes": "Python prewarm already exists and works (2 tests pass). This story is about further optimization \u2014 sharing the Pyodide WASM module instance across multiple Python executions within the same VM, reducing subsequent startup from seconds to milliseconds. Current prewarm caches Node compile cache but reloads Pyodide each time."
     },
@@ -1270,7 +1270,7 @@
         "Test file: crates/sidecar/tests/posix_compliance.rs",
         "cargo test -p agent-os-sidecar --test posix_compliance -- --test-threads=1 passes"
       ],
-      "priority": 111,
+      "priority": 121,
       "passes": false,
       "notes": "Found in audit: /proc and /dev are implemented but have limited test coverage. Signal handling is implemented but guest-side delivery not well tested. Process model (zombies, orphans, process groups) is implemented but needs conformance tests. These tests verify the kernel behaves like a real Linux system."
     },
@@ -1293,7 +1293,7 @@
         "Test file: crates/sidecar/tests/isolation_audit.rs",
         "cargo test -p agent-os-sidecar --test isolation_audit -- --test-threads=1 passes"
       ],
-      "priority": 112,
+      "priority": 122,
       "passes": false,
       "notes": "Found in audit: security_hardening.rs has a key test marked #[ignore] due to V8 sidecar flakiness. No systematic isolation audit exists. The existing tests check individual boundaries but don't verify the complete attack surface. This overlaps with US-044 but is more specific and actionable."
     },
@@ -1309,9 +1309,118 @@
         "Tests for each operation in crates/kernel/tests/ or crates/sidecar/tests/",
         "cargo test passes"
       ],
-      "priority": 113,
+      "priority": 123,
       "passes": false,
       "notes": "Found in audit: ftruncate is missing (truncate exists but not fd-based), mkdtemp is missing, access() is a stub using only stat(), flock structure exists in kernel but API not wired. These are used by real packages \u2014 e.g., proper-lockfile (Pi SDK dep) uses flock."
+    },
+    {
+      "id": "US-069",
+      "title": "Builtin completeness gate test \u2014 every Node.js builtin loads or explicitly denies",
+      "description": "As a developer, I want a test that iterates ALL Node.js builtins and verifies each either loads successfully or throws ERR_ACCESS_DENIED \u2014 no undefined, no hang, no silent failure.",
+      "acceptanceCriteria": [
+        "Test iterates the complete list of Node.js builtins: fs, path, os, crypto, http, https, http2, net, dgram, dns, tls, child_process, stream, events, buffer, util, url, querystring, string_decoder, punycode, zlib, assert, constants, readline, tty, perf_hooks, timers, timers/promises, stream/promises, stream/consumers, stream/web, module, process, vm, worker_threads, inspector, v8, cluster, async_hooks, diagnostics_channel, wasi, trace_events, repl, domain, sys",
+        "For each builtin, the test runs guest JS: const m = require('builtin_name'); typeof m \u2014 must return 'object' or 'function' (loaded) or throw with code ERR_ACCESS_DENIED (denied)",
+        "NO builtin may return undefined, null, or an empty object {} (that's a stub, not a polyfill)",
+        "NO builtin may hang (test has 5s timeout per module)",
+        "NO builtin may throw a generic Error \u2014 must throw ERR_ACCESS_DENIED specifically if denied",
+        "Test documents the expected status of each builtin: 'polyfilled', 'kernel-backed', 'denied', or 'stub-ok' (for diagnostics_channel/async_hooks minimal stubs)",
+        "If any new builtin is added to Node.js in future versions, the test fails until it's classified",
+        "Test file: crates/sidecar/tests/builtin_completeness.rs",
+        "cargo test -p agent-os-sidecar --test builtin_completeness -- --test-threads=1 passes"
+      ],
+      "priority": 100,
+      "passes": false,
+      "notes": "PREVENTS THE CLASS OF BUG THAT BLOCKED PI FOR WEEKS. The conformance test suite (US-051) only tested builtins that existed \u2014 it never checked for missing ones. This test is the gate: if require('os') returns undefined instead of a real module, this test catches it immediately. Every future polyfill addition or removal must update this test's expected status map."
+    },
+    {
+      "id": "US-070",
+      "title": "Fix WASM command PATH resolution so agents find sh, grep, sed, etc.",
+      "description": "As a developer, I want guest code calling child_process.spawn('sh') or child_process.spawn('grep') to find the WASM-compiled coreutils from the registry software packages.",
+      "acceptanceCriteria": [
+        "child_process.spawn('sh', ['-c', 'echo hello']) works inside the VM and returns 'hello'",
+        "child_process.spawn('grep', ['pattern', 'file']) works inside the VM",
+        "child_process.spawn('sed', ['s/a/b/', 'file']) works inside the VM",
+        "child_process.spawn('ls', ['/']) works and lists kernel VFS root",
+        "The WASM command lookup checks registry software package install paths",
+        "PATH environment variable in the VM includes directories where WASM commands are installed",
+        "If a command is not found, the error is ENOENT with clear message \u2014 not a hang or silent failure",
+        "Test verifies at least 5 common commands resolve: sh, ls, cat, grep, echo",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
+      ],
+      "priority": 101,
+      "passes": false,
+      "notes": "DIRECTLY BLOCKED PI'S BASH TOOL. The WASM coreutils exist in registry/native/crates/commands/ (sh, grep, sed, awk, ls, cat, etc.) and are compiled to WASM. But the command resolver in the sidecar doesn't always find them. The issue is in command resolution (US-017 was supposed to fix this) \u2014 either PATH doesn't include the software install directory, or the resolver doesn't search WASM command paths. Check crates/sidecar/src/execution.rs command resolution logic and how software packages are mounted."
+    },
+    {
+      "id": "US-071",
+      "title": "Test and fix require.resolve() for guest code",
+      "description": "As a developer, I want require.resolve() to work correctly in guest code so packages that use it to find files relative to dependencies work.",
+      "acceptanceCriteria": [
+        "Guest code calling require.resolve('fs') returns the polyfill path (not undefined)",
+        "Guest code calling require.resolve('./local-file.js') returns the absolute guest path",
+        "Guest code calling require.resolve('some-package') returns the package entry point path",
+        "Guest code calling require.resolve('nonexistent') throws MODULE_NOT_FOUND error",
+        "require.resolve.paths('some-package') returns the search paths array",
+        "Tests in crates/execution/tests/ verify all cases",
+        "cargo test -p agent-os-execution -- --test-threads=1 passes"
+      ],
+      "priority": 102,
+      "passes": false,
+      "notes": "Found in audit: require.resolve() API exists in the resolver (resolve_require function at javascript.rs:614) but has ZERO tests for guest-facing behavior. Many packages use require.resolve() to find files \u2014 e.g., finding template files relative to a dependency, or checking if an optional dependency exists."
+    },
+    {
+      "id": "US-072",
+      "title": "CJS export extraction runtime fallback via Object.keys()",
+      "description": "As a developer, I want CJS modules with dynamic export patterns to have correct named ESM exports, using runtime extraction as fallback when static analysis fails.",
+      "acceptanceCriteria": [
+        "When static extract_cjs_export_names() in V8 runtime misses exports, fall back to runtime extraction",
+        "Runtime extraction: evaluate CJS module, call Object.keys(module.exports), generate ESM re-exports for each key",
+        "Object.assign(module.exports, { a, b, c }) pattern produces named exports a, b, c via ESM import",
+        "module.exports = Object.create(proto, { x: { value: 1 } }) pattern produces named export x",
+        "Re-export pattern: module.exports = require('other-package') preserves other-package's named exports",
+        "Fallback only triggers when static extraction finds 0 named exports but module.exports is a non-null object",
+        "Performance: runtime fallback adds <5ms per module (only triggered on static extraction miss)",
+        "Tests verify all patterns in crates/execution/tests/cjs_esm_interop.rs",
+        "cargo test -p agent-os-execution --test cjs_esm_interop -- --test-threads=1 passes"
+      ],
+      "priority": 103,
+      "passes": false,
+      "notes": "Found in audit: extract_cjs_export_names() only scans for exports.X = and Object.defineProperty patterns. Misses Object.assign, spread, computed properties. When extraction fails, named ESM imports return undefined silently. The fix is runtime fallback: if static extraction finds nothing, evaluate the module and enumerate Object.keys(module.exports). This is how Node.js handles CJS-to-ESM interop."
+    },
+    {
+      "id": "US-073",
+      "title": "AbortSignal/AbortController completeness for fetch and HTTP timeouts",
+      "description": "As a developer, I want AbortSignal and AbortController to work correctly in guest code so HTTP request timeouts and cancellation work.",
+      "acceptanceCriteria": [
+        "globalThis.AbortController is available and constructable",
+        "globalThis.AbortSignal is available with AbortSignal.timeout() static method",
+        "fetch(url, { signal: AbortSignal.timeout(1000) }) aborts after 1s with AbortError",
+        "const controller = new AbortController(); controller.abort() cancels a pending fetch",
+        "AbortSignal.any([signal1, signal2]) works (composite signals)",
+        "signal.addEventListener('abort', handler) fires on abort",
+        "signal.reason contains the abort reason",
+        "Tests verify timeout and manual abort scenarios",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
+      ],
+      "priority": 104,
+      "passes": false,
+      "notes": "AbortController is partially available via undici but not verified end-to-end. Modern HTTP clients use AbortSignal.timeout() for request timeouts. If this doesn't work, fetch() calls without explicit timeouts can hang forever. The Anthropic SDK (used by Pi) uses AbortSignal for request cancellation."
+    },
+    {
+      "id": "US-074",
+      "title": "fs.promises true async behavior \u2014 don't block on concurrent operations",
+      "description": "As a developer, I want fs.promises operations to be truly async so Promise.all with multiple file operations doesn't deadlock.",
+      "acceptanceCriteria": [
+        "Promise.all([fs.promises.readFile('a'), fs.promises.readFile('b'), fs.promises.readFile('c')]) completes without deadlock",
+        "Promise.all with 10 concurrent fs.promises.writeFile calls completes within 5s",
+        "fs.promises.readFile does not block the V8 event loop while waiting for the sidecar response",
+        "Async fs operations use the async bridge path (not syncPromise blocking)",
+        "Test verifies concurrent file operations complete in parallel, not sequentially",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
+      ],
+      "priority": 105,
+      "passes": false,
+      "notes": "Found in audit: fs.promises operations are currently sync RPC wrappers \u2014 they block the V8 isolate while waiting for the sidecar response. This means Promise.all with multiple fs calls runs them sequentially, not concurrently. For single-threaded agents this works, but any code using concurrent I/O patterns will be slower than expected or deadlock. The fix: use the async bridge path (ASYNC_BRIDGE_FNS) for fs.promises operations instead of syncPromise."
     }
   ]
 }
