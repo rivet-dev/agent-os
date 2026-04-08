@@ -53,6 +53,7 @@ Each agent type needs:
 - **All tests run inside the VM** -- network servers, file I/O, agent processes.
 - Session tests that need launch argv or OS-instruction assertions should inspect `getSessionAgentInfo(sessionId)` from sidecar state instead of spying on `kernel.spawn`; `createSession()` now launches through sidecar RPCs.
 - Network tests on the native sidecar path should stick to listener bind/state assertions unless the bridge work explicitly targets guest HTTP/client round-trips. `vm.fetch()` does not currently translate arbitrary guest listener ports back to the host, and guest `net.connect()` coverage is still limited.
+- For guest-JavaScript startup diagnostics, isolate each suspect import or constructor in its own fresh VM. Once a V8-side probe wedges or times out, later `node` spawns in the same VM can degrade into generic broken-pipe noise instead of the original failure.
 - Agent tests must be run sequentially in layers:
   1. PI headless mode (spawn pi directly, verify output)
   2. pi-acp manual spawn (JSON-RPC over stdio)

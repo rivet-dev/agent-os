@@ -967,7 +967,7 @@
         "The failure list is documented in .agent/notes/pi-sdk-boot-gaps.md"
       ],
       "priority": 44,
-      "passes": false,
+      "passes": true,
       "notes": "This is a diagnostic story, not a fix story. The goal is to enumerate exactly what's missing so subsequent stories can fix targeted gaps instead of guessing. Run the test, collect the failure list, write it to a note file. Key Pi SDK deps to watch: @anthropic-ai/sdk (HTTP client), jiti (dynamic TS loading), zod (validation), various stream/event patterns."
     },
     {

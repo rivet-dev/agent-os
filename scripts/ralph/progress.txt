@@ -11,6 +11,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Pi/V8 boot probes in `packages/core` should run one suspicious import or constructor per fresh VM; a timed-out guest JS startup can poison later `node` spawns in the same VM and turn the original issue into generic broken-pipe noise
 - Public SDK type exports in `packages/core` now belong in `src/types.ts`; keep legacy runtime/kernel implementation helpers behind `src/runtime-compat.ts` and out of the main root export surface
 - `packages/core/src/sidecar/rpc-client.ts` is now the single home for sidecar wire helpers, compat proxy helpers, and sidecar descriptor serializers; keep shared/explicit sidecar pooling and VM lease bookkeeping in `packages/core/src/agent-os.ts`
 - Native sidecar `allProcesses()` / `processTree()` snapshots only surface the top-level tracked runtime processes; guest-local `child_process.spawn()` children can report guest PIDs to user code without appearing as separate tree nodes
@@ -485,4 +486,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Shared V8 guest executions still have a real host runtime PID behind them for lifecycle control, so test the absence of host guest-node launches rather than assuming “in-V8” means `child_pid() == 0`
   - When a story’s focused suite is already green, the remaining acceptance work may be stale coverage elsewhere in the required broader suite; fix the stale expectation instead of forcing the runtime back toward an older contract
   - `cargo test -p agent-os-execution -- --test-threads=1` is the acceptance gate that catches these cross-suite expectation drifts even when `--test module_resolution` already passes
+---
+## 2026-04-07 23:49:52 PDT - US-050
+- Added `packages/core/tests/pi-sdk-boot-probe.test.ts`, a focused V8 boot probe that runs one Pi SDK import or constructor per fresh VM and emits a structured failure matrix instead of hanging the whole test run
+- Documented the current boot gaps in `.agent/notes/pi-sdk-boot-gaps.md` and updated `packages/core/CLAUDE.md` with the reusable fresh-VM diagnostic pattern for guest-JS startup probes
+- Files changed: `.agent/notes/pi-sdk-boot-gaps.md`, `packages/core/tests/pi-sdk-boot-probe.test.ts`, `packages/core/CLAUDE.md`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Fresh-VM isolation matters for V8 startup diagnostics in `packages/core`; once one guest `node` startup wedges, later probes in the same VM can collapse into misleading transport failures
+  - On this branch, the strongest reproducible blockers are timeouts on `@mariozechner/pi-coding-agent`, `@mariozechner/jiti`, `createCodingTools()`, `createAgentSession()`, and `node:fs/promises`, while `@anthropic-ai/sdk`, `zod`, `node:child_process`, and `node:module` already load successfully
+  - The first Pi story here is diagnostic only: keep the test passing by reporting structured failures, and move fixes into later stories once the failure list is concrete
 ---
