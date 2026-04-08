@@ -769,7 +769,7 @@ fn translate_request_args_for_legacy(method: &str, args: &[Value]) -> Vec<Value>
         if let Some(Value::String(data)) = translated.get(1) {
             translated[1] = json!({
                 "__agentOsType": "bytes",
-                "base64": data,
+                "base64": v8_runtime::base64_encode_pub(data.as_bytes()),
             });
         }
     }

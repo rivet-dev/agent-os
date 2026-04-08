@@ -882,7 +882,7 @@
         "cargo test -p agent-os-execution -- --test-threads=1 env passes"
       ],
       "priority": 56,
-      "passes": false,
+      "passes": true,
       "notes": "The old secure-exec had full env virtualization in bridge/process.ts (2,251 lines). The V8 bridge (v8-bridge.js) may already partially handle this via the process polyfill, but it needs verification. Check what guest_env filtering the sidecar does in service.rs and whether the V8 runtime exposes host env to guest code. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/process.ts."
     },
     {
@@ -1020,7 +1020,7 @@
         "pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts passes"
       ],
       "priority": 51,
-      "passes": false,
+      "passes": true,
       "notes": "This replaces US-041 as the final Pi E2E story. By this point, US-048-052 have verified module resolution, polyfill conformance, and SDK boot. This story should be straightforward \u2014 just wire the test and verify the lifecycle. If it still fails, the boot probe and conformance tests missed something \u2014 go back and add coverage."
     },
     {

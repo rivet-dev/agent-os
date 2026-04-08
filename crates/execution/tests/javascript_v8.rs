@@ -1083,6 +1083,7 @@ if (typeof basename !== "function" || typeof dirname !== "function" || typeof is
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
+
 #[test]
 #[ignore = "Guest child_process command resolution is still broken on this branch; sidecar/execution conformance for the remaining builtins is active"]
 fn javascript_execution_v8_child_process_conformance_matches_host_node() {
@@ -1292,6 +1293,47 @@ controller.signal.addEventListener("abort", () => {
 controller.abort("stop");
 if (!controller.signal.aborted || controller.signal.reason !== "stop" || !seenAbort) {
   throw new Error("abort controller did not update signal state");
+}
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    assert_eq!(result.exit_code, 0);
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn javascript_execution_v8_request_accepts_abort_signal() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+const controller = new AbortController();
+const request = new Request("http://example.com/test", {
+  method: "POST",
+  body: JSON.stringify({ ok: true }),
+  duplex: "half",
+  signal: controller.signal,
+  headers: { "content-type": "application/json" },
+});
+if (!(request.signal instanceof AbortSignal)) {
+  throw new Error("request signal was not preserved");
 }
 "#,
             )),

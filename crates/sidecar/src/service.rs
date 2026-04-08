@@ -18,7 +18,7 @@ pub(crate) use crate::execution::{
     javascript_sync_rpc_option_bool, javascript_sync_rpc_option_u32, parse_signal,
     runtime_child_is_alive, sanitize_javascript_child_process_internal_bootstrap_env,
     service_javascript_net_sync_rpc, service_javascript_sync_rpc, signal_runtime_process,
-    vm_network_resource_counts,
+    vm_network_resource_counts, write_kernel_process_stdin,
 };
 use crate::filesystem::{
     guest_filesystem_call as filesystem_guest_filesystem_call,
@@ -1304,13 +1304,16 @@ where
                 }
             })),
         };
-        let initialize_response = match self.send_acp_request_and_collect(
+        let initialize_response = match self
+            .send_acp_request_and_collect(
             &vm_id,
             &process_id,
             &payload.agent_type,
             None,
             initialize,
-        ) {
+        )
+            .await
+        {
             Ok((response, response_events)) => {
                 events.extend(response_events);
                 response
@@ -1338,13 +1341,16 @@ where
                 "mcpServers": payload.mcp_servers,
             })),
         };
-        let session_response = match self.send_acp_request_and_collect(
+        let session_response = match self
+            .send_acp_request_and_collect(
             &vm_id,
             &process_id,
             &payload.agent_type,
             None,
             session_new,
-        ) {
+        )
+            .await
+        {
             Ok((response, response_events)) => {
                 events.extend(response_events);
                 response
@@ -1472,13 +1478,15 @@ where
             params: Some(Value::Object(merged_params.clone())),
         };
 
-        let (mut response, mut events) = self.send_acp_request_and_collect(
+        let (mut response, mut events) = self
+            .send_acp_request_and_collect(
             &vm_id,
             &process_id,
             &agent_type,
             Some(&payload.session_id),
             outbound,
-        )?;
+        )
+            .await?;
         if payload.method == ACP_CANCEL_METHOD && is_cancel_method_not_found(&response) {
             let notification = JsonRpcNotification {
                 jsonrpc: String::from("2.0"),
@@ -2447,7 +2455,8 @@ where
         let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
             SidecarError::InvalidState(format!("VM {vm_id} has no active process {process_id}"))
         })?;
-        process.execution.write_stdin(encoded.as_bytes())
+        process.execution.write_stdin(encoded.as_bytes())?;
+        write_kernel_process_stdin(&mut vm.kernel, process, encoded.as_bytes())
     }
 
     fn kill_acp_process(&mut self, vm_id: &str, process_id: &str) {
@@ -2480,7 +2489,7 @@ where
         ))
     }
 
-    fn send_acp_request_and_collect(
+    async fn send_acp_request_and_collect(
         &mut self,
         vm_id: &str,
         process_id: &str,
@@ -2495,6 +2504,25 @@ where
         let mut events = Vec::new();
 
         loop {
+            let _ = self.pump_process_events(&ownership).await?;
+
+            while let Some(envelope) =
+                self.take_matching_process_event_envelope(vm_id, process_id)?
+            {
+                if let Some(response) = self.handle_acp_process_event(
+                    vm_id,
+                    process_id,
+                    session_id,
+                    &ownership,
+                    envelope.event,
+                    &mut events,
+                )? {
+                    if response.id == request.id {
+                        return Ok((response, events));
+                    }
+                }
+            }
+
             let event = {
                 let vm = self.vms.get_mut(vm_id).ok_or_else(|| {
                     SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}"))
@@ -2506,7 +2534,8 @@ where
                 })?;
                 process
                     .execution
-                    .poll_event_blocking(Duration::from_millis(10))?
+                    .poll_event(Duration::from_millis(10))
+                    .await?
             };
 
             if let Some(event) = event {
@@ -2545,6 +2574,37 @@ where
                 ));
             }
         }
+    }
+
+    fn take_matching_process_event_envelope(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+    ) -> Result<Option<ProcessEventEnvelope>, SidecarError> {
+        if let Some(index) = self
+            .pending_process_events
+            .iter()
+            .position(|event| event.vm_id == vm_id && event.process_id == process_id)
+        {
+            return Ok(self.pending_process_events.remove(index));
+        }
+
+        let receiver = self.process_event_receiver.as_mut().ok_or_else(|| {
+            SidecarError::InvalidState(String::from("process event receiver unavailable"))
+        })?;
+        let mut matching_envelope = None;
+        while let Ok(envelope) = receiver.try_recv() {
+            if matching_envelope.is_none()
+                && envelope.vm_id == vm_id
+                && envelope.process_id == process_id
+            {
+                matching_envelope = Some(envelope);
+                break;
+            }
+            self.pending_process_events.push_back(envelope);
+        }
+
+        Ok(matching_envelope)
     }
 
     fn handle_acp_process_event(

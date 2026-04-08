@@ -1,8 +1,13 @@
 import { resolve } from "node:path";
 import type { Fixture, ToolCall } from "@copilotkit/llmock";
+import common from "@rivet-dev/agent-os-common";
+import pi from "@rivet-dev/agent-os-pi";
 import { describe, expect, test } from "vitest";
 import type { AgentCapabilities, AgentInfo } from "../src/agent-os.js";
 import { AgentOs } from "../src/agent-os.js";
+import {
+	hasRegistryCommands,
+} from "./helpers/registry-commands.js";
 import {
 	createAnthropicFixture,
 	startLlmock,
@@ -28,14 +33,14 @@ function createToolFixtures(
 		createAnthropicFixture(
 			{
 				predicate: (req) =>
-					!JSON.stringify(getRequestBody(req)).includes("tool_result"),
+					!JSON.stringify(getRequestBody(req)).includes('"role":"tool"'),
 			},
 			{ toolCalls: [toolCall] },
 		),
 		createAnthropicFixture(
 			{
 				predicate: (req) =>
-					JSON.stringify(getRequestBody(req)).includes("tool_result") &&
+					JSON.stringify(getRequestBody(req)).includes('"role":"tool"') &&
 					JSON.stringify(getRequestBody(req)).includes(expectedToolResult),
 			},
 			{ content: finalText },
@@ -47,6 +52,7 @@ async function createPiVm(mockUrl: string): Promise<AgentOs> {
 	return AgentOs.create({
 		loopbackExemptPorts: [Number(new URL(mockUrl).port)],
 		moduleAccessCwd: MODULE_ACCESS_CWD,
+		software: hasRegistryCommands ? [common, pi] : [pi],
 	});
 }
 
@@ -103,6 +109,7 @@ describe("full createSession('pi') inside the VM", () => {
 					env: {
 						HOME: homeDir,
 						ANTHROPIC_API_KEY: "mock-key",
+						ANTHROPIC_BASE_URL: url,
 					},
 				})
 			).sessionId;
@@ -163,7 +170,9 @@ describe("full createSession('pi') inside the VM", () => {
 		}
 	}, 120_000);
 
-	test("runs the real Pi SDK ACP flow end-to-end for bash tool calls", async () => {
+	(hasRegistryCommands ? test : test.skip)(
+		"runs the real Pi SDK ACP flow end-to-end for bash tool calls",
+		async () => {
 		const fixtures = createToolFixtures(
 			{
 				name: "bash",
@@ -188,6 +197,7 @@ describe("full createSession('pi') inside the VM", () => {
 					env: {
 						HOME: homeDir,
 						ANTHROPIC_API_KEY: "mock-key",
+						ANTHROPIC_BASE_URL: url,
 					},
 				})
 			).sessionId;
@@ -212,5 +222,7 @@ describe("full createSession('pi') inside the VM", () => {
 			await vm.dispose();
 			await stopLlmock(mock);
 		}
-	}, 120_000);
+		},
+		120_000,
+	);
 });

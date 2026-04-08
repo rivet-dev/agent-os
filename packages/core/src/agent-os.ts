@@ -153,6 +153,7 @@ import {
 import {
 	type CommandPackageMetadata,
 	processSoftware,
+	resolvePackageDir,
 	type SoftwareInput,
 	type SoftwareRoot,
 } from "./packages.js";
@@ -2296,9 +2297,7 @@ export class AgentOs {
 					}
 					if (!hostPkgJsonPath) {
 						hostPkgJsonPath = join(
-							this._moduleAccessCwd,
-							"node_modules",
-							config.acpAdapter,
+							resolvePackageDir(this._moduleAccessCwd, config.acpAdapter),
 							"package.json",
 						);
 					}
@@ -2664,9 +2663,7 @@ export class AgentOs {
 		// Fall back to CWD-based node_modules.
 		if (!hostPkgJsonPath) {
 			hostPkgJsonPath = join(
-				this._moduleAccessCwd,
-				"node_modules",
-				packageName,
+				resolvePackageDir(this._moduleAccessCwd, packageName),
 				"package.json",
 			);
 		}

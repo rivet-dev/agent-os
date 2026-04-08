@@ -109,7 +109,11 @@ impl AcpSessionState {
             agent_type,
             process_id,
             stdout_buffer: String::new(),
-            next_request_id: 1,
+            // The sidecar already used request ids 1 and 2 on this ACP
+            // connection for initialize and session/new before the session
+            // state is created. Continue from 3 so later session RPCs never
+            // reuse ids on the same transport.
+            next_request_id: 3,
             next_sequence_number: 0,
             events: Vec::new(),
             modes: session_result

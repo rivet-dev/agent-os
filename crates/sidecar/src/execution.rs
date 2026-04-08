@@ -3523,7 +3523,8 @@ fn prepare_javascript_runtime_env(
             SidecarError::InvalidState(format!("failed to encode allowed builtins: {error}"))
         })?,
     );
-    env.insert(String::from("HOME"), guest_cwd.to_owned());
+    env.entry(String::from("HOME"))
+        .or_insert_with(|| guest_cwd.to_owned());
     if !loopback_exempt_ports.is_empty() {
         env.insert(
             String::from(LOOPBACK_EXEMPT_PORTS_ENV),
@@ -3631,7 +3632,8 @@ fn host_node_modules_root(path: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod runtime_guest_path_mapping_tests {
-    use super::host_node_modules_root;
+    use super::{host_node_modules_root, javascript_sync_rpc_option_bool};
+    use serde_json::json;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3657,6 +3659,22 @@ mod runtime_guest_path_mapping_tests {
         assert_eq!(resolved, workspace_node_modules);
 
         fs::remove_dir_all(&temp).expect("temp tree should be removed");
+    }
+
+    #[test]
+    fn javascript_sync_rpc_option_bool_accepts_boolean_recursive_argument() {
+        assert_eq!(
+            javascript_sync_rpc_option_bool(&[json!("/workspace"), json!(true)], 1, "recursive"),
+            Some(true)
+        );
+        assert_eq!(
+            javascript_sync_rpc_option_bool(
+                &[json!("/workspace"), json!({ "recursive": false })],
+                1,
+                "recursive"
+            ),
+            Some(false)
+        );
     }
 }
 
@@ -6805,9 +6823,13 @@ pub(crate) fn javascript_sync_rpc_option_bool(
     index: usize,
     key: &str,
 ) -> Option<bool> {
-    args.get(index)
-        .and_then(|value| value.get(key))
-        .and_then(Value::as_bool)
+    let value = args.get(index)?;
+    if key == "recursive" {
+        if let Some(boolean) = value.as_bool() {
+            return Some(boolean);
+        }
+    }
+    value.get(key).and_then(Value::as_bool)
 }
 
 pub(crate) fn javascript_sync_rpc_option_u32(
@@ -9002,7 +9024,7 @@ fn install_kernel_stdin_pipe(kernel: &mut SidecarKernel, pid: u32) -> Result<u32
     Ok(write_fd)
 }
 
-fn write_kernel_process_stdin(
+pub(crate) fn write_kernel_process_stdin(
     kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
     chunk: &[u8],
@@ -9016,7 +9038,7 @@ fn write_kernel_process_stdin(
         .map_err(kernel_error)
 }
 
-fn close_kernel_process_stdin(
+pub(crate) fn close_kernel_process_stdin(
     kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
 ) -> Result<(), SidecarError> {

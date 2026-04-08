@@ -6,7 +6,10 @@ import type { PermissionTier } from "./runtime.js";
  * Resolve a package directory by walking up the directory tree.
  * Supports both nested (pnpm) and flat (npm) node_modules layouts.
  */
-function resolvePackageDir(startDir: string, packageName: string): string {
+export function resolvePackageDir(
+	startDir: string,
+	packageName: string,
+): string {
 	const localPkgJson = join(startDir, "package.json");
 	if (existsSync(localPkgJson)) {
 		try {

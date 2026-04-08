@@ -61,7 +61,9 @@ Each agent type needs:
 - **API tokens**: All tests use `@copilotkit/llmock` with `ANTHROPIC_API_KEY='mock-key'`. No real API tokens needed. Do not load tokens from `~/misc/env.txt` or any external file.
 - **Mock LLM testing**: Use `@copilotkit/llmock` to run a mock LLM server on the HOST (not inside the VM). Use `loopbackExemptPorts` in `AgentOs.create()` to exempt the mock port from SSRF checks. The kernel needs `permissions: allowAll` for network access.
 - **Pi SDK llmock setup**: Pi reads Anthropic endpoints from `~/.pi/agent/models.json`, not `ANTHROPIC_BASE_URL`. For `createSession("pi")` tests, write a provider override such as `{ "providers": { "anthropic": { "baseUrl": "<llmock-url>", "apiKey": "mock-key" } } }` inside the VM before creating the session.
+- Pi headless llmock tests should still pass `ANTHROPIC_BASE_URL` through the session env even with the `~/.pi/agent/models.json` override, because some Pi SDK request paths still consult the env-configured base URL during ACP-driven tool turns.
 - **Module access**: Set `moduleAccessCwd` in `AgentOs.create()` to a host dir with `node_modules/`. pnpm puts devDeps in `packages/core/node_modules/`.
+- Pi bash-tool E2E coverage depends on registry WASM commands being built locally. Gate those tests with `tests/helpers/registry-commands.ts` `hasRegistryCommands` and include the `@rivet-dev/agent-os-common` software package only when the command artifacts exist.
 - **Kernel permissions are declarative pass-through config.** `AgentOsOptions.permissions` should stay JSON-serializable and be forwarded to the native sidecar without host-side probing or callback evaluation; Rust owns glob matching and policy decisions.
 
 ### Test Structure

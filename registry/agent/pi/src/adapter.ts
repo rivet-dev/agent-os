@@ -40,13 +40,35 @@ import {
 	readFileSync,
 	readdirSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
+import { PassThrough } from "node:stream";
 
 const PI_SDK_PACKAGE = "@mariozechner/pi-coding-agent";
 const MODULE_ACCESS_NODE_MODULES = "/root/node_modules";
+const require = createRequire(import.meta.url);
+
+const realStdin = process.stdin;
+const bufferedStdin = new PassThrough();
+(bufferedStdin as PassThrough & { isTTY?: boolean; fd?: number }).isTTY =
+	realStdin.isTTY;
+(bufferedStdin as PassThrough & { isTTY?: boolean; fd?: number }).fd =
+	realStdin.fd;
+if (typeof realStdin.setRawMode === "function") {
+	(
+		bufferedStdin as PassThrough & {
+			setRawMode?: (mode: boolean) => void;
+		}
+	).setRawMode = realStdin.setRawMode.bind(realStdin);
+}
+Object.defineProperty(process, "stdin", {
+	configurable: true,
+	enumerable: true,
+	value: bufferedStdin,
+});
 
 type SessionManagerLike = {
-	inMemory(): unknown;
+	inMemory(cwd?: string): unknown;
 };
 
 type ModelLike = {
@@ -161,6 +183,7 @@ type PiToolLike = {
 type PiSessionLike = {
 	readonly sessionId: string;
 	readonly thinkingLevel: string;
+	readonly messages: unknown[];
 	subscribe(
 		listener: (event: AgentSessionEvent) => void,
 	): () => void;
@@ -190,6 +213,21 @@ type PiSdkRuntime = {
 	convertToLlm(messages: unknown[]): unknown[];
 	getAgentDir(): string;
 	getDocsPath(): string;
+	createAgentSession(options?: {
+		cwd?: string;
+		agentDir?: string;
+		sessionManager?: unknown;
+		resourceLoader?: MinimalResourceLoaderLike;
+		settingsManager?: SettingsManagerInstanceLike;
+		tools?: PiToolLike[];
+	}): Promise<{ session: PiSessionLike; modelFallbackMessage?: string }>;
+	createCodingTools(
+		cwd: string,
+		options?: {
+			read?: { autoResizeImages?: boolean };
+			bash?: { commandPrefix?: string };
+		},
+	): PiToolLike[];
 	createAllTools(
 		cwd: string,
 		options?: {
@@ -227,6 +265,10 @@ class MinimalPiSession implements PiSessionLike {
 
 	get thinkingLevel(): string {
 		return this.agent.state.thinkingLevel;
+	}
+
+	get messages(): unknown[] {
+		return (this.agent as { state: { messages?: unknown[] } }).state.messages ?? [];
 	}
 
 	subscribe(listener: (event: AgentSessionEvent) => void): () => void {
@@ -347,7 +389,23 @@ class MinimalResourceLoader implements MinimalResourceLoaderLike {
 	extendResources(_paths: string[]): void {}
 }
 
+function findInstalledPackageRoot(packageName: string): string | null {
+	const searchPaths = require.resolve.paths(packageName) ?? [];
+	for (const basePath of searchPaths) {
+		const candidateRoot = join(basePath, packageName);
+		if (existsSync(join(candidateRoot, "package.json"))) {
+			return candidateRoot;
+		}
+	}
+	return null;
+}
+
 function findProjectedPackageRoot(packageName: string): string {
+	const installedRoot = findInstalledPackageRoot(packageName);
+	if (installedRoot) {
+		return installedRoot;
+	}
+
 	const directRoot = `${MODULE_ACCESS_NODE_MODULES}/${packageName}`;
 	const pnpmRoot = `${MODULE_ACCESS_NODE_MODULES}/.pnpm`;
 	const pnpmPrefix = `${packageName.replace("/", "+")}@`;
@@ -377,6 +435,7 @@ async function loadPiSdkRuntime(): Promise<PiSdkRuntime> {
 				defaultsModule,
 				messagesModule,
 				modelRegistryModule,
+				sdkModule,
 				sessionManagerModule,
 				settingsManagerModule,
 				toolsModule,
@@ -388,6 +447,7 @@ async function loadPiSdkRuntime(): Promise<PiSdkRuntime> {
 					import(`${packageRoot}/dist/core/defaults.js`),
 					import(`${packageRoot}/dist/core/messages.js`),
 					import(`${packageRoot}/dist/core/model-registry.js`),
+					import(`${packageRoot}/dist/core/sdk.js`),
 					import(`${packageRoot}/dist/core/session-manager.js`),
 					import(`${packageRoot}/dist/core/settings-manager.js`),
 					import(`${packageRoot}/dist/core/tools/index.js`),
@@ -407,6 +467,10 @@ async function loadPiSdkRuntime(): Promise<PiSdkRuntime> {
 					messagesModule.convertToLlm as PiSdkRuntime["convertToLlm"],
 				getAgentDir: configModule.getAgentDir as PiSdkRuntime["getAgentDir"],
 				getDocsPath: configModule.getDocsPath as PiSdkRuntime["getDocsPath"],
+				createAgentSession:
+					sdkModule.createAgentSession as PiSdkRuntime["createAgentSession"],
+				createCodingTools:
+					sdkModule.createCodingTools as PiSdkRuntime["createCodingTools"],
 				createAllTools:
 					toolsModule.createAllTools as PiSdkRuntime["createAllTools"],
 			};
@@ -420,190 +484,26 @@ async function createAgentSession(options: {
 	cwd: string;
 	sessionManager: unknown;
 	resourceLoader: MinimalResourceLoaderLike;
+	tools?: PiToolLike[];
 }): Promise<{ session: PiSessionLike; modelFallbackMessage?: string }> {
 	const {
-		Agent,
-		AuthStorage,
-		DEFAULT_THINKING_LEVEL,
-		ModelRegistry,
+		createAgentSession: createPiAgentSession,
 		SettingsManager,
-		convertToLlm,
-		getAgentDir,
-		getDocsPath,
-		createAllTools,
 	} = await loadPiSdkRuntime();
 
 	const cwd = options.cwd;
-	const agentDir = getAgentDir();
-	const authPath = join(agentDir, "auth.json");
-	const modelsPath = join(agentDir, "models.json");
-	const authStorage = AuthStorage.create(authPath);
-	const modelRegistry = new ModelRegistry(authStorage, modelsPath);
+	const homeDir = process.env.HOME || "/home/user";
+	const agentDir = join(homeDir, ".pi", "agent");
 	const settingsManager = SettingsManager.create(cwd, agentDir);
-	const sessionManager = options.sessionManager as SessionManagerInstanceLike;
-	const resourceLoader = options.resourceLoader;
-	const existingSession = sessionManager.buildSessionContext();
-	const hasExistingSession = existingSession.messages.length > 0;
-	const hasThinkingEntry = sessionManager
-		.getBranch()
-		.some((entry) => entry.type === "thinking_level_change");
-
-	let model: ModelLike | undefined;
-	let modelFallbackMessage: string | undefined;
-	if (!model && hasExistingSession && existingSession.model) {
-		const restoredModel = modelRegistry.find(
-			existingSession.model.provider,
-			existingSession.model.modelId,
-		);
-		if (restoredModel && (await modelRegistry.getApiKey(restoredModel))) {
-			model = restoredModel;
-		}
-		if (!model) {
-			modelFallbackMessage =
-				`Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
-		}
-	}
-
-	if (!model) {
-		const defaultProvider = settingsManager.getDefaultProvider();
-		const defaultModelId = settingsManager.getDefaultModel();
-		if (defaultProvider && defaultModelId) {
-			model = modelRegistry.find(defaultProvider, defaultModelId);
-		}
-		if (!model) {
-			const availableModels = await modelRegistry.getAvailable();
-			model = availableModels[0];
-		}
-		if (!model) {
-			modelFallbackMessage =
-				`No models available. Use /login or set an API key environment variable. See ${join(getDocsPath(), "providers.md")}. Then use /model to select a model.`;
-		} else if (modelFallbackMessage) {
-			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
-		}
-	}
-
-	let thinkingLevel = hasExistingSession
-		? hasThinkingEntry
-			? existingSession.thinkingLevel
-			: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL)
-		: undefined;
-	if (thinkingLevel === undefined) {
-		thinkingLevel =
-			settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
-	}
-	if (!model?.reasoning) {
-		thinkingLevel = "off";
-	}
-
-	const convertToLlmWithBlockImages = (messages: unknown[]) => {
-		const converted = convertToLlm(messages) as Array<{
-			role?: string;
-			content?: Array<{ type: string; text?: string }>;
-		}>;
-		if (!settingsManager.getBlockImages()) {
-			return converted;
-		}
-		return converted.map((message) => {
-			if (
-				message.role === "user" ||
-				message.role === "toolResult"
-			) {
-				const content = message.content;
-				if (Array.isArray(content)) {
-					const hasImages = content.some((part) => part.type === "image");
-					if (hasImages) {
-						const filteredContent = content
-							.map((part) =>
-								part.type === "image"
-									? { type: "text", text: "Image reading is disabled." }
-									: part,
-							)
-							.filter(
-								(part, index, allParts) =>
-									!(
-										part.type === "text" &&
-										part.text === "Image reading is disabled." &&
-										index > 0 &&
-										allParts[index - 1]?.type === "text" &&
-										allParts[index - 1]?.text ===
-											"Image reading is disabled."
-									),
-							);
-						return {
-							...message,
-							content: filteredContent,
-						};
-					}
-				}
-			}
-			return message;
-		});
-	};
-
-	const agent = new Agent({
-		initialState: {
-			systemPrompt: "",
-			model,
-			thinkingLevel,
-			tools: [],
-		},
-		convertToLlm: convertToLlmWithBlockImages,
-		onPayload: async (payload) => payload,
-		sessionId: sessionManager.getSessionId(),
-		transformContext: async (messages) => messages,
-		steeringMode: settingsManager.getSteeringMode(),
-		followUpMode: settingsManager.getFollowUpMode(),
-		transport: settingsManager.getTransport(),
-		thinkingBudgets: settingsManager.getThinkingBudgets(),
-		maxRetryDelayMs: settingsManager.getRetrySettings().maxDelayMs,
-		getApiKey: async (provider) => {
-			const resolvedProvider = provider || agent.state.model?.provider;
-			if (!resolvedProvider) {
-				throw new Error("No model selected");
-			}
-			const key = await modelRegistry.getApiKeyForProvider(resolvedProvider);
-			if (!key) {
-				const currentModel = agent.state.model;
-				const isOAuth = currentModel && modelRegistry.isUsingOAuth(currentModel);
-				if (isOAuth) {
-					throw new Error(
-						`Authentication failed for "${resolvedProvider}". Credentials may have expired or network is unavailable. Run '/login ${resolvedProvider}' to re-authenticate.`,
-					);
-				}
-				throw new Error(
-					`No API key found for "${resolvedProvider}". Set an API key environment variable or run '/login ${resolvedProvider}'.`,
-				);
-			}
-			return key;
-		},
-	});
-
-	if (hasExistingSession) {
-		agent.replaceMessages(existingSession.messages);
-		if (!hasThinkingEntry) {
-			sessionManager.appendThinkingLevelChange(thinkingLevel);
-		}
-	} else {
-		if (model) {
-			sessionManager.appendModelChange(model.provider, model.id);
-		}
-		sessionManager.appendThinkingLevelChange(thinkingLevel);
-	}
-
-	const session = new MinimalPiSession(
-		agent,
-		sessionManager,
-		settingsManager,
-		resourceLoader,
-		{ createAllTools },
+	const result = await createPiAgentSession({
 		cwd,
-		appendSystemPrompt,
-	);
-
-	return {
-		session,
-		modelFallbackMessage,
-	};
+		agentDir,
+		sessionManager: options.sessionManager,
+		resourceLoader: options.resourceLoader,
+		settingsManager,
+		tools: options.tools,
+	});
+	return result;
 }
 
 // ── CLI argument parsing ────────────────────────────────────────────
@@ -626,6 +526,10 @@ class PiSdkAgent implements Agent {
 	private cwd = "/home/user";
 	private cancelRequested = false;
 	private currentToolCalls = new Map<string, string>();
+	private emittedAssistantText = false;
+	private bufferingUpdates = false;
+	private pendingUpdates: SessionNotification["update"][] = [];
+	private streamedTextContent = new Set<string>();
 	private editSnapshots = new Map<
 		string,
 		{ path: string; oldText: string }
@@ -660,16 +564,34 @@ class PiSdkAgent implements Agent {
 		params: NewSessionRequest,
 	): Promise<NewSessionResponse> {
 		this.cwd = params.cwd;
-		const { SessionManager } = await loadPiSdkRuntime();
+		const {
+			SessionManager,
+			SettingsManager,
+			createCodingTools,
+		} = await loadPiSdkRuntime();
 		const resourceLoader = new MinimalResourceLoader({
 			...(appendSystemPrompt ? { appendSystemPrompt } : {}),
 		});
 		await resourceLoader.reload();
+		const settingsManager = SettingsManager.create(
+			params.cwd,
+			join(process.env.HOME || "/home/user", ".pi", "agent"),
+		);
 
 		const { session } = await createAgentSession({
 			cwd: params.cwd,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(params.cwd),
 			resourceLoader,
+			tools: this.wrapTools(
+				createCodingTools(params.cwd, {
+					read: {
+						autoResizeImages: settingsManager.getImageAutoResize(),
+					},
+					bash: {
+						commandPrefix: settingsManager.getShellCommandPrefix(),
+					},
+				}),
+			),
 		});
 
 		this.session = session;
@@ -695,12 +617,17 @@ class PiSdkAgent implements Agent {
 	}
 
 	async prompt(params: PromptRequest): Promise<PromptResponse> {
-		if (!this.session) {
+		const session = this.session;
+		if (!session) {
 			throw new Error("No session created");
 		}
 
 		this.cancelRequested = false;
+		this.bufferingUpdates = true;
 		this.currentToolCalls.clear();
+		this.emittedAssistantText = false;
+		this.pendingUpdates = [];
+		this.streamedTextContent.clear();
 
 		// Extract text from prompt parts
 		const promptParts = params.prompt ?? [];
@@ -714,13 +641,24 @@ class PiSdkAgent implements Agent {
 		// Events fire via subscribe() during execution and are translated
 		// to ACP notifications in handlePiEvent().
 		try {
-			await this.session.prompt(text);
-		} catch {
-			// Prompt may throw on abort or error
+			await session.prompt(text);
+		} catch (error) {
+			if (!this.cancelRequested) {
+				throw error;
+			}
 		}
 
-		// Flush any pending notifications before returning the response
-		await this.lastEmit;
+		if (!this.emittedAssistantText) {
+			const latestText = this.latestAssistantText();
+			await this.emitAssistantText(latestText);
+		}
+
+		// The SDK resolves prompt() before its queued session event pipeline
+		// has necessarily drained through subscribe() listeners.
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+		await this.flushPendingUpdates();
+		this.bufferingUpdates = false;
 
 		const stopReason = this.cancelRequested ? "cancelled" : "end_turn";
 		return {
@@ -757,6 +695,14 @@ class PiSdkAgent implements Agent {
 	// ── Event translation ───────────────────────────────────────────
 
 	private emit(update: SessionNotification["update"]): Promise<void> {
+		if (this.bufferingUpdates) {
+			this.pendingUpdates.push(update);
+			return Promise.resolve();
+		}
+		return this.sendUpdate(update);
+	}
+
+	private sendUpdate(update: SessionNotification["update"]): Promise<void> {
 		this.lastEmit = this.lastEmit
 			.then(() =>
 				this.conn.sessionUpdate({
@@ -768,6 +714,28 @@ class PiSdkAgent implements Agent {
 		return this.lastEmit;
 	}
 
+	private async flushPendingUpdates(): Promise<void> {
+		const updates = this.pendingUpdates;
+		this.pendingUpdates = [];
+		for (const update of updates) {
+			await this.sendUpdate(update);
+		}
+	}
+
+	private emitAssistantText(text: string): Promise<void> {
+		if (!text) {
+			return Promise.resolve();
+		}
+		this.emittedAssistantText = true;
+		return this.emit({
+			sessionUpdate: "agent_message_chunk",
+			content: {
+				type: "text",
+				text,
+			},
+		});
+	}
+
 	private handlePiEvent(event: AgentSessionEvent): void {
 		switch (event.type) {
 			case "message_update": {
@@ -775,13 +743,13 @@ class PiSdkAgent implements Agent {
 				if (!ame) break;
 
 				if (ame.type === "text_delta" && "delta" in ame) {
-					this.emit({
-						sessionUpdate: "agent_message_chunk",
-						content: {
-							type: "text",
-							text: String((ame as { delta: string }).delta),
-						},
-					});
+					this.streamedTextContent.add(this.textContentKey(ame));
+					this.emitAssistantText(String((ame as { delta: string }).delta));
+				} else if (ame.type === "text_end" && "content" in ame) {
+					const textKey = this.textContentKey(ame);
+					if (!this.streamedTextContent.has(textKey)) {
+						this.emitAssistantText(String((ame as { content: string }).content));
+					}
 				} else if (ame.type === "thinking_delta" && "delta" in ame) {
 					this.emit({
 						sessionUpdate: "agent_thought_chunk",
@@ -1026,6 +994,131 @@ class PiSdkAgent implements Agent {
 			: resolvePath(this.cwd, path);
 		return [{ path: resolvedPath }];
 	}
+
+	private textContentKey(ame: Record<string, unknown>): string {
+		const contentIndex =
+			typeof ame.contentIndex === "number" ? ame.contentIndex : -1;
+		return String(contentIndex);
+	}
+
+	private latestAssistantText(): string {
+		if (!this.session) {
+			return "";
+		}
+
+		for (let index = this.session.messages.length - 1; index >= 0; index--) {
+			const message = this.session.messages[index] as {
+				role?: string;
+				content?: unknown;
+			};
+			if (message.role !== "assistant") {
+				continue;
+			}
+
+			const content = message.content;
+			if (typeof content === "string") {
+				return content;
+			}
+			if (!Array.isArray(content)) {
+				const errorMessage =
+					typeof (message as { errorMessage?: unknown }).errorMessage === "string"
+						? (message as { errorMessage: string }).errorMessage
+						: "";
+				return errorMessage;
+			}
+
+			const text = content
+				.map((part) => {
+					const block = part as { type?: string; text?: string };
+					return block.type === "text" && typeof block.text === "string"
+						? block.text
+						: "";
+				})
+				.filter(Boolean)
+				.join("");
+			if (text) {
+				return text;
+			}
+
+			const errorMessage =
+				typeof (message as { errorMessage?: unknown }).errorMessage === "string"
+					? (message as { errorMessage: string }).errorMessage
+					: "";
+			return errorMessage;
+		}
+
+		return "";
+	}
+
+	private wrapTools(tools: PiToolLike[]): PiToolLike[] {
+		return tools.map((tool) => ({
+			...tool,
+			execute: async (toolCallId, args, signal, onUpdate) => {
+				const rawInput =
+					args && typeof args === "object"
+						? (args as Record<string, unknown>)
+						: undefined;
+				const locations = this.toToolCallLocations(rawInput);
+
+				this.currentToolCalls.set(toolCallId, "in_progress");
+				await this.emit({
+					sessionUpdate: "tool_call",
+					toolCallId,
+					title: tool.name,
+					kind: toToolKind(tool.name),
+					status: "in_progress",
+					locations,
+					rawInput,
+				});
+
+				try {
+					const result = await tool.execute(
+						toolCallId,
+						args,
+						signal,
+						(partialResult) => {
+							void this.emit({
+								sessionUpdate: "tool_call_update",
+								toolCallId,
+								status: "in_progress",
+								content: toTextContent(toolResultToText(partialResult)),
+								rawOutput:
+									partialResult && typeof partialResult === "object"
+										? (partialResult as Record<string, unknown>)
+										: undefined,
+							});
+							onUpdate?.(partialResult);
+						},
+					);
+
+					await this.emit({
+						sessionUpdate: "tool_call_update",
+						toolCallId,
+						status: "completed",
+						content: toTextContent(toolResultToText(result)),
+						rawOutput:
+							result && typeof result === "object"
+								? (result as Record<string, unknown>)
+								: undefined,
+					});
+					return result;
+				} catch (error) {
+					await this.emit({
+						sessionUpdate: "tool_call_update",
+						toolCallId,
+						status: "failed",
+						content:
+							error instanceof Error
+								? toTextContent(error.message)
+								: undefined,
+					});
+					throw error;
+				} finally {
+					this.currentToolCalls.delete(toolCallId);
+				}
+			},
+		}));
+	}
 }
 
 // ── Standalone helpers ──────────────────────────────────────────────
@@ -1036,6 +1129,23 @@ function toToolKind(
 	if (toolName === "read") return "read";
 	if (toolName === "write" || toolName === "edit") return "edit";
 	return "other";
+}
+
+function toTextContent(text: string):
+	| Array<{ type: "content"; content: { type: "text"; text: string } }>
+	| undefined {
+	if (!text) {
+		return undefined;
+	}
+	return [
+		{
+			type: "content",
+			content: {
+				type: "text",
+				text,
+			},
+		},
+	];
 }
 
 function toolResultToText(result: unknown): string {
@@ -1101,11 +1211,11 @@ const input = new WritableStream<Uint8Array>({
 
 const output = new ReadableStream<Uint8Array>({
 	start(controller) {
-		process.stdin.on("data", (chunk: Buffer) => {
+		realStdin.on("data", (chunk: Buffer) => {
 			controller.enqueue(new Uint8Array(chunk));
 		});
-		process.stdin.on("end", () => controller.close());
-		process.stdin.on("error", (err: Error) => controller.error(err));
+		realStdin.on("end", () => controller.close());
+		realStdin.on("error", (error: Error) => controller.error(error));
 	},
 });
 
@@ -1116,9 +1226,9 @@ const _connection = new AgentSideConnection(
 );
 
 // Keep process alive
-process.stdin.resume();
+realStdin.resume();
 
 // Shutdown on stdin close
-process.stdin.on("end", () => {
+realStdin.on("end", () => {
 	process.exit(0);
 });

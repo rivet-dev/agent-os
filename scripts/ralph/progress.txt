@@ -20,6 +20,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Pi SDK E2E tests should configure llmock in both places: write the Anthropic provider override to `~/.pi/agent/models.json` inside the VM and pass `ANTHROPIC_BASE_URL` in the session env, because ACP-driven tool turns can still consult the env-configured base URL
 - Guest `stream/promises.pipeline()` shims must attach `finished()` before calling `end()` on the destination; otherwise fast in-memory sinks can emit `finish`/`close` before the listener exists and hang the Promise
 - Treat `crates/bridge/bridge-contract.json` as the canonical host-bridge inventory and `crates/execution/assets/polyfill-registry.json` as the canonical `_loadPolyfill` inventory; when bridge globals or runtime-loadable builtins change, update those files together with `crates/v8-runtime/src/session.rs` and `crates/execution/src/javascript.rs`
 - Guest-side CommonJS helpers in `crates/execution/assets/v8-bridge.source.js` must pass explicit `"require"` mode into `_resolveModule`; otherwise dual packages resolve the import branch and `require()` can try to execute ESM as CommonJS
@@ -618,4 +619,14 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Guest CommonJS builtin subpaths need both `Module.builtinModules` membership and a matching `loadBuiltinModule()` case in `crates/execution/assets/v8-bridge.source.js`; fixing only one side still breaks `require("node:stream/promises")`-style imports
   - `stream/promises.pipeline()` must subscribe to `finished()` before calling `end()` on the destination, otherwise fast in-memory sinks can emit `finish`/`close` before the listener is attached and the Promise hangs forever
   - Rebuild `agent-os-v8` after changing `crates/execution/assets/v8-bridge.source.js`; sidecar V8 tests can keep exercising a stale runtime binary even after `v8-bridge.js` is regenerated
+---
+## 2026-04-08 13:50:41 PDT - US-053
+- Wired the real Pi SDK ACP flow end-to-end so `createSession("pi")` now boots Pi against llmock, streams tool usage through the adapter, preserves the correct ACP request sequence, and completes write-tool response turns inside the VM
+- Fixed sidecar/runtime edge cases that blocked Pi tool turns: preserve an explicit `HOME` when preparing the JavaScript runtime env and accept bare boolean `recursive` mkdir sync-RPC args from the V8 bridge so Pi's file-writing tool can create directories without spurious `EEXIST` failures
+- Updated the Pi headless test to match the SDK's real tool follow-up payload shape, pass the Anthropic base URL through the session env, and skip bash-tool coverage when registry WASM commands are unavailable locally
+- Files changed: `crates/{AGENTS.md,sidecar/src/{acp/session.rs,execution.rs,service.rs}}`, `packages/core/{AGENTS.md,src/{agent-os.ts,packages.ts},tests/pi-headless.test.ts}`, `registry/agent/pi/src/adapter.ts`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Pi ACP turns can still consult `ANTHROPIC_BASE_URL` during tool follow-ups even when `~/.pi/agent/models.json` overrides the provider, so headless llmock tests should set both
+  - The V8 bridge can encode `fs.mkdirSync(path, true)` as a raw boolean second argument; sidecar sync-RPC option parsing must not assume every flag arrives in an options object
+  - Pi bash-tool E2E coverage depends on registry command artifacts being present locally, so tests should gate that path with `hasRegistryCommands` instead of failing when the WASM command set is absent
 ---
