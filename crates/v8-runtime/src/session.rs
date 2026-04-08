@@ -375,8 +375,6 @@ fn session_thread(
                             } else {
                                 isolate::create_isolate(heap_limit_mb)
                             };
-                            // Must re-apply WASM disable after every restore (not captured in snapshot)
-                            execution::disable_wasm(&mut iso);
                             iso.set_host_import_module_dynamically_callback(
                                 execution::dynamic_import_callback,
                             );
@@ -887,7 +885,6 @@ pub(crate) const ASYNC_BRIDGE_FNS: &[&str] = &[
     "_scheduleTimer",
     "_kernelStdinRead",
     // Network (async)
-    "_networkFetchRaw",
     "_networkDnsLookupRaw",
     "_networkHttpRequestRaw",
     "_networkHttpServerListenRaw",

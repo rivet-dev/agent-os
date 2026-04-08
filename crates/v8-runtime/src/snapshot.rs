@@ -26,7 +26,7 @@ pub fn create_snapshot(bridge_code: &str) -> Result<v8::StartupData, String> {
     init_v8_platform();
 
     let mut isolate = v8::Isolate::snapshot_creator(Some(external_refs()), None);
-    {
+    let bridge_result = {
         let scope = &mut v8::HandleScope::new(&mut isolate);
         let context = v8::Context::new(scope, Default::default());
         let scope = &mut v8::ContextScope::new(scope, context);
@@ -38,17 +38,44 @@ pub fn create_snapshot(bridge_code: &str) -> Result<v8::StartupData, String> {
         inject_snapshot_defaults(scope);
 
         // Compile and run bridge code — context captures fully-initialized state
-        let source = v8::String::new(scope, bridge_code)
-            .ok_or_else(|| "failed to create V8 string for bridge code".to_string())?;
-        let script = v8::Script::compile(scope, source, None)
-            .ok_or_else(|| "bridge code compilation failed during snapshot creation".to_string())?;
-        script.run(scope);
+        let result = (|| -> Result<(), String> {
+            let try_catch = &mut v8::TryCatch::new(scope);
+            let source = match v8::String::new(try_catch, bridge_code) {
+                Some(source) => source,
+                None => return Err("failed to create V8 string for bridge code".to_string()),
+            };
+            let Some(script) = v8::Script::compile(try_catch, source, None) else {
+                let message = try_catch
+                    .exception()
+                    .map(|exception| exception.to_rust_string_lossy(try_catch))
+                    .unwrap_or_else(|| {
+                        "bridge code compilation failed during snapshot creation".into()
+                    });
+                return Err(format!(
+                    "bridge code compilation failed during snapshot creation: {message}"
+                ));
+            };
+            if script.run(try_catch).is_none() {
+                let message = try_catch
+                    .exception()
+                    .map(|exception| exception.to_rust_string_lossy(try_catch))
+                    .unwrap_or_else(|| {
+                        "bridge code execution failed during snapshot creation".into()
+                    });
+                return Err(format!(
+                    "bridge code execution failed during snapshot creation: {message}"
+                ));
+            }
+            Ok(())
+        })();
 
         scope.set_default_context(context);
-    }
+        result
+    };
     let blob = isolate
         .create_blob(v8::FunctionCodeHandling::Keep)
         .ok_or_else(|| "V8 snapshot creation failed".to_string())?;
+    bridge_result?;
 
     // Reject oversized snapshots
     if blob.len() > MAX_SNAPSHOT_BLOB_BYTES {
@@ -677,7 +704,7 @@ mod tests {
                             '_cryptoRandomFill', '_fsReadFile', '_fsWriteFile',
                             '_childProcessSpawnStart', '_childProcessPoll', '_childProcessSpawnSync'];
                         var asyncKeys = ['_dynamicImport', '_scheduleTimer',
-                            '_networkFetchRaw', '_networkHttpServerListenRaw'];
+                            '_networkHttpServerListenRaw'];
 
                         for (var i = 0; i < syncKeys.length; i++) {
                             if (typeof globalThis[syncKeys[i]] !== 'function') {
@@ -767,7 +794,7 @@ mod tests {
 
                     // Verify all async bridge functions are registered as stubs
                     var asyncFns = ['_dynamicImport', '_scheduleTimer',
-                        '_networkFetchRaw', '_networkDnsLookupRaw',
+                        '_networkDnsLookupRaw',
                         '_networkHttpRequestRaw', '_networkHttpServerListenRaw',
                         '_networkHttpServerCloseRaw', '_networkHttpServerWaitRaw',
                         '_networkHttp2ServerWaitRaw', '_networkHttp2SessionWaitRaw'];
@@ -1047,6 +1074,74 @@ mod tests {
                 result.to_rust_string_lossy(scope),
                 "arm64",
                 "_osConfig.arch should be overridden to 'arm64'"
+            );
+        }
+
+        // --- Part 19a: function globals survive snapshot restore ---
+        {
+            let bridge_code = r#"
+                (function() {
+                    globalThis.__snapshotFn = async function () { return "ok"; };
+                })();
+            "#;
+            let blob = create_snapshot(bridge_code).expect("snapshot creation");
+            let mut isolate = create_isolate_from_snapshot(blob, None);
+
+            let scope = &mut v8::HandleScope::new(&mut isolate);
+            let context = v8::Context::new(scope, Default::default());
+            let scope = &mut v8::ContextScope::new(scope, context);
+
+            let check = v8::String::new(
+                scope,
+                r#"(function() {
+                    return JSON.stringify({
+                        fnType: typeof globalThis.__snapshotFn,
+                        promiseType: typeof globalThis.__snapshotFn?.(),
+                    });
+                })()"#,
+            )
+            .unwrap();
+            let script = v8::Script::compile(scope, check, None).unwrap();
+            let result = script.run(scope).unwrap();
+            assert_eq!(
+                result.to_rust_string_lossy(scope),
+                r#"{"fnType":"function","promiseType":"object"}"#,
+                "function-valued globals should survive snapshot restore"
+            );
+        }
+
+        // --- Part 19b: bundled bridge installs fetch globals before snapshot restore ---
+        {
+            let bridge_code = concat!(
+                include_str!("../../execution/assets/v8-bridge.js"),
+                "\n",
+                include_str!("../../execution/assets/v8-bridge-zlib.js")
+            );
+            let blob = create_snapshot(bridge_code).expect("snapshot creation");
+            let mut isolate = create_isolate_from_snapshot(blob, None);
+
+            let scope = &mut v8::HandleScope::new(&mut isolate);
+            let context = v8::Context::new(scope, Default::default());
+            let scope = &mut v8::ContextScope::new(scope, context);
+
+            let check = v8::String::new(
+                scope,
+                r#"(function() {
+                    return JSON.stringify({
+                        fetchType: typeof globalThis.fetch,
+                        headersType: typeof globalThis.Headers,
+                        requestType: typeof globalThis.Request,
+                        responseType: typeof globalThis.Response,
+                    });
+                })()"#,
+            )
+            .unwrap();
+            let script = v8::Script::compile(scope, check, None).unwrap();
+            let result = script.run(scope).unwrap();
+            assert_eq!(
+                result.to_rust_string_lossy(scope),
+                r#"{"fetchType":"function","headersType":"function","requestType":"function","responseType":"function"}"#,
+                "bundled bridge should expose fetch globals in restored contexts"
             );
         }
 

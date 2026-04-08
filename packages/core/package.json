@@ -55,6 +55,7 @@
 		"long-timeout": "^0.1.1",
 		"minimatch": "^10.2.4",
 		"node-stdlib-browser": "^1.3.1",
+		"undici": "^7.24.6",
 		"web-streams-polyfill": "^3.3.3"
 	},
 	"devDependencies": {

@@ -846,7 +846,12 @@ fn javascript_execution_resolves_dependencies_from_package_specific_symlink_moun
         .expect("respond to fs.statSync");
 
     let result = execution.wait().expect("wait for JavaScript execution");
-    assert_eq!(result.exit_code, 0);
+    let stdout = String::from_utf8(result.stdout.clone()).expect("stdout utf8");
+    let stderr = String::from_utf8(result.stderr.clone()).expect("stderr utf8");
+    assert_eq!(
+        result.exit_code, 0,
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
@@ -906,8 +911,12 @@ fn javascript_execution_v8_timer_callbacks_fire_and_clear_correctly() {
         .expect("start JavaScript execution");
 
     let result = execution.wait().expect("wait for JavaScript execution");
-    assert_eq!(result.exit_code, 0);
-    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    let stdout = String::from_utf8(result.stdout.clone()).expect("stdout utf8");
+    let stderr = String::from_utf8(result.stderr.clone()).expect("stderr utf8");
+    assert_eq!(
+        result.exit_code, 0,
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
@@ -1292,7 +1301,9 @@ if (first.every((value) => value === 0)) {
 if (second.every((value) => value === 0)) {
   throw new Error("second random buffer was all zero");
 }
-if (Buffer.from(first).equals(Buffer.from(second))) {
+const buffersMatch = first.length === second.length &&
+  first.every((value, index) => value === second[index]);
+if (buffersMatch) {
   throw new Error("random buffers repeated");
 }
 
@@ -1306,8 +1317,12 @@ if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.te
         .expect("start JavaScript execution");
 
     let result = execution.wait().expect("wait for JavaScript execution");
-    assert_eq!(result.exit_code, 0);
-    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    let stdout = String::from_utf8(result.stdout.clone()).expect("stdout utf8");
+    let stderr = String::from_utf8(result.stderr.clone()).expect("stderr utf8");
+    assert_eq!(
+        result.exit_code, 0,
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
@@ -1323,6 +1338,7 @@ fn javascript_execution_v8_crypto_basic_operations_emit_expected_sync_rpcs() {
     );
     assert_eq!(map_bridge_method("_cryptoPbkdf2"), ("crypto.pbkdf2", false));
     assert_eq!(map_bridge_method("_cryptoScrypt"), ("crypto.scrypt", false));
+    assert_eq!(map_bridge_method("_netSocketConnectRaw"), ("net.connect", false));
 }
 
 #[test]

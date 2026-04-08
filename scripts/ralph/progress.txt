@@ -1,6 +1,15 @@
 # Ralph Progress Log
 Started: Mon Apr  6 01:03:18 PM PDT 2026
 ---
+## 2026-04-08 04:46:46 PDT - US-057
+- Replaced the host-bypassing `_networkFetchRaw` path with bundled undici running inside the guest V8 bridge, added undici-specific runtime shims/build aliases, removed the sidecar `net.fetch` handler, and fixed guest socket/web-stream compatibility so fetch streams response bodies over kernel TCP sockets
+- Added focused fetch coverage in `crates/sidecar/tests/fetch_via_undici.rs`, tightened V8 snapshot/session tests around bundled fetch globals, removed `_networkFetchRaw` from bridge registrations, and documented the undici/web-stream shim requirement in `crates/execution/AGENTS.md`
+- Files changed: `crates/execution/{AGENTS.md,assets/v8-bridge.source.js,assets/v8-bridge.js,assets/v8-bridge-zlib.js,assets/undici-shims/*,src/v8_host.rs,src/v8_runtime.rs,tests/javascript_v8.rs}`, `crates/v8-runtime/{src/execution.rs,src/session.rs,src/snapshot.rs}`, `crates/sidecar/{src/execution.rs,tests/fetch_via_undici.rs,tests/support/mod.rs}`, `packages/core/{package.json,scripts/build-v8-bridge.mjs}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Bundled undici fetch breaks late in the response path if `node:stream.finished()` only understands EventEmitter streams; the guest bridge must treat the web-stream ponyfill as a first-class stream implementation too
+  - Removing a bridge call means updating all three surfaces together: `map_bridge_method()` in execution, `SYNC_BRIDGE_FNS`/`ASYNC_BRIDGE_FNS` in `crates/v8-runtime`, and the snapshot tests that assert stub registration
+  - `cargo test -p agent-os-sidecar -- --test-threads=1` is still blocked on this branch by unrelated `builtin_conformance` failures in `buffer`, `stdlib-polyfills`, and `url`, so use the focused fetch test plus `cargo test -p agent-os-execution --test javascript_v8` to validate this fetch story without conflating it with those pending conformance stories
+---
 ## 2026-04-07 11:40:27 PDT - US-021
 - Deleted the legacy TypeScript host-tools argv/prompt/server/shim files, added `packages/core/src/host-tools-zod.ts`, and moved toolkit registration plus sidecar tool-invocation handling into `packages/core/src/agent-os.ts`
 - Updated the public export surface to drop the deleted host-tools helpers, refreshed `packages/core/CLAUDE.md` (via the `AGENTS.md` symlink) to match the new sidecar-owned tool flow, and replaced the removed test suites with focused Zod-conversion, sidecar-dispatch, and tool-reference coverage
@@ -11,6 +20,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Bundled undici fetch depends on the aliased `node:stream` helpers understanding `web-streams-polyfill` `ReadableStream` instances; keep `finished()`, `isReadable()`, `isErrored()`, and `isDisturbed()` compatible in `crates/execution/assets/undici-shims/stream.js` or fetch will fail after the TCP response arrives
 - `crates/execution/tests/cjs_esm_interop.rs` should keep desired-behavior CJS/ESM gaps as explicit `#[ignore]` tests tied to the follow-up fix story instead of weakening assertions to current runtime behavior
 - Build the V8 stdlib-only builtin bundle from `crates/execution/assets/v8-bridge.source.js` via `packages/core/scripts/build-v8-bridge.mjs`, and keep the heavier assert/util/zlib payload in `v8-bridge-zlib.js` so `v8-bridge.js` stays under the 500KB cap
 - `crates/sidecar/src/vm.rs` must register the runtime-owned execution commands (`node`, `python`, `wasm`) during both `create_vm()` and `configure_vm()`; runtime-based `ExecuteRequest`s can run before any discovered `/__agentos/commands/*` entries are refreshed

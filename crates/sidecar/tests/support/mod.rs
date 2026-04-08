@@ -274,7 +274,7 @@ pub fn collect_process_output_with_timeout(
 
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for process events"
+            "timed out waiting for process events\nstdout:\n{stdout}\nstderr:\n{stderr}"
         );
     }
 }

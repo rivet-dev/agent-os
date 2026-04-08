@@ -416,7 +416,6 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
         "_kernelStdinRead" => ("__kernel_stdin_read", false),
 
         // Network operations
-        "_networkFetchRaw" => ("net.fetch", false),
         "_networkHttpRequestRaw" => ("net.http_request", false),
         "_networkHttpServerListenRaw" => ("net.http_listen", false),
         "_networkHttpServerCloseRaw" => ("net.http_close", false),

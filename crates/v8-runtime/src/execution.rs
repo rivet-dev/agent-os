@@ -893,7 +893,8 @@ pub fn execute_module(
             None,
         );
 
-        let v8_source = match v8::String::new(tc, user_code) {
+        let effective_user_code = add_esm_runtime_prelude(user_code);
+        let v8_source = match v8::String::new(tc, &effective_user_code) {
             Some(s) => s,
             None => {
                 clear_module_state();
@@ -2803,6 +2804,60 @@ mod tests {
                         .unwrap()
                         .to_rust_string_lossy(scope),
                     "hello"
+                );
+            }
+        }
+
+        // --- Part 25a: ESM root modules receive fetch globals from the runtime prelude ---
+        {
+            let mut iso = isolate::create_isolate(None);
+            let ctx = isolate::create_context(&mut iso);
+
+            let bridge_ctx = BridgeCallContext::new(
+                Box::new(Vec::new()),
+                Box::new(Cursor::new(Vec::new())),
+                "test-session".into(),
+            );
+
+            let bridge_code = r#"
+                globalThis.fetch = async function () { return "ok"; };
+            "#;
+            let user_code = r#"
+                const result = await fetch();
+                export const fetchType = typeof fetch;
+                export default result;
+            "#;
+            let (code, exports, error) = {
+                let scope = &mut v8::HandleScope::new(&mut iso);
+                let local = v8::Local::new(scope, &ctx);
+                let scope = &mut v8::ContextScope::new(scope, local);
+                execute_module(scope, &bridge_ctx, bridge_code, user_code, None, &mut None)
+            };
+
+            assert_eq!(code, 0, "error: {:?}", error);
+            assert!(error.is_none());
+            let exports = exports.unwrap();
+            {
+                let scope = &mut v8::HandleScope::new(&mut iso);
+                let local = v8::Local::new(scope, &ctx);
+                let scope = &mut v8::ContextScope::new(scope, local);
+                let val = crate::bridge::deserialize_v8_value(scope, &exports).unwrap();
+                let obj = v8::Local::<v8::Object>::try_from(val).unwrap();
+
+                let fetch_type_key = v8::String::new(scope, "fetchType").unwrap();
+                assert_eq!(
+                    obj.get(scope, fetch_type_key.into())
+                        .unwrap()
+                        .to_rust_string_lossy(scope),
+                    "function"
+                );
+
+                let default_key = v8::String::new(scope, "default").unwrap();
+                assert_eq!(
+                    obj.get(scope, default_key.into())
+                        .unwrap()
+                        .to_rust_string_lossy(scope),
+                    "ok"
                 );
             }
         }
@@ -5329,21 +5384,64 @@ fn extract_cjs_export_names(source: &str) -> Vec<String> {
 }
 
 fn add_esm_runtime_prelude(source: &str) -> String {
-    if !source.contains("require(") {
-        return source.to_owned();
-    }
+    let mut prelude = String::new();
 
-    if source.contains("createRequire(import.meta.url)")
-        || source.contains("createRequire(")
-        || source.contains("const require =")
-        || source.contains("let require =")
-        || source.contains("var require =")
-        || source.contains("function require(")
+    if source.contains("require(")
+        && !source.contains("createRequire(import.meta.url)")
+        && !source.contains("createRequire(")
+        && !source.contains("const require =")
+        && !source.contains("let require =")
+        && !source.contains("var require =")
+        && !source.contains("function require(")
     {
-        return source.to_owned();
+        prelude.push_str("const require = globalThis._moduleModule.createRequire(import.meta.url);\n");
     }
 
-    format!("const require = globalThis._moduleModule.createRequire(import.meta.url);\n{source}")
+    for (name, triggers) in [
+        ("fetch", &["fetch("][..]),
+        ("Headers", &["Headers", "new Headers("][..]),
+        ("Request", &["Request", "new Request("][..]),
+        ("Response", &["Response", "new Response("][..]),
+        ("Blob", &["Blob", "new Blob("][..]),
+        ("File", &["File", "new File("][..]),
+        ("FormData", &["FormData", "new FormData("][..]),
+    ] {
+        if needs_esm_global_alias(source, name, triggers) {
+            prelude.push_str(&format!("const {name} = globalThis.{name};\n"));
+        }
+    }
+
+    if prelude.is_empty() {
+        source.to_owned()
+    } else {
+        format!("{prelude}{source}")
+    }
+}
+
+fn needs_esm_global_alias(source: &str, name: &str, triggers: &[&str]) -> bool {
+    if !triggers.iter().any(|trigger| source.contains(trigger)) {
+        return false;
+    }
+
+    for pattern in [
+        format!("const {name}"),
+        format!("let {name}"),
+        format!("var {name}"),
+        format!("function {name}"),
+        format!("class {name}"),
+        format!("import {{ {name}"),
+        format!("import {{{name}"),
+        format!(", {name} }}"),
+        format!(",{name}}}"),
+        format!("import {name} from"),
+        format!("import * as {name}"),
+    ] {
+        if source.contains(&pattern) {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn is_valid_js_ident(s: &str) -> bool {

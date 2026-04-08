@@ -1108,7 +1108,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
       ],
       "priority": 43,
-      "passes": false,
+      "passes": true,
       "notes": "ARCHITECTURAL FIX. The current _networkFetchRaw is a high-level bridge call that delegates the entire HTTP request to the host, bypassing the kernel network stack. This means fetch() doesn't go through kernel permissions, kernel DNS, or kernel socket table. In contrast, net.connect, http.request, etc. properly use kernel TCP sockets. The fix is to run undici inside the guest V8 isolate, where it makes TCP connections via the kernel socket bridge (same as net.connect). This matches how real Node.js works \u2014 fetch() is implemented by undici which uses net.connect internally. undici is already in pnpm-lock.yaml (v7.24.6). Bundle it into v8-bridge.js and configure it to use the kernel net polyfill for TCP."
     },
     {

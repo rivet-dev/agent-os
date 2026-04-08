@@ -506,7 +506,7 @@ impl ActiveTcpSocket {
         let socket = SockRef::from(&*stream);
         socket.set_keepalive(enable).map_err(sidecar_net_error)?;
         if enable {
-            if let Some(delay_secs) = initial_delay_secs {
+            if let Some(delay_secs) = initial_delay_secs.filter(|delay_secs| *delay_secs > 0) {
                 socket
                     .set_tcp_keepalive(
                         &TcpKeepalive::new().with_time(Duration::from_secs(delay_secs)),
@@ -6995,7 +6995,6 @@ where
         "dns.lookup" | "dns.resolve" | "dns.resolve4" | "dns.resolve6" => {
             service_javascript_dns_sync_rpc(bridge, vm_id, dns, request)
         }
-        "net.fetch" => service_javascript_fetch_sync_rpc(bridge, vm_id, socket_paths, request),
         "net.http_request" | "net.http_listen" | "net.http_close" | "net.http_wait"
         | "net.http_respond" => service_javascript_net_sync_rpc(
             bridge,
@@ -9026,115 +9025,6 @@ fn close_kernel_process_stdin(
         .map_err(kernel_error)
 }
 
-fn service_javascript_fetch_sync_rpc<B>(
-    bridge: &SharedBridge<B>,
-    vm_id: &str,
-    socket_paths: &JavascriptSocketPathContext,
-    request: &JavascriptSyncRpcRequest,
-) -> Result<Value, SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
-    let resource = javascript_sync_rpc_arg_str(&request.args, 0, "net.fetch resource")?;
-    if let Some(response) = build_data_url_fetch_response(resource)? {
-        return Ok(response);
-    }
-
-    let url = Url::parse(resource)
-        .map_err(|error| SidecarError::Execution(format!("ERR_INVALID_URL: {error}")))?;
-    let options_json = javascript_sync_rpc_arg_str(&request.args, 1, "net.fetch options payload")?;
-    let options: JavascriptHttpRequestOptions =
-        serde_json::from_str(options_json).map_err(|error| {
-            SidecarError::InvalidState(format!("net.fetch options must be valid JSON: {error}"))
-        })?;
-    let headers = parse_http_header_collection(&options.headers, "net.fetch headers")?;
-
-    if let Some(host) = url.host_str() {
-        if is_loopback_request_host(host) {
-            let port = url.port_or_known_default().ok_or_else(|| {
-                SidecarError::Execution(format!("ERR_INVALID_URL: missing port for {resource}"))
-            })?;
-            if !socket_paths.loopback_port_allowed(port) {
-                let ip = host
-                    .parse::<IpAddr>()
-                    .ok()
-                    .or_else(|| (host == "localhost").then_some(IpAddr::V4(Ipv4Addr::LOCALHOST)))
-                    .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
-                return Err(blocked_loopback_connect_error(resource, ip, port));
-            }
-            return issue_outbound_fetch_request(&url, &options, &headers);
-        }
-    }
-
-    if let Err(error) = bridge.require_network_access(vm_id, NetworkOperation::Fetch, resource) {
-        return Err(match error {
-            SidecarError::Execution(_) => SidecarError::Execution(format!(
-                "ERR_ACCESS_DENIED: blocked outbound network access to {resource}"
-            )),
-            other => other,
-        });
-    }
-
-    issue_outbound_fetch_request(&url, &options, &headers)
-}
-
-fn build_data_url_fetch_response(resource: &str) -> Result<Option<Value>, SidecarError> {
-    let Some(payload) = resource.strip_prefix("data:") else {
-        return Ok(None);
-    };
-    let (metadata, body) = payload.split_once(',').ok_or_else(|| {
-        SidecarError::Execution(String::from(
-            "ERR_INVALID_URL: malformed data URL missing comma separator",
-        ))
-    })?;
-    let metadata = metadata.trim();
-    let is_base64 = metadata
-        .split(';')
-        .any(|segment| segment.eq_ignore_ascii_case("base64"));
-    let content_type = metadata
-        .split(';')
-        .find(|segment| !segment.is_empty() && !segment.eq_ignore_ascii_case("base64"))
-        .unwrap_or("text/plain;charset=US-ASCII");
-
-    let response = if is_base64 {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(body)
-            .map_err(|error| {
-                SidecarError::Execution(format!("ERR_INVALID_URL: invalid data URL body: {error}"))
-            })?;
-        json!({
-            "ok": true,
-            "status": 200,
-            "statusText": "OK",
-            "headers": {
-                "content-type": content_type,
-                "x-body-encoding": "base64",
-            },
-            "body": base64::engine::general_purpose::STANDARD.encode(bytes),
-            "url": resource,
-            "redirected": false,
-        })
-    } else {
-        json!({
-            "ok": true,
-            "status": 200,
-            "statusText": "OK",
-            "headers": {
-                "content-type": content_type,
-            },
-            "body": body,
-            "url": resource,
-            "redirected": false,
-        })
-    };
-
-    serde_json::to_string(&response)
-        .map(Value::String)
-        .map(Some)
-        .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
-}
-
 fn parse_http_request_options(
     request: &JavascriptSyncRpcRequest,
 ) -> Result<(Url, JavascriptHttpRequestOptions, HttpHeaderCollection), SidecarError> {
@@ -9295,51 +9185,6 @@ fn outbound_http_response_json(url: &Url, response: ureq::Response) -> Result<Va
     .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
 }
 
-fn outbound_fetch_response_json(
-    url: &Url,
-    response: ureq::Response,
-) -> Result<Value, SidecarError> {
-    let status = response.status();
-    let status_text = response.status_text().to_owned();
-    let mut normalized_headers = Map::new();
-    for raw_name in response.headers_names() {
-        let values = response.all(&raw_name);
-        let value = if values.len() == 1 {
-            Value::String(values[0].to_owned())
-        } else {
-            Value::Array(
-                values
-                    .into_iter()
-                    .map(|value| Value::String(value.to_owned()))
-                    .collect(),
-            )
-        };
-        normalized_headers.insert(raw_name.to_ascii_lowercase(), value);
-    }
-
-    let mut reader = response.into_reader();
-    let mut body = Vec::new();
-    reader.read_to_end(&mut body).map_err(|error| {
-        SidecarError::Execution(format!("failed to read HTTP response: {error}"))
-    })?;
-    normalized_headers.insert(
-        String::from("x-body-encoding"),
-        Value::String(String::from("base64")),
-    );
-
-    serde_json::to_string(&json!({
-        "ok": (200..=299).contains(&status),
-        "status": status,
-        "statusText": status_text,
-        "headers": normalized_headers,
-        "body": base64::engine::general_purpose::STANDARD.encode(body),
-        "url": url.as_str(),
-        "redirected": false,
-    }))
-    .map(Value::String)
-    .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
-}
-
 fn issue_outbound_http_request(
     url: &Url,
     options: &JavascriptHttpRequestOptions,
@@ -9359,31 +9204,6 @@ fn issue_outbound_http_request(
     match response {
         Ok(response) => outbound_http_response_json(url, response),
         Err(ureq::Error::Status(_, response)) => outbound_http_response_json(url, response),
-        Err(ureq::Error::Transport(error)) => Err(SidecarError::Execution(format!(
-            "ERR_HTTP_REQUEST_FAILED: {error}"
-        ))),
-    }
-}
-
-fn issue_outbound_fetch_request(
-    url: &Url,
-    options: &JavascriptHttpRequestOptions,
-    headers: &HttpHeaderCollection,
-) -> Result<Value, SidecarError> {
-    let method = options.method.as_deref().unwrap_or("GET");
-    let mut request = ureq::request(method, url.as_str());
-    for (name, values) in &headers.normalized {
-        let header_value = values.join(", ");
-        request = request.set(name, &header_value);
-    }
-    let response = match options.body.as_deref() {
-        Some(body) => request.send_string(body),
-        None => request.call(),
-    };
-
-    match response {
-        Ok(response) => outbound_fetch_response_json(url, response),
-        Err(ureq::Error::Status(_, response)) => outbound_fetch_response_json(url, response),
         Err(ureq::Error::Transport(error)) => Err(SidecarError::Execution(format!(
             "ERR_HTTP_REQUEST_FAILED: {error}"
         ))),
@@ -12595,7 +12415,7 @@ where
         }
         "net.write" => {
             let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "net.write socket id")?;
-            let chunk = javascript_sync_rpc_bytes_arg(&request.args, 1, "net.write chunk")?;
+            let chunk = javascript_sync_rpc_base64_arg(&request.args, 1, "net.write chunk")?;
             if let Some(socket) = process.tcp_sockets.get(socket_id) {
                 socket.write_all(&chunk).map(|written| json!(written))
             } else {

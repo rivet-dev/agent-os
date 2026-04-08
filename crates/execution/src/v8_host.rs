@@ -17,6 +17,7 @@ const V8_RUNTIME_PATH_ENV: &str = "AGENT_OS_V8_RUNTIME_PATH";
 /// Default binary name.
 const V8_BINARY_NAME: &str = "agent-os-v8";
 /// Pre-bundled polyfill bridge code.
+/// Rebuild `crates/execution/assets/v8-bridge.js` before changing this embed.
 const V8_BRIDGE_CODE: &str = concat!(
     include_str!("../assets/v8-bridge.js"),
     "\n",

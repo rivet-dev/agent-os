@@ -7,6 +7,39 @@ import * as querystringStdlibModuleNs from "node:querystring";
 import * as streamStdlibModuleNs from "node:stream";
 import * as stringDecoderStdlibModuleNs from "node:string_decoder";
 import * as urlStdlibModuleNs from "node:url";
+import * as utilStdlibModuleNs from "node:util";
+import {
+  WebReadableStream,
+  WebWritableStream,
+  WebTransformStream,
+} from "./undici-shims/web-streams-global.js";
+import undiciAgentModule from "undici/lib/dispatcher/agent.js";
+import undiciFetchModule from "undici/lib/web/fetch/index.js";
+import undiciGlobalModule from "undici/lib/global.js";
+import undiciHeadersModule from "undici/lib/web/fetch/headers.js";
+import undiciRequestModule from "undici/lib/web/fetch/request.js";
+import undiciResponseModule from "undici/lib/web/fetch/response.js";
+
+const EarlyBufferGlobal =
+  bufferStdlibModuleNs.Buffer ??
+  bufferStdlibModuleNs.default?.Buffer ??
+  bufferStdlibModuleNs.default;
+if (typeof globalThis.Buffer === "undefined" && typeof EarlyBufferGlobal === "function") {
+  globalThis.Buffer = EarlyBufferGlobal;
+}
+
+const EarlyUtilTypes =
+  utilStdlibModuleNs.types ??
+  utilStdlibModuleNs.default?.types;
+if (EarlyUtilTypes && typeof EarlyUtilTypes.isProxy !== "function") {
+  EarlyUtilTypes.isProxy = () => false;
+} else if (EarlyUtilTypes) {
+  try {
+    EarlyUtilTypes.isProxy({});
+  } catch (_error) {
+    EarlyUtilTypes.isProxy = () => false;
+  }
+}
 
 "use strict";
 var __bridge = (() => {
@@ -2637,8 +2670,11 @@ var __bridge = (() => {
   defineGlobal("EventTarget", EventTarget);
   defineGlobal("AbortSignal", AbortSignal);
   defineGlobal("AbortController", AbortController);
-  defineGlobal("ReadableStream", ReadableStream);
-  defineGlobal("WritableStream", WritableStream);
+  defineGlobal("ReadableStream", typeof WebReadableStream === "function" ? WebReadableStream : ReadableStream);
+  defineGlobal("WritableStream", typeof WebWritableStream === "function" ? WebWritableStream : WritableStream);
+  if (typeof WebTransformStream === "function") {
+    defineGlobal("TransformStream", WebTransformStream);
+  }
 
   // .agent/recovery/secure-exec/shared/global-exposure.ts
   var NODE_CUSTOM_GLOBAL_INVENTORY = [
@@ -3061,11 +3097,6 @@ var __bridge = (() => {
       name: "_childProcessSpawnSync",
       classification: "hardened",
       rationale: "Host child_process bridge reference."
-    },
-    {
-      name: "_networkFetchRaw",
-      classification: "hardened",
-      rationale: "Host network bridge reference."
     },
     {
       name: "_networkDnsLookupRaw",
@@ -8030,6 +8061,16 @@ var __bridge = (() => {
   exposeCustomGlobal("_childProcessModule", childProcess);
   var child_process_default = childProcess;
 
+  var UndiciAgent = undiciAgentModule?.default ?? undiciAgentModule;
+  var undiciFetch = undiciFetchModule?.fetch ?? undiciFetchModule?.default ?? undiciFetchModule;
+  var UndiciHeaders = undiciHeadersModule?.Headers ?? undiciHeadersModule?.default ?? undiciHeadersModule;
+  var UndiciRequest = undiciRequestModule?.Request ?? undiciRequestModule?.default ?? undiciRequestModule;
+  var UndiciResponse = undiciResponseModule?.Response ?? undiciResponseModule?.default ?? undiciResponseModule;
+  var setUndiciGlobalDispatcher = undiciGlobalModule?.setGlobalDispatcher;
+  if (typeof globalThis[Symbol.for("undici.globalDispatcher.1")] === "undefined" && typeof setUndiciGlobalDispatcher === "function" && typeof UndiciAgent === "function") {
+    setUndiciGlobalDispatcher(new UndiciAgent());
+  }
+
   // .agent/recovery/secure-exec/nodejs/src/bridge/network.ts
   var network_exports = {};
   __export(network_exports, {
@@ -8047,60 +8088,14 @@ var __bridge = (() => {
   });
   var MAX_HTTP_BODY_BYTES = 50 * 1024 * 1024;
   var _fetchHandleCounter = 0;
-  function encodeFetchBody(body, bodyEncoding) {
-    if (bodyEncoding === "base64" && typeof Buffer !== "undefined") {
-      return new Uint8Array(Buffer.from(body, "base64"));
-    }
-    if (typeof TextEncoder !== "undefined") {
-      return new TextEncoder().encode(body);
-    }
-    const bytes = new Uint8Array(body.length);
-    for (let index = 0; index < body.length; index += 1) {
-      bytes[index] = body.charCodeAt(index) & 255;
-    }
-    return bytes;
-  }
-  function createFetchBodyStream(body, bodyEncoding) {
-    const ReadableStreamCtor = globalThis.ReadableStream;
-    if (typeof ReadableStreamCtor !== "function") {
-      return null;
-    }
-    const bytes = encodeFetchBody(body, bodyEncoding);
-    const handleId = typeof _registerHandle === "function" ? `fetch-body:${++_fetchHandleCounter}` : null;
-    let released = false;
-    let delivered = false;
-    const release = () => {
-      if (released || !handleId) {
-        return;
-      }
-      released = true;
-      _unregisterHandle?.(handleId);
-    };
-    if (handleId) {
-      _registerHandle?.(handleId, "fetch response body");
-    }
-    return new ReadableStreamCtor({
-      pull(controller) {
-        if (delivered) {
-          release();
-          controller.close();
-          return;
-        }
-        delivered = true;
-        controller.enqueue(bytes);
-        controller.close();
-        release();
-      },
-      cancel() {
-        release();
-      }
-    });
-  }
   function serializeFetchHeaders(headers) {
     if (!headers) {
       return {};
     }
     if (headers instanceof Headers) {
+      return Object.fromEntries(headers.entries());
+    }
+    if (typeof UndiciHeaders === "function" && headers instanceof UndiciHeaders) {
       return Object.fromEntries(headers.entries());
     }
     if (isFlatHeaderList(headers)) {
@@ -8114,97 +8109,47 @@ var __bridge = (() => {
       }
       return normalized;
     }
+    if (typeof headers.entries === "function") {
+      return Object.fromEntries(headers.entries());
+    }
+    if (typeof headers[Symbol.iterator] === "function") {
+      return Object.fromEntries(headers);
+    }
     return Object.fromEntries(new Headers(headers).entries());
   }
   function createFetchHeaders(headers) {
     return new Headers(serializeFetchHeaders(headers));
   }
-  function applyBridgeErrorCode(error) {
-    const normalized = error instanceof Error ? error : new Error(String(error));
-    if (normalized.code) {
-      return normalized;
-    }
-    const match = String(normalized.message || "").match(/\b(ERR_[A-Z0-9_]+|E[A-Z0-9_]+):/);
-    if (match) {
-      normalized.code = match[1];
+  function normalizeFetchRequestInit(options = {}) {
+    const normalized = { ...options };
+    if (Object.prototype.hasOwnProperty.call(normalized, "headers")) {
+      normalized.headers = serializeFetchHeaders(normalized.headers);
     }
     return normalized;
   }
   async function fetch(input, options = {}) {
-    if (typeof _networkFetchRaw === "undefined") {
-      console.error("fetch requires NetworkAdapter to be configured");
-      throw new Error("fetch requires NetworkAdapter to be configured");
+    if (typeof undiciFetch !== "function") {
+      throw new Error("fetch requires undici to be configured");
     }
-    let resolvedUrl;
+    let resolvedInput = input;
+    let normalizedOptions = options;
     if (input instanceof Request) {
-      resolvedUrl = input.url;
-      options = {
+      resolvedInput = input.url;
+      normalizedOptions = {
         method: input.method,
         headers: serializeFetchHeaders(input.headers),
         body: input.body,
         ...options
       };
-    } else {
-      resolvedUrl = String(input);
     }
-    const optionsJson = JSON.stringify({
-      method: options.method || "GET",
-      headers: serializeFetchHeaders(options.headers),
-      body: options.body || null
-    });
+    normalizedOptions = normalizeFetchRequestInit(normalizedOptions);
+    const requestLabel = typeof resolvedInput === "string" ? resolvedInput : resolvedInput?.url ? String(resolvedInput.url) : String(resolvedInput);
     const handleId = typeof _registerHandle === "function" ? `fetch:${++_fetchHandleCounter}` : null;
     if (handleId) {
-      _registerHandle?.(handleId, `fetch ${resolvedUrl}`);
+      _registerHandle?.(handleId, `fetch ${requestLabel}`);
     }
     try {
-      let responseJson;
-      try {
-        responseJson = await _networkFetchRaw.apply(void 0, [resolvedUrl, optionsJson], {
-          result: { promise: true }
-        });
-      } catch (error) {
-        throw applyBridgeErrorCode(error);
-      }
-      const response = JSON.parse(responseJson);
-      const bodyEncoding = response.headers?.["x-body-encoding"] ?? null;
-      const responseBody = response.body ?? "";
-      let bodyStream;
-      return {
-        ok: response.ok,
-        status: response.status,
-        statusText: response.statusText,
-        headers: new Map(Object.entries(response.headers || {})),
-        url: response.url || resolvedUrl,
-        redirected: response.redirected || false,
-        type: "basic",
-        get body() {
-          if (bodyStream === void 0) {
-            bodyStream = createFetchBodyStream(responseBody, bodyEncoding);
-          }
-          return bodyStream;
-        },
-        async text() {
-          if (bodyEncoding === "base64" && typeof Buffer !== "undefined") {
-            return Buffer.from(responseBody, "base64").toString("utf8");
-          }
-          return responseBody;
-        },
-        async json() {
-          const textBody = bodyEncoding === "base64" && typeof Buffer !== "undefined" ? Buffer.from(responseBody, "base64").toString("utf8") : responseBody;
-          return JSON.parse(textBody || "{}");
-        },
-        async arrayBuffer() {
-          return Uint8Array.from(
-            encodeFetchBody(responseBody, bodyEncoding)
-          ).buffer;
-        },
-        async blob() {
-          throw new Error("Blob not supported in sandbox");
-        },
-        clone() {
-          return { ...this };
-        }
-      };
+      return await undiciFetch(resolvedInput, normalizedOptions);
     } finally {
       if (handleId) {
         _unregisterHandle?.(handleId);
@@ -9362,7 +9307,7 @@ var __bridge = (() => {
     once(event, listener) {
       const wrapper = (...args) => {
         this.off(event, wrapper);
-        listener(...args);
+        listener.call(this, ...args);
       };
       return this.on(event, wrapper);
     }
@@ -9386,7 +9331,7 @@ var __bridge = (() => {
     }
     emit(event, ...args) {
       const handlers = this._listeners[event];
-      if (handlers) handlers.slice().forEach((fn) => fn(...args));
+      if (handlers) handlers.slice().forEach((fn) => fn.call(this, ...args));
       return handlers !== void 0 && handlers.length > 0;
     }
     listenerCount(event) {
@@ -9492,7 +9437,7 @@ var __bridge = (() => {
     once(event, listener) {
       const wrapper = (...args) => {
         this.off(event, wrapper);
-        listener(...args);
+        listener.call(this, ...args);
       };
       return this.on(event, wrapper);
     }
@@ -9675,7 +9620,7 @@ var __bridge = (() => {
     emit(event, ...args) {
       const listeners = this._listeners[event];
       if (!listeners || listeners.length === 0) return false;
-      listeners.slice().forEach((listener) => listener(...args));
+      listeners.slice().forEach((listener) => listener.call(this, ...args));
       return true;
     }
     createConnection(options, cb) {
@@ -10596,7 +10541,7 @@ ${headerLines}\r
     once(event, listener) {
       const wrapped = (...args) => {
         this.off(event, wrapped);
-        listener(...args);
+        listener.call(this, ...args);
       };
       return this.on(event, wrapped);
     }
@@ -10613,7 +10558,7 @@ ${headerLines}\r
     emit(event, ...args) {
       const listeners = this._listeners[event];
       if (!listeners || listeners.length === 0) return false;
-      listeners.slice().forEach((fn) => fn(...args));
+      listeners.slice().forEach((fn) => fn.call(this, ...args));
       return true;
     }
     // Readable stream stubs for framework compatibility
@@ -10691,7 +10636,7 @@ ${headerLines}\r
     once(event, listener) {
       const wrapped = (...args) => {
         this.off(event, wrapped);
-        listener(...args);
+        listener.call(this, ...args);
       };
       return this.on(event, wrapped);
     }
@@ -10708,7 +10653,7 @@ ${headerLines}\r
     emit(event, ...args) {
       const listeners = this._listeners[event];
       if (!listeners || listeners.length === 0) return false;
-      listeners.slice().forEach((fn) => fn(...args));
+      listeners.slice().forEach((fn) => fn.call(this, ...args));
       return true;
     }
     _emit(event, ...args) {
@@ -11141,7 +11086,7 @@ ${headerLines}\r
     _emit(event, ...args) {
       const listeners = this._listeners[event];
       if (!listeners || listeners.length === 0) return;
-      listeners.slice().forEach((listener) => listener(...args));
+      listeners.slice().forEach((listener) => listener.call(this, ...args));
     }
     _finishStart(resultJson) {
       const result = JSON.parse(resultJson);
@@ -11264,7 +11209,7 @@ ${headerLines}\r
     once(event, listener) {
       const wrapped = (...args) => {
         this.off(event, wrapped);
-        listener(...args);
+        listener.call(this, ...args);
       };
       return this.on(event, wrapped);
     }
@@ -11937,6 +11882,7 @@ ${headerLines}\r
       validateHeaderValue,
       _checkIsHttpToken: checkIsHttpToken,
       _checkInvalidHeaderChar: checkInvalidHeaderChar,
+      maxHeaderSize: 65535,
       METHODS: [...HTTP_METHODS],
       STATUS_CODES: HTTP_STATUS_TEXT
     };
@@ -11994,7 +11940,7 @@ ${headerLines}\r
       const listeners = this._listeners[event];
       if (listeners) {
         for (const listener of [...listeners]) {
-          listener(...args);
+          listener.call(this, ...args);
           handled = true;
         }
       }
@@ -12002,7 +11948,7 @@ ${headerLines}\r
       if (onceListeners) {
         this._onceListeners[event] = [];
         for (const listener of [...onceListeners]) {
-          listener(...args);
+          listener.call(this, ...args);
           handled = true;
         }
       }
@@ -13922,9 +13868,9 @@ ${headerLines}\r
   exposeCustomGlobal("_upgradeSocketData", onUpgradeSocketData);
   exposeCustomGlobal("_upgradeSocketEnd", onUpgradeSocketEnd);
   exposeCustomGlobal("fetch", fetch);
-  exposeCustomGlobal("Headers", Headers);
-  exposeCustomGlobal("Request", Request);
-  exposeCustomGlobal("Response", Response);
+  exposeCustomGlobal("Headers", UndiciHeaders);
+  exposeCustomGlobal("Request", UndiciRequest);
+  exposeCustomGlobal("Response", UndiciResponse);
   if (typeof globalThis.Blob === "undefined") {
     exposeCustomGlobal("Blob", class BlobStub {
     });
@@ -14128,9 +14074,10 @@ ${headerLines}\r
   }
   function normalizeConnectArgs(portOrOptions, hostOrCallback, callback) {
     if (portOrOptions !== null && typeof portOrOptions === "object") {
+      const normalizedPort = typeof portOrOptions.port === "string" ? Number(portOrOptions.port) : portOrOptions.port;
       return {
         host: typeof portOrOptions.host === "string" && portOrOptions.host.length > 0 ? portOrOptions.host : void 0,
-        port: portOrOptions.port,
+        port: normalizedPort,
         path: typeof portOrOptions.path === "string" && portOrOptions.path.length > 0 ? portOrOptions.path : void 0,
         keepAlive: portOrOptions.keepAlive,
         keepAliveInitialDelay: portOrOptions.keepAliveInitialDelay,
@@ -14260,6 +14207,20 @@ ${headerLines}\r
     } catch {
       return null;
     }
+  }
+  function normalizeNetSocketHandle(handle) {
+    if (!handle) {
+      throw new Error("net.connect bridge returned an empty socket handle");
+    }
+    if (typeof handle === "string") {
+      return {
+        socketId: handle
+      };
+    }
+    if (typeof handle === "object" && typeof handle.socketId === "string") {
+      return handle;
+    }
+    throw new Error("net.connect bridge returned an invalid socket handle");
   }
   function serializeTlsValue(value) {
     if (value === void 0 || value === null) {
@@ -14539,6 +14500,7 @@ ${headerLines}\r
     destroyed = false;
     writable = true;
     readable = true;
+    readyState = "open";
     readableLength = 0;
     writableLength = 0;
     remoteAddress;
@@ -14567,6 +14529,7 @@ ${headerLines}\r
     _tlsSessionReused = false;
     // Readable stream state stub for library compatibility
     _readableState = { endEmitted: false };
+    _readQueue = [];
     _handle = null;
     constructor(options) {
       if (options?.allowHalfOpen) this.allowHalfOpen = true;
@@ -14602,11 +14565,14 @@ ${headerLines}\r
         });
         return this;
       }
-      this._socketId = _netSocketConnectRaw.applySync(
+      const handle = normalizeNetSocketHandle(_netSocketConnectRaw.applySync(
         void 0,
-        [JSON.stringify(path ? { path } : { host, port })]
-      );
+        [path ? { path } : { host, port }]
+      ));
+      debugBridgeNetwork("socket connect", handle.socketId, host, port, path ?? null);
+      this._socketId = handle.socketId;
       this._handle = createConnectedSocketHandle(this._socketId);
+      this._applySocketInfo(handle);
       registerNetSocket(this._socketId, this);
       void this._waitForConnect();
       if (keepAlive) {
@@ -14627,6 +14593,7 @@ ${headerLines}\r
         buf = Buffer.from(data);
       }
       if (this._loopbackServer) {
+        debugBridgeNetwork("socket write loopback", this._socketId, buf.length);
         this.bytesWritten += buf.length;
         this._loopbackBuffer = Buffer.concat([this._loopbackBuffer, buf]);
         this._touchTimeout();
@@ -14638,6 +14605,7 @@ ${headerLines}\r
       if (typeof _netSocketWriteRaw === "undefined") return false;
       if (this.destroyed || !this._socketId) return false;
       const base64 = buf.toString("base64");
+      debugBridgeNetwork("socket write", this._socketId, buf.length, base64.slice(0, 64));
       this.bytesWritten += buf.length;
       _netSocketWriteRaw.applySync(void 0, [this._socketId, base64]);
       this._touchTimeout();
@@ -14660,6 +14628,7 @@ ${headerLines}\r
         return this;
       }
       if (typeof _netSocketEndRaw !== "undefined" && this._socketId && !this.destroyed) {
+        debugBridgeNetwork("socket end", this._socketId);
         _netSocketEndRaw.applySync(void 0, [this._socketId]);
         this._touchTimeout();
       }
@@ -14667,6 +14636,7 @@ ${headerLines}\r
     }
     destroy(error) {
       if (this.destroyed) return this;
+      debugBridgeNetwork("socket destroy", this._socketId, error?.message ?? null);
       this.destroyed = true;
       this.writable = false;
       this.readable = false;
@@ -14734,6 +14704,7 @@ ${headerLines}\r
       }
       this._keepAliveState = nextEnable;
       this._keepAliveDelaySeconds = nextEnable ? nextDelaySeconds : 0;
+      debugBridgeNetwork("socket setKeepAlive", this._socketId, nextEnable, nextDelaySeconds);
       this._handle?.setKeepAlive?.(nextEnable, nextDelaySeconds);
       return this;
     }
@@ -14743,6 +14714,7 @@ ${headerLines}\r
         return this;
       }
       this._noDelayState = nextState;
+      debugBridgeNetwork("socket setNoDelay", this._socketId, nextState);
       this._handle?.setNoDelay?.(nextState);
       return this;
     }
@@ -14790,6 +14762,44 @@ ${headerLines}\r
     }
     resume() {
       return this;
+    }
+    read(size) {
+      if (this._readQueue.length === 0) {
+        return null;
+      }
+      if (size == null || size <= 0) {
+        const chunk = this._readQueue.shift() ?? null;
+        if (chunk) {
+          this.readableLength = Math.max(0, this.readableLength - chunk.length);
+        }
+        return chunk;
+      }
+      const head = this._readQueue[0];
+      if (!head) {
+        return null;
+      }
+      if (head.length <= size) {
+        this._readQueue.shift();
+        this.readableLength = Math.max(0, this.readableLength - head.length);
+        return head;
+      }
+      const chunk = head.subarray(0, size);
+      this._readQueue[0] = head.subarray(size);
+      this.readableLength = Math.max(0, this.readableLength - chunk.length);
+      return chunk;
+    }
+    unshift(chunk) {
+      const payload = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (payload.length === 0) {
+        return this;
+      }
+      this._readQueue.unshift(payload);
+      this.readableLength += payload.length;
+      return this;
+    }
+    cork() {
+    }
+    uncork() {
     }
     address() {
       return { port: this.localPort, family: this.localFamily, address: this.localAddress };
@@ -14906,7 +14916,7 @@ ${headerLines}\r
       const listeners = this._listeners[event];
       if (listeners) {
         for (const fn of [...listeners]) {
-          fn(...args);
+          fn.call(this, ...args);
           handled = true;
         }
       }
@@ -14915,11 +14925,25 @@ ${headerLines}\r
         const fns = [...onceListeners];
         this._onceListeners[event] = [];
         for (const fn of fns) {
-          fn(...args);
+          fn.call(this, ...args);
           handled = true;
         }
       }
       return handled;
+    }
+    _queueReadablePayload(payload) {
+      if (!payload || payload.length === 0) {
+        return;
+      }
+      this._readQueue.push(payload);
+      this.readableLength += payload.length;
+      this._emitNet("readable");
+      if (this.listenerCount("data") > 0) {
+        const chunk = this.read();
+        if (chunk !== null) {
+          this._emitNet("data", chunk);
+        }
+      }
     }
     async _waitForConnect() {
       if (typeof _netSocketWaitConnectRaw === "undefined" || this._socketId === 0) {
@@ -14937,8 +14961,11 @@ ${headerLines}\r
         this._applySocketInfo(parseNetSocketInfo(infoJson));
         this._connected = true;
         this.connecting = false;
+        debugBridgeNetwork("socket connected", this._socketId, this.localAddress, this.localPort, this.remoteAddress, this.remotePort);
         this._touchTimeout();
+        debugBridgeNetwork("socket emit connect", this._socketId, this.listenerCount("connect"));
         this._emitNet("connect");
+        debugBridgeNetwork("socket emit ready", this._socketId, this.listenerCount("ready"));
         this._emitNet("ready");
         if (!this._tlsUpgrading) {
           await this._pumpBridgeReads();
@@ -14948,6 +14975,7 @@ ${headerLines}\r
           return;
         }
         const err = error instanceof Error ? error : new Error(String(error));
+        debugBridgeNetwork("socket connect error", this._socketId, err.message, err.stack ?? null);
         this._emitNet("error", err);
         this.destroy();
       }
@@ -14974,6 +15002,7 @@ ${headerLines}\r
             return;
           }
           if (chunkBase64 === null) {
+            debugBridgeNetwork("socket remote end", this._socketId);
             this.readable = false;
             this._readableState.endEmitted = true;
             this._emitNet("end");
@@ -14984,9 +15013,10 @@ ${headerLines}\r
             return;
           }
           const payload = Buffer.from(chunkBase64, "base64");
+          debugBridgeNetwork("socket data", this._socketId, payload.length);
           this.bytesRead += payload.length;
           this._touchTimeout();
-          this._emitNet("data", payload);
+          this._queueReadablePayload(payload);
         }
       } finally {
         this._bridgeReadLoopRunning = false;
@@ -15052,7 +15082,7 @@ ${headerLines}\r
         }
         this.bytesRead += payload.length;
         this._touchTimeout();
-        this._emitNet("data", payload);
+        this._queueReadablePayload(payload);
       });
     }
     _closeLoopbackReadable() {
@@ -15244,7 +15274,7 @@ ${headerLines}\r
       try {
         const resultValue = _netServerListenRaw.applySyncPromise(
           void 0,
-          [JSON.stringify({ port, host, path, backlog, readableAll, writableAll })]
+          [{ port, host, path, backlog, readableAll, writableAll }]
         );
         const result = typeof resultValue === "string" ? JSON.parse(resultValue) : resultValue;
         const address = result.address ?? result;
@@ -15349,7 +15379,7 @@ ${headerLines}\r
       const listeners = this._listeners[event];
       if (listeners) {
         for (const fn of [...listeners]) {
-          fn(...args);
+          fn.call(this, ...args);
           handled = true;
         }
       }
@@ -15357,7 +15387,7 @@ ${headerLines}\r
       if (onceListeners) {
         this._onceListeners[event] = [];
         for (const fn of [...onceListeners]) {
-          fn(...args);
+          fn.call(this, ...args);
           handled = true;
         }
       }
@@ -15600,7 +15630,7 @@ ${headerLines}\r
       const listeners = this._listeners[event];
       if (listeners) {
         for (const fn of [...listeners]) {
-          fn(...args);
+          fn.call(this, ...args);
           handled = true;
         }
       }
@@ -15608,7 +15638,7 @@ ${headerLines}\r
       if (onceListeners) {
         this._onceListeners[event] = [];
         for (const fn of [...onceListeners]) {
-          fn(...args);
+          fn.call(this, ...args);
           handled = true;
         }
       }
@@ -17474,9 +17504,10 @@ ${headerLines}\r
   });
   var NativeURL = typeof globalThis.URL === "function" ? globalThis.URL : class URL {
     constructor(url, base) {
-      const baseHref = String(base ? new URL(base).href : "");
       const raw = String(url ?? "");
-      const full = /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(raw) ? raw : baseHref.replace(/\/[^/]*$/, "/") + raw;
+      const hasScheme = /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(raw);
+      const baseHref = hasScheme || typeof base === "undefined" ? "" : String(new URL(base).href);
+      const full = hasScheme ? raw : baseHref.replace(/\/[^/]*$/, "/") + raw;
       const match = full.match(/^(\w+:)\/\/([^/:?#]+)(:\d+)?(.*)$/);
       this.protocol = match?.[1] || "";
       this.hostname = match?.[2] || "";
@@ -18126,7 +18157,7 @@ ${headerLines}\r
     let handled = false;
     if (_processListeners[event]) {
       for (const listener of _processListeners[event]) {
-        listener(...args);
+        listener.call(process2, ...args);
         handled = true;
       }
     }
@@ -18134,7 +18165,7 @@ ${headerLines}\r
       const listeners = _processOnceListeners[event].slice();
       _processOnceListeners[event] = [];
       for (const listener of listeners) {
-        listener(...args);
+        listener.call(process2, ...args);
         handled = true;
       }
     }
@@ -19793,11 +19824,36 @@ ${headerLines}\r
     if (typeof globalBuffer.constants !== "object" || globalBuffer.constants === null) {
       globalBuffer.constants = BUFFER_CONSTANTS;
     }
-    if (typeof g.atob === "undefined") {
-      g.atob = (value) => globalBuffer.from(String(value), "base64").toString("binary");
+    const builtinUtilModule = globalThis.__agentOsBuiltinUtilModule;
+    if (builtinUtilModule?.types) {
+      builtinUtilModule.types.isProxy = () => false;
     }
-    if (typeof g.btoa === "undefined") {
-      g.btoa = (value) => globalBuffer.from(String(value), "binary").toString("base64");
+    if (typeof g.atob === "undefined" || typeof g.btoa === "undefined") {
+      const base64 = require_base64_js();
+      if (typeof g.atob === "undefined") {
+        g.atob = (value) => {
+          const bytes = base64.toByteArray(String(value));
+          let decoded = "";
+          for (const byte of bytes) {
+            decoded += String.fromCharCode(byte);
+          }
+          return decoded;
+        };
+      }
+      if (typeof g.btoa === "undefined") {
+        g.btoa = (value) => {
+          const input = String(value);
+          const bytes = new Uint8Array(input.length);
+          for (let index = 0; index < input.length; index += 1) {
+            const code = input.charCodeAt(index);
+            if (code > 255) {
+              throw new TypeError("Invalid character");
+            }
+            bytes[index] = code;
+          }
+          return base64.fromByteArray(bytes);
+        };
+      }
     }
     if (typeof g.Crypto === "undefined") {
       g.Crypto = SandboxCrypto;
@@ -19822,6 +19878,10 @@ ${headerLines}\r
         cryptoObj.subtle = cryptoPolyfill.subtle;
       }
     }
+    g.fetch = fetch;
+    g.Headers = UndiciHeaders;
+    g.Request = UndiciRequest;
+    g.Response = UndiciResponse;
   }
 
   // .agent/recovery/secure-exec/nodejs/src/bridge/module.ts
@@ -20184,6 +20244,15 @@ ${headerLines}\r
   var builtinPunycodeStdlibModule = cloneStdlibModule(punycodeStdlibModuleNs);
   var builtinQuerystringStdlibModule = cloneStdlibModule(querystringStdlibModuleNs);
   var builtinStreamStdlibModule = cloneStdlibModule(streamStdlibModuleNs);
+  defineMissingModuleProperty(builtinStreamStdlibModule, "isReadable", (stream) => {
+    return Boolean(stream) && stream.readable !== false && stream.destroyed !== true;
+  });
+  defineMissingModuleProperty(builtinStreamStdlibModule, "isErrored", (stream) => {
+    return stream?.errored != null;
+  });
+  defineMissingModuleProperty(builtinStreamStdlibModule, "isDisturbed", (stream) => {
+    return Boolean(stream?.locked || stream?.disturbed === true || stream?.readableDidRead === true);
+  });
   var builtinStringDecoderStdlibModule = cloneStdlibModule(stringDecoderStdlibModuleNs);
   var builtinUrlStdlibModule = cloneStdlibModule(urlStdlibModuleNs);
   function normalizeBuiltinRequest(request) {
