@@ -29,6 +29,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Guest builtin policy has to stay aligned across `crates/execution/assets/polyfill-registry.json`, `crates/execution/src/javascript.rs` builtin normalization/_loadPolyfill handling, `crates/execution/assets/v8-bridge.source.js` `Module.builtinModules` plus `loadBuiltinModule()`, and `crates/execution/src/node_import_cache.rs`; if one layer lags, guests get `MODULE_NOT_FOUND` or host fallthrough instead of the intended deny/stub behavior
 - Queued `crates/v8-runtime` sessions must keep polling their control channel before acquiring a concurrency slot; otherwise `destroy_session()` can deadlock when the max-concurrency queue is full
 - The `crates/v8-runtime` snapshot suite currently has to run in isolation: keep `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main unit-test binary and run `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately
 - Pi SDK E2E tests should configure llmock in both places: write the Anthropic provider override to `~/.pi/agent/models.json` inside the VM and pass `ANTHROPIC_BASE_URL` in the session env, because ACP-driven tool turns can still consult the env-configured base URL
@@ -651,4 +652,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Pi ACP turns can still consult `ANTHROPIC_BASE_URL` during tool follow-ups even when `~/.pi/agent/models.json` overrides the provider, so headless llmock tests should set both
   - The V8 bridge can encode `fs.mkdirSync(path, true)` as a raw boolean second argument; sidecar sync-RPC option parsing must not assume every flag arrives in an options object
   - Pi bash-tool E2E coverage depends on registry command artifacts being present locally, so tests should gate that path with `hasRegistryCommands` instead of failing when the WASM command set is absent
+---
+## 2026-04-08 14:20:54 PDT - US-060
+- Denied dangerous guest builtins explicitly in the V8 bridge (`vm`, `worker_threads`, `inspector`, `v8`, `cluster`) with `ERR_ACCESS_DENIED`, while adding minimal compatibility stubs for `diagnostics_channel` and `async_hooks`
+- Kept builtin policy aligned across the polyfill registry, V8 builtin normalization/loading, host-node import-cache asset generation, and execution tests; regenerated the bundled V8 bridge and documented the cross-surface alignment rule in `crates/execution/AGENTS.md`
+- Files changed: `crates/execution/{AGENTS.md,assets/polyfill-registry.json,assets/v8-bridge.source.js,assets/v8-bridge.js,src/javascript.rs,src/node_import_cache.rs,tests/javascript_v8.rs}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Denied builtins still need to remain visible to the guest module system as builtins; otherwise `require('node:...')` falls back to `MODULE_NOT_FOUND` instead of the intended `ERR_ACCESS_DENIED`
+  - Compatibility builtins like `diagnostics_channel` and `async_hooks` should stay as small local stubs in both the V8 bridge and the import-cache assets rather than falling through to host modules
+  - After changing `crates/execution/assets/v8-bridge.source.js`, rebuild `crates/execution/assets/v8-bridge.js` before trusting V8 execution tests; stale generated bundles can make a correct source edit look broken
 ---

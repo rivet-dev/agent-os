@@ -19520,24 +19520,96 @@ ${headerLines}\r
     },
     performance: builtinPerformance
   };
-  var builtinVmModule = {
-    Script: class {
-      constructor(code, options = {}) {
-        this.code = String(code ?? "");
-        this.options = options;
+  function createAccessDeniedBuiltinError(request) {
+    const normalized = String(request).replace(/^node:/, "");
+    const error = new Error(`node:${normalized} is not available in the Agent OS guest runtime`);
+    error.code = "ERR_ACCESS_DENIED";
+    return error;
+  }
+  var builtinDiagnosticsChannelModule = {
+    channel(name = "") {
+      const channelName = String(name);
+      return {
+        name: channelName,
+        hasSubscribers: false,
+        publish() {
+        },
+        subscribe() {
+        },
+        unsubscribe() {
+        }
+      };
+    },
+    hasSubscribers() {
+      return false;
+    },
+    subscribe() {
+    },
+    unsubscribe() {
+    }
+  };
+  var builtinAsyncHooksModule = {
+    AsyncLocalStorage: class {
+      constructor() {
+        this._store = void 0;
       }
-      runInThisContext() {
-        return builtinVmModule.runInThisContext(this.code, this.options);
+      disable() {
+        this._store = void 0;
+      }
+      enterWith(store) {
+        this._store = store;
+      }
+      exit(callback, ...args) {
+        return callback(...args);
+      }
+      getStore() {
+        return this._store;
+      }
+      run(store, callback, ...args) {
+        const previous = this._store;
+        this._store = store;
+        try {
+          return callback(...args);
+        } finally {
+          this._store = previous;
+        }
       }
     },
-    createContext(context = {}) {
-      return context;
+    AsyncResource: class {
+      constructor(type = "AgentOsAsyncResource") {
+        this.type = type;
+      }
+      emitBefore() {
+      }
+      emitAfter() {
+      }
+      emitDestroy() {
+      }
+      asyncId() {
+        return 0;
+      }
+      triggerAsyncId() {
+        return 0;
+      }
+      runInAsyncScope(callback, thisArg, ...args) {
+        return callback.apply(thisArg, args);
+      }
     },
-    isContext(value) {
-      return !!value && typeof value === "object";
+    createHook() {
+      return {
+        enable() {
+          return this;
+        },
+        disable() {
+          return this;
+        }
+      };
     },
-    runInThisContext(code, _options = {}) {
-      return (0, eval)(String(code ?? ""));
+    executionAsyncId() {
+      return 0;
+    },
+    triggerAsyncId() {
+      return 0;
     }
   };
   var TIMER_DISPATCH = {
@@ -20522,6 +20594,7 @@ ${headerLines}\r
       "async_hooks",
       "buffer",
       "child_process",
+      "cluster",
       "constants",
       "crypto",
       "dgram",
@@ -20533,6 +20606,7 @@ ${headerLines}\r
       "http",
       "http2",
       "https",
+      "inspector",
       "module",
       "net",
       "os",
@@ -20694,37 +20768,6 @@ ${headerLines}\r
   });
   var builtinStringDecoderStdlibModule = cloneStdlibModule(stringDecoderStdlibModuleNs);
   var builtinUrlStdlibModule = cloneStdlibModule(urlStdlibModuleNs);
-  var builtinV8Module = {
-    getHeapStatistics() {
-      return {
-        total_heap_size: 0,
-        total_heap_size_executable: 0,
-        total_physical_size: 0,
-        total_available_size: 0,
-        used_heap_size: 0,
-        heap_size_limit: 0,
-        malloced_memory: 0,
-        peak_malloced_memory: 0,
-        does_zap_garbage: 0,
-        number_of_native_contexts: 0,
-        number_of_detached_contexts: 0,
-        total_global_handles_size: 0,
-        used_global_handles_size: 0,
-        external_memory: 0
-      };
-    },
-    getHeapSpaceStatistics() {
-      return [];
-    },
-    getHeapSnapshot() {
-      return builtinStreamStdlibModule.Readable.fromWeb(new ReadableStream({
-        start(controller) {
-          controller.enqueue(Buffer.from("{}"));
-          controller.close();
-        }
-      }));
-    }
-  };
   function normalizeBuiltinRequest(request) {
     return String(request).replace(/^node:/, "");
   }
@@ -20737,10 +20780,16 @@ ${headerLines}\r
     switch (normalized) {
       case "assert":
         return globalThis.__agentOsBuiltinAssertModule;
+      case "async_hooks":
+        return builtinAsyncHooksModule;
       case "buffer":
         return builtinBufferStdlibModule;
+      case "cluster":
+        throw createAccessDeniedBuiltinError(request);
       case "crypto":
         return builtinCryptoModule;
+      case "diagnostics_channel":
+        return builtinDiagnosticsChannelModule;
       case "http":
         return _httpModule;
       case "events":
@@ -20791,8 +20840,6 @@ ${headerLines}\r
         return builtinUrlStdlibModule;
       case "util":
         return globalThis.__agentOsBuiltinUtilModule;
-      case "v8":
-        return builtinV8Module;
       case "child_process":
         return _childProcessModule;
       case "constants":
@@ -20811,12 +20858,16 @@ ${headerLines}\r
         return _sqliteModule;
       case "https":
         return _httpsModule;
+      case "inspector":
+        throw createAccessDeniedBuiltinError(request);
       case "module":
         return _moduleModule;
-      case "vm":
-        return builtinVmModule;
       case "zlib":
         return globalThis.__agentOsBuiltinZlibModule;
+      case "v8":
+      case "vm":
+      case "worker_threads":
+        throw createAccessDeniedBuiltinError(request);
       default: {
         const error = new Error(`Cannot find module '${request}'`);
         error.code = "MODULE_NOT_FOUND";

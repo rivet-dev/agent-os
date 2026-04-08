@@ -46,16 +46,13 @@
         "stream/web",
         "timers/promises",
         "tls",
-        "tty",
-        "v8",
-        "vm",
-        "worker_threads"
+        "tty"
       ]
     },
     {
       "source": "denied",
       "errorCode": "ERR_ACCESS_DENIED",
-      "names": ["cluster", "inspector"]
+      "names": ["cluster", "inspector", "vm", "v8", "worker_threads"]
     }
   ]
 }

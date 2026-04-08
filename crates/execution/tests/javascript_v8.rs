@@ -192,11 +192,12 @@ if (process.ppid !== 41) throw new Error(`ppid=${process.ppid}`);
         .expect("start JavaScript execution");
 
     let result = execution.wait().expect("wait for JavaScript execution");
-    assert_eq!(result.exit_code, 0);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         result.stderr.is_empty(),
-        "unexpected stderr: {:?}",
-        result.stderr
+        "unexpected stderr: {stderr}"
     );
 }
 
@@ -236,11 +237,12 @@ if (fileURLToPath(href) !== guestPath) {
         .expect("start JavaScript execution");
 
     let result = execution.wait().expect("wait for JavaScript execution");
-    assert_eq!(result.exit_code, 0);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         result.stderr.is_empty(),
-        "unexpected stderr: {:?}",
-        result.stderr
+        "unexpected stderr: {stderr}"
     );
 }
 
@@ -371,7 +373,7 @@ if (typeof fs.readFile !== "function") {
 }
 
 #[test]
-fn javascript_execution_imports_node_perf_hooks_and_vm_without_hanging() {
+fn javascript_execution_imports_node_perf_hooks_without_hanging() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
     let context = engine.create_context(CreateJavascriptContextRequest {
@@ -390,15 +392,9 @@ fn javascript_execution_imports_node_perf_hooks_and_vm_without_hanging() {
             inline_code: Some(String::from(
                 r#"
 import { performance } from "node:perf_hooks";
-import vm from "node:vm";
 
 if (typeof performance?.now !== "function") {
   throw new Error("node:perf_hooks did not expose performance.now()");
-}
-
-const compiled = vm.runInThisContext("(function () { return 7; })");
-if (compiled() !== 7) {
-  throw new Error("node:vm did not evaluate code in this context");
 }
 "#,
             )),
@@ -415,7 +411,7 @@ if (compiled() !== 7) {
 }
 
 #[test]
-fn javascript_execution_requires_node_v8_without_hanging() {
+fn javascript_execution_denies_dangerous_builtins_with_err_access_denied() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
     let context = engine.create_context(CreateJavascriptContextRequest {
@@ -436,10 +432,81 @@ fn javascript_execution_requires_node_v8_without_hanging() {
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const v8 = require("node:v8");
+for (const builtin of ["vm", "worker_threads", "inspector", "v8", "cluster"]) {
+  let denied = false;
+  try {
+    require(`node:${builtin}`);
+  } catch (error) {
+    denied =
+      error?.code === "ERR_ACCESS_DENIED" &&
+      String(error?.message ?? "").includes(`node:${builtin}`);
+  }
+  if (!denied) {
+    throw new Error(`node:${builtin} was not denied`);
+  }
+}
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
 
-if (typeof v8.getHeapStatistics !== "function") {
-  throw new Error("node:v8 did not expose getHeapStatistics()");
+    let result = execution.wait().expect("wait for JavaScript execution");
+    assert_eq!(result.exit_code, 0);
+    assert!(
+        result.stderr.is_empty(),
+        "unexpected stderr: {:?}",
+        result.stderr
+    );
+}
+
+#[test]
+fn javascript_execution_provides_async_hooks_and_diagnostics_channel_stubs() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const asyncHooks = require("node:async_hooks");
+const diagnosticsChannel = require("node:diagnostics_channel");
+
+const hook = asyncHooks.createHook({});
+if (hook.enable() !== hook || hook.disable() !== hook) {
+  throw new Error("node:async_hooks createHook() did not return a no-op hook");
+}
+if (asyncHooks.executionAsyncId() !== 0 || asyncHooks.triggerAsyncId() !== 0) {
+  throw new Error("node:async_hooks ids should default to 0");
+}
+
+const storage = new asyncHooks.AsyncLocalStorage();
+const result = storage.run("token", () => storage.getStore());
+if (result !== "token") {
+  throw new Error(`node:async_hooks AsyncLocalStorage lost store: ${String(result)}`);
+}
+
+const channel = diagnosticsChannel.channel("undici:request:create");
+if (channel.name !== "undici:request:create") {
+  throw new Error(`unexpected channel name: ${String(channel.name)}`);
+}
+if (channel.hasSubscribers !== false) {
+  throw new Error("diagnostics channel should report no subscribers");
+}
+if (diagnosticsChannel.hasSubscribers("undici:request:create") !== false) {
+  throw new Error("diagnostics_channel.hasSubscribers should be false");
 }
 "#,
             )),

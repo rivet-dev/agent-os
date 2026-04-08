@@ -15,7 +15,7 @@ const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
 const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "7";
-const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "6";
+const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "7";
 const NODE_IMPORT_CACHE_DIR_PREFIX: &str = "agent-os-node-import-cache";
 const DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const PYODIDE_DIST_DIR: &str = "pyodide-dist";
@@ -113,7 +113,6 @@ const DENIED_BUILTINS = new Set([
   'child_process',
   'cluster',
   'dgram',
-  'diagnostics_channel',
   'dns',
   'http',
   'http2',
@@ -754,10 +753,18 @@ function resolveBuiltinAsset(specifier, context) {
       return assetModuleDescriptor(
         path.join(ASSET_ROOT, 'builtins', 'fs-promises.mjs'),
       );
+    case 'async_hooks':
+      return assetModuleDescriptor(
+        path.join(ASSET_ROOT, 'builtins', 'async-hooks.mjs'),
+      );
     case 'child_process':
       return ALLOWED_BUILTINS.has('child_process')
         ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'child-process.mjs'))
         : null;
+    case 'diagnostics_channel':
+      return assetModuleDescriptor(
+        path.join(ASSET_ROOT, 'builtins', 'diagnostics-channel.mjs'),
+      );
     case 'net':
       return ALLOWED_BUILTINS.has('net')
         ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'net.mjs'))
@@ -1854,7 +1861,6 @@ const DENIED_BUILTINS = new Set([
   'child_process',
   'cluster',
   'dgram',
-  'diagnostics_channel',
   'dns',
   'http',
   'http2',
@@ -8192,6 +8198,11 @@ struct DeniedBuiltinAsset {
 
 const BUILTIN_ASSETS: &[BuiltinAsset] = &[
     BuiltinAsset {
+        name: "async-hooks",
+        module_specifier: "node:async_hooks",
+        init_counter_key: "__agentOsBuiltinAsyncHooksInitCount",
+    },
+    BuiltinAsset {
         name: "assert",
         module_specifier: "node:assert",
         init_counter_key: "__agentOsBuiltinAssertInitCount",
@@ -8245,6 +8256,11 @@ const BUILTIN_ASSETS: &[BuiltinAsset] = &[
         name: "dgram",
         module_specifier: "node:dgram",
         init_counter_key: "__agentOsBuiltinDgramInitCount",
+    },
+    BuiltinAsset {
+        name: "diagnostics-channel",
+        module_specifier: "node:diagnostics_channel",
+        init_counter_key: "__agentOsBuiltinDiagnosticsChannelInitCount",
     },
     BuiltinAsset {
         name: "dns",
@@ -8320,10 +8336,6 @@ const DENIED_BUILTIN_ASSETS: &[DeniedBuiltinAsset] = &[
     DeniedBuiltinAsset {
         name: "dgram",
         module_specifier: "node:dgram",
-    },
-    DeniedBuiltinAsset {
-        name: "diagnostics_channel",
-        module_specifier: "node:diagnostics_channel",
     },
     DeniedBuiltinAsset {
         name: "http",
@@ -8743,11 +8755,15 @@ fn render_register_source() -> String {
 
 fn render_builtin_asset_source(asset: &BuiltinAsset) -> String {
     match asset.name {
+        "async-hooks" => render_async_hooks_builtin_asset_source(asset.init_counter_key),
         "fs" => render_fs_builtin_asset_source(asset.init_counter_key),
         "fs-promises" => render_fs_promises_builtin_asset_source(asset.init_counter_key),
         "child-process" => render_child_process_builtin_asset_source(asset.init_counter_key),
         "net" => render_net_builtin_asset_source(asset.init_counter_key),
         "dgram" => render_dgram_builtin_asset_source(asset.init_counter_key),
+        "diagnostics-channel" => {
+            render_diagnostics_channel_builtin_asset_source(asset.init_counter_key)
+        }
         "dns" => render_dns_builtin_asset_source(asset.init_counter_key),
         "http" => render_http_builtin_asset_source(asset.init_counter_key),
         "http2" => render_http2_builtin_asset_source(asset.init_counter_key),
@@ -8916,6 +8932,91 @@ export const writeFile = mod.writeFile;\n"
     )
 }
 
+fn render_async_hooks_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+\n\
+class AsyncLocalStorage {{\n\
+  constructor() {{\n\
+    this._store = undefined;\n\
+  }}\n\
+  disable() {{\n\
+    this._store = undefined;\n\
+  }}\n\
+  enterWith(store) {{\n\
+    this._store = store;\n\
+  }}\n\
+  exit(callback, ...args) {{\n\
+    return callback(...args);\n\
+  }}\n\
+  getStore() {{\n\
+    return this._store;\n\
+  }}\n\
+  run(store, callback, ...args) {{\n\
+    const previous = this._store;\n\
+    this._store = store;\n\
+    try {{\n\
+      return callback(...args);\n\
+    }} finally {{\n\
+      this._store = previous;\n\
+    }}\n\
+  }}\n\
+}}\n\
+\n\
+class AsyncResource {{\n\
+  constructor(type = 'AgentOsAsyncResource') {{\n\
+    this.type = type;\n\
+  }}\n\
+  emitBefore() {{}}\n\
+  emitAfter() {{}}\n\
+  emitDestroy() {{}}\n\
+  asyncId() {{\n\
+    return 0;\n\
+  }}\n\
+  triggerAsyncId() {{\n\
+    return 0;\n\
+  }}\n\
+  runInAsyncScope(callback, thisArg, ...args) {{\n\
+    return callback.apply(thisArg, args);\n\
+  }}\n\
+}}\n\
+\n\
+function createHook() {{\n\
+  return {{\n\
+    enable() {{\n\
+      return this;\n\
+    }},\n\
+    disable() {{\n\
+      return this;\n\
+    }},\n\
+  }};\n\
+}}\n\
+\n\
+function executionAsyncId() {{\n\
+  return 0;\n\
+}}\n\
+\n\
+function triggerAsyncId() {{\n\
+  return 0;\n\
+}}\n\
+\n\
+const mod = {{\n\
+  AsyncLocalStorage,\n\
+  AsyncResource,\n\
+  createHook,\n\
+  executionAsyncId,\n\
+  triggerAsyncId,\n\
+}};\n\
+\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export {{ AsyncLocalStorage, AsyncResource, createHook, executionAsyncId, triggerAsyncId }};\n"
+    )
+}
+
 fn render_child_process_builtin_asset_source(init_counter_key: &str) -> String {
     let init_counter_key = format!("{init_counter_key:?}");
 
@@ -8993,6 +9094,40 @@ export const __agentOsInitCount = initCount;\n\
 export default mod;\n\
 export const Socket = mod.Socket;\n\
 export const createSocket = mod.createSocket;\n"
+    )
+}
+
+fn render_diagnostics_channel_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+\n\
+function channel(name = '') {{\n\
+  const channelName = String(name);\n\
+  return {{\n\
+    name: channelName,\n\
+    hasSubscribers: false,\n\
+    publish() {{}},\n\
+    subscribe() {{}},\n\
+    unsubscribe() {{}},\n\
+  }};\n\
+}}\n\
+\n\
+function hasSubscribers() {{\n\
+  return false;\n\
+}}\n\
+\n\
+function subscribe() {{}}\n\
+\n\
+function unsubscribe() {{}}\n\
+\n\
+const mod = {{ channel, hasSubscribers, subscribe, unsubscribe }};\n\
+\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export {{ channel, hasSubscribers, subscribe, unsubscribe }};\n"
     )
 }
 
@@ -10021,7 +10156,6 @@ export async function loadPyodide(options) {
             String::from("child_process"),
             String::from("cluster"),
             String::from("dgram"),
-            String::from("diagnostics_channel"),
             String::from("http"),
             String::from("http2"),
             String::from("https"),
@@ -10043,6 +10177,26 @@ export async function loadPyodide(options) {
 
         assert!(module_asset.contains("node:module is not available"));
         assert!(trace_events_asset.contains("ERR_ACCESS_DENIED"));
+    }
+
+    #[test]
+    fn ensure_materialized_writes_async_and_diagnostics_builtin_assets() {
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let builtins_root = import_cache.asset_root().join("builtins");
+        let async_hooks_asset = fs::read_to_string(builtins_root.join("async-hooks.mjs"))
+            .expect("read async_hooks builtin asset");
+        let diagnostics_asset =
+            fs::read_to_string(builtins_root.join("diagnostics-channel.mjs"))
+                .expect("read diagnostics_channel builtin asset");
+
+        assert!(async_hooks_asset.contains("class AsyncLocalStorage"));
+        assert!(async_hooks_asset.contains("function createHook()"));
+        assert!(diagnostics_asset.contains("function channel(name = '')"));
+        assert!(diagnostics_asset.contains("function hasSubscribers()"));
     }
 
     #[test]

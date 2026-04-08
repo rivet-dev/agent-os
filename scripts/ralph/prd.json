@@ -1163,7 +1163,7 @@
         "cargo test -p agent-os-execution -- --test-threads=1 passes"
       ],
       "priority": 105,
-      "passes": false,
+      "passes": true,
       "notes": "Security hardening. vm and worker_threads are escape vectors. inspector gives debug access. v8 currently returns {} which causes silent failures. diagnostics_channel and async_hooks need minimal stubs because undici and some packages import them \u2014 a full denial would break fetch()."
     },
     {
