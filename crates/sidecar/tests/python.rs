@@ -10,9 +10,10 @@ use agent_os_sidecar::protocol::{
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 use support::{
@@ -26,6 +27,68 @@ struct ProcessResult {
     stdout: String,
     stderr: String,
     exit_code: Option<i32>,
+}
+
+fn pyodide_asset_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("sidecar crate parent")
+        .join("execution")
+        .join("assets")
+        .join("pyodide")
+}
+
+fn spawn_static_file_server(root: PathBuf) -> (u16, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind static file listener");
+    listener
+        .set_nonblocking(true)
+        .expect("set nonblocking listener");
+    let port = listener.local_addr().expect("listener address").port();
+    let handle = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut served_any = false;
+        let mut idle_since: Option<Instant> = None;
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    served_any = true;
+                    idle_since = None;
+                    let mut request = [0_u8; 4096];
+                    let read = stream.read(&mut request).unwrap_or(0);
+                    let request_text = String::from_utf8_lossy(&request[..read]);
+                    let path = request_text
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    let relative = path.trim_start_matches('/');
+                    let file_path = root.join(relative);
+                    let (status_line, body) = match fs::read(&file_path) {
+                        Ok(body) => ("HTTP/1.1 200 OK", body),
+                        Err(_) => ("HTTP/1.1 404 Not Found", b"missing".to_vec()),
+                    };
+                    let response = format!(
+                        "{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.write_all(&body);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if served_any {
+                        match idle_since {
+                            Some(start) if start.elapsed() >= Duration::from_millis(500) => break,
+                            Some(_) => {}
+                            None => idle_since = Some(Instant::now()),
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (port, handle)
 }
 
 fn execute_inline_python(
@@ -688,7 +751,12 @@ print(json.dumps(result))
         "unexpected stderr from python security execution: {stderr}"
     );
 
-    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse python security JSON");
+    let json_line = stdout
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .expect("python security stdout line");
+    let parsed: Value = serde_json::from_str(json_line).expect("parse python security JSON");
     for key in [
         "js_process_env",
         "js_require",
@@ -877,7 +945,7 @@ with open("/workspace/from-kernel.txt", "r", encoding="utf-8") as handle:
 with open("/workspace/from-python.txt", "w", encoding="utf-8") as handle:
     handle.write("from python")
 
-print(json.dumps({
+print(json.dumps({{
     "original": original,
     "entries": sorted(os.listdir("/workspace")),
 }))
@@ -1676,6 +1744,143 @@ fn python_runtime_imports_bundled_pandas_without_network() {
     assert!(
         stdout.lines().any(|line| line.trim() == "2.3.3"),
         "expected pandas version in stdout, got: {stdout}"
+    );
+}
+
+#[test]
+fn python_runtime_supports_micropip_package_installation() {
+    assert_node_available();
+
+    let (port, server) = spawn_static_file_server(pyodide_asset_dir());
+    let mut sidecar = new_sidecar("python-micropip-install");
+    let cwd = temp_dir("python-micropip-install-cwd");
+    let connection_id = authenticate(&mut sidecar, "conn-python");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let vm_id = create_vm_with_metadata_and_permissions(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::Python,
+        &cwd,
+        BTreeMap::from([(
+            String::from("env.AGENT_OS_LOOPBACK_EXEMPT_PORTS"),
+            serde_json::to_string(&vec![port.to_string()]).expect("serialize exempt ports"),
+        )]),
+        PermissionsPolicy::allow_all(),
+    );
+
+    execute_inline_python_with_env(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-micropip-install",
+        &format!(
+            r#"
+import json
+import micropip
+
+await micropip.install("http://127.0.0.1:{port}/click-8.3.1-py3-none-any.whl")
+
+import click
+print(json.dumps({{
+    "version": click.__version__,
+    "command_name": click.Command("demo").name,
+}}))
+"#,
+        ),
+        BTreeMap::from([(
+            String::from("AGENT_OS_PYODIDE_PACKAGE_BASE_URL"),
+            format!("http://127.0.0.1:{port}/"),
+        )]),
+    );
+
+    let (stdout, stderr, exit_code) = collect_process_output_with_timeout(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-micropip-install",
+        Duration::from_secs(30),
+    );
+
+    let _ = server.join();
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    let json_line = stdout
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .expect("micropip stdout line");
+    let parsed: Value = serde_json::from_str(json_line).expect("parse micropip JSON");
+    assert_eq!(parsed["version"], Value::String(String::from("8.3.1")));
+    assert_eq!(parsed["command_name"], Value::String(String::from("demo")));
+}
+
+#[test]
+fn python_runtime_micropip_install_respects_network_permissions() {
+    assert_node_available();
+
+    let (port, server) = spawn_static_file_server(pyodide_asset_dir());
+    let mut sidecar = new_sidecar("python-micropip-network-denied");
+    let cwd = temp_dir("python-micropip-network-denied-cwd");
+    let connection_id = authenticate(&mut sidecar, "conn-python");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let vm_id = create_vm_with_metadata_and_permissions(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::Python,
+        &cwd,
+        BTreeMap::from([(
+            String::from("env.AGENT_OS_LOOPBACK_EXEMPT_PORTS"),
+            serde_json::to_string(&vec![port.to_string()]).expect("serialize exempt ports"),
+        )]),
+        PermissionsPolicy {
+            fs: PermissionsPolicy::allow_all().fs,
+            network: Some(PatternPermissionScope::Mode(PermissionMode::Deny)),
+            child_process: PermissionsPolicy::allow_all().child_process,
+            env: PermissionsPolicy::allow_all().env,
+        },
+    );
+
+    execute_inline_python_with_env(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-micropip-network-denied",
+        &format!(
+            r#"
+import micropip
+await micropip.install("http://127.0.0.1:{port}/click-8.3.1-py3-none-any.whl")
+"#,
+        ),
+        BTreeMap::from([(
+            String::from("AGENT_OS_PYODIDE_PACKAGE_BASE_URL"),
+            format!("http://127.0.0.1:{port}/"),
+        )]),
+    );
+
+    let (_stdout, stderr, exit_code) = collect_process_output_with_timeout(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-micropip-network-denied",
+        Duration::from_secs(30),
+    );
+
+    let _ = server.join();
+    assert_ne!(exit_code, 0);
+    assert!(
+        stderr.contains("permission")
+            || stderr.contains("denied")
+            || stderr.contains("EACCES"),
+        "expected micropip permission error, got: {stderr}"
     );
 }
 

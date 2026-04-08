@@ -35,6 +35,9 @@ const BUNDLED_PYTHON_DATEUTIL_WHL: &[u8] =
 const BUNDLED_PYTZ_WHL: &[u8] =
     include_bytes!("../assets/pyodide/pytz-2025.2-py2.py3-none-any.whl");
 const BUNDLED_SIX_WHL: &[u8] = include_bytes!("../assets/pyodide/six-1.17.0-py2.py3-none-any.whl");
+const BUNDLED_MICROPIP_WHL: &[u8] =
+    include_bytes!("../assets/pyodide/micropip-0.11.0-py3-none-any.whl");
+const BUNDLED_CLICK_WHL: &[u8] = include_bytes!("../assets/pyodide/click-8.3.1-py3-none-any.whl");
 const NODE_PYTHON_RUNNER_SOURCE: &str = include_str!("../assets/runners/python-runner.mjs");
 
 static CLEANED_NODE_IMPORT_CACHE_ROOTS: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
@@ -67,6 +70,14 @@ const BUNDLED_PYODIDE_PACKAGE_ASSETS: &[BundledPyodidePackageAsset] = &[
     BundledPyodidePackageAsset {
         file_name: "six-1.17.0-py2.py3-none-any.whl",
         bytes: BUNDLED_SIX_WHL,
+    },
+    BundledPyodidePackageAsset {
+        file_name: "micropip-0.11.0-py3-none-any.whl",
+        bytes: BUNDLED_MICROPIP_WHL,
+    },
+    BundledPyodidePackageAsset {
+        file_name: "click-8.3.1-py3-none-any.whl",
+        bytes: BUNDLED_CLICK_WHL,
     },
 ];
 const NODE_IMPORT_CACHE_LOADER_TEMPLATE: &str = r#"

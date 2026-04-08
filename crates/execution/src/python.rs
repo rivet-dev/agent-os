@@ -39,6 +39,7 @@ const NODE_ALLOWED_BUILTINS_ENV: &str = "AGENT_OS_ALLOWED_NODE_BUILTINS";
 const NODE_ALLOW_PROCESS_BINDINGS_ENV: &str = "AGENT_OS_ALLOW_PROCESS_BINDINGS";
 const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const PYODIDE_INDEX_URL_ENV: &str = "AGENT_OS_PYODIDE_INDEX_URL";
+const PYODIDE_PACKAGE_BASE_URL_ENV: &str = "AGENT_OS_PYODIDE_PACKAGE_BASE_URL";
 const PYTHON_CODE_ENV: &str = "AGENT_OS_PYTHON_CODE";
 const PYTHON_FILE_ENV: &str = "AGENT_OS_PYTHON_FILE";
 const PYTHON_PREWARM_ONLY_ENV: &str = "AGENT_OS_PYTHON_PREWARM_ONLY";
@@ -70,6 +71,7 @@ const RESERVED_PYTHON_ENV_KEYS: &[&str] = &[
     NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
     NODE_IMPORT_CACHE_PATH_ENV,
     PYODIDE_INDEX_URL_ENV,
+    PYODIDE_PACKAGE_BASE_URL_ENV,
     PYTHON_CODE_ENV,
     PYTHON_EXECUTION_TIMEOUT_MS_ENV,
     PYTHON_FILE_ENV,
@@ -1150,6 +1152,18 @@ fn create_node_child(
         .env(
             PYODIDE_INDEX_URL_ENV,
             resolved_pyodide_dist_path(&context.pyodide_dist_path, &request.cwd),
+        )
+        .env(
+            PYODIDE_PACKAGE_BASE_URL_ENV,
+            request
+                .env
+                .get(PYODIDE_PACKAGE_BASE_URL_ENV)
+                .cloned()
+                .unwrap_or_else(|| {
+                    resolved_pyodide_dist_path(&context.pyodide_dist_path, &request.cwd)
+                        .to_string_lossy()
+                        .into_owned()
+                }),
         )
         .env(NODE_IMPORT_CACHE_ASSET_ROOT_ENV, import_cache.asset_root())
         .env(NODE_IMPORT_CACHE_PATH_ENV, import_cache.cache_path())

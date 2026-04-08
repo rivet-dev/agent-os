@@ -1232,7 +1232,7 @@
         "Tests verify micropip installation and import of a third-party package"
       ],
       "priority": 119,
-      "passes": false,
+      "passes": true,
       "notes": "Currently Python packages are limited to preloaded numpy/pandas. micropip is Pyodide's package manager that can install pure-Python wheels. This requires network access through the kernel (US-063). Packages are installed into Pyodide's in-memory filesystem."
     },
     {
@@ -1421,6 +1421,23 @@
       "priority": 105,
       "passes": true,
       "notes": "Found in audit: fs.promises operations are currently sync RPC wrappers \u2014 they block the V8 isolate while waiting for the sidecar response. This means Promise.all with multiple fs calls runs them sequentially, not concurrently. For single-threaded agents this works, but any code using concurrent I/O patterns will be slower than expected or deadlock. The fix: use the async bridge path (ASYNC_BRIDGE_FNS) for fs.promises operations instead of syncPromise."
+    },
+    {
+      "id": "US-075",
+      "title": "Verify unmodified Pi CLI (pi-acp) works E2E via createSession('pi-cli')",
+      "description": "As a developer, I want to verify that the UNMODIFIED upstream Pi binary (pi --mode rpc via pi-acp) works inside the VM, not just our custom SDK adapter. This tests that real npm packages work without modification.",
+      "acceptanceCriteria": [
+        "createSession('pi-cli') boots the pi-acp adapter which spawns the real Pi CLI binary (pi --mode rpc) inside the VM",
+        "The Pi CLI binary runs UNMODIFIED \u2014 no patches, no esbuild, no bundling. It's loaded directly from node_modules/",
+        "Pi CLI receives a prompt, makes tool calls (write file, run bash), and returns a response via ACP JSON-RPC",
+        "Test uses @copilotkit/llmock with ANTHROPIC_API_KEY='mock-key' \u2014 no real API tokens",
+        "The test is separate from pi-headless.test.ts (which tests the SDK adapter) \u2014 this tests the CLI adapter",
+        "Test file: packages/core/tests/pi-cli-headless.test.ts",
+        "pnpm --dir packages/core exec vitest run tests/pi-cli-headless.test.ts passes"
+      ],
+      "priority": 99,
+      "passes": false,
+      "notes": "US-053 verified our custom SDK adapter (registry/agent/pi/src/adapter.ts) works. But that adapter uses createAgentSession() which is OUR wrapper. pi-cli uses pi-acp which spawns the REAL unmodified Pi CLI binary (pi --mode rpc). If pi-cli works, it proves that arbitrary npm packages with Node.js binaries work inside the VM without modification. This is the ultimate compatibility test. The existing pi-acp-adapter.test.ts only tests package projection, not actual E2E execution."
     }
   ]
 }

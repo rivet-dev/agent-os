@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ACCESS_DENIED_CODE = 'ERR_ACCESS_DENIED';
 const ASSET_ROOT_ENV = 'AGENT_OS_NODE_IMPORT_CACHE_ASSET_ROOT';
 const PYODIDE_INDEX_URL_ENV = 'AGENT_OS_PYODIDE_INDEX_URL';
+const PYODIDE_PACKAGE_BASE_URL_ENV = 'AGENT_OS_PYODIDE_PACKAGE_BASE_URL';
 const PYTHON_CODE_ENV = 'AGENT_OS_PYTHON_CODE';
 const PYTHON_FILE_ENV = 'AGENT_OS_PYTHON_FILE';
 const PYTHON_PREWARM_ONLY_ENV = 'AGENT_OS_PYTHON_PREWARM_ONLY';
@@ -110,6 +111,18 @@ function resolveIndexLocation(value) {
   };
 }
 
+function normalizeBaseUrl(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error('package base URL must not be empty');
+  }
+
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) {
+    return value.endsWith('/') ? value : `${value}/`;
+  }
+
+  return normalizeDirectoryPath(path.resolve(value));
+}
+
 function writeStream(stream, message) {
   if (message == null) {
     return;
@@ -125,6 +138,46 @@ function formatError(error) {
   }
 
   return String(error);
+}
+
+function normalizeFetchHeaders(headers) {
+  if (headers == null) {
+    return {};
+  }
+
+  if (headers instanceof Headers) {
+    return Object.fromEntries(headers.entries());
+  }
+
+  if (Array.isArray(headers)) {
+    return Object.fromEntries(headers);
+  }
+
+  return Object.fromEntries(Object.entries(headers).map(([key, value]) => [key, String(value)]));
+}
+
+async function normalizeFetchBody(body) {
+  if (body == null) {
+    return null;
+  }
+
+  if (typeof body === 'string') {
+    return Buffer.from(body).toString('base64');
+  }
+
+  if (ArrayBuffer.isView(body)) {
+    return Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString('base64');
+  }
+
+  if (body instanceof ArrayBuffer) {
+    return Buffer.from(body).toString('base64');
+  }
+
+  if (typeof Blob !== 'undefined' && body instanceof Blob) {
+    return Buffer.from(await body.arrayBuffer()).toString('base64');
+  }
+
+  throw new Error('unsupported fetch body type for Agent OS Python package loading');
 }
 
 function emitPythonStartupMetrics({
@@ -431,6 +484,15 @@ import builtins as _agent_os_builtins
 import sys as _agent_os_sys
 import types as _agent_os_types
 
+try:
+    import agent_os_internal_js as _agent_os_safe_js
+    import agent_os_internal_pyodide_js as _agent_os_safe_pyodide_js
+    import agent_os_internal_pyodide_js_api as _agent_os_safe_pyodide_js_api
+except Exception:
+    _agent_os_safe_js = None
+    _agent_os_safe_pyodide_js = None
+    _agent_os_safe_pyodide_js_api = None
+
 def _agent_os_raise_access_denied(module_name):
     raise RuntimeError(f"{module_name} is not available in the Agent OS guest Python runtime")
 
@@ -450,9 +512,21 @@ _agent_os_blocked_modules = {
     for _agent_os_module_name in ('js', 'pyodide_js')
 }
 
+_agent_os_safe_modules = {
+    "js": _agent_os_safe_js,
+    "pyodide_js": _agent_os_safe_pyodide_js,
+    "pyodide_js._api": _agent_os_safe_pyodide_js_api,
+}
+
 _agent_os_original_import = _agent_os_builtins.__import__
 
+def _agent_os_allow_internal_js(globals):
+    module_name = str((globals or {}).get("__name__", ""))
+    return module_name.startswith("micropip") or module_name.startswith("pyodide.http")
+
 def _agent_os_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name in _agent_os_safe_modules and _agent_os_safe_modules[name] is not None and _agent_os_allow_internal_js(globals):
+        return _agent_os_safe_modules[name]
     if name in _agent_os_blocked_modules:
         return _agent_os_blocked_modules[name]
     return _agent_os_original_import(name, globals, locals, fromlist, level)
@@ -769,7 +843,63 @@ function installPythonKernelRpcShims(pyodide) {
   pyodide.runPython(PYTHON_KERNEL_RPC_SHIMS_SOURCE);
 }
 
-function installPythonGuestPreloadHardening() {
+function installPythonMicropipCompat(pyodide) {
+  if (typeof pyodide?.registerJsModule !== 'function') {
+    return;
+  }
+
+  const abortSignalAny = (signals) => {
+    const values = Array.from(signals ?? []);
+    if (typeof AbortSignal?.any === 'function') {
+      return AbortSignal.any(values);
+    }
+
+    const controller = new AbortController();
+    for (const signal of values) {
+      if (!signal) {
+        continue;
+      }
+      if (signal.aborted) {
+        controller.abort(signal.reason);
+        return controller.signal;
+      }
+      signal.addEventListener?.(
+        'abort',
+        () => {
+          if (!controller.signal.aborted) {
+            controller.abort(signal.reason);
+          }
+        },
+        { once: true },
+      );
+    }
+    return controller.signal;
+  };
+
+  pyodide.registerJsModule('agent_os_internal_js', {
+    AbortController,
+    AbortSignal,
+    Object,
+    Request,
+    fetch: globalThis.fetch,
+  });
+  const pyodideApiCompat = {
+    abortSignalAny,
+    install: pyodide?._api?.install,
+    loadBinaryFile: pyodide?._api?.loadBinaryFile,
+    lockfile_info: pyodide?._api?.lockfile_info,
+    lockfile_packages: pyodide?._api?.lockfile_packages,
+  };
+  pyodide.registerJsModule('agent_os_internal_pyodide_js', {
+    loadedPackages: pyodide.loadedPackages,
+    loadPackage: pyodide.loadPackage?.bind(pyodide),
+    lockfileBaseUrl: pyodide?._api?.config?.packageBaseUrl ?? '',
+    _api: pyodideApiCompat,
+  });
+  pyodide.registerJsModule('agent_os_internal_pyodide_js_api', pyodideApiCompat);
+}
+
+function installPythonGuestPreloadHardening(bridge = null) {
   if (originalRequire) {
     hardenProperty(globalThis, 'require', () => {
       throw accessDenied('require');
@@ -777,13 +907,14 @@ function installPythonGuestPreloadHardening() {
   }
 
   if (originalFetch) {
-    const restrictedFetch = (resource, init) => {
+    const restrictedFetch = async (resource, init = {}) => {
+      const request = typeof Request !== 'undefined' && resource instanceof Request ? resource : null;
       const candidate =
         typeof resource === 'string'
           ? resource
           : resource instanceof URL
             ? resource.href
-            : resource?.url;
+            : request?.url;
 
       let url;
       try {
@@ -792,10 +923,28 @@ function installPythonGuestPreloadHardening() {
         throw accessDenied('network access');
       }
 
-      if (url.protocol !== 'data:') {
-        throw accessDenied(`network access to ${url.protocol}`);
+      if (url.protocol === 'data:' || url.protocol === 'file:') {
+        return originalFetch(resource, init);
       }
 
+      if ((url.protocol === 'http:' || url.protocol === 'https:') && bridge) {
+        const method = (init.method ?? request?.method ?? 'GET').toUpperCase();
+        const headers = normalizeFetchHeaders(init.headers ?? request?.headers);
+        const bodyBase64 = await normalizeFetchBody(init.body ?? null);
+        const payload = JSON.parse(
+          bridge.httpRequestSync(url.href, method, JSON.stringify(headers), bodyBase64),
+        );
+        const responseBody = Buffer.from(payload.bodyBase64 ?? '', 'base64');
+        return new Response(responseBody, {
+          status: payload.status,
+          statusText: payload.reason,
+          headers: payload.headers ?? {},
+        });
+      }
+
+      if (url.protocol !== 'data:' && url.protocol !== 'file:') {
+        throw accessDenied(`network access to ${url.protocol}`);
+      }
       return originalFetch(resource, init);
     };
 
@@ -1195,6 +1344,7 @@ let pythonVfsRpcBridge = null;
 try {
   const startupStarted = realPerformance.now();
   const { indexPath, indexUrl } = resolveIndexLocation(requiredEnv(PYODIDE_INDEX_URL_ENV));
+  const packageBaseUrl = normalizeBaseUrl(process.env[PYODIDE_PACKAGE_BASE_URL_ENV] ?? indexPath);
   const prewarmOnly = process.env[PYTHON_PREWARM_ONLY_ENV] === '1';
   const preloadPackages = parsePreloadPackages(process.env[PYTHON_PRELOAD_PACKAGES_ENV]);
   const lockFileContents = await readLockFileContents(indexUrl);
@@ -1205,7 +1355,8 @@ try {
     throw new Error(`pyodide.mjs at ${indexUrl} does not export loadPyodide()`);
   }
 
-  installPythonGuestPreloadHardening();
+  pythonVfsRpcBridge = installPythonVfsRpcBridge();
+  installPythonGuestPreloadHardening(pythonVfsRpcBridge);
   const loadPyodideStarted = realPerformance.now();
   const pyodide = await loadPyodide({
     indexURL: indexPath,
@@ -1229,14 +1380,24 @@ try {
     process.exitCode = 0;
   } else {
   installPythonStdin(pyodide);
-  pythonVfsRpcBridge = installPythonVfsRpcBridge();
   installPythonWorkspaceFs(pyodide, pythonVfsRpcBridge);
   installPythonGuestLoaderHooks();
-  if (preloadPackages.length > 0) {
-    const packageLoadStarted = realPerformance.now();
-    await pyodide.loadPackage(preloadPackages);
-    packageLoadMs = realPerformance.now() - packageLoadStarted;
+  const canLoadPackages = typeof pyodide?.loadPackage === 'function';
+  if (!canLoadPackages && preloadPackages.length > 0) {
+    throw new Error('Pyodide loadPackage() is required to preload Python packages');
   }
+  if (canLoadPackages) {
+    await pyodide.loadPackage(['micropip']);
+    if (preloadPackages.length > 0) {
+      const packageLoadStarted = realPerformance.now();
+      await pyodide.loadPackage(preloadPackages);
+      packageLoadMs = realPerformance.now() - packageLoadStarted;
+    }
+  }
+  if (pyodide?._api?.config) {
+    pyodide._api.config.packageBaseUrl = packageBaseUrl;
+  }
+  installPythonMicropipCompat(pyodide);
   installPythonKernelRpcShims(pyodide);
   installPythonGuestProcessHardening();
   installPythonGuestImportBlocklist(pyodide);

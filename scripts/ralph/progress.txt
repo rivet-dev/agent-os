@@ -29,6 +29,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Pyodide `micropip` support in `crates/execution/assets/runners/python-runner.mjs` must keep guest `js` / `pyodide_js` imports blocked for user code while exposing only a narrow internal compat module to `micropip` and `pyodide.http`; if the runner or bundled import-cache assets change, bump `NODE_IMPORT_CACHE_ASSET_VERSION` in `crates/execution/src/node_import_cache.rs` so stale `/tmp/agent-os-node-import-cache-*` materializations do not hide the update.
 - `fs.promises` bridge work needs separate async V8 globals plus matching `map_bridge_method()` and `ASYNC_BRIDGE_FNS` updates; wrapping `fs.*Sync` in `async` functions still serializes `Promise.all(...)` behind the first sidecar response.
 - `AbortSignal` support in `crates/execution/assets/v8-bridge.source.js` needs explicit static helper coverage (`abort`, `timeout`, `any`) even when a native constructor exists; preserving the constructor alone is not enough to guarantee fetch cancellation APIs survive bridge bootstrap.
 - `crates/v8-runtime/src/execution.rs` CJS-to-ESM shims should only evaluate `globalThis._requireFrom(...)` for `Object.keys(module.exports)` fallback when static export extraction finds zero names; doing runtime enumeration unconditionally adds avoidable work and can trigger guest module side effects before import time.
@@ -759,4 +760,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - `fs.promises` concurrency regressions are easiest to catch by withholding sidecar responses in a harness; if the guest only emits one request before the first reply, it is still hitting the sync bridge path
   - After changing bridge globals in `crates/v8-runtime/src/session.rs`, rebuild `agent-os-v8` before trusting sidecar integration failures; a stale binary can look like missing JS events instead of a registration bug
   - The async fs bridge can reuse the existing sidecar `fs.promises.*` handlers, so this class of fix only needs V8 registration plus runtime name mapping changes, not a new sidecar protocol surface
+---
+## 2026-04-08 16:05:42 PDT - US-064
+- Added bundled `micropip` support to the Pyodide runner, introduced a bridge-backed network fetch path for wheel downloads, threaded `AGENT_OS_PYODIDE_PACKAGE_BASE_URL` through Python execution, and kept guest `js` / `pyodide_js` escape hatches blocked by exposing a narrow internal compat surface only to `micropip` / `pyodide.http`
+- Added bundled wheel assets plus sidecar coverage for successful third-party installation/import and for network-permission denial during `micropip.install(...)`, then documented the package-base override and micropip constraints in the execution docs
+- Files changed: `crates/execution/{CLAUDE.md,assets/pyodide/README.md,assets/pyodide/click-8.3.1-py3-none-any.whl,assets/pyodide/micropip-0.11.0-py3-none-any.whl,assets/runners/python-runner.mjs,src/node_import_cache.rs,src/python.rs}`, `crates/sidecar/tests/python.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - `micropip` depends on `js` and `pyodide_js` internals, so Python hardening has to preserve the user-facing import block while giving only trusted runtime modules a scoped compat shim
+  - Explicit wheel URLs are the safest test shape for Python package-install permission checks because they guarantee the install path exercises bridge-backed network access instead of a local preload shortcut
+  - If `python-runner.mjs` or bundled Pyodide assets change and tests still behave like the old code, clear that by bumping `NODE_IMPORT_CACHE_ASSET_VERSION` before chasing nonexistent logic bugs
 ---
