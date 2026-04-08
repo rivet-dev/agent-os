@@ -1247,7 +1247,7 @@
         "cargo test -p agent-os-execution -- --test-threads=1 python_prewarm passes"
       ],
       "priority": 120,
-      "passes": false,
+      "passes": true,
       "notes": "Python prewarm already exists and works (2 tests pass). This story is about further optimization \u2014 sharing the Pyodide WASM module instance across multiple Python executions within the same VM, reducing subsequent startup from seconds to milliseconds. Current prewarm caches Node compile cache but reloads Pyodide each time."
     },
     {
@@ -1348,7 +1348,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
       ],
       "priority": 101,
-      "passes": false,
+      "passes": true,
       "notes": "DIRECTLY BLOCKED PI'S BASH TOOL. The WASM coreutils exist in registry/native/crates/commands/ (sh, grep, sed, awk, ls, cat, etc.) and are compiled to WASM. But the command resolver in the sidecar doesn't always find them. The issue is in command resolution (US-017 was supposed to fix this) \u2014 either PATH doesn't include the software install directory, or the resolver doesn't search WASM command paths. Check crates/sidecar/src/execution.rs command resolution logic and how software packages are mounted."
     },
     {

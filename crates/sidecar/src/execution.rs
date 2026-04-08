@@ -8,14 +8,14 @@ use crate::protocol::{
     BoundUdpSnapshotResponse, CloseStdinRequest, EventFrame, EventPayload, ExecuteRequest,
     FindBoundUdpRequest, FindListenerRequest, GetSignalStateRequest, GetZombieTimerCountRequest,
     GuestRuntimeKind, JavascriptChildProcessSpawnOptions, JavascriptChildProcessSpawnRequest,
-    JavascriptDgramBindRequest, JavascriptDgramCreateSocketRequest,
-    JavascriptDgramSendRequest, JavascriptDnsLookupRequest, JavascriptDnsResolveRequest,
-    JavascriptNetConnectRequest, JavascriptNetListenRequest,
-    KillProcessRequest, ListenerSnapshotResponse, OwnershipScope, ProcessExitedEvent,
-    ProcessKilledResponse, ProcessOutputEvent, ProcessStartedResponse, RequestFrame,
-    ResponsePayload, SidecarRequestPayload, SignalDispositionAction, SignalHandlerRegistration,
-    SignalStateResponse, SocketStateEntry, StdinClosedResponse, StdinWrittenResponse,
-    StreamChannel, WasmPermissionTier, WriteStdinRequest, ZombieTimerCountResponse,
+    JavascriptDgramBindRequest, JavascriptDgramCreateSocketRequest, JavascriptDgramSendRequest,
+    JavascriptDnsLookupRequest, JavascriptDnsResolveRequest, JavascriptNetConnectRequest,
+    JavascriptNetListenRequest, KillProcessRequest, ListenerSnapshotResponse, OwnershipScope,
+    ProcessExitedEvent, ProcessKilledResponse, ProcessOutputEvent, ProcessStartedResponse,
+    RequestFrame, ResponsePayload, SidecarRequestPayload, SignalDispositionAction,
+    SignalHandlerRegistration, SignalStateResponse, SocketStateEntry, StdinClosedResponse,
+    StdinWrittenResponse, StreamChannel, WasmPermissionTier, WriteStdinRequest,
+    ZombieTimerCountResponse,
 };
 use crate::service::{
     audit_fields, dirname, emit_security_audit_event, emit_structured_event, javascript_error,
@@ -50,9 +50,9 @@ use agent_os_execution::wasm::{
 use agent_os_execution::{
     CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
     JavascriptExecutionEvent, JavascriptSyncRpcRequest, NodeSignalDispositionAction,
-    NodeSignalHandlerRegistration, PythonExecutionEvent, PythonVfsRpcMethod,
-    PythonVfsRpcRequest, PythonVfsRpcResponsePayload, StartJavascriptExecutionRequest,
-    StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecutionEvent,
+    NodeSignalHandlerRegistration, PythonExecutionEvent, PythonVfsRpcMethod, PythonVfsRpcRequest,
+    PythonVfsRpcResponsePayload, StartJavascriptExecutionRequest, StartPythonExecutionRequest,
+    StartWasmExecutionRequest, WasmExecutionEvent,
     WasmPermissionTier as ExecutionWasmPermissionTier,
 };
 use agent_os_kernel::kernel::{KernelProcessHandle, SpawnOptions, VirtualProcessOptions};
@@ -2453,7 +2453,8 @@ where
                 }),
                 reject_unauthorized: None,
             };
-            let headers = parse_http_header_collection(&options.headers, "python httpRequest headers")?;
+            let headers =
+                parse_http_header_collection(&options.headers, "python httpRequest headers")?;
             let response = issue_outbound_http_request(&request_url, &options, &headers)?;
             let payload_json = response.as_str().ok_or_else(|| {
                 SidecarError::Execution(String::from(
@@ -2544,7 +2545,10 @@ where
                 });
             }
             Ok(PythonVfsRpcResponsePayload::DnsLookup {
-                addresses: addresses.into_iter().map(|address| address.to_string()).collect(),
+                addresses: addresses
+                    .into_iter()
+                    .map(|address| address.to_string())
+                    .collect(),
             })
         })();
 
@@ -2645,7 +2649,7 @@ where
         }
     }
 
-    fn resolve_javascript_child_process_execution(
+    pub(crate) fn resolve_javascript_child_process_execution(
         &self,
         vm: &VmState,
         parent_host_cwd: &Path,
@@ -3729,16 +3733,62 @@ fn resolve_guest_command_entrypoint(
     command: &str,
 ) -> Option<String> {
     if !is_path_like_specifier(command) {
-        return vm.command_guest_paths.get(command).cloned();
+        if let Some(entrypoint) = vm.command_guest_paths.get(command) {
+            return Some(entrypoint.clone());
+        }
+
+        for search_dir in guest_command_search_dirs(vm, guest_cwd) {
+            let candidate = normalize_path(&format!("{search_dir}/{command}"));
+            if let Some(entrypoint) = resolve_guest_command_path_candidate(vm, &candidate) {
+                return Some(entrypoint);
+            }
+        }
+
+        return None;
     }
 
     let normalized = resolve_path_like_guest_specifier(guest_cwd, command);
-    if normalized.starts_with("/bin/")
-        || normalized.starts_with("/usr/bin/")
-        || normalized.starts_with("/usr/local/bin/")
-        || normalized.starts_with("/__agentos/commands/")
+    resolve_guest_command_path_candidate(vm, &normalized).or(Some(normalized))
+}
+
+fn guest_command_search_dirs(vm: &VmState, guest_cwd: &str) -> Vec<String> {
+    let mut search_dirs = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    if let Some(path) = vm.guest_env.get("PATH") {
+        for segment in path.split(':') {
+            let trimmed = segment.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let normalized = if trimmed.starts_with('/') {
+                normalize_path(trimmed)
+            } else {
+                normalize_path(&format!("{guest_cwd}/{trimmed}"))
+            };
+            if seen.insert(normalized.clone()) {
+                search_dirs.push(normalized);
+            }
+        }
+    }
+
+    for fallback in ["/bin", "/usr/bin", "/usr/local/bin"] {
+        let normalized = String::from(fallback);
+        if seen.insert(normalized.clone()) {
+            search_dirs.push(normalized);
+        }
+    }
+
+    search_dirs
+}
+
+fn resolve_guest_command_path_candidate(vm: &VmState, candidate: &str) -> Option<String> {
+    if candidate.starts_with("/bin/")
+        || candidate.starts_with("/usr/bin/")
+        || candidate.starts_with("/usr/local/bin/")
+        || candidate.starts_with("/__agentos/commands/")
     {
-        if let Some(file_name) = Path::new(&normalized)
+        if let Some(file_name) = Path::new(candidate)
             .file_name()
             .and_then(|name| name.to_str())
         {
@@ -3748,7 +3798,10 @@ fn resolve_guest_command_entrypoint(
         }
     }
 
-    Some(normalized)
+    vm.kernel
+        .exists(candidate)
+        .ok()
+        .and_then(|exists| exists.then(|| normalize_path(candidate)))
 }
 
 fn resolve_host_entrypoint_within_vm_host_cwd(
@@ -5875,7 +5928,9 @@ fn build_client_tls_stream(
     Ok(tls_stream)
 }
 
-fn build_client_tls_config(options: &JavascriptTlsBridgeOptions) -> Result<ClientConfig, SidecarError> {
+fn build_client_tls_config(
+    options: &JavascriptTlsBridgeOptions,
+) -> Result<ClientConfig, SidecarError> {
     let provider = tls_provider();
     let builder = ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
@@ -5942,7 +5997,9 @@ fn build_server_tls_stream(
     Ok(tls_stream)
 }
 
-fn build_server_tls_config(options: &JavascriptTlsBridgeOptions) -> Result<ServerConfig, SidecarError> {
+fn build_server_tls_config(
+    options: &JavascriptTlsBridgeOptions,
+) -> Result<ServerConfig, SidecarError> {
     let certificates = tls_certificates_from_material(options.cert.as_ref().ok_or_else(|| {
         SidecarError::InvalidState(String::from("TLS server upgrade requires a certificate"))
     })?)?;
@@ -11839,17 +11896,17 @@ where
                 1,
                 "net.http2_server_respond request id",
             )?;
-            let response_json = javascript_sync_rpc_arg_str(
-                &request.args,
-                2,
-                "net.http2_server_respond payload",
-            )?;
+            let response_json =
+                javascript_sync_rpc_arg_str(&request.args, 2, "net.http2_server_respond payload")?;
             serde_json::from_str::<Value>(response_json).map_err(|error| {
                 SidecarError::Execution(format!(
                     "net.http2_server_respond payload must be valid JSON: {error}"
                 ))
             })?;
-            let Some(pending) = process.pending_http_requests.get_mut(&(server_id, request_id)) else {
+            let Some(pending) = process
+                .pending_http_requests
+                .get_mut(&(server_id, request_id))
+            else {
                 return Err(SidecarError::InvalidState(format!(
                     "unknown pending HTTP/2 request {request_id} for server {server_id}"
                 )));
@@ -12103,11 +12160,8 @@ where
             }
         }
         "net.http2_session_wait" => {
-            let session_id = javascript_sync_rpc_arg_u64(
-                &request.args,
-                0,
-                "net.http2_session_wait session id",
-            )?;
+            let session_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "net.http2_session_wait session id")?;
             dispatch_http2_wait_loop(process, session_id, false)
         }
         "net.http2_stream_respond" => {

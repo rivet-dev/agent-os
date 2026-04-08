@@ -17,7 +17,8 @@ use crate::protocol::{
     VmConfiguredResponse, VmCreatedResponse, VmDisposedResponse, VmLifecycleState,
 };
 use crate::service::{
-    audit_fields, emit_security_audit_event, kernel_error, plugin_error, root_filesystem_error,
+    audit_fields, emit_security_audit_event, kernel_error, normalize_path, plugin_error,
+    root_filesystem_error,
 };
 use crate::state::{
     BridgeError, VmConfiguration, VmDnsConfig, VmLayer, VmLayerStore, VmOverlayLayer, VmState,
@@ -41,7 +42,7 @@ use agent_os_kernel::root_fs::{
     RootFilesystemMode as KernelRootFilesystemMode, RootFilesystemSnapshot,
     ROOT_FILESYSTEM_SNAPSHOT_FORMAT,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
@@ -77,7 +78,7 @@ where
         self.bridge
             .set_vm_permissions(&vm_id, &permissions_policy)?;
         let permissions = bridge_permissions(self.bridge.clone(), &vm_id);
-        let guest_env = filter_env(&vm_id, &extract_guest_env(&payload.metadata), &permissions);
+        let mut guest_env = filter_env(&vm_id, &extract_guest_env(&payload.metadata), &permissions);
         let loaded_snapshot = self.bridge.with_mut(|bridge| {
             bridge.load_filesystem_state(LoadFilesystemStateRequest {
                 vm_id: vm_id.clone(),
@@ -96,6 +97,7 @@ where
             config,
         );
         let command_guest_paths = discover_command_guest_paths(&mut kernel);
+        refresh_guest_command_path_env(&mut guest_env, &command_guest_paths);
         let mut execution_commands = vec![
             String::from(JAVASCRIPT_COMMAND),
             String::from(PYTHON_COMMAND),
@@ -242,6 +244,7 @@ where
             },
         )?;
         vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);
+        refresh_guest_command_path_env(&mut vm.guest_env, &vm.command_guest_paths);
         let mut execution_commands = vec![
             String::from(JAVASCRIPT_COMMAND),
             String::from(PYTHON_COMMAND),
@@ -1130,6 +1133,48 @@ fn parse_vm_dns_nameserver(value: &str) -> Result<SocketAddr, SidecarError> {
         "invalid {} entry {value}; expected IP or IP:port",
         VM_DNS_SERVERS_METADATA_KEY
     )))
+}
+
+fn refresh_guest_command_path_env(
+    guest_env: &mut BTreeMap<String, String>,
+    command_guest_paths: &BTreeMap<String, String>,
+) {
+    let mut merged = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for guest_path in command_guest_paths.values() {
+        let Some(parent) = Path::new(guest_path)
+            .parent()
+            .and_then(|path| path.to_str())
+        else {
+            continue;
+        };
+        let normalized = normalize_path(parent);
+        if seen.insert(normalized.clone()) {
+            merged.push(normalized);
+        }
+    }
+
+    if let Some(existing_path) = guest_env.get("PATH") {
+        for segment in existing_path.split(':') {
+            let trimmed = segment.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let normalized = if trimmed.starts_with('/') {
+                normalize_path(trimmed)
+            } else {
+                trimmed.to_owned()
+            };
+            if seen.insert(normalized.clone()) {
+                merged.push(normalized);
+            }
+        }
+    }
+
+    if !merged.is_empty() {
+        guest_env.insert(String::from("PATH"), merged.join(":"));
+    }
 }
 
 pub(crate) fn normalize_dns_hostname(hostname: &str) -> Result<String, SidecarError> {

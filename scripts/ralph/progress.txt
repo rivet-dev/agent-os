@@ -29,6 +29,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- When sidecar-mounted WASM command roots under `/__agentos/commands/*` change, refresh both `vm.command_guest_paths` and `vm.guest_env["PATH"]`; nested guest `child_process.spawn("sh")` / `spawn("grep")` resolution depends on both surfaces staying aligned
 - Guest builtin policy has to stay aligned across `crates/execution/assets/polyfill-registry.json`, `crates/execution/src/javascript.rs` builtin normalization/_loadPolyfill handling, `crates/execution/assets/v8-bridge.source.js` `Module.builtinModules` plus `loadBuiltinModule()`, and `crates/execution/src/node_import_cache.rs`; if one layer lags, guests get `MODULE_NOT_FOUND` or host fallthrough instead of the intended deny/stub behavior
 - Guest CommonJS builtin behavior has one more alignment point: `createRequire()` in `crates/execution/assets/v8-bridge.source.js`. If its builtin guard diverges from `Module.builtinModules`/`loadBuiltinModule()`, `require()` can deny modules that `_requireFrom()` and ESM imports allow.
 - Guest `fs.watch` / `fs.watchFile` support should stay as guest-side polling in `crates/execution/assets/v8-bridge.source.js` until the kernel exposes a real notification primitive; keep sidecar coverage focused on observable events, not a new RPC surface
@@ -78,6 +79,17 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Bundled undici fetch depends on the aliased `node:stream` helpers understanding `web-streams-polyfill` `ReadableStream` instances; keep `finished()`, `isReadable()`, `isErrored()`, and `isDisturbed()` compatible in `crates/execution/assets/undici-shims/stream.js` or fetch will fail after the TCP response arrives
 - `crates/execution/tests/cjs_esm_interop.rs` should keep desired-behavior CJS/ESM gaps as explicit `#[ignore]` tests tied to the follow-up fix story instead of weakening assertions to current runtime behavior
 - Build the V8 stdlib-only builtin bundle from `crates/execution/assets/v8-bridge.source.js` via `packages/core/scripts/build-v8-bridge.mjs`, and keep the heavier assert/util/zlib payload in `v8-bridge-zlib.js` so `v8-bridge.js` stays under the 500KB cap
+
+## 2026-04-08 15:28:52 PDT - US-070
+- Fixed sidecar command resolution so guest child-process lookups search VM `PATH` entries and mounted `/__agentos/commands/*` roots instead of relying only on the precomputed command map, and refreshed guest `PATH` whenever command mounts are discovered or reconfigured
+- Added focused sidecar coverage that mounts fake WASM command roots, verifies `/__agentos/commands/0` is injected into guest `PATH`, resolves `sh`, `ls`, `cat`, `grep`, `echo`, and `sed` through nested JavaScript child-process resolution, and checks the missing-command failure stays explicit
+- Updated `crates/CLAUDE.md` with the command-map-plus-PATH rule for mounted WASM commands
+- Files changed: `crates/sidecar/{src/execution.rs,src/vm.rs,tests/service.rs}`, `crates/CLAUDE.md`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Sidecar command mounts are not fully wired by `vm.command_guest_paths` alone; nested child-process resolution also needs `vm.guest_env["PATH"]` updated to include each `/__agentos/commands/*` parent directory
+  - For sidecar-only command-resolution stories, use the included `service.rs` harness to assert `resolve_javascript_child_process_execution()` directly instead of executing placeholder WASM binaries end to end; that keeps the test focused on lookup semantics instead of unrelated runtime execution failures
+  - `cargo test -p agent-os-sidecar --test service command_resolution -- --test-threads=1` plus a focused regression test is the right scoped validation path here, and `cargo check -p agent-os-sidecar` catches compile issues without violating the repo guidance against bare sidecar package test runs
+---
 - Bootstrap globals added in `packages/core/scripts/build-v8-bridge.mjs` are only for early bundle initialization; if they include `URL` or `URLSearchParams`, mark them as bootstrap stubs and make `crates/execution/assets/v8-bridge.source.js` ignore or replace them once stdlib polyfills load
 - Low-level sidecar `net.write` test RPCs take raw bytes encoded as base64, not plain UTF-8 strings; direct service-test payloads need encoding even when the guest-facing JS API accepts normal strings
 - `crates/sidecar/src/vm.rs` must register the runtime-owned execution commands (`node`, `python`, `wasm`) during both `create_vm()` and `configure_vm()`; runtime-based `ExecuteRequest`s can run before any discovered `/__agentos/commands/*` entries are refreshed

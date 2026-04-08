@@ -4473,6 +4473,156 @@ ykAheWCsAteSEWVc0w==\n\
         }
 
         #[test]
+        fn javascript_child_process_searches_path_for_mounted_wasm_commands() {
+            let command_root = temp_dir("agent-os-sidecar-command-path-root");
+            for command in ["sh", "ls", "cat", "grep", "echo", "sed"] {
+                write_fixture(&command_root.join(command), b"placeholder");
+            }
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+
+            sidecar
+                .dispatch_blocking(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/__agentos/commands/0"),
+                            read_only: true,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("host_dir"),
+                                config: json!({
+                                    "hostPath": command_root,
+                                    "readOnly": true,
+                                }),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: None,
+                        module_access_cwd: None,
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: BTreeMap::new(),
+                        allowed_node_builtins: vec![String::from("child_process")],
+                        loopback_exempt_ports: Vec::new(),
+                    }),
+                ))
+                .expect("configure command-path mounts");
+
+            let vm = sidecar.vms.get(&vm_id).expect("configured vm");
+            let path = vm
+                .guest_env
+                .get("PATH")
+                .expect("configured PATH should exist");
+            assert!(
+                path.split(':')
+                    .any(|entry| entry == "/__agentos/commands/0"),
+                "PATH should include mounted command root: {path}"
+            );
+
+            for (command, request, expected_process_args) in [
+                (
+                    "sh",
+                    crate::protocol::JavascriptChildProcessSpawnRequest {
+                        command: String::from("sh"),
+                        args: vec![String::from("-c"), String::from("echo hello")],
+                        options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
+                    },
+                    vec![String::from("-c"), String::from("echo hello")],
+                ),
+                (
+                    "ls",
+                    crate::protocol::JavascriptChildProcessSpawnRequest {
+                        command: String::from("ls"),
+                        args: vec![String::from("/")],
+                        options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
+                    },
+                    vec![String::from("/")],
+                ),
+                (
+                    "cat",
+                    crate::protocol::JavascriptChildProcessSpawnRequest {
+                        command: String::from("cat"),
+                        args: vec![String::from("/tmp/file")],
+                        options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
+                    },
+                    vec![String::from("/tmp/file")],
+                ),
+                (
+                    "grep",
+                    crate::protocol::JavascriptChildProcessSpawnRequest {
+                        command: String::from("grep"),
+                        args: vec![String::from("pattern"), String::from("/tmp/file")],
+                        options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
+                    },
+                    vec![String::from("pattern"), String::from("/tmp/file")],
+                ),
+                (
+                    "echo",
+                    crate::protocol::JavascriptChildProcessSpawnRequest {
+                        command: String::from("echo"),
+                        args: vec![String::from("hello")],
+                        options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
+                    },
+                    vec![String::from("hello")],
+                ),
+                (
+                    "sed",
+                    crate::protocol::JavascriptChildProcessSpawnRequest {
+                        command: String::from("sed"),
+                        args: vec![String::from("s/a/b/"), String::from("/tmp/file")],
+                        options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
+                    },
+                    vec![String::from("s/a/b/"), String::from("/tmp/file")],
+                ),
+            ] {
+                let resolved = sidecar
+                    .resolve_javascript_child_process_execution(vm, &vm.host_cwd, &request)
+                    .unwrap_or_else(|error| panic!("failed to resolve {command}: {error}"));
+                assert_eq!(
+                    resolved.runtime,
+                    GuestRuntimeKind::WebAssembly,
+                    "{command} should resolve as a WASM command"
+                );
+                assert_eq!(
+                    resolved.process_args, expected_process_args,
+                    "{command} process args mismatch: {resolved:?}"
+                );
+                assert!(
+                    resolved.entrypoint.ends_with(&format!("/{command}")),
+                    "{command} entrypoint should end with /{command}: {}",
+                    resolved.entrypoint
+                );
+            }
+
+            let missing = sidecar.resolve_javascript_child_process_execution(
+                vm,
+                &vm.host_cwd,
+                &crate::protocol::JavascriptChildProcessSpawnRequest {
+                    command: String::from("definitely-not-a-command"),
+                    args: Vec::new(),
+                    options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
+                },
+            );
+            let error = missing.expect_err("missing command should fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("command not found: definitely-not-a-command"),
+                "missing command error should mention the command: {error}"
+            );
+        }
+
+        #[test]
         fn command_resolution_executes_javascript_path_command_with_sidecar_mappings() {
             let workspace = temp_dir("agent-os-sidecar-command-resolution-js");
             write_fixture(
@@ -8273,7 +8423,9 @@ console.log(JSON.stringify(summary));
             );
 
             let session_state: Value = serde_json::from_str(
-                connect_payload["state"].as_str().expect("session state payload"),
+                connect_payload["state"]
+                    .as_str()
+                    .expect("session state payload"),
             )
             .expect("parse secure session state");
             assert_eq!(session_state["encrypted"], json!(true));
@@ -8294,7 +8446,13 @@ console.log(JSON.stringify(summary));
             .expect("create vm");
             let cwd = temp_dir("agent-os-sidecar-http2-respond");
             write_fixture(&cwd.join("entry.mjs"), "");
-            start_fake_javascript_process(&mut sidecar, &vm_id, &cwd, "proc-js-http2-respond", "[]");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-http2-respond",
+                "[]",
+            );
 
             let response_json = String::from(
                 "{\"status\":200,\"headers\":[[\"content-type\",\"text/plain\"]],\"body\":\"c2VjdXJlLXBvbmc=\",\"bodyEncoding\":\"base64\"}",
