@@ -924,6 +924,26 @@ pub(crate) const ASYNC_BRIDGE_FNS: &[&str] = &[
     "_networkHttp2SessionWaitRaw",
     "_netSocketWaitConnectRaw",
     "_netServerCloseRaw",
+    // Filesystem promises (async)
+    "_fsReadFileAsync",
+    "_fsWriteFileAsync",
+    "_fsReadFileBinaryAsync",
+    "_fsWriteFileBinaryAsync",
+    "_fsReadDirAsync",
+    "_fsMkdirAsync",
+    "_fsRmdirAsync",
+    "_fsAccessAsync",
+    "_fsStatAsync",
+    "_fsUnlinkAsync",
+    "_fsRenameAsync",
+    "_fsChmodAsync",
+    "_fsChownAsync",
+    "_fsLinkAsync",
+    "_fsSymlinkAsync",
+    "_fsReadlinkAsync",
+    "_fsLstatAsync",
+    "_fsTruncateAsync",
+    "_fsUtimesAsync",
 ];
 
 /// Run the session event loop: dispatch incoming messages to V8.

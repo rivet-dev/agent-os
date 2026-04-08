@@ -3109,7 +3109,17 @@ var __bridge = (() => {
       rationale: "Host filesystem bridge reference."
     },
     {
+      name: "_fsReadFileAsync",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
       name: "_fsWriteFile",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
+      name: "_fsWriteFileAsync",
       classification: "hardened",
       rationale: "Host filesystem bridge reference."
     },
@@ -3119,7 +3129,17 @@ var __bridge = (() => {
       rationale: "Host filesystem bridge reference."
     },
     {
+      name: "_fsReadFileBinaryAsync",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
       name: "_fsWriteFileBinary",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
+      name: "_fsWriteFileBinaryAsync",
       classification: "hardened",
       rationale: "Host filesystem bridge reference."
     },
@@ -3129,7 +3149,17 @@ var __bridge = (() => {
       rationale: "Host filesystem bridge reference."
     },
     {
+      name: "_fsReadDirAsync",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
       name: "_fsMkdir",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
+      name: "_fsMkdirAsync",
       classification: "hardened",
       rationale: "Host filesystem bridge reference."
     },
@@ -3139,7 +3169,17 @@ var __bridge = (() => {
       rationale: "Host filesystem bridge reference."
     },
     {
+      name: "_fsRmdirAsync",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
       name: "_fsExists",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
+      name: "_fsAccessAsync",
       classification: "hardened",
       rationale: "Host filesystem bridge reference."
     },
@@ -3149,7 +3189,17 @@ var __bridge = (() => {
       rationale: "Host filesystem bridge reference."
     },
     {
+      name: "_fsStatAsync",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
       name: "_fsUnlink",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
+      name: "_fsUnlinkAsync",
       classification: "hardened",
       rationale: "Host filesystem bridge reference."
     },
@@ -3159,7 +3209,17 @@ var __bridge = (() => {
       rationale: "Host filesystem bridge reference."
     },
     {
+      name: "_fsRenameAsync",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
       name: "_fsChmod",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
+      name: "_fsChmodAsync",
       classification: "hardened",
       rationale: "Host filesystem bridge reference."
     },
@@ -3169,7 +3229,17 @@ var __bridge = (() => {
       rationale: "Host filesystem bridge reference."
     },
     {
+      name: "_fsChownAsync",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
       name: "_fsLink",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
+      name: "_fsLinkAsync",
       classification: "hardened",
       rationale: "Host filesystem bridge reference."
     },
@@ -3179,7 +3249,17 @@ var __bridge = (() => {
       rationale: "Host filesystem bridge reference."
     },
     {
+      name: "_fsSymlinkAsync",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
       name: "_fsReadlink",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
+      name: "_fsReadlinkAsync",
       classification: "hardened",
       rationale: "Host filesystem bridge reference."
     },
@@ -3189,12 +3269,27 @@ var __bridge = (() => {
       rationale: "Host filesystem bridge reference."
     },
     {
+      name: "_fsLstatAsync",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
       name: "_fsTruncate",
       classification: "hardened",
       rationale: "Host filesystem bridge reference."
     },
     {
+      name: "_fsTruncateAsync",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
       name: "_fsUtimes",
+      classification: "hardened",
+      rationale: "Host filesystem bridge reference."
+    },
+    {
+      name: "_fsUtimesAsync",
       classification: "hardened",
       rationale: "Host filesystem bridge reference."
     },
@@ -5947,6 +6042,20 @@ var __bridge = (() => {
       }
     };
   }
+  function createBridgeAsyncFacade(name) {
+    return {
+      apply(_thisArg, args) {
+        const fn = getBridgeSyncFn(name);
+        if (typeof fn === "function") {
+          return fn(...(args || []));
+        }
+        if (fn && typeof fn.apply === "function") {
+          return fn.apply(_thisArg, args);
+        }
+        return Promise.resolve(void 0);
+      }
+    };
+  }
   var _fs = {
     readFile: createBridgeSyncFacade("_fsReadFile"),
     writeFile: createBridgeSyncFacade("_fsWriteFile"),
@@ -5967,6 +6076,27 @@ var __bridge = (() => {
     lstat: createBridgeSyncFacade("_fsLstat"),
     truncate: createBridgeSyncFacade("_fsTruncate"),
     utimes: createBridgeSyncFacade("_fsUtimes")
+  };
+  var _fsAsync = {
+    readFile: createBridgeAsyncFacade("_fsReadFileAsync"),
+    writeFile: createBridgeAsyncFacade("_fsWriteFileAsync"),
+    readFileBinary: createBridgeAsyncFacade("_fsReadFileBinaryAsync"),
+    writeFileBinary: createBridgeAsyncFacade("_fsWriteFileBinaryAsync"),
+    readDir: createBridgeAsyncFacade("_fsReadDirAsync"),
+    mkdir: createBridgeAsyncFacade("_fsMkdirAsync"),
+    rmdir: createBridgeAsyncFacade("_fsRmdirAsync"),
+    stat: createBridgeAsyncFacade("_fsStatAsync"),
+    unlink: createBridgeAsyncFacade("_fsUnlinkAsync"),
+    rename: createBridgeAsyncFacade("_fsRenameAsync"),
+    chmod: createBridgeAsyncFacade("_fsChmodAsync"),
+    chown: createBridgeAsyncFacade("_fsChownAsync"),
+    link: createBridgeAsyncFacade("_fsLinkAsync"),
+    symlink: createBridgeAsyncFacade("_fsSymlinkAsync"),
+    readlink: createBridgeAsyncFacade("_fsReadlinkAsync"),
+    lstat: createBridgeAsyncFacade("_fsLstatAsync"),
+    truncate: createBridgeAsyncFacade("_fsTruncateAsync"),
+    utimes: createBridgeAsyncFacade("_fsUtimesAsync"),
+    access: createBridgeAsyncFacade("_fsAccessAsync")
   };
   var _fdOpen = createBridgeSyncFacade("fs.openSync");
   var _fdClose = createBridgeSyncFacade("fs.closeSync");
@@ -6023,6 +6153,170 @@ var __bridge = (() => {
       }
       return new Dirent(entry.name, entry.isDirectory, dirPath);
     });
+  }
+  async function fsReadFileAsync(path, options) {
+    validateEncodingOption(options);
+    const rawPath = typeof path === "number" ? _fdGetPath.applySync(void 0, [normalizeFdInteger(path)]) : normalizePathLike(path);
+    if (!rawPath) throw createFsError("EBADF", "EBADF: bad file descriptor", "read");
+    const pathStr = rawPath;
+    const encoding = typeof options === "string" ? options : options?.encoding;
+    try {
+      if (encoding) {
+        return await _fsAsync.readFile.apply(void 0, [pathStr, encoding]);
+      }
+      const base64Content = await _fsAsync.readFileBinary.apply(void 0, [pathStr]);
+      return import_buffer.Buffer.from(base64Content, "base64");
+    } catch (err) {
+      const errMsg = err?.message || String(err);
+      if (errMsg.includes("entry not found") || errMsg.includes("not found") || errMsg.includes("ENOENT") || errMsg.includes("no such file or directory")) {
+        throw createFsError(
+          "ENOENT",
+          `ENOENT: no such file or directory, open '${rawPath}'`,
+          "open",
+          rawPath
+        );
+      }
+      if (errMsg.includes("EACCES") || errMsg.includes("permission denied")) {
+        throw createFsError(
+          "EACCES",
+          `EACCES: permission denied, open '${rawPath}'`,
+          "open",
+          rawPath
+        );
+      }
+      throw err;
+    }
+  }
+  async function fsWriteFileAsync(file, data, options) {
+    validateEncodingOption(options);
+    const rawPath = typeof file === "number" ? _fdGetPath.applySync(void 0, [normalizeFdInteger(file)]) : normalizePathLike(file);
+    if (!rawPath) throw createFsError("EBADF", "EBADF: bad file descriptor", "write");
+    const pathStr = rawPath;
+    try {
+      if (typeof data === "string") {
+        return await _fsAsync.writeFile.apply(void 0, [pathStr, data]);
+      }
+      if (ArrayBuffer.isView(data)) {
+        const uint8 = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        return await _fsAsync.writeFileBinary.apply(void 0, [pathStr, encodeBridgeBytes(uint8)]);
+      }
+      return await _fsAsync.writeFile.apply(void 0, [pathStr, String(data)]);
+    } catch (err) {
+      throwNormalizedFsBridgeError(err, "write", rawPath);
+    }
+  }
+  async function fsReaddirAsync(path, options) {
+    validateEncodingOption(options);
+    const rawPath = normalizePathLike(path);
+    try {
+      const entriesJson = await _fsAsync.readDir.apply(void 0, [rawPath]);
+      return normalizeReaddirEntries(decodeBridgeJson(entriesJson), rawPath, options?.withFileTypes);
+    } catch (err) {
+      const errMsg = err?.message || String(err);
+      if (errMsg.includes("entry not found") || errMsg.includes("not found")) {
+        throw createFsError(
+          "ENOENT",
+          `ENOENT: no such file or directory, scandir '${rawPath}'`,
+          "scandir",
+          rawPath
+        );
+      }
+      throw err;
+    }
+  }
+  async function fsMkdirAsync(path, options) {
+    const rawPath = normalizePathLike(path);
+    const recursive = typeof options === "object" ? options?.recursive ?? false : false;
+    await _fsAsync.mkdir.apply(void 0, [rawPath, recursive]);
+    return recursive ? rawPath : void 0;
+  }
+  async function fsRmdirAsync(path) {
+    const pathStr = normalizePathLike(path);
+    await _fsAsync.rmdir.apply(void 0, [pathStr]);
+  }
+  async function fsStatAsync(path) {
+    const rawPath = normalizePathLike(path);
+    try {
+      const statJson = await _fsAsync.stat.apply(void 0, [rawPath]);
+      return new Stats(decodeBridgeJson(statJson));
+    } catch (err) {
+      const errMsg = err?.message || String(err);
+      if (errMsg.includes("entry not found") || errMsg.includes("not found") || errMsg.includes("ENOENT") || errMsg.includes("no such file or directory")) {
+        throw createFsError(
+          "ENOENT",
+          `ENOENT: no such file or directory, stat '${rawPath}'`,
+          "stat",
+          rawPath
+        );
+      }
+      throw err;
+    }
+  }
+  async function fsLstatAsync(path) {
+    const pathStr = normalizePathLike(path);
+    const statJson = await _fsAsync.lstat.apply(void 0, [pathStr]);
+    return new Stats(decodeBridgeJson(statJson));
+  }
+  async function fsUnlinkAsync(path) {
+    const pathStr = normalizePathLike(path);
+    await _fsAsync.unlink.apply(void 0, [pathStr]);
+  }
+  async function fsRenameAsync(oldPath, newPath) {
+    const oldPathStr = normalizePathLike(oldPath, "oldPath");
+    const newPathStr = normalizePathLike(newPath, "newPath");
+    await _fsAsync.rename.apply(void 0, [oldPathStr, newPathStr]);
+  }
+  async function fsAccessAsync(path) {
+    const pathStr = normalizePathLike(path);
+    try {
+      await _fsAsync.access.apply(void 0, [pathStr]);
+    } catch (err) {
+      const errMsg = err?.message || String(err);
+      if (errMsg.includes("entry not found") || errMsg.includes("not found") || errMsg.includes("ENOENT") || errMsg.includes("no such file or directory")) {
+        throw createFsError(
+          "ENOENT",
+          `ENOENT: no such file or directory, access '${pathStr}'`,
+          "access",
+          pathStr
+        );
+      }
+      throw err;
+    }
+  }
+  async function fsChmodAsync(path, mode) {
+    const pathStr = normalizePathLike(path);
+    const modeNum = normalizeModeValue(mode, "mode");
+    await _fsAsync.chmod.apply(void 0, [pathStr, modeNum]);
+  }
+  async function fsChownAsync(path, uid, gid) {
+    const pathStr = normalizePathLike(path);
+    const normalizedUid = normalizeChownId(uid, "uid");
+    const normalizedGid = normalizeChownId(gid, "gid");
+    await _fsAsync.chown.apply(void 0, [pathStr, normalizedUid, normalizedGid]);
+  }
+  async function fsLinkAsync(existingPath, newPath) {
+    const existingStr = normalizePathLike(existingPath, "existingPath");
+    const newStr = normalizePathLike(newPath, "newPath");
+    await _fsAsync.link.apply(void 0, [existingStr, newStr]);
+  }
+  async function fsSymlinkAsync(target, path) {
+    const targetStr = normalizePathLike(target, "target");
+    const pathStr = normalizePathLike(path);
+    await _fsAsync.symlink.apply(void 0, [targetStr, pathStr]);
+  }
+  async function fsReadlinkAsync(path) {
+    const pathStr = normalizePathLike(path);
+    return await _fsAsync.readlink.apply(void 0, [pathStr]);
+  }
+  async function fsTruncateAsync(path, len) {
+    const pathStr = normalizePathLike(path);
+    await _fsAsync.truncate.apply(void 0, [pathStr, len ?? 0]);
+  }
+  async function fsUtimesAsync(path, atime, mtime) {
+    const pathStr = normalizePathLike(path);
+    const atimeNum = normalizeTimestampToMs(atime, "atime");
+    const mtimeNum = normalizeTimestampToMs(mtime, "mtime");
+    await _fsAsync.utimes.apply(void 0, [pathStr, atimeNum, mtimeNum]);
   }
   var fs = {
     // Constants
@@ -7069,43 +7363,46 @@ var __bridge = (() => {
         if (path instanceof FileHandle) {
           return path.readFile(options);
         }
-        return fs.readFileSync(path, options);
+        return fsReadFileAsync(path, options);
       },
       async writeFile(path, data, options) {
         if (path instanceof FileHandle) {
           return path.writeFile(data, options);
         }
-        return fs.writeFileSync(path, data, options);
+        return fsWriteFileAsync(path, data, options);
       },
       async appendFile(path, data, options) {
         if (path instanceof FileHandle) {
           return path.appendFile(data, options);
         }
-        return fs.appendFileSync(path, data, options);
+        const existing = await fsReadFileAsync(path, "utf8").catch((err) => err?.code === "ENOENT" ? "" : Promise.reject(err));
+        const content = typeof data === "string" ? data : String(data);
+        await fsWriteFileAsync(path, existing + content, options);
       },
       async readdir(path, options) {
-        return fs.readdirSync(path, options);
+        return fsReaddirAsync(path, options);
       },
       async mkdir(path, options) {
-        return fs.mkdirSync(path, options);
+        return fsMkdirAsync(path, options);
       },
       async rmdir(path) {
-        return fs.rmdirSync(path);
+        return fsRmdirAsync(path);
       },
       async stat(path) {
-        return fs.statSync(path);
+        return fsStatAsync(path);
       },
       async lstat(path) {
-        return fs.lstatSync(path);
+        return fsLstatAsync(path);
       },
       async unlink(path) {
-        return fs.unlinkSync(path);
+        return fsUnlinkAsync(path);
       },
       async rename(oldPath, newPath) {
-        return fs.renameSync(oldPath, newPath);
+        return fsRenameAsync(oldPath, newPath);
       },
       async copyFile(src, dest) {
-        return fs.copyFileSync(src, dest);
+        const content = await fsReadFileAsync(src);
+        await fsWriteFileAsync(dest, content);
       },
       async cp(src, dest, options) {
         return fs.cpSync(src, dest, options);
@@ -7126,41 +7423,34 @@ var __bridge = (() => {
         return fs.globSync(pattern, _options);
       },
       async access(path) {
-        if (!fs.existsSync(path)) {
-          throw createFsError(
-            "ENOENT",
-            `ENOENT: no such file or directory, access '${path}'`,
-            "access",
-            path
-          );
-        }
+        return fsAccessAsync(path);
       },
       async rm(path, options) {
         return fs.rmSync(path, options);
       },
       async chmod(path, mode) {
-        return fs.chmodSync(path, mode);
+        return fsChmodAsync(path, mode);
       },
       async chown(path, uid, gid) {
-        return fs.chownSync(path, uid, gid);
+        return fsChownAsync(path, uid, gid);
       },
       async lchown(path, uid, gid) {
         return fs.lchownSync(path, uid, gid);
       },
       async link(existingPath, newPath) {
-        return fs.linkSync(existingPath, newPath);
+        return fsLinkAsync(existingPath, newPath);
       },
       async symlink(target, path) {
-        return fs.symlinkSync(target, path);
+        return fsSymlinkAsync(target, path);
       },
       async readlink(path) {
-        return fs.readlinkSync(path);
+        return fsReadlinkAsync(path);
       },
       async truncate(path, len) {
-        return fs.truncateSync(path, len);
+        return fsTruncateAsync(path, len);
       },
       async utimes(path, atime, mtime) {
-        return fs.utimesSync(path, atime, mtime);
+        return fsUtimesAsync(path, atime, mtime);
       },
       watch(path, options) {
         return createPromisesWatchIterator(path, options);

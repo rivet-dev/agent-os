@@ -1419,7 +1419,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
       ],
       "priority": 105,
-      "passes": false,
+      "passes": true,
       "notes": "Found in audit: fs.promises operations are currently sync RPC wrappers \u2014 they block the V8 isolate while waiting for the sidecar response. This means Promise.all with multiple fs calls runs them sequentially, not concurrently. For single-threaded agents this works, but any code using concurrent I/O patterns will be slower than expected or deadlock. The fix: use the async bridge path (ASYNC_BRIDGE_FNS) for fs.promises operations instead of syncPromise."
     }
   ]

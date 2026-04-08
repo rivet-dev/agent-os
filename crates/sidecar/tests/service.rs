@@ -5484,8 +5484,7 @@ console.log(
         }
 
         #[test]
-        #[ignore = "V8 sidecar JS fs/promises integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
-        fn javascript_fs_promises_rpc_requests_proxy_into_the_vm_kernel_filesystem() {
+        fn javascript_fs_promises_batch_requests_before_waiting_on_sidecar_responses() {
             assert_node_available();
 
             let mut sidecar = create_test_sidecar();
@@ -5504,9 +5503,18 @@ console.log(
                 r#"
 import fs from "node:fs/promises";
 
-await fs.writeFile("/rpc/note.txt", "hello from sidecar promises rpc");
-const contents = await fs.readFile("/rpc/note.txt", "utf8");
-console.log(contents);
+await Promise.all(
+  Array.from({ length: 10 }, (_, index) =>
+    fs.writeFile(`/rpc/write-${index}.txt`, `value-${index}`)
+  )
+);
+console.log("writes-complete");
+const contents = await Promise.all(
+  Array.from({ length: 10 }, (_, index) =>
+    fs.readFile(`/rpc/write-${index}.txt`, "utf8")
+  )
+);
+console.log(JSON.stringify(contents));
 await new Promise(() => {});
 "#,
             );
@@ -5564,8 +5572,12 @@ await new Promise(() => {});
                 );
             }
 
+            let mut saw_write_batch = false;
+            let mut saw_read_batch = false;
             let mut saw_stdout = false;
-            for _ in 0..4 {
+            let mut pending_requests = Vec::new();
+
+            for _ in 0..40 {
                 let event = {
                     let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
                     let process = vm
@@ -5575,36 +5587,96 @@ await new Promise(() => {});
                     process
                         .execution
                         .poll_event_blocking(Duration::from_secs(5))
-                        .expect("poll javascript promises rpc event")
-                        .expect("javascript promises rpc event")
+                        .expect("poll javascript promises event")
+                        .expect("javascript promises event")
                 };
 
-                if let ActiveExecutionEvent::Stdout(chunk) = &event {
-                    let stdout = String::from_utf8(chunk.clone()).expect("stdout utf8");
-                    if stdout.contains("hello from sidecar promises rpc") {
-                        saw_stdout = true;
-                        break;
+                match event {
+                    ActiveExecutionEvent::JavascriptSyncRpcRequest(request) => {
+                        pending_requests.push(request);
+
+                        let expected_method = if !saw_write_batch {
+                            "fs.promises.writeFile"
+                        } else if !saw_read_batch {
+                            "fs.promises.readFile"
+                        } else {
+                            panic!("received unexpected extra fs.promises request batch");
+                        };
+
+                        if pending_requests.len() == 10 {
+                            assert!(
+                                pending_requests
+                                    .iter()
+                                    .all(|request| request.method == expected_method),
+                                "expected batched {expected_method} requests, got {:?}",
+                                pending_requests
+                                    .iter()
+                                    .map(|request| request.method.as_str())
+                                    .collect::<Vec<_>>()
+                            );
+
+                            for request in pending_requests.drain(..) {
+                                sidecar
+                                    .handle_execution_event(
+                                        &vm_id,
+                                        "proc-js-promises",
+                                        ActiveExecutionEvent::JavascriptSyncRpcRequest(request),
+                                    )
+                                    .expect("handle batched javascript promises rpc event");
+                            }
+
+                            if !saw_write_batch {
+                                saw_write_batch = true;
+                            } else {
+                                saw_read_batch = true;
+                            }
+                        }
+                    }
+                    ActiveExecutionEvent::Stdout(chunk) => {
+                        let stdout = String::from_utf8(chunk).expect("stdout utf8");
+                        if stdout.contains(r#"["value-0","value-1","value-2","value-3","value-4","value-5","value-6","value-7","value-8","value-9"]"#) {
+                            saw_stdout = true;
+                            break;
+                        }
+                    }
+                    other => {
+                        let _ = sidecar
+                            .handle_execution_event(&vm_id, "proc-js-promises", other)
+                            .expect("handle javascript promises side event");
                     }
                 }
-
-                sidecar
-                    .handle_execution_event(&vm_id, "proc-js-promises", event)
-                    .expect("handle javascript promises rpc event");
             }
 
             let content = {
                 let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
-                String::from_utf8(
-                    vm.kernel
-                        .read_file("/rpc/note.txt")
-                        .expect("read bridged file from kernel"),
-                )
-                .expect("utf8 file contents")
+                (0..10)
+                    .map(|index| {
+                        String::from_utf8(
+                            vm.kernel
+                                .read_file(&format!("/rpc/write-{index}.txt"))
+                                .expect("read bridged file from kernel"),
+                        )
+                        .expect("utf8 file contents")
+                    })
+                    .collect::<Vec<_>>()
             };
-            assert_eq!(content, "hello from sidecar promises rpc");
+            assert_eq!(
+                content,
+                (0..10)
+                    .map(|index| format!("value-{index}"))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                saw_write_batch,
+                "expected Promise.all(writeFile) to issue a full batch before the first response"
+            );
+            assert!(
+                saw_read_batch,
+                "expected Promise.all(readFile) to issue a full batch before the first response"
+            );
             assert!(
                 saw_stdout,
-                "expected guest stdout after fs.promises round-trip"
+                "expected guest stdout after concurrent fs.promises round-trip"
             );
 
             let process = {

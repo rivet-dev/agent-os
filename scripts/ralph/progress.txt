@@ -29,6 +29,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- `fs.promises` bridge work needs separate async V8 globals plus matching `map_bridge_method()` and `ASYNC_BRIDGE_FNS` updates; wrapping `fs.*Sync` in `async` functions still serializes `Promise.all(...)` behind the first sidecar response.
 - `AbortSignal` support in `crates/execution/assets/v8-bridge.source.js` needs explicit static helper coverage (`abort`, `timeout`, `any`) even when a native constructor exists; preserving the constructor alone is not enough to guarantee fetch cancellation APIs survive bridge bootstrap.
 - `crates/v8-runtime/src/execution.rs` CJS-to-ESM shims should only evaluate `globalThis._requireFrom(...)` for `Object.keys(module.exports)` fallback when static export extraction finds zero names; doing runtime enumeration unconditionally adds avoidable work and can trigger guest module side effects before import time.
 - Guest CommonJS `require.resolve()` behavior in `crates/execution/assets/v8-bridge.source.js` has two entrypoints to keep aligned: `createRequire()` and the per-module `require` created in `_compile()`. If only one gets `resolve.paths()` or builtin-path updates, packages behave differently depending on which `require` they received.
@@ -749,4 +750,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - `AbortSignal` static helpers can be missing even when `AbortController`/`AbortSignal` instances already work, so bridge tests need to probe the static API surface separately from basic `signal.aborted` behavior
   - After editing `crates/execution/assets/v8-bridge.source.js`, regenerate `crates/execution/assets/v8-bridge.js` and rebuild `agent-os-v8` before trusting V8 execution or sidecar integration results
   - Sidecar fetch-abort assertions should key off rejected promises plus guest signal state, not undici-specific enumerable error fields like `.code`, which can vary across cancellation paths
+---
+## 2026-04-08 15:50:39 PDT - US-074
+- Moved `fs.promises` path-based operations onto dedicated async bridge globals so concurrent `readFile` and `writeFile` calls no longer block behind syncPromise RPCs, then regenerated the bundled `v8-bridge.js`
+- Added sidecar coverage that batches unresolved `Promise.all(...)` filesystem requests and verifies the guest emits ten `fs.promises.writeFile` calls and then ten `fs.promises.readFile` calls before the first sidecar response
+- Files changed: `crates/execution/{CLAUDE.md,assets/v8-bridge.source.js,assets/v8-bridge.js,src/v8_runtime.rs}`, `crates/v8-runtime/src/session.rs`, `crates/sidecar/tests/service.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - `fs.promises` concurrency regressions are easiest to catch by withholding sidecar responses in a harness; if the guest only emits one request before the first reply, it is still hitting the sync bridge path
+  - After changing bridge globals in `crates/v8-runtime/src/session.rs`, rebuild `agent-os-v8` before trusting sidecar integration failures; a stale binary can look like missing JS events instead of a registration bug
+  - The async fs bridge can reuse the existing sidecar `fs.promises.*` handlers, so this class of fix only needs V8 registration plus runtime name mapping changes, not a new sidecar protocol surface
 ---
