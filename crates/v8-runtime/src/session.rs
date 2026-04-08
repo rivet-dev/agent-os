@@ -280,14 +280,35 @@ fn session_thread(
     #[cfg_attr(test, allow(unused_variables))] shared_call_id: SharedCallIdCounter,
     #[cfg_attr(test, allow(unused_variables))] snapshot_cache: Arc<SnapshotCache>,
 ) {
-    // Acquire concurrency slot (blocks if at capacity)
-    {
+    // Acquire concurrency slot, but keep polling the session channel so a queued
+    // session can still shut down cleanly before it ever gets a slot.
+    let mut deferred_commands = VecDeque::new();
+    let acquired_slot = {
         let (lock, cvar) = &*slot_control;
         let mut count = lock.lock().unwrap();
-        while *count >= max_concurrency {
-            count = cvar.wait(count).unwrap();
+        loop {
+            if *count < max_concurrency {
+                *count += 1;
+                break true;
+            }
+
+            let (next_count, _) = cvar
+                .wait_timeout(count, std::time::Duration::from_millis(50))
+                .unwrap();
+            count = next_count;
+
+            match rx.try_recv() {
+                Ok(SessionCommand::Shutdown) | Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    break false;
+                }
+                Ok(command) => deferred_commands.push_back(command),
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+            }
         }
-        *count += 1;
+    };
+
+    if !acquired_slot {
+        return;
     }
 
     // Isolate creation is deferred to first Execute (when bridge code is known
@@ -330,7 +351,13 @@ fn session_thread(
 
     // Process commands until shutdown or channel close
     loop {
-        match rx.recv() {
+        let next_command = if let Some(command) = deferred_commands.pop_front() {
+            Ok(command)
+        } else {
+            rx.recv()
+        };
+
+        match next_command {
             Ok(SessionCommand::Shutdown) | Err(_) => break,
             Ok(SessionCommand::Message(_msg)) => {
                 #[cfg(not(test))]

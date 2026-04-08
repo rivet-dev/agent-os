@@ -913,7 +913,7 @@
         "CI passes on the current branch"
       ],
       "priority": 58,
-      "passes": false,
+      "passes": true,
       "notes": "Operational. crates/v8-runtime/ uses v8 = '130' (rusty_v8) which takes ~5 minutes to build from source. CI should cache the built binary and the rusty_v8 build artifacts. Check if there's an existing CI workflow (.github/workflows/) to extend rather than creating a new one."
     },
     {

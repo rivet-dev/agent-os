@@ -108,3 +108,4 @@ pnpm lint         # biome check
 ```
 
 - When changing V8 bridge registration or snapshot bootstrap code under `crates/v8-runtime/`, rebuild `agent-os-v8` before rerunning sidecar V8 integration tests. `cargo test -p agent-os-sidecar` can reuse an older `target/debug/agent-os-v8` binary.
+- The `crates/v8-runtime` snapshot test (`snapshot::tests::snapshot_consolidated_tests`) currently has to run in isolation: use `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main suite and `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately until the shared test binary teardown SIGSEGV is fixed.

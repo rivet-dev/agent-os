@@ -29,6 +29,8 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Queued `crates/v8-runtime` sessions must keep polling their control channel before acquiring a concurrency slot; otherwise `destroy_session()` can deadlock when the max-concurrency queue is full
+- The `crates/v8-runtime` snapshot suite currently has to run in isolation: keep `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main unit-test binary and run `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately
 - Pi SDK E2E tests should configure llmock in both places: write the Anthropic provider override to `~/.pi/agent/models.json` inside the VM and pass `ANTHROPIC_BASE_URL` in the session env, because ACP-driven tool turns can still consult the env-configured base URL
 - Guest `stream/promises.pipeline()` shims must attach `finished()` before calling `end()` on the destination; otherwise fast in-memory sinks can emit `finish`/`close` before the listener exists and hang the Promise
 - Treat `crates/bridge/bridge-contract.json` as the canonical host-bridge inventory and `crates/execution/assets/polyfill-registry.json` as the canonical `_loadPolyfill` inventory; when bridge globals or runtime-loadable builtins change, update those files together with `crates/v8-runtime/src/session.rs` and `crates/execution/src/javascript.rs`
@@ -78,6 +80,17 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Bridge-backed host filesystem adapters must translate missing `stat`/`lstat` results to `ENOENT`; generic `EIO` breaks create-on-write flows on `js_bridge` mounts
 - Rust allows splitting impl blocks across modules — struct definition in state.rs, method impls in service.rs
 - NativeSidecar<B> fields are `pub(crate)` so impl blocks in vm.rs (and future domain modules) can access them
+
+## 2026-04-08 14:14:33 PDT - US-047
+- Extended `.github/workflows/ci.yml` to install Rust, cache `target` plus `~/.cargo/.rusty_v8`, build `agent-os-v8-runtime`, run the main `agent-os-v8-runtime` suite, run the ignored snapshot suite in isolation, and run the full `agent-os-execution` V8-facing test suite
+- Fixed two issues the new CI coverage exposed: `crates/bridge/bridge-contract.json` was missing `_processKill`/`_processSignalState`, and queued V8 session threads in `crates/v8-runtime/src/session.rs` could deadlock on destroy while waiting for a concurrency slot
+- Recorded the isolated snapshot-test workflow in the repo root `AGENTS.md`/`CLAUDE.md`, and marked the in-binary snapshot suite ignored so the aggregated `cargo test -p agent-os-v8-runtime -- --test-threads=1` command stays green while the teardown SIGSEGV remains isolated
+- Files changed: `.github/workflows/ci.yml`, `CLAUDE.md`, `crates/bridge/bridge-contract.json`, `crates/v8-runtime/src/{session.rs,snapshot.rs}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - The formal bridge inventory test in `crates/v8-runtime/src/session.rs` is only as good as `crates/bridge/bridge-contract.json`; when new V8 globals land, update the contract file in the same change or CI will fail immediately
+  - `destroy_session()` has to work for sessions that are still queued behind `max_concurrency`, so slot-wait code must keep servicing `Shutdown` and preserve any early session messages until the slot is acquired
+  - The V8 snapshot test is functionally green but still crashes the shared unit-test binary on teardown when mixed with other V8 suites, so CI should keep that coverage in a dedicated `--exact --ignored` invocation until the harness-level SIGSEGV is fixed
+---
 - Cross-module method calls require `pub(crate)` visibility on the called method (e.g., vm.rs calling service.rs helper methods)
 - Shared free functions (kernel_error, audit_fields, emit_security_audit_event, etc.) are `pub(crate)` in service.rs and imported by domain modules
 - MountPluginContext<B> is `pub(crate)` with `pub(crate)` fields so vm.rs reconcile_mounts can construct it
