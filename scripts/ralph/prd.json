@@ -1384,7 +1384,7 @@
         "cargo test -p agent-os-execution --test cjs_esm_interop -- --test-threads=1 passes"
       ],
       "priority": 103,
-      "passes": false,
+      "passes": true,
       "notes": "Found in audit: extract_cjs_export_names() only scans for exports.X = and Object.defineProperty patterns. Misses Object.assign, spread, computed properties. When extraction fails, named ESM imports return undefined silently. The fix is runtime fallback: if static extraction finds nothing, evaluate the module and enumerate Object.keys(module.exports). This is how Node.js handles CJS-to-ESM interop."
     },
     {

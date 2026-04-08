@@ -29,6 +29,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- `crates/v8-runtime/src/execution.rs` CJS-to-ESM shims should only evaluate `globalThis._requireFrom(...)` for `Object.keys(module.exports)` fallback when static export extraction finds zero names; doing runtime enumeration unconditionally adds avoidable work and can trigger guest module side effects before import time.
 - Guest CommonJS `require.resolve()` behavior in `crates/execution/assets/v8-bridge.source.js` has two entrypoints to keep aligned: `createRequire()` and the per-module `require` created in `_compile()`. If only one gets `resolve.paths()` or builtin-path updates, packages behave differently depending on which `require` they received.
 - When sidecar-mounted WASM command roots under `/__agentos/commands/*` change, refresh both `vm.command_guest_paths` and `vm.guest_env["PATH"]`; nested guest `child_process.spawn("sh")` / `spawn("grep")` resolution depends on both surfaces staying aligned
 - Guest builtin policy has to stay aligned across `crates/execution/assets/polyfill-registry.json`, `crates/execution/src/javascript.rs` builtin normalization/_loadPolyfill handling, `crates/execution/assets/v8-bridge.source.js` `Module.builtinModules` plus `loadBuiltinModule()`, and `crates/execution/src/node_import_cache.rs`; if one layer lags, guests get `MODULE_NOT_FOUND` or host fallthrough instead of the intended deny/stub behavior
@@ -38,6 +39,16 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Queued `crates/v8-runtime` sessions must keep polling their control channel before acquiring a concurrency slot; otherwise `destroy_session()` can deadlock when the max-concurrency queue is full
 - The `crates/v8-runtime` snapshot suite currently has to run in isolation: keep `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main unit-test binary and run `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately
 - Pi SDK E2E tests should configure llmock in both places: write the Anthropic provider override to `~/.pi/agent/models.json` inside the VM and pass `ANTHROPIC_BASE_URL` in the session env, because ACP-driven tool turns can still consult the env-configured base URL
+
+## 2026-04-08 15:35:49 PDT - US-072
+- Tightened CJS-to-ESM shim generation so runtime export enumeration only runs as a fallback when static extraction finds zero names, and only for non-null object exports
+- Added focused interop coverage for named ESM imports from `Object.assign(module.exports, ...)`, `Object.create(...descriptors)`, and `module.exports = require(...)` re-export patterns
+- Files changed: `crates/v8-runtime/src/execution.rs`, `crates/execution/tests/cjs_esm_interop.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - CJS shim fallback logic should stay lazy: static extraction handles the cheap/common `exports.foo` and `Object.defineProperty(...)` cases, and runtime `Object.keys()` enumeration is the expensive escape hatch for dynamic export shapes
+  - The best place to lock CJS/ESM parity is `crates/execution/tests/cjs_esm_interop.rs`; add new edge cases there instead of weakening existing assertions when another export pattern breaks
+  - Runtime fallback should reject `null`, `undefined`, and primitive `module.exports` values before calling `Object.keys()`, otherwise non-object defaults can distort named import behavior
+---
 - Guest `stream/promises.pipeline()` shims must attach `finished()` before calling `end()` on the destination; otherwise fast in-memory sinks can emit `finish`/`close` before the listener exists and hang the Promise
 - Treat `crates/bridge/bridge-contract.json` as the canonical host-bridge inventory and `crates/execution/assets/polyfill-registry.json` as the canonical `_loadPolyfill` inventory; when bridge globals or runtime-loadable builtins change, update those files together with `crates/v8-runtime/src/session.rs` and `crates/execution/src/javascript.rs`
 - Guest-side CommonJS helpers in `crates/execution/assets/v8-bridge.source.js` must pass explicit `"require"` mode into `_resolveModule`; otherwise dual packages resolve the import branch and `require()` can try to execute ESM as CommonJS

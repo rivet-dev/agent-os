@@ -316,7 +316,7 @@ console.log(JSON.stringify({ alpha: dep.alpha, beta, defaultBeta: dep.beta }));
 }
 
 #[test]
-fn runtime_object_assign_module_exports_still_exposes_the_default_export_shape() {
+fn runtime_object_assign_module_exports_exposes_named_esm_imports_via_runtime_fallback() {
     let fixture = Fixture::new();
     fixture.write(
         "dep.cjs",
@@ -327,13 +327,16 @@ Object.assign(module.exports, { answer: 42, label: "ok" });
     fixture.write(
         "entry.mjs",
         r#"
-import dep from "./dep.cjs";
-console.log(JSON.stringify(dep));
+import dep, { answer, label } from "./dep.cjs";
+console.log(JSON.stringify({ answer, label, defaultAnswer: dep.answer }));
 "#,
     );
 
     let output = run_guest_json(&fixture, "./entry.mjs");
-    assert_eq!(output, json!({ "answer": 42, "label": "ok" }));
+    assert_eq!(
+        output,
+        json!({ "answer": 42, "label": "ok", "defaultAnswer": 42 })
+    );
 }
 
 #[test]
@@ -356,6 +359,69 @@ console.log(JSON.stringify(dep));
 
     let output = run_guest_json(&fixture, "./entry.mjs");
     assert_eq!(output, json!({ "alpha": 1, "beta": 2 }));
+}
+
+#[test]
+fn runtime_object_create_descriptor_exports_expose_named_esm_imports_via_runtime_fallback() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "dep.cjs",
+        r#"
+const proto = { inherited: 99 };
+module.exports = Object.create(proto, {
+  x: { value: 1, enumerable: true },
+  hidden: { value: 2, enumerable: false }
+});
+"#,
+    );
+    fixture.write(
+        "entry.mjs",
+        r#"
+import dep, { x } from "./dep.cjs";
+console.log(JSON.stringify({
+  x,
+  defaultX: dep.x,
+  inherited: dep.inherited,
+  hasHidden: Object.prototype.hasOwnProperty.call(dep, "hidden")
+}));
+"#,
+    );
+
+    let output = run_guest_json(&fixture, "./entry.mjs");
+    assert_eq!(
+        output,
+        json!({ "x": 1, "defaultX": 1, "inherited": 99, "hasHidden": true })
+    );
+}
+
+#[test]
+fn runtime_cjs_reexport_preserves_named_esm_imports_via_runtime_fallback() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "other.cjs",
+        r#"
+Object.assign(module.exports, { alpha: 1, beta: 2 });
+"#,
+    );
+    fixture.write(
+        "dep.cjs",
+        r#"
+module.exports = require("./other.cjs");
+"#,
+    );
+    fixture.write(
+        "entry.mjs",
+        r#"
+import dep, { alpha, beta } from "./dep.cjs";
+console.log(JSON.stringify({ alpha, beta, defaultAlpha: dep.alpha }));
+"#,
+    );
+
+    let output = run_guest_json(&fixture, "./entry.mjs");
+    assert_eq!(
+        output,
+        json!({ "alpha": 1, "beta": 2, "defaultAlpha": 1 })
+    );
 }
 
 #[test]

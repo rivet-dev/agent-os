@@ -5281,7 +5281,9 @@ fn build_cjs_esm_shim(
     let mut names = extract_cjs_export_names(raw_source)
         .into_iter()
         .collect::<HashSet<_>>();
-    names.extend(extract_runtime_cjs_export_names(scope, resolved_path));
+    if names.is_empty() {
+        names.extend(extract_runtime_cjs_export_names(scope, resolved_path));
+    }
 
     let mut exports = names.into_iter().collect::<Vec<_>>();
     exports.sort();
@@ -5333,6 +5335,9 @@ fn extract_runtime_cjs_export_names(
         Some(value) => value,
         None => return Vec::new(),
     };
+    if required_module.is_null_or_undefined() || !required_module.is_object() {
+        return Vec::new();
+    }
 
     let object_key = match v8::String::new(tc, "Object") {
         Some(key) => key,
