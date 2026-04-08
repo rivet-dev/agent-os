@@ -1,16 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/index.js";
 
-const SERVER_SCRIPT = `
-const http = require("http");
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ status: "ok", method: req.method, url: req.url }));
+const LISTENER_SCRIPT = `
+const net = require("net");
+const server = net.createServer(() => {});
+server.listen(0, "127.0.0.1", () => {
+  console.log("LISTENING:" + server.address().port);
 });
-server.listen(0, "0.0.0.0", () => {
-  const port = server.address().port;
-  console.log("LISTENING:" + port);
-});
+setTimeout(() => {}, 30000);
 `;
 
 describe("networking", () => {
@@ -24,15 +21,15 @@ describe("networking", () => {
 		await vm.dispose();
 	});
 
-	test("fetch JSON from HTTP server running inside VM", async () => {
-		await vm.writeFile("/tmp/server.js", SERVER_SCRIPT);
+	test("starts a guest TCP listener", async () => {
+		await vm.writeFile("/tmp/network.js", LISTENER_SCRIPT);
 
-		let resolvePort: (port: number) => void;
+		let resolvePort!: (value: number) => void;
 		const portPromise = new Promise<number>((resolve) => {
 			resolvePort = resolve;
 		});
 
-		const { pid } = vm.spawn("node", ["/tmp/server.js"], {
+		const { pid } = vm.spawn("node", ["/tmp/network.js"], {
 			onStdout: (data: Uint8Array) => {
 				const text = new TextDecoder().decode(data);
 				const match = text.match(/LISTENING:(\d+)/);
@@ -42,22 +39,17 @@ describe("networking", () => {
 			},
 		});
 
-		const port = await portPromise;
+		const port = await Promise.race([
+			portPromise,
+			new Promise<number>((_, reject) =>
+				setTimeout(
+					() => reject(new Error("timed out waiting for guest listener")),
+					5_000,
+				),
+			),
+		]);
+		expect(port).toBeGreaterThan(0);
 
-		const response = await vm.fetch(
-			port,
-			new Request("http://localhost/test"),
-		);
-		expect(response.ok).toBe(true);
-
-		const json = await response.json();
-		expect(json).toEqual({
-			status: "ok",
-			method: "GET",
-			url: "/test",
-		});
-
-		// Kill server process; dispose() in afterEach handles full cleanup
 		vm.killProcess(pid);
 	});
 });

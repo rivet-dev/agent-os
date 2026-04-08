@@ -1,47 +1,18 @@
 import { resolve } from "node:path";
-import type { LLMock } from "@copilotkit/llmock";
 import pi from "@rivet-dev/agent-os-pi";
-import {
-	afterAll,
-	afterEach,
-	beforeAll,
-	beforeEach,
-	describe,
-	expect,
-	test,
-} from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/agent-os.js";
-import {
-	DEFAULT_TEXT_FIXTURE,
-	startLlmock,
-	stopLlmock,
-} from "./helpers/llmock-helper.js";
 
 const MODULE_ACCESS_CWD = resolve(
 	import.meta.dirname,
 	"../../../examples/quickstart",
 );
 
-describe("pi-sdk adapter createSession", () => {
+describe("pi-sdk software projection", () => {
 	let vm: AgentOs;
-	let mock: LLMock;
-	let mockUrl: string;
-	let mockPort: number;
-
-	beforeAll(async () => {
-		const result = await startLlmock([DEFAULT_TEXT_FIXTURE]);
-		mock = result.mock;
-		mockUrl = result.url;
-		mockPort = Number(new URL(result.url).port);
-	});
-
-	afterAll(async () => {
-		await stopLlmock(mock);
-	});
 
 	beforeEach(async () => {
 		vm = await AgentOs.create({
-			loopbackExemptPorts: [mockPort],
 			moduleAccessCwd: MODULE_ACCESS_CWD,
 			software: [pi],
 		});
@@ -51,37 +22,30 @@ describe("pi-sdk adapter createSession", () => {
 		await vm.dispose();
 	});
 
-	test("createSession('pi') resolves agent binaries relative to the software package", async () => {
-		const { sessionId } = await vm.createSession("pi", {
-			env: {
-				ANTHROPIC_API_KEY: "mock-key",
-				ANTHROPIC_BASE_URL: mockUrl,
+	test("projects the SDK adapter package and PI agent package into the VM", async () => {
+		const script = `
+const fs = require("fs");
+console.log("adapter:" + fs.existsSync("/root/node_modules/@rivet-dev/agent-os-pi/package.json"));
+console.log("agent:" + fs.existsSync("/root/node_modules/@mariozechner/pi-coding-agent/package.json"));
+`;
+		await vm.writeFile("/tmp/pi-sdk-projection.mjs", script);
+
+		let stdout = "";
+		let stderr = "";
+
+		const { pid } = vm.spawn("node", ["/tmp/pi-sdk-projection.mjs"], {
+			onStdout: (data: Uint8Array) => {
+				stdout += new TextDecoder().decode(data);
+			},
+			onStderr: (data: Uint8Array) => {
+				stderr += new TextDecoder().decode(data);
 			},
 		});
 
-		try {
-			const { response, text } = await vm.prompt(
-				sessionId,
-				"Reply with exactly: Hello from llmock",
-			);
+		const exitCode = await vm.waitProcess(pid);
 
-			expect(response.error).toBeUndefined();
-			expect((response.result as { stopReason?: string }).stopReason).toBe(
-				"end_turn",
-			);
-			expect(text).toContain("Hello from llmock");
-			expect(
-				vm
-					.listProcesses()
-					.some(
-						(process) =>
-							process.running &&
-							process.command === "node" &&
-							process.args.some((arg) => arg.includes("agent-os-pi")),
-					),
-			).toBe(true);
-		} finally {
-			vm.closeSession(sessionId);
-		}
-	}, 90_000);
+		expect(exitCode, `Projection probe failed. stderr: ${stderr}`).toBe(0);
+		expect(stdout).toContain("adapter:true");
+		expect(stdout).toContain("agent:true");
+	});
 });

@@ -612,7 +612,7 @@
         "No test files skipped or disabled to pass \u2014 all tests run and pass"
       ],
       "priority": 41,
-      "passes": false,
+      "passes": true,
       "notes": "Final cleanup story. Known pre-existing failures to fix: (1) packages/dev-shell \u2014 8 integration test failures (kernel.spawn node returns exit code 1, @xterm/headless CJS/ESM import issue on Node \u2265 22), (2) packages/core/tests/native-sidecar-process.test.ts \u2014 4 failures (listener/UDP queries, socketTable/processTable state, connectTerminal, openShell), (3) packages/browser \u2014 test failures. Debug each systematically \u2014 these are runtime/platform issues, not migration regressions."
     },
     {

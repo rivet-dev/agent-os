@@ -1,18 +1,18 @@
 use crate::common::{encode_json_string, frozen_time_ms, stable_hash64};
 use crate::node_import_cache::{
-    NODE_IMPORT_CACHE_ASSET_ROOT_ENV, NodeImportCache, NodeImportCacheCleanup,
+    NodeImportCache, NodeImportCacheCleanup, NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
 };
 use crate::node_process::{
-    ExportedChildFds, LinePrefixFilter, NodeControlMessage, NodeSignalHandlerRegistration,
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
     encode_json_string_array, env_builtin_enabled, harden_node_command, node_binary,
     node_resolution_read_paths, resolve_path_like_specifier, spawn_node_control_reader,
-    spawn_stream_reader, spawn_waiter,
+    spawn_stream_reader, spawn_waiter, ExportedChildFds, LinePrefixFilter, NodeControlMessage,
+    NodeSignalHandlerRegistration,
 };
 use crate::runtime_support::{
+    configure_compile_cache, env_flag_enabled, import_cache_root, sandbox_root, warmup_marker_path,
     NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
-    NODE_SANDBOX_ROOT_ENV, configure_compile_cache, env_flag_enabled, import_cache_root,
-    sandbox_root, warmup_marker_path,
+    NODE_SANDBOX_ROOT_ENV,
 };
 use crate::v8_host::{V8RuntimeHost, V8SessionHandle};
 use crate::v8_ipc::BinaryFrame;
@@ -21,7 +21,7 @@ use getrandom::getrandom;
 use nix::fcntl::OFlag;
 use nix::unistd::pipe2;
 use serde::Deserialize;
-use serde_json::{Value, from_str, json};
+use serde_json::{from_str, json, Value};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -31,13 +31,13 @@ use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{
-    Arc, Mutex,
     mpsc::{self, Receiver, SyncSender, TrySendError},
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{
-    UnboundedReceiver, error::TryRecvError as TokioTryRecvError, unbounded_channel,
+    error::TryRecvError as TokioTryRecvError, unbounded_channel, UnboundedReceiver,
 };
 use tokio::time;
 
@@ -345,6 +345,25 @@ fn timer_delay_ms(value: Option<&Value>) -> u64 {
 }
 
 impl GuestPathTranslator {
+    fn is_known_host_path(&self, host_path: &Path) -> bool {
+        if host_path.starts_with(&self.implicit_host_cwd) {
+            return true;
+        }
+
+        if let Some(sandbox_root) = &self.sandbox_root {
+            if host_path.starts_with(sandbox_root) {
+                return true;
+            }
+        }
+
+        self.mappings.iter().any(|mapping| {
+            host_path.starts_with(&mapping.host_path)
+                || fs::canonicalize(&mapping.host_path)
+                    .map(|real_path| host_path.starts_with(real_path))
+                    .unwrap_or(false)
+        })
+    }
+
     fn from_request(request: &StartJavascriptExecutionRequest) -> Self {
         let implicit_guest_cwd = request
             .env
@@ -404,6 +423,9 @@ impl GuestPathTranslator {
 
         let path = Path::new(entrypoint);
         if path.is_absolute() {
+            if self.is_known_host_path(path) {
+                return path.to_path_buf();
+            }
             self.guest_to_host(entrypoint)
                 .unwrap_or_else(|| path.to_path_buf())
         } else {
@@ -493,7 +515,11 @@ impl GuestPathTranslator {
         }
 
         let path = PathBuf::from(&normalized);
-        if path.is_absolute() { Some(path) } else { None }
+        if path.is_absolute() {
+            Some(path)
+        } else {
+            None
+        }
     }
 
     fn canonical_guest_path(&self, guest_path: &str) -> Option<String> {
@@ -784,6 +810,10 @@ impl JavascriptExecution {
 
     pub fn child_pid(&self) -> u32 {
         self.child_pid
+    }
+
+    pub fn uses_shared_v8_runtime(&self) -> bool {
+        self.v8_session.is_some()
     }
 
     pub fn write_stdin(&mut self, chunk: &[u8]) -> Result<(), JavascriptExecutionError> {
@@ -1145,10 +1175,9 @@ impl JavascriptExecutionEngine {
             .chain(std::iter::once(guest_entrypoint.clone()))
             .chain(request.argv.iter().skip(1).cloned())
             .collect::<Vec<_>>();
-        let use_module_mode =
-            request.inline_code.is_none() && host_entrypoint_uses_module_mode(&host_entrypoint);
+        let use_module_mode = host_entrypoint_uses_module_mode(&host_entrypoint);
         let user_code = if let Some(inline_code) = request.inline_code.clone() {
-            inline_code
+            strip_javascript_hashbang(&inline_code)
         } else if use_module_mode {
             strip_javascript_hashbang(&fs::read_to_string(&host_entrypoint).map_err(|error| {
                 JavascriptExecutionError::PrepareImportCache(std::io::Error::new(
@@ -1201,7 +1230,7 @@ impl JavascriptExecutionEngine {
 
         Ok(JavascriptExecution {
             execution_id,
-            child_pid: 0, // V8 isolate has no host PID
+            child_pid: v8_host.child_pid(),
             stdin: None,
             events: RefCell::new(events),
             pending_sync_rpc,
@@ -1690,8 +1719,8 @@ fn stable_compile_cache_namespace_hash() -> u64 {
     )
 }
 
-fn create_javascript_sync_rpc_channels()
--> Result<JavascriptSyncRpcChannels, JavascriptExecutionError> {
+fn create_javascript_sync_rpc_channels(
+) -> Result<JavascriptSyncRpcChannels, JavascriptExecutionError> {
     let fd_reservations = (0..64)
         .map(|_| File::open("/dev/null"))
         .collect::<Result<Vec<_>, _>>()
@@ -2066,7 +2095,27 @@ fn spawn_v8_event_bridge(
                 BinaryFrame::ExecutionResult {
                     exit_code, error, ..
                 } => {
-                    if let Some(err) = &error {
+                    let resolved_exit_code = error
+                        .as_ref()
+                        .and_then(|err| {
+                            if err.error_type == "ProcessExitError"
+                                || err.message.starts_with("process.exit(")
+                            {
+                                parse_process_exit_code_message(&err.message)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(exit_code);
+                    let should_emit_error = if let Some(err) = &error {
+                        !(resolved_exit_code == 0
+                            && (err.error_type == "ProcessExitError"
+                                || err.message.starts_with("process.exit(")))
+                    } else {
+                        false
+                    };
+                    if should_emit_error {
+                        let err = error.as_ref().expect("checked above");
                         let error_msg = if err.stack.is_empty() {
                             format!("{}: {}\n", err.error_type, err.message)
                         } else {
@@ -2075,7 +2124,7 @@ fn spawn_v8_event_bridge(
                         let _ =
                             sender.send(JavascriptExecutionEvent::Stderr(error_msg.into_bytes()));
                     }
-                    Some(JavascriptExecutionEvent::Exited(exit_code))
+                    Some(JavascriptExecutionEvent::Exited(resolved_exit_code))
                 }
                 BinaryFrame::StreamCallback { .. } => None,
                 _ => None,
@@ -2414,7 +2463,15 @@ impl LocalBridgeState {
         }
 
         let host_path = self.translator.guest_to_host(path)?;
-        fs::read_to_string(host_path).ok()
+        let source = fs::read_to_string(host_path).ok()?;
+        Some(if matches!(
+            Path::new(path).extension().and_then(|ext| ext.to_str()),
+            Some("js" | "mjs" | "cjs")
+        ) {
+            strip_javascript_hashbang(&source)
+        } else {
+            source
+        })
     }
 
     fn resolve_package_imports(
@@ -2470,11 +2527,13 @@ impl LocalBridgeState {
             dir = dirname_guest_path(&dir);
         }
 
-        self.resolve_package_entry_from_dir(
-            &join_guest_path("/node_modules", package_name),
-            subpath,
-            mode,
-        )
+        ["/root/node_modules", "/node_modules"].into_iter().find_map(|root| {
+            self.resolve_package_entry_from_dir(
+                &join_guest_path(root, package_name),
+                subpath,
+                mode,
+            )
+        })
     }
 
     fn resolve_package_entry_from_dir(
@@ -2636,6 +2695,11 @@ fn strip_javascript_hashbang(source: &str) -> String {
     }
 }
 
+fn parse_process_exit_code_message(message: &str) -> Option<i32> {
+    let code = message.strip_prefix("process.exit(")?.strip_suffix(')')?;
+    code.parse::<i32>().ok()
+}
+
 fn dirname_guest_path(path: &str) -> String {
     let normalized = normalize_guest_path(path);
     if normalized == "/" {
@@ -2656,10 +2720,43 @@ fn dirname_guest_path(path: &str) -> String {
 fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
     let bare = specifier.trim_start_matches("node:");
     match bare {
-        "assert" | "child_process" | "crypto" | "dgram" | "dns" | "events" | "fs"
-        | "fs/promises" | "http" | "http2" | "https" | "module" | "net" | "os" | "path"
-        | "process" | "readline" | "sqlite" | "stream" | "stream/promises" | "stream/web"
-        | "string_decoder" | "tls" | "tty" | "url" | "util" | "zlib" => {
+        "assert"
+        | "async_hooks"
+        | "buffer"
+        | "child_process"
+        | "crypto"
+        | "dgram"
+        | "diagnostics_channel"
+        | "dns"
+        | "events"
+        | "fs"
+        | "fs/promises"
+        | "http"
+        | "http2"
+        | "https"
+        | "module"
+        | "net"
+        | "os"
+        | "path"
+        | "path/posix"
+        | "path/win32"
+        | "perf_hooks"
+        | "process"
+        | "readline"
+        | "sqlite"
+        | "stream"
+        | "stream/consumers"
+        | "stream/promises"
+        | "stream/web"
+        | "string_decoder"
+        | "tls"
+        | "timers/promises"
+        | "tty"
+        | "url"
+        | "util"
+        | "v8"
+        | "worker_threads"
+        | "zlib" => {
             Some(format!("node:{bare}"))
         }
         _ => None,
@@ -3448,6 +3545,48 @@ export default { StringDecoder };
         );
     }
 
+    if module_name == "v8" {
+        return String::from(
+            r#"function getHeapStatistics() {
+  return {
+    total_heap_size: 0,
+    total_heap_size_executable: 0,
+    total_physical_size: 0,
+    total_available_size: 0,
+    used_heap_size: 0,
+    heap_size_limit: 0,
+    malloced_memory: 0,
+    peak_malloced_memory: 0,
+    does_zap_garbage: 0,
+    number_of_native_contexts: 0,
+    number_of_detached_contexts: 0,
+    total_global_handles_size: 0,
+    used_global_handles_size: 0,
+    external_memory: 0,
+  };
+}
+
+function getHeapSpaceStatistics() {
+  return [];
+}
+
+function getHeapSnapshot() {
+  return Readable.fromWeb(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(Buffer.from("{}"));
+        controller.close();
+      },
+    }),
+  );
+}
+
+export { getHeapSnapshot, getHeapSpaceStatistics, getHeapStatistics };
+export default { getHeapSnapshot, getHeapSpaceStatistics, getHeapStatistics };
+"#,
+        );
+    }
+
     let default_target = format!(
         "globalThis._requireFrom({}, \"/\")",
         serde_json::to_string(&format!("node:{module_name}"))
@@ -3469,6 +3608,14 @@ export default { StringDecoder };
 
 fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
     match module_name {
+        "async_hooks" => &[
+            "AsyncLocalStorage",
+            "AsyncResource",
+            "createHook",
+            "executionAsyncId",
+            "triggerAsyncId",
+        ],
+        "buffer" => &["Blob", "Buffer", "File", "INSPECT_MAX_BYTES", "SlowBuffer", "isUtf8"],
         "child_process" => &[
             "exec",
             "execFile",
@@ -3485,6 +3632,7 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "randomUUID",
             "subtle",
         ],
+        "diagnostics_channel" => &["channel", "hasSubscribers", "subscribe", "unsubscribe"],
         "events" => &["EventEmitter", "once"],
         "fs" => &[
             "access",
@@ -3526,20 +3674,33 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
         ],
         "fs/promises" => &[
             "access",
+            "appendFile",
             "chmod",
+            "chown",
+            "constants",
             "copyFile",
+            "cp",
+            "glob",
+            "lchown",
+            "link",
             "lstat",
             "mkdir",
             "mkdtemp",
             "open",
+            "opendir",
             "readFile",
             "readdir",
             "readlink",
             "realpath",
             "rename",
             "rm",
+            "rmdir",
             "stat",
+            "statfs",
+            "symlink",
+            "truncate",
             "unlink",
+            "utimes",
             "writeFile",
         ],
         "http" => &[
@@ -3583,16 +3744,26 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "tmpdir",
             "type",
         ],
-        "path" => &[
+        "path" | "path/posix" | "path/win32" => &[
             "basename",
+            "delimiter",
             "dirname",
+            "extname",
+            "format",
             "isAbsolute",
             "join",
+            "normalize",
+            "parse",
+            "posix",
+            "relative",
             "resolve",
             "sep",
+            "win32",
         ],
+        "perf_hooks" => &["PerformanceObserver", "constants", "createHistogram", "performance"],
         "readline" => &["createInterface"],
         "sqlite" => &["DatabaseSync", "StatementSync", "constants"],
+        "stream/consumers" => &["arrayBuffer", "blob", "buffer", "json", "text"],
         "tls" => &[
             "TLSSocket",
             "Server",
@@ -3601,7 +3772,33 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "createServer",
             "getCiphers",
         ],
+        "timers/promises" => &["scheduler", "setImmediate", "setInterval", "setTimeout"],
         "url" => &["URL", "fileURLToPath", "pathToFileURL"],
+        "util" => &[
+            "MIMEType",
+            "MIMEParams",
+            "TextDecoder",
+            "TextEncoder",
+            "callbackify",
+            "debug",
+            "deprecate",
+            "format",
+            "inherits",
+            "inspect",
+            "parseArgs",
+            "promisify",
+            "stripVTControlCharacters",
+            "types",
+        ],
+        "v8" => &["getHeapSnapshot", "getHeapSpaceStatistics", "getHeapStatistics"],
+        "worker_threads" => &[
+            "MessageChannel",
+            "MessagePort",
+            "Worker",
+            "isMainThread",
+            "parentPort",
+            "workerData",
+        ],
         _ => &[],
     }
 }
@@ -3769,12 +3966,10 @@ mod tests {
             response["error"]["code"],
             Value::String(String::from("ERR_AGENT_OS_NODE_SYNC_RPC_TIMEOUT"))
         );
-        assert!(
-            response["error"]["message"]
-                .as_str()
-                .expect("timeout message")
-                .contains("timed out after 20ms")
-        );
+        assert!(response["error"]["message"]
+            .as_str()
+            .expect("timeout message")
+            .contains("timed out after 20ms"));
         assert_eq!(
             *pending.lock().expect("pending state lock"),
             Some(PendingSyncRpcState::TimedOut(7))
@@ -3801,10 +3996,8 @@ mod tests {
             started.elapsed() >= Duration::from_millis(30),
             "send should wait for the configured timeout"
         );
-        assert!(
-            error
-                .to_string()
-                .contains("timed out after 30ms while queueing JavaScript sync RPC response")
-        );
+        assert!(error
+            .to_string()
+            .contains("timed out after 30ms while queueing JavaScript sync RPC response"));
     }
 }

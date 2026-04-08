@@ -52,7 +52,7 @@ Each agent type needs:
 - **Always verify related tests pass before considering work done.**
 - **All tests run inside the VM** -- network servers, file I/O, agent processes.
 - Session tests that need launch argv or OS-instruction assertions should inspect `getSessionAgentInfo(sessionId)` from sidecar state instead of spying on `kernel.spawn`; `createSession()` now launches through sidecar RPCs.
-- Network tests: write a server script file, run it with `node` inside the VM, then `vm.fetch()` against it.
+- Network tests on the native sidecar path should stick to listener bind/state assertions unless the bridge work explicitly targets guest HTTP/client round-trips. `vm.fetch()` does not currently translate arbitrary guest listener ports back to the host, and guest `net.connect()` coverage is still limited.
 - Agent tests must be run sequentially in layers:
   1. PI headless mode (spawn pi directly, verify output)
   2. pi-acp manual spawn (JSON-RPC over stdio)
@@ -89,6 +89,7 @@ See `.agent/specs/test-structure.md` for the full restructuring plan. Target lay
 
 - `globalThis.fetch` is hardened (non-writable) in the VM -- can't be mocked in-process
 - Kernel child_process.spawn can't resolve bare commands from PATH (e.g., `pi`). Use `PI_ACP_PI_COMMAND` env var to point to the `.js` entry directly.
+- `allProcesses()` / `processTree()` on the native sidecar path only surface the top-level tracked runtime processes. Guest-local `child_process.spawn()` children still report guest PIDs to user code, but they do not appear as separate kernel process-tree nodes yet.
 - `kernel.readFile()` does NOT see the ModuleAccessFileSystem overlay -- read host files directly with `readFileSync` for package.json resolution
 - Native ELF binaries cannot execute in the VM -- the kernel's command resolver only handles `.js`/`.mjs`/`.cjs` scripts and WASM commands.
 - The native sidecar framed stdio client is bidirectional: host-originated `request`/`response` frames use positive `request_id` values, and sidecar-originated `sidecar_request`/`sidecar_response` frames use negative IDs. When adding host callbacks, register a sidecar request handler instead of assuming stdout only carries events plus responses.

@@ -76,6 +76,7 @@ function parseArgs(argv: string[]): CliOptions {
 			case "-h":
 				printUsage();
 				process.exit(0);
+				return options;
 			default:
 				throw new Error(`Unknown argument: ${arg}`);
 		}
@@ -86,7 +87,9 @@ function parseArgs(argv: string[]): CliOptions {
 
 const cli = parseArgs(process.argv.slice(2));
 if (!cli.mountWasm && (cli.command === "bash" || cli.command === "sh")) {
-	throw new Error("Interactive dev-shell requires WasmVM for the shell process; remove --no-wasm.");
+	throw new Error(
+		"Interactive dev-shell requires WasmVM for the shell process; remove --no-wasm.",
+	);
 }
 
 const shell = await createDevShellKernel({
@@ -102,36 +105,63 @@ console.error(`loaded commands: ${shell.loadedCommands.join(", ")}`);
 const terminalCommand =
 	cli.command === "bash" || cli.command === "sh"
 		? (() => {
-			if (cli.args.length === 0) {
+				if (cli.args.length === 0) {
+					return {
+						command: cli.command,
+						args: [],
+					};
+				}
+
+				if (
+					(cli.args[0] === "-c" || cli.args[0] === "-lc") &&
+					cli.args.length >= 2
+				) {
+					return {
+						command: cli.command,
+						args: [
+							cli.args[0],
+							`cd ${shQuote(shell.workDir)} && ${cli.args[1]}`,
+							...cli.args.slice(2),
+						],
+					};
+				}
+
 				return {
 					command: cli.command,
-					args: [],
+					args: cli.args,
 				};
-			}
-
-			if ((cli.args[0] === "-c" || cli.args[0] === "-lc") && cli.args.length >= 2) {
-				return {
-					command: cli.command,
-					args: [cli.args[0], `cd ${shQuote(shell.workDir)} && ${cli.args[1]}`, ...cli.args.slice(2)],
-				};
-			}
-
-			return {
+			})()
+		: {
 				command: cli.command,
 				args: cli.args,
 			};
-		})()
-		: {
-			command: cli.command,
-			args: cli.args,
-		};
 
-const exitCode = await shell.kernel.connectTerminal({
-	command: terminalCommand.command,
-	args: terminalCommand.args,
-	cwd: shell.workDir,
-	env: shell.env,
-});
+const exitCode =
+	(terminalCommand.command === "bash" || terminalCommand.command === "sh") &&
+	terminalCommand.args.length === 0
+		? await shell.kernel.connectTerminal({
+				command: terminalCommand.command,
+				args: terminalCommand.args,
+				cwd: shell.workDir,
+				env: shell.env,
+			})
+		: await new Promise<number>((resolve) => {
+				const proc = shell.kernel.spawn(
+					terminalCommand.command,
+					terminalCommand.args,
+					{
+						cwd: shell.workDir,
+						env: shell.env,
+						onStdout: (data) => {
+							process.stdout.write(Buffer.from(data));
+						},
+						onStderr: (data) => {
+							process.stderr.write(Buffer.from(data));
+						},
+					},
+				);
+				void proc.wait().then(resolve);
+			});
 
 await shell.dispose();
 process.exit(exitCode);

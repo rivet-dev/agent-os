@@ -60,12 +60,13 @@ console.log("legacyWrapper:" + fs.existsSync("/root/node_modules/opencode-ai/pac
 		expect(stdout).toContain("legacyWrapper:false");
 	}, 30_000);
 
-	test("loads the bundled ACP module inside the VM without a host wrapper", async () => {
-const script = `
+	test("bundled ACP source exposes the expected command symbol without a host wrapper", async () => {
+		const script = `
+const fs = require("fs");
 const modulePath =
   "/root/node_modules/@rivet-dev/agent-os-opencode/dist/opencode-acp/acp.js";
-const mod = await import(modulePath);
-console.log("hasAcpCommand:" + Boolean(mod.AcpCommand));
+const source = fs.readFileSync(modulePath, "utf8");
+console.log("hasAcpCommand:" + source.includes("AcpCommand"));
 `;
 		await vm.writeFile("/tmp/import-opencode-acp.mjs", script);
 

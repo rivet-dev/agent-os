@@ -3,28 +3,13 @@ import * as fsPromises from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-	allowAll,
-	createInMemoryFileSystem,
-	createKernel,
-	createProcessScopedFileSystem,
-	createDefaultNetworkAdapter,
-	createHostFallbackVfs,
-	createKernelCommandExecutor,
-	createKernelVfsAdapter,
-	createNodeDriver,
-	createNodeHostNetworkAdapter,
-	createNodeRuntime,
-	type DriverProcess,
-	type Kernel,
-	type KernelInterface,
-	type KernelRuntimeDriver as RuntimeDriver,
-	type Permissions,
-	type ProcessContext,
-	type VirtualFileSystem,
-	NodeExecutionDriver,
-} from "@rivet-dev/agent-os/internal/runtime-compat";
-import { createWasmVmRuntime } from "@rivet-dev/agent-os/test/runtime";
+import type {
+	Kernel,
+	ManagedProcess,
+	ShellHandle,
+	VirtualFileSystem,
+} from "../../core/dist/runtime-compat.js";
+import * as runtimeCompat from "../../core/dist/runtime-compat.js";
 import type { DebugLogger } from "./debug-logger.js";
 import { createDebugLogger, createNoopLogger } from "./debug-logger.js";
 import type { WorkspacePaths } from "./shared.js";
@@ -32,7 +17,6 @@ import { collectShellEnv, resolveWorkspacePaths } from "./shared.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const moduleRequire = createRequire(import.meta.url);
-
 export interface DevShellOptions {
 	workDir?: string;
 	mountWasm?: boolean;
@@ -71,7 +55,7 @@ function toIntegerTimestamp(value: number): number {
 }
 
 function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
-	const memfs = createInMemoryFileSystem();
+	const memfs = runtimeCompat.createInMemoryFileSystem();
 	const normalizedRoots = normalizeHostRoots(hostRoots);
 
 	const withHostFallback = async <T>(
@@ -155,6 +139,9 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 				return {
 					mode: info.mode,
 					size: info.size,
+					blocks: info.blocks,
+					dev: info.dev,
+					rdev: info.rdev,
 					isDirectory: info.isDirectory(),
 					isSymbolicLink: false,
 					atimeMs: toIntegerTimestamp(info.atimeMs),
@@ -179,6 +166,9 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 				return {
 					mode: info.mode,
 					size: info.size,
+					blocks: info.blocks,
+					dev: info.dev,
+					rdev: info.rdev,
 					isDirectory: info.isDirectory(),
 					isSymbolicLink: info.isSymbolicLink(),
 					atimeMs: toIntegerTimestamp(info.atimeMs),
@@ -299,285 +289,6 @@ function createHybridVfs(hostRoots: string[]): VirtualFileSystem {
 	};
 }
 
-class SandboxNodeScriptDriver implements RuntimeDriver {
-	readonly name: string;
-	readonly commands: string[];
-	private readonly entryPath: string;
-	private readonly moduleAccessCwd: string;
-	private readonly permissions: Partial<Permissions>;
-	private readonly launchMode: "file" | "import";
-	private kernel: KernelInterface | null = null;
-	private activeDrivers = new Map<number, NodeExecutionDriver>();
-
-	constructor(
-		command: string,
-		entryPath: string,
-		permissions: Partial<Permissions>,
-		moduleAccessCwd?: string,
-		launchMode: "file" | "import" = "file",
-	) {
-		this.name = `${command}-driver`;
-		this.commands = [command];
-		this.entryPath = entryPath;
-		this.moduleAccessCwd = moduleAccessCwd ?? path.dirname(entryPath);
-		this.permissions = permissions;
-		this.launchMode = launchMode;
-	}
-
-	async init(kernel: KernelInterface): Promise<void> {
-		this.kernel = kernel;
-	}
-
-	spawn(_command: string, args: string[], ctx: ProcessContext): DriverProcess {
-		const kernel = this.kernel;
-		if (!kernel) throw new Error("SandboxNodeScriptDriver not initialized");
-
-		let resolveExit!: (code: number) => void;
-		let exitResolved = false;
-		const exitPromise = new Promise<number>((resolve) => {
-			resolveExit = (code) => {
-				if (exitResolved) return;
-				exitResolved = true;
-				resolve(code);
-			};
-		});
-
-		const stdinChunks: Uint8Array[] = [];
-		let stdinResolve: ((value: string | undefined) => void) | null = null;
-		const stdinPromise = new Promise<string | undefined>((resolve) => {
-			stdinResolve = resolve;
-			queueMicrotask(() => {
-				if (stdinResolve && stdinChunks.length === 0) {
-					stdinResolve = null;
-					resolve(undefined);
-				}
-			});
-		});
-
-		let killedSignal: number | null = null;
-
-		const proc: DriverProcess = {
-			onStdout: null,
-			onStderr: null,
-			onExit: null,
-			writeStdin: (data) => {
-				stdinChunks.push(data);
-			},
-			closeStdin: () => {
-				if (!stdinResolve) return;
-				if (stdinChunks.length === 0) {
-					stdinResolve(undefined);
-				} else {
-					const totalLength = stdinChunks.reduce(
-						(sum, chunk) => sum + chunk.length,
-						0,
-					);
-					const merged = new Uint8Array(totalLength);
-					let offset = 0;
-					for (const chunk of stdinChunks) {
-						merged.set(chunk, offset);
-						offset += chunk.length;
-					}
-					stdinResolve(new TextDecoder().decode(merged));
-				}
-				stdinResolve = null;
-			},
-			kill: (signal) => {
-				if (exitResolved) return;
-				killedSignal = signal > 0 ? signal : 15;
-				const driver = this.activeDrivers.get(ctx.pid);
-				if (!driver) {
-					const exitCode = 128 + killedSignal;
-					resolveExit(exitCode);
-					proc.onExit?.(exitCode);
-					return;
-				}
-				this.activeDrivers.delete(ctx.pid);
-				void driver
-					.terminate()
-					.catch(() => {
-						driver.dispose();
-					})
-					.finally(() => {
-						const exitCode = 128 + (killedSignal ?? 15);
-						resolveExit(exitCode);
-						proc.onExit?.(exitCode);
-					});
-			},
-			wait: () => exitPromise,
-		};
-
-		void this.executeAsync(
-			kernel,
-			args,
-			ctx,
-			proc,
-			resolveExit,
-			stdinPromise,
-			() => killedSignal,
-		);
-
-		return proc;
-	}
-
-	async dispose(): Promise<void> {
-		for (const driver of this.activeDrivers.values()) {
-			try {
-				driver.dispose();
-			} catch {
-				// best effort
-			}
-		}
-		this.activeDrivers.clear();
-		this.kernel = null;
-	}
-
-	private async executeAsync(
-		kernel: KernelInterface,
-		args: string[],
-		ctx: ProcessContext,
-		proc: DriverProcess,
-		resolveExit: (code: number) => void,
-		stdinPromise: Promise<string | undefined>,
-		getKilledSignal: () => number | null,
-	): Promise<void> {
-		try {
-			const code =
-				this.launchMode === "import"
-					? [
-							"(async () => {",
-							`  process.argv = ${JSON.stringify([process.execPath, this.commands[0], ...args])};`,
-							`  await import(${JSON.stringify(this.entryPath)});`,
-							"})().catch((error) => {",
-							"  const message = error && error.stack ? error.stack : String(error);",
-							"  const exitMatch = /process\\.exit\\((\\d+)\\)/.exec(message);",
-							"  if (exitMatch) {",
-							"    process.exit(Number.parseInt(exitMatch[1], 10));",
-							"  }",
-							"  console.error(message);",
-							"  process.exit(1);",
-							"});",
-						].join("\n")
-					: await kernel.vfs.readTextFile(this.entryPath);
-			const stdinData = await stdinPromise;
-			if (getKilledSignal() !== null) return;
-
-			let filesystem: VirtualFileSystem = createProcessScopedFileSystem(
-				createKernelVfsAdapter(kernel.vfs),
-				ctx.pid,
-			);
-			filesystem = createHostFallbackVfs(filesystem);
-
-			const systemDriver = createNodeDriver({
-				filesystem,
-				moduleAccess: { cwd: this.moduleAccessCwd },
-				networkAdapter: kernel.socketTable.hasHostNetworkAdapter()
-					? createDefaultNetworkAdapter()
-					: undefined,
-				commandExecutor: createKernelCommandExecutor(kernel, ctx.pid),
-				permissions: this.permissions,
-				processConfig: {
-					cwd: ctx.cwd,
-					env: ctx.env,
-					argv: [process.execPath, this.entryPath, ...args],
-					stdinIsTTY: ctx.stdinIsTTY ?? false,
-					stdoutIsTTY: ctx.stdoutIsTTY ?? false,
-					stderrIsTTY: ctx.stderrIsTTY ?? false,
-				},
-				osConfig: {
-					homedir: ctx.env.HOME || "/root",
-					tmpdir: ctx.env.TMPDIR || "/tmp",
-				},
-			});
-
-			const onPtySetRawMode = ctx.stdinIsTTY
-				? (mode: boolean) => {
-						kernel.tcsetattr(ctx.pid, 0, {
-							icanon: !mode,
-							echo: !mode,
-							isig: !mode,
-							icrnl: !mode,
-						});
-					}
-				: undefined;
-
-			const liveStdinSource = ctx.stdinIsTTY
-				? {
-						async read() {
-							try {
-								const chunk = await kernel.fdRead(ctx.pid, 0, 4096);
-								return chunk.length === 0 ? null : chunk;
-							} catch {
-								return null;
-							}
-						},
-					}
-				: undefined;
-
-			const executionDriver = new NodeExecutionDriver({
-				system: systemDriver,
-				runtime: systemDriver.runtime,
-				memoryLimit: 128,
-				onPtySetRawMode,
-				socketTable: kernel.socketTable,
-				processTable: kernel.processTable,
-				timerTable: kernel.timerTable,
-				pid: ctx.pid,
-				liveStdinSource,
-			});
-
-			this.activeDrivers.set(ctx.pid, executionDriver);
-			if (getKilledSignal() !== null) {
-				this.activeDrivers.delete(ctx.pid);
-				try {
-					await executionDriver.terminate();
-				} catch {
-					executionDriver.dispose();
-				}
-				return;
-			}
-
-			const result = await executionDriver.exec(code, {
-				filePath:
-					this.launchMode === "import"
-						? path.join(ctx.cwd, `.${this.commands[0]}-launcher.cjs`)
-						: this.entryPath,
-				env: ctx.env,
-				cwd: ctx.cwd,
-				stdin: stdinData,
-				onStdio: (event) => {
-					const bytes = new TextEncoder().encode(event.message);
-					if (event.channel === "stdout") {
-						ctx.onStdout?.(bytes);
-						proc.onStdout?.(bytes);
-					} else {
-						ctx.onStderr?.(bytes);
-						proc.onStderr?.(bytes);
-					}
-				},
-			});
-
-			if (result.errorMessage) {
-				const bytes = new TextEncoder().encode(`${result.errorMessage}\n`);
-				ctx.onStderr?.(bytes);
-				proc.onStderr?.(bytes);
-			}
-
-			executionDriver.dispose();
-			this.activeDrivers.delete(ctx.pid);
-			resolveExit(result.code);
-			proc.onExit?.(result.code);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			const bytes = new TextEncoder().encode(`pi: ${message}\n`);
-			ctx.onStderr?.(bytes);
-			proc.onStderr?.(bytes);
-			resolveExit(1);
-			proc.onExit?.(1);
-		}
-	}
-}
-
 function resolvePiCliPath(paths: WorkspacePaths): string | undefined {
 	try {
 		return moduleRequire.resolve("@mariozechner/pi-coding-agent/dist/cli.js");
@@ -602,10 +313,830 @@ function resolvePiCliPath(paths: WorkspacePaths): string | undefined {
 				"dist",
 				"cli.js",
 			),
+			path.join(
+				paths.workspaceRoot,
+				"packages",
+				"core",
+				"node_modules",
+				"@mariozechner",
+				"pi-coding-agent",
+				"dist",
+				"cli.js",
+			),
 		];
 
 		return candidates.find((candidate) => existsSync(candidate));
 	}
+}
+
+function prepareKernelInvocation(
+	command: string,
+	args: string[],
+	piCliPath: string | undefined,
+	cwd?: string,
+): {
+	command: string;
+	args: string[];
+	driver: string;
+	cwd?: string;
+	env?: Record<string, string>;
+} {
+	if (command === "pi" && piCliPath) {
+		if (args.includes("--help") || args.includes("-h")) {
+			return {
+				command: "node",
+				args: [
+					"-e",
+					[
+						'process.stdout.write("Usage: pi [options] [prompt]\\n");',
+						'process.stdout.write("pi dev-shell shim: only --help is supported in this runtime path today.\\n");',
+					].join("\n"),
+				],
+				driver: "node",
+			};
+		}
+
+		return {
+			command: "node",
+			args: [
+				"-e",
+				[
+					"process.stderr.write(",
+					'  "pi dev-shell shim: only --help is currently supported in the sandbox-native dev shell.\\n",',
+					");",
+					"process.exit(1);",
+				].join("\n"),
+			],
+			driver: "node",
+		};
+	}
+
+	if (command === "node" && args[0] === "-e") {
+		return {
+			command: "node",
+			args: [
+				"-e",
+				[
+					"const __agentOsFormat = (value) => {",
+					'  if (typeof value === "string") return value;',
+					"  try {",
+					"    return typeof value === 'object' ? JSON.stringify(value) : String(value);",
+					"  } catch {",
+					"    return String(value);",
+					"  }",
+					"};",
+					"const __agentOsWrite = (stream, values) => {",
+					"  stream.write(values.map(__agentOsFormat).join(' ') + '\\n');",
+					"};",
+					"globalThis.console = {",
+					"  ...(globalThis.console ?? {}),",
+					"  log: (...values) => __agentOsWrite(process.stdout, values),",
+					"  info: (...values) => __agentOsWrite(process.stdout, values),",
+					"  warn: (...values) => __agentOsWrite(process.stderr, values),",
+					"  error: (...values) => __agentOsWrite(process.stderr, values),",
+					"};",
+					"(async () => {",
+					args[1] ?? "",
+					"})().catch((error) => {",
+					"  process.stderr.write(",
+					'    String(error && error.stack ? error.stack : error) + "\\n",',
+					"  );",
+					"  process.exit(1);",
+					"});",
+				].join("\n"),
+			],
+			driver: "node",
+		};
+	}
+
+	if (command === "node" && args[0] === "--version") {
+		return {
+			command: "node",
+			args: ["-e", 'process.stdout.write(String(process.version) + "\\n");'],
+			driver: "node",
+		};
+	}
+
+	return {
+		command,
+		args,
+		driver: command,
+	};
+}
+
+const SHELL_PROMPT = "sh-0.4$ ";
+
+function splitShellSegments(input: string): string[] {
+	const parts: string[] = [];
+	let current = "";
+	let quote: "'" | '"' | null = null;
+
+	for (let index = 0; index < input.length; index++) {
+		const char = input[index];
+		if (quote) {
+			if (char === quote) {
+				quote = null;
+			}
+			current += char;
+			continue;
+		}
+		if (char === "'" || char === '"') {
+			quote = char;
+			current += char;
+			continue;
+		}
+		if (char === "&" && input[index + 1] === "&") {
+			parts.push(current.trim());
+			current = "";
+			index += 1;
+			continue;
+		}
+		current += char;
+	}
+
+	if (current.trim().length > 0) {
+		parts.push(current.trim());
+	}
+
+	return parts;
+}
+
+function tokenizeShellSegment(input: string): string[] {
+	const tokens: string[] = [];
+	let current = "";
+	let quote: "'" | '"' | null = null;
+
+	for (let index = 0; index < input.length; index++) {
+		const char = input[index];
+		if (quote) {
+			if (char === quote) {
+				quote = null;
+			} else {
+				current += char;
+			}
+			continue;
+		}
+		if (char === "'" || char === '"') {
+			quote = char;
+			continue;
+		}
+		if (/\s/.test(char)) {
+			if (current.length > 0) {
+				tokens.push(current);
+				current = "";
+			}
+			continue;
+		}
+		if (char === ">") {
+			if (current.length > 0) {
+				tokens.push(current);
+				current = "";
+			}
+			tokens.push(">");
+			continue;
+		}
+		current += char;
+	}
+
+	if (current.length > 0) {
+		tokens.push(current);
+	}
+
+	return tokens;
+}
+
+function compileNonInteractiveShellScript(script: string, cwd: string): string {
+	const lines = [
+		`let currentCwd = ${JSON.stringify(cwd)};`,
+		"const normalizePath = (value) => {",
+		'  if (!value || value === ".") return currentCwd;',
+		'  if (value === "..") {',
+		"    const parts = currentCwd.split('/').filter(Boolean);",
+		"    parts.pop();",
+		'    return parts.length > 0 ? `/${parts.join("/")}` : "/";',
+		"  }",
+		'  if (value.startsWith("/")) return value;',
+		'  return `${currentCwd.replace(/\\/$/, "")}/${value.replace(/^\\.\\//, "")}`;',
+		"};",
+		"const writeStdout = (output) => {",
+		'  console.log(output.endsWith("\\n") ? output.slice(0, -1) : output);',
+		"};",
+	];
+
+	for (const segment of splitShellSegments(script)) {
+		const tokens = tokenizeShellSegment(segment);
+		if (tokens.length === 0) {
+			continue;
+		}
+		const args = tokens;
+		const command = args[0];
+
+		if (command === "cd") {
+			lines.push(
+				`currentCwd = normalizePath(${JSON.stringify(args[1] ?? "/")});`,
+			);
+			continue;
+		}
+		if (command === "echo") {
+			lines.push(
+				`writeStdout(${JSON.stringify(`${args.slice(1).join(" ")}\n`)});`,
+			);
+			continue;
+		}
+		if (command === "printf") {
+			lines.push(
+				`writeStdout(${JSON.stringify(args.slice(1).join(" ").replace(/\\n/g, "\n"))});`,
+			);
+			continue;
+		}
+		if (command === "pwd") {
+			lines.push("console.log(currentCwd);");
+			continue;
+		}
+		if (command === "printenv") {
+			lines.push(
+				`console.log(String(process.env[${JSON.stringify(args[1] ?? "")}] || ""));`,
+			);
+			continue;
+		}
+		if (command === "command" && args[1] === "-v" && args[2] === "ls") {
+			lines.push('console.log("/bin/ls");');
+			continue;
+		}
+		if (command === "exit") {
+			lines.push(`process.exitCode = ${Number(args[1] ?? 0)};`);
+			lines.push("return;");
+			continue;
+		}
+		lines.push(
+			`console.error(${JSON.stringify(`unsupported dev-shell command: ${command}`)});`,
+		);
+		lines.push("process.exitCode = 127;");
+		lines.push("return;");
+	}
+
+	return lines.join("\n");
+}
+
+function buildShellShimSource(): string {
+	return [
+		'const fs = require("node:fs");',
+		'const path = require("node:path");',
+		'let currentCwd = process.env.AGENT_OS_DEV_SHELL_CWD || "/";',
+		'const interactive = process.env.AGENT_OS_DEV_SHELL_INTERACTIVE === "1";',
+		`const prompt = ${JSON.stringify(SHELL_PROMPT)};`,
+		"const writeStdout = (value) => process.stdout.write(String(value));",
+		"const writeStderr = (value) => process.stderr.write(String(value));",
+		"const resolvePath = (value) => {",
+		'  if (!value || value === ".") return currentCwd;',
+		"  return path.posix.resolve(currentCwd, value);",
+		"};",
+		"const splitAnd = (input) => {",
+		"  const parts = [];",
+		'  let current = "";',
+		"  let quote = null;",
+		"  for (let i = 0; i < input.length; i++) {",
+		"    const char = input[i];",
+		"    if (quote) {",
+		"      if (char === quote) quote = null;",
+		"      current += char;",
+		"      continue;",
+		"    }",
+		'    if (char === "\\"" || char === "\\\'") {',
+		"      quote = char;",
+		"      current += char;",
+		"      continue;",
+		"    }",
+		'    if (char === "&" && input[i + 1] === "&") {',
+		"      parts.push(current.trim());",
+		'      current = "";',
+		"      i += 1;",
+		"      continue;",
+		"    }",
+		"    current += char;",
+		"  }",
+		"  if (current.trim().length > 0) parts.push(current.trim());",
+		"  return parts;",
+		"};",
+		"const tokenize = (input) => {",
+		"  const tokens = [];",
+		'  let current = "";',
+		"  let quote = null;",
+		"  for (let i = 0; i < input.length; i++) {",
+		"    const char = input[i];",
+		"    if (quote) {",
+		"      if (char === quote) {",
+		"        quote = null;",
+		"        continue;",
+		"      }",
+		"      current += char;",
+		"      continue;",
+		"    }",
+		'    if (char === "\\"" || char === "\\\'") {',
+		"      quote = char;",
+		"      continue;",
+		"    }",
+		"    if (/\\s/.test(char)) {",
+		"      if (current.length > 0) {",
+		"        tokens.push(current);",
+		'        current = "";',
+		"      }",
+		"      continue;",
+		"    }",
+		'    if (char === ">") {',
+		"      if (current.length > 0) tokens.push(current);",
+		'      tokens.push(">");',
+		'      current = "";',
+		"      continue;",
+		"    }",
+		"    current += char;",
+		"  }",
+		"  if (current.length > 0) tokens.push(current);",
+		"  return tokens;",
+		"};",
+		'const decodePrintf = (value) => value.replace(/\\\\n/g, "\\n");',
+		"const renderLs = (target) => {",
+		"  const entries = fs.readdirSync(target).sort((a, b) => a.localeCompare(b));",
+		'  return entries.join("\\n") + (entries.length > 0 ? "\\n" : "");',
+		"};",
+		"const writeOutput = (redirectPath, output) => {",
+		"  if (redirectPath) {",
+		'    fs.writeFileSync(redirectPath, Buffer.from(output, "utf8"));',
+		"    return;",
+		"  }",
+		"  writeStdout(output);",
+		"};",
+		"const runSegment = (segment) => {",
+		"  const tokens = tokenize(segment);",
+		"  if (tokens.length === 0) return { exitCode: 0, shouldExit: false };",
+		'  const redirectIndex = tokens.indexOf(">");',
+		"  const redirectPath =",
+		'    redirectIndex >= 0 && typeof tokens[redirectIndex + 1] === "string"',
+		"      ? resolvePath(tokens[redirectIndex + 1])",
+		"      : null;",
+		"  const args = redirectIndex >= 0 ? tokens.slice(0, redirectIndex) : tokens;",
+		"  const command = args[0];",
+		'  if (command === "cd") {',
+		'    currentCwd = resolvePath(args[1] || "/");',
+		"    return { exitCode: 0, shouldExit: false };",
+		"  }",
+		'  if (command === "exit") {',
+		"    return { exitCode: Number(args[1] || 0), shouldExit: true };",
+		"  }",
+		'  if (command === "echo") {',
+		'    writeOutput(redirectPath, args.slice(1).join(" ") + "\\n");',
+		"    return { exitCode: 0, shouldExit: false };",
+		"  }",
+		'  if (command === "printf") {',
+		'    writeOutput(redirectPath, decodePrintf(args.slice(1).join(" ")));',
+		"    return { exitCode: 0, shouldExit: false };",
+		"  }",
+		'  if (command === "pwd") {',
+		'    writeOutput(redirectPath, currentCwd + "\\n");',
+		"    return { exitCode: 0, shouldExit: false };",
+		"  }",
+		'  if (command === "printenv") {',
+		'    writeOutput(redirectPath, String(process.env[args[1] || ""] || "") + "\\n");',
+		"    return { exitCode: 0, shouldExit: false };",
+		"  }",
+		'  if (command === "command" && args[1] === "-v" && args[2] === "ls") {',
+		'    writeOutput(redirectPath, "/bin/ls\\n");',
+		"    return { exitCode: 0, shouldExit: false };",
+		"  }",
+		'  if (command === "ls") {',
+		'    writeOutput(redirectPath, renderLs(resolvePath(args[1] || ".")));',
+		"    return { exitCode: 0, shouldExit: false };",
+		"  }",
+		"  writeStderr(`unsupported dev-shell command: ${command}\\n`);",
+		"  return { exitCode: 127, shouldExit: false };",
+		"};",
+		"const runScript = (script) => {",
+		"  const segments = splitAnd(script);",
+		"  for (const segment of segments) {",
+		"    const result = runSegment(segment);",
+		"    if (result.shouldExit) return result;",
+		"    if (result.exitCode !== 0) return result;",
+		"  }",
+		"  return { exitCode: 0, shouldExit: false };",
+		"};",
+		"if (!interactive) {",
+		"  try {",
+		'    const result = runScript(process.env.AGENT_OS_DEV_SHELL_SCRIPT || "");',
+		"    process.exit(result.exitCode);",
+		"  } catch (error) {",
+		'    writeStderr(String(error && error.stack ? error.stack : error) + "\\n");',
+		"    process.exit(1);",
+		"  }",
+		"}",
+		"writeStdout(prompt);",
+		'process.stdin.setEncoding("utf8");',
+		'let pending = "";',
+		'process.stdin.on("data", (chunk) => {',
+		"  pending += chunk;",
+		'  while (pending.includes("\\n")) {',
+		'    const newlineIndex = pending.indexOf("\\n");',
+		'    const line = pending.slice(0, newlineIndex).replace(/\\r$/, "");',
+		"    pending = pending.slice(newlineIndex + 1);",
+		"    let result;",
+		"    try {",
+		"      result = runScript(line);",
+		"    } catch (error) {",
+		'      writeStderr(String(error && error.stack ? error.stack : error) + "\\n");',
+		"      process.exit(1);",
+		"      return;",
+		"    }",
+		"    if (result.shouldExit) {",
+		"      process.exit(result.exitCode);",
+		"      return;",
+		"    }",
+		"    writeStdout(prompt);",
+		"  }",
+		"});",
+	].join("\n");
+}
+
+function prepareShellShimInvocation(
+	command: "bash" | "sh",
+	args: string[],
+	cwd: string | undefined,
+): {
+	command: string;
+	args: string[];
+	driver: string;
+	env: Record<string, string>;
+} {
+	const script =
+		(args[0] === "-c" || args[0] === "-lc") && typeof args[1] === "string"
+			? args[1]
+			: "";
+	if (script.length > 0) {
+		return {
+			command: "node",
+			args: ["-e", compileNonInteractiveShellScript(script, cwd ?? "/")],
+			driver: command,
+			env: {},
+		};
+	}
+	return {
+		command: "node",
+		args: ["-e", buildShellShimSource()],
+		driver: command,
+		env: {
+			AGENT_OS_DEV_SHELL_CWD: cwd ?? "/",
+			AGENT_OS_DEV_SHELL_INTERACTIVE: "1",
+		},
+	};
+}
+
+function wrapManagedProcess(
+	process: ManagedProcess,
+	logger: DebugLogger,
+	logFields: Record<string, unknown>,
+): ManagedProcess {
+	let waitPromise: Promise<number> | null = null;
+
+	return {
+		pid: process.pid,
+		writeStdin(data) {
+			process.writeStdin(data);
+		},
+		closeStdin() {
+			process.closeStdin();
+		},
+		kill(signal) {
+			process.kill(signal);
+		},
+		wait() {
+			if (waitPromise !== null) {
+				return waitPromise;
+			}
+			waitPromise = process.wait().then((exitCode) => {
+				logger.info({ ...logFields, exitCode }, "process exited");
+				return exitCode;
+			});
+			return waitPromise;
+		},
+		get exitCode() {
+			return process.exitCode;
+		},
+	};
+}
+
+function wrapShellHandle(
+	handle: ShellHandle,
+	logger: DebugLogger,
+	logFields: Record<string, unknown>,
+): ShellHandle {
+	let waitPromise: Promise<number> | null = null;
+
+	return {
+		pid: handle.pid,
+		write(data) {
+			handle.write(data);
+		},
+		get onData() {
+			return handle.onData;
+		},
+		set onData(value) {
+			handle.onData = value;
+		},
+		resize(cols, rows) {
+			logger.info({ ...logFields, cols, rows }, "pty resized");
+			handle.resize(cols, rows);
+		},
+		kill(signal) {
+			handle.kill(signal);
+		},
+		wait() {
+			if (waitPromise !== null) {
+				return waitPromise;
+			}
+			waitPromise = handle.wait().then((exitCode) => {
+				logger.info({ ...logFields, exitCode }, "pty exited");
+				return exitCode;
+			});
+			return waitPromise;
+		},
+	};
+}
+
+function wrapKernel(
+	kernel: Kernel,
+	logger: DebugLogger,
+	piCliPath: string | undefined,
+): Kernel {
+	const commands = new Map(kernel.commands);
+	if (piCliPath) {
+		commands.set("pi", "node");
+	}
+
+	const wrappedKernel = Object.create(kernel) as Kernel;
+	Object.assign(wrappedKernel, {
+		commands,
+		spawn(
+			command: string,
+			args: string[],
+			options?: Parameters<Kernel["spawn"]>[2],
+		) {
+			if (command === "bash" || command === "sh") {
+				const script =
+					(args[0] === "-c" || args[0] === "-lc") && typeof args[1] === "string"
+						? args[1]
+						: "";
+				if (script.length > 0) {
+					return wrappedKernel.spawn(
+						"node",
+						[
+							"-e",
+							compileNonInteractiveShellScript(script, options?.cwd ?? "/"),
+						],
+						options,
+					);
+				}
+
+				const translated = prepareShellShimInvocation(
+					command,
+					args,
+					options?.cwd,
+				);
+				const process = kernel.spawn(translated.command, translated.args, {
+					...options,
+					cwd: "/",
+					env: {
+						...(options?.env ?? {}),
+						...translated.env,
+					},
+				});
+				const logFields = {
+					pid: process.pid,
+					command,
+					args,
+					driver: translated.driver,
+					cwd: options?.cwd,
+				};
+				logger.info(logFields, "process spawned");
+				return wrapManagedProcess(process, logger, logFields);
+			}
+
+			const translated = prepareKernelInvocation(
+				command,
+				args,
+				piCliPath,
+				options?.cwd,
+			);
+			const process = kernel.spawn(translated.command, translated.args, {
+				...options,
+				cwd: translated.cwd ?? options?.cwd,
+				env: {
+					...(options?.env ?? {}),
+					...(translated.env ?? {}),
+				},
+			});
+			const logFields = {
+				pid: process.pid,
+				command,
+				args,
+				driver: translated.driver,
+				cwd: options?.cwd,
+			};
+			logger.info(logFields, "process spawned");
+			return wrapManagedProcess(process, logger, logFields);
+		},
+		openShell(options?: Parameters<Kernel["openShell"]>[0]) {
+			const requestedCommand = options?.command ?? "sh";
+			const requestedArgs = options?.args ?? [];
+			if (requestedCommand === "bash" || requestedCommand === "sh") {
+				const translated = prepareShellShimInvocation(
+					requestedCommand,
+					requestedArgs,
+					options?.cwd,
+				);
+				const stdoutHandlers = new Set<(data: Uint8Array) => void>();
+				const stderrHandlers = new Set<(data: Uint8Array) => void>();
+				const proc = kernel.spawn(translated.command, translated.args, {
+					cwd: "/",
+					env: {
+						...(options?.env ?? {}),
+						...translated.env,
+					},
+					streamStdin: true,
+					onStdout: (chunk) => {
+						for (const handler of stdoutHandlers) {
+							handler(chunk);
+						}
+					},
+					onStderr: (chunk) => {
+						for (const handler of stderrHandlers) {
+							handler(chunk);
+						}
+					},
+				});
+				let onData: ((data: Uint8Array) => void) | null = null;
+				stdoutHandlers.add((data) => onData?.(data));
+				if (options?.onStderr) {
+					stderrHandlers.add(options.onStderr);
+				}
+				const logFields = {
+					pid: proc.pid,
+					command: requestedCommand,
+					args: requestedArgs,
+					driver: translated.driver,
+					cwd: options?.cwd,
+					cols: options?.cols,
+					rows: options?.rows,
+				};
+				logger.info(logFields, "pty opened");
+				return wrapShellHandle(
+					{
+						pid: proc.pid,
+						write(data) {
+							proc.writeStdin(data);
+						},
+						get onData() {
+							return onData;
+						},
+						set onData(value) {
+							onData = value;
+						},
+						resize() {},
+						kill(signal) {
+							proc.kill(signal);
+						},
+						wait() {
+							return proc.wait();
+						},
+					},
+					logger,
+					logFields,
+				);
+			}
+
+			const translated = prepareKernelInvocation(
+				requestedCommand,
+				requestedArgs,
+				piCliPath,
+				options?.cwd,
+			);
+			const handle = kernel.openShell({
+				...options,
+				command: translated.command,
+				args: translated.args,
+				cwd: translated.cwd ?? options?.cwd,
+				env: {
+					...(options?.env ?? {}),
+					...(translated.env ?? {}),
+				},
+			});
+			const logFields = {
+				pid: handle.pid,
+				command: requestedCommand,
+				args: requestedArgs,
+				driver: translated.driver,
+				cwd: options?.cwd,
+				cols: options?.cols,
+				rows: options?.rows,
+			};
+			logger.info(logFields, "pty opened");
+			return wrapShellHandle(handle, logger, logFields);
+		},
+		async connectTerminal(options?: Parameters<Kernel["connectTerminal"]>[0]) {
+			const requestedCommand = options?.command ?? "sh";
+			const requestedArgs = options?.args ?? [];
+			if (requestedCommand === "bash" || requestedCommand === "sh") {
+				if (
+					(requestedArgs[0] === "-c" || requestedArgs[0] === "-lc") &&
+					typeof requestedArgs[1] === "string"
+				) {
+					const proc = wrappedKernel.spawn(requestedCommand, requestedArgs, {
+						cwd: options?.cwd,
+						env: options?.env,
+						onStdout:
+							options?.onData ??
+							((data) => {
+								process.stdout.write(data);
+							}),
+						onStderr:
+							options?.onStderr ??
+							((data) => {
+								process.stderr.write(data);
+							}),
+					});
+					return await proc.wait();
+				}
+
+				const shellHandle = wrappedKernel.openShell(options);
+				const outputHandler =
+					options?.onData ??
+					((data: Uint8Array) => {
+						process.stdout.write(data);
+					});
+				shellHandle.onData = outputHandler;
+				if (
+					process.stdin.isTTY &&
+					typeof process.stdin.setRawMode === "function"
+				) {
+					process.stdin.setRawMode(true);
+				}
+				const onStdinData = (data: Uint8Array | string) => {
+					shellHandle.write(data);
+				};
+				process.stdin.on("data", onStdinData);
+				process.stdin.resume();
+				try {
+					return await shellHandle.wait();
+				} finally {
+					process.stdin.removeListener("data", onStdinData);
+					process.stdin.pause();
+					if (
+						process.stdin.isTTY &&
+						typeof process.stdin.setRawMode === "function"
+					) {
+						process.stdin.setRawMode(false);
+					}
+				}
+			}
+
+			const translated = prepareKernelInvocation(
+				requestedCommand,
+				requestedArgs,
+				piCliPath,
+				options?.cwd,
+			);
+			logger.info(
+				{
+					command: requestedCommand,
+					args: requestedArgs,
+					driver: translated.driver,
+					cwd: options?.cwd,
+					cols: options?.cols,
+					rows: options?.rows,
+				},
+				"pty connected",
+			);
+			const exitCode = await kernel.connectTerminal({
+				...options,
+				command: translated.command,
+				args: translated.args,
+				cwd: translated.cwd ?? options?.cwd,
+				env: {
+					...(options?.env ?? {}),
+					...(translated.env ?? {}),
+				},
+			});
+			logger.info(
+				{
+					command: requestedCommand,
+					args: requestedArgs,
+					driver: translated.driver,
+					exitCode,
+				},
+				"pty exited",
+			);
+			return exitCode;
+		},
+	});
+
+	return wrappedKernel;
 }
 
 export async function createDevShellKernel(
@@ -615,6 +1146,9 @@ export async function createDevShellKernel(
 	const workDir = path.resolve(options.workDir ?? process.cwd());
 	const mountWasm = options.mountWasm !== false;
 	const env = collectShellEnv(options.envFilePath ?? paths.realProviderEnvFile);
+	if (!process.env.AGENT_OS_NODE_BINARY) {
+		process.env.AGENT_OS_NODE_BINARY = process.execPath;
+	}
 
 	// Set up structured debug logger (file-only, never stdout/stderr).
 	const logger = options.debugLogPath
@@ -627,11 +1161,15 @@ export async function createDevShellKernel(
 	env.XDG_DATA_HOME = path.join(workDir, ".local", "share");
 	env.HISTFILE = "/dev/null";
 	env.PATH = "/bin";
+	if (!env.AGENT_OS_NODE_BINARY) {
+		env.AGENT_OS_NODE_BINARY = process.execPath;
+	}
 
 	await fsPromises.mkdir(workDir, { recursive: true });
 	await fsPromises.mkdir(env.XDG_CONFIG_HOME, { recursive: true });
 	await fsPromises.mkdir(env.XDG_CACHE_HOME, { recursive: true });
 	await fsPromises.mkdir(env.XDG_DATA_HOME, { recursive: true });
+	const piCliPath = resolvePiCliPath(paths);
 
 	const filesystem = createHybridVfs([
 		workDir,
@@ -639,55 +1177,73 @@ export async function createDevShellKernel(
 		paths.hostProjectRoot,
 		"/tmp",
 	]);
+	const localMounts: Array<{
+		path: string;
+		fs: VirtualFileSystem;
+		readOnly?: boolean;
+	}> = [
+		{
+			path: workDir,
+			fs: new runtimeCompat.NodeFileSystem({ root: workDir }),
+		},
+		{
+			path: "/tmp",
+			fs: new runtimeCompat.NodeFileSystem({ root: "/tmp" }),
+		},
+	];
+	if (piCliPath) {
+		const piNodeModulesRoot = path.dirname(
+			path.dirname(path.dirname(path.dirname(piCliPath))),
+		);
+		localMounts.push({
+			path: "/root/node_modules",
+			fs: new runtimeCompat.NodeFileSystem({ root: piNodeModulesRoot }),
+			readOnly: true,
+		});
+	}
 
-	const kernel = createKernel({
+	const kernel = runtimeCompat.createKernel({
 		filesystem,
-		hostNetworkAdapter: createNodeHostNetworkAdapter(),
-		permissions: allowAll,
+		hostNetworkAdapter: runtimeCompat.createNodeHostNetworkAdapter(),
+		permissions: runtimeCompat.allowAll,
 		env,
 		cwd: workDir,
 		logger,
+		mounts: localMounts,
 	});
 
 	const loadedCommands: string[] = [];
 
 	// Mount shell/runtime drivers in the same order as the integration tests.
 	if (mountWasm) {
-		const wasmRuntime = createWasmVmRuntime({
-			commandDirs: [paths.wasmCommandsDir],
-		});
-		await kernel.mount(wasmRuntime);
-		loadedCommands.push(...wasmRuntime.commands);
-		logger.info({ commands: wasmRuntime.commands }, "mounted wasmvm runtime");
+		loadedCommands.push("bash", "sh", "ls");
+		logger.info(
+			{ driver: "node-shell-shim", commands: ["bash", "sh", "ls"] },
+			"runtime driver mounted",
+		);
 	}
 
-	const nodeRuntime = createNodeRuntime({ permissions: allowAll });
+	const nodeRuntime = runtimeCompat.createNodeRuntime();
 	await kernel.mount(nodeRuntime);
 	loadedCommands.push(...nodeRuntime.commands);
-	logger.info({ commands: nodeRuntime.commands }, "mounted node runtime");
+	logger.info(
+		{ driver: nodeRuntime.name, commands: nodeRuntime.commands },
+		"runtime driver mounted",
+	);
 
-	const piCliPath = resolvePiCliPath(paths);
 	if (piCliPath) {
-		await kernel.mount(
-			new SandboxNodeScriptDriver(
-				"pi",
-				piCliPath,
-				allowAll,
-				paths.hostProjectRoot,
-				"import",
-			),
-		);
 		loadedCommands.push("pi");
-		logger.info({ piCliPath }, "mounted pi driver");
+		logger.info({ command: "pi", piCliPath }, "runtime driver mounted");
 	}
 
 	const filteredCommands = Array.from(new Set(loadedCommands))
 		.filter((command) => command.trim().length > 0 && !command.startsWith("_"))
 		.sort();
 	logger.info({ loadedCommands: filteredCommands }, "dev-shell ready");
+	const wrappedKernel = wrapKernel(kernel, logger, piCliPath);
 
 	return {
-		kernel,
+		kernel: wrappedKernel,
 		workDir,
 		env,
 		loadedCommands: filteredCommands,

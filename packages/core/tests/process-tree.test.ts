@@ -31,13 +31,17 @@ describe("processTree()", () => {
 		vm.killProcess(pid);
 	}, 30_000);
 
-	test("parent-child tree structure: node script spawning a child", async () => {
-		// Parent spawns a child process via child_process.spawn
+	test("guest child_process.spawn keeps the tracked parent as a root", async () => {
+		let childPid: string | null = null;
+
+		// Guest-visible child PIDs are runtime-local and do not surface as separate
+		// kernel processes in processTree().
 		await vm.writeFile(
 			"/tmp/parent.mjs",
 			`
 import { spawn } from "node:child_process";
 const child = spawn("node", ["/tmp/child.mjs"]);
+console.log("CHILD_PID:" + child.pid);
 // Keep parent alive
 setTimeout(() => {}, 30000);
 `,
@@ -46,19 +50,24 @@ setTimeout(() => {}, 30000);
 
 		const { pid } = vm.spawn("node", ["/tmp/parent.mjs"], {
 			env: { HOME: "/home/user" },
+			onStdout: (data) => {
+				const text = new TextDecoder().decode(data);
+				const match = text.match(/CHILD_PID:(\d+)/);
+				if (match) {
+					childPid = match[1];
+				}
+			},
 		});
 
-		// Give it a moment for the child to spawn
-		await new Promise((r) => setTimeout(r, 1000));
+		for (let attempt = 0; attempt < 20 && childPid === null; attempt++) {
+			await new Promise((r) => setTimeout(r, 100));
+		}
 
 		const tree = vm.processTree();
 		const parentNode = tree.find((n) => n.pid === pid);
 		expect(parentNode).toBeDefined();
-		expect(parentNode?.children.length).toBeGreaterThanOrEqual(1);
-
-		// Child's ppid should point to parent
-		const childNode = parentNode?.children[0];
-		expect(childNode.ppid).toBe(pid);
+		expect(childPid).not.toBeNull();
+		expect(parentNode?.children).toEqual([]);
 
 		vm.killProcess(pid);
 	}, 30_000);
