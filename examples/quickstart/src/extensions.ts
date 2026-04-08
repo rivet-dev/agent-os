@@ -11,6 +11,8 @@ import { AgentOs } from "@rivet-dev/agent-os";
 const os = await AgentOs.create();
 
 const { sessionId } = await os.createSession("pi", {
-  mcpServers: [{ type: "local", command: "npx", args: ["@playwright/mcp"] }],
-  cwd: "/project",
+	mcpServers: [{ type: "local", command: "npx", args: ["@playwright/mcp"] }],
+	cwd: "/project",
 });
+
+console.log("Session ID:", sessionId);

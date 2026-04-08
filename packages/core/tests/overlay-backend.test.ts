@@ -1,7 +1,7 @@
-import type { VirtualFileSystem } from "../src/runtime-compat.js";
-import { createInMemoryFileSystem } from "../src/runtime-compat.js";
 import { beforeEach, describe, expect, test } from "vitest";
 import { createOverlayBackend } from "../src/overlay-filesystem.js";
+import type { VirtualFileSystem } from "../src/runtime-compat.js";
+import { createInMemoryFileSystem } from "../src/runtime-compat.js";
 import { defineFsDriverTests } from "../src/test/file-system.js";
 
 // ---------------------------------------------------------------------------
@@ -83,9 +83,7 @@ describe("OverlayBackend (layer behavior)", () => {
 
 	test("delete creates whiteout, readFile throws ENOENT", async () => {
 		await overlay.removeFile("/data/base.txt");
-		await expect(overlay.readFile("/data/base.txt")).rejects.toThrow(
-			"ENOENT",
-		);
+		await expect(overlay.readFile("/data/base.txt")).rejects.toThrow("ENOENT");
 	});
 
 	test("delete creates whiteout, stat throws ENOENT", async () => {

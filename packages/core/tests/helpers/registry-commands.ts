@@ -9,22 +9,22 @@
  */
 
 import { existsSync } from "node:fs";
+import codex from "@rivet-dev/agent-os-codex";
 import coreutils from "@rivet-dev/agent-os-coreutils";
-import sed from "@rivet-dev/agent-os-sed";
-import grep from "@rivet-dev/agent-os-grep";
-import gawk from "@rivet-dev/agent-os-gawk";
-import findutils from "@rivet-dev/agent-os-findutils";
+import curl from "@rivet-dev/agent-os-curl";
 import diffutils from "@rivet-dev/agent-os-diffutils";
-import tar from "@rivet-dev/agent-os-tar";
+import fd from "@rivet-dev/agent-os-fd";
+import file from "@rivet-dev/agent-os-file";
+import findutils from "@rivet-dev/agent-os-findutils";
+import gawk from "@rivet-dev/agent-os-gawk";
+import grep from "@rivet-dev/agent-os-grep";
 import gzip from "@rivet-dev/agent-os-gzip";
 import jq from "@rivet-dev/agent-os-jq";
 import ripgrep from "@rivet-dev/agent-os-ripgrep";
-import fd from "@rivet-dev/agent-os-fd";
+import sed from "@rivet-dev/agent-os-sed";
+import tar from "@rivet-dev/agent-os-tar";
 import tree from "@rivet-dev/agent-os-tree";
-import file from "@rivet-dev/agent-os-file";
 import yq from "@rivet-dev/agent-os-yq";
-import codex from "@rivet-dev/agent-os-codex";
-import curl from "@rivet-dev/agent-os-curl";
 
 /** All standard registry software packages. */
 export const REGISTRY_SOFTWARE = [

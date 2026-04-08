@@ -3,8 +3,8 @@
  * assert against deterministic terminal screen state.
  */
 
-import type { Kernel } from "../runtime-compat.js";
 import { Terminal } from "@xterm/headless";
+import type { Kernel } from "../runtime-compat.js";
 
 type ShellHandle = ReturnType<Kernel["openShell"]>;
 

@@ -22,7 +22,6 @@ use crate::service::{
 use crate::state::{
     BridgeError, VmConfiguration, VmDnsConfig, VmLayer, VmLayerStore, VmOverlayLayer, VmState,
     DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME, JAVASCRIPT_COMMAND,
-    PYTHON_COMMAND, WASM_COMMAND,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -98,7 +97,7 @@ where
         kernel
             .register_driver(CommandDriver::new(
                 EXECUTION_DRIVER_NAME,
-                [JAVASCRIPT_COMMAND, PYTHON_COMMAND, WASM_COMMAND],
+                [JAVASCRIPT_COMMAND],
             ))
             .map_err(kernel_error)?;
         kernel
@@ -235,11 +234,7 @@ where
             },
         )?;
         vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);
-        let mut execution_commands = vec![
-            String::from(JAVASCRIPT_COMMAND),
-            String::from(PYTHON_COMMAND),
-            String::from(WASM_COMMAND),
-        ];
+        let mut execution_commands = vec![String::from(JAVASCRIPT_COMMAND)];
         execution_commands.extend(vm.command_guest_paths.keys().cloned());
         vm.kernel
             .register_driver(CommandDriver::new(
@@ -683,6 +678,95 @@ fn append_module_access_mount(
             id: String::from("module_access"),
             config: serde_json::json!({
                 "hostPath": root,
+            }),
+        },
+    });
+    append_module_access_symlink_mounts(mounts, &root)?;
+    Ok(())
+}
+
+fn append_module_access_symlink_mounts(
+    mounts: &mut Vec<MountDescriptor>,
+    node_modules_root: &Path,
+) -> Result<(), SidecarError> {
+    for entry in fs::read_dir(node_modules_root)
+        .map_err(|error| SidecarError::Io(format!("failed to read module_access root: {error}")))?
+    {
+        let entry = entry
+            .map_err(|error| SidecarError::Io(format!("failed to inspect module_access root: {error}")))?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| SidecarError::Io(format!("failed to stat module_access entry: {error}")))?;
+        if metadata.file_type().is_symlink() {
+            append_module_access_symlink_mount(
+                mounts,
+                &format!("/root/node_modules/{name}"),
+                &path,
+            )?;
+            continue;
+        }
+        if !metadata.is_dir() || !name.starts_with('@') {
+            continue;
+        }
+        for scoped_entry in fs::read_dir(&path)
+            .map_err(|error| SidecarError::Io(format!("failed to read module_access scope: {error}")))?
+        {
+            let scoped_entry = scoped_entry.map_err(|error| {
+                SidecarError::Io(format!("failed to inspect module_access scope: {error}"))
+            })?;
+            let scoped_name = scoped_entry.file_name().to_string_lossy().into_owned();
+            if scoped_name.starts_with('.') {
+                continue;
+            }
+            let scoped_path = scoped_entry.path();
+            let scoped_metadata = fs::symlink_metadata(&scoped_path).map_err(|error| {
+                SidecarError::Io(format!("failed to stat module_access scoped entry: {error}"))
+            })?;
+            if scoped_metadata.file_type().is_symlink() {
+                append_module_access_symlink_mount(
+                    mounts,
+                    &format!("/root/node_modules/{name}/{scoped_name}"),
+                    &scoped_path,
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn append_module_access_symlink_mount(
+    mounts: &mut Vec<MountDescriptor>,
+    guest_path: &str,
+    symlink_path: &Path,
+) -> Result<(), SidecarError> {
+    if mounts.iter().any(|mount| mount.guest_path == guest_path) {
+        return Ok(());
+    }
+
+    let target = fs::canonicalize(symlink_path).map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to resolve module_access package symlink {}: {error}",
+            symlink_path.display()
+        ))
+    })?;
+    if !target.is_dir() {
+        return Ok(());
+    }
+
+    mounts.push(MountDescriptor {
+        guest_path: guest_path.to_owned(),
+        read_only: true,
+        plugin: MountPluginDescriptor {
+            id: String::from("host_dir"),
+            config: serde_json::json!({
+                "hostPath": target,
+                "readOnly": true,
             }),
         },
     });

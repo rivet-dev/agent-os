@@ -2543,7 +2543,12 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 
     fn filesystem_usage(&mut self) -> KernelResult<FileSystemUsage> {
-        Ok(measure_filesystem_usage(self.raw_filesystem_mut())?)
+        let filesystem = self.raw_filesystem_mut();
+        let filesystem_any = filesystem as &mut dyn Any;
+        if let Some(mount_table) = filesystem_any.downcast_mut::<MountTable>() {
+            return Ok(mount_table.root_usage()?);
+        }
+        Ok(measure_filesystem_usage(filesystem)?)
     }
 
     fn storage_stat(&mut self, path: &str) -> KernelResult<Option<VirtualStat>> {

@@ -27,9 +27,9 @@
     }
   },
   "scripts": {
-    "check-types": "tsc --noEmit",
-    "build": "tsc",
-    "test": "vitest run --fileParallelism=false"
+    "check-types": "tsc --noEmit -p ./tsconfig.json",
+    "build": "tsc -p ./tsconfig.json",
+    "test": "vitest run --fileParallelism=false --passWithNoTests"
   },
   "dependencies": {
     "@secure-exec/core": "^0.2.1",

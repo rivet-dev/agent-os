@@ -45,23 +45,24 @@ export type {
 	PrepareInstructionsOptions,
 } from "./agents.js";
 export type {
+	CronAction,
+	CronEvent,
+	CronEventHandler,
+	CronJob,
+	CronJobInfo,
+	CronJobOptions,
+	ScheduleDriver,
+	ScheduleEntry,
+	ScheduleHandle,
+} from "./cron/index.js";
+export type { HostDirBackendOptions } from "./host-dir-mount.js";
+export type { HostTool, ToolExample, ToolKit } from "./host-tools.js";
+export type {
 	JsonRpcError,
 	JsonRpcNotification,
 	JsonRpcRequest,
 	JsonRpcResponse,
 } from "./json-rpc.js";
-export type {
-	AgentSoftwareDescriptor,
-	AnySoftwareDescriptor,
-	SoftwareContext,
-	SoftwareDescriptor,
-	SoftwareInput,
-	SoftwareRoot,
-	ToolSoftwareDescriptor,
-	WasmCommandDirDescriptor,
-	WasmCommandSoftwareDescriptor,
-} from "./packages.js";
-export type { HostDirBackendOptions } from "./host-dir-mount.js";
 export type {
 	FilesystemSnapshotExport,
 	LayerHandle,
@@ -73,17 +74,16 @@ export type {
 	WritableLayerHandle,
 } from "./layers.js";
 export type {
-	CronAction,
-	CronEvent,
-	CronEventHandler,
-	CronJob,
-	CronJobInfo,
-	CronJobOptions,
-	ScheduleDriver,
-	ScheduleEntry,
-	ScheduleHandle,
-} from "./cron/index.js";
-export type { HostTool, ToolExample, ToolKit } from "./host-tools.js";
+	AgentSoftwareDescriptor,
+	AnySoftwareDescriptor,
+	SoftwareContext,
+	SoftwareDescriptor,
+	SoftwareInput,
+	SoftwareRoot,
+	ToolSoftwareDescriptor,
+	WasmCommandDirDescriptor,
+	WasmCommandSoftwareDescriptor,
+} from "./packages.js";
 export type {
 	ChildProcessPermissions,
 	ConnectTerminalOptions,
@@ -94,6 +94,7 @@ export type {
 	NetworkAccessRequest,
 	NetworkPermissions,
 	OpenShellOptions,
+	PatternPermissionRule,
 	PermissionDecision,
 	PermissionMode,
 	Permissions,
@@ -102,5 +103,4 @@ export type {
 	VirtualDirEntry,
 	VirtualFileSystem,
 	VirtualStat,
-	PatternPermissionRule,
 } from "./runtime.js";

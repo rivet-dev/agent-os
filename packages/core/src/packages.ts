@@ -1,5 +1,5 @@
-import { readFileSync, realpathSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { PermissionTier } from "./runtime.js";
 
 /**
@@ -36,8 +36,9 @@ function resolvePackageDir(startDir: string, packageName: string): string {
 			`Ensure it is installed.`,
 	);
 }
-import type { Kernel } from "./runtime-compat.js";
+
 import type { AgentConfig } from "./agents.js";
+import type { Kernel } from "./runtime-compat.js";
 
 // ── Software Descriptor Types ────────────────────────────────────────
 
@@ -172,7 +173,9 @@ function createSoftwareContext(
 
 	for (const reqPkg of requires) {
 		const hostDir = resolvePackageDir(packageDir, reqPkg);
-		const pkg = JSON.parse(readFileSync(join(hostDir, "package.json"), "utf-8"));
+		const pkg = JSON.parse(
+			readFileSync(join(hostDir, "package.json"), "utf-8"),
+		);
 		const vmDir = `/root/node_modules/${reqPkg}`;
 		resolvedPackages.set(reqPkg, { hostDir, vmDir, pkg });
 	}
@@ -247,8 +250,15 @@ export interface ProcessedSoftware {
 }
 
 /** Check if a descriptor is a typed software descriptor (has a `type` field). */
-function isTypedDescriptor(desc: AnySoftwareDescriptor): desc is AgentSoftwareDescriptor | ToolSoftwareDescriptor | WasmCommandSoftwareDescriptor {
-	return "type" in desc && typeof (desc as SoftwareDescriptor).type === "string";
+function isTypedDescriptor(
+	desc: AnySoftwareDescriptor,
+): desc is
+	| AgentSoftwareDescriptor
+	| ToolSoftwareDescriptor
+	| WasmCommandSoftwareDescriptor {
+	return (
+		"type" in desc && typeof (desc as SoftwareDescriptor).type === "string"
+	);
 }
 
 const VALID_PERMISSION_TIERS = new Set<PermissionTier>([
@@ -259,7 +269,10 @@ const VALID_PERMISSION_TIERS = new Set<PermissionTier>([
 ]);
 
 function isPermissionTier(value: unknown): value is PermissionTier {
-	return typeof value === "string" && VALID_PERMISSION_TIERS.has(value as PermissionTier);
+	return (
+		typeof value === "string" &&
+		VALID_PERMISSION_TIERS.has(value as PermissionTier)
+	);
 }
 
 function registerPermission(
@@ -320,9 +333,11 @@ function collectCommandMetadata(
 		}
 	}
 
-	const permissions = (pkg as {
-		permissions?: WasmCommandSoftwareDescriptor["permissions"];
-	}).permissions;
+	const permissions = (
+		pkg as {
+			permissions?: WasmCommandSoftwareDescriptor["permissions"];
+		}
+	).permissions;
 	if (permissions) {
 		for (const commandName of permissions.full ?? []) {
 			appendDeclaredCommand(declaredCommands, seen, commandName);
@@ -365,7 +380,8 @@ function collectRegistryPackagePermissions(
 		}
 
 		const name = (rawCommand as { name: unknown }).name;
-		const permissionTier = (rawCommand as { permissionTier: unknown }).permissionTier;
+		const permissionTier = (rawCommand as { permissionTier: unknown })
+			.permissionTier;
 		if (typeof name !== "string" || !isPermissionTier(permissionTier)) continue;
 		registerPermission(commandPermissions, name, permissionTier);
 	}
@@ -402,9 +418,7 @@ function collectTypedDescriptorPermissions(
  * as a WASM command source. Typed descriptors with `type: "agent"` or `type: "tool"`
  * are processed for module mounting and agent registration.
  */
-export function processSoftware(
-	software: SoftwareInput[],
-): ProcessedSoftware {
+export function processSoftware(software: SoftwareInput[]): ProcessedSoftware {
 	const commandDirs: string[] = [];
 	const commandPackages: CommandPackageMetadata[] = [];
 	const commandPermissions: Record<string, PermissionTier> = {};
@@ -452,7 +466,8 @@ export function processSoftware(
 					agentPackage: pkg.agent.agentPackage,
 					declaringPackageDir: pkg.packageDir,
 					launchArgs: pkg.agent.launchArgs,
-					defaultEnv: Object.keys(combinedEnv).length > 0 ? combinedEnv : undefined,
+					defaultEnv:
+						Object.keys(combinedEnv).length > 0 ? combinedEnv : undefined,
 					prepareInstructions: pkg.agent.prepareInstructions,
 				};
 

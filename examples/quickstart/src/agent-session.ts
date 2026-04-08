@@ -3,11 +3,11 @@
 // NOTE: This example requires an API key for the chosen agent and a working
 // agent runtime. It may not complete in all environments.
 
-import { AgentOs } from "@rivet-dev/agent-os";
 import type { SoftwareInput } from "@rivet-dev/agent-os";
-import common from "@rivet-dev/agent-os-common";
+import { AgentOs } from "@rivet-dev/agent-os";
 import claude from "@rivet-dev/agent-os-claude";
 import codex from "@rivet-dev/agent-os-codex-agent";
+import common from "@rivet-dev/agent-os-common";
 import opencode from "@rivet-dev/agent-os-opencode";
 import pi from "@rivet-dev/agent-os-pi";
 
@@ -36,7 +36,10 @@ vm.onSessionEvent(sessionId, (event) => {
 });
 
 // Send a prompt and wait for the response
-const { response, text } = await vm.prompt(sessionId, "What is 2 + 2? Reply with just the number.");
+const { text } = await vm.prompt(
+	sessionId,
+	"What is 2 + 2? Reply with just the number.",
+);
 console.log("Response:", text);
 
 // Close the session

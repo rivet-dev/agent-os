@@ -5,8 +5,8 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
 import { NativeSidecarProcessClient } from "../src/sidecar/rpc-client.js";

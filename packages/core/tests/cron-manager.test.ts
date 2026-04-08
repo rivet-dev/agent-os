@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CronManager } from "../src/cron/cron-manager.js";
-import type { ScheduleDriver, ScheduleEntry, ScheduleHandle } from "../src/cron/schedule-driver.js";
+import type {
+	ScheduleDriver,
+	ScheduleEntry,
+	ScheduleHandle,
+} from "../src/cron/schedule-driver.js";
 import type { CronEvent } from "../src/cron/types.js";
 
 // ---------------------------------------------------------------------------
@@ -322,7 +326,9 @@ describe("CronManager", () => {
 		const complete = events.find((e) => e.type === "cron:complete");
 		expect(complete).toBeDefined();
 		expect(complete!.jobId).toBe("j10");
-		expect(complete!.type === "cron:complete" && complete!.durationMs).toBeGreaterThanOrEqual(0);
+		expect(
+			complete!.type === "cron:complete" && complete!.durationMs,
+		).toBeGreaterThanOrEqual(0);
 	});
 
 	// -----------------------------------------------------------------------

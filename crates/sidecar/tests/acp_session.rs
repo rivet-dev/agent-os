@@ -1,7 +1,7 @@
-#[path = "../src/protocol.rs"]
-mod protocol;
 #[path = "../src/acp/mod.rs"]
 mod acp;
+#[path = "../src/protocol.rs"]
+mod protocol;
 
 use acp::compat::{
     is_cancel_method_not_found, maybe_normalize_permission_response,
@@ -102,9 +102,10 @@ fn session_state_tracks_metadata_and_derived_model_option() {
         created.modes.expect("modes")["currentModeId"],
         Value::String(String::from("build"))
     );
-    assert!(created.config_options.iter().any(|option| {
-        option.get("id").and_then(Value::as_str) == Some("model")
-    }));
+    assert!(created
+        .config_options
+        .iter()
+        .any(|option| { option.get("id").and_then(Value::as_str) == Some("model") }));
 
     let state = session.state_response();
     assert_eq!(state.session_id, "mock-agent-session");
@@ -170,7 +171,7 @@ fn permission_requests_are_normalized_and_deduped() {
     .expect("normalized permission reply");
     assert_eq!(reply_id, JsonRpcId::Number(90));
     assert_eq!(result["outcome"]["optionId"], "always");
-  }
+}
 
 #[test]
 fn notifications_record_sequence_numbers_and_session_updates() {
@@ -214,20 +215,14 @@ fn notifications_record_sequence_numbers_and_session_updates() {
 #[test]
 fn opencode_mode_changes_inject_synthetic_session_update() {
     let mut session = session("opencode");
-    let params = Map::from_iter([(
-        String::from("modeId"),
-        Value::String(String::from("plan")),
-    )]);
+    let params = Map::from_iter([(String::from("modeId"), Value::String(String::from("plan")))]);
 
     let synthetic = session
         .apply_request_success("session/set_mode", &params, 0)
         .expect("synthetic mode update");
     assert_eq!(synthetic.method, "session/update");
     assert_eq!(
-        session
-            .state_response()
-            .modes
-            .expect("modes")["currentModeId"],
+        session.state_response().modes.expect("modes")["currentModeId"],
         Value::String(String::from("plan"))
     );
 }

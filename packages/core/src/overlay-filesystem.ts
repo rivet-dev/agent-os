@@ -40,14 +40,14 @@ export function createOverlayBackend(
 		throw new Error("Read-only overlays cannot accept a writable upper layer");
 	}
 
-	const configuredLowers = options.lowers
-		?? (options.lower ? [options.lower] : []);
-	const lowers = configuredLowers.length > 0
-		? configuredLowers
-		: [createInMemoryFileSystem()];
-	const upper = mode === "read-only"
-		? null
-		: options.upper ?? createInMemoryFileSystem();
+	const configuredLowers =
+		options.lowers ?? (options.lower ? [options.lower] : []);
+	const lowers =
+		configuredLowers.length > 0
+			? configuredLowers
+			: [createInMemoryFileSystem()];
+	const upper =
+		mode === "read-only" ? null : (options.upper ?? createInMemoryFileSystem());
 
 	function normPath(path: string): string {
 		return posixPath.normalize(path);
@@ -55,12 +55,17 @@ export function createOverlayBackend(
 
 	function isInternalMetadataPath(path: string): boolean {
 		const normalized = normPath(path);
-		return normalized === OVERLAY_METADATA_ROOT
-			|| normalized.startsWith(`${OVERLAY_METADATA_ROOT}/`);
+		return (
+			normalized === OVERLAY_METADATA_ROOT ||
+			normalized.startsWith(`${OVERLAY_METADATA_ROOT}/`)
+		);
 	}
 
 	function shouldHideDirectoryEntry(path: string, entryName: string): boolean {
-		return normPath(path) === "/" && entryName === posixPath.basename(OVERLAY_METADATA_ROOT);
+		return (
+			normPath(path) === "/" &&
+			entryName === posixPath.basename(OVERLAY_METADATA_ROOT)
+		);
 	}
 
 	function markerDirectory(kind: OverlayMarkerKind): string {
@@ -91,7 +96,10 @@ export function createOverlayBackend(
 		await upper.mkdir(OVERLAY_OPAQUE_DIR, { recursive: true });
 	}
 
-	async function markerExists(kind: OverlayMarkerKind, path: string): Promise<boolean> {
+	async function markerExists(
+		kind: OverlayMarkerKind,
+		path: string,
+	): Promise<boolean> {
 		if (!upper) {
 			return false;
 		}
@@ -216,7 +224,7 @@ export function createOverlayBackend(
 	}
 
 	async function mergedLstat(path: string): Promise<VirtualStat> {
-		if (isInternalMetadataPath(path) || await isWhitedOut(path)) {
+		if (isInternalMetadataPath(path) || (await isWhitedOut(path))) {
 			throw new KernelError("ENOENT", `no such file: ${path}`);
 		}
 		if (await hasEntryInUpper(path)) {
@@ -299,7 +307,7 @@ export function createOverlayBackend(
 	}
 
 	async function pathExistsInMergedView(path: string): Promise<boolean> {
-		if (isInternalMetadataPath(path) || await isWhitedOut(path)) {
+		if (isInternalMetadataPath(path) || (await isWhitedOut(path))) {
 			return false;
 		}
 		if (await hasEntryInUpper(path)) {
@@ -310,7 +318,7 @@ export function createOverlayBackend(
 
 	const backend: VirtualFileSystem = {
 		async readFile(path: string): Promise<Uint8Array> {
-			if (isInternalMetadataPath(path) || await isWhitedOut(path)) {
+			if (isInternalMetadataPath(path) || (await isWhitedOut(path))) {
 				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
 			if (await existsInUpper(path)) {
@@ -324,7 +332,7 @@ export function createOverlayBackend(
 		},
 
 		async readTextFile(path: string): Promise<string> {
-			if (isInternalMetadataPath(path) || await isWhitedOut(path)) {
+			if (isInternalMetadataPath(path) || (await isWhitedOut(path))) {
 				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
 			if (await existsInUpper(path)) {
@@ -338,7 +346,7 @@ export function createOverlayBackend(
 		},
 
 		async readDir(path: string): Promise<string[]> {
-			if (isInternalMetadataPath(path) || await isWhitedOut(path)) {
+			if (isInternalMetadataPath(path) || (await isWhitedOut(path))) {
 				throw new KernelError("ENOENT", `no such directory: ${path}`);
 			}
 
@@ -353,10 +361,11 @@ export function createOverlayBackend(
 						directoryExists = true;
 						for (const entry of lowerEntries) {
 							if (
-								entry === "."
-								|| entry === ".."
-								|| shouldHideDirectoryEntry(path, entry)
-							) continue;
+								entry === "." ||
+								entry === ".." ||
+								shouldHideDirectoryEntry(path, entry)
+							)
+								continue;
 							const childPath = posixPath.join(normPath(path), entry);
 							if (!(await isWhitedOut(childPath))) {
 								entries.add(entry);
@@ -374,10 +383,11 @@ export function createOverlayBackend(
 					directoryExists = true;
 					for (const entry of upperEntries) {
 						if (
-							entry === "."
-							|| entry === ".."
-							|| shouldHideDirectoryEntry(path, entry)
-						) continue;
+							entry === "." ||
+							entry === ".." ||
+							shouldHideDirectoryEntry(path, entry)
+						)
+							continue;
 						entries.add(entry);
 					}
 				} catch {
@@ -393,7 +403,7 @@ export function createOverlayBackend(
 		},
 
 		async readDirWithTypes(path: string): Promise<VirtualDirEntry[]> {
-			if (isInternalMetadataPath(path) || await isWhitedOut(path)) {
+			if (isInternalMetadataPath(path) || (await isWhitedOut(path))) {
 				throw new KernelError("ENOENT", `no such directory: ${path}`);
 			}
 
@@ -408,10 +418,11 @@ export function createOverlayBackend(
 						directoryExists = true;
 						for (const entry of lowerEntries) {
 							if (
-								entry.name === "."
-								|| entry.name === ".."
-								|| shouldHideDirectoryEntry(path, entry.name)
-							) continue;
+								entry.name === "." ||
+								entry.name === ".." ||
+								shouldHideDirectoryEntry(path, entry.name)
+							)
+								continue;
 							const childPath = posixPath.join(normPath(path), entry.name);
 							if (!(await isWhitedOut(childPath))) {
 								entriesByName.set(entry.name, entry);
@@ -429,10 +440,11 @@ export function createOverlayBackend(
 					directoryExists = true;
 					for (const entry of upperEntries) {
 						if (
-							entry.name === "."
-							|| entry.name === ".."
-							|| shouldHideDirectoryEntry(path, entry.name)
-						) continue;
+							entry.name === "." ||
+							entry.name === ".." ||
+							shouldHideDirectoryEntry(path, entry.name)
+						)
+							continue;
 						entriesByName.set(entry.name, entry);
 					}
 				} catch {
@@ -447,10 +459,7 @@ export function createOverlayBackend(
 			return [...entriesByName.values()];
 		},
 
-		async writeFile(
-			path: string,
-			content: string | Uint8Array,
-		): Promise<void> {
+		async writeFile(path: string, content: string | Uint8Array): Promise<void> {
 			if (isInternalMetadataPath(path)) {
 				throwMetadataAccessDenied(path, "open");
 			}
@@ -511,7 +520,7 @@ export function createOverlayBackend(
 		},
 
 		async stat(path: string): Promise<VirtualStat> {
-			if (isInternalMetadataPath(path) || await isWhitedOut(path)) {
+			if (isInternalMetadataPath(path) || (await isWhitedOut(path))) {
 				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
 			if (await existsInUpper(path)) {
@@ -578,7 +587,7 @@ export function createOverlayBackend(
 		},
 
 		async realpath(path: string): Promise<string> {
-			if (isInternalMetadataPath(path) || await isWhitedOut(path)) {
+			if (isInternalMetadataPath(path) || (await isWhitedOut(path))) {
 				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
 			if (await existsInUpper(path)) {
@@ -604,7 +613,7 @@ export function createOverlayBackend(
 		},
 
 		async readlink(path: string): Promise<string> {
-			if (isInternalMetadataPath(path) || await isWhitedOut(path)) {
+			if (isInternalMetadataPath(path) || (await isWhitedOut(path))) {
 				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
 			if (await hasEntryInUpper(path)) {
@@ -618,7 +627,7 @@ export function createOverlayBackend(
 		},
 
 		async lstat(path: string): Promise<VirtualStat> {
-			if (isInternalMetadataPath(path) || await isWhitedOut(path)) {
+			if (isInternalMetadataPath(path) || (await isWhitedOut(path))) {
 				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
 			if (await hasEntryInUpper(path)) {
@@ -694,7 +703,10 @@ export function createOverlayBackend(
 			// Some backends interpret utimes inputs as seconds rather than
 			// milliseconds. Normalize them here so the overlay presents a
 			// consistent millisecond-based contract.
-			if (updated.atimeMs === atime * 1000 && updated.mtimeMs === mtime * 1000) {
+			if (
+				updated.atimeMs === atime * 1000 &&
+				updated.mtimeMs === mtime * 1000
+			) {
 				await upper.utimes(path, atime / 1000, mtime / 1000);
 			}
 		},
@@ -720,7 +732,7 @@ export function createOverlayBackend(
 			offset: number,
 			length: number,
 		): Promise<Uint8Array> {
-			if (isInternalMetadataPath(path) || await isWhitedOut(path)) {
+			if (isInternalMetadataPath(path) || (await isWhitedOut(path))) {
 				throw new KernelError("ENOENT", `no such file: ${path}`);
 			}
 			if (await existsInUpper(path)) {

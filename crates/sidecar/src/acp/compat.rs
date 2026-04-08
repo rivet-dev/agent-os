@@ -49,21 +49,21 @@ pub(crate) fn normalize_inbound_permission_request(
         PendingPermissionRequest {
             id: request.id.clone(),
             method: request.method.clone(),
-            options: params.get("options").and_then(Value::as_array).map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_object)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            }),
+            options: params
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_object)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                }),
         },
     );
 
     let mut normalized = params;
-    normalized.insert(
-        String::from("permissionId"),
-        Value::String(permission_id),
-    );
+    normalized.insert(String::from("permissionId"), Value::String(permission_id));
     normalized.insert(
         String::from("_acpMethod"),
         Value::String(request.method.clone()),
@@ -96,7 +96,10 @@ pub(crate) fn maybe_normalize_permission_response(
         return None;
     }
 
-    Some((pending.id.clone(), normalize_permission_result(&payload, &pending)))
+    Some((
+        pending.id.clone(),
+        normalize_permission_result(&payload, &pending),
+    ))
 }
 
 pub(crate) fn is_cancel_method_not_found(response: &JsonRpcResponse) -> bool {
@@ -163,10 +166,7 @@ pub(crate) fn derive_config_options(
             Value::String(String::from("model")),
         ),
         (String::from("label"), Value::String(String::from("Model"))),
-        (
-            String::from("allowedValues"),
-            Value::Array(allowed_values),
-        ),
+        (String::from("allowedValues"), Value::Array(allowed_values)),
         (
             String::from("readOnly"),
             Value::Bool(matches!(
@@ -248,7 +248,8 @@ fn normalize_permission_result(
     }
 
     let requested_reply = params.get("reply").and_then(Value::as_str);
-    if let Some(selected_option_id) = resolve_permission_option_id(&pending.options, requested_reply)
+    if let Some(selected_option_id) =
+        resolve_permission_option_id(&pending.options, requested_reply)
     {
         return json!({
             "outcome": {
@@ -259,9 +260,13 @@ fn normalize_permission_result(
     }
 
     match requested_reply {
-        Some("always") => json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } }),
+        Some("always") => {
+            json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })
+        }
         Some("once") => json!({ "outcome": { "outcome": "selected", "optionId": "allow_once" } }),
-        Some("reject") => json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }),
+        Some("reject") => {
+            json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })
+        }
         _ => json!({ "outcome": { "outcome": "cancelled" } }),
     }
 }

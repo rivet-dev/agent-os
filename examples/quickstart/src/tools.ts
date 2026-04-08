@@ -4,8 +4,8 @@
 // Each toolkit becomes a set of tools accessible at AGENTOS_TOOLS_PORT.
 // Node scripts inside the VM can call the server directly with fetch.
 
-import { z } from "zod";
 import { AgentOs, hostTool, toolKit } from "@rivet-dev/agent-os";
+import { z } from "zod";
 
 const weatherToolkit = toolKit({
 	name: "weather",

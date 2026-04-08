@@ -774,7 +774,21 @@ fn run_warmup_command(
     mut command: Command,
     timeout: Option<Duration>,
 ) -> Result<WarmupOutput, WasmExecutionError> {
-    let mut child = command.spawn().map_err(WasmExecutionError::WarmupSpawn)?;
+    let program = command.get_program().to_string_lossy().into_owned();
+    let args = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let cwd = command
+        .get_current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| String::from("<none>"));
+    let mut child = command.spawn().map_err(|error| {
+        WasmExecutionError::WarmupSpawn(std::io::Error::new(
+            error.kind(),
+            format!("{error} (program: {program}, cwd: {cwd}, args: {:?})", args),
+        ))
+    })?;
     let Some(mut stderr) = child.stderr.take() else {
         return Err(WasmExecutionError::MissingChildStream("stderr"));
     };

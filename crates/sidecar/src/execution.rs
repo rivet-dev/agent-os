@@ -26,21 +26,20 @@ use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveHttp2Server, ActiveHttp2Session,
     ActiveHttp2Stream, ActiveHttpServer, ActiveProcess, ActiveSqliteDatabase,
     ActiveSqliteStatement, ActiveTcpListener, ActiveTcpSocket, ActiveTlsState, ActiveTlsStream,
-    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError,
-    DEFAULT_JAVASCRIPT_NET_BACKLOG, DnsResolutionSource, EXECUTION_DRIVER_NAME,
-    EXECUTION_SANDBOX_ROOT_ENV, Http2BridgeEvent, Http2RuntimeSnapshot, Http2SessionCommand,
-    Http2SessionSnapshot, Http2SocketSnapshot, Http2StreamDirection, JAVASCRIPT_COMMAND,
-    JavascriptSocketFamily, JavascriptSocketPathContext, JavascriptTcpListenerEvent,
-    JavascriptTcpSocketEvent, JavascriptTlsBridgeOptions, JavascriptTlsClientHello,
-    JavascriptTlsDataValue, JavascriptTlsMaterial, JavascriptUdpFamily, JavascriptUdpSocketEvent,
-    JavascriptUnixListenerEvent, LOOPBACK_EXEMPT_PORTS_ENV, NetworkResourceCounts, PYTHON_COMMAND,
-    PendingTcpSocket, PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope,
-    ResolvedChildProcessExecution, ResolvedTcpConnectAddr, SharedBridge, SidecarKernel,
-    SocketQueryKind, TOOL_DRIVER_NAME, ToolExecution, VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY,
-    VM_LISTEN_PORT_MAX_METADATA_KEY, VM_LISTEN_PORT_MIN_METADATA_KEY, VmDnsConfig, VmListenPolicy,
-    VmState, WASM_COMMAND,
+    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError, DnsResolutionSource,
+    Http2BridgeEvent, Http2RuntimeSnapshot, Http2SessionCommand, Http2SessionSnapshot,
+    Http2SocketSnapshot, Http2StreamDirection, JavascriptSocketFamily, JavascriptSocketPathContext,
+    JavascriptTcpListenerEvent, JavascriptTcpSocketEvent, JavascriptTlsBridgeOptions,
+    JavascriptTlsClientHello, JavascriptTlsDataValue, JavascriptTlsMaterial, JavascriptUdpFamily,
+    JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket,
+    PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution,
+    ResolvedTcpConnectAddr, SharedBridge, SidecarKernel, SocketQueryKind, ToolExecution,
+    VmDnsConfig, VmListenPolicy, VmState, DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME,
+    EXECUTION_SANDBOX_ROOT_ENV, JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND,
+    TOOL_DRIVER_NAME, VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
+    VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
 };
-use crate::tools::{ToolCommandResolution, format_tool_failure_output, resolve_tool_command};
+use crate::tools::{format_tool_failure_output, resolve_tool_command, ToolCommandResolution};
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
 use agent_os_bridge::LifecycleState;
@@ -62,16 +61,16 @@ use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use base64::Engine;
 use bytes::Bytes;
-use h2::{Reason, client, server};
-use hickory_resolver::TokioResolver;
+use h2::{client, server, Reason};
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::TokioResolver;
 use hmac::{Hmac, Mac};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri};
 use md5::Md5;
 use nix::libc;
-use nix::sys::signal::{Signal, kill as send_signal};
-use nix::sys::wait::{Id as WaitId, WaitPidFlag, WaitStatus, waitid as wait_on_child};
+use nix::sys::signal::{kill as send_signal, Signal};
+use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::derive::Deriver;
@@ -98,11 +97,11 @@ use rustls::{
     ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, ServerConfig,
     ServerConnection, SignatureScheme,
 };
-use scrypt::{Params as ScryptParams, scrypt};
+use scrypt::{scrypt, Params as ScryptParams};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use sha1::Sha1;
-use sha2::{Sha256, Sha512, digest::Digest};
+use sha2::{digest::Digest, Sha256, Sha512};
 use socket2::{SockRef, TcpKeepalive};
 use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet};
@@ -121,7 +120,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use url::Url;
 
 const DEFAULT_KERNEL_STDIN_READ_MAX_BYTES: usize = 64 * 1024;
@@ -1015,15 +1014,21 @@ impl ActiveUnixListener {
 }
 
 impl ActiveTcpListener {
-    fn bind(guest_host: &str, guest_port: u16, backlog: Option<u32>) -> Result<Self, SidecarError> {
-        let bind_addr = resolve_tcp_bind_addr(guest_host, 0)?;
+    fn bind(
+        bind_host: &str,
+        guest_host: &str,
+        guest_port: u16,
+        backlog: Option<u32>,
+    ) -> Result<Self, SidecarError> {
+        let bind_addr = resolve_tcp_bind_addr(bind_host, 0)?;
+        let guest_addr = resolve_tcp_bind_addr(guest_host, guest_port)?;
         let listener = TcpListener::bind(bind_addr).map_err(sidecar_net_error)?;
         listener.set_nonblocking(true).map_err(sidecar_net_error)?;
         let local_addr = listener.local_addr().map_err(sidecar_net_error)?;
         Ok(Self {
             listener,
             local_addr,
-            guest_local_addr: SocketAddr::new(bind_addr.ip(), guest_port),
+            guest_local_addr: guest_addr,
             backlog: usize::try_from(backlog.unwrap_or(DEFAULT_JAVASCRIPT_NET_BACKLOG))
                 .expect("default backlog fits within usize"),
             active_connection_ids: BTreeSet::new(),
@@ -1127,17 +1132,17 @@ impl ActiveUdpSocket {
             )));
         }
 
-        let (guest_host, guest_family) = normalize_udp_bind_host(host, self.family)?;
+        let (bind_host, guest_host, guest_family) = normalize_udp_bind_host(host, self.family)?;
         let guest_port = allocate_guest_listen_port(
             port,
             guest_family,
             &context.used_udp_guest_ports,
             context.listen_policy,
         )?;
-        let bind_addr = resolve_udp_bind_addr(guest_host, 0, self.family)?;
+        let bind_addr = resolve_udp_bind_addr(bind_host, 0, self.family)?;
         let socket = UdpSocket::bind(bind_addr).map_err(sidecar_net_error)?;
         socket.set_nonblocking(true).map_err(sidecar_net_error)?;
-        let local_addr = SocketAddr::new(bind_addr.ip(), guest_port);
+        let local_addr = resolve_udp_bind_addr(guest_host, guest_port, self.family)?;
         self.socket = Some(socket);
         self.guest_local_addr = Some(local_addr);
         Ok(local_addr)
@@ -1725,6 +1730,9 @@ where
             String::from(EXECUTION_SANDBOX_ROOT_ENV),
             sandbox_root.to_string_lossy().into_owned(),
         );
+        if resolved.runtime == GuestRuntimeKind::JavaScript {
+            env.insert(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"));
+        }
         let argv = std::iter::once(resolved.entrypoint.clone())
             .chain(resolved.execution_args.iter().cloned())
             .collect::<Vec<_>>();
@@ -1743,7 +1751,15 @@ where
 
         let execution = match resolved.runtime {
             GuestRuntimeKind::JavaScript => {
-                prepare_javascript_shadow(vm, &resolved)?;
+                let inline_code = load_javascript_entrypoint_source(
+                    vm,
+                    &resolved.host_cwd,
+                    &resolved.entrypoint,
+                    &env,
+                );
+                if inline_code.is_none() {
+                    prepare_javascript_shadow(vm, &resolved)?;
+                }
 
                 let context =
                     self.javascript_engine
@@ -1762,7 +1778,7 @@ where
                             .collect(),
                         env: env.clone(),
                         cwd: resolved.host_cwd.clone(),
-                        inline_code: None,
+                        inline_code,
                     })
                     .map_err(javascript_error)?;
                 ActiveExecution::Javascript(execution)
@@ -1821,18 +1837,13 @@ where
             }
         };
         let child_pid = execution.child_pid();
-        let kernel_stdin_writer_fd =
-            install_kernel_stdin_pipe(&mut vm.kernel, kernel_handle.pid())?;
+        let kernel_pid = kernel_handle.pid();
+        let kernel_stdin_writer_fd = install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?;
         vm.active_processes.insert(
             payload.process_id.clone(),
-            ActiveProcess::new(
-                kernel_handle.pid(),
-                kernel_handle,
-                resolved.runtime,
-                execution,
-            )
-            .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
-            .with_host_cwd(resolved.host_cwd.clone()),
+            ActiveProcess::new(kernel_pid, kernel_handle, resolved.runtime, execution)
+                .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
+                .with_host_cwd(resolved.host_cwd.clone()),
         );
         self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
 
@@ -1841,7 +1852,11 @@ where
                 request,
                 ResponsePayload::ProcessStarted(ProcessStartedResponse {
                     process_id: payload.process_id,
-                    pid: Some(child_pid),
+                    pid: Some(if child_pid == 0 {
+                        kernel_pid
+                    } else {
+                        child_pid
+                    }),
                 }),
             ),
             events: Vec::new(),
@@ -2060,13 +2075,20 @@ where
                     });
                 }
             }
-            ActiveExecution::Javascript(execution) if execution.child_pid() == 0 => {
+            ActiveExecution::Javascript(execution)
+                if execution.uses_shared_v8_runtime()
+                    && matches!(signal, 0 | libc::SIGSTOP | libc::SIGCONT) =>
+            {
+                signal_runtime_process(execution.child_pid(), signal)?;
+            }
+            ActiveExecution::Javascript(execution) if execution.uses_shared_v8_runtime() => {
                 if signal != 0 {
                     execution
                         .terminate()
                         .map_err(|error| SidecarError::Execution(error.to_string()))?;
                 }
             }
+            ActiveExecution::Javascript(execution) if execution.child_pid() == 0 => {}
             _ => signal_runtime_process(process.execution.child_pid(), signal)?,
         }
         emit_security_audit_event(
@@ -2258,6 +2280,7 @@ where
         process_id: &str,
     ) -> Result<Vec<ActiveExecutionEvent>, SidecarError> {
         let mut events = Vec::new();
+        let mut deadline = Instant::now() + Duration::from_millis(150);
 
         loop {
             let event = {
@@ -2275,9 +2298,35 @@ where
             };
 
             let Some(event) = event else {
-                break;
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let blocking_wait = deadline.saturating_duration_since(Instant::now());
+                if blocking_wait.is_zero() {
+                    break;
+                }
+                let delayed_event = {
+                    let Some(vm) = self.vms.get_mut(vm_id) else {
+                        break;
+                    };
+                    let Some(process) = vm.active_processes.get_mut(process_id) else {
+                        break;
+                    };
+                    match process.execution.poll_event_blocking(blocking_wait) {
+                        Ok(event) => event,
+                        Err(SidecarError::Execution(_)) => None,
+                        Err(other) => return Err(other),
+                    }
+                };
+                let Some(event) = delayed_event else {
+                    break;
+                };
+                events.push(event);
+                deadline = Instant::now() + Duration::from_millis(150);
+                continue;
             };
             events.push(event);
+            deadline = Instant::now() + Duration::from_millis(150);
         }
 
         Ok(events)
@@ -3607,6 +3656,19 @@ fn prepare_javascript_shadow(
     if host_mount_path_for_guest_path(vm, &guest_entrypoint).is_some() {
         return Ok(());
     }
+    if vm.kernel.lstat(&guest_entrypoint).is_err() {
+        let host_entrypoint = {
+            let candidate = Path::new(&resolved.entrypoint);
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                resolved.host_cwd.join(candidate)
+            }
+        };
+        if host_entrypoint.exists() {
+            return Ok(());
+        }
+    }
     materialize_guest_path_to_shadow(vm, &guest_entrypoint)
 }
 
@@ -3831,44 +3893,52 @@ fn resolve_dns_with_sidecar_resolver(
     dns: &VmDnsConfig,
     hostname: &str,
 ) -> Result<Vec<IpAddr>, SidecarError> {
-    let runtime = tokio::runtime::Runtime::new().map_err(|error| {
-        SidecarError::Execution(format!("failed to create DNS runtime: {error}"))
-    })?;
+    let resolver_config = vm_dns_resolver_config(dns);
+    let hostname = hostname.to_owned();
+    std::thread::spawn(move || -> Result<Vec<IpAddr>, SidecarError> {
+        let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+            SidecarError::Execution(format!("failed to create DNS runtime: {error}"))
+        })?;
 
-    runtime.block_on(async {
-        let builder = if let Some(config) = vm_dns_resolver_config(dns) {
-            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
-        } else {
-            TokioResolver::builder_tokio().map_err(|error| {
+        runtime.block_on(async move {
+            let builder = if let Some(config) = resolver_config {
+                TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+            } else {
+                TokioResolver::builder_tokio().map_err(|error| {
+                    SidecarError::Execution(format!(
+                        "failed to initialize DNS resolver from system configuration: {error}"
+                    ))
+                })?
+            };
+
+            let resolver = builder.build().map_err(|error| {
+                SidecarError::Execution(format!("failed to build DNS resolver: {error}"))
+            })?;
+            let lookup = resolver.lookup_ip(&hostname).await.map_err(|error| {
                 SidecarError::Execution(format!(
-                    "failed to initialize DNS resolver from system configuration: {error}"
+                    "failed to resolve DNS address {hostname}: {error}"
                 ))
-            })?
-        };
+            })?;
 
-        let resolver = builder.build().map_err(|error| {
-            SidecarError::Execution(format!("failed to build DNS resolver: {error}"))
-        })?;
-        let lookup = resolver.lookup_ip(hostname).await.map_err(|error| {
-            SidecarError::Execution(format!("failed to resolve DNS address {hostname}: {error}"))
-        })?;
-
-        let mut addresses = Vec::new();
-        let mut seen = BTreeSet::new();
-        for ip in lookup.iter() {
-            if seen.insert(ip) {
-                addresses.push(ip);
+            let mut addresses = Vec::new();
+            let mut seen = BTreeSet::new();
+            for ip in lookup.iter() {
+                if seen.insert(ip) {
+                    addresses.push(ip);
+                }
             }
-        }
 
-        if addresses.is_empty() {
-            return Err(SidecarError::Execution(format!(
-                "failed to resolve DNS address {hostname}"
-            )));
-        }
+            if addresses.is_empty() {
+                return Err(SidecarError::Execution(format!(
+                    "failed to resolve DNS address {hostname}"
+                )));
+            }
 
-        Ok(addresses)
+            Ok(addresses)
+        })
     })
+    .join()
+    .map_err(|_| SidecarError::Execution(String::from("dns resolver thread panicked")))?
 }
 
 fn emit_dns_resolution_event<B>(
@@ -4250,6 +4320,8 @@ pub(crate) fn build_javascript_socket_path_context(
     vm: &VmState,
 ) -> Result<JavascriptSocketPathContext, SidecarError> {
     let internal_env = crate::vm::extract_guest_env(&vm.metadata);
+    let mut loopback_exempt_ports = parse_loopback_exempt_ports(&internal_env)?;
+    loopback_exempt_ports.extend(vm.configuration.loopback_exempt_ports.iter().copied());
     let mut tcp_loopback_guest_to_host_ports = BTreeMap::new();
     let mut udp_loopback_guest_to_host_ports = BTreeMap::new();
     let mut udp_loopback_host_to_guest_ports = BTreeMap::new();
@@ -4269,7 +4341,7 @@ pub(crate) fn build_javascript_socket_path_context(
         sandbox_root: vm.cwd.clone(),
         mounts: vm.configuration.mounts.clone(),
         listen_policy: parse_vm_listen_policy(&vm.metadata)?,
-        loopback_exempt_ports: parse_loopback_exempt_ports(&internal_env)?,
+        loopback_exempt_ports,
         tcp_loopback_guest_to_host_ports,
         udp_loopback_guest_to_host_ports,
         udp_loopback_host_to_guest_ports,
@@ -4296,15 +4368,14 @@ fn check_network_resource_limit(
 
 fn normalize_tcp_listen_host(
     host: Option<&str>,
-) -> Result<(JavascriptSocketFamily, &'static str), SidecarError> {
+) -> Result<(JavascriptSocketFamily, &'static str, &'static str), SidecarError> {
     match host.unwrap_or("127.0.0.1") {
-        "127.0.0.1" | "localhost" => Ok((JavascriptSocketFamily::Ipv4, "127.0.0.1")),
-        "::1" => Ok((JavascriptSocketFamily::Ipv6, "::1")),
-        "0.0.0.0" | "::" => Err(SidecarError::Execution(String::from(
-            "EACCES: TCP listeners must bind to loopback, not unspecified addresses",
-        ))),
+        "127.0.0.1" | "localhost" => Ok((JavascriptSocketFamily::Ipv4, "127.0.0.1", "127.0.0.1")),
+        "::1" => Ok((JavascriptSocketFamily::Ipv6, "::1", "::1")),
+        "0.0.0.0" => Ok((JavascriptSocketFamily::Ipv4, "127.0.0.1", "0.0.0.0")),
+        "::" => Ok((JavascriptSocketFamily::Ipv6, "::1", "::")),
         other => Err(SidecarError::Execution(format!(
-            "EACCES: TCP listeners must bind to loopback, got {other}"
+            "EACCES: TCP listeners must bind to loopback or unspecified addresses, got {other}"
         ))),
     }
 }
@@ -4312,26 +4383,27 @@ fn normalize_tcp_listen_host(
 fn normalize_udp_bind_host(
     host: Option<&str>,
     family: JavascriptUdpFamily,
-) -> Result<(&'static str, JavascriptSocketFamily), SidecarError> {
+) -> Result<(&'static str, &'static str, JavascriptSocketFamily), SidecarError> {
     match (family, host) {
-        (JavascriptUdpFamily::Ipv4, None)
-        | (JavascriptUdpFamily::Ipv4, Some("127.0.0.1"))
+        (JavascriptUdpFamily::Ipv4, None) | (JavascriptUdpFamily::Ipv4, Some("0.0.0.0")) => {
+            Ok(("127.0.0.1", "0.0.0.0", JavascriptSocketFamily::Ipv4))
+        }
+        (JavascriptUdpFamily::Ipv4, Some("127.0.0.1"))
         | (JavascriptUdpFamily::Ipv4, Some("localhost")) => {
-            Ok(("127.0.0.1", JavascriptSocketFamily::Ipv4))
+            Ok(("127.0.0.1", "127.0.0.1", JavascriptSocketFamily::Ipv4))
         }
-        (JavascriptUdpFamily::Ipv6, None)
-        | (JavascriptUdpFamily::Ipv6, Some("::1"))
+        (JavascriptUdpFamily::Ipv6, None) | (JavascriptUdpFamily::Ipv6, Some("::")) => {
+            Ok(("::1", "::", JavascriptSocketFamily::Ipv6))
+        }
+        (JavascriptUdpFamily::Ipv6, Some("::1"))
         | (JavascriptUdpFamily::Ipv6, Some("localhost")) => {
-            Ok(("::1", JavascriptSocketFamily::Ipv6))
+            Ok(("::1", "::1", JavascriptSocketFamily::Ipv6))
         }
-        (_, Some("0.0.0.0")) | (_, Some("::")) => Err(SidecarError::Execution(String::from(
-            "EACCES: UDP sockets must bind to loopback, not unspecified addresses",
-        ))),
         (JavascriptUdpFamily::Ipv4, Some(other)) => Err(SidecarError::Execution(format!(
-            "EACCES: udp4 sockets must bind to 127.0.0.1, got {other}"
+            "EACCES: udp4 sockets must bind to 127.0.0.1 or 0.0.0.0, got {other}"
         ))),
         (JavascriptUdpFamily::Ipv6, Some(other)) => Err(SidecarError::Execution(format!(
-            "EACCES: udp6 sockets must bind to ::1, got {other}"
+            "EACCES: udp6 sockets must bind to ::1 or ::, got {other}"
         ))),
     }
 }
@@ -4396,6 +4468,7 @@ fn socket_host_matches(requested: Option<&str>, actual: &str) -> bool {
         {
             true
         }
+        Some(requested) if is_unspecified_socket_host(requested) => is_loopback_socket_host(actual),
         Some(requested) if requested.eq_ignore_ascii_case("localhost") => {
             is_loopback_socket_host(actual)
         }
@@ -6025,9 +6098,10 @@ fn sqlite_exec_database(
         .map_err(sqlite_error)?;
     mark_sqlite_mutation(database, sql);
     sqlite_sync_database(kernel, kernel_pid, database)?;
-    Ok(json!(
-        database.connection.total_changes().saturating_sub(before)
-    ))
+    Ok(json!(database
+        .connection
+        .total_changes()
+        .saturating_sub(before)))
 }
 
 fn sqlite_query_database(
@@ -6838,7 +6912,7 @@ where
         "dns.lookup" | "dns.resolve" | "dns.resolve4" | "dns.resolve6" => {
             service_javascript_dns_sync_rpc(bridge, vm_id, dns, request)
         }
-        "net.fetch" => service_javascript_fetch_sync_rpc(bridge, vm_id, request),
+        "net.fetch" => service_javascript_fetch_sync_rpc(bridge, vm_id, socket_paths, request),
         "net.http_request" | "net.http_listen" | "net.http_close" | "net.http_wait"
         | "net.http_respond" => service_javascript_net_sync_rpc(
             bridge,
@@ -7354,11 +7428,9 @@ fn service_javascript_crypto_verify_sync_rpc(
     verifier
         .update(&data)
         .map_err(javascript_crypto_openssl_error)?;
-    Ok(json!(
-        verifier
-            .verify(&signature)
-            .map_err(javascript_crypto_openssl_error)?
-    ))
+    Ok(json!(verifier
+        .verify(&signature)
+        .map_err(javascript_crypto_openssl_error)?))
 }
 
 fn service_javascript_crypto_asymmetric_op_sync_rpc(
@@ -8874,6 +8946,7 @@ fn close_kernel_process_stdin(
 fn service_javascript_fetch_sync_rpc<B>(
     bridge: &SharedBridge<B>,
     vm_id: &str,
+    socket_paths: &JavascriptSocketPathContext,
     request: &JavascriptSyncRpcRequest,
 ) -> Result<Value, SidecarError>
 where
@@ -8885,8 +8958,34 @@ where
         return Ok(response);
     }
 
-    Url::parse(resource)
+    let url = Url::parse(resource)
         .map_err(|error| SidecarError::Execution(format!("ERR_INVALID_URL: {error}")))?;
+    let options_json =
+        javascript_sync_rpc_arg_str(&request.args, 1, "net.fetch options payload")?;
+    let options: JavascriptHttpRequestOptions =
+        serde_json::from_str(options_json).map_err(|error| {
+            SidecarError::InvalidState(format!("net.fetch options must be valid JSON: {error}"))
+        })?;
+    let headers = parse_http_header_collection(&options.headers, "net.fetch headers")?;
+
+    if let Some(host) = url.host_str() {
+        if is_loopback_request_host(host) {
+            let port = url.port_or_known_default().ok_or_else(|| {
+                SidecarError::Execution(format!("ERR_INVALID_URL: missing port for {resource}"))
+            })?;
+            if !socket_paths.loopback_port_allowed(port) {
+                let ip = host
+                    .parse::<IpAddr>()
+                    .ok()
+                    .or_else(|| {
+                        (host == "localhost").then_some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+                    })
+                    .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+                return Err(blocked_loopback_connect_error(resource, ip, port));
+            }
+            return issue_outbound_fetch_request(&url, &options, &headers);
+        }
+    }
 
     if let Err(error) = bridge.require_network_access(vm_id, NetworkOperation::Fetch, resource) {
         return Err(match error {
@@ -8897,9 +8996,7 @@ where
         });
     }
 
-    Err(SidecarError::Execution(format!(
-        "ERR_ACCESS_DENIED: blocked outbound network access to {resource}"
-    )))
+    issue_outbound_fetch_request(&url, &options, &headers)
 }
 
 fn build_data_url_fetch_response(resource: &str) -> Result<Option<Value>, SidecarError> {
@@ -9118,6 +9215,43 @@ fn outbound_http_response_json(url: &Url, response: ureq::Response) -> Result<Va
     .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
 }
 
+fn outbound_fetch_response_json(url: &Url, response: ureq::Response) -> Result<Value, SidecarError> {
+    let status = response.status();
+    let status_text = response.status_text().to_owned();
+    let mut normalized_headers = Map::new();
+    for raw_name in response.headers_names() {
+        let values = response.all(&raw_name);
+        let value = if values.len() == 1 {
+            Value::String(values[0].to_owned())
+        } else {
+            Value::Array(values.into_iter().map(|value| Value::String(value.to_owned())).collect())
+        };
+        normalized_headers.insert(raw_name.to_ascii_lowercase(), value);
+    }
+
+    let mut reader = response.into_reader();
+    let mut body = Vec::new();
+    reader.read_to_end(&mut body).map_err(|error| {
+        SidecarError::Execution(format!("failed to read HTTP response: {error}"))
+    })?;
+    normalized_headers.insert(
+        String::from("x-body-encoding"),
+        Value::String(String::from("base64")),
+    );
+
+    serde_json::to_string(&json!({
+        "ok": (200..=299).contains(&status),
+        "status": status,
+        "statusText": status_text,
+        "headers": normalized_headers,
+        "body": base64::engine::general_purpose::STANDARD.encode(body),
+        "url": url.as_str(),
+        "redirected": false,
+    }))
+    .map(Value::String)
+    .map_err(|error| SidecarError::Execution(format!("ERR_AGENT_OS_NODE_SYNC_RPC: {error}")))
+}
+
 fn issue_outbound_http_request(
     url: &Url,
     options: &JavascriptHttpRequestOptions,
@@ -9137,6 +9271,31 @@ fn issue_outbound_http_request(
     match response {
         Ok(response) => outbound_http_response_json(url, response),
         Err(ureq::Error::Status(_, response)) => outbound_http_response_json(url, response),
+        Err(ureq::Error::Transport(error)) => Err(SidecarError::Execution(format!(
+            "ERR_HTTP_REQUEST_FAILED: {error}"
+        ))),
+    }
+}
+
+fn issue_outbound_fetch_request(
+    url: &Url,
+    options: &JavascriptHttpRequestOptions,
+    headers: &HttpHeaderCollection,
+) -> Result<Value, SidecarError> {
+    let method = options.method.as_deref().unwrap_or("GET");
+    let mut request = ureq::request(method, url.as_str());
+    for (name, values) in &headers.normalized {
+        let header_value = values.join(", ");
+        request = request.set(name, &header_value);
+    }
+    let response = match options.body.as_deref() {
+        Some(body) => request.send_string(body),
+        None => request.call(),
+    };
+
+    match response {
+        Ok(response) => outbound_fetch_response_json(url, response),
+        Err(ureq::Error::Status(_, response)) => outbound_fetch_response_json(url, response),
         Err(ureq::Error::Transport(error)) => Err(SidecarError::Execution(format!(
             "ERR_HTTP_REQUEST_FAILED: {error}"
         ))),
@@ -11129,12 +11288,13 @@ where
                     "HTTP/2 secure servers are not supported yet in the sidecar bridge",
                 )));
             }
-            let (family, host) = normalize_tcp_listen_host(payload.host.as_deref())?;
+            let (family, bind_host, guest_host) =
+                normalize_tcp_listen_host(payload.host.as_deref())?;
             let requested_port = payload.port.unwrap_or(0);
             bridge.require_network_access(
                 vm_id,
                 NetworkOperation::Listen,
-                format_tcp_resource(host, requested_port),
+                format_tcp_resource(bind_host, requested_port),
             )?;
             let port = allocate_guest_listen_port(
                 requested_port,
@@ -11142,7 +11302,7 @@ where
                 &socket_paths.used_tcp_guest_ports,
                 socket_paths.listen_policy,
             )?;
-            let listener = ActiveTcpListener::bind(host, port, payload.backlog)?;
+            let listener = ActiveTcpListener::bind(bind_host, guest_host, port, payload.backlog)?;
             let guest_local_addr = listener.guest_local_addr();
             let closed = Arc::new(AtomicBool::new(false));
             {
@@ -11682,12 +11842,13 @@ where
                         "net.http_listen payload must be valid JSON: {error}"
                     ))
                 })?;
-            let (family, host) = normalize_tcp_listen_host(payload.hostname.as_deref())?;
+            let (family, bind_host, guest_host) =
+                normalize_tcp_listen_host(payload.hostname.as_deref())?;
             let requested_port = payload.port.unwrap_or(0);
             bridge.require_network_access(
                 vm_id,
                 NetworkOperation::Listen,
-                format_tcp_resource(host, requested_port),
+                format_tcp_resource(bind_host, requested_port),
             )?;
             let port = allocate_guest_listen_port(
                 requested_port,
@@ -11695,8 +11856,12 @@ where
                 &socket_paths.used_tcp_guest_ports,
                 socket_paths.listen_policy,
             )?;
-            let listener =
-                ActiveTcpListener::bind(host, port, Some(DEFAULT_JAVASCRIPT_NET_BACKLOG))?;
+            let listener = ActiveTcpListener::bind(
+                bind_host,
+                guest_host,
+                port,
+                Some(DEFAULT_JAVASCRIPT_NET_BACKLOG),
+            )?;
             let guest_local_addr = listener.guest_local_addr();
             process.http_servers.insert(
                 payload.server_id,
@@ -11835,10 +12000,21 @@ where
                         "net.listen requires a request payload",
                     ))
                 })
-                .and_then(|value| {
-                    serde_json::from_value::<JavascriptNetListenRequest>(value).map_err(|error| {
-                        SidecarError::InvalidState(format!("invalid net.listen payload: {error}"))
-                    })
+                .and_then(|value| match value {
+                    Value::String(json) => {
+                        serde_json::from_str::<JavascriptNetListenRequest>(&json).map_err(|error| {
+                            SidecarError::InvalidState(format!(
+                                "invalid net.listen payload: {error}"
+                            ))
+                        })
+                    }
+                    other => serde_json::from_value::<JavascriptNetListenRequest>(other).map_err(
+                        |error| {
+                            SidecarError::InvalidState(format!(
+                                "invalid net.listen payload: {error}"
+                            ))
+                        },
+                    ),
                 })?;
             if let Some(path) = payload.path.as_deref() {
                 let guest_path = normalize_path(path);
@@ -11866,12 +12042,13 @@ where
                     "path": guest_path,
                 }))
             } else {
-                let (family, host) = normalize_tcp_listen_host(payload.host.as_deref())?;
+                let (family, bind_host, guest_host) =
+                    normalize_tcp_listen_host(payload.host.as_deref())?;
                 let requested_port = payload.port.unwrap_or(0);
                 bridge.require_network_access(
                     vm_id,
                     NetworkOperation::Listen,
-                    format_tcp_resource(host, requested_port),
+                    format_tcp_resource(bind_host, requested_port),
                 )?;
                 let port = allocate_guest_listen_port(
                     requested_port,
@@ -11879,7 +12056,8 @@ where
                     &socket_paths.used_tcp_guest_ports,
                     socket_paths.listen_policy,
                 )?;
-                let listener = ActiveTcpListener::bind(host, port, payload.backlog)?;
+                let listener =
+                    ActiveTcpListener::bind(bind_host, guest_host, port, payload.backlog)?;
                 let listener_id = process.allocate_tcp_listener_id();
                 let local_addr = listener.guest_local_addr();
                 process.tcp_listeners.insert(listener_id.clone(), listener);

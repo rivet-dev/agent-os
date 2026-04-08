@@ -23,6 +23,7 @@ const V8_BRIDGE_CODE: &str = include_str!("../assets/v8-bridge.js");
 pub struct V8RuntimeHost {
     writer: Arc<Mutex<BufWriter<UnixStream>>>,
     sessions: Arc<Mutex<HashMap<String, mpsc::Sender<BinaryFrame>>>>,
+    child_pid: u32,
     _child: Child,
     _reader_handle: thread::JoinHandle<()>,
 }
@@ -96,6 +97,7 @@ impl V8RuntimeHost {
         Ok(V8RuntimeHost {
             writer,
             sessions,
+            child_pid: child.id(),
             _child: child,
             _reader_handle: reader_handle,
         })
@@ -135,6 +137,10 @@ impl V8RuntimeHost {
     /// Get a clone of the writer handle for creating session handles.
     pub fn writer_handle(&self) -> Arc<Mutex<BufWriter<UnixStream>>> {
         self.writer.clone()
+    }
+
+    pub fn child_pid(&self) -> u32 {
+        self.child_pid
     }
 }
 

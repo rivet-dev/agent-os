@@ -23,8 +23,10 @@ export function sortFilesystemEntries(
 	entries: FilesystemEntry[],
 ): FilesystemEntry[] {
 	return [...entries].sort((a, b) => {
-		const depthA = a.path === "/" ? 0 : a.path.split("/").filter(Boolean).length;
-		const depthB = b.path === "/" ? 0 : b.path.split("/").filter(Boolean).length;
+		const depthA =
+			a.path === "/" ? 0 : a.path.split("/").filter(Boolean).length;
+		const depthB =
+			b.path === "/" ? 0 : b.path.split("/").filter(Boolean).length;
 
 		if (depthA !== depthB) {
 			return depthA - depthB;
@@ -104,7 +106,8 @@ async function snapshotPath(
 	path: string,
 	entries: FilesystemEntry[],
 ): Promise<void> {
-	const stat = path === "/" ? await filesystem.stat(path) : await filesystem.lstat(path);
+	const stat =
+		path === "/" ? await filesystem.stat(path) : await filesystem.lstat(path);
 
 	if (stat.isSymbolicLink) {
 		entries.push({
@@ -134,15 +137,16 @@ async function snapshotPath(
 			.sort((a, b) => a.localeCompare(b));
 
 		for (const child of children) {
-			const childPath = path === "/"
-				? posixPath.join("/", child)
-				: posixPath.join(path, child);
+			const childPath =
+				path === "/" ? posixPath.join("/", child) : posixPath.join(path, child);
 			await snapshotPath(filesystem, childPath, entries);
 		}
 		return;
 	}
 
-	const content = Buffer.from(await filesystem.readFile(path)).toString("base64");
+	const content = Buffer.from(await filesystem.readFile(path)).toString(
+		"base64",
+	);
 	entries.push({
 		path,
 		type: "file",

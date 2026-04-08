@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { posix as posixPath } from "node:path";
@@ -521,8 +521,9 @@ export class NativeSidecarKernelProxy {
 			shell.kill();
 			throw error;
 		}
-
-		void shell.wait().finally(cleanup);
+		void shell.wait().finally(() => {
+			cleanup();
+		});
 		return shell.pid;
 	}
 
@@ -831,18 +832,6 @@ export class NativeSidecarKernelProxy {
 		entry: TrackedProcessEntry,
 		signal: number,
 	): Promise<void> {
-		if (entry.hostPid !== null) {
-			try {
-				process.kill(entry.hostPid, signal);
-				return;
-			} catch (error) {
-				if (isMissingHostProcessError(error)) {
-					return;
-				}
-				throw error;
-			}
-		}
-
 		try {
 			await this.client.killProcess(
 				this.session,
@@ -859,7 +848,7 @@ export class NativeSidecarKernelProxy {
 	}
 
 	private flushPendingStdin(entry: TrackedProcessEntry): Promise<void> {
-		if (entry.stdinFlushPromise) {
+		if (entry.stdinFlushPromise !== null) {
 			return entry.stdinFlushPromise;
 		}
 
@@ -1425,7 +1414,6 @@ function readHostProcesses(): HostProcessRow[] {
 	}
 }
 
-export { NativeSidecarProcessClient } from "./native-process-client.js";
 export type {
 	AuthenticatedSession,
 	CreatedVm,
@@ -1440,6 +1428,7 @@ export type {
 	SidecarSignalHandlerRegistration,
 	SidecarSocketStateEntry,
 } from "./native-process-client.js";
+export { NativeSidecarProcessClient } from "./native-process-client.js";
 
 export type AgentOsSidecarPlacement =
 	| { kind: "shared"; pool?: string }

@@ -11,7 +11,13 @@
 import { AgentOs } from "@rivet-dev/agent-os";
 import { createS3Backend } from "@rivet-dev/agent-os-s3";
 
-const { S3_BUCKET, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_ENDPOINT } = process.env;
+const {
+	S3_BUCKET,
+	S3_REGION,
+	S3_ACCESS_KEY_ID,
+	S3_SECRET_ACCESS_KEY,
+	S3_ENDPOINT,
+} = process.env;
 if (!S3_BUCKET || !S3_ACCESS_KEY_ID || !S3_SECRET_ACCESS_KEY) {
 	console.error("Required: S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY");
 	process.exit(1);
@@ -20,7 +26,10 @@ if (!S3_BUCKET || !S3_ACCESS_KEY_ID || !S3_SECRET_ACCESS_KEY) {
 const s3Fs = createS3Backend({
 	bucket: S3_BUCKET,
 	region: S3_REGION ?? "us-east-1",
-	credentials: { accessKeyId: S3_ACCESS_KEY_ID, secretAccessKey: S3_SECRET_ACCESS_KEY },
+	credentials: {
+		accessKeyId: S3_ACCESS_KEY_ID,
+		secretAccessKey: S3_SECRET_ACCESS_KEY,
+	},
 	endpoint: S3_ENDPOINT,
 });
 
@@ -38,6 +47,9 @@ console.log("Read:", new TextDecoder().decode(content));
 
 // List the directory
 const files = await vm.readdir("/mnt/data");
-console.log("Files:", files.filter((f) => f !== "." && f !== ".."));
+console.log(
+	"Files:",
+	files.filter((f) => f !== "." && f !== ".."),
+);
 
 await vm.dispose();

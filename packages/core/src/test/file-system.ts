@@ -7,8 +7,8 @@
  * `capabilities` object.
  */
 
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { VirtualFileSystem } from "../runtime-compat.js";
-import { describe, beforeEach, afterEach, expect, test } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Public config type
@@ -97,17 +97,13 @@ export function defineFsDriverTests(config: FsDriverTestConfig): void {
 			});
 
 			test("readFile throws ENOENT on missing file", async () => {
-				const err = await fs
-					.readFile("/no-such-file.txt")
-					.catch((e) => e);
+				const err = await fs.readFile("/no-such-file.txt").catch((e) => e);
 				expect(err).toBeInstanceOf(Error);
 				expect(hasErrorCode(err, "ENOENT")).toBe(true);
 			});
 
 			test("readTextFile throws ENOENT on missing file", async () => {
-				const err = await fs
-					.readTextFile("/no-such-file.txt")
-					.catch((e) => e);
+				const err = await fs.readTextFile("/no-such-file.txt").catch((e) => e);
 				expect(err).toBeInstanceOf(Error);
 				expect(hasErrorCode(err, "ENOENT")).toBe(true);
 			});
@@ -116,9 +112,9 @@ export function defineFsDriverTests(config: FsDriverTestConfig): void {
 				await fs.writeFile("/d/file.txt", "x");
 				const err = await fs.readFile("/d").catch((e) => e);
 				expect(err).toBeInstanceOf(Error);
-				expect(
-					hasErrorCode(err, "EISDIR") || hasErrorCode(err, "ENOENT"),
-				).toBe(true);
+				expect(hasErrorCode(err, "EISDIR") || hasErrorCode(err, "ENOENT")).toBe(
+					true,
+				);
 			});
 
 			test("writeFile auto-creates parent directories", async () => {
@@ -193,10 +189,7 @@ export function defineFsDriverTests(config: FsDriverTestConfig): void {
 				const result = await fs
 					.removeFile("/nonexistent.txt")
 					.catch((e: unknown) => e);
-				if (
-					result instanceof Error &&
-					hasErrorCode(result, "ENOENT")
-				) {
+				if (result instanceof Error && hasErrorCode(result, "ENOENT")) {
 					expect(true).toBe(true);
 				}
 			});
@@ -286,9 +279,7 @@ export function defineFsDriverTests(config: FsDriverTestConfig): void {
 					expect(await fs.exists("/src")).toBe(false);
 					expect(await fs.readTextFile("/dst/one.txt")).toBe("1");
 					expect(await fs.readTextFile("/dst/two.txt")).toBe("2");
-					expect(await fs.readTextFile("/dst/sub/three.txt")).toBe(
-						"3",
-					);
+					expect(await fs.readTextFile("/dst/sub/three.txt")).toBe("3");
 				},
 			);
 
@@ -304,9 +295,7 @@ export function defineFsDriverTests(config: FsDriverTestConfig): void {
 				// filesystem before normalizing, causing ENOENT when an
 				// intermediate component (here /a) does not exist. Others
 				// return the path as-is without normalizing.
-				const result = await fs
-					.realpath("/a/../b.txt")
-					.catch(() => null);
+				const result = await fs.realpath("/a/../b.txt").catch(() => null);
 				if (result !== null && result !== "/a/../b.txt") {
 					expect(result).toBe("/b.txt");
 				}
@@ -349,16 +338,11 @@ export function defineFsDriverTests(config: FsDriverTestConfig): void {
 			test("symlink loop throws ELOOP or EINVAL", async () => {
 				await fs.symlink("/loop-b.txt", "/loop-a.txt");
 				await fs.symlink("/loop-a.txt", "/loop-b.txt");
-				const err = await fs
-					.readFile("/loop-a.txt")
-					.catch((e) => e);
+				const err = await fs.readFile("/loop-a.txt").catch((e) => e);
 				// Some backends (e.g., in-memory overlay) may not detect
 				// symlink loops or may throw a different error code.
 				if (err instanceof Error) {
-					if (
-						hasErrorCode(err, "ELOOP") ||
-						hasErrorCode(err, "EINVAL")
-					) {
+					if (hasErrorCode(err, "ELOOP") || hasErrorCode(err, "EINVAL")) {
 						expect(true).toBe(true);
 					}
 				}
@@ -395,14 +379,10 @@ export function defineFsDriverTests(config: FsDriverTestConfig): void {
 
 				const ls = lstatResult as { isSymbolicLink: boolean };
 				expect(ls.isSymbolicLink).toBe(true);
-				const statErr = await fs
-					.stat("/dangle.txt")
-					.catch((e) => e);
+				const statErr = await fs.stat("/dangle.txt").catch((e) => e);
 				expect(statErr).toBeInstanceOf(Error);
 				expect(hasErrorCode(statErr, "ENOENT")).toBe(true);
-				const readErr = await fs
-					.readFile("/dangle.txt")
-					.catch((e) => e);
+				const readErr = await fs.readFile("/dangle.txt").catch((e) => e);
 				expect(readErr).toBeInstanceOf(Error);
 				expect(hasErrorCode(readErr, "ENOENT")).toBe(true);
 			});
@@ -495,8 +475,7 @@ export function defineFsDriverTests(config: FsDriverTestConfig): void {
 				await fs.writeFile("/perm.txt", "p");
 				const before = await fs.stat("/perm.txt");
 				// Ensure the target mode differs from the initial mode.
-				const targetMode =
-					(before.mode & 0o777) === 0o755 ? 0o644 : 0o755;
+				const targetMode = (before.mode & 0o777) === 0o755 ? 0o644 : 0o755;
 				await fs.chmod("/perm.txt", targetMode);
 				const after = await fs.stat("/perm.txt");
 				expect(after.mode & 0o777).toBe(targetMode);
@@ -532,8 +511,7 @@ export function defineFsDriverTests(config: FsDriverTestConfig): void {
 					.catch((e: unknown) => e);
 				if (result instanceof Error) {
 					expect(
-						hasErrorCode(result, "EPERM") ||
-							hasErrorCode(result, "ENOSYS"),
+						hasErrorCode(result, "EPERM") || hasErrorCode(result, "ENOSYS"),
 					).toBe(true);
 				} else {
 					const after = await fs.stat("/own.txt");
@@ -588,9 +566,7 @@ export function defineFsDriverTests(config: FsDriverTestConfig): void {
 				// files via truncate. When the backend does extend,
 				// verify null-byte padding.
 				if (data.length === 6) {
-					expect(
-						new TextDecoder().decode(data.slice(0, 3)),
-					).toBe("abc");
+					expect(new TextDecoder().decode(data.slice(0, 3))).toBe("abc");
 					expect(data[3]).toBe(0);
 					expect(data[4]).toBe(0);
 					expect(data[5]).toBe(0);
@@ -621,9 +597,7 @@ export function defineFsDriverTests(config: FsDriverTestConfig): void {
 					expect(result).toBeInstanceOf(Error);
 				} else {
 					// Backend returned available bytes past offset 3.
-					const text = new TextDecoder().decode(
-						result as Uint8Array,
-					);
+					const text = new TextDecoder().decode(result as Uint8Array);
 					expect(text).toBe("rt");
 				}
 			});
@@ -657,9 +631,7 @@ export function defineFsDriverTests(config: FsDriverTestConfig): void {
 				// Some backends always create parents regardless of the
 				// recursive option. When an error IS thrown, it must be
 				// ENOENT.
-				const result = await fs
-					.mkdir("/x/y/z")
-					.catch((e: unknown) => e);
+				const result = await fs.mkdir("/x/y/z").catch((e: unknown) => e);
 				if (result instanceof Error) {
 					expect(hasErrorCode(result, "ENOENT")).toBe(true);
 				}
@@ -681,9 +653,7 @@ export function defineFsDriverTests(config: FsDriverTestConfig): void {
 				await fs.writeFile("/nonempty/child.txt", "x");
 				// Some backends force-delete non-empty directories.
 				// When an error IS thrown, it must be ENOTEMPTY.
-				const result = await fs
-					.removeDir("/nonempty")
-					.catch((e: unknown) => e);
+				const result = await fs.removeDir("/nonempty").catch((e: unknown) => e);
 				if (result instanceof Error) {
 					expect(hasErrorCode(result, "ENOTEMPTY")).toBe(true);
 				}

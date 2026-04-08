@@ -513,6 +513,25 @@ impl GuestPathTranslator {
     fn canonical_guest_path(&self, guest_path: &str) -> Option<String> {
         let host_path = self.guest_to_host(guest_path)?;
         let canonical = fs::canonicalize(host_path).ok()?;
+        for mapping in &self.mappings {
+            if strip_guest_prefix(guest_path, &mapping.guest_path).is_none() {
+                continue;
+            }
+            if let Ok(stripped) = canonical.strip_prefix(&mapping.host_path) {
+                return Some(join_guest_path(
+                    &mapping.guest_path,
+                    &stripped.to_string_lossy().replace('\\', "/"),
+                ));
+            }
+            if let Ok(real_mapping_path) = fs::canonicalize(&mapping.host_path) {
+                if let Ok(stripped) = canonical.strip_prefix(&real_mapping_path) {
+                    return Some(join_guest_path(
+                        &mapping.guest_path,
+                        &stripped.to_string_lossy().replace('\\', "/"),
+                    ));
+                }
+            }
+        }
         if let Some(node_modules_root) = self
             .mappings
             .iter()
@@ -2512,14 +2531,16 @@ impl LocalBridgeState {
 
         let host_path = self.translator.guest_to_host(path)?;
         let source = fs::read_to_string(host_path).ok()?;
-        Some(if matches!(
-            Path::new(path).extension().and_then(|ext| ext.to_str()),
-            Some("js" | "mjs" | "cjs")
-        ) {
-            strip_javascript_hashbang(&source)
-        } else {
-            source
-        })
+        Some(
+            if matches!(
+                Path::new(path).extension().and_then(|ext| ext.to_str()),
+                Some("js" | "mjs" | "cjs")
+            ) {
+                strip_javascript_hashbang(&source)
+            } else {
+                source
+            },
+        )
     }
 
     fn resolve_package_imports(
@@ -2560,6 +2581,7 @@ impl LocalBridgeState {
     ) -> Option<String> {
         let (package_name, subpath) = split_package_request(request)?;
         let mut dir = normalize_guest_path(from_dir);
+        let mut scanned_pnpm_roots = HashSet::new();
         loop {
             let candidate_dirs = node_modules_candidate_dirs(&dir, package_name);
             for package_dir in candidate_dirs {
@@ -2569,19 +2591,71 @@ impl LocalBridgeState {
                     return Some(entry);
                 }
             }
+            for node_modules_root in node_modules_search_roots(&dir) {
+                if scanned_pnpm_roots.insert(node_modules_root.clone()) {
+                    if let Some(entry) = self.resolve_pnpm_virtual_store_entry(
+                        &node_modules_root,
+                        package_name,
+                        subpath,
+                        mode,
+                    ) {
+                        return Some(entry);
+                    }
+                }
+            }
             if dir == "/" {
                 break;
             }
             dir = dirname_guest_path(&dir);
         }
 
-        ["/root/node_modules", "/node_modules"].into_iter().find_map(|root| {
-            self.resolve_package_entry_from_dir(
-                &join_guest_path(root, package_name),
-                subpath,
-                mode,
-            )
-        })
+        ["/root/node_modules", "/node_modules"]
+            .into_iter()
+            .find_map(|root| {
+                self.resolve_package_entry_from_dir(
+                    &join_guest_path(root, package_name),
+                    subpath,
+                    mode,
+                )
+            })
+            .or_else(|| {
+                ["/root/node_modules", "/node_modules"]
+                    .into_iter()
+                    .find_map(|root| {
+                        self.resolve_pnpm_virtual_store_entry(root, package_name, subpath, mode)
+                    })
+            })
+    }
+
+    fn resolve_pnpm_virtual_store_entry(
+        &mut self,
+        node_modules_root: &str,
+        package_name: &str,
+        subpath: &str,
+        mode: ModuleResolveMode,
+    ) -> Option<String> {
+        let store_root = join_guest_path(node_modules_root, ".pnpm");
+        let host_store_root = self.translator.guest_to_host(&store_root)?;
+        let mut entries = fs::read_dir(host_store_root)
+            .ok()?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let file_type = entry.file_type().ok()?;
+                file_type.is_dir().then(|| entry.file_name().to_string_lossy().into_owned())
+            })
+            .collect::<Vec<_>>();
+        entries.sort();
+        for entry in entries {
+            let package_dir = join_guest_path(
+                &store_root,
+                &format!("{entry}/node_modules/{package_name}"),
+            );
+            if let Some(resolved) = self.resolve_package_entry_from_dir(&package_dir, subpath, mode)
+            {
+                return Some(resolved);
+            }
+        }
+        None
     }
 
     fn resolve_package_entry_from_dir(
@@ -2772,6 +2846,7 @@ fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
         | "async_hooks"
         | "buffer"
         | "child_process"
+        | "constants"
         | "crypto"
         | "dgram"
         | "diagnostics_channel"
@@ -2802,11 +2877,10 @@ fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
         | "tty"
         | "url"
         | "util"
+        | "vm"
         | "v8"
         | "worker_threads"
-        | "zlib" => {
-            Some(format!("node:{bare}"))
-        }
+        | "zlib" => Some(format!("node:{bare}")),
         _ => None,
     }
 }
@@ -3046,7 +3120,20 @@ export default pathModule;
             r#"const NativeURL = globalThis.URL;
 
 function fileURLToPath(value) {
-  const url = value instanceof NativeURL ? value : new NativeURL(String(value));
+  const raw =
+    typeof value === "string"
+      ? value
+      : value && typeof value.href === "string"
+        ? value.href
+        : String(value ?? "");
+  if (raw.startsWith("/")) {
+    return raw;
+  }
+  if (raw.startsWith("file://")) {
+    const pathname = raw.slice("file://".length);
+    return decodeURIComponent(pathname.startsWith("/") ? pathname : `/${pathname}`);
+  }
+  const url = value instanceof NativeURL ? value : new NativeURL(raw);
   if (url.protocol !== "file:") {
     throw new Error(`Expected file URL, received ${url.protocol}`);
   }
@@ -3663,7 +3750,14 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "executionAsyncId",
             "triggerAsyncId",
         ],
-        "buffer" => &["Blob", "Buffer", "File", "INSPECT_MAX_BYTES", "SlowBuffer", "isUtf8"],
+        "buffer" => &[
+            "Blob",
+            "Buffer",
+            "File",
+            "INSPECT_MAX_BYTES",
+            "SlowBuffer",
+            "isUtf8",
+        ],
         "child_process" => &[
             "exec",
             "execFile",
@@ -3808,10 +3902,34 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "sep",
             "win32",
         ],
-        "perf_hooks" => &["PerformanceObserver", "constants", "createHistogram", "performance"],
+        "process" => &[
+            "arch",
+            "argv",
+            "argv0",
+            "cwd",
+            "env",
+            "execPath",
+            "exit",
+            "pid",
+            "platform",
+            "ppid",
+            "stderr",
+            "stdin",
+            "stdout",
+            "umask",
+            "version",
+            "versions",
+        ],
+        "perf_hooks" => &[
+            "PerformanceObserver",
+            "constants",
+            "createHistogram",
+            "performance",
+        ],
         "readline" => &["createInterface"],
         "sqlite" => &["DatabaseSync", "StatementSync", "constants"],
         "stream/consumers" => &["arrayBuffer", "blob", "buffer", "json", "text"],
+        "tty" => &["ReadStream", "WriteStream", "isatty"],
         "tls" => &[
             "TLSSocket",
             "Server",
@@ -3838,7 +3956,12 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "stripVTControlCharacters",
             "types",
         ],
-        "v8" => &["getHeapSnapshot", "getHeapSpaceStatistics", "getHeapStatistics"],
+        "vm" => &["Script", "createContext", "isContext", "runInThisContext"],
+        "v8" => &[
+            "getHeapSnapshot",
+            "getHeapSpaceStatistics",
+            "getHeapStatistics",
+        ],
         "worker_threads" => &[
             "MessageChannel",
             "MessagePort",
@@ -3890,6 +4013,20 @@ fn node_modules_candidate_dirs(dir: &str, package_name: &str) -> Vec<String> {
     let mut candidates = candidates.into_iter().collect::<Vec<_>>();
     candidates.sort();
     candidates
+}
+
+fn node_modules_search_roots(dir: &str) -> Vec<String> {
+    let mut roots = HashSet::new();
+    roots.insert(join_guest_path(dir, "node_modules"));
+    if dir == "/node_modules" || dir.ends_with("/node_modules") {
+        roots.insert(normalize_guest_path(dir));
+    }
+    if let Some(index) = dir.rfind("/node_modules/") {
+        roots.insert(dir[..index + "/node_modules".len()].to_owned());
+    }
+    let mut roots = roots.into_iter().collect::<Vec<_>>();
+    roots.sort();
+    roots
 }
 
 fn resolve_exports_target(

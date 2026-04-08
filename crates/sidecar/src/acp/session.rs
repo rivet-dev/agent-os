@@ -95,7 +95,10 @@ impl AcpSessionState {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        if let Some(overrides) = session_result.get("configOptions").and_then(Value::as_array) {
+        if let Some(overrides) = session_result
+            .get("configOptions")
+            .and_then(Value::as_array)
+        {
             config_options = overrides.clone();
         }
         config_options.extend(derive_config_options(&agent_type, session_result));

@@ -574,6 +574,38 @@ fn pnpm_symlinked_referrer_can_resolve_sibling_dependency() {
 }
 
 #[test]
+fn pnpm_symlinked_referrer_can_resolve_virtual_store_dependency() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "node_modules/.pnpm/pkg-a@1.0.0/node_modules/pkg-a/index.js",
+        "module.exports = require('pkg-b');",
+    );
+    fixture.write_json(
+        "node_modules/.pnpm/pkg-a@1.0.0/node_modules/pkg-a/package.json",
+        serde_json::json!({ "main": "./index.js" }),
+    );
+    fixture.write(
+        "node_modules/.pnpm/pkg-b@1.0.0/node_modules/pkg-b/index.js",
+        "module.exports = 1;",
+    );
+    fixture.write_json(
+        "node_modules/.pnpm/pkg-b@1.0.0/node_modules/pkg-b/package.json",
+        serde_json::json!({ "main": "./index.js" }),
+    );
+    fixture.symlink_dir(
+        "node_modules/.pnpm/pkg-a@1.0.0/node_modules/pkg-a",
+        "node_modules/pkg-a",
+    );
+
+    assert_require(
+        &fixture,
+        "pkg-b",
+        "/root/node_modules/pkg-a/index.js",
+        "/root/node_modules/.pnpm/pkg-b@1.0.0/node_modules/pkg-b/index.js",
+    );
+}
+
+#[test]
 fn root_node_modules_fallback_is_checked_last() {
     let fixture = Fixture::new();
     fixture.mkdir("project/src");

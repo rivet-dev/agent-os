@@ -27,7 +27,7 @@ describe("layer store", () => {
 			store.createOverlayFilesystem({
 				upper,
 				lowers: [],
-			})
+			}),
 		).toThrow("no longer valid");
 	});
 });

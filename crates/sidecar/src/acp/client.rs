@@ -20,11 +20,8 @@ const ACP_CANCEL_METHOD: &str = "session/cancel";
 const RECENT_ACTIVITY_LIMIT: usize = 20;
 const ACTIVITY_TEXT_LIMIT: usize = 240;
 
-pub type InboundRequestFuture = Pin<
-    Box<
-        dyn Future<Output = Result<Option<InboundRequestOutcome>, String>> + Send + 'static,
-    >,
->;
+pub type InboundRequestFuture =
+    Pin<Box<dyn Future<Output = Result<Option<InboundRequestOutcome>, String>> + Send + 'static>>;
 pub type InboundRequestHandler = Arc<dyn Fn(JsonRpcRequest) -> InboundRequestFuture + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,7 +120,11 @@ impl AcpClient {
     }
 
     pub fn set_request_handler(&self, handler: Option<InboundRequestHandler>) {
-        *self.inner.request_handler.lock().expect("request handler lock poisoned") = handler;
+        *self
+            .inner
+            .request_handler
+            .lock()
+            .expect("request handler lock poisoned") = handler;
     }
 
     pub async fn request(
@@ -231,10 +232,9 @@ impl AcpClient {
 
         {
             let mut writer = self.inner.writer.lock().await;
-            writer
-                .shutdown()
-                .await
-                .map_err(|error| AcpClientError::Io(format!("failed to close ACP writer: {error}")))?;
+            writer.shutdown().await.map_err(|error| {
+                AcpClientError::Io(format!("failed to close ACP writer: {error}"))
+            })?;
         }
         self.inner
             .reject_all(AcpClientError::Closed(String::from("AcpClient closed")));
@@ -286,8 +286,9 @@ impl AcpClient {
     }
 
     async fn write_message(&self, message: JsonRpcMessage) -> Result<(), AcpClientError> {
-        let encoded = serialize_message(&message)
-            .map_err(|error| AcpClientError::Io(format!("failed to serialize ACP frame: {error}")))?;
+        let encoded = serialize_message(&message).map_err(|error| {
+            AcpClientError::Io(format!("failed to serialize ACP frame: {error}"))
+        })?;
         let mut writer = self.inner.writer.lock().await;
         writer
             .write_all(encoded.as_bytes())
@@ -403,8 +404,7 @@ where
                 *inner
                     .transport_state
                     .lock()
-                    .expect("transport state lock poisoned") =
-                    format!("transport_error {error}");
+                    .expect("transport state lock poisoned") = format!("transport_error {error}");
                 inner.record_activity(format!("process_exit transport_error={error}"));
                 break;
             }
@@ -569,7 +569,8 @@ fn normalize_permission_result(
     }
 
     let requested_reply = params.get("reply").and_then(Value::as_str);
-    if let Some(selected_option_id) = resolve_permission_option_id(&pending.options, requested_reply)
+    if let Some(selected_option_id) =
+        resolve_permission_option_id(&pending.options, requested_reply)
     {
         return json!({
             "outcome": {
@@ -687,9 +688,8 @@ fn summarize_inbound_message(message: &JsonRpcMessage) -> String {
             "received request {} id={}",
             request.method, request.id
         )),
-        JsonRpcMessage::Notification(notification) => truncate_activity_text(&format!(
-            "received notification {}",
-            notification.method
-        )),
+        JsonRpcMessage::Notification(notification) => {
+            truncate_activity_text(&format!("received notification {}", notification.method))
+        }
     }
 }

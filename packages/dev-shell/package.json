@@ -9,7 +9,7 @@
     "build": "tsc",
     "check-types": "tsc --noEmit",
     "dev-shell": "tsx src/shell.ts",
-    "test": "vitest run"
+    "test": "NODE_OPTIONS=--max-old-space-size=256 vitest run --fileParallelism=false"
   },
   "dependencies": {
     "@rivet-dev/agent-os": "workspace:*",

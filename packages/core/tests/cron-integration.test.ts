@@ -41,8 +41,8 @@ class MockScheduleDriver implements ScheduleDriver {
 // ---------------------------------------------------------------------------
 
 import {
-	REGISTRY_SOFTWARE,
 	hasRegistryCommands,
+	REGISTRY_SOFTWARE,
 } from "./helpers/registry-commands.js";
 
 describe("cron integration via AgentOs API", () => {

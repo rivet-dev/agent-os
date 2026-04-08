@@ -40,9 +40,7 @@ export class BrowserWorkerAdapter {
 				worker.addEventListener("message", (e) => handler(e.data));
 			},
 			onError(handler) {
-				worker.addEventListener("error", (e) =>
-					handler(new Error(e.message)),
-				);
+				worker.addEventListener("error", (e) => handler(new Error(e.message)));
 			},
 			onExit(_handler) {
 				// Web Workers don't have an exit event — the terminate()

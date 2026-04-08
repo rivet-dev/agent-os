@@ -1,10 +1,14 @@
 import { Cron } from "croner";
+import type { LongTimeout } from "long-timeout";
 import {
 	clearTimeout as clearLongTimeout,
 	setTimeout as longSetTimeout,
 } from "long-timeout";
-import type { LongTimeout } from "long-timeout";
-import type { ScheduleDriver, ScheduleEntry, ScheduleHandle } from "./schedule-driver.js";
+import type {
+	ScheduleDriver,
+	ScheduleEntry,
+	ScheduleHandle,
+} from "./schedule-driver.js";
 
 /**
  * Checks whether a schedule string is a cron expression (as opposed to an
@@ -13,7 +17,9 @@ import type { ScheduleDriver, ScheduleEntry, ScheduleHandle } from "./schedule-d
  * ISO timestamps.
  */
 function isCronExpression(schedule: string): boolean {
-	return schedule.includes(" ") && !schedule.includes("T") && !schedule.includes("Z");
+	return (
+		schedule.includes(" ") && !schedule.includes("T") && !schedule.includes("Z")
+	);
 }
 
 /**

@@ -358,6 +358,11 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
         "_fsLstat" => ("fs.lstatSync", false),
         "_fsTruncate" => ("fs.truncateSync", false),
         "_fsUtimes" => ("fs.utimesSync", false),
+        "fs.openSync" => ("fs.openSync", false),
+        "fs.closeSync" => ("fs.closeSync", false),
+        "fs.readSync" => ("fs.readSync", false),
+        "fs.writeSync" => ("fs.writeSync", false),
+        "fs.fstatSync" => ("fs.fstatSync", false),
 
         // Child process operations
         "_childProcessSpawnStart" => ("child_process.spawn", false),

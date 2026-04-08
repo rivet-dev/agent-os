@@ -1,8 +1,5 @@
 import { expect, type Page } from "@playwright/test";
-import type {
-	ExecOptions,
-	TimingMitigation,
-} from "../../src/runtime.js";
+import type { ExecOptions, TimingMitigation } from "../../src/runtime.js";
 
 export type HarnessStdioEvent = {
 	channel: "stdout" | "stderr";

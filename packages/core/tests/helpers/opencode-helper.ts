@@ -76,9 +76,6 @@ export async function createVmWorkspace(vm: AgentOs): Promise<string> {
 	return workspaceDir;
 }
 
-export async function readVmText(
-	vm: AgentOs,
-	path: string,
-): Promise<string> {
+export async function readVmText(vm: AgentOs, path: string): Promise<string> {
 	return new TextDecoder().decode(await vm.readFile(path));
 }

@@ -12,12 +12,13 @@ const TRANSPARENT_WRAPPER_TYPES = new Set([
 ]);
 
 function getSchemaDef(schema: ZodType): Record<string, unknown> {
-	return (((schema as unknown) as {
-		_def?: Record<string, unknown>;
-		def?: Record<string, unknown>;
-	})
-		._def ??
-		((schema as unknown) as { def?: Record<string, unknown> }).def ??
+	return ((
+		schema as unknown as {
+			_def?: Record<string, unknown>;
+			def?: Record<string, unknown>;
+		}
+	)._def ??
+		(schema as unknown as { def?: Record<string, unknown> }).def ??
 		{}) as Record<string, unknown>;
 }
 
@@ -62,7 +63,9 @@ function getDescription(schema: ZodType): string | undefined {
 	}
 	const instanceDescription = (schema as unknown as { description?: unknown })
 		.description;
-	return typeof instanceDescription === "string" ? instanceDescription : undefined;
+	return typeof instanceDescription === "string"
+		? instanceDescription
+		: undefined;
 }
 
 function withDescription(schema: ZodType, value: Record<string, unknown>) {
@@ -119,10 +122,9 @@ export function zodToJsonSchema(schema: ZodType): unknown {
 	}
 
 	if (typeName === "enum" || typeName === "nativeenum") {
-		const enumValues =
-			Array.isArray(def.values)
-				? def.values
-				: Object.values((def.entries ?? {}) as Record<string, string>);
+		const enumValues = Array.isArray(def.values)
+			? def.values
+			: Object.values((def.entries ?? {}) as Record<string, string>);
 		return withDescription(schema, { type: "string", enum: enumValues });
 	}
 

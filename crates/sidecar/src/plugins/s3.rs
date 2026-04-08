@@ -419,7 +419,6 @@ impl VirtualFileSystem for S3BackedFilesystem {
 
 #[derive(Debug)]
 struct S3ObjectStore {
-    runtime: Runtime,
     client: S3Client,
     bucket: String,
 }
@@ -431,23 +430,28 @@ impl S3ObjectStore {
         endpoint: Option<String>,
         credentials: Option<S3MountCredentials>,
     ) -> Result<Self, PluginError> {
-        let runtime = Runtime::new()
-            .map_err(|error| PluginError::unsupported(format!("create tokio runtime: {error}")))?;
+        let shared_config = std::thread::spawn(move || -> Result<_, PluginError> {
+            let runtime = Runtime::new().map_err(|error| {
+                PluginError::unsupported(format!("create tokio runtime: {error}"))
+            })?;
 
-        let shared_config = runtime.block_on(async {
-            let mut loader = aws_config::defaults(BehaviorVersion::latest())
-                .region(aws_sdk_s3::config::Region::new(region));
-            if let Some(credentials) = credentials {
-                loader = loader.credentials_provider(Credentials::new(
-                    credentials.access_key_id,
-                    credentials.secret_access_key,
-                    None,
-                    None,
-                    "agent-os-s3-plugin",
-                ));
-            }
-            loader.load().await
-        });
+            Ok(runtime.block_on(async move {
+                let mut loader = aws_config::defaults(BehaviorVersion::latest())
+                    .region(aws_sdk_s3::config::Region::new(region));
+                if let Some(credentials) = credentials {
+                    loader = loader.credentials_provider(Credentials::new(
+                        credentials.access_key_id,
+                        credentials.secret_access_key,
+                        None,
+                        None,
+                        "agent-os-s3-plugin",
+                    ));
+                }
+                loader.load().await
+            }))
+        })
+        .join()
+        .map_err(|_| PluginError::unsupported("s3 runtime thread panicked"))??;
 
         let mut builder = S3ConfigBuilder::from(&shared_config).force_path_style(true);
         if let Some(endpoint) = endpoint {
@@ -455,7 +459,6 @@ impl S3ObjectStore {
         }
 
         Ok(Self {
-            runtime,
             client: S3Client::from_conf(builder.build()),
             bucket,
         })
@@ -471,34 +474,41 @@ impl S3ObjectStore {
         let key = key.to_owned();
         let client = self.client.clone();
 
-        self.runtime.block_on(async move {
-            match client.get_object().bucket(bucket).key(&key).send().await {
-                Ok(response) => {
-                    let bytes = response
-                        .body
-                        .collect()
-                        .await
-                        .map_err(|error| {
-                            StorageError::new(format!("read s3 object '{key}': {error}"))
-                        })?
-                        .into_bytes()
-                        .to_vec();
-                    Ok(Some(bytes))
-                }
-                Err(error) => {
-                    if matches!(
-                        error.as_service_error().and_then(|service| service.code()),
-                        Some("NoSuchKey") | Some("NotFound")
-                    ) {
-                        return Ok(None);
-                    }
+        std::thread::spawn(move || -> Result<Option<Vec<u8>>, StorageError> {
+            let runtime = Runtime::new()
+                .map_err(|error| StorageError::new(format!("create tokio runtime: {error}")))?;
 
-                    Err(StorageError::new(format!(
-                        "load s3 object '{key}': {error}"
-                    )))
+            runtime.block_on(async move {
+                match client.get_object().bucket(bucket).key(&key).send().await {
+                    Ok(response) => {
+                        let bytes = response
+                            .body
+                            .collect()
+                            .await
+                            .map_err(|error| {
+                                StorageError::new(format!("read s3 object '{key}': {error}"))
+                            })?
+                            .into_bytes()
+                            .to_vec();
+                        Ok(Some(bytes))
+                    }
+                    Err(error) => {
+                        if matches!(
+                            error.as_service_error().and_then(|service| service.code()),
+                            Some("NoSuchKey") | Some("NotFound")
+                        ) {
+                            return Ok(None);
+                        }
+
+                        Err(StorageError::new(format!(
+                            "load s3 object '{key}': {error}"
+                        )))
+                    }
                 }
-            }
+            })
         })
+        .join()
+        .map_err(|_| StorageError::new("s3 runtime thread panicked"))?
     }
 
     fn put_bytes(&self, key: &str, bytes: &[u8]) -> Result<(), StorageError> {
@@ -507,17 +517,26 @@ impl S3ObjectStore {
         let body = bytes.to_vec();
         let client = self.client.clone();
 
-        self.runtime.block_on(async move {
-            client
-                .put_object()
-                .bucket(bucket)
-                .key(&key)
-                .body(ByteStream::from(body))
-                .send()
-                .await
-                .map_err(|error| StorageError::new(format!("write s3 object '{key}': {error}")))?;
-            Ok(())
+        std::thread::spawn(move || -> Result<(), StorageError> {
+            let runtime = Runtime::new()
+                .map_err(|error| StorageError::new(format!("create tokio runtime: {error}")))?;
+
+            runtime.block_on(async move {
+                client
+                    .put_object()
+                    .bucket(bucket)
+                    .key(&key)
+                    .body(ByteStream::from(body))
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        StorageError::new(format!("write s3 object '{key}': {error}"))
+                    })?;
+                Ok(())
+            })
         })
+        .join()
+        .map_err(|_| StorageError::new("s3 runtime thread panicked"))?
     }
 
     fn delete_object(&self, key: &str) -> Result<(), StorageError> {
@@ -525,22 +544,29 @@ impl S3ObjectStore {
         let key = key.to_owned();
         let client = self.client.clone();
 
-        self.runtime.block_on(async move {
-            match client.delete_object().bucket(bucket).key(&key).send().await {
-                Ok(_) => Ok(()),
-                Err(error)
-                    if matches!(
-                        error.as_service_error().and_then(|service| service.code()),
-                        Some("NoSuchKey") | Some("NotFound")
-                    ) =>
-                {
-                    Ok(())
+        std::thread::spawn(move || -> Result<(), StorageError> {
+            let runtime = Runtime::new()
+                .map_err(|error| StorageError::new(format!("create tokio runtime: {error}")))?;
+
+            runtime.block_on(async move {
+                match client.delete_object().bucket(bucket).key(&key).send().await {
+                    Ok(_) => Ok(()),
+                    Err(error)
+                        if matches!(
+                            error.as_service_error().and_then(|service| service.code()),
+                            Some("NoSuchKey") | Some("NotFound")
+                        ) =>
+                    {
+                        Ok(())
+                    }
+                    Err(error) => Err(StorageError::new(format!(
+                        "delete s3 object '{key}': {error}"
+                    ))),
                 }
-                Err(error) => Err(StorageError::new(format!(
-                    "delete s3 object '{key}': {error}"
-                ))),
-            }
+            })
         })
+        .join()
+        .map_err(|_| StorageError::new("s3 runtime thread panicked"))?
     }
 }
 
@@ -599,6 +625,10 @@ fn is_disallowed_s3_endpoint_ip(ip: IpAddr) -> bool {
 }
 
 fn is_allowed_test_endpoint_host(host: &str) -> bool {
+    if std::env::var_os("AGENT_OS_ALLOW_LOCAL_S3_ENDPOINTS").is_some() {
+        return matches!(host, "127.0.0.1" | "localhost" | "::1");
+    }
+
     #[cfg(test)]
     {
         matches!(host, "127.0.0.1" | "localhost" | "::1")

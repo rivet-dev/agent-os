@@ -67,12 +67,12 @@ describe("batch file operations", () => {
 			const results = await vm.readFiles(["/tmp/r1.txt", "/tmp/r2.txt"]);
 
 			expect(results).toHaveLength(2);
-			expect(
-				new TextDecoder().decode(results[0].content as Uint8Array),
-			).toBe("one");
-			expect(
-				new TextDecoder().decode(results[1].content as Uint8Array),
-			).toBe("two");
+			expect(new TextDecoder().decode(results[0].content as Uint8Array)).toBe(
+				"one",
+			);
+			expect(new TextDecoder().decode(results[1].content as Uint8Array)).toBe(
+				"two",
+			);
 			expect(results[0].error).toBeUndefined();
 		});
 

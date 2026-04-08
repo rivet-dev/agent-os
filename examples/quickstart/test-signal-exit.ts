@@ -1,16 +1,21 @@
+import { resolve } from "node:path";
 import { AgentOs } from "@rivet-dev/agent-os";
 import common from "@rivet-dev/agent-os-common";
 import pi from "@rivet-dev/agent-os-pi";
-import { resolve } from "path";
 
 async function main() {
-  const vm = await AgentOs.create({ 
-    software: [common, pi],
-    moduleAccessCwd: resolve(import.meta.dirname, "node_modules/@mariozechner/pi-coding-agent"),
-  });
+	const vm = await AgentOs.create({
+		software: [common, pi],
+		moduleAccessCwd: resolve(
+			import.meta.dirname,
+			"node_modules/@mariozechner/pi-coding-agent",
+		),
+	});
 
-  // Write test script to VM filesystem
-  await vm.writeFile("/tmp/test.cjs", `
+	// Write test script to VM filesystem
+	await vm.writeFile(
+		"/tmp/test.cjs",
+		`
     try {
       var onExit = require('signal-exit');
       console.log('signal-exit type:', typeof onExit);
@@ -34,14 +39,18 @@ async function main() {
     } catch(e) {
       console.error('GLOBAL CHECK FAILED:', e.message);
     }
-  `);
+  `,
+	);
 
-  const r1 = await vm.exec("node /tmp/test.cjs");
-  console.log("Exit code:", r1.exitCode);
-  console.log("Stdout:", r1.stdout);
-  console.log("Stderr:", r1.stderr);
+	const r1 = await vm.exec("node /tmp/test.cjs");
+	console.log("Exit code:", r1.exitCode);
+	console.log("Stdout:", r1.stdout);
+	console.log("Stderr:", r1.stderr);
 
-  await vm.dispose();
+	await vm.dispose();
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main().catch((e) => {
+	console.error(e);
+	process.exit(1);
+});

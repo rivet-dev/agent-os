@@ -117,7 +117,9 @@ pub(crate) fn resolve_tool_command(
     let Some(kind) = identify_tool_command(vm, command) else {
         return Ok(None);
     };
-    let guest_cwd = cwd.map(normalize_path).unwrap_or_else(|| vm.guest_cwd.clone());
+    let guest_cwd = cwd
+        .map(normalize_path)
+        .unwrap_or_else(|| vm.guest_cwd.clone());
     let resolution = match kind {
         ToolCommand::Master => resolve_master_command(vm, args, &guest_cwd)?,
         ToolCommand::Toolkit(toolkit_name) => {
@@ -315,8 +317,8 @@ fn resolve_invocation_input(
             .kernel
             .read_file(&guest_path)
             .map_err(|error| format!("Invalid JSON file: {error}"))?;
-        let text = String::from_utf8(bytes)
-            .map_err(|error| format!("Invalid JSON file: {error}"))?;
+        let text =
+            String::from_utf8(bytes).map_err(|error| format!("Invalid JSON file: {error}"))?;
         return serde_json::from_str(&text).map_err(|error| format!("Invalid JSON file: {error}"));
     }
 
@@ -347,7 +349,10 @@ fn parse_argv(schema: &Value, argv: &[String]) -> Result<Value, String> {
 
     let mut flag_to_field = BTreeMap::new();
     for (field_name, field_schema) in &properties {
-        flag_to_field.insert(camel_to_kebab(field_name), (field_name.clone(), field_schema));
+        flag_to_field.insert(
+            camel_to_kebab(field_name),
+            (field_name.clone(), field_schema),
+        );
     }
 
     let mut input = Map::new();
@@ -385,9 +390,9 @@ fn parse_argv(schema: &Value, argv: &[String]) -> Result<Value, String> {
                 let value = argv
                     .get(index + 1)
                     .ok_or_else(|| format!("Flag --{raw_flag} requires a value"))?;
-                let number = value.parse::<f64>().map_err(|_| {
-                    format!("Flag --{raw_flag} expects a number, got \"{value}\"")
-                })?;
+                let number = value
+                    .parse::<f64>()
+                    .map_err(|_| format!("Flag --{raw_flag} expects a number, got \"{value}\""))?;
                 let number = serde_json::Number::from_f64(number).ok_or_else(|| {
                     format!("Flag --{raw_flag} expects a finite number, got \"{value}\"")
                 })?;
@@ -574,8 +579,9 @@ fn describe_flags(schema: &Value) -> Vec<Value> {
         .map(|(field_name, field_schema)| {
             let field_type = match json_schema_type(&field_schema) {
                 Some("array") => {
-                    let item_type = json_schema_type(field_schema.get("items").unwrap_or(&Value::Null))
-                        .unwrap_or("string");
+                    let item_type =
+                        json_schema_type(field_schema.get("items").unwrap_or(&Value::Null))
+                            .unwrap_or("string");
                     format!("{item_type}[]")
                 }
                 Some("string") => {
@@ -737,7 +743,11 @@ fn toolkit_command_name(toolkit_name: &str) -> String {
 
 fn tool_command_names(vm: &VmState) -> Vec<String> {
     let mut commands = vec![String::from(TOOL_MASTER_COMMAND)];
-    commands.extend(vm.toolkits.keys().map(|toolkit_name| toolkit_command_name(toolkit_name)));
+    commands.extend(
+        vm.toolkits
+            .keys()
+            .map(|toolkit_name| toolkit_command_name(toolkit_name)),
+    );
     commands
 }
 

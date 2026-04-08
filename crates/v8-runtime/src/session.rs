@@ -803,6 +803,11 @@ pub(crate) const SYNC_BRIDGE_FNS: &[&str] = &[
     "_fsLstat",
     "_fsTruncate",
     "_fsUtimes",
+    "fs.openSync",
+    "fs.closeSync",
+    "fs.readSync",
+    "fs.writeSync",
+    "fs.fstatSync",
     // Child process (sync)
     "_childProcessSpawnStart",
     "_childProcessPoll",

@@ -1,4 +1,7 @@
-import { InMemoryFileSystem, createInMemoryFileSystem } from "./os-filesystem.js";
+import {
+	createInMemoryFileSystem,
+	InMemoryFileSystem,
+} from "./os-filesystem.js";
 
 export type StdioChannel = "stdout" | "stderr";
 export type TimingMitigation = "off" | "freeze";
@@ -140,7 +143,11 @@ export interface CommandExecutor {
 export interface NetworkAdapter {
 	fetch(
 		url: string,
-		options?: { method?: string; headers?: Record<string, string>; body?: BodyLike | null },
+		options?: {
+			method?: string;
+			headers?: Record<string, string>;
+			body?: BodyLike | null;
+		},
 	): Promise<{
 		ok: boolean;
 		status: number;
@@ -150,12 +157,19 @@ export interface NetworkAdapter {
 		url: string;
 		redirected: boolean;
 	}>;
-	dnsLookup(
-		hostname: string,
-	): Promise<{ address?: string; family?: number; error?: string; code?: string }>;
+	dnsLookup(hostname: string): Promise<{
+		address?: string;
+		family?: number;
+		error?: string;
+		code?: string;
+	}>;
 	httpRequest(
 		url: string,
-		options?: { method?: string; headers?: Record<string, string>; body?: BodyLike | null },
+		options?: {
+			method?: string;
+			headers?: Record<string, string>;
+			body?: BodyLike | null;
+		},
 	): Promise<{
 		status: number;
 		statusText: string;
@@ -396,9 +410,15 @@ export function wrapNetworkAdapter(
 	permissions?: Permissions,
 ): NetworkAdapter {
 	if (!permissions?.network) return adapter;
-	const check = (request: { url?: string; host?: string; port?: number }): void => {
+	const check = (request: {
+		url?: string;
+		host?: string;
+		port?: number;
+	}): void => {
 		if (!permissionAllowed(permissions.network?.(request))) {
-			throw new Error(`EACCES: blocked network access to '${request.url ?? request.host ?? ""}'`);
+			throw new Error(
+				`EACCES: blocked network access to '${request.url ?? request.host ?? ""}'`,
+			);
 		}
 	};
 	return {
@@ -445,13 +465,31 @@ export async function resolveModule(
 	filesystem: VirtualFileSystem,
 	_mode: "require" | "import" = "require",
 ): Promise<string | null> {
-	if (!specifier.startsWith(".") && !specifier.startsWith("/") && !specifier.startsWith("node:")) {
+	if (
+		!specifier.startsWith(".") &&
+		!specifier.startsWith("/") &&
+		!specifier.startsWith("node:")
+	) {
 		return specifier;
 	}
 	if (specifier.startsWith("node:")) {
 		return specifier;
 	}
-	const base = specifier.startsWith("/") ? specifier : `${dirname(fromPath)}/${specifier}`;
+	let fromDir = normalizePath(fromPath);
+	try {
+		const fromStat = await filesystem.stat(fromDir);
+		if (!fromStat.isDirectory) {
+			fromDir = dirname(fromDir);
+		}
+	} catch {
+		const basename = fromDir.split("/").at(-1) ?? "";
+		if (basename.includes(".")) {
+			fromDir = dirname(fromDir);
+		}
+	}
+	const base = specifier.startsWith("/")
+		? specifier
+		: `${fromDir}/${specifier}`;
 	const candidates = [
 		normalizePath(base),
 		`${normalizePath(base)}.js`,
@@ -484,7 +522,10 @@ export function exposeCustomGlobal(name: string, value: unknown): void {
 	(globalThis as Record<string, unknown>)[name] = value;
 }
 
-export function exposeMutableRuntimeStateGlobal(name: string, value: unknown): void {
+export function exposeMutableRuntimeStateGlobal(
+	name: string,
+	value: unknown,
+): void {
 	(globalThis as Record<string, unknown>)[name] = value;
 }
 
@@ -502,6 +543,19 @@ export function getIsolateRuntimeSource(id: string): string {
 export function getRequireSetupCode(): string {
 	return `
 		(function () {
+			const callSyncBridge = (ref, ...args) => {
+				if (typeof ref === "function") {
+					return ref(...args);
+				}
+				if (ref && typeof ref.applySync === "function") {
+					return ref.applySync(undefined, args);
+				}
+				if (ref && typeof ref.applySyncPromise === "function") {
+					return ref.applySyncPromise(undefined, args);
+				}
+				return undefined;
+			};
+
 			const pathDirname = (value) => {
 				const normalized = String(value || "/").replace(/\\\\/g, "/");
 				if (normalized === "/") return "/";
@@ -510,7 +564,10 @@ export function getRequireSetupCode(): string {
 			};
 
 			globalThis.require = function require(specifier) {
-				const polyfillSource = globalThis._loadPolyfill?.(specifier.replace(/^node:/, ""));
+				const polyfillSource = callSyncBridge(
+					globalThis._loadPolyfill,
+					specifier.replace(/^node:/, ""),
+				);
 				if (polyfillSource) {
 					const module = { exports: {} };
 					const fn = new Function("module", "exports", polyfillSource);
@@ -519,7 +576,8 @@ export function getRequireSetupCode(): string {
 				}
 
 				const currentModule = globalThis._currentModule || { dirname: "/" };
-				const resolved = globalThis._resolveModuleSync?.(
+				const resolved = callSyncBridge(
+					globalThis._resolveModuleSync,
 					specifier,
 					currentModule.dirname || "/",
 					"require",
@@ -533,7 +591,11 @@ export function getRequireSetupCode(): string {
 					return cache[resolved].exports;
 				}
 
-				const source = globalThis._loadFileSync?.(resolved, "require");
+				const source = callSyncBridge(
+					globalThis._loadFileSync,
+					resolved,
+					"require",
+				);
 				if (source == null) {
 					throw new Error("Cannot load module '" + resolved + "'");
 				}
@@ -561,4 +623,4 @@ export function getRequireSetupCode(): string {
 	`;
 }
 
-export { InMemoryFileSystem, createInMemoryFileSystem };
+export { createInMemoryFileSystem, InMemoryFileSystem };

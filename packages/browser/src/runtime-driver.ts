@@ -1,10 +1,4 @@
-import {
-	createFsStub,
-	createNetworkStub,
-	loadFile,
-	mkdir,
-	resolveModule,
-} from "./runtime.js";
+import { getBrowserSystemDriverOptions } from "./driver.js";
 import type {
 	ExecOptions,
 	ExecResult,
@@ -19,8 +13,18 @@ import type {
 	VirtualFileSystem,
 	VirtualStat,
 } from "./runtime.js";
-import { getBrowserSystemDriverOptions } from "./driver.js";
 import {
+	createFsStub,
+	createNetworkStub,
+	loadFile,
+	mkdir,
+	resolveModule,
+} from "./runtime.js";
+import {
+	assertBrowserSyncBridgeSupport,
+	type BrowserSyncBridgePayload,
+	type BrowserWorkerSyncRequestMessage,
+	createBrowserSyncBridgePayload,
 	SYNC_BRIDGE_KIND_BINARY,
 	SYNC_BRIDGE_KIND_JSON,
 	SYNC_BRIDGE_KIND_NONE,
@@ -33,11 +37,7 @@ import {
 	SYNC_BRIDGE_SIGNAL_STATUS_INDEX,
 	SYNC_BRIDGE_STATUS_ERROR,
 	SYNC_BRIDGE_STATUS_OK,
-	assertBrowserSyncBridgeSupport,
-	createBrowserSyncBridgePayload,
 	toBrowserSyncBridgeError,
-	type BrowserSyncBridgePayload,
-	type BrowserWorkerSyncRequestMessage,
 } from "./sync-bridge.js";
 import type {
 	BrowserWorkerExecOptions,
@@ -70,7 +70,8 @@ const DEFAULT_BROWSER_TIMING_MITIGATION: TimingMitigation = "freeze";
 const BROWSER_OPTION_VALIDATORS = [
 	{
 		label: "memoryLimit",
-		hasValue: (options: RuntimeDriverOptions) => options.memoryLimit !== undefined,
+		hasValue: (options: RuntimeDriverOptions) =>
+			options.memoryLimit !== undefined,
 	},
 	{
 		label: "cpuTimeLimitMs",
@@ -128,9 +129,9 @@ function toBrowserWorkerExecOptions(
 }
 
 function validateBrowserRuntimeOptions(options: RuntimeDriverOptions): void {
-	const unsupported = BROWSER_OPTION_VALIDATORS
-		.filter((validator) => validator.hasValue(options))
-		.map((validator) => validator.label);
+	const unsupported = BROWSER_OPTION_VALIDATORS.filter((validator) =>
+		validator.hasValue(options),
+	).map((validator) => validator.label);
 	if (unsupported.length === 0) {
 		return;
 	}
@@ -279,10 +280,7 @@ async function handleSyncBridgeOperation(
 			await filesystem.removeFile(String(message.args[0]));
 			return { kind: SYNC_BRIDGE_KIND_NONE };
 		case "fs.rename":
-			await filesystem.rename(
-				String(message.args[0]),
-				String(message.args[1]),
-			);
+			await filesystem.rename(String(message.args[0]), String(message.args[1]));
 			return { kind: SYNC_BRIDGE_KIND_NONE };
 		case "fs.realpath":
 			return {
@@ -301,16 +299,10 @@ async function handleSyncBridgeOperation(
 			);
 			return { kind: SYNC_BRIDGE_KIND_NONE };
 		case "fs.link":
-			await filesystem.link(
-				String(message.args[0]),
-				String(message.args[1]),
-			);
+			await filesystem.link(String(message.args[0]), String(message.args[1]));
 			return { kind: SYNC_BRIDGE_KIND_NONE };
 		case "fs.chmod":
-			await filesystem.chmod(
-				String(message.args[0]),
-				Number(message.args[1]),
-			);
+			await filesystem.chmod(String(message.args[0]), Number(message.args[1]));
 			return { kind: SYNC_BRIDGE_KIND_NONE };
 		case "fs.truncate":
 			await filesystem.truncate(
@@ -360,7 +352,9 @@ export class BrowserRuntimeDriver implements NodeRuntimeDriver {
 		factoryOptions: BrowserRuntimeDriverFactoryOptions = {},
 	) {
 		if (typeof Worker === "undefined") {
-			throw new Error("Browser runtime requires a global Worker implementation");
+			throw new Error(
+				"Browser runtime requires a global Worker implementation",
+			);
 		}
 		assertBrowserSyncBridgeSupport();
 
@@ -493,7 +487,11 @@ export class BrowserRuntimeDriver implements NodeRuntimeDriver {
 			}
 
 			data.set(bytes, 0);
-			Atomics.store(signal, SYNC_BRIDGE_SIGNAL_STATUS_INDEX, SYNC_BRIDGE_STATUS_OK);
+			Atomics.store(
+				signal,
+				SYNC_BRIDGE_SIGNAL_STATUS_INDEX,
+				SYNC_BRIDGE_STATUS_OK,
+			);
 			Atomics.store(signal, SYNC_BRIDGE_SIGNAL_KIND_INDEX, response.kind);
 			Atomics.store(signal, SYNC_BRIDGE_SIGNAL_LENGTH_INDEX, bytes.byteLength);
 		} catch (error) {
@@ -511,12 +509,24 @@ export class BrowserRuntimeDriver implements NodeRuntimeDriver {
 			}
 
 			data.set(bytes, 0);
-			Atomics.store(signal, SYNC_BRIDGE_SIGNAL_STATUS_INDEX, SYNC_BRIDGE_STATUS_ERROR);
-			Atomics.store(signal, SYNC_BRIDGE_SIGNAL_KIND_INDEX, SYNC_BRIDGE_KIND_JSON);
+			Atomics.store(
+				signal,
+				SYNC_BRIDGE_SIGNAL_STATUS_INDEX,
+				SYNC_BRIDGE_STATUS_ERROR,
+			);
+			Atomics.store(
+				signal,
+				SYNC_BRIDGE_SIGNAL_KIND_INDEX,
+				SYNC_BRIDGE_KIND_JSON,
+			);
 			Atomics.store(signal, SYNC_BRIDGE_SIGNAL_LENGTH_INDEX, bytes.byteLength);
 		}
 
-		Atomics.store(signal, SYNC_BRIDGE_SIGNAL_STATE_INDEX, SYNC_BRIDGE_SIGNAL_STATE_READY);
+		Atomics.store(
+			signal,
+			SYNC_BRIDGE_SIGNAL_STATE_INDEX,
+			SYNC_BRIDGE_SIGNAL_STATE_READY,
+		);
 		Atomics.notify(signal, SYNC_BRIDGE_SIGNAL_STATE_INDEX, 1);
 	}
 
@@ -601,7 +611,10 @@ export class BrowserRuntimeDriver implements NodeRuntimeDriver {
 		});
 	}
 
-	async run<T = unknown>(code: string, filePath?: string): Promise<RunResult<T>> {
+	async run<T = unknown>(
+		code: string,
+		filePath?: string,
+	): Promise<RunResult<T>> {
 		await this.ready;
 		const hook = this.defaultOnStdio;
 		return this.callWorker<RunResult<T>>(

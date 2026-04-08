@@ -1,11 +1,7 @@
 {
-	"$schema": "https://biomejs.dev/schemas/2.3.11/schema.json",
+	"$schema": "https://biomejs.dev/schemas/2.4.10/schema.json",
 	"files": {
-		"includes": [
-			"packages/**/*.ts",
-			"examples/**/*.ts",
-			"!/**/node_modules"
-		],
+		"includes": ["packages/**/*.ts", "examples/**/*.ts", "!/**/node_modules"],
 		"ignoreUnknown": true
 	},
 	"vcs": {

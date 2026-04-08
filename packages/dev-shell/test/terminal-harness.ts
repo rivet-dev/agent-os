@@ -1,5 +1,5 @@
-import { Terminal } from "@xterm/headless";
 import type { Kernel } from "@rivet-dev/agent-os/test/runtime";
+import { Terminal } from "@xterm/headless";
 
 type ShellHandle = ReturnType<Kernel["openShell"]>;
 
@@ -15,13 +15,23 @@ export class TerminalHarness {
 
 	constructor(
 		kernel: Kernel,
-		options?: { cols?: number; rows?: number; env?: Record<string, string>; cwd?: string },
+		options?: {
+			cols?: number;
+			rows?: number;
+			env?: Record<string, string>;
+			cwd?: string;
+		},
 	) {
 		const cols = options?.cols ?? 80;
 		const rows = options?.rows ?? 24;
 
 		this.term = new Terminal({ cols, rows, allowProposedApi: true });
-		this.shell = kernel.openShell({ cols, rows, env: options?.env, cwd: options?.cwd });
+		this.shell = kernel.openShell({
+			cols,
+			rows,
+			env: options?.env,
+			cwd: options?.cwd,
+		});
 		this.shell.onData = (data: Uint8Array) => {
 			this.term.write(data);
 		};
@@ -29,7 +39,9 @@ export class TerminalHarness {
 
 	async type(input: string): Promise<void> {
 		if (this.typing) {
-			throw new Error("TerminalHarness.type() called while previous type() is still in-flight");
+			throw new Error(
+				"TerminalHarness.type() called while previous type() is still in-flight",
+			);
 		}
 		this.typing = true;
 		try {
@@ -100,8 +112,8 @@ export class TerminalHarness {
 			if (Date.now() >= deadline) {
 				throw new Error(
 					`waitFor("${text}", ${occurrence}) timed out after ${timeoutMs}ms.\n` +
-					`Expected: "${text}" (occurrence ${occurrence})\n` +
-					`Screen:\n${screen}`,
+						`Expected: "${text}" (occurrence ${occurrence})\n` +
+						`Screen:\n${screen}`,
 				);
 			}
 

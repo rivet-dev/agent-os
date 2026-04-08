@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { AgentOs } from "../src/index.js";
 import curlPackage from "@rivet-dev/agent-os-curl";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { AgentOs } from "../src/index.js";
 import {
 	REGISTRY_SOFTWARE,
 	registrySkipReason,
@@ -27,13 +27,13 @@ describe.skipIf(registrySkipReason)("WASM command packages", () => {
 
 	describe("sh (coreutils)", () => {
 		test("variables and arithmetic", async () => {
-			const r = await vm.exec('X=42; echo $((X + 8))');
+			const r = await vm.exec("X=42; echo $((X + 8))");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout.trim()).toBe("50");
 		});
 
 		test("for loop", async () => {
-			const r = await vm.exec('for i in 1 2 3; do echo $i; done');
+			const r = await vm.exec("for i in 1 2 3; do echo $i; done");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout.trim()).toBe("1\n2\n3");
 		});
@@ -128,7 +128,9 @@ EOF`);
 		});
 
 		test("ls lists files", async () => {
-			await vm.exec("mkdir -p /tmp/ls-test && echo a > /tmp/ls-test/a.txt && echo b > /tmp/ls-test/b.txt");
+			await vm.exec(
+				"mkdir -p /tmp/ls-test && echo a > /tmp/ls-test/a.txt && echo b > /tmp/ls-test/b.txt",
+			);
 			const r = await vm.exec("ls /tmp/ls-test/");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout).toContain("a.txt");
@@ -267,7 +269,9 @@ EOF`);
 
 	describe("grep", () => {
 		test("basic pattern match", async () => {
-			await vm.exec('printf "apple\\nbanana\\ncherry\\napricot\\n" > /tmp/grep.txt');
+			await vm.exec(
+				'printf "apple\\nbanana\\ncherry\\napricot\\n" > /tmp/grep.txt',
+			);
 			const r = await vm.exec("grep ap /tmp/grep.txt");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout).toContain("apple");
@@ -370,9 +374,7 @@ EOF`);
 
 		test("sum column", async () => {
 			await vm.exec('printf "10\\n20\\n30\\n" > /tmp/sum.txt');
-			const r = await vm.exec(
-				"awk '{s+=$1} END {print s}' /tmp/sum.txt",
-			);
+			const r = await vm.exec("awk '{s+=$1} END {print s}' /tmp/sum.txt");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout.trim()).toBe("60");
 		});
@@ -389,7 +391,9 @@ EOF`);
 
 	describe("find and xargs (findutils)", () => {
 		test("find files by name", async () => {
-			await vm.exec("mkdir -p /tmp/findtest/sub && echo a > /tmp/findtest/a.txt && echo b > /tmp/findtest/b.log && echo c > /tmp/findtest/sub/c.txt");
+			await vm.exec(
+				"mkdir -p /tmp/findtest/sub && echo a > /tmp/findtest/a.txt && echo b > /tmp/findtest/b.log && echo c > /tmp/findtest/sub/c.txt",
+			);
 			const r = await vm.exec("find /tmp/findtest -name '*.txt'");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout).toContain("a.txt");
@@ -398,10 +402,10 @@ EOF`);
 		});
 
 		test("find with -type d", async () => {
-			await vm.exec("mkdir -p /tmp/finddir/sub1 /tmp/finddir/sub2 && echo f > /tmp/finddir/file.txt");
-			const r = await vm.exec(
-				"find /tmp/finddir -mindepth 1 -type d",
+			await vm.exec(
+				"mkdir -p /tmp/finddir/sub1 /tmp/finddir/sub2 && echo f > /tmp/finddir/file.txt",
 			);
+			const r = await vm.exec("find /tmp/finddir -mindepth 1 -type d");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout).toContain("sub1");
 			expect(r.stdout).toContain("sub2");
@@ -438,7 +442,9 @@ EOF`);
 
 	describe("tar", () => {
 		test("create and extract archive", async () => {
-			await vm.exec("mkdir -p /tmp/tardir && echo file-a > /tmp/tardir/a.txt && echo file-b > /tmp/tardir/b.txt");
+			await vm.exec(
+				"mkdir -p /tmp/tardir && echo file-a > /tmp/tardir/a.txt && echo file-b > /tmp/tardir/b.txt",
+			);
 			const create = await vm.exec("tar cf /tmp/test.tar -C /tmp tardir");
 			expect(create.exitCode).toBe(0);
 
@@ -469,9 +475,7 @@ EOF`);
 			expect(comp.exitCode).toBe(0);
 			expect(comp.stdout.trim()).toBe("ok");
 
-			const decomp = await vm.exec(
-				"gunzip /tmp/gz.txt.gz && cat /tmp/gz.txt",
-			);
+			const decomp = await vm.exec("gunzip /tmp/gz.txt.gz && cat /tmp/gz.txt");
 			expect(decomp.exitCode).toBe(0);
 			expect(decomp.stdout.trim()).toBe("compress me please");
 		});
@@ -489,26 +493,30 @@ EOF`);
 
 	describe("jq", () => {
 		test("extract field from JSON", async () => {
-			const r = await vm.exec('echo \'{"name":"test","version":42}\' | jq .name');
+			const r = await vm.exec(
+				'echo \'{"name":"test","version":42}\' | jq .name',
+			);
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout.trim()).toBe('"test"');
 		});
 
 		test("extract number", async () => {
-			const r = await vm.exec('echo \'{"x":99}\' | jq .x');
+			const r = await vm.exec("echo '{\"x\":99}' | jq .x");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout.trim()).toBe("99");
 		});
 
 		test("filter array", async () => {
-			const r = await vm.exec('echo \'[{"a":1},{"a":2},{"a":3}]\' | jq ".[].a"');
+			const r = await vm.exec(
+				'echo \'[{"a":1},{"a":2},{"a":3}]\' | jq ".[].a"',
+			);
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout.trim()).toBe("1\n2\n3");
 		});
 
 		test("construct new JSON", async () => {
 			const r = await vm.exec(
-				'echo \'{"a":1,"b":2}\' | jq \'{sum: (.a + .b)}\'',
+				"echo '{\"a\":1,\"b\":2}' | jq '{sum: (.a + .b)}'",
 			);
 			expect(r.exitCode).toBe(0);
 			const parsed = JSON.parse(r.stdout.trim());
@@ -520,7 +528,9 @@ EOF`);
 
 	describe("rg (ripgrep)", () => {
 		test("search files recursively", async () => {
-			await vm.exec("mkdir -p /tmp/rgdir/sub && echo 'needle here' > /tmp/rgdir/a.txt && echo nothing > /tmp/rgdir/b.txt && echo 'another needle' > /tmp/rgdir/sub/c.txt");
+			await vm.exec(
+				"mkdir -p /tmp/rgdir/sub && echo 'needle here' > /tmp/rgdir/a.txt && echo nothing > /tmp/rgdir/b.txt && echo 'another needle' > /tmp/rgdir/sub/c.txt",
+			);
 			const r = await vm.exec("rg needle /tmp/rgdir/");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout).toContain("a.txt");
@@ -529,7 +539,9 @@ EOF`);
 		});
 
 		test("rg -l lists matching files only", async () => {
-			await vm.exec("mkdir -p /tmp/rgl && echo match > /tmp/rgl/x.txt && echo no > /tmp/rgl/y.txt");
+			await vm.exec(
+				"mkdir -p /tmp/rgl && echo match > /tmp/rgl/x.txt && echo no > /tmp/rgl/y.txt",
+			);
 			const r = await vm.exec("rg -l match /tmp/rgl/");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout).toContain("x.txt");
@@ -541,7 +553,9 @@ EOF`);
 
 	describe("fd (fd-find)", () => {
 		test("find files by pattern", async () => {
-			await vm.exec("mkdir -p /tmp/fdtest/sub && echo ts > /tmp/fdtest/hello.ts && echo js > /tmp/fdtest/world.js && echo ts > /tmp/fdtest/sub/foo.ts");
+			await vm.exec(
+				"mkdir -p /tmp/fdtest/sub && echo ts > /tmp/fdtest/hello.ts && echo js > /tmp/fdtest/world.js && echo ts > /tmp/fdtest/sub/foo.ts",
+			);
 			const r = await vm.exec("fd '\\.ts$' /tmp/fdtest/");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout).toContain("hello.ts");
@@ -554,7 +568,9 @@ EOF`);
 
 	describe("tree", () => {
 		test("displays directory structure", async () => {
-			await vm.exec("mkdir -p /tmp/treedir/sub && echo a > /tmp/treedir/a.txt && echo b > /tmp/treedir/sub/b.txt");
+			await vm.exec(
+				"mkdir -p /tmp/treedir/sub && echo a > /tmp/treedir/a.txt && echo b > /tmp/treedir/sub/b.txt",
+			);
 			const r = await vm.exec("tree /tmp/treedir");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout).toContain("a.txt");
@@ -709,7 +725,7 @@ server.listen(0, "0.0.0.0", () => {
 
 		test("chmod changes file mode", async () => {
 			await vm.exec("echo test > /tmp/chmod-test.txt");
-			const r1 = await vm.exec('chmod 755 /tmp/chmod-test.txt');
+			const r1 = await vm.exec("chmod 755 /tmp/chmod-test.txt");
 			expect(r1.exitCode).toBe(0);
 			const r = await vm.exec('stat -c "%a" /tmp/chmod-test.txt');
 			expect(r.exitCode).toBe(0);
@@ -754,7 +770,9 @@ server.listen(0, "0.0.0.0", () => {
 
 	describe("cross-package pipelines", () => {
 		test("find | grep | wc pipeline", async () => {
-			await vm.exec("mkdir -p /tmp/pipe && echo x > /tmp/pipe/a.txt && echo x > /tmp/pipe/b.log && echo x > /tmp/pipe/c.txt");
+			await vm.exec(
+				"mkdir -p /tmp/pipe && echo x > /tmp/pipe/a.txt && echo x > /tmp/pipe/b.log && echo x > /tmp/pipe/c.txt",
+			);
 			const r = await vm.exec(
 				"find /tmp/pipe -name '*.txt' | grep txt | wc -l",
 			);
@@ -763,7 +781,9 @@ server.listen(0, "0.0.0.0", () => {
 		});
 
 		test("awk + sort pipeline", async () => {
-			await vm.exec('printf "alice 90\\nbob 70\\ncharlie 85\\n" > /tmp/scores.txt');
+			await vm.exec(
+				'printf "alice 90\\nbob 70\\ncharlie 85\\n" > /tmp/scores.txt',
+			);
 			const r = await vm.exec(
 				"sort -k2 -rn /tmp/scores.txt | head -1 | awk '{print $1}'",
 			);
@@ -772,7 +792,9 @@ server.listen(0, "0.0.0.0", () => {
 		});
 
 		test("tar + gzip round trip", async () => {
-			await vm.exec("mkdir -p /tmp/tgz && echo round-trip-data > /tmp/tgz/data.txt");
+			await vm.exec(
+				"mkdir -p /tmp/tgz && echo round-trip-data > /tmp/tgz/data.txt",
+			);
 			const create = await vm.exec(
 				"tar cf - -C /tmp tgz | gzip > /tmp/archive.tar.gz",
 			);
@@ -786,16 +808,18 @@ server.listen(0, "0.0.0.0", () => {
 		});
 
 		test("sed + grep text processing chain", async () => {
-			await vm.exec('printf "ERROR: disk full\\nINFO: ok\\nERROR: timeout\\nINFO: done\\n" > /tmp/chain.txt');
-			const r = await vm.exec(
-				"grep ERROR /tmp/chain.txt | sed 's/ERROR: //'",
+			await vm.exec(
+				'printf "ERROR: disk full\\nINFO: ok\\nERROR: timeout\\nINFO: done\\n" > /tmp/chain.txt',
 			);
+			const r = await vm.exec("grep ERROR /tmp/chain.txt | sed 's/ERROR: //'");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout.trim()).toBe("disk full\ntimeout");
 		});
 
 		test("jq + awk data transformation", async () => {
-			await vm.exec('printf \'[{"price":10},{"price":20}]\\n\' > /tmp/items.json');
+			await vm.exec(
+				'printf \'[{"price":10},{"price":20}]\\n\' > /tmp/items.json',
+			);
 			const r = await vm.exec(
 				"cat /tmp/items.json | jq '.[].price' | awk '{s+=$1} END {print s}'",
 			);

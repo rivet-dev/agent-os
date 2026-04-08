@@ -1807,16 +1807,14 @@ impl ResponsePayload {
     fn ownership_requirement(&self) -> OwnershipRequirement {
         match self {
             Self::Authenticated(_) | Self::SessionOpened(_) => OwnershipRequirement::Connection,
-            Self::VmCreated(_)
-            | Self::SessionCreated(_)
-            | Self::PersistenceState(_)
-            | Self::PersistenceFlushed(_) => {
+            Self::VmCreated(_) | Self::PersistenceState(_) | Self::PersistenceFlushed(_) => {
                 OwnershipRequirement::Session
             }
+            Self::SessionCreated(_)
+            | Self::SessionRpc(_)
+            | Self::SessionState(_)
+            | Self::AgentSessionClosed(_) => OwnershipRequirement::Vm,
             Self::Rejected(_) => OwnershipRequirement::Any,
-            Self::SessionRpc(_) | Self::SessionState(_) | Self::AgentSessionClosed(_) => {
-                OwnershipRequirement::Vm
-            }
             Self::VmDisposed(_)
             | Self::RootFilesystemBootstrapped(_)
             | Self::VmConfigured(_)

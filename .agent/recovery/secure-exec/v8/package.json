@@ -1,0 +1,41 @@
+{
+  "name": "@secure-exec/v8",
+  "version": "0.2.1",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rivet-dev/secure-exec.git",
+    "directory": "packages/v8"
+  },
+  "scripts": {
+    "build": "tsc",
+    "check-types": "tsc --noEmit"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  },
+  "optionalDependencies": {
+    "@secure-exec/v8-darwin-arm64": "0.2.1",
+    "@secure-exec/v8-darwin-x64": "0.2.1",
+    "@secure-exec/v8-linux-arm64-gnu": "0.2.1",
+    "@secure-exec/v8-linux-x64-gnu": "0.2.1"
+  },
+  "dependencies": {
+    "cbor-x": "^1.6.4"
+  }
+}

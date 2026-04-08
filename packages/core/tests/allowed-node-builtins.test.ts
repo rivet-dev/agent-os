@@ -2,12 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { NativeSidecarKernelProxy } from "../src/sidecar/rpc-client.js";
 import type {
 	AuthenticatedSession,
 	CreatedVm,
 	NativeSidecarProcessClient,
 } from "../src/sidecar/rpc-client.js";
+import { NativeSidecarKernelProxy } from "../src/sidecar/rpc-client.js";
 
 describe("NativeSidecarKernelProxy execute payloads", () => {
 	let proxy: NativeSidecarKernelProxy | null = null;

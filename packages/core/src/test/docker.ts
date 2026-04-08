@@ -7,8 +7,8 @@
  */
 
 import { execFile as execFileCb } from "node:child_process";
-import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
+import { promisify } from "node:util";
 
 const execFile = promisify(execFileCb);
 
@@ -78,13 +78,7 @@ export async function startContainer(
 ): Promise<ContainerHandle> {
 	const containerName = options.name ?? `test-${randomUUID().slice(0, 8)}`;
 
-	const args: string[] = [
-		"run",
-		"--detach",
-		"--name",
-		containerName,
-		"--rm",
-	];
+	const args: string[] = ["run", "--detach", "--name", containerName, "--rm"];
 
 	// Port mappings
 	if (options.ports) {
@@ -136,7 +130,10 @@ export async function startContainer(
 			);
 		}
 		// Re-check for daemon not running (docker exits with non-zero and stderr mentions "daemon")
-		if (err instanceof Error && err.message?.includes("Cannot connect to the Docker daemon")) {
+		if (
+			err instanceof Error &&
+			err.message?.includes("Cannot connect to the Docker daemon")
+		) {
 			throw new Error(
 				"Cannot connect to the Docker daemon. Is Docker running?",
 			);
@@ -178,7 +175,7 @@ export async function startContainer(
 				await stop();
 				throw new Error(
 					`Failed to resolve host port for container port ${key} on container ${containerId}. ` +
-					`docker port output: ${JSON.stringify(portOut.trim())}`,
+						`docker port output: ${JSON.stringify(portOut.trim())}`,
 				);
 			}
 		}
@@ -235,7 +232,7 @@ async function waitForHealthy(
 				}
 				throw new Error(
 					`Container ${containerId} ${containerState}${exitInfo} before becoming healthy.` +
-					(logs ? `\nLast logs:\n${logs}` : ""),
+						(logs ? `\nLast logs:\n${logs}` : ""),
 				);
 			}
 
@@ -250,7 +247,10 @@ async function waitForHealthy(
 			if (status === "healthy") return;
 		} catch (err) {
 			// Re-throw container crash errors.
-			if (err instanceof Error && (err.message.includes("exited") || err.message.includes("dead"))) {
+			if (
+				err instanceof Error &&
+				(err.message.includes("exited") || err.message.includes("dead"))
+			) {
 				throw err;
 			}
 			// inspect may fail briefly while container is starting
@@ -391,14 +391,20 @@ export interface SandboxAgentContainerHandle extends ContainerHandle {
 export async function startSandboxAgentContainer(
 	options?: SandboxAgentContainerOptions,
 ): Promise<SandboxAgentContainerHandle> {
-	const image =
-		options?.image ?? "sandbox-agent-test:dev";
+	const image = options?.image ?? "sandbox-agent-test:dev";
 	const port = options?.port ?? 2468;
 
 	const container = await startContainer({
 		image,
 		ports: [{ host: 0, container: port }],
-		command: ["server", "--host", "0.0.0.0", "--port", String(port), "--no-token"],
+		command: [
+			"server",
+			"--host",
+			"0.0.0.0",
+			"--port",
+			String(port),
+			"--no-token",
+		],
 	});
 
 	const hostPort = container.ports[`${port}/tcp`];

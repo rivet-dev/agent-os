@@ -1,4 +1,14 @@
 export type {
+	BrowserDriverOptions,
+	BrowserRuntimeSystemOptions,
+} from "./driver.js";
+export {
+	createBrowserDriver,
+	createBrowserNetworkAdapter,
+	createOpfsFileSystem,
+} from "./driver.js";
+export { InMemoryFileSystem } from "./os-filesystem.js";
+export type {
 	ExecOptions,
 	ExecResult,
 	NodeRuntimeDriver,
@@ -14,16 +24,6 @@ export {
 	allowAllNetwork,
 	createInMemoryFileSystem,
 } from "./runtime.js";
-export type {
-	BrowserDriverOptions,
-	BrowserRuntimeSystemOptions,
-} from "./driver.js";
-export {
-	createBrowserDriver,
-	createBrowserNetworkAdapter,
-	createOpfsFileSystem,
-} from "./driver.js";
-export { InMemoryFileSystem } from "./os-filesystem.js";
 export type { BrowserRuntimeDriverFactoryOptions } from "./runtime-driver.js";
 export { createBrowserRuntimeDriverFactory } from "./runtime-driver.js";
 export type { WorkerHandle } from "./worker-adapter.js";

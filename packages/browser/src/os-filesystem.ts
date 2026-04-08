@@ -404,11 +404,7 @@ export class InMemoryFileSystem implements VirtualFileSystem {
 		);
 	}
 
-	async pwrite(
-		path: string,
-		offset: number,
-		data: Uint8Array,
-	): Promise<void> {
+	async pwrite(path: string, offset: number, data: Uint8Array): Promise<void> {
 		const entry = this.resolveEntry(path);
 		if (!entry || entry.type !== "file") {
 			throw this.enoent("open", path);

@@ -1,14 +1,14 @@
-use crate::bridge::{build_mount_plugin_registry, MountPluginContext};
 use crate::acp::compat::{
     is_cancel_method_not_found, maybe_normalize_permission_response,
     normalize_inbound_permission_request, summarize_inbound_notification,
     summarize_inbound_request, summarize_inbound_response, to_record, ACP_CANCEL_METHOD,
 };
+use crate::acp::session::{AcpSessionState, AcpTerminalState};
 use crate::acp::{
     deserialize_message, serialize_message, JsonRpcError, JsonRpcId, JsonRpcMessage,
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
 };
-use crate::acp::session::{AcpSessionState, AcpTerminalState};
+use crate::bridge::{build_mount_plugin_registry, MountPluginContext};
 pub(crate) use crate::execution::{
     build_javascript_socket_path_context, error_code, format_dns_resource, format_tcp_resource,
     ignore_stale_javascript_sync_rpc_response, javascript_sync_rpc_arg_str,
@@ -42,9 +42,8 @@ use crate::protocol::{
     SessionRpcResponse, SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame,
     SidecarResponsePayload, SidecarResponseTracker, SidecarResponseTrackerError,
     SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse, SocketStateEntry,
-    StdinClosedResponse, StdinWrittenResponse, StreamChannel, StructuredEvent,
-    VmLifecycleEvent, VmLifecycleState, WasmPermissionTier, WriteStdinRequest,
-    ZombieTimerCountResponse,
+    StdinClosedResponse, StdinWrittenResponse, StreamChannel, StructuredEvent, VmLifecycleEvent,
+    VmLifecycleState, WasmPermissionTier, WriteStdinRequest, ZombieTimerCountResponse,
 };
 use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
@@ -1089,21 +1088,29 @@ where
         if let Some((acp_session_id, terminal_id)) =
             self.acp_terminal_owner_for_process(&vm_id, &process_id)
         {
-            self.handle_acp_terminal_execution_event(
-                &vm_id,
-                &acp_session_id,
-                &terminal_id,
-                event,
-            )?;
+            self.handle_acp_terminal_execution_event(&vm_id, &acp_session_id, &terminal_id, event)?;
             return Ok(None);
         }
 
         if matches!(event, ActiveExecutionEvent::Exited(_)) {
-            let trailing = self
-                .drain_process_events_blocking(&vm_id, &process_id)?
-                .into_iter()
-                .filter(|event| !matches!(event, ActiveExecutionEvent::Exited(_)))
-                .collect::<Vec<_>>();
+            let mut trailing = Vec::new();
+            let mut deferred = VecDeque::new();
+            while let Some(pending) = self.pending_process_events.pop_front() {
+                if pending.vm_id == vm_id
+                    && pending.process_id == process_id
+                    && !matches!(pending.event, ActiveExecutionEvent::Exited(_))
+                {
+                    trailing.push(pending.event);
+                } else {
+                    deferred.push_back(pending);
+                }
+            }
+            self.pending_process_events = deferred;
+            trailing.extend(
+                self.drain_process_events_blocking(&vm_id, &process_id)?
+                    .into_iter()
+                    .filter(|event| !matches!(event, ActiveExecutionEvent::Exited(_))),
+            );
 
             if !trailing.is_empty() {
                 self.pending_process_events
@@ -1264,10 +1271,7 @@ where
         self.next_agent_process_id += 1;
         let process_id = format!("acp-agent-{}", self.next_agent_process_id);
         let mut env = payload.env.clone();
-        env.insert(
-            String::from("AGENT_OS_KEEP_STDIN_OPEN"),
-            String::from("1"),
-        );
+        env.insert(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"));
         let execute_result = self
             .execute(
                 request,
@@ -1450,10 +1454,7 @@ where
                 .expect("ACP session should exist");
             let rpc_id = session.next_request_id;
             session.next_request_id += 1;
-            session.record_activity(format!(
-                "sent request {} id={}",
-                payload.method, rpc_id
-            ));
+            session.record_activity(format!("sent request {} id={}", payload.method, rpc_id));
             rpc_id
         };
         let merged_params = {
@@ -1506,23 +1507,21 @@ where
                     .acp_sessions
                     .get_mut(&payload.session_id)
                     .expect("ACP session should exist");
-                session.apply_request_success(
-                    &payload.method,
-                    &merged_params,
-                    event_count_before,
-                )
+                session.apply_request_success(&payload.method, &merged_params, event_count_before)
             };
             if let Some(notification) = synthetic {
-                events.push(self.build_acp_event_frame(
-                    &request.ownership,
-                    &payload.session_id,
-                    self.acp_sessions
-                        .get(&payload.session_id)
-                        .expect("ACP session should exist")
-                        .next_sequence_number
-                        - 1,
-                    &notification,
-                )?);
+                events.push(
+                    self.build_acp_event_frame(
+                        &request.ownership,
+                        &payload.session_id,
+                        self.acp_sessions
+                            .get(&payload.session_id)
+                            .expect("ACP session should exist")
+                            .next_sequence_number
+                            - 1,
+                        &notification,
+                    )?,
+                );
             }
         }
 
@@ -1926,10 +1925,13 @@ where
             if session.vm_id != vm_id {
                 return None;
             }
-            session.terminals.iter().find_map(|(terminal_id, terminal)| {
-                (terminal.process_id == process_id)
-                    .then(|| (session_id.clone(), terminal_id.clone()))
-            })
+            session
+                .terminals
+                .iter()
+                .find_map(|(terminal_id, terminal)| {
+                    (terminal.process_id == process_id)
+                        .then(|| (session_id.clone(), terminal_id.clone()))
+                })
         })
     }
 
@@ -1974,9 +1976,7 @@ where
                         SidecarError::InvalidState(format!("unknown ACP session {session_id}"))
                     })?;
                     let terminal = session.terminals.get_mut(terminal_id).ok_or_else(|| {
-                        SidecarError::InvalidState(format!(
-                            "ACP terminal not found: {terminal_id}"
-                        ))
+                        SidecarError::InvalidState(format!("ACP terminal not found: {terminal_id}"))
                     })?;
                     terminal.exit_code = Some(exit_code);
                     (terminal.process_id.clone(), terminal.released)
@@ -2000,9 +2000,7 @@ where
                     .and_then(|session| session.terminals.get(terminal_id))
                     .map(|terminal| terminal.process_id.clone())
                     .ok_or_else(|| {
-                        SidecarError::InvalidState(format!(
-                            "ACP terminal not found: {terminal_id}"
-                        ))
+                        SidecarError::InvalidState(format!("ACP terminal not found: {terminal_id}"))
                     })?;
                 let _ = self.handle_execution_event(vm_id, &process_id, other)?;
                 Ok(())
@@ -2129,19 +2127,21 @@ where
     ) -> Result<Option<Value>, SidecarError> {
         let params = to_record(request.params.clone());
         let (vm_id, kernel_pid, connection_id, sidecar_session_id) = {
-            let session = self
-                .acp_sessions
-                .get(session_id)
-                .ok_or_else(|| SidecarError::InvalidState(format!("unknown ACP session {session_id}")))?;
+            let session = self.acp_sessions.get(session_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown ACP session {session_id}"))
+            })?;
             let vm = self.vms.get(&session.vm_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown sidecar VM {}", session.vm_id))
             })?;
-            let process = vm.active_processes.get(&session.process_id).ok_or_else(|| {
-                SidecarError::InvalidState(format!(
-                    "VM {} has no active process {}",
-                    session.vm_id, session.process_id
-                ))
-            })?;
+            let process = vm
+                .active_processes
+                .get(&session.process_id)
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(format!(
+                        "VM {} has no active process {}",
+                        session.vm_id, session.process_id
+                    ))
+                })?;
             (
                 session.vm_id.clone(),
                 process.kernel_pid,
@@ -2191,11 +2191,14 @@ where
                         "fs/write_text_file requires string path and content",
                     ))
                 })?;
-                let content = params.get("content").and_then(Value::as_str).ok_or_else(|| {
-                    SidecarError::InvalidState(String::from(
-                        "fs/write_text_file requires string path and content",
-                    ))
-                })?;
+                let content = params
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        SidecarError::InvalidState(String::from(
+                            "fs/write_text_file requires string path and content",
+                        ))
+                    })?;
                 let path = normalize_path(path);
                 {
                     let vm = self.vms.get_mut(&vm_id).ok_or_else(|| {
@@ -2310,16 +2313,13 @@ where
                             "terminal/output requires a terminalId",
                         ))
                     })?;
-                self.sync_acp_terminal(
-                    &vm_id,
-                    session_id,
-                    terminal_id,
-                    false,
-                    Duration::ZERO,
-                )?;
+                self.sync_acp_terminal(&vm_id, session_id, terminal_id, false, Duration::ZERO)?;
                 let terminal = self.require_visible_acp_terminal(session_id, terminal_id)?;
                 let mut result = Map::from_iter([
-                    (String::from("output"), Value::String(terminal.output.clone())),
+                    (
+                        String::from("output"),
+                        Value::String(terminal.output.clone()),
+                    ),
                     (String::from("truncated"), Value::Bool(terminal.truncated)),
                 ]);
                 if let Some(exit_code) = terminal.exit_code {
@@ -2354,7 +2354,9 @@ where
                             "ACP terminal {terminal_id} did not report an exit code"
                         ))
                     })?;
-                Ok(Some(json!({ "exitCode": exit_code, "signal": Value::Null })))
+                Ok(Some(
+                    json!({ "exitCode": exit_code, "signal": Value::Null }),
+                ))
             }
             "terminal/kill" => {
                 let terminal_id = params
@@ -2414,14 +2416,8 @@ where
                 name: String::from("acp.session_event"),
                 detail: BTreeMap::from([
                     (String::from("session_id"), String::from(session_id)),
-                    (
-                        String::from("sequence_number"),
-                        sequence_number.to_string(),
-                    ),
-                    (
-                        String::from("method"),
-                        notification.method.clone(),
-                    ),
+                    (String::from("sequence_number"), sequence_number.to_string()),
+                    (String::from("method"), notification.method.clone()),
                     (
                         String::from("notification"),
                         serde_json::to_string(notification).map_err(|error| {
@@ -2500,10 +2496,9 @@ where
 
         loop {
             let event = {
-                let vm = self
-                    .vms
-                    .get_mut(vm_id)
-                    .ok_or_else(|| SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}")))?;
+                let vm = self.vms.get_mut(vm_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}"))
+                })?;
                 let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
                     SidecarError::InvalidState(format!(
                         "VM {vm_id} has no active process {process_id}"
@@ -2543,7 +2538,11 @@ where
                             &Map::new(),
                         )
                     });
-                return Err(Self::session_timeout_error(&session, &request.method, &request.id));
+                return Err(Self::session_timeout_error(
+                    &session,
+                    &request.method,
+                    &request.id,
+                ));
             }
         }
     }
@@ -2639,9 +2638,7 @@ where
                                         &mut session.pending_permission_requests,
                                     );
                                     if normalized.is_none() && !duplicate {
-                                        session
-                                            .seen_inbound_request_ids
-                                            .insert(request.id.clone());
+                                        session.seen_inbound_request_ids.insert(request.id.clone());
                                     }
                                     (normalized, duplicate)
                                 };
@@ -2718,10 +2715,8 @@ where
             ActiveExecutionEvent::Stderr(chunk) => {
                 if let Some(session_id) = session_id {
                     if let Some(session) = self.acp_sessions.get_mut(session_id) {
-                        session.record_activity(format!(
-                            "stderr {}",
-                            String::from_utf8_lossy(&chunk)
-                        ));
+                        session
+                            .record_activity(format!("stderr {}", String::from_utf8_lossy(&chunk)));
                     }
                 }
                 Ok(None)
@@ -2738,10 +2733,9 @@ where
                 signal,
                 registration,
             } => {
-                let vm = self
-                    .vms
-                    .get_mut(vm_id)
-                    .ok_or_else(|| SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}")))?;
+                let vm = self.vms.get_mut(vm_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}"))
+                })?;
                 vm.signal_states
                     .entry(String::from(process_id))
                     .or_default()

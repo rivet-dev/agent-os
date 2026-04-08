@@ -5459,8 +5459,34 @@ var __bridge = (() => {
     truncate: createBridgeSyncFacade("_fsTruncate"),
     utimes: createBridgeSyncFacade("_fsUtimes")
   };
+  var _fdOpen = createBridgeSyncFacade("fs.openSync");
+  var _fdClose = createBridgeSyncFacade("fs.closeSync");
+  var _fdRead = createBridgeSyncFacade("fs.readSync");
+  var _fdWrite = createBridgeSyncFacade("fs.writeSync");
+  var _fdFstat = createBridgeSyncFacade("fs.fstatSync");
+  var _fdFtruncate = createBridgeSyncFacade("fs.ftruncateSync");
+  var _fdFsync = createBridgeSyncFacade("fs.fsyncSync");
+  var _fdGetPath = createBridgeSyncFacade("fs._getPathSync");
   function decodeBridgeJson(value) {
     return typeof value === "string" ? JSON.parse(value) : value;
+  }
+  function throwNormalizedFsBridgeError(err, syscall, path) {
+    const errMsg = err?.message || String(err);
+    if (errMsg.includes("entry not found") || errMsg.includes("not found") || errMsg.includes("ENOENT") || errMsg.includes("no such file or directory")) {
+      throw createFsError("ENOENT", `ENOENT: no such file or directory, ${syscall} '${path}'`, syscall, path);
+    }
+    if (errMsg.includes("EROFS") || errMsg.includes("read-only file system")) {
+      throw createFsError("EROFS", `EROFS: read-only file system, ${syscall} '${path}'`, syscall, path);
+    }
+    if (errMsg.includes("ERR_ACCESS_DENIED")) {
+      const error = createFsError("ERR_ACCESS_DENIED", `ERR_ACCESS_DENIED: permission denied, ${syscall} '${path}'`, syscall, path);
+      error.code = "ERR_ACCESS_DENIED";
+      throw error;
+    }
+    if (errMsg.includes("EACCES") || errMsg.includes("permission denied")) {
+      throw createFsError("EACCES", `EACCES: permission denied, ${syscall} '${path}'`, syscall, path);
+    }
+    throw err;
   }
   function joinDirEntryPath(dirPath, entryName) {
     if (dirPath === "/") {
@@ -5580,21 +5606,38 @@ var __bridge = (() => {
       const rawPath = typeof file === "number" ? _fdGetPath.applySync(void 0, [normalizeFdInteger(file)]) : normalizePathLike(file);
       if (!rawPath) throw createFsError("EBADF", "EBADF: bad file descriptor", "write");
       const pathStr = rawPath;
-      if (typeof data === "string") {
-        return _fs.writeFile.applySyncPromise(void 0, [pathStr, data]);
-      } else if (ArrayBuffer.isView(data)) {
-        const uint8 = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-        const base64 = import_buffer.Buffer.from(uint8).toString("base64");
-        return _fs.writeFileBinary.applySyncPromise(void 0, [pathStr, base64]);
-      } else {
-        return _fs.writeFile.applySyncPromise(void 0, [pathStr, String(data)]);
+      try {
+        if (typeof data === "string") {
+          return _fs.writeFile.applySyncPromise(void 0, [pathStr, data]);
+        } else if (ArrayBuffer.isView(data)) {
+          const uint8 = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+          const base64 = import_buffer.Buffer.from(uint8).toString("base64");
+          return _fs.writeFileBinary.applySyncPromise(void 0, [pathStr, base64]);
+        } else {
+          return _fs.writeFile.applySyncPromise(void 0, [pathStr, String(data)]);
+        }
+      } catch (err) {
+        throwNormalizedFsBridgeError(err, "write", rawPath);
       }
     },
     appendFileSync(path, data, options) {
       validateEncodingOption(options);
-      const existing = fs.existsSync(path) ? fs.readFileSync(path, "utf8") : "";
+      const rawPath = normalizePathLike(path);
+      let existing = "";
+      try {
+        existing = fs.existsSync(path) ? fs.readFileSync(path, "utf8") : "";
+      } catch (err) {
+        throwNormalizedFsBridgeError(err, "open", rawPath);
+      }
       const content = typeof data === "string" ? data : String(data);
-      fs.writeFileSync(path, existing + content, options);
+      try {
+        fs.writeFileSync(path, existing + content, options);
+      } catch (err) {
+        if (!err?.code) {
+          throw createFsError("EACCES", `EACCES: permission denied, write '${rawPath}'`, "write", rawPath);
+        }
+        throwNormalizedFsBridgeError(err, "write", rawPath);
+      }
     },
     readdirSync(path, options) {
       validateEncodingOption(options);
@@ -15177,16 +15220,17 @@ ${headerLines}\r
         this.once("listening", cb);
       }
       try {
-        const resultJson = _netServerListenRaw.applySyncPromise(
+        const resultValue = _netServerListenRaw.applySyncPromise(
           void 0,
           [JSON.stringify({ port, host, path, backlog, readableAll, writableAll })]
         );
-        const result = JSON.parse(resultJson);
+        const result = typeof resultValue === "string" ? JSON.parse(resultValue) : resultValue;
+        const address = result.address ?? result;
         this._serverId = result.serverId;
-        this._address = result.address.localPath ? result.address.localPath : {
-          address: result.address.localAddress,
-          family: result.address.localFamily,
-          port: result.address.localPort
+        this._address = address.localPath ? address.localPath : {
+          address: address.localAddress,
+          family: address.localFamily ?? address.family,
+          port: address.localPort
         };
         this.listening = true;
         this._syncHandleRef();
@@ -17553,6 +17597,215 @@ ${headerLines}\r
     });
   }
 
+  // .agent/recovery/secure-exec/nodejs/src/bridge/events.ts
+  var eventsErrorMonitor = Symbol("events.errorMonitor");
+  var eventsDefaultMaxListeners = 10;
+  function cloneEventListeners(emitter, event) {
+    const listeners = emitter._events[event];
+    return Array.isArray(listeners) ? listeners.slice() : [];
+  }
+  function removeEventListenerRecord(emitter, event, listener, onceOnly = false) {
+    const listeners = emitter._events[event];
+    if (!Array.isArray(listeners) || listeners.length === 0) {
+      return emitter;
+    }
+    const next = listeners.filter(
+      (record) => record.listener !== listener || onceOnly && !record.once
+    );
+    if (next.length === 0) {
+      delete emitter._events[event];
+    } else {
+      emitter._events[event] = next;
+    }
+    return emitter;
+  }
+  function emitEventRecords(emitter, event, args) {
+    const listeners = cloneEventListeners(emitter, event);
+    if (listeners.length === 0) {
+      return false;
+    }
+    for (const record of listeners) {
+      if (record.once) {
+        removeEventListenerRecord(emitter, event, record.listener, true);
+      }
+      record.listener.apply(emitter, args);
+    }
+    return true;
+  }
+  function topLevelEventListenerCount(emitter, event) {
+    return cloneEventListeners(emitter, event).length;
+  }
+  function topLevelGetEventListeners(emitter, event) {
+    return cloneEventListeners(emitter, event).map((record) => record.listener);
+  }
+  function topLevelGetMaxListeners(emitter) {
+    if (emitter && typeof emitter.getMaxListeners === "function") {
+      return emitter.getMaxListeners();
+    }
+    return eventsDefaultMaxListeners;
+  }
+  function topLevelSetMaxListeners(n, ...emitters) {
+    for (const emitter of emitters) {
+      if (emitter && typeof emitter.setMaxListeners === "function") {
+        emitter.setMaxListeners(n);
+      }
+    }
+  }
+  function addAbortListener(signal, listener) {
+    if (!signal || typeof signal.addEventListener !== "function") {
+      throw new TypeError("AbortSignal is required");
+    }
+    const wrapped = () => listener();
+    if (signal.aborted) {
+      queueMicrotask(wrapped);
+      return { dispose() {
+      } };
+    }
+    signal.addEventListener("abort", wrapped, { once: true });
+    return {
+      dispose() {
+        signal.removeEventListener("abort", wrapped);
+      }
+    };
+  }
+  function once(emitter, eventName) {
+    return new Promise((resolve, reject) => {
+      const onEvent = (...args) => {
+        if (typeof emitter.removeListener === "function") {
+          emitter.removeListener("error", onError);
+        }
+        resolve(args);
+      };
+      const onError = (error) => {
+        if (typeof emitter.removeListener === "function") {
+          emitter.removeListener(eventName, onEvent);
+        }
+        reject(error);
+      };
+      emitter.once(eventName, onEvent);
+      if (eventName !== "error" && typeof emitter.once === "function") {
+        emitter.once("error", onError);
+      }
+    });
+  }
+  var EventEmitter = class {
+    constructor() {
+      this._events = Object.create(null);
+      this._maxListeners = eventsDefaultMaxListeners;
+    }
+    addListener(event, listener) {
+      return this.on(event, listener);
+    }
+    on(event, listener) {
+      if (typeof listener !== "function") {
+        throw new TypeError("listener must be a function");
+      }
+      const key = String(event);
+      const listeners = this._events[key] ?? [];
+      listeners.push({ listener, once: false });
+      this._events[key] = listeners;
+      return this;
+    }
+    once(event, listener) {
+      if (typeof listener !== "function") {
+        throw new TypeError("listener must be a function");
+      }
+      const key = String(event);
+      const listeners = this._events[key] ?? [];
+      listeners.push({ listener, once: true });
+      this._events[key] = listeners;
+      return this;
+    }
+    prependListener(event, listener) {
+      if (typeof listener !== "function") {
+        throw new TypeError("listener must be a function");
+      }
+      const key = String(event);
+      const listeners = this._events[key] ?? [];
+      listeners.unshift({ listener, once: false });
+      this._events[key] = listeners;
+      return this;
+    }
+    prependOnceListener(event, listener) {
+      if (typeof listener !== "function") {
+        throw new TypeError("listener must be a function");
+      }
+      const key = String(event);
+      const listeners = this._events[key] ?? [];
+      listeners.unshift({ listener, once: true });
+      this._events[key] = listeners;
+      return this;
+    }
+    removeListener(event, listener) {
+      return removeEventListenerRecord(this, String(event), listener);
+    }
+    off(event, listener) {
+      return this.removeListener(event, listener);
+    }
+    removeAllListeners(event) {
+      if (typeof event === "undefined") {
+        this._events = Object.create(null);
+      } else {
+        delete this._events[String(event)];
+      }
+      return this;
+    }
+    emit(event, ...args) {
+      const key = String(event);
+      if (key === "error" && topLevelEventListenerCount(this, key) === 0) {
+        throw args[0] instanceof Error ? args[0] : new Error(String(args[0] ?? "Unhandled error event"));
+      }
+      let handled = emitEventRecords(this, key, args);
+      if (key === "error") {
+        handled = emitEventRecords(this, String(eventsErrorMonitor), args) || handled;
+      }
+      return handled;
+    }
+    listeners(event) {
+      return topLevelGetEventListeners(this, String(event));
+    }
+    rawListeners(event) {
+      return this.listeners(event);
+    }
+    listenerCount(event) {
+      return topLevelEventListenerCount(this, String(event));
+    }
+    eventNames() {
+      return Object.keys(this._events);
+    }
+    setMaxListeners(n) {
+      this._maxListeners = Number(n);
+      return this;
+    }
+    getMaxListeners() {
+      return Number.isFinite(this._maxListeners) ? this._maxListeners : eventsDefaultMaxListeners;
+    }
+  };
+  EventEmitter.once = once;
+  EventEmitter.getEventListeners = topLevelGetEventListeners;
+  EventEmitter.getMaxListeners = topLevelGetMaxListeners;
+  EventEmitter.setMaxListeners = topLevelSetMaxListeners;
+  Object.defineProperty(EventEmitter, "defaultMaxListeners", {
+    get() {
+      return eventsDefaultMaxListeners;
+    },
+    set(value) {
+      eventsDefaultMaxListeners = Number(value);
+    }
+  });
+  var eventsModule = {
+    addAbortListener,
+    defaultMaxListeners: eventsDefaultMaxListeners,
+    errorMonitor: eventsErrorMonitor,
+    EventEmitter,
+    getEventListeners: topLevelGetEventListeners,
+    getMaxListeners: topLevelGetMaxListeners,
+    listenerCount: topLevelEventListenerCount,
+    once,
+    setMaxListeners: topLevelSetMaxListeners
+  };
+  exposeCustomGlobal("_eventsModule", eventsModule);
+
   // .agent/recovery/secure-exec/nodejs/src/bridge/process.ts
   var import_buffer2 = __toESM(require_buffer(), 1);
   function readProcessConfig() {
@@ -17883,6 +18136,58 @@ ${headerLines}\r
     },
     isTTY: _getStderrIsTTY
   });
+  function formatConsoleValue(value) {
+    if (typeof value === "string") {
+      return value;
+    }
+    if (typeof value === "bigint") {
+      return `${value}n`;
+    }
+    if (value instanceof Error) {
+      return value.stack || value.message || String(value);
+    }
+    if (typeof value === "object" && value !== null) {
+      try {
+        return JSON.stringify(value);
+      } catch {
+      }
+    }
+    return String(value);
+  }
+  function formatConsoleArgs(args) {
+    return args.map((value) => formatConsoleValue(value)).join(" ");
+  }
+  globalThis.console = {
+    log(...args) {
+      _stdout.write(formatConsoleArgs(args));
+    },
+    info(...args) {
+      _stdout.write(formatConsoleArgs(args));
+    },
+    debug(...args) {
+      _stdout.write(formatConsoleArgs(args));
+    },
+    warn(...args) {
+      _stderr.write(formatConsoleArgs(args));
+    },
+    error(...args) {
+      _stderr.write(formatConsoleArgs(args));
+    },
+    dir(value) {
+      _stdout.write(formatConsoleArgs([value]));
+    },
+    trace(...args) {
+      const message = formatConsoleArgs(args);
+      const error = new Error(message);
+      _stderr.write(error.stack || message);
+    },
+    assert(condition, ...args) {
+      if (!condition) {
+        const message = args.length > 0 ? formatConsoleArgs(args) : "Assertion failed";
+        _stderr.write(message);
+      }
+    }
+  };
   var _stdinListeners = {};
   var _stdinOnceListeners = {};
   var _stdinLiveDecoder = new TextDecoder();
@@ -18079,6 +18384,16 @@ ${headerLines}\r
     once(event, listener) {
       if (!_stdinOnceListeners[event]) _stdinOnceListeners[event] = [];
       _stdinOnceListeners[event].push(listener);
+      if ((_getStdinIsTTY() || _getStreamStdin()) && (event === "data" || event === "end" || event === "close")) {
+        ensureLiveStdinStarted();
+      }
+      if (event === "data" && this.paused) {
+        this.resume();
+      }
+      if (event === "end" && getStdinData() && !getStdinEnded()) {
+        setStdinFlowMode(true);
+        _emitStdinData();
+      }
       return this;
     },
     off(event, listener) {
@@ -18548,6 +18863,83 @@ ${headerLines}\r
     enumerable: false
   });
   var process_default = process2;
+  function ttyIsatty(fd) {
+    if (fd === 0) {
+      return !!process_default.stdin?.isTTY;
+    }
+    if (fd === 1) {
+      return !!process_default.stdout?.isTTY;
+    }
+    if (fd === 2) {
+      return !!process_default.stderr?.isTTY;
+    }
+    return false;
+  }
+  function TtyReadStream(fd) {
+    return fd === 0 ? process_default.stdin : void 0;
+  }
+  function TtyWriteStream(fd) {
+    if (fd === 1) {
+      return process_default.stdout;
+    }
+    if (fd === 2) {
+      return process_default.stderr;
+    }
+    return void 0;
+  }
+  var builtinTtyModule = {
+    ReadStream: TtyReadStream,
+    WriteStream: TtyWriteStream,
+    isatty: ttyIsatty
+  };
+  var builtinPerformance = typeof performance !== "undefined" && performance && typeof performance.now === "function" ? performance : {
+    now() {
+      return getNowMs();
+    },
+    timeOrigin: Date.now() - getNowMs()
+  };
+  var builtinPerfHooksModule = {
+    PerformanceObserver: class {
+      observe() {
+      }
+      disconnect() {
+      }
+      takeRecords() {
+        return [];
+      }
+    },
+    constants: {},
+    createHistogram() {
+      return {
+        percentile() {
+          return 0;
+        },
+        record() {
+        }
+      };
+    },
+    performance: builtinPerformance
+  };
+  var builtinVmModule = {
+    Script: class {
+      constructor(code, options = {}) {
+        this.code = String(code ?? "");
+        this.options = options;
+      }
+      runInThisContext() {
+        return builtinVmModule.runInThisContext(this.code, this.options);
+      }
+    },
+    createContext(context = {}) {
+      return context;
+    },
+    isContext(value) {
+      return !!value && typeof value === "object";
+    },
+    runInThisContext(code, _options = {}) {
+      return (0, eval)(String(code ?? ""));
+    }
+  };
   var TIMER_DISPATCH = {
     create: "kernelTimerCreate",
     arm: "kernelTimerArm",
@@ -19153,6 +19545,50 @@ ${headerLines}\r
   };
   var cryptoPolyfillInstance = new SandboxCrypto(kCryptoToken);
   var cryptoPolyfill = cryptoPolyfillInstance;
+  function createBuiltinHash(algorithm) {
+    const chunks = [];
+    return {
+      update(data, encoding) {
+        const buffer = typeof data === "string" ? import_buffer2.Buffer.from(data, encoding || "utf8") : import_buffer2.Buffer.from(data);
+        chunks.push(buffer);
+        return this;
+      },
+      digest(encoding) {
+        if (typeof _cryptoHashDigest === "undefined") {
+          throwUnsupportedCryptoApi("createHash");
+        }
+        const input = chunks.length === 1 ? chunks[0] : import_buffer2.Buffer.concat(chunks);
+        const resultBase64 = _cryptoHashDigest.applySync(void 0, [
+          String(algorithm),
+          input.toString("base64")
+        ]);
+        const result = import_buffer2.Buffer.from(String(resultBase64 || ""), "base64");
+        return encoding ? result.toString(encoding) : result;
+      }
+    };
+  }
+  var builtinCryptoModule = {
+    createHash(algorithm) {
+      return createBuiltinHash(algorithm);
+    },
+    getFips() {
+      return 0;
+    },
+    getRandomValues(array) {
+      return cryptoPolyfill.getRandomValues(array);
+    },
+    randomBytes(size) {
+      const length = Math.max(0, Number(size) || 0);
+      const bytes = new Uint8Array(length);
+      cryptoPolyfill.getRandomValues(bytes);
+      return import_buffer2.Buffer.from(bytes);
+    },
+    randomUUID() {
+      return cryptoPolyfill.randomUUID();
+    },
+    subtle: subtleCrypto,
+    webcrypto: cryptoPolyfill
+  };
   function setupGlobals() {
     const g = globalThis;
     g.process = process2;
@@ -19183,6 +19619,12 @@ ${headerLines}\r
     }
     if (typeof globalBuffer.constants !== "object" || globalBuffer.constants === null) {
       globalBuffer.constants = BUFFER_CONSTANTS;
+    }
+    if (typeof g.atob === "undefined") {
+      g.atob = (value) => globalBuffer.from(String(value), "base64").toString("binary");
+    }
+    if (typeof g.btoa === "undefined") {
+      g.btoa = (value) => globalBuffer.from(String(value), "binary").toString("base64");
     }
     if (typeof g.Crypto === "undefined") {
       g.Crypto = SandboxCrypto;
@@ -19420,6 +19862,7 @@ ${headerLines}\r
       "assert",
       "buffer",
       "child_process",
+      "constants",
       "crypto",
       "dgram",
       "dns",
@@ -19430,6 +19873,8 @@ ${headerLines}\r
       "net",
       "os",
       "path",
+      "perf_hooks",
+      "process",
       "querystring",
       "sqlite",
       "stream",
@@ -19508,6 +19953,762 @@ ${headerLines}\r
     SourceMap
   };
   exposeCustomGlobal("_moduleModule", moduleModule);
+  function builtinPathNormalizeSegments(parts) {
+    const output = [];
+    for (const part of parts) {
+      if (!part || part === ".") continue;
+      if (part === "..") {
+        if (output.length > 0) {
+          output.pop();
+        }
+        continue;
+      }
+      output.push(part);
+    }
+    return output;
+  }
+  function builtinPathIsAbsolute(path) {
+    return String(path || "").startsWith("/");
+  }
+  function builtinPathJoin(...parts) {
+    const absolute = parts.some((part, index) => index === 0 && builtinPathIsAbsolute(part));
+    const normalized = builtinPathNormalizeSegments(parts.flatMap((part) => String(part || "").split("/")));
+    const joined = normalized.join("/");
+    if (!joined) {
+      return absolute ? "/" : ".";
+    }
+    return absolute ? `/${joined}` : joined;
+  }
+  function builtinPathDirname(path) {
+    const normalized = String(path || "");
+    if (!normalized || normalized === "/") {
+      return "/";
+    }
+    const parts = builtinPathNormalizeSegments(normalized.split("/"));
+    if (parts.length <= 1) {
+      return builtinPathIsAbsolute(normalized) ? "/" : ".";
+    }
+    const dir = parts.slice(0, -1).join("/");
+    return builtinPathIsAbsolute(normalized) ? `/${dir}` : dir;
+  }
+  function builtinPathBasename(path) {
+    const normalized = builtinPathNormalizeSegments(String(path || "").split("/"));
+    return normalized.length === 0 ? "" : normalized[normalized.length - 1];
+  }
+  function builtinPathExtname(path) {
+    const base = builtinPathBasename(path);
+    const index = base.lastIndexOf(".");
+    if (index <= 0) {
+      return "";
+    }
+    return base.slice(index);
+  }
+  function builtinPathResolve(...parts) {
+    const absoluteParts = [];
+    for (let index = parts.length - 1; index >= 0; index -= 1) {
+      const part = String(parts[index] || "");
+      if (!part) continue;
+      absoluteParts.unshift(part);
+      if (builtinPathIsAbsolute(part)) {
+        break;
+      }
+    }
+    if (absoluteParts.length === 0 || !builtinPathIsAbsolute(absoluteParts[0])) {
+      absoluteParts.unshift(typeof process?.cwd === "function" ? process.cwd() : "/");
+    }
+    return builtinPathJoin(...absoluteParts);
+  }
+  function builtinPathRelative(from, to) {
+    const fromResolved = builtinPathResolve(from);
+    const toResolved = builtinPathResolve(to);
+    if (fromResolved === toResolved) {
+      return "";
+    }
+    const fromParts = builtinPathNormalizeSegments(fromResolved.split("/"));
+    const toParts = builtinPathNormalizeSegments(toResolved.split("/"));
+    let shared = 0;
+    while (shared < fromParts.length && shared < toParts.length && fromParts[shared] === toParts[shared]) {
+      shared += 1;
+    }
+    const up = new Array(fromParts.length - shared).fill("..");
+    const down = toParts.slice(shared);
+    const result = [...up, ...down].join("/");
+    return result || ".";
+  }
+  function builtinPathParse(path) {
+    const root = builtinPathIsAbsolute(path) ? "/" : "";
+    const dir = builtinPathDirname(path);
+    const base = builtinPathBasename(path);
+    const ext = builtinPathExtname(path);
+    const name = ext ? base.slice(0, -ext.length) : base;
+    return { root, dir, base, ext, name };
+  }
+  function builtinPathFormat(pathObject = {}) {
+    const dir = pathObject.dir || pathObject.root || "";
+    const base = pathObject.base || `${pathObject.name || ""}${pathObject.ext || ""}`;
+    if (!dir) {
+      return base;
+    }
+    if (!base) {
+      return dir;
+    }
+    return dir.endsWith("/") ? `${dir}${base}` : `${dir}/${base}`;
+  }
+  function builtinPathNormalize(path) {
+    return builtinPathJoin(String(path || ""));
+  }
+  var builtinPathModule = {
+    basename: builtinPathBasename,
+    delimiter: ":",
+    dirname: builtinPathDirname,
+    extname: builtinPathExtname,
+    format: builtinPathFormat,
+    isAbsolute: builtinPathIsAbsolute,
+    join: builtinPathJoin,
+    normalize: builtinPathNormalize,
+    parse: builtinPathParse,
+    relative: builtinPathRelative,
+    resolve: builtinPathResolve,
+    sep: "/"
+  };
+  builtinPathModule.posix = builtinPathModule;
+  builtinPathModule.win32 = builtinPathModule;
+  function builtinFileURLToPath(value) {
+    const raw = typeof value === "string" ? value : value && typeof value.href === "string" ? value.href : String(value ?? "");
+    if (raw.startsWith("/")) {
+      return raw;
+    }
+    if (raw.startsWith("file://")) {
+      const pathname = raw.slice("file://".length);
+      return decodeURIComponent(pathname.startsWith("/") ? pathname : `/${pathname}`);
+    }
+    const NativeURL = globalThis.URL;
+    const url = typeof NativeURL === "function" && value instanceof NativeURL ? value : new NativeURL(raw);
+    if (url.protocol !== "file:") {
+      throw new Error(`Expected file URL, received ${url.protocol}`);
+    }
+    return decodeURIComponent(url.pathname);
+  }
+  function builtinPathToFileURL(path) {
+    const normalized = String(path || "");
+    const absolute = normalized.startsWith("/") ? normalized : `/${normalized}`;
+    const NativeURL = globalThis.URL;
+    if (typeof NativeURL !== "function") {
+      return { href: `file://${absolute}` };
+    }
+    return new NativeURL(`file://${absolute}`);
+  }
+  var builtinUrlModule = {
+    URL: globalThis.URL,
+    fileURLToPath: builtinFileURLToPath,
+    pathToFileURL: builtinPathToFileURL
+  };
+  function BuiltinStringDecoder(encoding = "utf8") {
+    this.encoding = encoding;
+    this.decoder = new TextDecoder(encoding, { fatal: false });
+  }
+  BuiltinStringDecoder.prototype.write = function(input) {
+    const buffer = typeof input === "string" ? import_buffer.Buffer.from(input, this.encoding) : import_buffer.Buffer.isBuffer(input) ? input : import_buffer.Buffer.from(input ?? []);
+    return this.decoder.decode(buffer, { stream: true });
+  };
+  BuiltinStringDecoder.prototype.end = function(input) {
+    let output = "";
+    if (input !== void 0) {
+      output += this.write(input);
+    }
+    output += this.decoder.decode();
+    return output;
+  };
+  var builtinStringDecoderModule = {
+    StringDecoder: BuiltinStringDecoder
+  };
+  function BuiltinStream() {
+    this._listeners = /* @__PURE__ */ Object.create(null);
+    this._onceListeners = /* @__PURE__ */ Object.create(null);
+    this.destroyed = false;
+    this.errored = null;
+  }
+  BuiltinStream.prototype.on = function(event, listener) {
+    const key = String(event);
+    const listeners = this._listeners[key] ?? [];
+    listeners.push(listener);
+    this._listeners[key] = listeners;
+    return this;
+  };
+  BuiltinStream.prototype.once = function(event, listener) {
+    const key = String(event);
+    const listeners = this._onceListeners[key] ?? [];
+    listeners.push(listener);
+    this._onceListeners[key] = listeners;
+    return this;
+  };
+  BuiltinStream.prototype.off = function(event, listener) {
+    const key = String(event);
+    this._listeners[key] = (this._listeners[key] ?? []).filter((candidate) => candidate !== listener);
+    this._onceListeners[key] = (this._onceListeners[key] ?? []).filter((candidate) => candidate !== listener);
+    return this;
+  };
+  BuiltinStream.prototype.removeListener = BuiltinStream.prototype.off;
+  BuiltinStream.prototype.emit = function(event, ...args) {
+    const key = String(event);
+    const persistent = [...(this._listeners[key] ?? [])];
+    const once = [...(this._onceListeners[key] ?? [])];
+    delete this._onceListeners[key];
+    for (const listener of persistent) {
+      listener(...args);
+    }
+    for (const listener of once) {
+      listener(...args);
+    }
+    return persistent.length + once.length > 0;
+  };
+  BuiltinStream.prototype.pipe = function(destination) {
+    this.on("data", (chunk) => destination.write?.(chunk));
+    this.once("end", () => destination.end?.());
+    return destination;
+  };
+  function BuiltinReadable() {
+    BuiltinStream.call(this);
+    this.readable = true;
+    this.readableEnded = false;
+  }
+  BuiltinReadable.prototype = Object.create(BuiltinStream.prototype);
+  BuiltinReadable.prototype.constructor = BuiltinReadable;
+  BuiltinReadable.prototype.push = function(chunk) {
+    if (chunk === null) {
+      if (!this.readableEnded) {
+        this.readableEnded = true;
+        queueMicrotask(() => {
+          this.emit("end");
+          this.emit("close");
+        });
+      }
+      return false;
+    }
+    this.emit("data", import_buffer.Buffer.isBuffer(chunk) ? chunk : import_buffer.Buffer.from(chunk ?? []));
+    return true;
+  };
+  BuiltinReadable.fromWeb = function(stream) {
+    if (!stream || typeof stream.getReader !== "function") {
+      throw new TypeError("Readable.fromWeb expects a WHATWG ReadableStream");
+    }
+    return {
+      async *[Symbol.asyncIterator]() {
+        const reader = stream.getReader();
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            yield import_buffer.Buffer.from(value ?? []);
+          }
+        } finally {
+          reader.releaseLock?.();
+        }
+      }
+    };
+  };
+  function builtinStreamGetCallback(encodingOrCallback, callback) {
+    if (typeof encodingOrCallback === "function") return encodingOrCallback;
+    if (typeof callback === "function") return callback;
+    return null;
+  }
+  function builtinStreamQueueCallback(callback, error = null) {
+    if (typeof callback !== "function") return;
+    queueMicrotask(() => callback(error));
+  }
+  function BuiltinWritable() {
+    BuiltinStream.call(this);
+    this.writable = true;
+    this.writableEnded = false;
+  }
+  BuiltinWritable.prototype = Object.create(BuiltinStream.prototype);
+  BuiltinWritable.prototype.constructor = BuiltinWritable;
+  BuiltinWritable.prototype._write = function(_chunk, callback) {
+    builtinStreamQueueCallback(callback);
+  };
+  BuiltinWritable.prototype.write = function(chunk, encodingOrCallback, callback) {
+    if (this.writableEnded) {
+      const error = new Error("write after end");
+      builtinStreamQueueCallback(builtinStreamGetCallback(encodingOrCallback, callback), error);
+      this.emit("error", error);
+      return false;
+    }
+    this._write(import_buffer.Buffer.isBuffer(chunk) ? chunk : import_buffer.Buffer.from(chunk ?? []), builtinStreamGetCallback(encodingOrCallback, callback));
+    return true;
+  };
+  BuiltinWritable.prototype.end = function(chunk, encodingOrCallback, callback) {
+    if (chunk !== void 0 && chunk !== null) {
+      this.write(chunk, encodingOrCallback);
+    }
+    if (this.writableEnded) {
+      builtinStreamQueueCallback(builtinStreamGetCallback(encodingOrCallback, callback));
+      return this;
+    }
+    this.writableEnded = true;
+    const done = builtinStreamGetCallback(encodingOrCallback, callback);
+    queueMicrotask(() => {
+      builtinStreamQueueCallback(done);
+      this.emit("finish");
+      this.emit("close");
+    });
+    return this;
+  };
+  BuiltinWritable.prototype.destroy = function(error) {
+    if (this.destroyed) {
+      return this;
+    }
+    this.destroyed = true;
+    this.errored = error ?? null;
+    if (error) {
+      queueMicrotask(() => this.emit("error", error));
+    }
+    queueMicrotask(() => this.emit("close"));
+    return this;
+  };
+  function BuiltinDuplex() {
+    BuiltinReadable.call(this);
+    this.writable = true;
+    this.writableEnded = false;
+  }
+  BuiltinDuplex.prototype = Object.create(BuiltinReadable.prototype);
+  BuiltinDuplex.prototype.constructor = BuiltinDuplex;
+  BuiltinDuplex.prototype._write = BuiltinWritable.prototype._write;
+  BuiltinDuplex.prototype.write = BuiltinWritable.prototype.write;
+  BuiltinDuplex.prototype.end = BuiltinWritable.prototype.end;
+  BuiltinDuplex.prototype.destroy = BuiltinWritable.prototype.destroy;
+  function BuiltinTransform() {
+    BuiltinDuplex.call(this);
+  }
+  BuiltinTransform.prototype = Object.create(BuiltinDuplex.prototype);
+  BuiltinTransform.prototype.constructor = BuiltinTransform;
+  BuiltinTransform.prototype._transform = function(chunk, _encoding, callback) {
+    callback(null, chunk);
+  };
+  BuiltinTransform.prototype._write = function(chunk, callback) {
+    try {
+      this._transform(chunk, "buffer", (error, output) => {
+        if (!error && output !== void 0 && output !== null) {
+          this.push(output);
+        }
+        builtinStreamQueueCallback(callback, error ?? null);
+      });
+    } catch (error) {
+      builtinStreamQueueCallback(callback, error);
+      this.emit("error", error);
+    }
+  };
+  BuiltinTransform.prototype.end = function(chunk, encodingOrCallback, callback) {
+    BuiltinWritable.prototype.end.call(this, chunk, encodingOrCallback, callback);
+    this.push(null);
+    return this;
+  };
+  function BuiltinPassThrough() {
+    BuiltinTransform.call(this);
+  }
+  BuiltinPassThrough.prototype = Object.create(BuiltinTransform.prototype);
+  BuiltinPassThrough.prototype.constructor = BuiltinPassThrough;
+  function builtinStreamFinished(stream, callback) {
+    const done = (error = null) => {
+      cleanup();
+      if (typeof callback === "function") {
+        callback(error);
+      }
+    };
+    const onFinish = () => done();
+    const onEnd = () => done();
+    const onClose = () => done();
+    const onError = (error) => done(error);
+    const cleanup = () => {
+      stream?.off?.("finish", onFinish);
+      stream?.off?.("end", onEnd);
+      stream?.off?.("close", onClose);
+      stream?.off?.("error", onError);
+    };
+    stream?.once?.("finish", onFinish);
+    stream?.once?.("end", onEnd);
+    stream?.once?.("close", onClose);
+    stream?.once?.("error", onError);
+    return cleanup;
+  }
+  function builtinStreamPipeline(...streams) {
+    const callback = streams.length > 0 && typeof streams[streams.length - 1] === "function" ? streams.pop() : null;
+    if (streams.length < 2) {
+      const error = new TypeError("pipeline requires at least two streams");
+      callback?.(error);
+      throw error;
+    }
+    for (let index = 0; index < streams.length - 1; index += 1) {
+      streams[index].pipe(streams[index + 1]);
+    }
+    if (callback) {
+      builtinStreamFinished(streams[streams.length - 1], callback);
+    }
+    return streams[streams.length - 1];
+  }
+  var builtinStreamModule = {
+    Stream: BuiltinStream,
+    Readable: BuiltinReadable,
+    Writable: BuiltinWritable,
+    Duplex: BuiltinDuplex,
+    Transform: BuiltinTransform,
+    PassThrough: BuiltinPassThrough,
+    addAbortSignal(signal, stream) {
+      if (signal?.aborted) {
+        stream?.destroy?.(signal.reason);
+        return stream;
+      }
+      signal?.addEventListener?.("abort", () => stream?.destroy?.(signal.reason), { once: true });
+      return stream;
+    },
+    compose(...streams) {
+      return builtinStreamPipeline(...streams);
+    },
+    finished: builtinStreamFinished,
+    isErrored(stream) {
+      return Boolean(stream && stream.errored);
+    },
+    isReadable(stream) {
+      return Boolean(stream && stream.readable && !stream.destroyed);
+    },
+    isWritable(stream) {
+      return Boolean(stream && stream.writable && !stream.destroyed);
+    },
+    pipeline: builtinStreamPipeline
+  };
+  function builtinFormatValue(value) {
+    if (typeof value === "string") {
+      return value;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  function builtinUtilFormat(...args) {
+    if (args.length === 0) {
+      return "";
+    }
+    const first = args[0];
+    if (typeof first !== "string") {
+      return args.map((value) => builtinFormatValue(value)).join(" ");
+    }
+    let index = 1;
+    const formatted = first.replace(/%[sdj%]/g, (token) => {
+      if (token === "%%") return "%";
+      const value = args[index++];
+      if (token === "%s") return String(value);
+      if (token === "%d") return Number(value).toString();
+      if (token === "%j") return builtinFormatValue(value);
+      return token;
+    });
+    const tail = args.slice(index).map((value) => builtinFormatValue(value));
+    return tail.length > 0 ? `${formatted} ${tail.join(" ")}` : formatted;
+  }
+  function builtinUtilInspect(value) {
+    return builtinFormatValue(value);
+  }
+  function builtinUtilInherits(ctor, superCtor) {
+    if (typeof ctor !== "function" || typeof superCtor !== "function") {
+      throw new TypeError("inherits expects constructor functions");
+    }
+    ctor.super_ = superCtor;
+    ctor.prototype = Object.create(superCtor.prototype, {
+      constructor: {
+        value: ctor,
+        writable: true,
+        configurable: true
+      }
+    });
+  }
+  function builtinUtilPromisify(original) {
+    if (typeof original !== "function") {
+      throw new TypeError("promisify expects a function");
+    }
+    return function(...args) {
+      return new Promise((resolve, reject) => {
+        original.call(this, ...args, (error, value) => error ? reject(error) : resolve(value));
+      });
+    };
+  }
+  function builtinUtilCallbackify(original) {
+    if (typeof original !== "function") {
+      throw new TypeError("callbackify expects a function");
+    }
+    return function(...args) {
+      const callback = args.pop();
+      Promise.resolve(original.apply(this, args)).then(
+        (value) => callback(null, value),
+        (error) => callback(error)
+      );
+    };
+  }
+  function builtinUtilDeprecate(fn) {
+    return typeof fn === "function" ? function(...args) {
+      return fn.apply(this, args);
+    } : fn;
+  }
+  function builtinUtilDebuglog(section) {
+    const needle = String(section || "").toLowerCase();
+    const enabled = String(process?.env?.NODE_DEBUG || "").toLowerCase().split(/[\\s,]+/).includes(needle);
+    if (!enabled) {
+      return function() {
+      };
+    }
+    return function(...args) {
+      console.error(`${needle}: ${builtinUtilFormat(...args)}`);
+    };
+  }
+  function builtinStripVTControlCharacters(value) {
+    return String(value ?? "").replace(/\x1B\[[0-9;]*[A-Za-z]/g, "");
+  }
+  function builtinParseArgs(config = {}) {
+    const args = Array.isArray(config.args) ? [...config.args] : [...(process?.argv?.slice?.(2) ?? [])];
+    const values = Object.create(null);
+    const positionals = [];
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index];
+      if (arg === "--") {
+        positionals.push(...args.slice(index + 1));
+        break;
+      }
+      if (typeof arg === "string" && arg.startsWith("--")) {
+        const [name, inlineValue] = arg.slice(2).split("=", 2);
+        const optionConfig = config.options?.[name];
+        if (optionConfig?.type === "boolean") {
+          values[name] = inlineValue == null ? true : inlineValue !== "false";
+          continue;
+        }
+        if (inlineValue != null) {
+          values[name] = inlineValue;
+          continue;
+        }
+        const next = args[index + 1];
+        if (typeof next === "string" && !next.startsWith("-")) {
+          values[name] = next;
+          index += 1;
+        } else {
+          values[name] = true;
+        }
+        continue;
+      }
+      if (typeof arg === "string" && arg.startsWith("-") && arg.length > 1) {
+        for (const shortName of arg.slice(1)) {
+          values[shortName] = true;
+        }
+        continue;
+      }
+      positionals.push(arg);
+    }
+    return { values, positionals };
+  }
+  function BuiltinMIMEParams(entries = []) {
+    this._entries = [];
+    for (const [name, value] of entries) {
+      this.set(name, value);
+    }
+  }
+  BuiltinMIMEParams.prototype.get = function(name) {
+    const entry = this._entries.find((candidate) => candidate[0] === String(name));
+    return entry ? entry[1] : null;
+  };
+  BuiltinMIMEParams.prototype.set = function(name, value) {
+    const normalizedName = String(name);
+    const normalizedValue = String(value);
+    this.delete(normalizedName);
+    this._entries.push([normalizedName, normalizedValue]);
+  };
+  BuiltinMIMEParams.prototype.has = function(name) {
+    return this._entries.some((candidate) => candidate[0] === String(name));
+  };
+  BuiltinMIMEParams.prototype.delete = function(name) {
+    const normalizedName = String(name);
+    this._entries = this._entries.filter((candidate) => candidate[0] !== normalizedName);
+  };
+  BuiltinMIMEParams.prototype.toString = function() {
+    return this._entries.map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`).join("&");
+  };
+  function BuiltinMIMEType(input) {
+    const raw = String(input ?? "");
+    const [essencePart, ...paramParts] = raw.split(";");
+    const [type = "", subtype = ""] = essencePart.trim().split("/", 2);
+    this.type = type.toLowerCase();
+    this.subtype = subtype.toLowerCase();
+    this.params = new BuiltinMIMEParams();
+    for (const part of paramParts) {
+      const [name, value = ""] = part.split("=", 2);
+      if (name) {
+        this.params.set(name.trim(), value.trim());
+      }
+    }
+  }
+  Object.defineProperty(BuiltinMIMEType.prototype, "essence", {
+    get() {
+      return `${this.type}/${this.subtype}`;
+    }
+  });
+  BuiltinMIMEType.prototype.toString = function() {
+    const params = this.params.toString();
+    return params ? `${this.essence};${params}` : this.essence;
+  };
+  var builtinUtilModule = {
+    MIMEParams: BuiltinMIMEParams,
+    MIMEType: BuiltinMIMEType,
+    TextDecoder,
+    TextEncoder: TextEncoder2,
+    callbackify: builtinUtilCallbackify,
+    debug: builtinUtilDebuglog,
+    debuglog: builtinUtilDebuglog,
+    deprecate: builtinUtilDeprecate,
+    format: builtinUtilFormat,
+    inherits: builtinUtilInherits,
+    inspect: builtinUtilInspect,
+    parseArgs: builtinParseArgs,
+    promisify: builtinUtilPromisify,
+    stripVTControlCharacters: builtinStripVTControlCharacters,
+    types: {
+      isAnyArrayBuffer(value) {
+        return value instanceof ArrayBuffer || typeof SharedArrayBuffer !== "undefined" && value instanceof SharedArrayBuffer;
+      },
+      isArrayBufferView: ArrayBuffer.isView,
+      isDate(value) {
+        return value instanceof Date;
+      },
+      isNativeError(value) {
+        return value instanceof Error;
+      },
+      isRegExp(value) {
+        return value instanceof RegExp;
+      }
+    }
+  };
+  function builtinQuerystringParse(input = "") {
+    const output = /* @__PURE__ */ Object.create(null);
+    const raw = String(input).replace(/^\?/, "");
+    if (!raw) {
+      return output;
+    }
+    for (const pair of raw.split("&")) {
+      if (!pair) continue;
+      const [rawKey, rawValue = ""] = pair.split("=", 2);
+      const key = decodeURIComponent(rawKey.replace(/\+/g, " "));
+      const value = decodeURIComponent(rawValue.replace(/\+/g, " "));
+      if (Object.prototype.hasOwnProperty.call(output, key)) {
+        const existing = output[key];
+        output[key] = Array.isArray(existing) ? [...existing, value] : [existing, value];
+      } else {
+        output[key] = value;
+      }
+    }
+    return output;
+  }
+  function builtinQuerystringStringify(input = {}) {
+    const parts = [];
+    for (const [key, value] of Object.entries(input ?? {})) {
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(item))}`);
+        }
+      } else if (value != null) {
+        parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
+      }
+    }
+    return parts.join("&");
+  }
+  var builtinQuerystringModule = {
+    decode: builtinQuerystringParse,
+    encode: builtinQuerystringStringify,
+    escape: encodeURIComponent,
+    parse: builtinQuerystringParse,
+    stringify: builtinQuerystringStringify,
+    unescape: decodeURIComponent
+  };
+  var builtinBufferModule = {
+    Blob: globalThis.Blob,
+    Buffer: import_buffer.Buffer,
+    File: globalThis.File,
+    INSPECT_MAX_BYTES: import_buffer.INSPECT_MAX_BYTES,
+    SlowBuffer: import_buffer.SlowBuffer,
+    constants: import_buffer.Buffer?.constants ?? BUFFER_CONSTANTS,
+    kMaxLength: import_buffer.kMaxLength
+  };
+  var builtinTimersModule = {
+    clearImmediate: globalThis.clearImmediate ?? function() {
+    },
+    clearInterval: globalThis.clearInterval ?? function() {
+    },
+    clearTimeout: globalThis.clearTimeout ?? function() {
+    },
+    setImmediate: globalThis.setImmediate ?? function(callback, ...args) {
+      return globalThis.setTimeout?.(() => callback(...args), 0);
+    },
+    setInterval: globalThis.setInterval ?? function(callback, delay, ...args) {
+      return globalThis.setTimeout?.(() => callback(...args), delay ?? 0);
+    },
+    setTimeout: globalThis.setTimeout ?? function() {
+      return void 0;
+    }
+  };
+  var builtinAssertModule = (() => {
+    function AssertionError(message = "Assertion failed") {
+      this.name = "AssertionError";
+      this.message = message;
+      this.stack = new Error(message).stack;
+    }
+    AssertionError.prototype = Object.create(Error.prototype);
+    AssertionError.prototype.constructor = AssertionError;
+    function fail(message) {
+      throw new AssertionError(message);
+    }
+    function ok(value, message) {
+      if (!value) fail(message);
+    }
+    function equal(actual, expected, message) {
+      if (actual != expected) fail(message ?? `Expected ${actual} == ${expected}`);
+    }
+    function notEqual(actual, expected, message) {
+      if (actual == expected) fail(message ?? `Expected ${actual} != ${expected}`);
+    }
+    function strictEqual(actual, expected, message) {
+      if (actual !== expected) fail(message ?? `Expected ${actual} === ${expected}`);
+    }
+    function notStrictEqual(actual, expected, message) {
+      if (actual === expected) fail(message ?? `Expected ${actual} !== ${expected}`);
+    }
+    function deepEqual(actual, expected, message) {
+      if (builtinFormatValue(actual) !== builtinFormatValue(expected)) {
+        fail(message ?? "Expected values to be deeply equal");
+      }
+    }
+    function match(actual, expected, message) {
+      if (!(expected instanceof RegExp) || !expected.test(String(actual))) {
+        fail(message ?? `Expected ${actual} to match ${expected}`);
+      }
+    }
+    function ifError(error) {
+      if (error != null) {
+        throw error;
+      }
+    }
+    function assert(value, message) {
+      ok(value, message);
+    }
+    Object.assign(assert, {
+      AssertionError,
+      deepEqual,
+      deepStrictEqual: deepEqual,
+      equal,
+      fail,
+      ifError,
+      match,
+      notEqual,
+      notStrictEqual,
+      ok,
+      strict: assert,
+      strictEqual
+    });
+    return assert;
+  })();
   function normalizeBuiltinRequest(request) {
     return String(request).replace(/^node:/, "");
   }
@@ -19518,20 +20719,50 @@ ${headerLines}\r
   function loadBuiltinModule(request) {
     const normalized = rejectRestrictedBuiltinRequest(request);
     switch (normalized) {
+      case "assert":
+        return builtinAssertModule;
+      case "buffer":
+        return builtinBufferModule;
+      case "crypto":
+        return builtinCryptoModule;
       case "http":
         return _httpModule;
+      case "events":
+        return _eventsModule;
       case "fs":
         return _fsModule;
       case "os":
         return _osModule;
+      case "path":
+        return builtinPathModule;
+      case "perf_hooks":
+        return builtinPerfHooksModule;
+      case "process":
+        return process_default;
+      case "querystring":
+        return builtinQuerystringModule;
+      case "stream":
+        return builtinStreamModule;
+      case "string_decoder":
+        return builtinStringDecoderModule;
+      case "timers":
+        return builtinTimersModule;
+      case "url":
+        return builtinUrlModule;
+      case "util":
+        return builtinUtilModule;
       case "child_process":
         return _childProcessModule;
+      case "constants":
+        return _fsModule.constants ?? {};
       case "dns":
         return _dnsModule;
       case "net":
         return _netModule;
       case "tls":
         return _tlsModule;
+      case "tty":
+        return builtinTtyModule;
       case "dgram":
         return _dgramModule;
       case "sqlite":
@@ -19540,6 +20771,8 @@ ${headerLines}\r
         return _httpsModule;
       case "module":
         return _moduleModule;
+      case "vm":
+        return builtinVmModule;
       default: {
         const error = new Error(`Cannot find module '${request}'`);
         error.code = "MODULE_NOT_FOUND";

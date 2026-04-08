@@ -1,3 +1,6 @@
+import { transform } from "sucrase";
+import { createBrowserNetworkAdapter } from "./driver.js";
+import { validatePermissionSource } from "./permission-validation.js";
 import type {
 	CommandExecutor,
 	ExecResult,
@@ -22,9 +25,6 @@ import {
 	transformDynamicImport,
 	wrapNetworkAdapter,
 } from "./runtime.js";
-import { transform } from "sucrase";
-import { createBrowserNetworkAdapter } from "./driver.js";
-import { validatePermissionSource } from "./permission-validation.js";
 import {
 	assertBrowserSyncBridgeSupport,
 	type BrowserSyncBridgeErrorPayload,
@@ -75,6 +75,7 @@ let jsonPayloadLimitBytes = DEFAULT_JSON_PAYLOAD_BYTES;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+// biome-ignore lint/security/noGlobalEval: the browser worker intentionally evaluates isolated runtime source strings.
 const globalEval = eval as (source: string) => unknown;
 const SHARED_ARRAY_BUFFER_FREEZE_KEYS = [
 	"byteLength",
@@ -1017,42 +1018,39 @@ async function initRuntime(payload: BrowserWorkerInitPayload): Promise<void> {
 		rename: renameRef,
 	});
 
-	exposeCustomGlobal(
-		"_loadPolyfill",
-		makeApplySync((moduleName: string) => {
-			const name = moduleName.replace(/^node:/, "");
-			const polyfillMap = POLYFILL_CODE_MAP as Record<string, string>;
-			return polyfillMap[name] ?? null;
-		}),
-	);
+	exposeCustomGlobal("_loadPolyfill", (moduleName: string) => {
+		const name = moduleName.replace(/^node:/, "");
+		const polyfillMap = POLYFILL_CODE_MAP as Record<string, string>;
+		return polyfillMap[name] ?? null;
+	});
 
-	const resolveModuleSyncRef = makeApplySync(
-		(request: string, fromDir: string, mode?: "require" | "import") => {
-			return syncBridge.requestNullableText("module.resolve", [
-				request,
-				fromDir,
-				mode ?? "require",
-			]);
-		},
-	);
-	const loadFileSyncRef = makeApplySync(
-		(path: string, _mode?: "require" | "import") => {
-			const source = syncBridge.requestNullableText("module.loadFile", [path]);
-			if (source === null) {
-				return null;
-			}
-			let code = source;
-			if (isESM(source, path)) {
-				code = transform(code, { transforms: ["imports"] }).code;
-			}
-			return transformDynamicImport(code);
-		},
-	);
+	const resolveModuleSync = (
+		request: string,
+		fromDir: string,
+		mode?: "require" | "import",
+	) => {
+		return syncBridge.requestNullableText("module.resolve", [
+			request,
+			fromDir,
+			mode ?? "require",
+		]);
+	};
+	const loadFileSync = (path: string, _mode?: "require" | "import") => {
+		const source = syncBridge.requestNullableText("module.loadFile", [path]);
+		if (source === null) {
+			return null;
+		}
+		let code = source;
+		if (isESM(source, path)) {
+			code = transform(code, { transforms: ["imports"] }).code;
+		}
+		return transformDynamicImport(code);
+	};
 
-	exposeCustomGlobal("_resolveModuleSync", resolveModuleSyncRef);
-	exposeCustomGlobal("_loadFileSync", loadFileSyncRef);
-	exposeCustomGlobal("_resolveModule", resolveModuleSyncRef);
-	exposeCustomGlobal("_loadFile", loadFileSyncRef);
+	exposeCustomGlobal("_resolveModuleSync", resolveModuleSync);
+	exposeCustomGlobal("_loadFileSync", loadFileSync);
+	exposeCustomGlobal("_resolveModule", resolveModuleSync);
+	exposeCustomGlobal("_loadFile", loadFileSync);
 
 	exposeCustomGlobal("_scheduleTimer", {
 		apply(_ctx: undefined, args: [number]) {
@@ -1118,7 +1116,7 @@ async function initRuntime(payload: BrowserWorkerInitPayload): Promise<void> {
 					getDispatch()?.(sessionId, "stderr", data);
 				},
 			});
-			proc.wait().then((code) => {
+			void proc.wait().then((code) => {
 				getDispatch()?.(sessionId, "exit", code);
 				sessions.delete(sessionId);
 			});
@@ -1177,7 +1175,7 @@ async function initRuntime(payload: BrowserWorkerInitPayload): Promise<void> {
 	exposeMutableRuntimeStateGlobal("_moduleCache", {});
 	exposeMutableRuntimeStateGlobal("_pendingModules", {});
 	exposeMutableRuntimeStateGlobal("_currentModule", { dirname: "/" });
-	eval(getRequireSetupCode());
+	globalEval(getRequireSetupCode());
 	ensureProcessGlobal();
 
 	// Block dangerous Web APIs that bypass bridge permission checks
@@ -1302,7 +1300,10 @@ function createBrowserProcess(): Record<string, unknown> {
 		on(event: string, listener: BrowserProcessListener): BrowserStdin;
 		once(event: string, listener: BrowserProcessListener): BrowserStdin;
 		off(event: string, listener: BrowserProcessListener): BrowserStdin;
-		removeListener(event: string, listener: BrowserProcessListener): BrowserStdin;
+		removeListener(
+			event: string,
+			listener: BrowserProcessListener,
+		): BrowserStdin;
 		emit(event: string, value?: unknown): boolean;
 		pause(): BrowserStdin;
 		resume(): BrowserStdin;
@@ -1481,7 +1482,7 @@ function createBrowserProcess(): Record<string, unknown> {
 		},
 		exit(code?: number) {
 			const exitCode =
-				typeof code === "number" ? code : processBridge.exitCode ?? 0;
+				typeof code === "number" ? code : (processBridge.exitCode ?? 0);
 			processBridge.exitCode = exitCode;
 			throw new Error(`process.exit(${exitCode})`);
 		},
@@ -1502,8 +1503,7 @@ function createBrowserProcess(): Record<string, unknown> {
 		},
 		__agentOsRefreshProcess(nextConfig?: Record<string, unknown>) {
 			clearStdinListeners();
-			stdinData =
-				typeof nextConfig?.stdin === "string" ? nextConfig.stdin : "";
+			stdinData = typeof nextConfig?.stdin === "string" ? nextConfig.stdin : "";
 			stdinPosition = 0;
 			stdinEnded = false;
 			stdinFlushQueued = false;

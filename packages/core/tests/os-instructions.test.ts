@@ -163,9 +163,7 @@ describe("PI prepareInstructions", () => {
 		expect(result.args).toBeDefined();
 		expect(result.args).toContain("--append-system-prompt");
 		// The instruction text is the file content from /etc/agentos/instructions.md
-		const argIdx = (result.args as string[]).indexOf(
-			"--append-system-prompt",
-		);
+		const argIdx = (result.args as string[]).indexOf("--append-system-prompt");
 		const instructionsArg = (result.args as string[])[argIdx + 1];
 		expect(instructionsArg).toBeTruthy();
 		expect(instructionsArg.length).toBeGreaterThan(0);
@@ -179,11 +177,13 @@ describe("PI prepareInstructions", () => {
 			typeof config.prepareInstructions
 		>;
 		const additional = "CUSTOM_MARKER: extra instructions";
-		const result = await prepare(getAgentOsKernel(vm), "/home/user", additional);
-
-		const argIdx = (result.args as string[]).indexOf(
-			"--append-system-prompt",
+		const result = await prepare(
+			getAgentOsKernel(vm),
+			"/home/user",
+			additional,
 		);
+
+		const argIdx = (result.args as string[]).indexOf("--append-system-prompt");
 		const instructionsArg = (result.args as string[])[argIdx + 1];
 		expect(instructionsArg).toContain(additional);
 	});
@@ -252,9 +252,7 @@ describe("OpenCode prepareInstructions", () => {
 		const result = await prepare(getAgentOsKernel(vm), cwd, additional);
 
 		// Verify additional instructions written to /tmp/
-		const data = await vm.readFile(
-			"/tmp/agentos-additional-instructions.md",
-		);
+		const data = await vm.readFile("/tmp/agentos-additional-instructions.md");
 		const content = new TextDecoder().decode(data);
 		expect(content).toBe(additional);
 
@@ -262,9 +260,7 @@ describe("OpenCode prepareInstructions", () => {
 		const contextPaths = JSON.parse(
 			result.env?.OPENCODE_CONTEXTPATHS as string,
 		);
-		expect(contextPaths).toContain(
-			"/tmp/agentos-additional-instructions.md",
-		);
+		expect(contextPaths).toContain("/tmp/agentos-additional-instructions.md");
 		// Base instructions path is still included
 		expect(contextPaths).toContain("/etc/agentos/instructions.md");
 
@@ -487,8 +483,7 @@ describe("createSession OS instructions integration", () => {
 		await vm.writeFile(scriptPath, MOCK_ACP_ADAPTER);
 		const restore = useMockAdapterBin(scriptPath);
 
-		const additionalText =
-			"CUSTOM_MARKER: Always use pnpm for this project.";
+		const additionalText = "CUSTOM_MARKER: Always use pnpm for this project.";
 
 		try {
 			const { sessionId } = await vm.createSession("pi", {

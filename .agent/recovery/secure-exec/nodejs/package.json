@@ -1,0 +1,128 @@
+{
+  "name": "@secure-exec/nodejs",
+  "version": "0.2.1",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src/polyfills",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./internal/bridge-loader": {
+      "types": "./dist/bridge-loader.d.ts",
+      "import": "./dist/bridge-loader.js",
+      "default": "./dist/bridge-loader.js"
+    },
+    "./internal/polyfills": {
+      "types": "./dist/polyfills.d.ts",
+      "import": "./dist/polyfills.js",
+      "default": "./dist/polyfills.js"
+    },
+    "./internal/execution-driver": {
+      "types": "./dist/execution-driver.d.ts",
+      "import": "./dist/execution-driver.js",
+      "default": "./dist/execution-driver.js"
+    },
+    "./internal/isolate-bootstrap": {
+      "types": "./dist/isolate-bootstrap.d.ts",
+      "import": "./dist/isolate-bootstrap.js",
+      "default": "./dist/isolate-bootstrap.js"
+    },
+    "./internal/module-resolver": {
+      "types": "./dist/module-resolver.d.ts",
+      "import": "./dist/module-resolver.js",
+      "default": "./dist/module-resolver.js"
+    },
+    "./internal/bridge-handlers": {
+      "types": "./dist/bridge-handlers.d.ts",
+      "import": "./dist/bridge-handlers.js",
+      "default": "./dist/bridge-handlers.js"
+    },
+    "./internal/driver": {
+      "types": "./dist/driver.d.ts",
+      "import": "./dist/driver.js",
+      "default": "./dist/driver.js"
+    },
+    "./internal/module-access": {
+      "types": "./dist/module-access.d.ts",
+      "import": "./dist/module-access.js",
+      "default": "./dist/module-access.js"
+    },
+    "./internal/builtin-modules": {
+      "types": "./dist/builtin-modules.d.ts",
+      "import": "./dist/builtin-modules.js",
+      "default": "./dist/builtin-modules.js"
+    },
+    "./internal/esm-compiler": {
+      "types": "./dist/esm-compiler.d.ts",
+      "import": "./dist/esm-compiler.js",
+      "default": "./dist/esm-compiler.js"
+    },
+    "./internal/package-bundler": {
+      "types": "./dist/package-bundler.d.ts",
+      "import": "./dist/package-bundler.js",
+      "default": "./dist/package-bundler.js"
+    },
+    "./internal/bridge-contract": {
+      "types": "./dist/bridge-contract.d.ts",
+      "import": "./dist/bridge-contract.js",
+      "default": "./dist/bridge-contract.js"
+    },
+    "./internal/bridge": {
+      "types": "./dist/bridge/index.d.ts",
+      "import": "./dist/bridge/index.js",
+      "default": "./dist/bridge/index.js"
+    },
+    "./internal/kernel-runtime": {
+      "types": "./dist/kernel-runtime.d.ts",
+      "import": "./dist/kernel-runtime.js",
+      "default": "./dist/kernel-runtime.js"
+    },
+    "./internal/os-filesystem": {
+      "types": "./dist/os-filesystem.d.ts",
+      "import": "./dist/os-filesystem.js",
+      "default": "./dist/os-filesystem.js"
+    },
+    "./internal/worker-adapter": {
+      "types": "./dist/worker-adapter.d.ts",
+      "import": "./dist/worker-adapter.js",
+      "default": "./dist/worker-adapter.js"
+    }
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit",
+    "build:bridge": "node scripts/build-bridge.mjs",
+    "build:polyfills": "node scripts/build-polyfills.mjs",
+    "build:isolate-runtime": "node scripts/build-isolate-runtime.mjs",
+    "build:generated": "pnpm run build:bridge && pnpm run build:polyfills && pnpm run build:isolate-runtime",
+    "build": "pnpm run build:generated && tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@secure-exec/core": "workspace:*",
+    "@secure-exec/v8": "workspace:*",
+    "cbor-x": "^1.6.4",
+    "cjs-module-lexer": "^2.1.0",
+    "es-module-lexer": "^1.7.0",
+    "esbuild": "^0.27.1",
+    "node-stdlib-browser": "^1.3.1",
+    "web-streams-polyfill": "^4.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "buffer": "^6.0.3",
+    "sucrase": "^3.35.0",
+    "text-encoding-utf-8": "^1.0.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "whatwg-url": "^15.1.0"
+  }
+}

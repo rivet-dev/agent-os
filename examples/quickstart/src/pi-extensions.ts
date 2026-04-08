@@ -10,7 +10,7 @@
 //
 // NOTE: Requires ANTHROPIC_API_KEY to be set.
 
-import { AgentOs } from "@rivet-dev/agent-os-core";
+import { AgentOs } from "@rivet-dev/agent-os";
 import common from "@rivet-dev/agent-os-common";
 import pi from "@rivet-dev/agent-os-pi";
 
@@ -60,7 +60,10 @@ console.log("Session created:", sessionId);
 
 // Ask a simple question — if the extension loaded, the agent will
 // prefix its response with "EXTENSION_OK: "
-const { text } = await vm.prompt(sessionId, "What is 2 + 2? Reply with just the number.");
+const { text } = await vm.prompt(
+	sessionId,
+	"What is 2 + 2? Reply with just the number.",
+);
 console.log("Agent:", text);
 
 // ── Verify ─────────────────────────────────────────────────────────

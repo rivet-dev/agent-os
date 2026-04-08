@@ -36,6 +36,24 @@ Agent OS is a **fully virtualized operating system**. The kernel, written as a R
 - **The default VM filesystem model should be Docker-like.** Layered overlay view with one writable upper layer on top of one or more immutable lower snapshot layers.
 - **Everything runs inside the VM.** Agent processes, servers, network requests -- all spawned inside the Agent OS kernel, never on the host. This is a hard rule with no exceptions.
 
+## Secure-Exec Reference Implementation
+
+The Rust sidecar kernel was migrated from a working JavaScript kernel (`@secure-exec/core` + `@secure-exec/nodejs` + `@secure-exec/v8`). The original source is at `/home/nathan/secure-exec-1/` (tagged `v0.2.1`), and recovered polyfill/bridge code lives at `.agent/recovery/secure-exec/`. **When something doesn't work in the Rust V8 isolate runtime, check how secure-exec handled it first** — the answer is almost always already there. Key reference files:
+- `nodejs/src/bridge-handlers.ts` (6,405 lines) -- host-side handlers for all kernel syscalls
+- `nodejs/src/bridge/fs.ts` (3,974 lines) -- full kernel-backed `fs` polyfill
+- `nodejs/src/bridge/network.ts` (11,149 lines) -- full `net`/`dgram`/`dns` polyfill
+- `nodejs/src/bridge/process.ts` (2,251 lines) -- virtualized `process` global
+- `nodejs/src/execution-driver.ts` (1,693 lines) -- V8 isolate session lifecycle
+
+## Agent Adapters
+
+- **Agent adapters MUST use the real agent SDK.** Each agent adapter (`registry/agent/*/src/adapter.ts`) must call the agent's SDK directly (e.g., `createAgentSession()` from `@mariozechner/pi-coding-agent`). **NEVER replace an SDK adapter with a minimal/stub adapter that makes direct API calls** (e.g., direct `fetch` to `/v1/messages`). If the SDK doesn't work in V8, fix the V8 compatibility — don't bypass the SDK.
+- **No host agent exceptions.** Host-native wrappers and host binary launch paths are not allowed.
+
+## VM System Tools
+
+- **The VM has a full POSIX toolchain.** WASM-compiled coreutils, `sh`, `grep`, `sed`, `awk`, `find`, `tar`, `git`, and 100+ other commands are available via registry software packages (`registry/software/`, compiled from `registry/native/crates/commands/`). Agent code running inside the VM can spawn these tools via `child_process`. **Do not assume system tools are missing** — if a command isn't resolving, debug the command resolution path in the sidecar, don't work around it.
+
 ## Dependencies
 
 - **Rivet repo** -- A modifiable copy lives at `~/r-aos`. Use this when you need to make changes to the Rivet codebase.

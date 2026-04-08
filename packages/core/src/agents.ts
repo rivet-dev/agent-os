@@ -78,17 +78,10 @@ export type AgentType = "pi" | "pi-cli" | "opencode" | "claude";
 
 export const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
 	pi: {
-		acpAdapter: "pi-acp",
+		acpAdapter: "@rivet-dev/agent-os-pi",
 		agentPackage: "@mariozechner/pi-coding-agent",
-		// OS instructions injection: reads /etc/agentos/instructions.md from VM,
-		// passes via --append-system-prompt. User's AGENTS.md/CLAUDE.md at cwd
-		// still loads via PI's directory walk. Zero filesystem writes.
-		prepareInstructions: async (
-			kernel,
-			_cwd,
-			additionalInstructions,
-			opts,
-		) => {
+		// OS instructions injection keeps the Pi session self-contained inside the VM.
+		prepareInstructions: async (kernel, _cwd, additionalInstructions, opts) => {
 			const instructions = await readVmInstructions(
 				kernel,
 				additionalInstructions,
@@ -104,12 +97,7 @@ export const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
 		agentPackage: "@mariozechner/pi-coding-agent",
 		// Full CLI-based ACP adapter: spawns pi --mode rpc as a subprocess.
 		// Higher memory overhead but provides full CLI feature set.
-		prepareInstructions: async (
-			kernel,
-			_cwd,
-			additionalInstructions,
-			opts,
-		) => {
+		prepareInstructions: async (kernel, _cwd, additionalInstructions, opts) => {
 			const instructions = await readVmInstructions(
 				kernel,
 				additionalInstructions,
@@ -133,12 +121,7 @@ export const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
 		// path to /etc/agentos/instructions.md. No cwd file writes needed; the
 		// file is already on disk from VM boot. /etc/agentos/ is read-only, so we
 		// only write additional session-level prompt fragments into /tmp/.
-		prepareInstructions: async (
-			kernel,
-			_cwd,
-			additionalInstructions,
-			opts,
-		) => {
+		prepareInstructions: async (kernel, _cwd, additionalInstructions, opts) => {
 			const contextPaths = opts?.skipBase
 				? []
 				: [
@@ -156,8 +139,7 @@ export const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
 						INSTRUCTIONS_PATH,
 					];
 			if (additionalInstructions) {
-				const additionalPath =
-					"/tmp/agentos-additional-instructions.md";
+				const additionalPath = "/tmp/agentos-additional-instructions.md";
 				await kernel.writeFile(additionalPath, additionalInstructions);
 				contextPaths.push(additionalPath);
 			}
@@ -189,12 +171,7 @@ export const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
 			SHELL: "/bin/bash",
 			USE_BUILTIN_RIPGREP: "0",
 		},
-		prepareInstructions: async (
-			kernel,
-			_cwd,
-			additionalInstructions,
-			opts,
-		) => {
+		prepareInstructions: async (kernel, _cwd, additionalInstructions, opts) => {
 			const instructions = await readVmInstructions(
 				kernel,
 				additionalInstructions,

@@ -5,9 +5,12 @@
 
 import { AgentOs } from "@rivet-dev/agent-os";
 import common from "@rivet-dev/agent-os-common";
+import {
+	createSandboxFs,
+	createSandboxToolkit,
+} from "@rivet-dev/agent-os-sandbox";
 import { SandboxAgent } from "sandbox-agent";
 import { docker } from "sandbox-agent/docker";
-import { createSandboxFs, createSandboxToolkit } from "@rivet-dev/agent-os-sandbox";
 
 // Start a Docker-backed sandbox.
 const sandbox = await SandboxAgent.start({

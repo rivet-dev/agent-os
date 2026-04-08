@@ -43,9 +43,7 @@ describe.skipIf(!ANTHROPIC_API_KEY)("pi tool execution (real API)", () => {
 		expect(response.error).toBeUndefined();
 
 		// Verify Pi executed a tool (write or bash)
-		const completedEvents = toolEvents.filter(
-			(e) => e.status === "completed",
-		);
+		const completedEvents = toolEvents.filter((e) => e.status === "completed");
 		expect(completedEvents.length).toBeGreaterThanOrEqual(1);
 
 		// Verify the file was actually written inside the VM

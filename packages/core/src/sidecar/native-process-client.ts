@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import type { JsonRpcNotification, JsonRpcResponse } from "../json-rpc.js";
 
 const PROTOCOL_SCHEMA = {
@@ -1043,7 +1043,11 @@ export class NativeSidecarProcessClient {
 			description: string;
 			tools: Record<string, SidecarRegisteredToolDefinition>;
 		},
-	): Promise<{ toolkit: string; commandCount: number; promptMarkdown: string }> {
+	): Promise<{
+		toolkit: string;
+		commandCount: number;
+		promptMarkdown: string;
+	}> {
 		const response = await this.sendRequest({
 			ownership: {
 				scope: "vm",
@@ -1865,39 +1869,33 @@ export class NativeSidecarProcessClient {
 			ownership: input.ownership,
 			payload: input.payload,
 		};
-		const response = await new Promise<ResponseFrame>(
-			async (resolve, reject) => {
-				const entry = {
-					resolve: (frame: ResponseFrame) => {
-						clearTimeout(entry.timer);
-						this.pendingResponses.delete(requestId);
-						resolve(frame);
-					},
-					reject: (error: Error) => {
-						clearTimeout(entry.timer);
-						this.pendingResponses.delete(requestId);
-						reject(error);
-					},
-					timer: setTimeout(() => {
-						this.pendingResponses.delete(requestId);
-						reject(
-							new Error(
-								`timed out waiting for sidecar protocol frame for ${input.payload.type}\nstderr:\n${this.stderrText()}`,
-							),
-						);
-					}, this.frameTimeoutMs),
-				};
-				this.pendingResponses.set(requestId, entry);
-
-				try {
-					await this.writeFrame(request);
-				} catch (error) {
-					entry.reject(
-						error instanceof Error ? error : new Error(String(error)),
+		const response = await new Promise<ResponseFrame>((resolve, reject) => {
+			const entry = {
+				resolve: (frame: ResponseFrame) => {
+					clearTimeout(entry.timer);
+					this.pendingResponses.delete(requestId);
+					resolve(frame);
+				},
+				reject: (error: Error) => {
+					clearTimeout(entry.timer);
+					this.pendingResponses.delete(requestId);
+					reject(error);
+				},
+				timer: setTimeout(() => {
+					this.pendingResponses.delete(requestId);
+					reject(
+						new Error(
+							`timed out waiting for sidecar protocol frame for ${input.payload.type}\nstderr:\n${this.stderrText()}`,
+						),
 					);
-				}
-			},
-		);
+				}, this.frameTimeoutMs),
+			};
+			this.pendingResponses.set(requestId, entry);
+
+			void this.writeFrame(request).catch((error) => {
+				entry.reject(error instanceof Error ? error : new Error(String(error)));
+			});
+		});
 
 		if (response.payload.type === "rejected") {
 			throw new Error(
@@ -2271,7 +2269,9 @@ function toWireProjectedModuleDescriptor(
 	};
 }
 
-function toJsonRpcRecord(value: unknown): JsonRpcResponse | Record<string, unknown> {
+function toJsonRpcRecord(
+	value: unknown,
+): JsonRpcResponse | Record<string, unknown> {
 	if (value && typeof value === "object" && !Array.isArray(value)) {
 		return value as JsonRpcResponse | Record<string, unknown>;
 	}

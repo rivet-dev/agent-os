@@ -1,155 +1,216 @@
 import { resolve } from "node:path";
-import type { LLMock } from "@copilotkit/llmock";
+import type { Fixture, ToolCall } from "@copilotkit/llmock";
+import { describe, expect, test } from "vitest";
+import type { AgentCapabilities, AgentInfo } from "../src/agent-os.js";
+import { AgentOs } from "../src/agent-os.js";
 import {
-	afterAll,
-	afterEach,
-	beforeAll,
-	beforeEach,
-	describe,
-	expect,
-	test,
-} from "vitest";
-import { AgentOs } from "../src/index.js";
-import {
-	DEFAULT_TEXT_FIXTURE,
+	createAnthropicFixture,
 	startLlmock,
 	stopLlmock,
 } from "./helpers/llmock-helper.js";
 
-/**
- * Use the workspace root as module access CWD. With shamefully-hoist=true
- * in .npmrc, all transitive dependencies are hoisted to the root node_modules,
- * making them accessible via the ModuleAccessFileSystem overlay.
- */
-const SESSION_MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
+const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 
-describe("PI headless mode", () => {
-	let vm: AgentOs;
-	let mock: LLMock;
-	let mockUrl: string;
-	let mockPort: number;
+function getRequestBody(req: unknown): Record<string, unknown> {
+	const direct = req as Record<string, unknown>;
+	const body = direct.body;
+	return body && typeof body === "object"
+		? (body as Record<string, unknown>)
+		: direct;
+}
 
-	beforeAll(async () => {
-		const result = await startLlmock([DEFAULT_TEXT_FIXTURE]);
-		mock = result.mock;
-		mockUrl = result.url;
-		mockPort = Number(new URL(result.url).port);
+function createToolFixtures(
+	toolCall: ToolCall,
+	expectedToolResult: string,
+	finalText: string,
+): Fixture[] {
+	return [
+		createAnthropicFixture(
+			{
+				predicate: (req) =>
+					!JSON.stringify(getRequestBody(req)).includes("tool_result"),
+			},
+			{ toolCalls: [toolCall] },
+		),
+		createAnthropicFixture(
+			{
+				predicate: (req) =>
+					JSON.stringify(getRequestBody(req)).includes("tool_result") &&
+					JSON.stringify(getRequestBody(req)).includes(expectedToolResult),
+			},
+			{ content: finalText },
+		),
+	];
+}
+
+async function createPiVm(mockUrl: string): Promise<AgentOs> {
+	return AgentOs.create({
+		loopbackExemptPorts: [Number(new URL(mockUrl).port)],
+		moduleAccessCwd: MODULE_ACCESS_CWD,
 	});
+}
 
-	afterAll(async () => {
-		await stopLlmock(mock);
-	});
-
-	beforeEach(async () => {
-		vm = await AgentOs.create({
-			loopbackExemptPorts: [mockPort],
-			moduleAccessCwd: SESSION_MODULE_ACCESS_CWD,
-		});
-	});
-
-	afterEach(async () => {
-		await vm.dispose();
-	});
-
-	test("mock LLM server responds to API calls from inside VM", async () => {
-		// Write a script that calls the mock Anthropic API via fetch
-		const apiScript = `
-const response = await fetch("${mockUrl}/v1/messages", {
-  method: "POST",
-  headers: { "Content-Type": "application/json", "x-api-key": "mock-key" },
-  body: JSON.stringify({
-    model: "claude-sonnet-4-20250514",
-    max_tokens: 100,
-    messages: [{ role: "user", content: "say hello" }],
-  }),
-});
-const data = await response.json();
-console.log(data.content[0].text);
-`;
-		await vm.writeFile("/tmp/api-test.mjs", apiScript);
-
-		let stdout = "";
-		let stderr = "";
-
-		const { pid } = vm.spawn("node", ["/tmp/api-test.mjs"], {
-			onStdout: (data: Uint8Array) => {
-				stdout += new TextDecoder().decode(data);
+async function createVmPiHome(vm: AgentOs, mockUrl: string): Promise<string> {
+	const homeDir = "/home/user";
+	await vm.mkdir(`${homeDir}/.pi/agent`, { recursive: true });
+	await vm.writeFile(
+		`${homeDir}/.pi/agent/models.json`,
+		JSON.stringify(
+			{
+				providers: {
+					anthropic: {
+						baseUrl: mockUrl,
+						apiKey: "mock-key",
+					},
+				},
 			},
-			onStderr: (data: Uint8Array) => {
-				stderr += new TextDecoder().decode(data);
+			null,
+			2,
+		),
+	);
+	return homeDir;
+}
+
+async function createVmWorkspace(vm: AgentOs): Promise<string> {
+	const workspaceDir = "/home/user/workspace";
+	await vm.mkdir(workspaceDir, { recursive: true });
+	return workspaceDir;
+}
+
+describe("full createSession('pi') inside the VM", () => {
+	test("runs the real Pi SDK ACP flow end-to-end for write tool calls", async () => {
+		const fixtures = createToolFixtures(
+			{
+				name: "write",
+				arguments: JSON.stringify({
+					path: "notes.txt",
+					content: "hello from pi write",
+				}),
 			},
-			env: {
-				HOME: "/home/user",
-				ANTHROPIC_API_KEY: "mock-key",
+			"Successfully wrote",
+			"notes.txt was created successfully.",
+		);
+		const { mock, url } = await startLlmock(fixtures);
+		const vm = await createPiVm(url);
+
+		let sessionId: string | undefined;
+		try {
+			const homeDir = await createVmPiHome(vm, url);
+			const workspaceDir = await createVmWorkspace(vm);
+			sessionId = (
+				await vm.createSession("pi", {
+					cwd: workspaceDir,
+					env: {
+						HOME: homeDir,
+						ANTHROPIC_API_KEY: "mock-key",
+					},
+				})
+			).sessionId;
+
+			const agentInfo = vm.getSessionAgentInfo(sessionId) as AgentInfo;
+			expect(agentInfo.name).toBe("pi-sdk-acp");
+			expect(agentInfo.title).toBe("Pi SDK ACP adapter");
+			expect(agentInfo.version).toBeTruthy();
+
+			const capabilities = vm.getSessionCapabilities(
+				sessionId,
+			) as AgentCapabilities;
+			expect(capabilities.promptCapabilities).toMatchObject({
+				image: true,
+				audio: false,
+				embeddedContext: false,
+			});
+
+			const modes = vm.getSessionModes(sessionId);
+			expect(modes?.currentModeId).toBeTruthy();
+			expect(modes?.availableModes.length).toBeGreaterThan(0);
+
+			const { response, text } = await vm.prompt(
+				sessionId,
+				"Create notes.txt with the text hello from pi write.",
+			);
+
+			expect(response.error).toBeUndefined();
+			expect(text).toContain("notes.txt was created successfully.");
+			expect(
+				new TextDecoder().decode(await vm.readFile(`${workspaceDir}/notes.txt`)),
+			).toBe("hello from pi write");
+			expect(mock.getRequests().length).toBeGreaterThanOrEqual(2);
+
+			const events = vm
+				.getSessionEvents(sessionId)
+				.map((event) => event.notification);
+			expect(
+				events.some(
+					(event) =>
+						event.method === "session/update" &&
+						JSON.stringify(event.params).includes("tool_call"),
+				),
+			).toBe(true);
+			expect(
+				events.some(
+					(event) =>
+						event.method === "session/update" &&
+						JSON.stringify(event.params).includes("\"completed\""),
+				),
+			).toBe(true);
+		} finally {
+			if (sessionId) {
+				vm.closeSession(sessionId);
+			}
+			await vm.dispose();
+			await stopLlmock(mock);
+		}
+	}, 120_000);
+
+	test("runs the real Pi SDK ACP flow end-to-end for bash tool calls", async () => {
+		const fixtures = createToolFixtures(
+			{
+				name: "bash",
+				arguments: JSON.stringify({
+					command: "printf 'bash-ok' > bash-output.txt",
+					timeout: 10,
+				}),
 			},
-		});
+			"bash-ok",
+			"bash-output.txt was written successfully.",
+		);
+		const { mock, url } = await startLlmock(fixtures);
+		const vm = await createPiVm(url);
 
-		const exitCode = await vm.waitProcess(pid);
+		let sessionId: string | undefined;
+		try {
+			const homeDir = await createVmPiHome(vm, url);
+			const workspaceDir = await createVmWorkspace(vm);
+			sessionId = (
+				await vm.createSession("pi", {
+					cwd: workspaceDir,
+					env: {
+						HOME: homeDir,
+						ANTHROPIC_API_KEY: "mock-key",
+					},
+				})
+			).sessionId;
 
-		expect(exitCode, `API test failed. stderr: ${stderr}`).toBe(0);
-		expect(stdout).toContain("Hello from llmock");
-	}, 30_000);
+			const { response, text } = await vm.prompt(
+				sessionId,
+				"Use bash to write bash-ok into bash-output.txt.",
+			);
 
-	test("PI package entrypoints are mounted inside the VM", async () => {
-		const loadScript = `
-const fs = require("fs");
-const mainPath = "/root/node_modules/@mariozechner/pi-coding-agent/dist/main.js";
-const argsPath = "/root/node_modules/@mariozechner/pi-coding-agent/dist/cli/args.js";
-console.log("main-exists:" + fs.existsSync(mainPath));
-console.log("args-exists:" + fs.existsSync(argsPath));
-console.log("main-esm:" + fs.readFileSync(mainPath, "utf8").includes("export "));
-console.log("args-parse:" + fs.readFileSync(argsPath, "utf8").includes("parseArgs"));
-`;
-		await vm.writeFile("/tmp/pi-load-test.mjs", loadScript);
-
-		let stdout = "";
-		let stderr = "";
-
-		const { pid } = vm.spawn("node", ["/tmp/pi-load-test.mjs"], {
-			onStdout: (data: Uint8Array) => {
-				stdout += new TextDecoder().decode(data);
-			},
-			onStderr: (data: Uint8Array) => {
-				stderr += new TextDecoder().decode(data);
-			},
-			env: {
-				HOME: "/home/user",
-				PI_OFFLINE: "1",
-			},
-		});
-
-		const exitCode = await vm.waitProcess(pid);
-
-		expect(exitCode, `PI package probe failed. stderr: ${stderr}`).toBe(0);
-		expect(stdout).toContain("main-exists:true");
-		expect(stdout).toContain("args-exists:true");
-		expect(stdout).toContain("main-esm:true");
-		expect(stdout).toContain("args-parse:true");
-	}, 30_000);
-
-	test("standalone PI CLI is not exposed on the native sidecar PATH", async () => {
-		let stdout = "";
-		let stderr = "";
-
-		const { pid } = vm.spawn("pi", ["-p", "--no-session", "hello"], {
-			onStdout: (data: Uint8Array) => {
-				stdout += new TextDecoder().decode(data);
-			},
-			onStderr: (data: Uint8Array) => {
-				stderr += new TextDecoder().decode(data);
-			},
-			env: {
-				HOME: "/home/user",
-				PI_OFFLINE: "1",
-				ANTHROPIC_API_KEY: "mock-key",
-				ANTHROPIC_BASE_URL: mockUrl,
-			},
-		});
-
-		const exitCode = await vm.waitProcess(pid);
-
-		expect(exitCode).toBe(1);
-		expect(stdout).toBe("");
-		expect(stderr).toContain("command not found on native sidecar path: pi");
-	}, 30_000);
+			expect(response.error).toBeUndefined();
+			expect(text).toContain("bash-output.txt was written successfully.");
+			expect(
+				new TextDecoder().decode(
+					await vm.readFile(`${workspaceDir}/bash-output.txt`),
+				),
+			).toBe("bash-ok");
+			expect(mock.getRequests().length).toBeGreaterThanOrEqual(2);
+		} finally {
+			if (sessionId) {
+				vm.closeSession(sessionId);
+			}
+			await vm.dispose();
+			await stopLlmock(mock);
+		}
+	}, 120_000);
 });

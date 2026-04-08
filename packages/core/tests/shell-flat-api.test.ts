@@ -19,7 +19,10 @@ describe("flat shell API", () => {
 			`process.stdin.on("data", (chunk) => { process.stdout.write("GOT:" + chunk); });`,
 		);
 
-		const { shellId } = vm.openShell({ command: "node", args: ["/tmp/shell-echo.mjs"] });
+		const { shellId } = vm.openShell({
+			command: "node",
+			args: ["/tmp/shell-echo.mjs"],
+		});
 
 		const chunks: string[] = [];
 		vm.onShellData(shellId, (data) => {

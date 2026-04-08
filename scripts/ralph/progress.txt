@@ -32,6 +32,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - The current V8 sync-RPC bridge only tolerates one in-flight request effectively, so long-lived waits like HTTP server close listeners need stream events plus follow-up RPCs instead of a permanently pending sync-bridge Promise
 - The sidecar reads entrypoint files from VFS and passes as `inline_code` to avoid V8 module loading bridge calls in synchronous dispatch
 - Execution crate host-Node compatibility coverage stays behind the `legacy-js-tests` feature; default JavaScript validation should target the V8 isolate path and `crates/execution/tests/javascript_v8.rs`
+- Shared-V8 JavaScript executions still report the host runtime PID for lifecycle control, so V8 tests should assert `uses_shared_v8_runtime()` plus “no host guest-node launch” instead of expecting `child_pid() == 0`
 - Resolver-only coverage for `crates/execution/src/javascript.rs` should use `javascript::ModuleResolutionTestHarness` with temp-dir fixtures instead of booting a full V8 session
 - Warmup marker fingerprints for guest assets must include size and mtime data, not just inode identity; in-place rewrites of Pyodide or WASM assets otherwise fail to invalidate prewarm stamps
 - service.rs type definitions use `pub(crate)` fields when extracted to state.rs so impl blocks in service.rs can still access them
@@ -475,4 +476,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - `LocalBridgeState` resolver coverage is cheapest as a temp-dir integration test; you only need `/root` and `/root/node_modules` guest mappings to exercise exports/imports and pnpm layouts realistically
   - Symlinked pnpm package tests should use the symlinked guest referrer path (for example `/root/node_modules/pkg-a/index.js`) so `canonical_guest_path()` exercises the real `.pnpm/.../node_modules/...` walk-up logic
   - The current exports-array resolver picks the first syntactically resolvable target, not the first on-disk-existing file, so use `null` or another truly unresolvable branch when testing array fallback behavior
+---
+## 2026-04-07 23:05:11 PDT - US-049
+- Revalidated the module-resolution suite after US-048, confirmed the resolver coverage is green, and fixed the remaining execution-suite blocker by updating the V8 runtime regression test to assert shared-runtime semantics instead of the old `child_pid() == 0` assumption
+- Recorded the shared-V8 PID/testing nuance in `crates/execution/AGENTS.md` so future execution work doesn’t reintroduce the stale assertion
+- Files changed: `crates/execution/{AGENTS.md,tests/javascript_v8.rs}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Shared V8 guest executions still have a real host runtime PID behind them for lifecycle control, so test the absence of host guest-node launches rather than assuming “in-V8” means `child_pid() == 0`
+  - When a story’s focused suite is already green, the remaining acceptance work may be stale coverage elsewhere in the required broader suite; fix the stale expectation instead of forcing the runtime back toward an older contract
+  - `cargo test -p agent-os-execution -- --test-threads=1` is the acceptance gate that catches these cross-suite expectation drifts even when `--test module_resolution` already passes
 ---

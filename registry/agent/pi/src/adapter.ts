@@ -8,7 +8,8 @@
  * code that the CLI pulls in even in headless mode.
  *
  * Speaks ACP JSON-RPC over stdin/stdout using @agentclientprotocol/sdk.
- * Internally calls createAgentSession() from @mariozechner/pi-coding-agent.
+ * Internally builds a real Pi AgentSession without loading the CLI's
+ * resource loader path, which pulls jiti into the VM runtime.
  */
 
 import {
@@ -31,16 +32,579 @@ import type {
 	SetSessionModeResponse,
 	SessionNotification,
 } from "@agentclientprotocol/sdk";
-import type { AgentSessionEvent } from "@mariozechner/pi-coding-agent";
-import {
-	SessionManager,
-	createAgentSession,
+import type {
+	AgentSessionEvent,
 } from "@mariozechner/pi-coding-agent";
-import type { AgentSession } from "@mariozechner/pi-coding-agent";
+import {
+	existsSync,
+	readFileSync,
+	readdirSync,
+} from "node:fs";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { homedir } from "node:os";
-import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
+
+const PI_SDK_PACKAGE = "@mariozechner/pi-coding-agent";
+const MODULE_ACCESS_NODE_MODULES = "/root/node_modules";
+
+type SessionManagerLike = {
+	inMemory(): unknown;
+};
+
+type ModelLike = {
+	id: string;
+	provider: string;
+	reasoning?: boolean;
+};
+
+type MinimalResourceLoaderLike = {
+	reload(): Promise<void>;
+	getExtensions(): {
+		extensions: unknown[];
+		errors: unknown[];
+		runtime: {
+			flagValues: Map<string, unknown>;
+			pendingProviderRegistrations: Array<{
+				name: string;
+				config: unknown;
+			}>;
+		};
+	};
+	getSkills(): { skills: unknown[]; diagnostics: unknown[] };
+	getPrompts(): { prompts: unknown[]; diagnostics: unknown[] };
+	getThemes(): { themes: unknown[]; diagnostics: unknown[] };
+	getAgentsFiles(): { agentsFiles: unknown[] };
+	getSystemPrompt(): string;
+	getAppendSystemPrompt(): string[];
+	getPathMetadata(): Map<string, unknown>;
+	extendResources(_paths: string[]): void;
+};
+
+type PiAgentCoreLike = new (config: {
+	initialState: {
+		systemPrompt: string;
+		model: ModelLike | undefined;
+		thinkingLevel: string;
+		tools: unknown[];
+	};
+	convertToLlm: (messages: unknown[]) => unknown[];
+	onPayload: (payload: unknown, model: unknown) => Promise<unknown>;
+	sessionId: string;
+	transformContext: (messages: unknown[]) => Promise<unknown[]>;
+	steeringMode: unknown;
+	followUpMode: unknown;
+	transport: unknown;
+	thinkingBudgets: unknown;
+	maxRetryDelayMs: number;
+	getApiKey: (provider?: string) => Promise<string>;
+}) => {
+	state: {
+		model?: ModelLike;
+		thinkingLevel: string;
+	};
+	subscribe(listener: (event: unknown) => void): () => void;
+	prompt(text: string): Promise<void>;
+	abort(): void;
+	setThinkingLevel(level: string): void;
+	setTools(tools: PiToolLike[]): void;
+	setSystemPrompt(prompt: string): void;
+	replaceMessages(messages: unknown[]): void;
+};
+
+type SettingsManagerInstanceLike = {
+	getDefaultProvider(): string | undefined;
+	getDefaultModel(): string | undefined;
+	getDefaultThinkingLevel(): string | undefined;
+	getBlockImages(): boolean;
+	getSteeringMode(): unknown;
+	getFollowUpMode(): unknown;
+	getTransport(): unknown;
+	getThinkingBudgets(): unknown;
+	getRetrySettings(): { maxDelayMs: number };
+	getShellCommandPrefix(): string | undefined;
+	getImageAutoResize(): boolean;
+};
+
+type ModelRegistryInstanceLike = {
+	find(provider: string, modelId: string): ModelLike | undefined;
+	getAvailable(): Promise<ModelLike[]>;
+	getApiKey(model: ModelLike): Promise<string | undefined>;
+	getApiKeyForProvider(provider: string): Promise<string | undefined>;
+	isUsingOAuth(model: ModelLike): boolean;
+};
+
+type SessionManagerInstanceLike = {
+	buildSessionContext(): {
+		messages: unknown[];
+		model?: { provider: string; modelId: string };
+		thinkingLevel?: string;
+	};
+	getBranch(): Array<{ type: string }>;
+	appendModelChange(provider: string, modelId: string): void;
+	appendThinkingLevelChange(thinkingLevel: string): void;
+	getSessionId(): string;
+};
+
+type PiToolLike = {
+	name: string;
+	description?: string;
+	parameters?: unknown;
+	execute(
+		toolCallId: string,
+		args: unknown,
+		signal: AbortSignal,
+		onUpdate?: (partialResult: unknown) => void,
+	): Promise<{
+		content: unknown;
+		details?: unknown;
+	}>;
+};
+
+type PiSessionLike = {
+	readonly sessionId: string;
+	readonly thinkingLevel: string;
+	subscribe(
+		listener: (event: AgentSessionEvent) => void,
+	): () => void;
+	getAvailableThinkingLevels(): string[];
+	prompt(text: string): Promise<void>;
+	abort(): Promise<void>;
+	setThinkingLevel(level: string): void;
+};
+
+type PiSdkRuntime = {
+	Agent: PiAgentCoreLike;
+	AuthStorage: {
+		create(authPath?: string): unknown;
+	};
+	DEFAULT_THINKING_LEVEL: string;
+	ModelRegistry: new (authStorage: unknown, modelsPath?: string) => {
+		find(provider: string, modelId: string): ModelLike | undefined;
+		getAvailable(): Promise<ModelLike[]>;
+		getApiKey(model: ModelLike): Promise<string | undefined>;
+		getApiKeyForProvider(provider: string): Promise<string | undefined>;
+		isUsingOAuth(model: ModelLike): boolean;
+	};
+	SettingsManager: {
+		create(cwd?: string, agentDir?: string): SettingsManagerInstanceLike;
+	};
+	SessionManager: SessionManagerLike;
+	convertToLlm(messages: unknown[]): unknown[];
+	getAgentDir(): string;
+	getDocsPath(): string;
+	createAllTools(
+		cwd: string,
+		options?: {
+			read?: { autoResizeImages?: boolean };
+			bash?: { commandPrefix?: string };
+		},
+	): Record<string, PiToolLike>;
+};
+
+let piSdkRuntimePromise: Promise<PiSdkRuntime> | undefined;
+
+class MinimalPiSession implements PiSessionLike {
+	private readonly listeners = new Set<
+		(event: AgentSessionEvent) => void
+	>();
+
+	constructor(
+		private readonly agent: InstanceType<PiAgentCoreLike>,
+		private readonly sessionManager: SessionManagerInstanceLike,
+		private readonly settingsManager: SettingsManagerInstanceLike,
+		private readonly resourceLoader: MinimalResourceLoaderLike,
+		private readonly runtime: Pick<PiSdkRuntime, "createAllTools">,
+		private readonly cwd: string,
+		private readonly appendPrompt?: string,
+	) {
+		this.agent.subscribe((event) => {
+			this.emit(event as AgentSessionEvent);
+		});
+		this.rebuildRuntime();
+	}
+
+	get sessionId(): string {
+		return this.sessionManager.getSessionId();
+	}
+
+	get thinkingLevel(): string {
+		return this.agent.state.thinkingLevel;
+	}
+
+	subscribe(listener: (event: AgentSessionEvent) => void): () => void {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+
+	getAvailableThinkingLevels(): string[] {
+		return this.agent.state.model?.reasoning
+			? ["off", "minimal", "low", "medium", "high"]
+			: ["off"];
+	}
+
+	async prompt(text: string): Promise<void> {
+		await this.agent.prompt(text);
+	}
+
+	async abort(): Promise<void> {
+		this.agent.abort();
+	}
+
+	setThinkingLevel(level: string): void {
+		const nextLevel = this.agent.state.model?.reasoning ? level : "off";
+		this.agent.setThinkingLevel(nextLevel);
+		this.sessionManager.appendThinkingLevelChange(nextLevel);
+	}
+
+	private emit(event: AgentSessionEvent): void {
+		for (const listener of this.listeners) {
+			listener(event);
+		}
+	}
+
+	private rebuildRuntime(): void {
+		const baseTools = this.runtime.createAllTools(this.cwd, {
+			read: {
+				autoResizeImages: this.settingsManager.getImageAutoResize(),
+			},
+			bash: {
+				commandPrefix: this.settingsManager.getShellCommandPrefix(),
+			},
+		});
+		const activeToolNames = ["read", "bash", "edit", "write"].filter(
+			(name) => name in baseTools,
+		);
+		this.agent.setTools(
+			activeToolNames.map((name) => baseTools[name]).filter(Boolean),
+		);
+		this.agent.setSystemPrompt(
+			buildAdapterSystemPrompt(this.cwd, this.appendPrompt),
+		);
+	}
+}
+
+function buildAdapterSystemPrompt(
+	cwd: string,
+	appendPrompt?: string,
+): string {
+	const date = new Date().toISOString().slice(0, 10);
+	const extra = appendPrompt ? `\n\n${appendPrompt}` : "";
+	return (
+		"You are an expert coding assistant operating inside Pi's ACP adapter.\n" +
+		"Use the available tools when they help complete the user's request.\n" +
+		"Be concise, prefer direct file and shell operations, and describe file paths clearly." +
+		`${extra}\nCurrent date: ${date}\nCurrent working directory: ${cwd}`
+	);
+}
+
+class MinimalResourceLoader implements MinimalResourceLoaderLike {
+	private readonly runtime = {
+		flagValues: new Map<string, unknown>(),
+		pendingProviderRegistrations: [] as Array<{
+			name: string;
+			config: unknown;
+		}>,
+	};
+
+	constructor(private readonly options: { appendSystemPrompt?: string }) {}
+
+	async reload(): Promise<void> {}
+
+	getExtensions() {
+		return {
+			extensions: [],
+			errors: [],
+			runtime: this.runtime,
+		};
+	}
+
+	getSkills() {
+		return { skills: [], diagnostics: [] };
+	}
+
+	getPrompts() {
+		return { prompts: [], diagnostics: [] };
+	}
+
+	getThemes() {
+		return { themes: [], diagnostics: [] };
+	}
+
+	getAgentsFiles() {
+		return { agentsFiles: [] };
+	}
+
+	getSystemPrompt(): string {
+		return "";
+	}
+
+	getAppendSystemPrompt(): string[] {
+		return this.options.appendSystemPrompt ? [this.options.appendSystemPrompt] : [];
+	}
+
+	getPathMetadata(): Map<string, unknown> {
+		return new Map();
+	}
+
+	extendResources(_paths: string[]): void {}
+}
+
+function findProjectedPackageRoot(packageName: string): string {
+	const directRoot = `${MODULE_ACCESS_NODE_MODULES}/${packageName}`;
+	const pnpmRoot = `${MODULE_ACCESS_NODE_MODULES}/.pnpm`;
+	const pnpmPrefix = `${packageName.replace("/", "+")}@`;
+
+	if (existsSync(pnpmRoot)) {
+		for (const entry of readdirSync(pnpmRoot)) {
+			if (!entry.startsWith(pnpmPrefix)) continue;
+			const candidateRoot = join(pnpmRoot, entry, "node_modules", packageName);
+			if (existsSync(join(candidateRoot, "package.json"))) {
+				return candidateRoot;
+			}
+		}
+	}
+
+	return directRoot;
+}
+
+async function loadPiSdkRuntime(): Promise<PiSdkRuntime> {
+	if (!piSdkRuntimePromise) {
+		piSdkRuntimePromise = (async () => {
+			const packageRoot = findProjectedPackageRoot(PI_SDK_PACKAGE);
+			const agentCoreRoot = findProjectedPackageRoot("@mariozechner/pi-agent-core");
+			const [
+				agentCoreModule,
+				authStorageModule,
+				configModule,
+				defaultsModule,
+				messagesModule,
+				modelRegistryModule,
+				sessionManagerModule,
+				settingsManagerModule,
+				toolsModule,
+			] =
+				await Promise.all([
+					import(`${agentCoreRoot}/dist/index.js`),
+					import(`${packageRoot}/dist/core/auth-storage.js`),
+					import(`${packageRoot}/dist/config.js`),
+					import(`${packageRoot}/dist/core/defaults.js`),
+					import(`${packageRoot}/dist/core/messages.js`),
+					import(`${packageRoot}/dist/core/model-registry.js`),
+					import(`${packageRoot}/dist/core/session-manager.js`),
+					import(`${packageRoot}/dist/core/settings-manager.js`),
+					import(`${packageRoot}/dist/core/tools/index.js`),
+				]);
+
+			return {
+				Agent: agentCoreModule.Agent as PiAgentCoreLike,
+				AuthStorage: authStorageModule.AuthStorage as PiSdkRuntime["AuthStorage"],
+				DEFAULT_THINKING_LEVEL:
+					defaultsModule.DEFAULT_THINKING_LEVEL as string,
+				ModelRegistry:
+					modelRegistryModule.ModelRegistry as PiSdkRuntime["ModelRegistry"],
+				SettingsManager:
+					settingsManagerModule.SettingsManager as PiSdkRuntime["SettingsManager"],
+				SessionManager: sessionManagerModule.SessionManager as SessionManagerLike,
+				convertToLlm:
+					messagesModule.convertToLlm as PiSdkRuntime["convertToLlm"],
+				getAgentDir: configModule.getAgentDir as PiSdkRuntime["getAgentDir"],
+				getDocsPath: configModule.getDocsPath as PiSdkRuntime["getDocsPath"],
+				createAllTools:
+					toolsModule.createAllTools as PiSdkRuntime["createAllTools"],
+			};
+		})();
+	}
+
+	return piSdkRuntimePromise;
+}
+
+async function createAgentSession(options: {
+	cwd: string;
+	sessionManager: unknown;
+	resourceLoader: MinimalResourceLoaderLike;
+}): Promise<{ session: PiSessionLike; modelFallbackMessage?: string }> {
+	const {
+		Agent,
+		AuthStorage,
+		DEFAULT_THINKING_LEVEL,
+		ModelRegistry,
+		SettingsManager,
+		convertToLlm,
+		getAgentDir,
+		getDocsPath,
+		createAllTools,
+	} = await loadPiSdkRuntime();
+
+	const cwd = options.cwd;
+	const agentDir = getAgentDir();
+	const authPath = join(agentDir, "auth.json");
+	const modelsPath = join(agentDir, "models.json");
+	const authStorage = AuthStorage.create(authPath);
+	const modelRegistry = new ModelRegistry(authStorage, modelsPath);
+	const settingsManager = SettingsManager.create(cwd, agentDir);
+	const sessionManager = options.sessionManager as SessionManagerInstanceLike;
+	const resourceLoader = options.resourceLoader;
+	const existingSession = sessionManager.buildSessionContext();
+	const hasExistingSession = existingSession.messages.length > 0;
+	const hasThinkingEntry = sessionManager
+		.getBranch()
+		.some((entry) => entry.type === "thinking_level_change");
+
+	let model: ModelLike | undefined;
+	let modelFallbackMessage: string | undefined;
+	if (!model && hasExistingSession && existingSession.model) {
+		const restoredModel = modelRegistry.find(
+			existingSession.model.provider,
+			existingSession.model.modelId,
+		);
+		if (restoredModel && (await modelRegistry.getApiKey(restoredModel))) {
+			model = restoredModel;
+		}
+		if (!model) {
+			modelFallbackMessage =
+				`Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
+		}
+	}
+
+	if (!model) {
+		const defaultProvider = settingsManager.getDefaultProvider();
+		const defaultModelId = settingsManager.getDefaultModel();
+		if (defaultProvider && defaultModelId) {
+			model = modelRegistry.find(defaultProvider, defaultModelId);
+		}
+		if (!model) {
+			const availableModels = await modelRegistry.getAvailable();
+			model = availableModels[0];
+		}
+		if (!model) {
+			modelFallbackMessage =
+				`No models available. Use /login or set an API key environment variable. See ${join(getDocsPath(), "providers.md")}. Then use /model to select a model.`;
+		} else if (modelFallbackMessage) {
+			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
+		}
+	}
+
+	let thinkingLevel = hasExistingSession
+		? hasThinkingEntry
+			? existingSession.thinkingLevel
+			: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL)
+		: undefined;
+	if (thinkingLevel === undefined) {
+		thinkingLevel =
+			settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
+	}
+	if (!model?.reasoning) {
+		thinkingLevel = "off";
+	}
+
+	const convertToLlmWithBlockImages = (messages: unknown[]) => {
+		const converted = convertToLlm(messages) as Array<{
+			role?: string;
+			content?: Array<{ type: string; text?: string }>;
+		}>;
+		if (!settingsManager.getBlockImages()) {
+			return converted;
+		}
+		return converted.map((message) => {
+			if (
+				message.role === "user" ||
+				message.role === "toolResult"
+			) {
+				const content = message.content;
+				if (Array.isArray(content)) {
+					const hasImages = content.some((part) => part.type === "image");
+					if (hasImages) {
+						const filteredContent = content
+							.map((part) =>
+								part.type === "image"
+									? { type: "text", text: "Image reading is disabled." }
+									: part,
+							)
+							.filter(
+								(part, index, allParts) =>
+									!(
+										part.type === "text" &&
+										part.text === "Image reading is disabled." &&
+										index > 0 &&
+										allParts[index - 1]?.type === "text" &&
+										allParts[index - 1]?.text ===
+											"Image reading is disabled."
+									),
+							);
+						return {
+							...message,
+							content: filteredContent,
+						};
+					}
+				}
+			}
+			return message;
+		});
+	};
+
+	const agent = new Agent({
+		initialState: {
+			systemPrompt: "",
+			model,
+			thinkingLevel,
+			tools: [],
+		},
+		convertToLlm: convertToLlmWithBlockImages,
+		onPayload: async (payload) => payload,
+		sessionId: sessionManager.getSessionId(),
+		transformContext: async (messages) => messages,
+		steeringMode: settingsManager.getSteeringMode(),
+		followUpMode: settingsManager.getFollowUpMode(),
+		transport: settingsManager.getTransport(),
+		thinkingBudgets: settingsManager.getThinkingBudgets(),
+		maxRetryDelayMs: settingsManager.getRetrySettings().maxDelayMs,
+		getApiKey: async (provider) => {
+			const resolvedProvider = provider || agent.state.model?.provider;
+			if (!resolvedProvider) {
+				throw new Error("No model selected");
+			}
+			const key = await modelRegistry.getApiKeyForProvider(resolvedProvider);
+			if (!key) {
+				const currentModel = agent.state.model;
+				const isOAuth = currentModel && modelRegistry.isUsingOAuth(currentModel);
+				if (isOAuth) {
+					throw new Error(
+						`Authentication failed for "${resolvedProvider}". Credentials may have expired or network is unavailable. Run '/login ${resolvedProvider}' to re-authenticate.`,
+					);
+				}
+				throw new Error(
+					`No API key found for "${resolvedProvider}". Set an API key environment variable or run '/login ${resolvedProvider}'.`,
+				);
+			}
+			return key;
+		},
+	});
+
+	if (hasExistingSession) {
+		agent.replaceMessages(existingSession.messages);
+		if (!hasThinkingEntry) {
+			sessionManager.appendThinkingLevelChange(thinkingLevel);
+		}
+	} else {
+		if (model) {
+			sessionManager.appendModelChange(model.provider, model.id);
+		}
+		sessionManager.appendThinkingLevelChange(thinkingLevel);
+	}
+
+	const session = new MinimalPiSession(
+		agent,
+		sessionManager,
+		settingsManager,
+		resourceLoader,
+		{ createAllTools },
+		cwd,
+		appendSystemPrompt,
+	);
+
+	return {
+		session,
+		modelFallbackMessage,
+	};
+}
 
 // ── CLI argument parsing ────────────────────────────────────────────
 
@@ -53,51 +617,11 @@ for (let i = 0; i < argv.length; i++) {
 	}
 }
 
-// ── Extension discovery ────────────────────────────────────────────
-// Manually discover and load Pi extensions from standard directories.
-// Pi's built-in jiti loader requires performance.now() which the VM's
-// V8 runtime doesn't provide, so we load extensions ourselves via
-// require() and pass them as extensionFactories.
-
-function discoverExtensionFactories(cwd: string): ExtensionFactory[] {
-	const factories: ExtensionFactory[] = [];
-	const dirs = [
-		join(cwd, ".pi", "extensions"),
-		join(homedir(), ".pi", "agent", "extensions"),
-	];
-
-	for (const dir of dirs) {
-		if (!existsSync(dir)) continue;
-		let entries: string[];
-		try {
-			entries = readdirSync(dir);
-		} catch {
-			continue;
-		}
-		for (const name of entries) {
-			if (!name.endsWith(".js") && !name.endsWith(".ts")) continue;
-			const filePath = join(dir, name);
-			try {
-				// biome-ignore lint/security/noGlobalEval: needed to load extensions without jiti
-				const mod = eval(`require(${JSON.stringify(filePath)})`);
-				const factory = mod?.default ?? mod;
-				if (typeof factory === "function") {
-					factories.push(factory);
-				}
-			} catch {
-				// Skip extensions that fail to load
-			}
-		}
-	}
-
-	return factories;
-}
-
 // ── Agent implementation ────────────────────────────────────────────
 
 class PiSdkAgent implements Agent {
 	private conn: AgentSideConnection;
-	private session: AgentSession | null = null;
+	private session: PiSessionLike | null = null;
 	private sessionId = "";
 	private cwd = "/home/user";
 	private cancelRequested = false;
@@ -136,23 +660,13 @@ class PiSdkAgent implements Agent {
 		params: NewSessionRequest,
 	): Promise<NewSessionResponse> {
 		this.cwd = params.cwd;
-
-		// Discover extensions from standard Pi directories and load them
-		// manually (bypasses jiti which requires performance.now).
-		const extensionFactories = discoverExtensionFactories(params.cwd);
-
-		const { DefaultResourceLoader } = await import(
-			"@mariozechner/pi-coding-agent"
-		);
-		const resourceLoader = new DefaultResourceLoader({
-			cwd: params.cwd,
+		const { SessionManager } = await loadPiSdkRuntime();
+		const resourceLoader = new MinimalResourceLoader({
 			...(appendSystemPrompt ? { appendSystemPrompt } : {}),
-			noExtensions: true, // skip jiti-based discovery
-			extensionFactories,
 		});
 		await resourceLoader.reload();
 
-		const { session, extensionsResult } = await createAgentSession({
+		const { session } = await createAgentSession({
 			cwd: params.cwd,
 			sessionManager: SessionManager.inMemory(),
 			resourceLoader,
@@ -225,7 +739,7 @@ class PiSdkAgent implements Agent {
 		if (!this.session) return;
 
 		this.session.setThinkingLevel(
-			params.modeId as Parameters<AgentSession["setThinkingLevel"]>[0],
+			params.modeId as Parameters<PiSessionLike["setThinkingLevel"]>[0],
 		);
 
 		await this.emit({

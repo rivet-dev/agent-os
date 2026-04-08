@@ -31,7 +31,11 @@ interface CronJobState {
  * cannot determine a next run.
  */
 function computeNextTime(schedule: string): Date | undefined {
-	if (schedule.includes(" ") && !schedule.includes("T") && !schedule.includes("Z")) {
+	if (
+		schedule.includes(" ") &&
+		!schedule.includes("T") &&
+		!schedule.includes("Z")
+	) {
 		const cron = new Cron(schedule);
 		return cron.nextRun() ?? undefined;
 	}

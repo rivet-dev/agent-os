@@ -1,19 +1,17 @@
 import type {
-	Permissions,
-	VirtualFileSystem,
-} from "./runtime.js";
-import type {
 	NetworkAdapter,
+	Permissions,
 	SystemDriver,
+	VirtualFileSystem,
 } from "./runtime.js";
 import {
 	createCommandExecutorStub,
+	createEnosysError,
 	createFsStub,
+	createInMemoryFileSystem,
 	createNetworkStub,
 	wrapFileSystem,
 	wrapNetworkAdapter,
-	createInMemoryFileSystem,
-	createEnosysError,
 } from "./runtime.js";
 
 const S_IFREG = 0o100000;
@@ -72,7 +70,10 @@ export class OpfsFileSystem implements VirtualFileSystem {
 		this.rootPromise = getRootHandle();
 	}
 
-	private async getDirHandle(path: string, create = false): Promise<FileSystemDirectoryHandle> {
+	private async getDirHandle(
+		path: string,
+		create = false,
+	): Promise<FileSystemDirectoryHandle> {
 		const root = await this.rootPromise;
 		const parts = splitPath(path);
 		let current = root;
@@ -284,10 +285,16 @@ export class OpfsFileSystem implements VirtualFileSystem {
 	async realpath(path: string): Promise<string> {
 		const normalized = normalizePath(path);
 		if (await this.exists(normalized)) return normalized;
-		throw new Error(`ENOENT: no such file or directory, realpath '${normalized}'`);
+		throw new Error(
+			`ENOENT: no such file or directory, realpath '${normalized}'`,
+		);
 	}
 
-	async pread(path: string, offset: number, length: number): Promise<Uint8Array> {
+	async pread(
+		path: string,
+		offset: number,
+		length: number,
+	): Promise<Uint8Array> {
 		const data = await this.readFile(path);
 		return data.slice(offset, offset + length);
 	}
@@ -310,7 +317,10 @@ export interface BrowserDriverOptions {
 
 /** Create an OPFS-backed filesystem, falling back to in-memory if OPFS is unavailable. */
 export async function createOpfsFileSystem(): Promise<VirtualFileSystem> {
-	if (!("storage" in navigator) || typeof navigator.storage.getDirectory !== "function") {
+	if (
+		!("storage" in navigator) ||
+		typeof navigator.storage.getDirectory !== "function"
+	) {
 		return createInMemoryFileSystem();
 	}
 	return new OpfsFileSystem();
@@ -431,8 +441,4 @@ export async function createBrowserDriver(
 	return systemDriver;
 }
 
-export {
-	createCommandExecutorStub,
-	createFsStub,
-	createNetworkStub,
-};
+export { createCommandExecutorStub, createFsStub, createNetworkStub };

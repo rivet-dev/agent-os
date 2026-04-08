@@ -3,7 +3,8 @@
 use agent_os_execution::{
     CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
     JavascriptExecutionEngine, PythonExecutionEngine, StartJavascriptExecutionRequest,
-    StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecutionEngine, WasmPermissionTier,
+    StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecutionEngine,
+    WasmPermissionTier,
 };
 use std::collections::BTreeMap;
 use std::fs;

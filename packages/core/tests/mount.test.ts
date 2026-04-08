@@ -94,7 +94,9 @@ describe("mount integration", () => {
 
 	test("readOnly mount blocks writeFile with EROFS", async () => {
 		vm = await AgentOs.create({
-			mounts: [{ path: "/ro", driver: createInMemoryFileSystem(), readOnly: true }],
+			mounts: [
+				{ path: "/ro", driver: createInMemoryFileSystem(), readOnly: true },
+			],
 		});
 		await expect(
 			vm.writeFile("/ro/blocked.txt", "should fail"),

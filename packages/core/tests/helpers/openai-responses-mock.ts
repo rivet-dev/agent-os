@@ -1,4 +1,8 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+	createServer,
+	type IncomingMessage,
+	type ServerResponse,
+} from "node:http";
 
 export type ResponsesRequestBody = Record<string, unknown>;
 
@@ -16,7 +20,9 @@ export type RunningResponsesMock = {
 	stop: () => Promise<void>;
 };
 
-async function readJsonBody(req: IncomingMessage): Promise<ResponsesRequestBody> {
+async function readJsonBody(
+	req: IncomingMessage,
+): Promise<ResponsesRequestBody> {
 	const chunks: Buffer[] = [];
 	for await (const chunk of req) {
 		chunks.push(Buffer.from(chunk));

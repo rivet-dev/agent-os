@@ -6,13 +6,13 @@ import * as path from "node:path";
 import * as posixPath from "node:path/posix";
 import { fileURLToPath } from "node:url";
 import {
-	NativeSidecarKernelProxy,
-	type LocalCompatMount,
-	NativeSidecarProcessClient,
-	serializeMountConfigForSidecar,
 	type AuthenticatedSession,
 	type CreatedVm,
+	type LocalCompatMount,
+	NativeSidecarKernelProxy,
+	NativeSidecarProcessClient,
 	type RootFilesystemEntry,
+	serializeMountConfigForSidecar,
 } from "./sidecar/rpc-client.js";
 
 export const AF_INET = 2;
@@ -1650,9 +1650,7 @@ function discoverCommands(commandDirs: string[]): string[] {
 				if (isWasmBinaryFile(realPath)) {
 					commands.add(entry);
 				}
-			} catch {
-				continue;
-			}
+			} catch {}
 		}
 	}
 	return [...commands];
@@ -2215,6 +2213,29 @@ class NativeKernel implements Kernel {
 				event.payload.state === "ready",
 			10_000,
 		);
+		if (this.pendingLocalMounts.length > 0) {
+			await client.configureVm(session, vm, {
+				mounts: this.pendingLocalMounts.map((mount) =>
+					mount.fs instanceof NodeFileSystem
+						? serializeMountConfigForSidecar({
+								path: mount.path,
+								readOnly: mount.readOnly,
+								plugin: {
+									id: "host_dir",
+									config: {
+										hostPath: mount.fs.rootPath,
+										readOnly: mount.readOnly,
+									},
+								},
+							})
+						: serializeMountConfigForSidecar({
+								path: mount.path,
+								driver: mount.fs,
+								readOnly: mount.readOnly,
+							}),
+				),
+			});
+		}
 
 		const proxy = new NativeSidecarKernelProxy({
 			client,

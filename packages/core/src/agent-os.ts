@@ -48,7 +48,6 @@ import {
 	type VirtualStat,
 } from "./runtime-compat.js";
 
-export type { ConnectTerminalOptions } from "./runtime-compat.js";
 export type {
 	AgentCapabilities,
 	AgentInfo,
@@ -69,6 +68,7 @@ export type {
 	JsonRpcRequest,
 	JsonRpcResponse,
 } from "./json-rpc.js";
+export type { ConnectTerminalOptions } from "./runtime-compat.js";
 
 /** Process tree node: extends kernel ProcessInfo with child references. */
 export interface ProcessTreeNode extends KernelProcessInfo {
@@ -140,13 +140,16 @@ import {
 } from "./filesystem-snapshot.js";
 import { createHostDirBackend } from "./host-dir-mount.js";
 import {
+	type LocalCompatMount,
+	serializeMountConfigForSidecar,
+} from "./js-bridge.js";
+import {
 	createSnapshotExport,
 	type LayerStore,
 	type OverlayFilesystemMode,
 	type RootSnapshotExport,
 	type SnapshotLayerHandle,
 } from "./layers.js";
-import { type LocalCompatMount, serializeMountConfigForSidecar } from "./js-bridge.js";
 import {
 	type CommandPackageMetadata,
 	processSoftware,
@@ -154,6 +157,7 @@ import {
 	type SoftwareRoot,
 } from "./packages.js";
 import { createNodeHostNetworkAdapter } from "./runtime-compat.js";
+import { serializePermissionsForSidecar } from "./sidecar/permissions.js";
 import {
 	type AgentOsSidecarClient,
 	type AgentOsSidecarPlacement,
@@ -162,19 +166,18 @@ import {
 	type AgentOsSidecarTransport,
 	type AgentOsSidecarVmBootstrap,
 	type AgentOsSidecarVmHandle,
-	NativeSidecarProcessClient,
-	NativeSidecarKernelProxy,
-	AuthenticatedSession,
-	CreatedVm,
-	RootFilesystemEntry,
-	SidecarRegisteredToolDefinition,
-	SidecarRequestFrame,
-	SidecarResponsePayload,
-	SidecarSessionState,
+	type AuthenticatedSession,
+	type CreatedVm,
 	createAgentOsSidecarClient,
+	NativeSidecarKernelProxy,
+	NativeSidecarProcessClient,
+	type RootFilesystemEntry,
+	type SidecarRegisteredToolDefinition,
+	type SidecarRequestFrame,
+	type SidecarResponsePayload,
+	type SidecarSessionState,
 	serializeRootFilesystemForSidecar,
 } from "./sidecar/rpc-client.js";
-import { serializePermissionsForSidecar } from "./sidecar/permissions.js";
 
 const OS_INSTRUCTIONS_FIXTURE = fileURLToPath(
 	new URL("../fixtures/AGENTOS_SYSTEM_PROMPT.md", import.meta.url),
@@ -1743,7 +1746,7 @@ export class AgentOs {
 		};
 		this._processes.set(proc.pid, entry);
 
-		proc.wait().then((code) => {
+		void proc.wait().then((code) => {
 			for (const h of exitHandlers) h(code);
 		});
 
@@ -2489,6 +2492,7 @@ export class AgentOs {
 				params,
 			},
 		);
+		await this._hydrateSessionState(session).catch(() => {});
 		if (!response.error) {
 			if (
 				method === "session/set_mode" &&

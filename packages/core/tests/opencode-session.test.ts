@@ -1,9 +1,9 @@
 import { resolve } from "node:path";
 import type { Fixture, ToolCall } from "@copilotkit/llmock";
-import { describe, expect, test } from "vitest";
 import opencode from "@rivet-dev/agent-os-opencode";
-import { AgentOs } from "../src/agent-os.js";
+import { describe, expect, test } from "vitest";
 import type { AgentCapabilities, AgentInfo } from "../src/agent-os.js";
+import { AgentOs } from "../src/agent-os.js";
 import {
 	createAnthropicFixture,
 	DEFAULT_TEXT_FIXTURE,
@@ -15,7 +15,10 @@ import {
 	createVmWorkspace,
 	readVmText,
 } from "./helpers/opencode-helper.js";
-import { REGISTRY_SOFTWARE, registrySkipReason } from "./helpers/registry-commands.js";
+import {
+	REGISTRY_SOFTWARE,
+	registrySkipReason,
+} from "./helpers/registry-commands.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 
@@ -250,9 +253,7 @@ describe.skipIf(registrySkipReason)(
 					currentValue: "anthropic/claude-sonnet-4-20250514",
 					readOnly: true,
 				});
-				expect(modelOption?.description).toContain(
-					"before createSession()",
-				);
+				expect(modelOption?.description).toContain("before createSession()");
 
 				const setModelResponse = await vm.setSessionModel(
 					sessionId,
@@ -275,10 +276,7 @@ describe.skipIf(registrySkipReason)(
 					mock
 						.getRequests()
 						.some((request) =>
-							hasUserMessageContaining(
-								request,
-								"Plan Mode - System Reminder",
-							),
+							hasUserMessageContaining(request, "Plan Mode - System Reminder"),
 						),
 				).toBe(true);
 
@@ -316,7 +314,9 @@ describe.skipIf(registrySkipReason)(
 			const { mock, url } = await startLlmock([
 				{
 					match: { predicate: () => true },
-					response: { content: "This response should outlive the cancel request." },
+					response: {
+						content: "This response should outlive the cancel request.",
+					},
 					latency: 1_500,
 				},
 			]);
@@ -412,9 +412,9 @@ describe.skipIf(registrySkipReason)(
 
 				vm.onPermissionRequest(sessionId, (request) => {
 					permissionIds.push(request.permissionId);
-					expect(
-						(request.params._acpMethod as string | undefined) ?? "",
-					).toBe("session/request_permission");
+					expect((request.params._acpMethod as string | undefined) ?? "").toBe(
+						"session/request_permission",
+					);
 					expect(
 						(
 							request.params.options as Array<{ optionId?: string }> | undefined
@@ -434,9 +434,11 @@ describe.skipIf(registrySkipReason)(
 					"perm-ok",
 				);
 				expect(
-					vm.getSessionEvents(sessionId).some(
-						(entry) => entry.notification.method === "request/permission",
-					),
+					vm
+						.getSessionEvents(sessionId)
+						.some(
+							(entry) => entry.notification.method === "request/permission",
+						),
 				).toBe(true);
 			} finally {
 				if (sessionId) {
@@ -562,7 +564,10 @@ describe.skipIf(registrySkipReason)(
 				expect(vm.getSessionModes(sessionId)?.currentModeId).toBe("plan");
 
 				const planPrompt = "Plan once and do not run tools.";
-				const { response: planPromptResponse } = await vm.prompt(sessionId, planPrompt);
+				const { response: planPromptResponse } = await vm.prompt(
+					sessionId,
+					planPrompt,
+				);
 				expect(planPromptResponse.error).toBeUndefined();
 
 				const rawBuildResponse = await vm.rawSend(
@@ -576,7 +581,10 @@ describe.skipIf(registrySkipReason)(
 				expect(vm.getSessionModes(sessionId)?.currentModeId).toBe("build");
 
 				const buildPrompt = "Answer normally after returning to build mode.";
-				const { response: buildPromptResponse } = await vm.prompt(sessionId, buildPrompt);
+				const { response: buildPromptResponse } = await vm.prompt(
+					sessionId,
+					buildPrompt,
+				);
 				expect(buildPromptResponse.error).toBeUndefined();
 
 				const modeEvents = vm
@@ -589,16 +597,12 @@ describe.skipIf(registrySkipReason)(
 					);
 				expect(
 					modeEvents.some((event) =>
-						JSON.stringify(event.params).includes(
-							'"currentModeId":"plan"',
-						),
+						JSON.stringify(event.params).includes('"currentModeId":"plan"'),
 					),
 				).toBe(true);
 				expect(
 					modeEvents.some((event) =>
-						JSON.stringify(event.params).includes(
-							'"currentModeId":"build"',
-						),
+						JSON.stringify(event.params).includes('"currentModeId":"build"'),
 					),
 				).toBe(true);
 				expect(
@@ -618,10 +622,7 @@ describe.skipIf(registrySkipReason)(
 					.find((request) => hasUserMessageContaining(request, planPrompt));
 				expect(planRequest).toBeDefined();
 				expect(
-					hasUserMessageContaining(
-						planRequest,
-						"Plan Mode - System Reminder",
-					),
+					hasUserMessageContaining(planRequest, "Plan Mode - System Reminder"),
 				).toBe(true);
 
 				const buildRequest = mock
@@ -629,10 +630,7 @@ describe.skipIf(registrySkipReason)(
 					.find((request) => hasUserMessageContaining(request, buildPrompt));
 				expect(buildRequest).toBeDefined();
 				expect(
-					hasUserMessageContaining(
-						buildRequest,
-						"Plan Mode - System Reminder",
-					),
+					hasUserMessageContaining(buildRequest, "Plan Mode - System Reminder"),
 				).toBe(false);
 			} finally {
 				if (sessionId) {

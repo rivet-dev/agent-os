@@ -429,9 +429,22 @@ pub(crate) fn exception_to_result(
     scope: &mut v8::HandleScope,
     exception: v8::Local<v8::Value>,
 ) -> (i32, ExecutionError) {
-    let exit_code = extract_process_exit_code(scope, exception).unwrap_or(1);
     let error = extract_error_info(scope, exception);
+    let exit_code = extract_process_exit_code(scope, exception)
+        .or_else(|| parse_process_exit_code_from_error(&error))
+        .unwrap_or(1);
     (exit_code, error)
+}
+
+fn parse_process_exit_code_from_error(error: &ExecutionError) -> Option<i32> {
+    if error.error_type != "ProcessExitError" && !error.message.starts_with("process.exit(") {
+        return None;
+    }
+    let code = error
+        .message
+        .strip_prefix("process.exit(")?
+        .strip_suffix(')')?;
+    code.parse::<i32>().ok()
 }
 
 /// Extract structured error information from a V8 exception value.
@@ -5230,26 +5243,51 @@ fn is_likely_cjs(source: &str, resolved_path: &str) -> bool {
     if normalized_path.ends_with(".cjs") || normalized_path.ends_with(".cts") {
         return true;
     }
-    // If it has ESM syntax, it's not CJS
-    if source.contains("export ") || source.contains("import ") {
-        // Check for actual ESM: `export default`, `export {`, `export const`, `import {`, `import "`, `import(`
-        let has_esm_export = source.contains("export default")
-            || source.contains("export {")
-            || source.contains("export const")
-            || source.contains("export function")
-            || source.contains("export class")
-            || source.contains("export var")
-            || source.contains("export let");
-        let has_esm_import = source.contains("import {")
-            || source.contains("import \"")
-            || source.contains("import '")
-            || source.contains("import *");
-        if has_esm_export || has_esm_import {
-            return false;
-        }
+    if has_probable_esm_syntax(source) {
+        return false;
     }
     // CJS indicators
     source.contains("module.exports") || source.contains("exports.") || source.contains("require(")
+}
+
+fn has_probable_esm_syntax(source: &str) -> bool {
+    let mut in_block_comment = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+
+        if in_block_comment {
+            if trimmed.contains("*/") {
+                in_block_comment = false;
+            }
+            continue;
+        }
+
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('*') {
+            continue;
+        }
+
+        if trimmed.starts_with("/*") {
+            if !trimmed.contains("*/") {
+                in_block_comment = true;
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("export default")
+            || trimmed.starts_with("export {")
+            || trimmed.starts_with("export const")
+            || trimmed.starts_with("export function")
+            || trimmed.starts_with("export class")
+            || trimmed.starts_with("export var")
+            || trimmed.starts_with("export let")
+            || trimmed.starts_with("import ")
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Extract named export names from CJS source by scanning for `exports.X =` and
@@ -5261,11 +5299,13 @@ fn extract_cjs_export_names(source: &str) -> Vec<String> {
     // Pattern 1: exports.NAME = ...
     for line in source.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("exports.") {
-            if let Some(eq_pos) = rest.find('=') {
-                let name = rest[..eq_pos].trim();
-                if is_valid_js_ident(name) && name != "default" {
-                    names.insert(name.to_string());
+        for prefix in ["exports.", "module.exports."] {
+            if let Some(rest) = trimmed.strip_prefix(prefix) {
+                if let Some(eq_pos) = rest.find('=') {
+                    let name = rest[..eq_pos].trim();
+                    if is_valid_js_ident(name) && name != "default" {
+                        names.insert(name.to_string());
+                    }
                 }
             }
         }
@@ -5290,6 +5330,16 @@ fn extract_cjs_export_names(source: &str) -> Vec<String> {
 
 fn add_esm_runtime_prelude(source: &str) -> String {
     if !source.contains("require(") {
+        return source.to_owned();
+    }
+
+    if source.contains("createRequire(import.meta.url)")
+        || source.contains("createRequire(")
+        || source.contains("const require =")
+        || source.contains("let require =")
+        || source.contains("var require =")
+        || source.contains("function require(")
+    {
         return source.to_owned();
     }
 

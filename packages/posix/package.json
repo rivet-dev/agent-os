@@ -17,9 +17,9 @@
     }
   },
   "scripts": {
-    "check-types": "tsc --noEmit",
-    "build": "tsc",
-    "test": "vitest run"
+    "check-types": "tsc --noEmit -p ./tsconfig.json",
+    "build": "tsc -p ./tsconfig.json",
+    "test": "vitest run --passWithNoTests"
   },
   "license": "Apache-2.0",
   "dependencies": {

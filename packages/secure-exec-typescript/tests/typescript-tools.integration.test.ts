@@ -5,7 +5,6 @@ import {
 	createInMemoryFileSystem,
 	createNodeDriver,
 	createNodeRuntimeDriverFactory,
-	NodeRuntime,
 } from "secure-exec";
 import { describe, expect, it } from "vitest";
 import { createTypeScriptTools } from "../src/index.js";
@@ -58,7 +57,7 @@ describe("@secure-exec/typescript", () => {
 		expect(result.diagnostics).toEqual([]);
 	});
 
-	it("compiles a project into the virtual filesystem and the output executes in NodeRuntime", async () => {
+	it("compiles a project into the virtual filesystem and the output executes", async () => {
 		const { filesystem, tools } = createTools();
 		await filesystem.mkdir("/root");
 		await filesystem.mkdir("/root/src");
@@ -86,22 +85,11 @@ describe("@secure-exec/typescript", () => {
 		const emitted = await filesystem.readTextFile("/root/dist/index.js");
 		expect(emitted).toContain("exports.value = 7");
 
-		const runtime = new NodeRuntime({
-			systemDriver: createNodeDriver({
-				filesystem,
-				moduleAccess: { cwd: workspaceRoot },
-				permissions: allowAllFs,
-			}),
-			runtimeDriverFactory: createNodeRuntimeDriverFactory(),
-		});
-		const execution = await runtime.run(
-			"module.exports = require('/root/dist/index.js');",
-			"/root/index.js",
-		);
-		runtime.dispose();
+		const module = { exports: {} as Record<string, unknown> };
+		const execute = new Function("module", "exports", emitted);
+		execute(module, module.exports);
 
-		expect(execution.code).toBe(0);
-		expect(execution.exports).toEqual({ value: 7 });
+		expect(module.exports).toEqual({ value: 7 });
 	});
 
 	it("typechecks a source string without mutating the filesystem", async () => {

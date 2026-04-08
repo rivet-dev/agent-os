@@ -33,10 +33,7 @@ async fn read_message(
     deserialize_message(&line).expect("decode json-rpc line")
 }
 
-async fn write_raw(
-    writer: &mut tokio::io::WriteHalf<DuplexStream>,
-    line: &str,
-) {
+async fn write_raw(writer: &mut tokio::io::WriteHalf<DuplexStream>, line: &str) {
     writer
         .write_all(line.as_bytes())
         .await
@@ -44,10 +41,7 @@ async fn write_raw(
     writer.flush().await.expect("flush raw line");
 }
 
-async fn write_message(
-    writer: &mut tokio::io::WriteHalf<DuplexStream>,
-    message: &JsonRpcMessage,
-) {
+async fn write_message(writer: &mut tokio::io::WriteHalf<DuplexStream>, message: &JsonRpcMessage) {
     let encoded = agent_os_sidecar::acp::serialize_message(message).expect("encode json-rpc");
     write_raw(writer, &encoded).await;
 }
@@ -183,7 +177,10 @@ async fn client_shims_modern_permission_requests_to_legacy_notifications() {
     let outbound_permission = read_message(&mut reader).await;
     match outbound_permission {
         JsonRpcMessage::Response(response) => {
-            assert_eq!(response.id, JsonRpcId::String(String::from("perm-modern-1")));
+            assert_eq!(
+                response.id,
+                JsonRpcId::String(String::from("perm-modern-1"))
+            );
             assert_eq!(
                 response.result,
                 Some(json!({
@@ -208,8 +205,14 @@ async fn client_shims_modern_permission_requests_to_legacy_notifications() {
     )
     .await;
 
-    let prompt_response = prompt_task.await.expect("prompt task").expect("prompt response");
-    assert_eq!(prompt_response.result, Some(json!({ "status": "complete" })));
+    let prompt_response = prompt_task
+        .await
+        .expect("prompt task")
+        .expect("prompt response");
+    assert_eq!(
+        prompt_response.result,
+        Some(json!({ "status": "complete" }))
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -290,7 +293,10 @@ async fn client_normalizes_opencode_style_permission_option_ids() {
     )
     .await;
 
-    let prompt_response = prompt_task.await.expect("prompt task").expect("prompt response");
+    let prompt_response = prompt_task
+        .await
+        .expect("prompt task")
+        .expect("prompt response");
     assert_eq!(prompt_response.result, Some(json!({ "done": true })));
 }
 
@@ -325,10 +331,15 @@ async fn client_deduplicates_repeated_permission_request_ids() {
     write_message(&mut writer, &permission_request).await;
 
     let notification = recv_notification(&mut notifications).await;
-    assert_eq!(notification.params.expect("permission params")["permissionId"], json!("perm-dup-1"));
-    assert!(tokio::time::timeout(Duration::from_millis(50), notifications.recv())
-        .await
-        .is_err());
+    assert_eq!(
+        notification.params.expect("permission params")["permissionId"],
+        json!("perm-dup-1")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), notifications.recv())
+            .await
+            .is_err()
+    );
 
     client
         .request(
@@ -360,7 +371,10 @@ async fn client_deduplicates_repeated_permission_request_ids() {
     )
     .await;
 
-    let _ = prompt_task.await.expect("prompt task").expect("prompt response");
+    let _ = prompt_task
+        .await
+        .expect("prompt task")
+        .expect("prompt response");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -404,12 +418,18 @@ async fn client_falls_back_to_cancel_notification_when_request_form_is_unsupport
     match fallback {
         JsonRpcMessage::Notification(notification) => {
             assert_eq!(notification.method, "session/cancel");
-            assert_eq!(notification.params, Some(json!({ "sessionId": "session-1" })));
+            assert_eq!(
+                notification.params,
+                Some(json!({ "sessionId": "session-1" }))
+            );
         }
         other => panic!("unexpected fallback frame: {other:?}"),
     }
 
-    let response = cancel_task.await.expect("cancel task").expect("cancel response");
+    let response = cancel_task
+        .await
+        .expect("cancel task")
+        .expect("cancel response");
     assert_eq!(
         response.result,
         Some(json!({
@@ -429,7 +449,11 @@ async fn client_timeout_errors_include_recent_activity() {
 
     let request_task = tokio::spawn({
         let client = client.clone();
-        async move { client.request("session/prompt", Some(json!({ "sessionId": "hang" }))).await }
+        async move {
+            client
+                .request("session/prompt", Some(json!({ "sessionId": "hang" })))
+                .await
+        }
     });
 
     let outbound_request = read_message(&mut reader).await;
@@ -471,7 +495,11 @@ async fn client_waits_for_exit_drain_before_rejecting_pending_requests() {
     let started_at = Instant::now();
     let request_task = tokio::spawn({
         let client = client.clone();
-        async move { client.request("session/prompt", Some(json!({ "sessionId": "exit" }))).await }
+        async move {
+            client
+                .request("session/prompt", Some(json!({ "sessionId": "exit" })))
+                .await
+        }
     });
 
     let outbound_request = read_message(&mut reader).await;

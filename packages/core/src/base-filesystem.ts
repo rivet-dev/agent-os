@@ -1,11 +1,11 @@
 import { readFileSync } from "node:fs";
 import * as posixPath from "node:path/posix";
-import { KernelError, type VirtualFileSystem } from "./runtime-compat.js";
-import { createOverlayBackend } from "./overlay-filesystem.js";
 import {
 	createFilesystemFromEntries,
 	type FilesystemEntry,
 } from "./filesystem-snapshot.js";
+import { createOverlayBackend } from "./overlay-filesystem.js";
+import { KernelError, type VirtualFileSystem } from "./runtime-compat.js";
 
 export interface BaseFilesystemEnvironment {
 	env: Record<string, string>;
@@ -28,7 +28,10 @@ export interface BaseFilesystemSnapshot {
 	};
 }
 
-const SNAPSHOT_URL = new URL("../fixtures/base-filesystem.json", import.meta.url);
+const SNAPSHOT_URL = new URL(
+	"../fixtures/base-filesystem.json",
+	import.meta.url,
+);
 const SUPPRESSED_KERNEL_BOOTSTRAP_DIRS = new Set([
 	"/boot",
 	"/usr/games",
@@ -36,9 +39,7 @@ const SUPPRESSED_KERNEL_BOOTSTRAP_DIRS = new Set([
 	"/usr/libexec",
 	"/usr/man",
 ]);
-const SUPPRESSED_KERNEL_BOOTSTRAP_FILES = new Set([
-	"/usr/bin/env",
-]);
+const SUPPRESSED_KERNEL_BOOTSTRAP_FILES = new Set(["/usr/bin/env"]);
 
 let snapshotCache: BaseFilesystemSnapshot | null = null;
 
@@ -94,9 +95,9 @@ export function createBootstrapAwareFilesystem(
 			}
 			const normalized = normalizePath(path);
 			if (
-				bootstrapActive
-				&& SUPPRESSED_KERNEL_BOOTSTRAP_DIRS.has(normalized)
-				&& !(await rootHasPath(normalized))
+				bootstrapActive &&
+				SUPPRESSED_KERNEL_BOOTSTRAP_DIRS.has(normalized) &&
+				!(await rootHasPath(normalized))
 			) {
 				return;
 			}
@@ -108,34 +109,31 @@ export function createBootstrapAwareFilesystem(
 			options?: { recursive?: boolean },
 		): Promise<void> {
 			if (writesLocked) {
-				if (options?.recursive && await rootHasPath(path)) {
+				if (options?.recursive && (await rootHasPath(path))) {
 					return;
 				}
 				throwReadOnly();
 			}
 			const normalized = normalizePath(path);
 			if (
-				bootstrapActive
-				&& options?.recursive
-				&& SUPPRESSED_KERNEL_BOOTSTRAP_DIRS.has(normalized)
-				&& !(await rootHasPath(normalized))
+				bootstrapActive &&
+				options?.recursive &&
+				SUPPRESSED_KERNEL_BOOTSTRAP_DIRS.has(normalized) &&
+				!(await rootHasPath(normalized))
 			) {
 				return;
 			}
 			return filesystem.mkdir(path, options);
 		},
 
-		async writeFile(
-			path: string,
-			content: string | Uint8Array,
-		): Promise<void> {
+		async writeFile(path: string, content: string | Uint8Array): Promise<void> {
 			if (writesLocked) {
 				throwReadOnly();
 			}
 			const normalized = normalizePath(path);
 			if (
-				bootstrapActive
-				&& SUPPRESSED_KERNEL_BOOTSTRAP_FILES.has(normalized)
+				bootstrapActive &&
+				SUPPRESSED_KERNEL_BOOTSTRAP_FILES.has(normalized)
 			) {
 				return;
 			}

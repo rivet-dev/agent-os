@@ -28,7 +28,10 @@ fn json_rpc_codec_round_trips_all_message_shapes() {
     let encoded_response = serialize_message(&response).expect("encode response");
     let encoded_notification = serialize_message(&notification).expect("encode notification");
 
-    assert_eq!(deserialize_message(encoded_request.trim()), Some(request.clone()));
+    assert_eq!(
+        deserialize_message(encoded_request.trim()),
+        Some(request.clone())
+    );
     assert_eq!(
         deserialize_message(encoded_response.trim()),
         Some(response.clone())

@@ -2,8 +2,8 @@ import { AgentOs } from "@rivet-dev/agent-os";
 
 const os = await AgentOs.create();
 const session = await os.createSession("pi", {
-  mcpServers: [
-    { type: "local", command: "npx", args: ["my-tools-server"] },
-    { type: "remote", url: "https://tools.example.com/mcp" },
-  ]
+	mcpServers: [
+		{ type: "local", command: "npx", args: ["my-tools-server"] },
+		{ type: "remote", url: "https://tools.example.com/mcp" },
+	],
 });

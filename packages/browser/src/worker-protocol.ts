@@ -1,7 +1,7 @@
 import type {
+	ExecResult,
 	OSConfig,
 	ProcessConfig,
-	ExecResult,
 	RunResult,
 	StdioChannel,
 	TimingMitigation,

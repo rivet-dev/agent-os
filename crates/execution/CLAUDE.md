@@ -98,6 +98,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 - When testing import-cache temp-root cleanup, use a dedicated `NodeImportCache::new_in(...)` base dir so the one-time sweep stays isolated to that root.
 - Active JavaScript/Python/WASM executions must hold a `NodeImportCache` cleanup guard until the child exits; otherwise dropping the engine can delete `timing-bootstrap.mjs` and related assets while the host runtime is still importing them.
 - Host-Node compatibility coverage should stay behind the `legacy-js-tests` feature. Default validation for JavaScript execution must target the V8 isolate path and its `javascript_v8.rs` tests.
+- Shared-V8 JavaScript tests should assert `uses_shared_v8_runtime()` and the absence of host guest-node launches, not `child_pid() == 0`; shared isolates still report the host runtime PID so the sidecar can manage lifecycle signals.
 
 ## Guest Path Scrubbing
 

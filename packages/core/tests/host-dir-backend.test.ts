@@ -25,16 +25,24 @@ describe("host_dir native mount integration", () => {
 
 	test("path traversal attempt (../../etc/passwd) is blocked", async () => {
 		vm = await AgentOs.create({
-			mounts: [{ path: "/hostmnt", plugin: createHostDirBackend({ hostPath: tmpDir }) }],
+			mounts: [
+				{
+					path: "/hostmnt",
+					plugin: createHostDirBackend({ hostPath: tmpDir }),
+				},
+			],
 		});
-		await expect(
-			vm.readFile("/hostmnt/../../etc/passwd"),
-		).rejects.toThrow();
+		await expect(vm.readFile("/hostmnt/../../etc/passwd")).rejects.toThrow();
 	});
 
 	test("mounted host directory exposes existing host files", async () => {
 		vm = await AgentOs.create({
-			mounts: [{ path: "/hostmnt", plugin: createHostDirBackend({ hostPath: tmpDir }) }],
+			mounts: [
+				{
+					path: "/hostmnt",
+					plugin: createHostDirBackend({ hostPath: tmpDir }),
+				},
+			],
 		});
 		const content = new TextDecoder().decode(
 			await vm.readFile("/hostmnt/hello.txt"),
@@ -47,7 +55,12 @@ describe("host_dir native mount integration", () => {
 		fs.symlinkSync("/etc", escapePath);
 
 		vm = await AgentOs.create({
-			mounts: [{ path: "/hostmnt", plugin: createHostDirBackend({ hostPath: tmpDir }) }],
+			mounts: [
+				{
+					path: "/hostmnt",
+					plugin: createHostDirBackend({ hostPath: tmpDir }),
+				},
+			],
 		});
 		await expect(vm.readFile("/hostmnt/escape/hostname")).rejects.toThrow(
 			"EACCES",
@@ -56,7 +69,12 @@ describe("host_dir native mount integration", () => {
 
 	test("write blocked when helper defaults to readOnly", async () => {
 		vm = await AgentOs.create({
-			mounts: [{ path: "/hostmnt", plugin: createHostDirBackend({ hostPath: tmpDir }) }],
+			mounts: [
+				{
+					path: "/hostmnt",
+					plugin: createHostDirBackend({ hostPath: tmpDir }),
+				},
+			],
 		});
 		await expect(
 			vm.writeFile("/hostmnt/new.txt", "should fail"),
@@ -75,10 +93,7 @@ describe("host_dir native mount integration", () => {
 		await vm.writeFile("/hostmnt/writable.txt", "written from VM");
 
 		// Verify on host
-		const content = fs.readFileSync(
-			path.join(tmpDir, "writable.txt"),
-			"utf-8",
-		);
+		const content = fs.readFileSync(path.join(tmpDir, "writable.txt"), "utf-8");
 		expect(content).toBe("written from VM");
 	});
 

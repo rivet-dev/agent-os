@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TimerScheduleDriver } from "../src/cron/timer-driver.js";
 import type { ScheduleEntry } from "../src/cron/schedule-driver.js";
+import { TimerScheduleDriver } from "../src/cron/timer-driver.js";
 
 describe("TimerScheduleDriver", () => {
 	let driver: TimerScheduleDriver;
@@ -84,8 +84,16 @@ describe("TimerScheduleDriver", () => {
 	it("dispose clears all pending timers", async () => {
 		const callback1 = vi.fn();
 		const callback2 = vi.fn();
-		driver.schedule({ id: "job-5a", schedule: "* * * * *", callback: callback1 });
-		driver.schedule({ id: "job-5b", schedule: "* * * * *", callback: callback2 });
+		driver.schedule({
+			id: "job-5a",
+			schedule: "* * * * *",
+			callback: callback1,
+		});
+		driver.schedule({
+			id: "job-5b",
+			schedule: "* * * * *",
+			callback: callback2,
+		});
 
 		driver.dispose();
 
@@ -117,7 +125,11 @@ describe("TimerScheduleDriver", () => {
 		const callback2 = vi.fn();
 
 		// Every minute
-		driver.schedule({ id: "job-7a", schedule: "* * * * *", callback: callback1 });
+		driver.schedule({
+			id: "job-7a",
+			schedule: "* * * * *",
+			callback: callback1,
+		});
 		// 30 seconds from now
 		driver.schedule({
 			id: "job-7b",

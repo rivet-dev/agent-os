@@ -43,10 +43,14 @@ describe("tool reference registration", () => {
 			._toolReference;
 
 		expect(toolReference).toContain("## Available Host Tools");
-		expect(toolReference).toContain("Run `agentos list-tools` to see all available tools.");
+		expect(toolReference).toContain(
+			"Run `agentos list-tools` to see all available tools.",
+		);
 		expect(toolReference).toContain("### math");
 		expect(toolReference).toContain("Math utilities");
-		expect(toolReference).toContain("`agentos-math add --a <number> --b <number>`");
+		expect(toolReference).toContain(
+			"`agentos-math add --a <number> --b <number>`",
+		);
 		expect(toolReference).toContain("Add 1 and 2");
 	});
 

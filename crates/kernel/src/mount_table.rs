@@ -1,3 +1,4 @@
+use crate::resource_accounting::FileSystemUsage;
 use crate::vfs::{VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat};
 use std::any::Any;
 use std::collections::BTreeSet;
@@ -589,6 +590,15 @@ impl MountTable {
             .map(MountedVirtualFileSystem::inner_mut)
     }
 
+    pub fn root_usage(&mut self) -> VfsResult<FileSystemUsage> {
+        let root = self
+            .mounts
+            .iter_mut()
+            .find(|mount| mount.path == "/")
+            .ok_or_else(|| VfsError::new("ENOENT", "missing root mount"))?;
+        measure_mounted_filesystem_usage(root.filesystem.as_mut(), "/", &mut BTreeSet::new())
+    }
+
     fn resolve_index(&self, full_path: &str) -> VfsResult<(usize, String)> {
         let normalized = normalize_path(full_path);
         for (index, mount) in self.mounts.iter().enumerate() {
@@ -626,6 +636,43 @@ impl MountTable {
         }
         basenames.into_iter().collect()
     }
+}
+
+fn measure_mounted_filesystem_usage(
+    filesystem: &mut dyn MountedFileSystem,
+    path: &str,
+    visited: &mut BTreeSet<u64>,
+) -> VfsResult<FileSystemUsage> {
+    let stat = filesystem.lstat(path)?;
+    let mut usage = FileSystemUsage::default();
+
+    if visited.insert(stat.ino) {
+        usage.inode_count += 1;
+        if !stat.is_directory {
+            usage.total_bytes = usage.total_bytes.saturating_add(stat.size);
+        }
+    }
+
+    if !stat.is_directory || stat.is_symbolic_link {
+        return Ok(usage);
+    }
+
+    for entry in filesystem.read_dir_with_types(path)? {
+        if matches!(entry.name.as_str(), "." | "..") {
+            continue;
+        }
+
+        let child_path = if path == "/" {
+            format!("/{}", entry.name)
+        } else {
+            format!("{path}/{}", entry.name)
+        };
+        let child_usage = measure_mounted_filesystem_usage(filesystem, &child_path, visited)?;
+        usage.total_bytes = usage.total_bytes.saturating_add(child_usage.total_bytes);
+        usage.inode_count = usage.inode_count.saturating_add(child_usage.inode_count);
+    }
+
+    Ok(usage)
 }
 
 impl Drop for MountTable {

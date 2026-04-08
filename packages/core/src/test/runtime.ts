@@ -5,6 +5,15 @@
  * while the public SDK removes the raw vm.kernel escape hatch.
  */
 
+export {
+	type AgentOsRuntimeAdmin,
+	getAgentOsKernel,
+	getAgentOsRuntimeAdmin,
+} from "../agent-os.js";
+export type {
+	PermissionTier,
+	WasmVmRuntimeOptions,
+} from "../runtime.js";
 export type {
 	DriverProcess,
 	Kernel,
@@ -19,27 +28,14 @@ export {
 	allowAll,
 	createInMemoryFileSystem,
 	createKernel,
+	createNodeHostNetworkAdapter,
+	createNodeRuntime,
+	createWasmVmRuntime,
+	DEFAULT_FIRST_PARTY_TIERS,
+	NodeFileSystem,
 	SIGTERM,
 	SOCK_DGRAM,
 	SOCK_STREAM,
-} from "../runtime-compat.js";
-export {
-	createNodeHostNetworkAdapter,
-	createNodeRuntime,
-	NodeFileSystem,
-} from "../runtime-compat.js";
-export {
-	createWasmVmRuntime,
-	DEFAULT_FIRST_PARTY_TIERS,
 	WASMVM_COMMANDS,
 } from "../runtime-compat.js";
-export type {
-	PermissionTier,
-	WasmVmRuntimeOptions,
-} from "../runtime.js";
-export {
-	getAgentOsKernel,
-	getAgentOsRuntimeAdmin,
-	type AgentOsRuntimeAdmin,
-} from "../agent-os.js";
 export { TerminalHarness } from "./terminal-harness.js";

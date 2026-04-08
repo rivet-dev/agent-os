@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { type VirtualFileSystem } from "./runtime-compat.js";
-import { getBaseFilesystemSnapshot, type BaseFilesystemSnapshot } from "./base-filesystem.js";
-import { createOverlayBackend } from "./overlay-filesystem.js";
+import {
+	type BaseFilesystemSnapshot,
+	getBaseFilesystemSnapshot,
+} from "./base-filesystem.js";
 import {
 	createFilesystemFromEntries,
-	snapshotVirtualFilesystem,
 	type FilesystemEntry,
+	snapshotVirtualFilesystem,
 } from "./filesystem-snapshot.js";
+import { createOverlayBackend } from "./overlay-filesystem.js";
+import type { VirtualFileSystem } from "./runtime-compat.js";
 
 export type OverlayFilesystemMode = "ephemeral" | "read-only";
 
@@ -38,7 +41,10 @@ export interface SnapshotLayerHandle extends LayerHandle {
 }
 
 export type SnapshotImportSource =
-	| { kind: "base-filesystem-artifact"; source: BaseFilesystemSnapshot | unknown }
+	| {
+			kind: "base-filesystem-artifact";
+			source: BaseFilesystemSnapshot | unknown;
+	  }
 	| { kind: "snapshot-export"; source: FilesystemSnapshotExport | unknown };
 
 export interface LayerStore {
@@ -50,14 +56,14 @@ export interface LayerStore {
 	createOverlayFilesystem(
 		options:
 			| {
-				mode?: "ephemeral";
-				upper: WritableLayerHandle;
-				lowers: SnapshotLayerHandle[];
-			}
+					mode?: "ephemeral";
+					upper: WritableLayerHandle;
+					lowers: SnapshotLayerHandle[];
+			  }
 			| {
-				mode: "read-only";
-				lowers: SnapshotLayerHandle[];
-			},
+					mode: "read-only";
+					lowers: SnapshotLayerHandle[];
+			  },
 	): VirtualFileSystem;
 }
 
@@ -104,9 +110,7 @@ function isBaseFilesystemSnapshot(
 		return false;
 	}
 
-	return Array.isArray(
-		(filesystem as { entries?: unknown }).entries,
-	);
+	return Array.isArray((filesystem as { entries?: unknown }).entries);
 }
 
 function isFilesystemSnapshotExport(
@@ -116,7 +120,9 @@ function isFilesystemSnapshotExport(
 		return false;
 	}
 
-	if ((value as { format?: unknown }).format !== "agent-os-filesystem-snapshot-v1") {
+	if (
+		(value as { format?: unknown }).format !== "agent-os-filesystem-snapshot-v1"
+	) {
 		return false;
 	}
 
@@ -125,12 +131,12 @@ function isFilesystemSnapshotExport(
 		return false;
 	}
 
-	return Array.isArray(
-		(filesystem as { entries?: unknown }).entries,
-	);
+	return Array.isArray((filesystem as { entries?: unknown }).entries);
 }
 
-function normalizeSnapshotExport(source: SnapshotImportSource): FilesystemSnapshotExport {
+function normalizeSnapshotExport(
+	source: SnapshotImportSource,
+): FilesystemSnapshotExport {
 	if (source.kind === "base-filesystem-artifact") {
 		if (!isBaseFilesystemSnapshot(source.source)) {
 			throw new Error("Invalid base filesystem artifact");
@@ -282,7 +288,9 @@ export function createInMemoryLayerStore(): LayerStore {
 				throw new Error(`Layer ${options.upper.layerId} is not writable`);
 			}
 			if (!upperState.valid || upperState.leaseId !== options.upper.leaseId) {
-				throw new Error(`Writable layer ${options.upper.layerId} is no longer valid`);
+				throw new Error(
+					`Writable layer ${options.upper.layerId} is no longer valid`,
+				);
 			}
 			if (upperState.activeOverlay) {
 				throw new Error(

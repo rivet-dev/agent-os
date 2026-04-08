@@ -1,5 +1,6 @@
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
+use agent_os_kernel::mount_table::{MountOptions, MountTable};
 use agent_os_kernel::permissions::Permissions;
 use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::resource_accounting::ResourceLimits;
@@ -256,6 +257,33 @@ fn filesystem_limits_reject_fd_pwrite_before_resizing_file() {
 
     process.finish(0);
     kernel.wait_and_reap(process.pid()).expect("reap shell");
+}
+
+#[test]
+fn filesystem_limits_ignore_read_only_mount_usage() {
+    let mut config = KernelVmConfig::new("vm-mounted-filesystem-limits");
+    config.permissions = Permissions::allow_all();
+    config.resources = ResourceLimits {
+        max_filesystem_bytes: Some(16),
+        ..ResourceLimits::default()
+    };
+
+    let mut mounted = MemoryFileSystem::new();
+    mounted
+        .write_file("/big.bin", vec![b'x'; 1024])
+        .expect("seed mounted file");
+
+    let mut kernel = KernelVm::new(MountTable::new(MemoryFileSystem::new()), config);
+    kernel
+        .filesystem_mut()
+        .inner_mut()
+        .inner_mut()
+        .mount("/mnt", mounted, MountOptions::new("memory").read_only(true))
+        .expect("mount read-only filesystem");
+
+    kernel
+        .write_file("/tmp/a.txt", b"ok".to_vec())
+        .expect("mounted files should not count against root filesystem byte limits");
 }
 
 #[test]

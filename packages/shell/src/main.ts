@@ -1,34 +1,22 @@
 #!/usr/bin/env node
 
 import { AgentOs } from "@rivet-dev/agent-os";
-
+import codex from "@rivet-dev/agent-os-codex";
 // Software packages — uses npm-published versions which include pre-built
 // WASM binaries. Workspace copies have empty wasm/ dirs since the native
 // build (Rust nightly + wasi-sdk) is not run locally.
 // curl, wget, sqlite3 are excluded (not yet published, need patched wasi-libc).
 import common from "@rivet-dev/agent-os-common";
+import fd from "@rivet-dev/agent-os-fd";
+import file from "@rivet-dev/agent-os-file";
 import jq from "@rivet-dev/agent-os-jq";
 import ripgrep from "@rivet-dev/agent-os-ripgrep";
-import fd from "@rivet-dev/agent-os-fd";
 import tree from "@rivet-dev/agent-os-tree";
-import file from "@rivet-dev/agent-os-file";
-import zip from "@rivet-dev/agent-os-zip";
 import unzip from "@rivet-dev/agent-os-unzip";
 import yq from "@rivet-dev/agent-os-yq";
-import codex from "@rivet-dev/agent-os-codex";
+import zip from "@rivet-dev/agent-os-zip";
 
-const software = [
-	common,
-	jq,
-	ripgrep,
-	fd,
-	tree,
-	file,
-	zip,
-	unzip,
-	yq,
-	codex,
-];
+const software = [common, jq, ripgrep, fd, tree, file, zip, unzip, yq, codex];
 
 function printUsage(): void {
 	console.error(
@@ -88,6 +76,7 @@ function parseArgs(argv: string[]): CliOptions {
 			case "-h":
 				printUsage();
 				process.exit(0);
+				return options;
 			default:
 				throw new Error(`Unknown argument: ${arg}`);
 		}

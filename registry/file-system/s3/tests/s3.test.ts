@@ -8,6 +8,7 @@ let minio: MinioContainerHandle;
 let vm: AgentOs | null = null;
 
 beforeAll(async () => {
+	process.env.AGENT_OS_ALLOW_LOCAL_S3_ENDPOINTS = "1";
 	minio = await startMinioContainer({ healthTimeout: 60_000 });
 }, 90_000);
 
@@ -15,6 +16,7 @@ afterAll(async () => {
 	if (minio) {
 		await minio.stop();
 	}
+	delete process.env.AGENT_OS_ALLOW_LOCAL_S3_ENDPOINTS;
 });
 
 afterEach(async () => {

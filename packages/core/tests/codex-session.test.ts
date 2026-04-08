@@ -1,8 +1,8 @@
 import { resolve } from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
 import codex from "@rivet-dev/agent-os-codex-agent";
-import { AgentOs } from "../src/agent-os.js";
+import { afterEach, describe, expect, test } from "vitest";
 import type { AgentCapabilities, AgentInfo } from "../src/agent-os.js";
+import { AgentOs } from "../src/agent-os.js";
 import {
 	type ResponsesFixture,
 	startResponsesMock,
@@ -23,7 +23,9 @@ type RunningVm = {
 	url: string;
 };
 
-function getInputItems(body: Record<string, unknown>): Record<string, unknown>[] {
+function getInputItems(
+	body: Record<string, unknown>,
+): Record<string, unknown>[] {
 	const input = body.input;
 	return Array.isArray(input)
 		? input.filter(
@@ -201,7 +203,11 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 		const permissionIds: string[] = [];
 		runtime.vm.onPermissionRequest(sessionId, (request) => {
 			permissionIds.push(request.permissionId);
-			void runtime.vm.respondPermission(sessionId, request.permissionId, "once");
+			void runtime.vm.respondPermission(
+				sessionId,
+				request.permissionId,
+				"once",
+			);
 		});
 
 		const { response } = await runtime.vm.prompt(
@@ -210,18 +216,18 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 		);
 
 		expect(response.error).toBeUndefined();
-		expect(
-			(response.result as { stopReason?: string }).stopReason,
-		).toBe("end_turn");
+		expect((response.result as { stopReason?: string }).stopReason).toBe(
+			"end_turn",
+		);
 		expect(permissionIds).toHaveLength(1);
 		expect(runtime.requests.length).toBeGreaterThanOrEqual(2);
 		expect(
 			runtime.requests.some((body) => hasFunctionCallOutput(body, XU_OUTPUT)),
 		).toBe(true);
 		expect(hasItemType(runtime.requests[1], "reasoning")).toBe(true);
-		expect(hasFunctionCall(runtime.requests[1], "call_shell_1", XU_COMMAND)).toBe(
-			true,
-		);
+		expect(
+			hasFunctionCall(runtime.requests[1], "call_shell_1", XU_COMMAND),
+		).toBe(true);
 
 		const events = runtime.vm
 			.getSessionEvents(sessionId)
@@ -231,14 +237,14 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 				(event) =>
 					event.method === "session/update" &&
 					JSON.stringify(event.params).includes("tool_call_update"),
-				),
+			),
 		).toBe(true);
 		expect(
 			events.some(
 				(event) =>
 					event.method === "session/update" &&
 					JSON.stringify(event.params).includes("agent_message_chunk"),
-				),
+			),
 		).toBe(true);
 
 		runtime.vm.closeSession(sessionId);
@@ -315,7 +321,11 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 		const permissionIds: string[] = [];
 		runtime.vm.onPermissionRequest(sessionId, (request) => {
 			permissionIds.push(request.permissionId);
-			void runtime.vm.respondPermission(sessionId, request.permissionId, "once");
+			void runtime.vm.respondPermission(
+				sessionId,
+				request.permissionId,
+				"once",
+			);
 		});
 
 		const { response } = await runtime.vm.prompt(
@@ -324,17 +334,17 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 		);
 
 		expect(response.error).toBeUndefined();
-		expect(
-			(response.result as { stopReason?: string }).stopReason,
-		).toBe("end_turn");
+		expect((response.result as { stopReason?: string }).stopReason).toBe(
+			"end_turn",
+		);
 		expect(permissionIds).toHaveLength(2);
 		expect(runtime.requests).toHaveLength(2);
-		expect(hasFunctionCall(runtime.requests[1], "call_shell_alpha", firstCommand)).toBe(
-			true,
-		);
-		expect(hasFunctionCall(runtime.requests[1], "call_shell_beta", secondCommand)).toBe(
-			true,
-		);
+		expect(
+			hasFunctionCall(runtime.requests[1], "call_shell_alpha", firstCommand),
+		).toBe(true);
+		expect(
+			hasFunctionCall(runtime.requests[1], "call_shell_beta", secondCommand),
+		).toBe(true);
 		expect(hasFunctionCallOutput(runtime.requests[1], firstOutput)).toBe(true);
 		expect(hasFunctionCallOutput(runtime.requests[1], secondOutput)).toBe(true);
 
@@ -402,7 +412,9 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 			image: false,
 		});
 
-		expect(runtime.vm.getSessionModes(sessionId)?.currentModeId).toBe("default");
+		expect(runtime.vm.getSessionModes(sessionId)?.currentModeId).toBe(
+			"default",
+		);
 		expect(
 			runtime.vm
 				.getSessionConfigOptions(sessionId)
@@ -415,7 +427,9 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 
 		expect(runtime.vm.getSessionModes(sessionId)?.currentModeId).toBe("plan");
 		const configOptions = runtime.vm.getSessionConfigOptions(sessionId);
-		const modelOption = configOptions.find((option) => option.category === "model");
+		const modelOption = configOptions.find(
+			(option) => option.category === "model",
+		);
 		const thoughtOption = configOptions.find(
 			(option) => option.category === "thought_level",
 		);
@@ -430,7 +444,9 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 			},
 		);
 		expect(rawResponse.error).toBeUndefined();
-		expect(runtime.vm.getSessionModes(sessionId)?.currentModeId).toBe("default");
+		expect(runtime.vm.getSessionModes(sessionId)?.currentModeId).toBe(
+			"default",
+		);
 		await runtime.vm.setSessionMode(sessionId, "plan");
 
 		const { response: promptResponse } = await runtime.vm.prompt(
@@ -442,7 +458,8 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 		expect(runtime.requests).toHaveLength(1);
 		expect(runtime.requests[0].model).toBe("gpt-5.4");
 		expect(
-			(runtime.requests[0].reasoning as { effort?: string } | undefined)?.effort,
+			(runtime.requests[0].reasoning as { effort?: string } | undefined)
+				?.effort,
 		).toBe("high");
 		expect(runtime.requests[0].tools).toEqual([]);
 
@@ -529,24 +546,32 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 		});
 		const sessionId = session.sessionId;
 
-		const { response: firstResponse } = await runtime.vm.prompt(sessionId, firstPrompt);
+		const { response: firstResponse } = await runtime.vm.prompt(
+			sessionId,
+			firstPrompt,
+		);
 		expect(firstResponse.error).toBeUndefined();
-		expect(
-			(firstResponse.result as { stopReason?: string }).stopReason,
-		).toBe("end_turn");
+		expect((firstResponse.result as { stopReason?: string }).stopReason).toBe(
+			"end_turn",
+		);
 
-		const { response: secondResponse } = await runtime.vm.prompt(sessionId, secondPrompt);
+		const { response: secondResponse } = await runtime.vm.prompt(
+			sessionId,
+			secondPrompt,
+		);
 		expect(secondResponse.error).toBeUndefined();
-		expect(
-			(secondResponse.result as { stopReason?: string }).stopReason,
-		).toBe("end_turn");
+		expect((secondResponse.result as { stopReason?: string }).stopReason).toBe(
+			"end_turn",
+		);
 
 		expect(runtime.requests).toHaveLength(2);
 		expect(hasRoleContent(runtime.requests[1], "user", firstPrompt)).toBe(true);
 		expect(hasRoleContent(runtime.requests[1], "assistant", firstReply)).toBe(
 			true,
 		);
-		expect(hasRoleContent(runtime.requests[1], "user", secondPrompt)).toBe(true);
+		expect(hasRoleContent(runtime.requests[1], "user", secondPrompt)).toBe(
+			true,
+		);
 
 		const messageChunks = runtime.vm
 			.getSessionEvents(sessionId)
@@ -591,7 +616,11 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 		const sessionId = session.sessionId;
 
 		runtime.vm.onPermissionRequest(sessionId, (request) => {
-			void runtime.vm.respondPermission(sessionId, request.permissionId, "reject");
+			void runtime.vm.respondPermission(
+				sessionId,
+				request.permissionId,
+				"reject",
+			);
 		});
 
 		const { response } = await runtime.vm.prompt(
@@ -600,9 +629,9 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 		);
 
 		expect(response.error).toBeUndefined();
-		expect(
-			(response.result as { stopReason?: string }).stopReason,
-		).toBe("cancelled");
+		expect((response.result as { stopReason?: string }).stopReason).toBe(
+			"cancelled",
+		);
 		expect(runtime.requests).toHaveLength(1);
 		expect(
 			runtime.requests.some((body) => hasFunctionCallOutput(body, XU_OUTPUT)),
@@ -656,9 +685,9 @@ describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
 
 		const { response: promptResponse } = await promptPromise;
 		expect(promptResponse.error).toBeUndefined();
-		expect(
-			(promptResponse.result as { stopReason?: string }).stopReason,
-		).toBe("cancelled");
+		expect((promptResponse.result as { stopReason?: string }).stopReason).toBe(
+			"cancelled",
+		);
 
 		await runtime.vm.destroySession(sessionId);
 		expect(runtime.vm.listSessions()).not.toContainEqual({

@@ -18,10 +18,7 @@ describe("process management", () => {
 
 	test("listProcesses() includes processes started via spawn()", async () => {
 		// Write a script that stays alive for a few seconds
-		await vm.writeFile(
-			"/tmp/long-running.mjs",
-			"setTimeout(() => {}, 30000);",
-		);
+		await vm.writeFile("/tmp/long-running.mjs", "setTimeout(() => {}, 30000);");
 		const { pid } = vm.spawn("node", ["/tmp/long-running.mjs"], {
 			env: { HOME: "/home/user" },
 		});
