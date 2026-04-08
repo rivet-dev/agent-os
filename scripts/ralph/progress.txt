@@ -30,6 +30,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 ---
 ## Codebase Patterns
 - Guest builtin policy has to stay aligned across `crates/execution/assets/polyfill-registry.json`, `crates/execution/src/javascript.rs` builtin normalization/_loadPolyfill handling, `crates/execution/assets/v8-bridge.source.js` `Module.builtinModules` plus `loadBuiltinModule()`, and `crates/execution/src/node_import_cache.rs`; if one layer lags, guests get `MODULE_NOT_FOUND` or host fallthrough instead of the intended deny/stub behavior
+- Guest `fs.watch` / `fs.watchFile` support should stay as guest-side polling in `crates/execution/assets/v8-bridge.source.js` until the kernel exposes a real notification primitive; keep sidecar coverage focused on observable events, not a new RPC surface
 - Queued `crates/v8-runtime` sessions must keep polling their control channel before acquiring a concurrency slot; otherwise `destroy_session()` can deadlock when the max-concurrency queue is full
 - The `crates/v8-runtime` snapshot suite currently has to run in isolation: keep `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main unit-test binary and run `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately
 - Pi SDK E2E tests should configure llmock in both places: write the Anthropic provider override to `~/.pi/agent/models.json` inside the VM and pass `ANTHROPIC_BASE_URL` in the session env, because ACP-driven tool turns can still consult the env-configured base URL
@@ -38,6 +39,16 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Guest-side CommonJS helpers in `crates/execution/assets/v8-bridge.source.js` must pass explicit `"require"` mode into `_resolveModule`; otherwise dual packages resolve the import branch and `require()` can try to execute ESM as CommonJS
 - Generated node-import-cache builtin assets need a `NODE_IMPORT_CACHE_ASSET_VERSION` bump in `crates/execution/src/node_import_cache.rs` whenever their source changes, or old `/tmp/agent-os-node-import-cache-*` materializations will keep serving stale code
 - If guest CommonJS must `require("node:...")`, update both `Module.builtinModules` and `loadBuiltinModule()` in `crates/execution/assets/v8-bridge.source.js`; registering only one side leaves `_requireFrom()` recursing or hanging on the builtin
+
+## 2026-04-08 14:32:03 PDT - US-061
+- Implemented polling-backed `fs.watch`, `fs.watchFile`, `fs.unwatchFile`, and `fs.promises.watch` in the V8 bridge, plus completed `WriteStream` option handling so `start` and `highWaterMark` work for text writes without truncating existing content
+- Added end-to-end sidecar coverage in `crates/sidecar/tests/fs_watch_and_streams.rs`, rebuilt the bundled `v8-bridge.js`, and updated the execution-area agent notes with the polling-watcher pattern
+- Files changed: `crates/execution/{CLAUDE.md,assets/v8-bridge.source.js,assets/v8-bridge.js}`, `crates/sidecar/tests/fs_watch_and_streams.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - V8-side bridge asset changes are embedded twice: rebuild `crates/execution/assets/v8-bridge.js` with `pnpm --dir packages/core build:v8-bridge`, then rebuild `agent-os-v8` before rerunning sidecar V8 integration tests or the old snapshot binary will still execute stale bridge code
+  - Sidecar tests outside the included `service.rs` harness cannot reach `NativeSidecar.vms`; seed VM files for integration coverage through `CreateVmRequest.root_filesystem.bootstrap_entries` instead of private test-only internals
+  - The legacy JS sync-RPC bridge still treats plain strings as literal bytes; for guest binary filesystem writes, either send encoded byte payloads or stay on text writes until the broader fd/file binary path is tightened up in a follow-up story
+---
 - After changing `crates/v8-runtime/src/execution.rs`, rebuild `agent-os-v8` before rerunning V8-backed execution or sidecar tests, or the harness may keep exercising a stale runtime binary
 - In `crates/execution/tests/cjs_esm_interop.rs`, keep a passing default-import fallback test next to each ignored desired-behavior named-export case for dynamic `module.exports` patterns; that preserves today’s graceful-degradation contract while `US-055` fixes the extraction gap
 - Bundled undici fetch depends on the aliased `node:stream` helpers understanding `web-streams-polyfill` `ReadableStream` instances; keep `finished()`, `isReadable()`, `isErrored()`, and `isDisturbed()` compatible in `crates/execution/assets/undici-shims/stream.js` or fetch will fail after the TCP response arrives

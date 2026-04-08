@@ -79,6 +79,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 - Node-facing `readdir` results must filter `.`/`..`.
 - Async methods should dispatch under `fs.promises.*`.
 - fd-based APIs (`open`, `read`, `write`, `close`, `fstat`) plus `createReadStream`/`createWriteStream` should ride the same bridge.
+- Guest `fs.watch` / `fs.watchFile` currently stay guest-owned polling wrappers over `fs.statSync`; keep them in `v8-bridge.source.js` unless the kernel grows a real notification API.
 - Runner-internal pipe/control writes must keep snapped host `node:fs` bindings because `syncBuiltinModuleExports(...)` mutates the builtin module for guests.
 
 ## JavaScript Sync RPC

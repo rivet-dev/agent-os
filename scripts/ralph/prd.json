@@ -1180,7 +1180,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
       ],
       "priority": 106,
-      "passes": false,
+      "passes": true,
       "notes": "Found in audit: fs.watch, fs.watchFile, createReadStream, createWriteStream are all missing. createReadStream/createWriteStream are used by many packages for efficient file I/O. fs.watch is used by file watchers, build tools, and dev servers. Implementation: createReadStream/createWriteStream can wrap fd-based I/O. fs.watch can use kernel VFS mutation hooks."
     },
     {

@@ -4401,9 +4401,6 @@ var __bridge = (() => {
     }
     return signal;
   }
-  function createUnsupportedWatcherError(api) {
-    return new Error(`fs.${api} is not supported in sandbox \u2014 use polling`);
-  }
   function normalizeWatchOptions(options, allowString) {
     let normalized;
     if (options === void 0 || options === null) {
@@ -4435,7 +4432,7 @@ var __bridge = (() => {
     };
   }
   function normalizeWatchArguments(path, optionsOrListener, listener) {
-    normalizePathLike(path);
+    const pathStr = normalizePathLike(path);
     let options = optionsOrListener;
     let resolvedListener = listener;
     if (typeof optionsOrListener === "function") {
@@ -4445,10 +4442,14 @@ var __bridge = (() => {
     if (resolvedListener !== void 0 && typeof resolvedListener !== "function") {
       throw createInvalidArgTypeError("listener", "of type function", resolvedListener);
     }
-    return normalizeWatchOptions(options, true);
+    return {
+      path: pathStr,
+      listener: resolvedListener,
+      options: normalizeWatchOptions(options, true)
+    };
   }
   function normalizeWatchFileArguments(path, optionsOrListener, listener) {
-    normalizePathLike(path);
+    const pathStr = normalizePathLike(path);
     let options = {};
     let resolvedListener = listener;
     if (typeof optionsOrListener === "function") {
@@ -4463,15 +4464,298 @@ var __bridge = (() => {
     if (typeof resolvedListener !== "function") {
       throw createInvalidArgTypeError("listener", "of type function", resolvedListener);
     }
+    validateBooleanOption("persistent", options.persistent);
+    validateBooleanOption("bigint", options.bigint);
     if (options.interval !== void 0 && typeof options.interval !== "number") {
       throw createInvalidArgTypeError("interval", "of type number", options.interval);
     }
+    return {
+      path: pathStr,
+      listener: resolvedListener,
+      options: {
+        persistent: options.persistent,
+        bigint: options.bigint,
+        interval: options.interval
+      }
+    };
   }
-  async function* createUnsupportedPromisesWatchIterator(path, options) {
-    const normalized = normalizeWatchOptions(options, false);
-    normalizePathLike(path);
-    throwIfAborted(normalized.signal);
-    throw createUnsupportedWatcherError("promises.watch");
+  function createMissingWatcherStats() {
+    return new Stats({
+      mode: 0,
+      size: 0,
+      dev: 0,
+      ino: 0,
+      nlink: 0,
+      uid: 0,
+      gid: 0,
+      rdev: 0,
+      blksize: 0,
+      blocks: 0,
+      atimeMs: 0,
+      mtimeMs: 0,
+      ctimeMs: 0,
+      birthtimeMs: 0
+    });
+  }
+  function createWatcherSnapshot(path) {
+    try {
+      const stats = fs.statSync(path);
+      return {
+        exists: true,
+        stats,
+        signature: JSON.stringify({
+          dev: stats.dev,
+          ino: stats.ino,
+          mode: stats.mode,
+          nlink: stats.nlink,
+          uid: stats.uid,
+          gid: stats.gid,
+          rdev: stats.rdev,
+          size: stats.size,
+          atimeMs: stats.atimeMs,
+          mtimeMs: stats.mtimeMs,
+          ctimeMs: stats.ctimeMs,
+          birthtimeMs: stats.birthtimeMs
+        })
+      };
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+        return {
+          exists: false,
+          stats: createMissingWatcherStats(),
+          signature: "missing"
+        };
+      }
+      throw error;
+    }
+  }
+  function createWatcherFilename(path, encoding) {
+    const basename = path === "/" ? "" : path.split("/").filter(Boolean).pop() ?? "";
+    if (encoding === "buffer") {
+      return import_buffer.Buffer.from(basename);
+    }
+    return basename;
+  }
+  function watcherEventType(previous, current) {
+    if (previous.exists !== current.exists) {
+      return "rename";
+    }
+    return "change";
+  }
+  var DEFAULT_FS_WATCH_INTERVAL_MS = 50;
+  var DEFAULT_FS_WATCH_FILE_INTERVAL_MS = 5007;
+  var activeStatWatchers = /* @__PURE__ */ new Map();
+  var PollingFsWatcher = class {
+    constructor(path, options) {
+      this._path = path;
+      this._intervalMs = options.interval;
+      this._onChange = options.onChange;
+      this._onClose = options.onClose;
+      this._listeners = /* @__PURE__ */ new Map();
+      this._closed = false;
+      this._signal = options.signal;
+      this._snapshot = createWatcherSnapshot(path);
+      this._poll = () => {
+        if (this._closed) {
+          return;
+        }
+        let next;
+        try {
+          next = createWatcherSnapshot(this._path);
+        } catch (error) {
+          this.emit("error", error);
+          return;
+        }
+        if (next.signature === this._snapshot.signature) {
+          return;
+        }
+        const previous = this._snapshot;
+        this._snapshot = next;
+        this._onChange(next, previous);
+      };
+      this._handleAbort = () => {
+        this.close();
+      };
+      this._timer = setInterval(this._poll, this._intervalMs);
+      if (options.persistent === false) {
+        this._timer?.unref?.();
+      }
+      if (this._signal) {
+        if (this._signal.aborted) {
+          queueMicrotask(() => this.close());
+        } else {
+          this._signal.addEventListener("abort", this._handleAbort, { once: true });
+        }
+      }
+    }
+    _path;
+    _intervalMs;
+    _onChange;
+    _onClose;
+    _listeners;
+    _timer;
+    _closed;
+    _signal;
+    _handleAbort;
+    _snapshot;
+    _poll;
+    on(event, listener) {
+      const listeners = this._listeners.get(event) ?? [];
+      listeners.push(listener);
+      this._listeners.set(event, listeners);
+      return this;
+    }
+    addListener(event, listener) {
+      return this.on(event, listener);
+    }
+    once(event, listener) {
+      const wrapper = (...args) => {
+        this.removeListener(event, wrapper);
+        listener(...args);
+      };
+      wrapper._originalListener = listener;
+      return this.on(event, wrapper);
+    }
+    off(event, listener) {
+      return this.removeListener(event, listener);
+    }
+    removeListener(event, listener) {
+      const listeners = this._listeners.get(event);
+      if (!listeners) {
+        return this;
+      }
+      const index = listeners.findIndex(
+        (candidate) => candidate === listener || candidate._originalListener === listener
+      );
+      if (index >= 0) {
+        listeners.splice(index, 1);
+      }
+      if (listeners.length === 0) {
+        this._listeners.delete(event);
+      }
+      return this;
+    }
+    removeAllListeners(event) {
+      if (event === void 0) {
+        this._listeners.clear();
+      } else {
+        this._listeners.delete(event);
+      }
+      return this;
+    }
+    emit(event, ...args) {
+      const listeners = this._listeners.get(event);
+      if (!listeners?.length) {
+        return false;
+      }
+      listeners.slice().forEach((listener) => listener(...args));
+      return true;
+    }
+    ref() {
+      this._timer?.ref?.();
+      return this;
+    }
+    unref() {
+      this._timer?.unref?.();
+      return this;
+    }
+    close() {
+      if (this._closed) {
+        return;
+      }
+      this._closed = true;
+      if (this._timer !== void 0) {
+        clearInterval(this._timer);
+        this._timer = void 0;
+      }
+      if (this._signal) {
+        this._signal.removeEventListener("abort", this._handleAbort);
+      }
+      this._onClose?.();
+      this.emit("close");
+    }
+  };
+  function registerStatWatcher(path, watcher) {
+    const watchers = activeStatWatchers.get(path) ?? /* @__PURE__ */ new Set();
+    watchers.add(watcher);
+    activeStatWatchers.set(path, watchers);
+  }
+  function unregisterStatWatcher(path, watcher) {
+    const watchers = activeStatWatchers.get(path);
+    if (!watchers) {
+      return;
+    }
+    watchers.delete(watcher);
+    if (watchers.size === 0) {
+      activeStatWatchers.delete(path);
+    }
+  }
+  function createFsWatcher(path, options) {
+    const filename = createWatcherFilename(path, options.encoding);
+    const watcher = new PollingFsWatcher(path, {
+      interval: DEFAULT_FS_WATCH_INTERVAL_MS,
+      persistent: options.persistent,
+      signal: options.signal,
+      onChange(current, previous) {
+        watcher.emit("change", watcherEventType(previous, current), filename);
+      }
+    });
+    return watcher;
+  }
+  function createFsStatWatcher(path, options, listener) {
+    const watcher = new PollingFsWatcher(path, {
+      interval: options.interval ?? DEFAULT_FS_WATCH_FILE_INTERVAL_MS,
+      persistent: options.persistent,
+      onChange(current, previous) {
+        watcher.emit("change", current.stats, previous.stats);
+      },
+      onClose() {
+        unregisterStatWatcher(path, watcher);
+      }
+    });
+    watcher.on("change", listener);
+    registerStatWatcher(path, watcher);
+    return watcher;
+  }
+  async function* createPromisesWatchIterator(path, options) {
+    const events = [];
+    let wake = null;
+    let closed = false;
+    let thrown = null;
+    const watcher = fs.watch(path, options, (eventType, filename) => {
+      events.push({ eventType, filename });
+      wake?.();
+      wake = null;
+    });
+    watcher.on("close", () => {
+      closed = true;
+      wake?.();
+      wake = null;
+    });
+    watcher.on("error", (error) => {
+      thrown = error;
+      wake?.();
+      wake = null;
+    });
+    try {
+      while (true) {
+        if (events.length > 0) {
+          yield events.shift();
+          continue;
+        }
+        if (thrown) {
+          throw thrown;
+        }
+        if (closed) {
+          return;
+        }
+        await new Promise((resolve) => {
+          wake = resolve;
+        });
+      }
+    } finally {
+      watcher.close();
+    }
   }
   function isReadWriteOptionsObject(value) {
     return value === null || value === void 0 || typeof value === "object" && !Array.isArray(value);
@@ -5072,8 +5356,13 @@ var __bridge = (() => {
     constructor(filePath, _options) {
       this._options = _options;
       const fdOption = normalizeStreamFd(_options?.fd);
+      const startOption = _options?.start;
+      const highWaterMarkCandidate = _options?.highWaterMark ?? _options?.bufferSize;
+      const openFlags = _options?.flags ?? (typeof startOption === "number" ? "r+" : "w");
       this.path = filePath;
       this.autoClose = _options?.autoClose !== false;
+      this.writableHighWaterMark = typeof highWaterMarkCandidate === "number" && Number.isFinite(highWaterMarkCandidate) && highWaterMarkCandidate > 0 ? Math.floor(highWaterMarkCandidate) : 16384;
+      this._position = typeof startOption === "number" ? startOption : null;
       this._streamFs = validateStreamFsOverride(_options?.fs, ["open", "close", "write"]);
       if (_options?.fs !== void 0) {
         validateStreamFsOverride(_options?.fs, ["writev"]);
@@ -5091,7 +5380,7 @@ var __bridge = (() => {
       if (!pathStr) {
         throw createFsError("EBADF", "EBADF: bad file descriptor", "write");
       }
-      this.fd = fs.openSync(pathStr, _options?.flags ?? "w", _options?.mode);
+      this.fd = fs.openSync(pathStr, openFlags, _options?.mode);
       queueMicrotask(() => {
         if (this.fd !== null && this.fd >= 0) {
           this.emit("open", this.fd);
@@ -5120,6 +5409,7 @@ var __bridge = (() => {
     _listeners = /* @__PURE__ */ new Map();
     _fileHandle = null;
     _streamFs;
+    _position = null;
     async _closeUnderlying() {
       if (this._fileHandle) {
         if (!this._fileHandle.closed) {
@@ -5209,24 +5499,67 @@ var __bridge = (() => {
           try {
             if (this._fileHandle) {
               for (const chunk of this._chunks) {
-                await this._fileHandle.write(chunk, 0, chunk.byteLength, void 0);
+                const result = await this._fileHandle.write(
+                  chunk,
+                  0,
+                  chunk.byteLength,
+                  this._position
+                );
+                if (typeof this._position === "number") {
+                  this._position += result?.bytesWritten ?? chunk.byteLength;
+                }
               }
               if (this.autoClose && !this._fileHandle.closed) {
                 await this._fileHandle.close();
               }
-            } else if (this.fd !== null && this.fd >= 0) {
-              for (const chunk of this._chunks) {
-                fs.writeSync(this.fd, chunk, 0, chunk.byteLength, null);
-              }
-              if (this.autoClose) {
-                await this._closeUnderlying();
-              }
             } else {
               const pathStr = typeof this.path === "string" ? this.path : this.path instanceof import_buffer.Buffer ? this.path.toString() : null;
               if (!pathStr) {
-                throw createFsError("EBADF", "EBADF: bad file descriptor", "write");
+                if (this.fd !== null && this.fd >= 0) {
+                  for (const chunk of this._chunks) {
+                    const bytesWritten = fs.writeSync(
+                      this.fd,
+                      chunk,
+                      0,
+                      chunk.byteLength,
+                      this._position
+                    );
+                    if (typeof this._position === "number") {
+                      this._position += bytesWritten;
+                    }
+                  }
+                  if (this.autoClose) {
+                    await this._closeUnderlying();
+                  }
+                } else {
+                  throw createFsError("EBADF", "EBADF: bad file descriptor", "write");
+                }
+              } else {
+                const chunks = this._chunks.map((chunk) => import_buffer.Buffer.from(chunk));
+                if (typeof this._position === "number") {
+                  const existing = fs.readFileSync(pathStr);
+                  const finalSize = Math.max(
+                    existing.length,
+                    this._position + chunks.reduce((sum, chunk) => sum + chunk.length, 0)
+                  );
+                  const output = import_buffer.Buffer.alloc(finalSize);
+                  existing.copy(output);
+                  let cursor = this._position;
+                  for (const chunk of chunks) {
+                    chunk.copy(output, cursor);
+                    cursor += chunk.length;
+                  }
+                  fs.writeFileSync(pathStr, output.toString(this._options?.encoding ?? "utf8"));
+                } else {
+                  fs.writeFileSync(
+                    pathStr,
+                    import_buffer.Buffer.concat(chunks).toString(this._options?.encoding ?? "utf8")
+                  );
+                }
+                if (this.autoClose && this.fd !== null && this.fd >= 0) {
+                  await this._closeUnderlying();
+                }
               }
-              fs.writeFileSync(pathStr, import_buffer.Buffer.concat(this._chunks.map((chunk) => import_buffer.Buffer.from(chunk))));
             }
             this.emit("finish");
             if (this.autoClose && !this.closed) {
@@ -5555,6 +5888,12 @@ var __bridge = (() => {
   function decodeBridgeJson(value) {
     return typeof value === "string" ? JSON.parse(value) : value;
   }
+  function encodeBridgeBytes(value) {
+    return {
+      __agentOsType: "bytes",
+      base64: import_buffer.Buffer.from(value).toString("base64")
+    };
+  }
   function throwNormalizedFsBridgeError(err, syscall, path) {
     const errMsg = err?.message || String(err);
     if (errMsg.includes("entry not found") || errMsg.includes("not found") || errMsg.includes("ENOENT") || errMsg.includes("no such file or directory")) {
@@ -5696,8 +6035,7 @@ var __bridge = (() => {
           return _fs.writeFile.applySyncPromise(void 0, [pathStr, data]);
         } else if (ArrayBuffer.isView(data)) {
           const uint8 = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-          const base64 = import_buffer.Buffer.from(uint8).toString("base64");
-          return _fs.writeFileBinary.applySyncPromise(void 0, [pathStr, base64]);
+          return _fs.writeFileBinary.applySyncPromise(void 0, [pathStr, encodeBridgeBytes(uint8)]);
         } else {
           return _fs.writeFile.applySyncPromise(void 0, [pathStr, String(data)]);
         }
@@ -5954,10 +6292,9 @@ var __bridge = (() => {
           normalized.length
         );
       }
-      const base64 = import_buffer.Buffer.from(dataBytes).toString("base64");
       const pos = normalized.position ?? null;
       try {
-        return _fdWrite.applySyncPromise(void 0, [fd, base64, pos]);
+        return _fdWrite.applySyncPromise(void 0, [fd, encodeBridgeBytes(dataBytes), pos]);
       } catch (e) {
         const msg = e?.message ?? String(e);
         if (msg.includes("EBADF")) throw createFsError("EBADF", msg, "write");
@@ -6487,18 +6824,22 @@ var __bridge = (() => {
         try {
           const bytesWritten = typeof normalized.buffer === "string" ? _fdWrite.applySyncPromise(
             void 0,
-            [fd, import_buffer.Buffer.from(normalized.buffer, normalized.encoding).toString("base64"), normalized.position ?? null]
+            [
+              fd,
+              encodeBridgeBytes(import_buffer.Buffer.from(normalized.buffer, normalized.encoding)),
+              normalized.position ?? null
+            ]
           ) : _fdWrite.applySyncPromise(
             void 0,
             [
               fd,
-              import_buffer.Buffer.from(
+              encodeBridgeBytes(import_buffer.Buffer.from(
                 new Uint8Array(
                   normalized.buffer.buffer,
                   normalized.buffer.byteOffset + normalized.offset,
                   normalized.length
                 )
-              ).toString("base64"),
+              )),
               normalized.position ?? null
             ]
           );
@@ -6731,7 +7072,7 @@ var __bridge = (() => {
         return fs.utimesSync(path, atime, mtime);
       },
       watch(path, options) {
-        return createUnsupportedPromisesWatchIterator(path, options);
+        return createPromisesWatchIterator(path, options);
       }
     },
     // Compatibility methods
@@ -6874,18 +7215,37 @@ var __bridge = (() => {
       const pathLike = normalizeStreamPath(path, fd);
       return new WriteStream(pathLike, opts);
     },
-    // Unsupported fs APIs — watch requires kernel-level inotify, use polling instead
-    watch(..._args) {
-      normalizeWatchArguments(_args[0], _args[1], _args[2]);
-      throw createUnsupportedWatcherError("watch");
+    // Watch APIs use guest-side polling over statSync until the kernel grows native notifications.
+    watch(...args) {
+      const { path, listener, options } = normalizeWatchArguments(args[0], args[1], args[2]);
+      const watcher = createFsWatcher(path, options);
+      if (listener) {
+        watcher.on("change", listener);
+      }
+      return watcher;
     },
-    watchFile(..._args) {
-      normalizeWatchFileArguments(_args[0], _args[1], _args[2]);
-      throw createUnsupportedWatcherError("watchFile");
+    watchFile(...args) {
+      const { path, listener, options } = normalizeWatchFileArguments(args[0], args[1], args[2]);
+      return createFsStatWatcher(path, options, listener);
     },
-    unwatchFile(..._args) {
-      normalizePathLike(_args[0]);
-      throw createUnsupportedWatcherError("unwatchFile");
+    unwatchFile(...args) {
+      const path = normalizePathLike(args[0]);
+      const listener = args[1];
+      if (listener !== void 0 && typeof listener !== "function") {
+        throw createInvalidArgTypeError("listener", "of type function", listener);
+      }
+      const watchers = activeStatWatchers.get(path);
+      if (!watchers) {
+        return;
+      }
+      for (const watcher of [...watchers]) {
+        const listeners = watcher._listeners.get("change") ?? [];
+        if (listener === void 0 || listeners.some(
+          (candidate) => candidate === listener || candidate._originalListener === listener
+        )) {
+          watcher.close();
+        }
+      }
     },
     chmod(path, mode, callback) {
       if (callback) {
