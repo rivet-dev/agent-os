@@ -988,7 +988,7 @@
         "cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1 passes"
       ],
       "priority": 49,
-      "passes": false,
+      "passes": true,
       "notes": "Scoped to what Pi SDK actually imports \u2014 NOT the full Node.js test suite. Each test runs guest JS code in a V8 isolate via the sidecar and asserts on output. If a polyfill method is missing or returns wrong values, the test fails with a clear message about what's wrong. Reference the Pi SDK boot probe (US-050) failure list to prioritize which builtins to test first."
     },
     {

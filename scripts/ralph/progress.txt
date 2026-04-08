@@ -591,3 +591,10 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - `_loadPolyfill` module-name responses need to stay expression-based (`globalThis._requireFrom(...)` or a throwing IIFE), not ESM wrapper source, because the guest bridge evaluates them as `return (<expression>)`
   - The new polyfill registry can carry future denied builtins ahead of loader-enforcement work, but any newly allowed builtin still needs the `_requireFrom(...)` path to terminate without bouncing back into `_loadPolyfill`
 ---
+## 2026-04-08 10:20:13 PDT - US-051
+- Re-ran the `US-051` acceptance target and confirmed `cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1` is green on the current branch, then reconciled the stale Ralph state by setting `US-051` back to `passes: true` in `prd.json`
+- Files changed: `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - If a story already has a committed `feat: US-…` change and a matching progress entry, verify its acceptance command before starting follow-on work; the PRD flag can drift even when the implementation is already present
+  - `cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1` is the acceptance source of truth for `US-051`; keep using that focused target instead of inferring completion from broader branch-level test runs
+---
