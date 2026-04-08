@@ -20768,52 +20768,16 @@ ${headerLines}\r
     }
     return url;
   }
-  function createRequire(filename) {
-    if (typeof filename !== "string" && !(filename instanceof URL)) {
-      throw new TypeError("filename must be a string or URL");
+  function computeRequireResolvePaths(dirname, request) {
+    if (Module.isBuiltin(request)) {
+      return null;
     }
-    const filepath = _parseFileUrl(String(filename));
-    const dirname = _pathDirname(filepath);
-    const builtins = [
-      "fs",
-      "path",
-      "os",
-      "events",
-      "util",
-      "http",
-      "_http_common",
-      "https",
-      "dns",
-      "dgram",
-      "child_process",
-      "stream",
-      "buffer",
-      "url",
-      "querystring",
-      "crypto",
-      "sqlite",
-      "zlib",
-      "assert",
-      "tty",
-      "net",
-      "tls"
-    ];
-    const resolvePaths = function(request) {
-      if (builtins.includes(request) || request.startsWith("node:")) {
-        return null;
-      }
-      if (request.startsWith("./") || request.startsWith("../") || request.startsWith("/")) {
-        return [dirname];
-      }
-      const paths = [];
-      let current = dirname;
-      while (current !== "/") {
-        paths.push(current + "/node_modules");
-        current = _pathDirname(current);
-      }
-      paths.push("/node_modules");
-      return paths;
-    };
+    if (request.startsWith("./") || request.startsWith("../") || request.startsWith("/")) {
+      return [dirname];
+    }
+    return Module._nodeModulePaths(dirname);
+  }
+  function createRequireResolve(dirname) {
     const resolve = function(request, _options) {
       const resolved = _resolveModule.applySyncPromise(void 0, [
         request,
@@ -20827,7 +20791,18 @@ ${headerLines}\r
       }
       return resolved;
     };
-    resolve.paths = resolvePaths;
+    resolve.paths = function(request) {
+      return computeRequireResolvePaths(dirname, request);
+    };
+    return resolve;
+  }
+  function createRequire(filename) {
+    if (typeof filename !== "string" && !(filename instanceof URL)) {
+      throw new TypeError("filename must be a string or URL");
+    }
+    const filepath = _parseFileUrl(String(filename));
+    const dirname = _pathDirname(filepath);
+    const resolve = createRequireResolve(dirname);
     const rejectRestrictedBuiltin = function(_request) {
     };
     const requireFn = function(request) {
@@ -20891,19 +20866,7 @@ ${headerLines}\r
         rejectRestrictedBuiltinRequest(request);
         return _requireFrom(request, this.path);
       };
-      moduleRequire.resolve = (request) => {
-        const resolved = _resolveModule.applySyncPromise(void 0, [
-          request,
-          this.path,
-          "require"
-        ]);
-        if (resolved === null) {
-          const err = new Error("Cannot find module '" + request + "'");
-          err.code = "MODULE_NOT_FOUND";
-          throw err;
-        }
-        return resolved;
-      };
+      moduleRequire.resolve = createRequireResolve(this.path);
       wrapper(this.exports, moduleRequire, this, filename, this.path);
       this.loaded = true;
       return this.exports;

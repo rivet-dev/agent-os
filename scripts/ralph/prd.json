@@ -1365,7 +1365,7 @@
         "cargo test -p agent-os-execution -- --test-threads=1 passes"
       ],
       "priority": 102,
-      "passes": false,
+      "passes": true,
       "notes": "Found in audit: require.resolve() API exists in the resolver (resolve_require function at javascript.rs:614) but has ZERO tests for guest-facing behavior. Many packages use require.resolve() to find files \u2014 e.g., finding template files relative to a dependency, or checking if an optional dependency exists."
     },
     {

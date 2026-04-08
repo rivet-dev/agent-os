@@ -32,6 +32,9 @@ Deleted coverage:
 */
 
 fn write_fixture(path: &Path, contents: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create fixture parent dirs");
+    }
     fs::write(path, contents).expect("write fixture");
 }
 
@@ -508,6 +511,113 @@ if (channel.hasSubscribers !== false) {
 if (diagnosticsChannel.hasSubscribers("undici:request:create") !== false) {
   throw new Error("diagnostics_channel.hasSubscribers should be false");
 }
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    assert_eq!(result.exit_code, 0);
+    assert!(
+        result.stderr.is_empty(),
+        "unexpected stderr: {:?}",
+        result.stderr
+    );
+}
+
+#[test]
+fn javascript_execution_supports_require_resolve_for_guest_code() {
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("local-file.js"),
+        "module.exports = 'local';\n",
+    );
+    write_fixture(
+        &temp.path().join("nested/check.cjs"),
+        r#"
+const localResolved = require.resolve("../local-file.js");
+if (localResolved !== "/root/local-file.js") {
+  throw new Error(`unexpected local resolution: ${String(localResolved)}`);
+}
+
+const packageResolved = require.resolve("some-package");
+if (packageResolved !== "/root/node_modules/some-package/index.js") {
+  throw new Error(`unexpected package resolution: ${String(packageResolved)}`);
+}
+
+const searchPaths = require.resolve.paths("some-package");
+const expectedPaths = [
+  "/root/nested/node_modules",
+  "/root/node_modules",
+  "/node_modules",
+];
+if (JSON.stringify(searchPaths) !== JSON.stringify(expectedPaths)) {
+  throw new Error(`unexpected search paths: ${JSON.stringify(searchPaths)}`);
+}
+"#,
+    );
+    write_fixture(
+        &temp.path().join("node_modules/some-package/package.json"),
+        r#"{"main":"./index.js"}"#,
+    );
+    write_fixture(
+        &temp.path().join("node_modules/some-package/index.js"),
+        "module.exports = 'pkg';\n",
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+if (require.resolve("fs") !== "node:fs") {
+  throw new Error(`builtin resolution failed: ${String(require.resolve("fs"))}`);
+}
+
+if (require.resolve("./local-file.js") !== "/root/local-file.js") {
+  throw new Error(`local resolution failed: ${String(require.resolve("./local-file.js"))}`);
+}
+
+if (require.resolve("some-package") !== "/root/node_modules/some-package/index.js") {
+  throw new Error(`package resolution failed: ${String(require.resolve("some-package"))}`);
+}
+
+const builtinPaths = require.resolve.paths("fs");
+if (builtinPaths !== null) {
+  throw new Error(`builtin paths should be null, got ${JSON.stringify(builtinPaths)}`);
+}
+
+const packagePaths = require.resolve.paths("some-package");
+const expectedPackagePaths = ["/root/node_modules", "/node_modules"];
+if (JSON.stringify(packagePaths) !== JSON.stringify(expectedPackagePaths)) {
+  throw new Error(`unexpected top-level search paths: ${JSON.stringify(packagePaths)}`);
+}
+
+let missingCode = null;
+try {
+  require.resolve("nonexistent");
+} catch (error) {
+  missingCode = error?.code ?? null;
+}
+if (missingCode !== "MODULE_NOT_FOUND") {
+  throw new Error(`unexpected missing-module code: ${String(missingCode)}`);
+}
+
+require("./nested/check.cjs");
 "#,
             )),
         })
