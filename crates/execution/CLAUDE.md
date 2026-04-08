@@ -107,6 +107,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 ## CommonJS Module Isolation
 
 - `node_import_cache.rs` has to patch `Module._resolveFilename` and the guest-facing `Module._cache` / `require.cache` view together; wrapping only `createGuestRequire()` does not constrain local `require()` inside already-loaded `.cjs` modules.
+- Resolver-only coverage for `javascript.rs` should use `javascript::ModuleResolutionTestHarness` with a temp-dir fixture instead of booting a V8 isolate; mapping `/root` plus `/root/node_modules` is enough to exercise exports/imports and pnpm `.pnpm` layouts.
 
 ## Guest `process` Hardening
 

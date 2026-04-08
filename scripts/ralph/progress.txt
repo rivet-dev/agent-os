@@ -32,6 +32,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - The current V8 sync-RPC bridge only tolerates one in-flight request effectively, so long-lived waits like HTTP server close listeners need stream events plus follow-up RPCs instead of a permanently pending sync-bridge Promise
 - The sidecar reads entrypoint files from VFS and passes as `inline_code` to avoid V8 module loading bridge calls in synchronous dispatch
 - Execution crate host-Node compatibility coverage stays behind the `legacy-js-tests` feature; default JavaScript validation should target the V8 isolate path and `crates/execution/tests/javascript_v8.rs`
+- Resolver-only coverage for `crates/execution/src/javascript.rs` should use `javascript::ModuleResolutionTestHarness` with temp-dir fixtures instead of booting a full V8 session
 - Warmup marker fingerprints for guest assets must include size and mtime data, not just inode identity; in-place rewrites of Pyodide or WASM assets otherwise fail to invalidate prewarm stamps
 - service.rs type definitions use `pub(crate)` fields when extracted to state.rs so impl blocks in service.rs can still access them
 - service.rs re-exports public types from state.rs via `pub use crate::state::{...}` so lib.rs re-exports continue to work
@@ -465,4 +466,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - `packages/core` native-sidecar tests should not assume guest-local `child_process.spawn()` children appear in `allProcesses()` / `processTree()`; only the top-level tracked runtime processes are surfaced there today
   - `vm.fetch()` is not a reliable assertion target for arbitrary guest listeners on the native sidecar path because guest-listener port translation back to the host is still missing; prefer bind/state assertions unless the story is explicitly about that bridge path
   - Guest `net.connect()` coverage is still incomplete on the native bridge, so listener-startup tests are a safer regression target than guest client/server round-trips
+---
+## 2026-04-07 21:17:57 PDT - US-048
+- Added `crates/execution/tests/module_resolution.rs` with 30 temp-filesystem tests covering builtin normalization, relative/absolute paths, extension probing, package exports/imports, CJS/ESM entry selection, and pnpm `.pnpm` layouts with symlinked packages
+- Added a minimal `javascript::ModuleResolutionTestHarness` in `crates/execution/src/javascript.rs` so integration tests can drive the real `LocalBridgeState` resolver without booting a V8 session, and documented that pattern in `crates/execution/AGENTS.md`
+- Files changed: `crates/execution/{AGENTS.md,src/javascript.rs,tests/module_resolution.rs}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - `LocalBridgeState` resolver coverage is cheapest as a temp-dir integration test; you only need `/root` and `/root/node_modules` guest mappings to exercise exports/imports and pnpm layouts realistically
+  - Symlinked pnpm package tests should use the symlinked guest referrer path (for example `/root/node_modules/pkg-a/index.js`) so `canonical_guest_path()` exercises the real `.pnpm/.../node_modules/...` walk-up logic
+  - The current exports-array resolver picks the first syntactically resolvable target, not the first on-disk-existing file, so use `null` or another truly unresolvable branch when testing array fallback behavior
 ---

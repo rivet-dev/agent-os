@@ -804,18 +804,19 @@
     {
       "id": "US-041",
       "title": "Run Pi agent end-to-end in V8 isolates",
-      "description": "As a developer, I want to boot a Pi agent session inside V8 isolates and verify it completes a real task end-to-end. None of the current stories test the full agent lifecycle.",
+      "description": "As a developer, I want to boot a Pi agent session inside V8 isolates using the FULL Pi SDK with our custom ACP adapter and verify it completes a real task end-to-end. This used to work in secure-exec \u2014 it is NOT a greenfield problem.",
       "acceptanceCriteria": [
-        "Pi agent boots via createSession('pi') with the V8 execution engine (not host node)",
-        "Agent receives a prompt, makes tool calls (filesystem, child_process), and returns a response",
-        "ACP JSON-RPC session lifecycle works: session/start → task/start → events → task/finish",
+        "Pi agent boots via createSession('pi') using the FULL Pi SDK (@mariozechner/pi-coding-agent) with our custom ACP adapter \u2014 NOT a minimal/stub adapter",
+        "The adapter at registry/agent/pi/src/adapter.ts uses createAgentSession() from the real Pi SDK, NOT direct Anthropic API calls",
+        "Agent receives a prompt, makes tool calls through the Pi SDK's tool system, and returns a response",
+        "ACP JSON-RPC session lifecycle works: session/start \u2192 task/start \u2192 events \u2192 task/finish",
         "All bridge calls (fs, child_process, crypto, timers, stdin) exercised during the session",
-        "Test uses @copilotkit/llmock with ANTHROPIC_API_KEY='mock-key' — no real API tokens",
+        "Test uses @copilotkit/llmock with ANTHROPIC_API_KEY='mock-key' \u2014 no real API tokens",
         "pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts passes"
       ],
-      "priority": 42,
+      "priority": 48,
       "passes": false,
-      "notes": "End-to-end agent validation. This is the real integration test — everything else tests subsystems in isolation. Depends on bridge gap stories (US-030-040) being complete. Use the existing pi-headless.test.ts as the starting point. The test should verify the agent sees kernel VFS (not host fs), kernel PIDs (not host PIDs), and kernel env (not host env)."
+      "notes": "CRITICAL: This MUST use the full Pi SDK, not a minimal/stub ACP adapter. The Pi SDK ran successfully inside secure-exec V8 isolates before the Rust migration. If Pi's extension loader or jiti fails in V8, FIX THE V8 COMPATIBILITY \u2014 do NOT bypass the SDK with a minimal adapter that makes direct Anthropic API calls. The adapter at registry/agent/pi/src/adapter.ts should call createAgentSession() from @mariozechner/pi-coding-agent and wire it to ACP over stdio. Reference the working secure-exec implementation at /home/nathan/secure-exec-1/ and the recovery files at .agent/recovery/secure-exec/. Any changes to adapter.ts that remove the Pi SDK dependency or replace it with direct API calls are WRONG. IMPORTANT: If V8 runtime compatibility gaps block the Pi SDK (e.g. performance.now() frozen by timing mitigation, jiti module loader needs Node APIs the polyfills don't support, missing shell binary for bash tool), fix those gaps in the Rust sidecar or V8 bridge \u2014 port whatever is missing from the secure-exec implementation. Check .agent/recovery/secure-exec/ for the original working polyfills and bridge-handlers.ts for how secure-exec handled these cases. This story includes migrating any remaining secure-exec functionality needed to make the full Pi SDK work."
     },
     {
       "id": "US-042",
@@ -829,7 +830,7 @@
         "If cold start >500ms, investigate V8 startup snapshot prewarming",
         "Benchmark added to scripts/benchmarks/ and runnable via a simple command"
       ],
-      "priority": 43,
+      "priority": 49,
       "passes": false,
       "notes": "Performance validation. The V8 runtime (crates/v8-runtime/) supports snapshot-based session creation via snapshot.rs. Cold start includes V8 isolate creation + v8-bridge.js evaluation. Warm start reuses the snapshot. Measure both. Compare against the old Command::new('node') path baseline if available."
     },
@@ -844,13 +845,13 @@
         "Benchmark added to scripts/benchmarks/ and runnable via a simple command",
         "Results include breakdown: v8-runtime base RSS, per-session delta, v8-bridge.js evaluation overhead"
       ],
-      "priority": 44,
+      "priority": 50,
       "passes": false,
       "notes": "Performance validation. The whole point of V8 isolates was lower memory per session vs spawning full node processes. Use process RSS from /proc/[pid]/status or similar. The existing scripts/benchmarks/pi-entrypoint-memory.bench.ts may be a useful reference for measurement patterns."
     },
     {
       "id": "US-044",
-      "title": "Guest escape audit — automated isolation invariant tests",
+      "title": "Guest escape audit \u2014 automated isolation invariant tests",
       "description": "As a developer, I want an automated test suite that verifies no guest code can reach host APIs, leak host state, or escape the kernel isolation boundary.",
       "acceptanceCriteria": [
         "Test suite in crates/sidecar/tests/isolation_audit.rs or crates/execution/tests/isolation_audit.rs",
@@ -864,7 +865,7 @@
         "Tests verify: guest require.resolve() returns guest-visible paths",
         "cargo test -p agent-os-sidecar --test isolation_audit -- --test-threads=1 passes"
       ],
-      "priority": 45,
+      "priority": 51,
       "passes": false,
       "notes": "Security hardening. The CLAUDE.md rules (crates/CLAUDE.md invariants 1-8) are clear but there's no automated test suite that systematically checks them. Each test should run guest JS code via the V8 engine and assert on the output. Reference: crates/execution/CLAUDE.md 'Virtualization Invariants' section."
     },
@@ -880,7 +881,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 env passes",
         "cargo test -p agent-os-execution -- --test-threads=1 env passes"
       ],
-      "priority": 46,
+      "priority": 52,
       "passes": false,
       "notes": "The old secure-exec had full env virtualization in bridge/process.ts (2,251 lines). The V8 bridge (v8-bridge.js) may already partially handle this via the process polyfill, but it needs verification. Check what guest_env filtering the sidecar does in service.rs and whether the V8 runtime exposes host env to guest code. Reference: .agent/recovery/secure-exec/nodejs/src/bridge/process.ts."
     },
@@ -896,7 +897,7 @@
         "Signal state tracked per-process in kernel process table (not per-V8-isolate)",
         "cargo test -p agent-os-sidecar -- --test-threads=1 signal passes"
       ],
-      "priority": 47,
+      "priority": 53,
       "passes": false,
       "notes": "The kernel already has full signal support in process_table.rs (SIGCHLD, SIGTERM, SIGWINCH, etc.). The gap is wiring guest process.on('SIGTERM') through the V8 bridge to the kernel signal table. The old secure-exec bridge/process.ts had this. The V8 bridge needs a signal registration bridge call and the sidecar needs to deliver signal events to the V8 session."
     },
@@ -911,9 +912,116 @@
         "V8 binary artifact is cached between CI runs to avoid rebuilding rusty_v8 from source",
         "CI passes on the current branch"
       ],
-      "priority": 48,
+      "priority": 54,
       "passes": false,
       "notes": "Operational. crates/v8-runtime/ uses v8 = '130' (rusty_v8) which takes ~5 minutes to build from source. CI should cache the built binary and the rusty_v8 build artifacts. Check if there's an existing CI workflow (.github/workflows/) to extend rather than creating a new one."
+    },
+    {
+      "id": "US-048",
+      "title": "Comprehensive module resolution test suite for V8 LocalBridgeState resolver",
+      "description": "As a developer, I want unit tests covering the module resolution logic in javascript.rs LocalBridgeState so we catch edge cases before they break agent SDK imports.",
+      "acceptanceCriteria": [
+        "Test file crates/execution/tests/module_resolution.rs created with 25+ tests",
+        "Tests cover: package.json exports maps (string shorthand, object with conditions, nested conditions, wildcard subpaths)",
+        "Tests cover: package.json imports maps (# subpath imports)",
+        "Tests cover: CJS/ESM interop (main vs module vs exports, type: module)",
+        "Tests cover: extension probing (.js, .mjs, .cjs, .json) and index.js fallback",
+        "Tests cover: pnpm node_modules structure (.pnpm store with symlinks)",
+        "Tests cover: builtin specifier normalization (node:fs, fs, node:path)",
+        "Tests cover: relative imports (./foo, ../bar), absolute imports (/root/foo)",
+        "Tests cover: directory imports with package.json main field",
+        "Tests use a mock filesystem (in-memory VFS or temp dir) \u2014 no real npm packages needed",
+        "cargo test -p agent-os-execution --test module_resolution passes"
+      ],
+      "priority": 42,
+      "passes": true,
+      "notes": "The module resolver lives in javascript.rs LocalBridgeState (resolve_module, resolve_path, resolve_node_modules, resolve_package_imports, resolve_package_entry_from_dir \u2014 lines 2421-2617). It currently has ZERO tests. This resolver handles all require()/import() calls in V8 guest code. Edge cases in exports maps and pnpm store layouts are the most common failure mode when loading real-world packages like Pi SDK."
+    },
+    {
+      "id": "US-049",
+      "title": "Fix module resolution bugs found by test suite",
+      "description": "As a developer, I want all module resolution edge cases fixed so real-world packages (Pi SDK, Anthropic SDK, etc.) resolve correctly in V8.",
+      "acceptanceCriteria": [
+        "All tests from US-048 pass",
+        "Any bugs found in resolve_exports_target, resolve_imports_target, or resolve_path are fixed",
+        "Wildcard subpath exports (e.g., './*': './dist/*.js') work correctly",
+        "Conditional exports with nested conditions (import > require > default) resolve in correct priority",
+        "Packages with both main and exports fields use exports (per Node.js spec)",
+        "cargo test -p agent-os-execution --test module_resolution passes",
+        "cargo test -p agent-os-execution -- --test-threads=1 passes"
+      ],
+      "priority": 43,
+      "passes": false,
+      "notes": "Depends on US-048. Fix whatever the test suite finds. Common issues: wildcard exports not expanded, conditional export priority wrong (should be import > require > default for ESM, require > import > default for CJS), string shorthand exports not handled."
+    },
+    {
+      "id": "US-050",
+      "title": "Pi SDK boot probe \u2014 require Pi SDK in V8 and log all failures",
+      "description": "As a developer, I want to boot the Pi SDK inside V8 isolates (just require, not run) and get a concrete list of what fails, so we know exactly what to fix before the E2E test.",
+      "acceptanceCriteria": [
+        "Test in crates/sidecar/tests/ or packages/core/tests/ that loads @mariozechner/pi-coding-agent inside V8",
+        "Test captures and reports: module resolution failures (which imports fail), missing polyfill methods (which Node.js APIs are called but not polyfilled), runtime errors during module evaluation",
+        "Test does NOT need to actually run the agent \u2014 just import the SDK entry point and call createAgentSession() constructor",
+        "Output is a structured list of failures, not just a crash",
+        "Test passes (even if SDK boot fails) \u2014 it reports failures, doesn't assert success yet",
+        "The failure list is documented in .agent/notes/pi-sdk-boot-gaps.md"
+      ],
+      "priority": 44,
+      "passes": false,
+      "notes": "This is a diagnostic story, not a fix story. The goal is to enumerate exactly what's missing so subsequent stories can fix targeted gaps instead of guessing. Run the test, collect the failure list, write it to a note file. Key Pi SDK deps to watch: @anthropic-ai/sdk (HTTP client), jiti (dynamic TS loading), zod (validation), various stream/event patterns."
+    },
+    {
+      "id": "US-051",
+      "title": "Node.js builtin conformance tests scoped to Pi SDK dependencies",
+      "description": "As a developer, I want conformance tests for the Node.js builtins that Pi SDK actually uses, so we verify polyfill correctness before the E2E test.",
+      "acceptanceCriteria": [
+        "Test file(s) in crates/execution/tests/ or crates/sidecar/tests/ covering V8 polyfill conformance",
+        "Tests cover fs: readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync, readFile (async), writeFile (async)",
+        "Tests cover child_process: spawn, spawnSync (exit codes, stdout, stderr, stdin piping)",
+        "Tests cover path: join, resolve, dirname, basename, extname, isAbsolute, relative, normalize",
+        "Tests cover crypto: createHash, createHmac, randomBytes, randomUUID",
+        "Tests cover events: EventEmitter (on, once, emit, removeListener)",
+        "Tests cover streams: Readable, Writable, Transform, pipeline",
+        "Tests cover buffer: Buffer.from, Buffer.alloc, toString, concat, slice",
+        "Tests cover url: URL constructor, searchParams, format, parse",
+        "Tests verify behavior matches real Node.js (same return values, same error codes)",
+        "cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1 passes"
+      ],
+      "priority": 45,
+      "passes": false,
+      "notes": "Scoped to what Pi SDK actually imports \u2014 NOT the full Node.js test suite. Each test runs guest JS code in a V8 isolate via the sidecar and asserts on output. If a polyfill method is missing or returns wrong values, the test fails with a clear message about what's wrong. Reference the Pi SDK boot probe (US-050) failure list to prioritize which builtins to test first."
+    },
+    {
+      "id": "US-052",
+      "title": "Fix V8 polyfill conformance gaps found by boot probe and conformance tests",
+      "description": "As a developer, I want all V8 polyfill gaps that block the Pi SDK fixed, so the SDK can boot and run inside V8 isolates.",
+      "acceptanceCriteria": [
+        "All failures from US-050 (Pi SDK boot probe) are resolved",
+        "All failures from US-051 (builtin conformance tests) are resolved",
+        "Pi SDK boot probe test updated to assert successful SDK import (not just report failures)",
+        "createAgentSession() from @mariozechner/pi-coding-agent returns successfully inside V8",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes",
+        "cargo test -p agent-os-execution -- --test-threads=1 passes"
+      ],
+      "priority": 46,
+      "passes": false,
+      "notes": "Depends on US-050 and US-051. Fix the specific gaps those stories identified. Common fixes: add missing methods to v8-bridge.js polyfills, fix incorrect return value formats, add missing error codes. Reference .agent/recovery/secure-exec/ for how the original JS kernel handled each case. Update .agent/notes/pi-sdk-boot-gaps.md as gaps are closed."
+    },
+    {
+      "id": "US-053",
+      "title": "Pi agent E2E with full SDK \u2014 boot, prompt, tool use, response",
+      "description": "As a developer, I want the full Pi agent lifecycle working end-to-end inside V8 isolates, using the real Pi SDK with our ACP adapter.",
+      "acceptanceCriteria": [
+        "Pi agent boots via createSession('pi') using the FULL Pi SDK with createAgentSession()",
+        "Agent receives a prompt via ACP, makes tool calls (write file, run bash command), returns a response",
+        "ACP JSON-RPC session lifecycle works: session/start \u2192 task/start \u2192 events \u2192 task/finish",
+        "Test uses @copilotkit/llmock with ANTHROPIC_API_KEY='mock-key' \u2014 no real API tokens",
+        "All bridge calls exercised: fs, child_process, crypto, timers, stdin",
+        "pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts passes"
+      ],
+      "priority": 47,
+      "passes": false,
+      "notes": "This replaces US-041 as the final Pi E2E story. By this point, US-048-052 have verified module resolution, polyfill conformance, and SDK boot. This story should be straightforward \u2014 just wire the test and verify the lifecycle. If it still fails, the boot probe and conformance tests missed something \u2014 go back and add coverage."
     }
   ]
 }

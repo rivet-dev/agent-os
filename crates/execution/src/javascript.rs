@@ -386,19 +386,7 @@ impl GuestPathTranslator {
             });
         }
 
-        mappings.sort_by(|left, right| {
-            right
-                .guest_path
-                .len()
-                .cmp(&left.guest_path.len())
-                .then_with(|| {
-                    right
-                        .host_path
-                        .components()
-                        .count()
-                        .cmp(&left.host_path.components().count())
-                })
-        });
+        sort_guest_path_mappings(&mut mappings);
 
         Self {
             implicit_guest_cwd,
@@ -547,6 +535,66 @@ impl GuestPathTranslator {
         }
         let guest = self.host_to_guest_string(&canonical);
         (!guest.starts_with("/unknown/")).then_some(normalize_guest_path(&guest))
+    }
+}
+
+fn sort_guest_path_mappings(mappings: &mut [GuestPathMapping]) {
+    mappings.sort_by(|left, right| {
+        right
+            .guest_path
+            .len()
+            .cmp(&left.guest_path.len())
+            .then_with(|| {
+                right
+                    .host_path
+                    .components()
+                    .count()
+                    .cmp(&left.host_path.components().count())
+            })
+    });
+}
+
+#[doc(hidden)]
+pub struct ModuleResolutionTestHarness {
+    local_bridge: LocalBridgeState,
+}
+
+impl ModuleResolutionTestHarness {
+    pub fn new(host_root: impl Into<PathBuf>) -> Self {
+        let host_root = host_root.into();
+        let mut mappings = vec![
+            GuestPathMapping {
+                guest_path: String::from("/root/node_modules"),
+                host_path: host_root.join("node_modules"),
+            },
+            GuestPathMapping {
+                guest_path: String::from("/root"),
+                host_path: host_root.clone(),
+            },
+        ];
+        sort_guest_path_mappings(&mut mappings);
+
+        Self {
+            local_bridge: LocalBridgeState {
+                translator: GuestPathTranslator {
+                    implicit_guest_cwd: String::from("/root"),
+                    implicit_host_cwd: host_root,
+                    sandbox_root: None,
+                    mappings,
+                },
+                ..LocalBridgeState::default()
+            },
+        }
+    }
+
+    pub fn resolve_import(&mut self, specifier: &str, from_path: &str) -> Option<String> {
+        self.local_bridge
+            .resolve_module(specifier, from_path, ModuleResolveMode::Import)
+    }
+
+    pub fn resolve_require(&mut self, specifier: &str, from_path: &str) -> Option<String> {
+        self.local_bridge
+            .resolve_module(specifier, from_path, ModuleResolveMode::Require)
     }
 }
 
