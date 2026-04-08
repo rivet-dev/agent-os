@@ -26,6 +26,8 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - Bundled undici fetch depends on the aliased `node:stream` helpers understanding `web-streams-polyfill` `ReadableStream` instances; keep `finished()`, `isReadable()`, `isErrored()`, and `isDisturbed()` compatible in `crates/execution/assets/undici-shims/stream.js` or fetch will fail after the TCP response arrives
 - `crates/execution/tests/cjs_esm_interop.rs` should keep desired-behavior CJS/ESM gaps as explicit `#[ignore]` tests tied to the follow-up fix story instead of weakening assertions to current runtime behavior
 - Build the V8 stdlib-only builtin bundle from `crates/execution/assets/v8-bridge.source.js` via `packages/core/scripts/build-v8-bridge.mjs`, and keep the heavier assert/util/zlib payload in `v8-bridge-zlib.js` so `v8-bridge.js` stays under the 500KB cap
+- Bootstrap globals added in `packages/core/scripts/build-v8-bridge.mjs` are only for early bundle initialization; if they include `URL` or `URLSearchParams`, mark them as bootstrap stubs and make `crates/execution/assets/v8-bridge.source.js` ignore or replace them once stdlib polyfills load
+- Low-level sidecar `net.write` test RPCs take raw bytes encoded as base64, not plain UTF-8 strings; direct service-test payloads need encoding even when the guest-facing JS API accepts normal strings
 - `crates/sidecar/src/vm.rs` must register the runtime-owned execution commands (`node`, `python`, `wasm`) during both `create_vm()` and `configure_vm()`; runtime-based `ExecuteRequest`s can run before any discovered `/__agentos/commands/*` entries are refreshed
 - Nested JavaScript `child_process` polling in the sidecar must surface queued child stdout/stderr/sync-RPC events before finalizing `Exited`; fast child output otherwise disappears behind the exit event
 - Pi/V8 boot probes in `packages/core` should run one suspicious import or constructor per fresh VM; a timed-out guest JS startup can poison later `node` spawns in the same VM and turn the original issue into generic broken-pipe noise
@@ -568,4 +570,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Dynamic CJS named exports are reliable once the V8 runtime falls back to evaluating the CJS module and enumerating `Object.keys(module.exports)` before generating the ESM shim; static source scanning alone misses `Object.assign`, spreads, and `Object.defineProperties`
   - If `crates/v8-runtime/src/execution.rs` changes appear to have no effect in execution tests, rebuild `cargo build -p agent-os-v8-runtime --bin agent-os-v8` first; the harness can reuse an older runtime binary from `target/debug`
   - `cargo test -p agent-os-sidecar -- --test-threads=1` still fails on this branch for the pre-existing `builtin_conformance` cases in `buffer`, `stdlib-polyfills`, and `url`; the `agent-os-execution` package and the focused interop suite are green
+---
+## 2026-04-08 05:29:39 PDT - US-055
+- Fixed the bridge bootstrap handoff so early `URL` and `URLSearchParams` placeholders do not shadow the real stdlib polyfills at runtime, regenerated `crates/execution/assets/v8-bridge.js`, and documented the bootstrap-stub rule in `crates/execution/AGENTS.md`
+- Updated the remaining direct sidecar `net.write` service tests to send base64 byte payloads instead of raw strings, which restored the full `cargo test -p agent-os-sidecar -- --test-threads=1` acceptance run for this story
+- Files changed: `packages/core/scripts/build-v8-bridge.mjs`, `crates/execution/{AGENTS.md,assets/v8-bridge.source.js,assets/v8-bridge.js}`, `crates/sidecar/tests/service.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - The V8 bridge bootstrap layer is only allowed to seed enough globals for bundle startup; any placeholder `URL` or `URLSearchParams` implementation must be explicitly marked and then discarded once `node-stdlib-browser` finishes loading
+  - Direct service-level RPC tests exercise the sidecar wire contract, not the guest JS convenience API, so byte-bearing methods like `net.write` require base64 payloads even when higher-level guest code accepts strings
+  - When sidecar builtin conformance breaks after a bridge-bundle edit, inspect both `packages/core/scripts/build-v8-bridge.mjs` and `crates/execution/assets/v8-bridge.source.js`; either layer can leave the wrong global installed
 ---

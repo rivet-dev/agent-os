@@ -1655,7 +1655,10 @@ ykAheWCsAteSEWVc0w==\n\
                 JavascriptSyncRpcRequest {
                     id: 60,
                     method: String::from("net.write"),
-                    args: vec![json!(server_socket_id.clone()), json!("ping")],
+                    args: vec![
+                        json!(server_socket_id.clone()),
+                        json!(base64::engine::general_purpose::STANDARD.encode("ping")),
+                    ],
                 },
             )
             .expect("write server payload");
@@ -2268,7 +2271,10 @@ ykAheWCsAteSEWVc0w==\n\
                 JavascriptSyncRpcRequest {
                     id: 7,
                     method: String::from("net.write"),
-                    args: vec![json!(socket_id.clone()), json!("ping")],
+                    args: vec![
+                        json!(socket_id.clone()),
+                        json!(base64::engine::general_purpose::STANDARD.encode("ping")),
+                    ],
                 },
             )
             .expect("write TLS client payload");
@@ -2535,7 +2541,10 @@ ykAheWCsAteSEWVc0w==\n\
                 JavascriptSyncRpcRequest {
                     id: 120,
                     method: String::from("net.write"),
-                    args: vec![json!(socket_id.clone()), json!("pong")],
+                    args: vec![
+                        json!(socket_id.clone()),
+                        json!(base64::engine::general_purpose::STANDARD.encode("pong")),
+                    ],
                 },
             )
             .expect("write TLS server payload");

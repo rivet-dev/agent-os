@@ -24,7 +24,7 @@ const EarlyBufferGlobal =
   bufferStdlibModuleNs.Buffer ??
   bufferStdlibModuleNs.default?.Buffer ??
   bufferStdlibModuleNs.default;
-if (typeof globalThis.Buffer === "undefined" && typeof EarlyBufferGlobal === "function") {
+if (typeof EarlyBufferGlobal === "function") {
   globalThis.Buffer = EarlyBufferGlobal;
 }
 
@@ -17103,7 +17103,7 @@ ${headerLines}\r
     }
     return toNodeUSVString(init);
   }
-  var NativeURLSearchParams = typeof globalThis.URLSearchParams === "function" ? globalThis.URLSearchParams : class URLSearchParams {
+  var NativeURLSearchParams = typeof globalThis.URLSearchParams === "function" && globalThis.URLSearchParams.__agentOsBootstrapStub !== true ? globalThis.URLSearchParams : class URLSearchParams {
     constructor(init = "") {
       this._pairs = [];
       if (typeof init === "string") {
@@ -17502,7 +17502,7 @@ ${headerLines}\r
       enumerable: false
     }
   });
-  var NativeURL = typeof globalThis.URL === "function" ? globalThis.URL : class URL {
+  var NativeURL = typeof globalThis.URL === "function" && globalThis.URL.__agentOsBootstrapStub !== true ? globalThis.URL : class URL {
     constructor(url, base) {
       const raw = String(url ?? "");
       const hasScheme = /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(raw);
