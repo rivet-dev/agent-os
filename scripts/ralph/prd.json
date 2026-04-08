@@ -831,7 +831,7 @@
         "Benchmark added to scripts/benchmarks/ and runnable via a simple command"
       ],
       "priority": 53,
-      "passes": false,
+      "passes": true,
       "notes": "Performance validation. The V8 runtime (crates/v8-runtime/) supports snapshot-based session creation via snapshot.rs. Cold start includes V8 isolate creation + v8-bridge.js evaluation. Warm start reuses the snapshot. Measure both. Compare against the old Command::new('node') path baseline if available."
     },
     {

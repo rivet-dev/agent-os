@@ -20,6 +20,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- In `crates/execution/tests/cjs_esm_interop.rs`, keep a passing default-import fallback test next to each ignored desired-behavior named-export case for dynamic `module.exports` patterns; that preserves today’s graceful-degradation contract while `US-055` fixes the extraction gap
 - Bundled undici fetch depends on the aliased `node:stream` helpers understanding `web-streams-polyfill` `ReadableStream` instances; keep `finished()`, `isReadable()`, `isErrored()`, and `isDisturbed()` compatible in `crates/execution/assets/undici-shims/stream.js` or fetch will fail after the TCP response arrives
 - `crates/execution/tests/cjs_esm_interop.rs` should keep desired-behavior CJS/ESM gaps as explicit `#[ignore]` tests tied to the follow-up fix story instead of weakening assertions to current runtime behavior
 - Build the V8 stdlib-only builtin bundle from `crates/execution/assets/v8-bridge.source.js` via `packages/core/scripts/build-v8-bridge.mjs`, and keep the heavier assert/util/zlib payload in `v8-bridge-zlib.js` so `v8-bridge.js` stays under the 500KB cap
@@ -546,4 +547,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - `ExecuteRequest { runtime: ... }` does not depend on discovered `/__agentos/commands/*` entries, so the execution driver must always seed the runtime-owned command names even on a brand-new VM
   - A full `cargo test -p agent-os-sidecar -- --test-threads=1` run is now green on this branch again; the earlier Python `ENOENT: command not found: python` failure came from missing runtime command registration, not from the stdlib bridge work
   - When a story touches the V8 bridge but the package-wide failure shows up in an unrelated runtime suite, check VM command registration before assuming the new bridge code caused it
+---
+## 2026-04-08 04:57:28 PDT - US-054
+- Tightened `crates/execution/tests/cjs_esm_interop.rs` from 25 to 27 cases by adding two non-ignored V8 runtime tests that lock in graceful-degradation behavior for dynamic `Object.assign(module.exports, ...)` and spread-based `module.exports` patterns while the stronger named-export expectations stay parked under `US-055`
+- Verified the suite with `cargo test -p agent-os-execution --test cjs_esm_interop -- --test-threads=1` (20 passed, 7 ignored), and re-ran `cargo test -p agent-os-sidecar -- --test-threads=1` to confirm the remaining failures are the pre-existing `builtin_conformance` gaps in `buffer`, `stdlib-polyfills`, and `url`
+- Files changed: `crates/execution/tests/cjs_esm_interop.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Dynamic `module.exports` patterns need both kinds of tests at once: a passing default-import case for current behavior and an ignored named-export case for the target behavior, otherwise later fixes lose the graceful-degradation contract
+  - The current branch-level blocker for a full sidecar run is `crates/sidecar/tests/builtin_conformance.rs` (`buffer`, `stdlib-polyfills`, `url`), which maps directly to the later conformance/fix stories instead of this interop suite
+  - Re-running the full sidecar package after execution-only test changes is still useful here because it distinguishes real regressions from the known branch debt the PRD already schedules later
 ---

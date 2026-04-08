@@ -317,6 +317,49 @@ console.log(JSON.stringify({ alpha: dep.alpha, beta, defaultBeta: dep.beta }));
 }
 
 #[test]
+fn runtime_object_assign_module_exports_still_exposes_the_default_export_shape() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "dep.cjs",
+        r#"
+Object.assign(module.exports, { answer: 42, label: "ok" });
+"#,
+    );
+    fixture.write(
+        "entry.mjs",
+        r#"
+import dep from "./dep.cjs";
+console.log(JSON.stringify(dep));
+"#,
+    );
+
+    let output = run_guest_json(&fixture, "./entry.mjs");
+    assert_eq!(output, json!({ "answer": 42, "label": "ok" }));
+}
+
+#[test]
+fn runtime_spread_based_module_exports_still_exposes_the_default_export_shape() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "dep.cjs",
+        r#"
+const shared = { alpha: 1 };
+module.exports = { ...shared, beta: 2 };
+"#,
+    );
+    fixture.write(
+        "entry.mjs",
+        r#"
+import dep from "./dep.cjs";
+console.log(JSON.stringify(dep));
+"#,
+    );
+
+    let output = run_guest_json(&fixture, "./entry.mjs");
+    assert_eq!(output, json!({ "alpha": 1, "beta": 2 }));
+}
+
+#[test]
 fn runtime_require_of_esm_only_packages_either_loads_or_throws_clearly() {
     let fixture = Fixture::new();
     fixture.write_json(
