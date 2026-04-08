@@ -22,6 +22,8 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 ## Codebase Patterns
 - Treat `crates/bridge/bridge-contract.json` as the canonical host-bridge inventory and `crates/execution/assets/polyfill-registry.json` as the canonical `_loadPolyfill` inventory; when bridge globals or runtime-loadable builtins change, update those files together with `crates/v8-runtime/src/session.rs` and `crates/execution/src/javascript.rs`
 - Guest-side CommonJS helpers in `crates/execution/assets/v8-bridge.source.js` must pass explicit `"require"` mode into `_resolveModule`; otherwise dual packages resolve the import branch and `require()` can try to execute ESM as CommonJS
+- Generated node-import-cache builtin assets need a `NODE_IMPORT_CACHE_ASSET_VERSION` bump in `crates/execution/src/node_import_cache.rs` whenever their source changes, or old `/tmp/agent-os-node-import-cache-*` materializations will keep serving stale code
+- If guest CommonJS must `require("node:...")`, update both `Module.builtinModules` and `loadBuiltinModule()` in `crates/execution/assets/v8-bridge.source.js`; registering only one side leaves `_requireFrom()` recursing or hanging on the builtin
 - After changing `crates/v8-runtime/src/execution.rs`, rebuild `agent-os-v8` before rerunning V8-backed execution or sidecar tests, or the harness may keep exercising a stale runtime binary
 - In `crates/execution/tests/cjs_esm_interop.rs`, keep a passing default-import fallback test next to each ignored desired-behavior named-export case for dynamic `module.exports` patterns; that preserves today’s graceful-degradation contract while `US-055` fixes the extraction gap
 - Bundled undici fetch depends on the aliased `node:stream` helpers understanding `web-streams-polyfill` `ReadableStream` instances; keep `finished()`, `isReadable()`, `isErrored()`, and `isDisturbed()` compatible in `crates/execution/assets/undici-shims/stream.js` or fetch will fail after the TCP response arrives
@@ -597,4 +599,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
 - **Learnings for future iterations:**
   - If a story already has a committed `feat: US-…` change and a matching progress entry, verify its acceptance command before starting follow-on work; the PRD flag can drift even when the implementation is already present
   - `cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1` is the acceptance source of truth for `US-051`; keep using that focused target instead of inferring completion from broader branch-level test runs
+---
+## 2026-04-08 10:39:17 PDT - US-052
+- Fixed the remaining Pi SDK V8 boot blockers by making inline `node:fs/promises` wrappers terminate through `node:fs`, bumping the node-import-cache asset version so regenerated builtin assets replace stale temp-root copies, and wiring `node:v8` into the guest CommonJS builtin registry so Jiti can `require("node:v8")`
+- Tightened `packages/core/tests/pi-sdk-boot-probe.test.ts` to require a fully successful Pi SDK boot, added focused V8 execution regressions for `node:fs/promises` import and `require("node:v8")`, updated `crates/execution/AGENTS.md`, and refreshed `.agent/notes/pi-sdk-boot-gaps.md` with the closed gaps
+- Files changed: `.agent/notes/pi-sdk-boot-gaps.md`, `crates/execution/{AGENTS.md,assets/v8-bridge.source.js,assets/v8-bridge.js,src/javascript.rs,src/node_import_cache.rs,tests/javascript_v8.rs}`, `packages/core/tests/pi-sdk-boot-probe.test.ts`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Inline builtin wrappers in `crates/execution/src/javascript.rs` cannot `_requireFrom()` the same builtin subpath they implement; `node:fs/promises` must be derived from `node:fs` or it loops back into module resolution
+  - Jiti’s import path proves that CommonJS builtin support is two-part: `Module.builtinModules` membership without a matching `loadBuiltinModule()` case still leaves `require("node:v8")` hanging
+  - Pi boot probes are now a strong acceptance test, not a diagnostics-only report; if they start timing out again, use one-off VM probes for the first dependency in the chain before re-running the full suite
 ---

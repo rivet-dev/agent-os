@@ -330,6 +330,47 @@ if (typeof process.pid !== "number" || process.pid <= 0) {
 }
 
 #[test]
+fn javascript_execution_imports_node_fs_promises_without_hanging() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+import fs from "node:fs/promises";
+
+if (typeof fs.access !== "function") {
+  throw new Error("node:fs/promises did not expose access()");
+}
+if (typeof fs.readFile !== "function") {
+  throw new Error("node:fs/promises did not expose readFile()");
+}
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    assert_eq!(result.exit_code, 0);
+    assert!(
+        result.stderr.is_empty(),
+        "unexpected stderr: {:?}",
+        result.stderr
+    );
+}
+
+#[test]
 fn javascript_execution_imports_node_perf_hooks_and_vm_without_hanging() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -358,6 +399,47 @@ if (typeof performance?.now !== "function") {
 const compiled = vm.runInThisContext("(function () { return 7; })");
 if (compiled() !== 7) {
   throw new Error("node:vm did not evaluate code in this context");
+}
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    assert_eq!(result.exit_code, 0);
+    assert!(
+        result.stderr.is_empty(),
+        "unexpected stderr: {:?}",
+        result.stderr
+    );
+}
+
+#[test]
+fn javascript_execution_requires_node_v8_without_hanging() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const v8 = require("node:v8");
+
+if (typeof v8.getHeapStatistics !== "function") {
+  throw new Error("node:v8 did not expose getHeapStatistics()");
 }
 "#,
             )),

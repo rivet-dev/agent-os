@@ -3844,6 +3844,48 @@ export default {
         );
     }
 
+    if module_name == "fs/promises" {
+        return String::from(
+            r#"const fsModule = globalThis._requireFrom("node:fs", "/");
+const _m = fsModule.promises;
+
+export default _m;
+export const constants = fsModule.constants;
+export const FileHandle = _m.FileHandle;
+export const access = _m.access;
+export const appendFile = _m.appendFile;
+export const chmod = _m.chmod;
+export const chown = _m.chown;
+export const copyFile = _m.copyFile;
+export const cp = _m.cp;
+export const lchmod = _m.lchmod;
+export const lchown = _m.lchown;
+export const link = _m.link;
+export const lstat = _m.lstat;
+export const lutimes = _m.lutimes;
+export const mkdir = _m.mkdir;
+export const mkdtemp = _m.mkdtemp;
+export const open = _m.open;
+export const opendir = _m.opendir;
+export const readFile = _m.readFile;
+export const readdir = _m.readdir;
+export const readlink = _m.readlink;
+export const realpath = _m.realpath;
+export const rename = _m.rename;
+export const rm = _m.rm;
+export const rmdir = _m.rmdir;
+export const stat = _m.stat;
+export const statfs = _m.statfs;
+export const symlink = _m.symlink;
+export const truncate = _m.truncate;
+export const unlink = _m.unlink;
+export const utimes = _m.utimes;
+export const watch = _m.watch;
+export const writeFile = _m.writeFile;
+"#,
+        );
+    }
+
     if module_name == "string_decoder" {
         return String::from(
             r#"class StringDecoder {

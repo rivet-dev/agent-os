@@ -20121,6 +20121,7 @@ ${headerLines}\r
       "tty",
       "url",
       "util",
+      "v8",
       "zlib",
       "vm",
       "module"
@@ -20258,6 +20259,37 @@ ${headerLines}\r
   });
   var builtinStringDecoderStdlibModule = cloneStdlibModule(stringDecoderStdlibModuleNs);
   var builtinUrlStdlibModule = cloneStdlibModule(urlStdlibModuleNs);
+  var builtinV8Module = {
+    getHeapStatistics() {
+      return {
+        total_heap_size: 0,
+        total_heap_size_executable: 0,
+        total_physical_size: 0,
+        total_available_size: 0,
+        used_heap_size: 0,
+        heap_size_limit: 0,
+        malloced_memory: 0,
+        peak_malloced_memory: 0,
+        does_zap_garbage: 0,
+        number_of_native_contexts: 0,
+        number_of_detached_contexts: 0,
+        total_global_handles_size: 0,
+        used_global_handles_size: 0,
+        external_memory: 0
+      };
+    },
+    getHeapSpaceStatistics() {
+      return [];
+    },
+    getHeapSnapshot() {
+      return builtinStreamStdlibModule.Readable.fromWeb(new ReadableStream({
+        start(controller) {
+          controller.enqueue(Buffer.from("{}"));
+          controller.close();
+        }
+      }));
+    }
+  };
   function normalizeBuiltinRequest(request) {
     return String(request).replace(/^node:/, "");
   }
@@ -20302,6 +20334,8 @@ ${headerLines}\r
         return builtinUrlStdlibModule;
       case "util":
         return globalThis.__agentOsBuiltinUtilModule;
+      case "v8":
+        return builtinV8Module;
       case "child_process":
         return _childProcessModule;
       case "constants":

@@ -376,7 +376,7 @@ async function runProbeCase(
 
 describe("Pi SDK V8 boot probe", () => {
 	test(
-		"reports Pi SDK boot gaps inside the VM without requiring a successful boot",
+		"boots the Pi SDK inside the VM",
 		async () => {
 			const report: ProbeReport = {
 				packageName: "@mariozechner/pi-coding-agent",
@@ -398,13 +398,15 @@ describe("Pi SDK V8 boot probe", () => {
 			console.log(`PI_BOOT_PROBE_REPORT ${JSON.stringify(report)}`);
 
 			expect(report.steps.length).toBe(probes.length);
-			expect(report.steps.some((step) => step.name === "sdk-path-import")).toBe(
-				true,
-			);
+			expect(report.failures).toEqual([]);
+			expect(report.steps.every((step) => step.status === "ok")).toBe(true);
 			expect(
-				report.steps.some((step) => step.name === "sdk-create-agent-session"),
-			).toBe(true);
-			expect(Array.isArray(report.failures)).toBe(true);
+				report.steps.find((step) => step.name === "sdk-path-import")?.status,
+			).toBe("ok");
+			expect(
+				report.steps.find((step) => step.name === "sdk-create-agent-session")
+					?.status,
+			).toBe("ok");
 		},
 		90_000,
 	);

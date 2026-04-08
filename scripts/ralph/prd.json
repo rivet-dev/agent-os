@@ -1004,7 +1004,7 @@
         "cargo test -p agent-os-execution -- --test-threads=1 passes"
       ],
       "priority": 50,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-050 and US-051. Fix the specific gaps those stories identified. Common fixes: add missing methods to v8-bridge.js polyfills, fix incorrect return value formats, add missing error codes. Reference .agent/recovery/secure-exec/ for how the original JS kernel handled each case. Update .agent/notes/pi-sdk-boot-gaps.md as gaps are closed."
     },
     {

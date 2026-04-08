@@ -15,7 +15,7 @@ const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
 const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "7";
-const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "4";
+const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "5";
 const NODE_IMPORT_CACHE_DIR_PREFIX: &str = "agent-os-node-import-cache";
 const DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const PYODIDE_DIST_DIR: &str = "pyodide-dist";
@@ -8867,8 +8867,7 @@ export const watchFile = mod.watchFile;\n\
 export const write = mod.write;\n\
 export const writeFile = mod.writeFile;\n\
 export const writeFileSync = mod.writeFileSync;\n\
-export const writeSync = mod.writeSync;\n\
-export * from \"node:fs\";\n"
+export const writeSync = mod.writeSync;\n"
     )
 }
 
@@ -8913,8 +8912,7 @@ export const truncate = mod.truncate;\n\
 export const unlink = mod.unlink;\n\
 export const utimes = mod.utimes;\n\
 export const watch = mod.watch;\n\
-export const writeFile = mod.writeFile;\n\
-export * from \"node:fs/promises\";\n"
+export const writeFile = mod.writeFile;\n"
     )
 }
 
