@@ -846,7 +846,7 @@
         "Results include breakdown: v8-runtime base RSS, per-session delta, v8-bridge.js evaluation overhead"
       ],
       "priority": 54,
-      "passes": false,
+      "passes": true,
       "notes": "Performance validation. The whole point of V8 isolates was lower memory per session vs spawning full node processes. Use process RSS from /proc/[pid]/status or similar. The existing scripts/benchmarks/pi-entrypoint-memory.bench.ts may be a useful reference for measurement patterns."
     },
     {

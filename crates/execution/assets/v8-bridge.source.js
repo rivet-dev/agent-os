@@ -19962,7 +19962,8 @@ ${headerLines}\r
     const resolve = function(request, _options) {
       const resolved = _resolveModule.applySyncPromise(void 0, [
         request,
-        dirname
+        dirname,
+        "require"
       ]);
       if (resolved === null) {
         const err = new Error("Cannot find module '" + request + "'");
@@ -20044,7 +20045,8 @@ ${headerLines}\r
       moduleRequire.resolve = (request) => {
         const resolved = _resolveModule.applySyncPromise(void 0, [
           request,
-          this.path
+          this.path,
+          "require"
         ]);
         if (resolved === null) {
           const err = new Error("Cannot find module '" + request + "'");
@@ -20079,7 +20081,8 @@ ${headerLines}\r
       const parentDir = parent && parent.path ? parent.path : "/";
       const resolved = _resolveModule.applySyncPromise(void 0, [
         request,
-        parentDir
+        parentDir,
+        "require"
       ]);
       if (resolved === null) {
         const err = new Error("Cannot find module '" + request + "'");
@@ -20343,7 +20346,8 @@ ${headerLines}\r
     }
     const resolved = _resolveModule.applySyncPromise(void 0, [
       request,
-      parentPath
+      parentPath,
+      "require"
     ]);
     if (resolved === null) {
       const error = new Error(`Cannot find module '${request}'`);

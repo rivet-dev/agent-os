@@ -4162,7 +4162,10 @@ fn resolve_exports_target(
             .iter()
             .find_map(|value| resolve_exports_target(value, subpath, mode)),
         Value::Object(record) => {
-            if subpath == "." && !record.keys().any(|key| key.starts_with("./")) {
+            if subpath == "."
+                && !record.contains_key(".")
+                && !record.keys().any(|key| key.starts_with("./"))
+            {
                 return resolve_conditional_target(record, mode);
             }
             if let Some(value) = record.get(subpath) {
@@ -4204,9 +4207,7 @@ fn resolve_conditional_target(
             }
         }
     }
-    record
-        .values()
-        .find_map(|value| resolve_exports_target(value, ".", mode))
+    None
 }
 
 fn resolve_imports_target(

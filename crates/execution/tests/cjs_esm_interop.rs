@@ -147,7 +147,6 @@ fn resolution_nested_exports_conditions_recurse_three_levels() {
 }
 
 #[test]
-#[ignore = "US-055: export-condition arrays currently prefer the first object branch even when its conditions do not match"]
 fn resolution_exports_array_and_condition_nesting_uses_first_valid_target() {
     let fixture = Fixture::new();
     fixture.write_json(
@@ -409,7 +408,6 @@ try {
 }
 
 #[test]
-#[ignore = "US-055: CJS require() still resolves the ESM branch for dual packages at runtime"]
 fn runtime_require_of_dual_packages_uses_the_cjs_entrypoint() {
     let fixture = Fixture::new();
     fixture.write_json(
@@ -714,7 +712,6 @@ console.log(JSON.stringify({
 }
 
 #[test]
-#[ignore = "US-055: node:assert polyfill is still missing assert.throws"]
 fn runtime_builtin_assert_exposes_throws() {
     let fixture = Fixture::new();
     fixture.write(
@@ -787,7 +784,6 @@ console.log(JSON.stringify({
 }
 
 #[test]
-#[ignore = "US-055: extract_cjs_export_names does not yet handle Object.assign(module.exports, ...)"]
 fn runtime_object_assign_module_exports_named_exports_are_visible_to_esm_imports() {
     let fixture = Fixture::new();
     fixture.write(
@@ -809,7 +805,6 @@ console.log(JSON.stringify({ answer, label }));
 }
 
 #[test]
-#[ignore = "US-055: extract_cjs_export_names does not yet inspect spread assignments on module.exports"]
 fn runtime_spread_based_module_exports_named_exports_are_visible_to_esm_imports() {
     let fixture = Fixture::new();
     fixture.write(
@@ -832,7 +827,6 @@ console.log(JSON.stringify({ alpha, beta }));
 }
 
 #[test]
-#[ignore = "US-055: extract_cjs_export_names does not yet handle Object.defineProperties(module.exports, ...)"]
 fn runtime_object_define_properties_reexports_are_visible_to_esm_imports() {
     let fixture = Fixture::new();
     fixture.write(
@@ -857,7 +851,6 @@ console.log(JSON.stringify({ answer, label }));
 }
 
 #[test]
-#[ignore = "US-055: JSON ESM imports are not yet wrapped into a parsed default export shim"]
 fn runtime_esm_json_imports_return_the_parsed_object() {
     let fixture = Fixture::new();
     fixture.write("data.json", r#"{ "name": "agent-os", "ok": true }"#);

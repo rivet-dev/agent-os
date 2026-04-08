@@ -1126,24 +1126,7 @@ fn prefetch_module_imports(
                     continue;
                 }
 
-                // Detect CJS and wrap in ESM shim if needed
-                let is_cjs = is_likely_cjs(source_code, resolved_path);
-                let effective_source = if is_cjs {
-                    let exports = extract_cjs_export_names(source_code);
-                    let mut shim = format!(
-                        "const _cjsModule = globalThis._requireFrom(\"{}\", \"/\");\nexport default _cjsModule;\n",
-                        resolved_path.replace('\\', "\\\\").replace('"', "\\\"")
-                    );
-                    for name in &exports {
-                        shim.push_str(&format!(
-                            "export const {} = _cjsModule[\"{}\"];\n",
-                            name, name
-                        ));
-                    }
-                    shim
-                } else {
-                    add_esm_runtime_prelude(source_code)
-                };
+                let effective_source = build_module_source(scope, source_code, resolved_path);
 
                 // Compile the module
                 let resource = match v8::String::new(scope, resolved_path) {
@@ -1240,31 +1223,7 @@ fn resolve_or_compile_module<'s>(
     // Phase 5: Load and compile the module source.
     let raw_source = load_module_via_ipc(scope, ctx, &resolved_path)?;
 
-    // Phase 5b: Detect CJS modules and wrap in ESM shim.
-    // CJS modules use module.exports/exports which isn't valid ESM syntax.
-    // Real Node.js wraps CJS in a default+named export shim. We do the same
-    // by generating: `const _m = globalThis._requireFrom(path, "/"); export default _m; export const {named1, named2, ...} = _m;`
-    let source_code = if is_likely_cjs(&raw_source, &resolved_path) {
-        // Extract potential named exports by scanning for common patterns
-        let exports = extract_cjs_export_names(&raw_source);
-        let mut shim =
-            format!(
-            "const _cjsModule = globalThis._requireFrom({}, \"/\");\nexport default _cjsModule;\n",
-            format!("\"{}\"", resolved_path.replace('\\', "\\\\").replace('"', "\\\""))
-        );
-        if !exports.is_empty() {
-            // Re-export each named export from the CJS module
-            for name in &exports {
-                shim.push_str(&format!(
-                    "export const {} = _cjsModule[\"{}\"];\n",
-                    name, name
-                ));
-            }
-        }
-        shim
-    } else {
-        add_esm_runtime_prelude(&raw_source)
-    };
+    let source_code = build_module_source(scope, &raw_source, &resolved_path);
 
     let resource = v8::String::new(scope, &resolved_path)?;
     let origin = v8::ScriptOrigin::new(
@@ -5290,6 +5249,146 @@ mod tests {
 
 /// Detect if source code is likely CommonJS (not ESM).
 /// Checks for module.exports, exports.X, or require() patterns without ESM import/export.
+fn build_module_source(
+    scope: &mut v8::HandleScope,
+    raw_source: &str,
+    resolved_path: &str,
+) -> String {
+    let normalized_path = resolved_path.to_ascii_lowercase();
+    if normalized_path.ends_with(".json") {
+        return build_json_esm_shim(resolved_path);
+    }
+    if is_likely_cjs(raw_source, resolved_path) {
+        return build_cjs_esm_shim(scope, raw_source, resolved_path);
+    }
+    add_esm_runtime_prelude(raw_source)
+}
+
+fn build_json_esm_shim(resolved_path: &str) -> String {
+    format!(
+        "const _jsonModule = globalThis._requireFrom({}, \"/\");\nexport default _jsonModule;\n",
+        quoted_module_path(resolved_path)
+    )
+}
+
+fn build_cjs_esm_shim(
+    scope: &mut v8::HandleScope,
+    raw_source: &str,
+    resolved_path: &str,
+) -> String {
+    use std::collections::HashSet;
+
+    let mut names = extract_cjs_export_names(raw_source)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    names.extend(extract_runtime_cjs_export_names(scope, resolved_path));
+
+    let mut exports = names.into_iter().collect::<Vec<_>>();
+    exports.sort();
+
+    let mut shim = format!(
+        "const _cjsModule = globalThis._requireFrom({}, \"/\");\nexport default _cjsModule;\n",
+        quoted_module_path(resolved_path)
+    );
+    for name in exports {
+        shim.push_str(&format!(
+            "export const {} = _cjsModule[\"{}\"];\n",
+            name, name
+        ));
+    }
+    shim
+}
+
+fn extract_runtime_cjs_export_names(
+    scope: &mut v8::HandleScope,
+    resolved_path: &str,
+) -> Vec<String> {
+    let tc = &mut v8::TryCatch::new(scope);
+    let context = tc.get_current_context();
+    let global = context.global(tc);
+
+    let require_key = match v8::String::new(tc, "_requireFrom") {
+        Some(key) => key,
+        None => return Vec::new(),
+    };
+    let require_fn = match global
+        .get(tc, require_key.into())
+        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+    {
+        Some(function) => function,
+        None => return Vec::new(),
+    };
+
+    let module_path = match v8::String::new(tc, resolved_path) {
+        Some(path) => path,
+        None => return Vec::new(),
+    };
+    let root = match v8::String::new(tc, "/") {
+        Some(path) => path,
+        None => return Vec::new(),
+    };
+    let require_args = [module_path.into(), root.into()];
+    let receiver = v8::undefined(tc).into();
+    let required_module = match require_fn.call(tc, receiver, &require_args) {
+        Some(value) => value,
+        None => return Vec::new(),
+    };
+
+    let object_key = match v8::String::new(tc, "Object") {
+        Some(key) => key,
+        None => return Vec::new(),
+    };
+    let object_ctor = match global
+        .get(tc, object_key.into())
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+    {
+        Some(object) => object,
+        None => return Vec::new(),
+    };
+
+    let keys_key = match v8::String::new(tc, "keys") {
+        Some(key) => key,
+        None => return Vec::new(),
+    };
+    let keys_fn = match object_ctor
+        .get(tc, keys_key.into())
+        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+    {
+        Some(function) => function,
+        None => return Vec::new(),
+    };
+
+    let keys_args = [required_module];
+    let keys = match keys_fn
+        .call(tc, object_ctor.into(), &keys_args)
+        .and_then(|value| v8::Local::<v8::Array>::try_from(value).ok())
+    {
+        Some(array) => array,
+        None => return Vec::new(),
+    };
+
+    let mut names = Vec::new();
+    for index in 0..keys.length() {
+        let Some(value) = keys.get_index(tc, index) else {
+            continue;
+        };
+        if !value.is_string() {
+            continue;
+        }
+        let name = value.to_rust_string_lossy(tc);
+        if is_valid_js_ident(&name) && name != "default" && name != "__esModule" {
+            names.push(name);
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn quoted_module_path(resolved_path: &str) -> String {
+    format!("\"{}\"", resolved_path.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 fn is_likely_cjs(source: &str, resolved_path: &str) -> bool {
     let normalized_path = resolved_path.to_ascii_lowercase();
     if normalized_path.ends_with(".mjs") || normalized_path.ends_with(".mts") {

@@ -110,6 +110,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 ## CommonJS Module Isolation
 
 - `node_import_cache.rs` has to patch `Module._resolveFilename` and the guest-facing `Module._cache` / `require.cache` view together; wrapping only `createGuestRequire()` does not constrain local `require()` inside already-loaded `.cjs` modules.
+- The V8 bridge's guest-side CommonJS helpers in `crates/execution/assets/v8-bridge.source.js` must pass an explicit `"require"` mode into `_resolveModule`; omitting it falls back to import resolution and picks the wrong conditional export branch for dual packages.
 - Resolver-only coverage for `javascript.rs` should use `javascript::ModuleResolutionTestHarness` with a temp-dir fixture instead of booting a V8 isolate; mapping `/root` plus `/root/node_modules` is enough to exercise exports/imports and pnpm `.pnpm` layouts.
 - `crates/execution/tests/cjs_esm_interop.rs` is the desired-behavior matrix for CJS/ESM/runtime edge cases. If an interop gap is deferred to a follow-up story, keep the strong assertion in place and mark that test `#[ignore = "US-055: ..."]` instead of weakening it to match current behavior.
 

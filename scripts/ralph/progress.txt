@@ -20,6 +20,8 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Guest-side CommonJS helpers in `crates/execution/assets/v8-bridge.source.js` must pass explicit `"require"` mode into `_resolveModule`; otherwise dual packages resolve the import branch and `require()` can try to execute ESM as CommonJS
+- After changing `crates/v8-runtime/src/execution.rs`, rebuild `agent-os-v8` before rerunning V8-backed execution or sidecar tests, or the harness may keep exercising a stale runtime binary
 - In `crates/execution/tests/cjs_esm_interop.rs`, keep a passing default-import fallback test next to each ignored desired-behavior named-export case for dynamic `module.exports` patterns; that preserves today’s graceful-degradation contract while `US-055` fixes the extraction gap
 - Bundled undici fetch depends on the aliased `node:stream` helpers understanding `web-streams-polyfill` `ReadableStream` instances; keep `finished()`, `isReadable()`, `isErrored()`, and `isDisturbed()` compatible in `crates/execution/assets/undici-shims/stream.js` or fetch will fail after the TCP response arrives
 - `crates/execution/tests/cjs_esm_interop.rs` should keep desired-behavior CJS/ESM gaps as explicit `#[ignore]` tests tied to the follow-up fix story instead of weakening assertions to current runtime behavior
@@ -556,4 +558,14 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Dynamic `module.exports` patterns need both kinds of tests at once: a passing default-import case for current behavior and an ignored named-export case for the target behavior, otherwise later fixes lose the graceful-degradation contract
   - The current branch-level blocker for a full sidecar run is `crates/sidecar/tests/builtin_conformance.rs` (`buffer`, `stdlib-polyfills`, `url`), which maps directly to the later conformance/fix stories instead of this interop suite
   - Re-running the full sidecar package after execution-only test changes is still useful here because it distinguishes real regressions from the known branch debt the PRD already schedules later
+---
+## 2026-04-08 05:09:54 PDT - US-055
+- Fixed the V8/runtime CJS↔ESM gaps by making guest `require()` resolution explicitly use `"require"` mode, teaching the resolver to skip invalid export-condition array branches, adding JSON ESM shims, and adding runtime fallback named-export extraction for dynamic CommonJS modules via `Object.keys(module.exports)`
+- Removed the 7 `US-055` ignores from `crates/execution/tests/cjs_esm_interop.rs`, rebuilt the generated V8 bridge and `agent-os-v8` runtime binary, and got the focused interop suite fully green at 27/27
+- Files changed: `crates/execution/{AGENTS.md,assets/v8-bridge.source.js,assets/v8-bridge.js,src/javascript.rs,tests/cjs_esm_interop.rs}`, `crates/v8-runtime/src/execution.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - CommonJS bridge helpers must pass explicit `"require"` mode to `_resolveModule`; the default import mode silently picks the wrong conditional-exports branch for dual packages and surfaces later as `Unexpected token 'export'`
+  - Dynamic CJS named exports are reliable once the V8 runtime falls back to evaluating the CJS module and enumerating `Object.keys(module.exports)` before generating the ESM shim; static source scanning alone misses `Object.assign`, spreads, and `Object.defineProperties`
+  - If `crates/v8-runtime/src/execution.rs` changes appear to have no effect in execution tests, rebuild `cargo build -p agent-os-v8-runtime --bin agent-os-v8` first; the harness can reuse an older runtime binary from `target/debug`
+  - `cargo test -p agent-os-sidecar -- --test-threads=1` still fails on this branch for the pre-existing `builtin_conformance` cases in `buffer`, `stdlib-polyfills`, and `url`; the `agent-os-execution` package and the focused interop suite are green
 ---
