@@ -848,10 +848,7 @@ fn javascript_execution_resolves_dependencies_from_package_specific_symlink_moun
     let result = execution.wait().expect("wait for JavaScript execution");
     let stdout = String::from_utf8(result.stdout.clone()).expect("stdout utf8");
     let stderr = String::from_utf8(result.stderr.clone()).expect("stderr utf8");
-    assert_eq!(
-        result.exit_code, 0,
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
@@ -913,10 +910,7 @@ fn javascript_execution_v8_timer_callbacks_fire_and_clear_correctly() {
     let result = execution.wait().expect("wait for JavaScript execution");
     let stdout = String::from_utf8(result.stdout.clone()).expect("stdout utf8");
     let stderr = String::from_utf8(result.stderr.clone()).expect("stderr utf8");
-    assert_eq!(
-        result.exit_code, 0,
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
@@ -1319,10 +1313,7 @@ if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.te
     let result = execution.wait().expect("wait for JavaScript execution");
     let stdout = String::from_utf8(result.stdout.clone()).expect("stdout utf8");
     let stderr = String::from_utf8(result.stderr.clone()).expect("stderr utf8");
-    assert_eq!(
-        result.exit_code, 0,
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
@@ -1338,7 +1329,69 @@ fn javascript_execution_v8_crypto_basic_operations_emit_expected_sync_rpcs() {
     );
     assert_eq!(map_bridge_method("_cryptoPbkdf2"), ("crypto.pbkdf2", false));
     assert_eq!(map_bridge_method("_cryptoScrypt"), ("crypto.scrypt", false));
-    assert_eq!(map_bridge_method("_netSocketConnectRaw"), ("net.connect", false));
+    assert_eq!(
+        map_bridge_method("_netSocketConnectRaw"),
+        ("net.connect", false)
+    );
+}
+
+#[test]
+fn javascript_execution_v8_load_polyfill_returns_runtime_module_expressions() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+const pathExpr = _loadPolyfill.applySyncPromise(undefined, ["path"]);
+if (typeof pathExpr !== "string" || !pathExpr.includes("node:path")) {
+  throw new Error(`unexpected path polyfill expression: ${String(pathExpr)}`);
+}
+
+const pathModule = Function('"use strict"; return (' + pathExpr + ');')();
+if (pathModule.join("alpha", "beta") !== "alpha/beta") {
+  throw new Error("path polyfill expression did not resolve the runtime module");
+}
+
+const deniedExpr = _loadPolyfill.applySyncPromise(undefined, ["inspector"]);
+if (typeof deniedExpr !== "string" || !deniedExpr.includes("ERR_ACCESS_DENIED")) {
+  throw new Error(`unexpected denied polyfill expression: ${String(deniedExpr)}`);
+}
+
+let denied = false;
+try {
+  Function('"use strict"; return (' + deniedExpr + ');')();
+} catch (error) {
+  denied = error?.code === "ERR_ACCESS_DENIED";
+}
+if (!denied) {
+  throw new Error("denied polyfill expression did not raise ERR_ACCESS_DENIED");
+}
+
+if (_loadPolyfill.applySyncPromise(undefined, ["not-a-real-builtin"]) !== null) {
+  throw new Error("unknown polyfill name should return null");
+}
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stdout = String::from_utf8(result.stdout.clone()).expect("stdout utf8");
+    let stderr = String::from_utf8(result.stderr.clone()).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
 #[test]

@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "source": "node-stdlib-browser",
+      "names": [
+        "assert",
+        "buffer",
+        "constants",
+        "events",
+        "path",
+        "path/posix",
+        "path/win32",
+        "punycode",
+        "querystring",
+        "stream",
+        "string_decoder",
+        "url",
+        "util",
+        "zlib"
+      ]
+    },
+    {
+      "source": "custom-bridge",
+      "names": [
+        "async_hooks",
+        "child_process",
+        "crypto",
+        "dgram",
+        "diagnostics_channel",
+        "dns",
+        "fs",
+        "fs/promises",
+        "http",
+        "http2",
+        "https",
+        "module",
+        "net",
+        "os",
+        "perf_hooks",
+        "process",
+        "readline",
+        "sqlite",
+        "stream/consumers",
+        "stream/promises",
+        "stream/web",
+        "timers/promises",
+        "tls",
+        "tty",
+        "v8",
+        "vm",
+        "worker_threads"
+      ]
+    },
+    {
+      "source": "denied",
+      "errorCode": "ERR_ACCESS_DENIED",
+      "names": ["cluster", "inspector"]
+    }
+  ]
+}

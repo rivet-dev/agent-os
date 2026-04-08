@@ -3,7 +3,10 @@
 //! Shared bridge contracts between the Agent OS kernel and execution planes.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
+
+use serde::Deserialize;
 
 /// Shared associated types for bridge implementations.
 pub trait BridgeTypes {
@@ -481,4 +484,84 @@ impl<T> HostBridge for T where
         + EventBridge
         + ExecutionBridge
 {
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BridgeCallConvention {
+    Sync,
+    Async,
+    SyncPromise,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeContractGroup {
+    pub convention: BridgeCallConvention,
+    #[serde(default)]
+    pub argument_types: Vec<String>,
+    pub return_type: String,
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeContract {
+    pub version: u32,
+    pub groups: Vec<BridgeContractGroup>,
+}
+
+static BRIDGE_CONTRACT: OnceLock<BridgeContract> = OnceLock::new();
+
+pub fn bridge_contract() -> &'static BridgeContract {
+    BRIDGE_CONTRACT.get_or_init(|| {
+        serde_json::from_str(include_str!("../bridge-contract.json"))
+            .expect("bridge-contract.json must be valid")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bridge_contract, BridgeCallConvention};
+
+    #[test]
+    fn bridge_contract_has_version_and_unique_method_names() {
+        let contract = bridge_contract();
+        assert!(
+            contract.version > 0,
+            "bridge contract version must be positive"
+        );
+
+        let mut seen = std::collections::BTreeSet::new();
+        for group in &contract.groups {
+            assert!(
+                !group.names.is_empty(),
+                "every bridge contract group must list at least one method"
+            );
+            for name in &group.names {
+                assert!(
+                    seen.insert(name.clone()),
+                    "duplicate bridge contract method: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bridge_contract_lists_each_convention() {
+        let contract = bridge_contract();
+        for convention in [
+            BridgeCallConvention::Sync,
+            BridgeCallConvention::Async,
+            BridgeCallConvention::SyncPromise,
+        ] {
+            assert!(
+                contract
+                    .groups
+                    .iter()
+                    .any(|group| group.convention == convention),
+                "missing bridge contract group for {convention:?}"
+            );
+        }
+    }
 }

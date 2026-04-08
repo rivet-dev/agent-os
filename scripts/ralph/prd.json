@@ -866,7 +866,7 @@
         "cargo test -p agent-os-sidecar --test isolation_audit -- --test-threads=1 passes"
       ],
       "priority": 55,
-      "passes": false,
+      "passes": true,
       "notes": "Security hardening. The CLAUDE.md rules (crates/CLAUDE.md invariants 1-8) are clear but there's no automated test suite that systematically checks them. Each test should run guest JS code via the V8 engine and assert on the output. Reference: crates/execution/CLAUDE.md 'Virtualization Invariants' section."
     },
     {
@@ -1124,8 +1124,194 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
       ],
       "priority": 48,
-      "passes": false,
+      "passes": true,
       "notes": "Lower priority than US-056/057. Secure-exec had a formal TypeScript bridge contract (bridge-contract.ts) with explicit calling conventions and versioning. The current V8 bridge lost this \u2014 contracts are implicit in code. This story restores the formal contract for maintainability. The _loadPolyfill mechanism allows on-demand polyfill loading instead of bundling everything upfront."
+    },
+    {
+      "id": "US-059",
+      "title": "Add missing Node.js builtin polyfills: os, tty, perf_hooks, zlib, timers/promises, stream/promises",
+      "description": "As a developer, I want all commonly-used Node.js builtins to have polyfills so real-world packages don't crash on missing modules.",
+      "acceptanceCriteria": [
+        "require('os') returns a module with hostname(), platform(), arch(), release(), tmpdir(), homedir(), cpus(), totalmem(), freemem(), type(), userInfo(), networkInterfaces(), EOL, constants \u2014 backed by kernel _osConfig",
+        "require('tty') returns a module with isatty() function and ReadStream/WriteStream classes",
+        "require('perf_hooks') returns a module with performance object (performance.now(), performance.mark(), performance.measure())",
+        "require('zlib') returns a module with deflateSync, inflateSync, gzipSync, gunzipSync, createDeflate, createInflate \u2014 use node-stdlib-browser's zlib or pako",
+        "require('timers/promises') returns a module with setTimeout, setInterval, setImmediate as async functions",
+        "require('stream/promises') returns a module with pipeline, finished as promise-returning functions",
+        "require('stream/consumers') returns a module with arrayBuffer, blob, buffer, json, text consumers",
+        "require('module') returns a module with createRequire(), builtinModules list",
+        "All modules have conformance tests in crates/sidecar/tests/builtin_conformance.rs",
+        "cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1 passes"
+      ],
+      "priority": 104,
+      "passes": false,
+      "notes": "Found in audit: 12 Node.js builtins are recognized but have NO polyfill. os, tty, perf_hooks, and zlib are the most commonly used by real packages (Pi SDK deps use os.homedir, chalk uses tty.isatty, timers/promises used by modern async code). Use node-stdlib-browser for zlib. Use kernel _osConfig for os. Stub tty with isatty() returning false. perf_hooks can return Date.now() based performance."
+    },
+    {
+      "id": "US-060",
+      "title": "Deny dangerous builtins explicitly: vm, worker_threads, inspector, v8, cluster, diagnostics_channel, async_hooks",
+      "description": "As a developer, I want dangerous builtins to throw ERR_ACCESS_DENIED immediately instead of returning empty objects or hanging.",
+      "acceptanceCriteria": [
+        "require('vm') throws ERR_ACCESS_DENIED with clear message",
+        "require('worker_threads') throws ERR_ACCESS_DENIED",
+        "require('inspector') throws ERR_ACCESS_DENIED",
+        "require('v8') throws ERR_ACCESS_DENIED (currently returns empty object)",
+        "require('cluster') throws ERR_ACCESS_DENIED",
+        "require('diagnostics_channel') returns a minimal stub (used by undici internally)",
+        "require('async_hooks') returns a minimal stub with createHook() that no-ops (used by some packages)",
+        "Each denied builtin has a test verifying the error",
+        "cargo test -p agent-os-execution -- --test-threads=1 passes"
+      ],
+      "priority": 105,
+      "passes": false,
+      "notes": "Security hardening. vm and worker_threads are escape vectors. inspector gives debug access. v8 currently returns {} which causes silent failures. diagnostics_channel and async_hooks need minimal stubs because undici and some packages import them \u2014 a full denial would break fetch()."
+    },
+    {
+      "id": "US-061",
+      "title": "Implement fs.watch/fs.watchFile and createReadStream/createWriteStream",
+      "description": "As a developer, I want file watching and streaming file I/O so packages that use these common APIs work in the VM.",
+      "acceptanceCriteria": [
+        "fs.watch(path, callback) works \u2014 emits 'change' events when files in the kernel VFS are modified",
+        "fs.watchFile(path, callback) works \u2014 polls for stat changes on the file",
+        "fs.createReadStream(path) returns a Readable stream that reads from kernel VFS",
+        "fs.createWriteStream(path) returns a Writable stream that writes to kernel VFS",
+        "Both streams support highWaterMark, encoding, start/end options",
+        "Tests in crates/sidecar/tests/ verify all four APIs",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
+      ],
+      "priority": 106,
+      "passes": false,
+      "notes": "Found in audit: fs.watch, fs.watchFile, createReadStream, createWriteStream are all missing. createReadStream/createWriteStream are used by many packages for efficient file I/O. fs.watch is used by file watchers, build tools, and dev servers. Implementation: createReadStream/createWriteStream can wrap fd-based I/O. fs.watch can use kernel VFS mutation hooks."
+    },
+    {
+      "id": "US-062",
+      "title": "Add HTTP/2 secure server/client support and fix stub handlers",
+      "description": "As a developer, I want HTTP/2 over TLS to work, and the remaining stub handlers (http2_server_respond, http2_server_wait, http2_session_wait) to be real implementations.",
+      "acceptanceCriteria": [
+        "HTTP/2 secure servers (h2 over TLS) work \u2014 not just h2c cleartext",
+        "HTTP/2 TLS clients work",
+        "net.http2_server_respond returns a real response, not Ok(Value::Null)",
+        "net.http2_server_wait returns real events, not Ok(Value::Null)",
+        "net.http2_session_wait returns real events, not Ok(Value::Null)",
+        "net.http_wait returns real events, not Ok(Value::Null)",
+        "Tests verify HTTP/2 over TLS end-to-end",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
+      ],
+      "priority": 107,
+      "passes": false,
+      "notes": "Found in audit: 4 HTTP/2 handlers are stubs returning Ok(Value::Null). HTTP/2 over TLS is not supported (only cleartext h2c). These are lower priority but needed for packages that use HTTP/2 (gRPC, modern HTTP clients)."
+    },
+    {
+      "id": "US-063",
+      "title": "Python/Pyodide: Add network access through kernel and child_process support",
+      "description": "As a developer, I want Python code running in Pyodide to be able to make HTTP requests through the kernel network stack and spawn child processes through the kernel process table.",
+      "acceptanceCriteria": [
+        "Python requests.get(url) works by routing through the kernel network stack (not blocked)",
+        "Python urllib.request.urlopen(url) works through kernel network",
+        "Python subprocess.run(['node', 'script.js']) works through kernel process table",
+        "Network permissions are enforced \u2014 denied hosts/ports return proper Python errors",
+        "Process permissions are enforced \u2014 denied commands return proper Python errors",
+        "DNS resolution from Python goes through kernel DNS resolver",
+        "Tests in crates/sidecar/tests/python.rs verify network and subprocess access",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 python passes"
+      ],
+      "priority": 108,
+      "passes": false,
+      "notes": "Currently Python network and subprocess access are COMPLETELY BLOCKED by design. For agents using Python, this needs to be enabled through the kernel stack (same as JS). The VFS RPC bridge already exists \u2014 extend it to handle network and process requests. Reference: the JS execution engine routes net/child_process through kernel bridge calls. Python needs the same bridge endpoints in python-runner.mjs."
+    },
+    {
+      "id": "US-064",
+      "title": "Python/Pyodide: Add micropip support and dynamic package installation",
+      "description": "As a developer, I want Python code to install packages via micropip so agents can use any Python library, not just numpy/pandas.",
+      "acceptanceCriteria": [
+        "micropip is available in the Pyodide environment",
+        "await micropip.install('package-name') works \u2014 downloads wheel through kernel network",
+        "Package installation respects network permissions",
+        "Installed packages persist for the duration of the execution session",
+        "Common packages work: requests, beautifulsoup4, pyyaml, toml, click",
+        "Tests verify micropip installation and import of a third-party package"
+      ],
+      "priority": 109,
+      "passes": false,
+      "notes": "Currently Python packages are limited to preloaded numpy/pandas. micropip is Pyodide's package manager that can install pure-Python wheels. This requires network access through the kernel (US-063). Packages are installed into Pyodide's in-memory filesystem."
+    },
+    {
+      "id": "US-065",
+      "title": "Python/Pyodide: Improve startup performance with V8 snapshot sharing",
+      "description": "As a developer, I want Python execution to start faster by sharing V8 snapshots or using a persistent Pyodide runtime across executions.",
+      "acceptanceCriteria": [
+        "Second Python execution in the same VM starts at least 3x faster than the first",
+        "Pyodide WASM module is shared across executions (not reloaded each time)",
+        "Prewarm mechanism works correctly with cache invalidation",
+        "Benchmark added to scripts/benchmarks/ measuring cold vs warm Python startup",
+        "cargo test -p agent-os-execution -- --test-threads=1 python_prewarm passes"
+      ],
+      "priority": 110,
+      "passes": false,
+      "notes": "Python prewarm already exists and works (2 tests pass). This story is about further optimization \u2014 sharing the Pyodide WASM module instance across multiple Python executions within the same VM, reducing subsequent startup from seconds to milliseconds. Current prewarm caches Node compile cache but reloads Pyodide each time."
+    },
+    {
+      "id": "US-066",
+      "title": "Add POSIX compliance tests for /proc, /dev, signals, and process model",
+      "description": "As a developer, I want automated tests verifying POSIX compliance for the kernel's proc filesystem, device files, signal handling, and process model.",
+      "acceptanceCriteria": [
+        "Tests verify /proc/self/pid matches kernel-assigned PID",
+        "Tests verify /proc/[pid]/cmdline returns correct command line",
+        "Tests verify /proc/[pid]/environ returns only kernel env (no host leak)",
+        "Tests verify /proc/[pid]/cwd returns kernel CWD (not host path)",
+        "Tests verify /proc/[pid]/fd lists open file descriptors",
+        "Tests verify /dev/null reads empty and writes discard",
+        "Tests verify /dev/urandom returns random bytes",
+        "Tests verify /dev/zero reads zeros",
+        "Tests verify SIGTERM delivery to guest process",
+        "Tests verify SIGCHLD delivery on child exit",
+        "Tests verify zombie process cleanup after waitpid",
+        "Tests verify process group signal delivery",
+        "Test file: crates/sidecar/tests/posix_compliance.rs",
+        "cargo test -p agent-os-sidecar --test posix_compliance -- --test-threads=1 passes"
+      ],
+      "priority": 111,
+      "passes": false,
+      "notes": "Found in audit: /proc and /dev are implemented but have limited test coverage. Signal handling is implemented but guest-side delivery not well tested. Process model (zombies, orphans, process groups) is implemented but needs conformance tests. These tests verify the kernel behaves like a real Linux system."
+    },
+    {
+      "id": "US-067",
+      "title": "Security isolation test suite: verify guest cannot escape to host",
+      "description": "As a developer, I want an automated test suite that systematically verifies every isolation boundary holds \u2014 guest code cannot reach host APIs, filesystems, network, or processes.",
+      "acceptanceCriteria": [
+        "Test: guest require('fs').readFileSync('/etc/passwd') returns kernel VFS content, NOT host /etc/passwd",
+        "Test: guest process.env does not contain AGENT_OS_* internal variables",
+        "Test: guest process.pid returns kernel PID, not host PID",
+        "Test: guest process.cwd() returns kernel CWD like /root, not host path",
+        "Test: guest error stack traces do not reveal host filesystem paths",
+        "Test: guest require.resolve() returns guest-visible paths, not host paths",
+        "Test: guest fetch('http://169.254.169.254/...') is blocked (SSRF protection)",
+        "Test: guest net.connect to host-only ports is blocked",
+        "Test: guest child_process.spawn runs through kernel, not host OS",
+        "Test: guest cannot access other VM's files or processes",
+        "Un-ignore the security_hardening.rs env/binding test (currently #[ignore])",
+        "Test file: crates/sidecar/tests/isolation_audit.rs",
+        "cargo test -p agent-os-sidecar --test isolation_audit -- --test-threads=1 passes"
+      ],
+      "priority": 112,
+      "passes": false,
+      "notes": "Found in audit: security_hardening.rs has a key test marked #[ignore] due to V8 sidecar flakiness. No systematic isolation audit exists. The existing tests check individual boundaries but don't verify the complete attack surface. This overlaps with US-044 but is more specific and actionable."
+    },
+    {
+      "id": "US-068",
+      "title": "Add missing POSIX filesystem operations: ftruncate, mkdtemp, access with permission check, flock",
+      "description": "As a developer, I want commonly-used POSIX filesystem operations that are currently missing or stubbed.",
+      "acceptanceCriteria": [
+        "ftruncate(fd, length) works \u2014 truncates an open file descriptor",
+        "mkdtemp(template) works \u2014 creates a temporary directory with unique name",
+        "access(path, mode) checks actual permission bits (R_OK, W_OK, X_OK), not just stat()",
+        "flock(fd, operation) works for LOCK_SH, LOCK_EX, LOCK_UN \u2014 the kernel already has FileLockManager",
+        "Tests for each operation in crates/kernel/tests/ or crates/sidecar/tests/",
+        "cargo test passes"
+      ],
+      "priority": 113,
+      "passes": false,
+      "notes": "Found in audit: ftruncate is missing (truncate exists but not fd-based), mkdtemp is missing, access() is a stub using only stat(), flock structure exists in kernel but API not wired. These are used by real packages \u2014 e.g., proper-lockfile (Pi SDK dep) uses flock."
     }
   ]
 }

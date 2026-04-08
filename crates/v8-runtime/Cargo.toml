@@ -11,6 +11,7 @@ name = "agent-os-v8"
 path = "src/main.rs"
 
 [dependencies]
+agent-os-bridge = { path = "../bridge" }
 v8 = "130"
 crossbeam-channel = "0.5"
 signal-hook = "0.3"

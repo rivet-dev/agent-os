@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{
     mpsc::{self, Receiver, SyncSender, TrySendError},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -322,6 +322,39 @@ struct LocalTimerEntry {
     delay_ms: u64,
     generation: u64,
     repeat: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum PolyfillSourceKind {
+    NodeStdlibBrowser,
+    CustomBridge,
+    Denied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PolyfillRegistryGroup {
+    source: PolyfillSourceKind,
+    #[serde(default)]
+    error_code: Option<String>,
+    names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PolyfillRegistry {
+    version: u32,
+    groups: Vec<PolyfillRegistryGroup>,
+}
+
+static POLYFILL_REGISTRY: OnceLock<PolyfillRegistry> = OnceLock::new();
+
+fn polyfill_registry() -> &'static PolyfillRegistry {
+    POLYFILL_REGISTRY.get_or_init(|| {
+        serde_json::from_str(include_str!("../assets/polyfill-registry.json"))
+            .expect("polyfill-registry.json must be valid")
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2298,10 +2331,12 @@ impl LocalBridgeState {
 
     fn handle_polyfill_dispatch(&mut self, args: &[Value]) -> Value {
         let Some(dispatch) = args.first().and_then(Value::as_str) else {
-            return Value::String(String::new());
+            return Value::Null;
         };
         if !dispatch.starts_with("__bd:") {
-            return Value::String(String::new());
+            return polyfill_expression(dispatch)
+                .map(Value::String)
+                .unwrap_or(Value::Null);
         }
         let (dispatch_method, payload_json) = dispatch
             .strip_prefix("__bd:")
@@ -2895,6 +2930,33 @@ fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
 
 fn is_builtin_specifier(specifier: &str) -> bool {
     normalize_builtin_specifier(specifier).is_some()
+}
+
+fn polyfill_expression(request: &str) -> Option<String> {
+    let normalized = request.trim_start_matches("node:");
+    let entry = polyfill_registry()
+        .groups
+        .iter()
+        .find(|group| group.names.iter().any(|name| name == normalized))?;
+
+    Some(match entry.source {
+        PolyfillSourceKind::NodeStdlibBrowser | PolyfillSourceKind::CustomBridge => format!(
+            "globalThis._requireFrom({}, \"/\")",
+            serde_json::to_string(&format!("node:{normalized}"))
+                .unwrap_or_else(|_| format!("\"node:{normalized}\""))
+        ),
+        PolyfillSourceKind::Denied => {
+            let error_code = entry.error_code.as_deref().unwrap_or("ERR_ACCESS_DENIED");
+            format!(
+                "(() => {{ const error = new Error({message}); error.code = {code}; throw error; }})()",
+                message = serde_json::to_string(&format!(
+                    "node:{normalized} is not available in the Agent OS guest runtime"
+                ))
+                .unwrap_or_else(|_| format!("\"node:{normalized} is not available in the Agent OS guest runtime\"")),
+                code = serde_json::to_string(error_code).unwrap_or_else(|_| "\"ERR_ACCESS_DENIED\"".to_owned())
+            )
+        }
+    })
 }
 
 fn build_builtin_module_wrapper(module_name: &str) -> String {

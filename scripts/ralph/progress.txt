@@ -20,6 +20,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Treat `crates/bridge/bridge-contract.json` as the canonical host-bridge inventory and `crates/execution/assets/polyfill-registry.json` as the canonical `_loadPolyfill` inventory; when bridge globals or runtime-loadable builtins change, update those files together with `crates/v8-runtime/src/session.rs` and `crates/execution/src/javascript.rs`
 - Guest-side CommonJS helpers in `crates/execution/assets/v8-bridge.source.js` must pass explicit `"require"` mode into `_resolveModule`; otherwise dual packages resolve the import branch and `require()` can try to execute ESM as CommonJS
 - After changing `crates/v8-runtime/src/execution.rs`, rebuild `agent-os-v8` before rerunning V8-backed execution or sidecar tests, or the harness may keep exercising a stale runtime binary
 - In `crates/execution/tests/cjs_esm_interop.rs`, keep a passing default-import fallback test next to each ignored desired-behavior named-export case for dynamic `module.exports` patterns; that preserves today’s graceful-degradation contract while `US-055` fixes the extraction gap
@@ -579,4 +580,14 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - The V8 bridge bootstrap layer is only allowed to seed enough globals for bundle startup; any placeholder `URL` or `URLSearchParams` implementation must be explicitly marked and then discarded once `node-stdlib-browser` finishes loading
   - Direct service-level RPC tests exercise the sidecar wire contract, not the guest JS convenience API, so byte-bearing methods like `net.write` require base64 payloads even when higher-level guest code accepts strings
   - When sidecar builtin conformance breaks after a bridge-bundle edit, inspect both `packages/core/scripts/build-v8-bridge.mjs` and `crates/execution/assets/v8-bridge.source.js`; either layer can leave the wrong global installed
+---
+## 2026-04-08 10:16:33 PDT - US-058
+- Added a canonical bridge contract in `crates/bridge/bridge-contract.json`, parsed it from `agent-os-bridge`, and made the V8 runtime test its registered sync/async bridge globals against that versioned contract instead of a handwritten Rust list
+- Restored native `_loadPolyfill` module-name handling in `crates/execution/src/javascript.rs` via the new `crates/execution/assets/polyfill-registry.json`, so guest code can request runtime polyfills by name again while `__bd:*` internal dispatch continues to work
+- Added guest-facing `_loadPolyfill` coverage in `crates/execution/tests/javascript_v8.rs`, documented the contract/registry sync rule in `crates/execution/AGENTS.md`, and verified the story with `cargo test -p agent-os-bridge`, `cargo test -p agent-os-v8-runtime bridge_contract_globals_are_registered -- --test-threads=1`, `cargo test -p agent-os-execution -- --test-threads=1`, and `cargo test -p agent-os-sidecar -- --test-threads=1`
+- Files changed: `Cargo.lock`, `crates/bridge/{Cargo.toml,bridge-contract.json,src/lib.rs}`, `crates/execution/{AGENTS.md,assets/polyfill-registry.json,src/javascript.rs,tests/javascript_v8.rs}`, `crates/v8-runtime/{Cargo.toml,src/session.rs}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Keep `bridge-contract.json` authoritative for host bridge globals and let tests compare `SYNC_BRIDGE_FNS` and `ASYNC_BRIDGE_FNS` against it instead of duplicating a second manual allowlist
+  - `_loadPolyfill` module-name responses need to stay expression-based (`globalThis._requireFrom(...)` or a throwing IIFE), not ESM wrapper source, because the guest bridge evaluates them as `return (<expression>)`
+  - The new polyfill registry can carry future denied builtins ahead of loader-enforcement work, but any newly allowed builtin still needs the `_requireFrom(...)` path to terminate without bouncing back into `_loadPolyfill`
 ---

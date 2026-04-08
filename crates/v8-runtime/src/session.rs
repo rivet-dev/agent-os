@@ -1166,6 +1166,7 @@ impl crate::host_call::ResponseReceiver for ChannelResponseReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_os_bridge::{bridge_contract, BridgeCallConvention};
     use std::collections::{HashMap, HashSet};
 
     /// Helper to create a SessionManager for tests
@@ -1178,88 +1179,37 @@ mod tests {
 
     #[test]
     fn bridge_contract_globals_are_registered() {
-        let registered = SYNC_BRIDGE_FNS
+        let contract = bridge_contract();
+
+        let expected_sync = contract
+            .groups
             .iter()
-            .chain(ASYNC_BRIDGE_FNS.iter())
-            .copied()
+            .filter(|group| {
+                matches!(
+                    group.convention,
+                    BridgeCallConvention::Sync | BridgeCallConvention::SyncPromise
+                )
+            })
+            .flat_map(|group| group.names.iter().map(String::as_str))
+            .collect::<HashSet<_>>();
+        let expected_async = contract
+            .groups
+            .iter()
+            .filter(|group| group.convention == BridgeCallConvention::Async)
+            .flat_map(|group| group.names.iter().map(String::as_str))
             .collect::<HashSet<_>>();
 
-        for expected in [
-            "_batchResolveModules",
-            "_cryptoHashDigest",
-            "_cryptoHmacDigest",
-            "_cryptoPbkdf2",
-            "_cryptoScrypt",
-            "_cryptoCipheriv",
-            "_cryptoDecipheriv",
-            "_cryptoCipherivCreate",
-            "_cryptoCipherivUpdate",
-            "_cryptoCipherivFinal",
-            "_cryptoSign",
-            "_cryptoVerify",
-            "_cryptoAsymmetricOp",
-            "_cryptoCreateKeyObject",
-            "_cryptoGenerateKeyPairSync",
-            "_cryptoGenerateKeySync",
-            "_cryptoGeneratePrimeSync",
-            "_cryptoDiffieHellman",
-            "_cryptoDiffieHellmanGroup",
-            "_cryptoDiffieHellmanSessionCreate",
-            "_cryptoDiffieHellmanSessionCall",
-            "_cryptoSubtle",
-            "_networkHttp2ServerListenRaw",
-            "_networkHttp2ServerCloseRaw",
-            "_networkHttp2ServerWaitRaw",
-            "_networkHttp2SessionConnectRaw",
-            "_networkHttp2SessionRequestRaw",
-            "_networkHttp2SessionSettingsRaw",
-            "_networkHttp2SessionSetLocalWindowSizeRaw",
-            "_networkHttp2SessionGoawayRaw",
-            "_networkHttp2SessionCloseRaw",
-            "_networkHttp2SessionDestroyRaw",
-            "_networkHttp2SessionWaitRaw",
-            "_networkHttp2ServerPollRaw",
-            "_networkHttp2SessionPollRaw",
-            "_networkHttp2StreamRespondRaw",
-            "_networkHttp2StreamPushStreamRaw",
-            "_networkHttp2StreamWriteRaw",
-            "_networkHttp2StreamEndRaw",
-            "_networkHttp2StreamCloseRaw",
-            "_networkHttp2StreamPauseRaw",
-            "_networkHttp2StreamResumeRaw",
-            "_networkHttp2StreamRespondWithFileRaw",
-            "_networkHttp2ServerRespondRaw",
-            "_upgradeSocketWriteRaw",
-            "_upgradeSocketEndRaw",
-            "_upgradeSocketDestroyRaw",
-            "_netSocketConnectRaw",
-            "_netSocketReadRaw",
-            "_netSocketSetNoDelayRaw",
-            "_netSocketSetKeepAliveRaw",
-            "_netSocketWriteRaw",
-            "_netSocketEndRaw",
-            "_netSocketDestroyRaw",
-            "_netSocketUpgradeTlsRaw",
-            "_netSocketGetTlsClientHelloRaw",
-            "_netSocketTlsQueryRaw",
-            "_tlsGetCiphersRaw",
-            "_netServerListenRaw",
-            "_netServerAcceptRaw",
-            "_netServerCloseRaw",
-            "_dgramSocketCreateRaw",
-            "_dgramSocketBindRaw",
-            "_dgramSocketRecvRaw",
-            "_dgramSocketSendRaw",
-            "_dgramSocketCloseRaw",
-            "_dgramSocketAddressRaw",
-            "_dgramSocketSetBufferSizeRaw",
-            "_dgramSocketGetBufferSizeRaw",
-        ] {
-            assert!(
-                registered.contains(expected),
-                "missing bridge global registration for {expected}"
-            );
-        }
+        let registered_sync = SYNC_BRIDGE_FNS.iter().copied().collect::<HashSet<_>>();
+        let registered_async = ASYNC_BRIDGE_FNS.iter().copied().collect::<HashSet<_>>();
+
+        assert_eq!(
+            registered_sync, expected_sync,
+            "SYNC_BRIDGE_FNS drifted from crates/bridge/bridge-contract.json"
+        );
+        assert_eq!(
+            registered_async, expected_async,
+            "ASYNC_BRIDGE_FNS drifted from crates/bridge/bridge-contract.json"
+        );
     }
 
     #[test]
