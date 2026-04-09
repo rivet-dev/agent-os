@@ -29,6 +29,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Full Claude agent end-to-end validation lives in `packages/core/tests/claude-session.test.ts`; use that suite when a regression spans tool calls, nested `node` execution, session metadata, and lifecycle behavior together.
 - Claude adapter patch work is manifest-driven: after changing `registry/agent/claude/scripts/build-patched-cli.mjs`, rerun `pnpm --dir registry/agent/claude build` and validate `createSession("claude")` from `packages/core/tests/claude-session.test.ts`, because `resolveClaudeCliPath()` and `resolveClaudeSdkPath()` read `dist/*.json` manifests rather than guessing the latest hashed artifact.
 - `crates/execution/assets/runners/python-runner.mjs` must keep Pyodide bootstrap progress lines (`Loading ...`, `Loaded ...`) out of guest stdout; sidecar tests and callers often parse stdout as JSON or exact program output.
 - Mounted WASM command resolution in `crates/sidecar/src/execution.rs` keeps the guest command name in `argv[0]`; `ResolvedChildProcessExecution.execution_args` is only the suffix after that command name, so child-process PATH tests should assert the full argv vector.
@@ -834,4 +835,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - The Claude package already wires patch generation into its `build` script, so story validation starts with rebuilding `registry/agent/claude` rather than hand-editing `dist/` artifacts
   - The most direct acceptance check for Claude patching is the metadata test in `packages/core/tests/claude-session.test.ts`; it proves session boot and adapter metadata without depending on tool-call behavior from later Claude stories
   - In this workspace, `packages/core` may lack a local `.bin/vitest` shim even when Vitest is installed under `.pnpm`, so a direct `node .../vitest/vitest.mjs` invocation is a safe fallback for focused validation
+---
+## 2026-04-09 05:01:40 PDT - US-111
+- Revalidated the full Claude end-to-end acceptance suite in `packages/core/tests/claude-session.test.ts`; all 8 tests passed against the real `@anthropic-ai/claude-agent-sdk` inside Agent OS, covering text-only turns, PATH-backed `xu`, nested `node` `execSync`, nested `node` `spawn`, session metadata/lifecycle, cancel/destroy, mode changes, and raw ACP sends
+- Confirmed this validation story required no additional code changes or AGENTS updates beyond marking `US-111` complete in `scripts/ralph/prd.json`
+- Files changed: `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - `packages/core/tests/claude-session.test.ts` is now the authoritative full Claude E2E suite; use it instead of smaller smoke tests when validating tool execution and nested child-process behavior together
+  - If `pnpm --dir packages/core exec vitest ...` is unavailable because the package-local `.bin` shim is missing, running the store-installed Vitest entrypoint directly still exercises the same acceptance file
+  - Claude E2E validation depends on both the adapter config from `US-109` and the manifest-based CLI patching from `US-110`, so rebuild `registry/agent/claude` first if the suite starts falling back to upstream SDK assets
 ---

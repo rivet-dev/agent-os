@@ -2085,7 +2085,7 @@
         "pnpm --dir packages/core exec vitest run tests/claude-session.test.ts passes"
       ],
       "priority": 92,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-109 (adapter config) and US-110 (CLI patching). This is the final validation story for Claude. If individual tests fail, the error should be specific (not a generic timeout) \u2014 debug the specific tool/flow that fails. The WASM child process fixes from step-26 should have resolved the proc_spawn/waitpid/stdout routing issues."
     }
   ]
