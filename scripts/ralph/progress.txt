@@ -21,6 +21,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Projected native assets under `/root/node_modules` are a visibility-only contract today; guest `child_process.spawn*()` still routes those paths through the VM resolver, so native ELF probes fail deterministically during WASM warmup instead of running host-native code.
 - The native sidecar's shell-visible builtin runtime stubs should mirror the compat runtime surface: keep `node` and `wasm` seeded for guest command resolution, but do not materialize extra `/bin/*` runtime stubs like `python` unless a lower snapshot or installed software explicitly provides them; direct runtime dispatch still covers non-shell-visible runtimes.
 - Native-sidecar WASM commands read and write through the VM shadow root rather than the kernel VFS directly, so keep the POSIX bootstrap directories (`/tmp`, `/var/tmp`, `/bin`, `/usr`, etc.) seeded there during VM creation or shell redirects and absolute-path checks will fail even when `vm.stat()` sees the path in the kernel filesystem.
+- When guest commands write files through the sidecar shadow root, mirror those host-side shadow writes back into the kernel on process exit or `vm.exec("... > /tmp/file")` can succeed while a later `vm.readFile("/tmp/file")` still returns `ENOENT`.
 - WASI guest commands only see mounted guest roots that are mirrored into the embedded runner's `buildPreopens()` map. If `vm.readFile()` can see a `host_dir` mount but `vm.exec("cat ...")` cannot, check `AGENT_OS_GUEST_PATH_MAPPINGS` -> WASI preopen propagation before changing the TypeScript mount setup.
 - For `vm.exec()` cwd coverage in `packages/core/tests/execute.test.ts`, set up relative-path fixtures from inside the guest shell when the story is about shell cwd semantics; visibility of files written via VM filesystem APIs is a separate host-shadow sync surface.
 
@@ -218,6 +219,16 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Sidecar/runtime drift can show up as guest filesystem shape regressions, not just execution failures; compare the native sidecar bootstrap surface against `packages/core/src/runtime-compat.ts` before adding more `/bin/*` stubs.
   - Direct runtime dispatch and shell-visible command stubs are separate contracts: a runtime can remain executable via `ExecuteRequest { runtime: ... }` without appearing in the guest filesystem.
   - The exact acceptance path for this story is sufficient: `pnpm --dir packages/core exec vitest run tests/agent-os-base-filesystem.test.ts` catches the unexpected lower-surface leak, and `pnpm check-types` confirms the sidecar/core drift fix stays type-safe across the workspace.
+---
+
+## 2026-04-09 12:08:57 PDT - US-016
+- Restored cron-driven `exec` file visibility by syncing guest-visible shadow-root writes back into the kernel when a sidecar process exits, so scheduled shell redirects now create real VM files instead of only host shadow files.
+- Added cron integration coverage for shell `cd`/relative-path semantics to prove cron `exec` actions match manual `vm.exec()` command resolution behavior for guest file writes.
+- Files changed: `crates/sidecar/src/execution.rs`, `crates/CLAUDE.md`, `packages/core/tests/cron-integration.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The native sidecar currently lets guest processes write through host shadow paths first; if those writes are not mirrored back on exit, shell commands can read their own redirected files while VM filesystem APIs still see `ENOENT`.
+  - Syncing the entire shadow tree must avoid replaying bootstrap directories like `/proc`; recurse directories but only mirror concrete files and symlinks back into the kernel.
+  - The exact acceptance path for this story is `pnpm --dir packages/core exec vitest run tests/cron-integration.test.ts` plus root `pnpm check-types`; the cron suite now covers both absolute-path writes and shell `cd` into a relative target.
 ---
 
 ## 2026-04-09 11:37:19 PDT - US-013

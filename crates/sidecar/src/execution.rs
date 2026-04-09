@@ -2508,6 +2508,7 @@ where
                         .active_processes
                         .remove(process_id)
                         .expect("process should still exist");
+                    sync_process_host_writes_to_kernel(vm, &process)?;
                     terminate_child_process_tree(&mut vm.kernel, &mut process);
                     process.kernel_handle.finish(exit_code);
                     let _ = vm.kernel.wait_and_reap(process.kernel_pid);
@@ -4600,6 +4601,133 @@ fn shadow_path_for_guest(vm: &VmState, guest_path: &str) -> PathBuf {
         return vm.cwd.clone();
     }
     vm.cwd.join(relative)
+}
+
+fn sync_process_host_writes_to_kernel(
+    vm: &mut VmState,
+    process: &ActiveProcess,
+) -> Result<(), SidecarError> {
+    let shadow_root = vm.cwd.clone();
+    sync_host_directory_tree_to_kernel(vm, &shadow_root, "/")?;
+
+    if !path_is_within_root(
+        &normalize_host_path(&process.host_cwd),
+        &normalize_host_path(&vm.cwd),
+    ) {
+        sync_host_directory_tree_to_kernel(vm, &process.host_cwd, &process.guest_cwd)?;
+    }
+
+    Ok(())
+}
+
+fn sync_host_directory_tree_to_kernel(
+    vm: &mut VmState,
+    host_root: &Path,
+    guest_root: &str,
+) -> Result<(), SidecarError> {
+    let normalized_host_root = normalize_host_path(host_root);
+    let normalized_guest_root = normalize_path(guest_root);
+    sync_host_directory_tree_to_kernel_inner(
+        vm,
+        &normalized_host_root,
+        &normalized_host_root,
+        &normalized_guest_root,
+    )
+}
+
+fn sync_host_directory_tree_to_kernel_inner(
+    vm: &mut VmState,
+    host_root: &Path,
+    current_host_dir: &Path,
+    guest_root: &str,
+) -> Result<(), SidecarError> {
+    let entries = match fs::read_dir(current_host_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(SidecarError::Io(format!(
+                "failed to read host shadow directory {}: {error}",
+                current_host_dir.display()
+            )))
+        }
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            SidecarError::Io(format!(
+                "failed to read host shadow entry in {}: {error}",
+                current_host_dir.display()
+            ))
+        })?;
+        let host_path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            SidecarError::Io(format!(
+                "failed to stat host shadow entry {}: {error}",
+                host_path.display()
+            ))
+        })?;
+        let relative_path = host_path
+            .strip_prefix(host_root)
+            .map_err(|error| {
+                SidecarError::InvalidState(format!(
+                    "failed to relativize host shadow path {} against {}: {error}",
+                    host_path.display(),
+                    host_root.display()
+                ))
+            })?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let guest_path = if guest_root == "/" {
+            normalize_path(&format!("/{relative_path}"))
+        } else {
+            normalize_path(&format!(
+                "{}/{}",
+                guest_root.trim_end_matches('/'),
+                relative_path
+            ))
+        };
+
+        if file_type.is_dir() {
+            sync_host_directory_tree_to_kernel_inner(vm, host_root, &host_path, guest_root)?;
+            continue;
+        }
+
+        if file_type.is_file() {
+            let bytes = fs::read(&host_path).map_err(|error| {
+                SidecarError::Io(format!(
+                    "failed to read host shadow file {}: {error}",
+                    host_path.display()
+                ))
+            })?;
+            vm.kernel
+                .write_file(&guest_path, bytes)
+                .map_err(kernel_error)?;
+            continue;
+        }
+
+        if file_type.is_symlink() {
+            let target = fs::read_link(&host_path).map_err(|error| {
+                SidecarError::Io(format!(
+                    "failed to read host shadow symlink {}: {error}",
+                    host_path.display()
+                ))
+            })?;
+            match vm.kernel.lstat(&guest_path) {
+                Ok(stat) if stat.is_directory => {
+                    let _ = vm.kernel.remove_dir(&guest_path);
+                }
+                Ok(_) => {
+                    let _ = vm.kernel.remove_file(&guest_path);
+                }
+                Err(_) => {}
+            }
+            vm.kernel
+                .symlink(&target.to_string_lossy(), &guest_path)
+                .map_err(kernel_error)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_path_like_guest_specifier(cwd: &str, specifier: &str) -> String {

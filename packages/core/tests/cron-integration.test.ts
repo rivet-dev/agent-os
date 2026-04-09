@@ -81,6 +81,27 @@ describe("cron integration via AgentOs API", () => {
 		},
 	);
 
+	it.skipIf(!hasRegistryCommands)(
+		"scheduleCron with exec action preserves shell cwd semantics",
+		async () => {
+			vm.scheduleCron({
+				id: "exec-cwd-job",
+				schedule: "* * * * *",
+				action: {
+					type: "exec",
+					command:
+						"mkdir -p /tmp/cron-cwd && cd /tmp/cron-cwd && printf from-cron > marker.txt",
+				},
+			});
+
+			await driver.fire("exec-cwd-job");
+
+			const data = await vm.readFile("/tmp/cron-cwd/marker.txt");
+			const text = new TextDecoder().decode(data);
+			expect(text).toBe("from-cron");
+		},
+	);
+
 	it("scheduleCron with callback action invokes function", async () => {
 		const fn = vi.fn();
 		vm.scheduleCron({
