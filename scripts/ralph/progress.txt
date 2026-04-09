@@ -7,6 +7,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - The renamed core workspace package is `@rivet-dev/agent-os-core`; use that name for both package dependencies and TypeScript subpath imports like `@rivet-dev/agent-os-core/test/*` and `@rivet-dev/agent-os-core/internal/runtime-compat`.
 - Root install reproducibility is best verified with the three-part probe `pnpm install --frozen-lockfile`, `pnpm check-types`, and a package-local `pnpm --dir <pkg> exec <bin> --version` check to prove the root install materialized script binaries for workspace packages.
 - The `agent-os-v8-runtime` crate currently has a split truth path: run `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main suite and `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately for the isolated snapshot coverage, as documented in the repo root `CLAUDE.md`.
+- `US-007` is gated by verification, not broad runtime churn: `cargo test -p agent-os-sidecar --test kill_cleanup -- --test-threads=1` plus root `pnpm check-types` is the acceptance path for VM/process teardown semantics on the current branch.
 - Node builtin compatibility regressions are best covered in `crates/sidecar/tests/builtin_conformance.rs`, which runs the same probe under host Node and guest V8 and compares the JSON output directly.
 - The shared-runtime `node:stream` path exercised by sidecar builtin conformance comes from the inline mini-stream module in `crates/execution/src/javascript.rs`; fixing `require("stream")` parity there is separate from the stdlib-backed `v8-bridge.source.js` path.
 - In the WASM host-process bridge, synthetic pipes must initialize both `producers` and `consumers`, and consumer registration must flush any chunks buffered before the child attaches; shell builtins can write into a pipe before a spawned reader like `wc` registers stdin.
@@ -150,4 +151,14 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - `US-006` should be treated as a two-command Rust verification path plus root `pnpm check-types`; the ignored snapshot coverage is intentionally not part of the default crate test invocation.
   - If the normal `agent-os-v8-runtime` suite is green but the story is still open, check whether the isolated snapshot command was run explicitly before assuming more code work is needed.
   - The canonical place documenting the temporary split snapshot workflow is the repo root `CLAUDE.md`, not a crate-local instruction file.
+---
+
+## 2026-04-09 11:01:03 PDT - US-007
+- Re-verified the sidecar VM/process teardown semantics on `finish-ts-rust-migration`; the focused `kill_cleanup` suite already covers disposing a VM with an active guest process, kill-path cleanup, session close cleanup, and connection removal cleanup, and it passes without source changes on the current branch.
+- Verified the cross-workspace gate with `pnpm check-types`, so this story closed as a verification-only backlog update rather than a code change.
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `crates/sidecar/tests/kill_cleanup.rs` is the focused truth suite for active guest execution teardown; if it is green, avoid speculative cleanup refactors outside that coverage.
+  - On the current branch, `disposeVm` with a running guest already returns `VmDisposed` and emits a `ProcessExited` event in the same response frame, which is the key acceptance signal for this story.
+  - For this backlog item, the exact acceptance commands are sufficient: `cargo test -p agent-os-sidecar --test kill_cleanup -- --test-threads=1` exercises the cleanup semantics directly, and `pnpm check-types` satisfies the workspace gate.
 ---
