@@ -458,9 +458,12 @@ fn stream_conformance_matches_host_node() {
     assert_conformance(
         "stream",
         r#"
+import { createRequire } from "node:module";
 import * as streamNs from "node:stream";
 
 const stream = streamNs.default ?? streamNs;
+const require = createRequire(import.meta.url);
+const cjsStream = require("stream");
 
 class Source extends stream.Readable {
   constructor() {
@@ -497,6 +500,36 @@ class Upper extends stream.Transform {
   }
 }
 
+class IterableSource extends stream.Readable {
+  constructor(values) {
+    super({ objectMode: true });
+    this.values = [...values];
+  }
+
+  _read() {
+    if (this.values.length === 0) {
+      this.push(null);
+      return;
+    }
+    this.push(this.values.shift());
+  }
+}
+
+class RequiredIterableSource extends cjsStream.Readable {
+  constructor(values) {
+    super({ objectMode: true });
+    this.values = [...values];
+  }
+
+  _read() {
+    if (this.values.length === 0) {
+      this.push(null);
+      return;
+    }
+    this.push(this.values.shift());
+  }
+}
+
 const chunks = [];
 const source = new Source();
 const sink = new Sink(chunks);
@@ -509,6 +542,23 @@ const pipelineResult = stream.pipeline(source, upper, sink, (error) => {
 source._read();
 await new Promise((resolve) => setTimeout(resolve, 0));
 
+const iteratedValues = [];
+for await (const chunk of new IterableSource(["gamma", "delta"])) {
+  iteratedValues.push(
+    Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk),
+  );
+}
+
+const requiredIteratedValues = [];
+for await (const chunk of new RequiredIterableSource(["theta", "lambda"])) {
+  requiredIteratedValues.push(
+    Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk),
+  );
+}
+
+const selfCheckReadable = new IterableSource(["self-check"]);
+const selfCheckIterator = selfCheckReadable[Symbol.asyncIterator]();
+
 console.log(JSON.stringify({
   output: chunks.join("|"),
   pipelineReturnedSink: pipelineResult === sink,
@@ -516,6 +566,14 @@ console.log(JSON.stringify({
   readableIsFunction: typeof stream.Readable === "function",
   writableIsFunction: typeof stream.Writable === "function",
   transformIsFunction: typeof stream.Transform === "function",
+  prototypeHasAsyncIterator:
+    typeof stream.Readable.prototype[Symbol.asyncIterator] === "function",
+  requiredPrototypeHasAsyncIterator:
+    typeof cjsStream.Readable.prototype[Symbol.asyncIterator] === "function",
+  readableIteratorReturnsSelf:
+    selfCheckIterator[Symbol.asyncIterator]() === selfCheckIterator,
+  iteratedValues,
+  requiredIteratedValues,
 }));
 "#,
     );

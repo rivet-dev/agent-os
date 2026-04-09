@@ -3595,6 +3595,112 @@ function queueResult(callback, error = null) {
   queueMicrotask(() => callback(error));
 }
 
+function createReadableAsyncIterator(stream) {
+  const queuedChunks = [];
+  let pendingResolve = null;
+  let pendingReject = null;
+  let done = stream?.readableEnded === true;
+  let error = stream?.errored ?? null;
+
+  const cleanup = () => {
+    stream?.off?.("data", onData);
+    stream?.off?.("end", onEnd);
+    stream?.off?.("close", onEnd);
+    stream?.off?.("error", onError);
+  };
+
+  const settlePending = (result) => {
+    if (pendingResolve) {
+      const resolve = pendingResolve;
+      pendingResolve = null;
+      pendingReject = null;
+      resolve(result);
+    }
+  };
+
+  const rejectPending = (reason) => {
+    if (pendingReject) {
+      const reject = pendingReject;
+      pendingResolve = null;
+      pendingReject = null;
+      reject(reason);
+    }
+  };
+
+  const onData = (chunk) => {
+    if (pendingResolve) {
+      settlePending({ done: false, value: chunk });
+      return;
+    }
+    queuedChunks.push(chunk);
+  };
+
+  const onEnd = () => {
+    if (done) return;
+    done = true;
+    cleanup();
+    settlePending({ done: true, value: void 0 });
+  };
+
+  const onError = (reason) => {
+    error = reason;
+    done = true;
+    cleanup();
+    rejectPending(reason);
+  };
+
+  const pull = () => {
+    if (done || typeof stream?._read !== "function") {
+      return;
+    }
+    try {
+      stream._read();
+    } catch (reason) {
+      stream.errored = reason;
+      onError(reason);
+    }
+  };
+
+  stream?.on?.("data", onData);
+  stream?.on?.("end", onEnd);
+  stream?.on?.("close", onEnd);
+  stream?.on?.("error", onError);
+
+  return {
+    next() {
+      if (error) {
+        return Promise.reject(error);
+      }
+      if (queuedChunks.length > 0) {
+        return Promise.resolve({ done: false, value: queuedChunks.shift() });
+      }
+      if (done) {
+        return Promise.resolve({ done: true, value: void 0 });
+      }
+      pull();
+      if (queuedChunks.length > 0) {
+        return Promise.resolve({ done: false, value: queuedChunks.shift() });
+      }
+      if (done) {
+        return Promise.resolve({ done: true, value: void 0 });
+      }
+      return new Promise((resolve, reject) => {
+        pendingResolve = resolve;
+        pendingReject = reject;
+      });
+    },
+    return() {
+      done = true;
+      cleanup();
+      stream?.destroy?.();
+      return Promise.resolve({ done: true, value: void 0 });
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+  };
+}
+
 class Stream extends MiniEmitter {
   pipe(destination) {
     this.on("data", (chunk) => destination.write(chunk));
@@ -3655,6 +3761,10 @@ class Readable extends Stream {
         }
       },
     };
+  }
+
+  [Symbol.asyncIterator]() {
+    return createReadableAsyncIterator(this);
   }
 }
 

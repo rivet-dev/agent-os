@@ -46,7 +46,7 @@
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Found in step-23. Claude SDK uses `for await (const event of response.stream)`. node-stdlib-browser's readable-stream package should have this, but it may need explicit wiring in the v8-bridge. Check if readable-stream v3+ is bundled (it has native async iterator support)."
     },
     {

@@ -3,6 +3,7 @@ Started: Thu Apr  9 06:09:31 AM PDT 2026
 ## Codebase Patterns
 - The renamed core workspace package is `@rivet-dev/agent-os-core`; use that name for both package dependencies and TypeScript subpath imports like `@rivet-dev/agent-os-core/test/*` and `@rivet-dev/agent-os-core/internal/runtime-compat`.
 - Node builtin compatibility regressions are best covered in `crates/sidecar/tests/builtin_conformance.rs`, which runs the same probe under host Node and guest V8 and compares the JSON output directly.
+- The shared-runtime `node:stream` path exercised by sidecar builtin conformance comes from the inline mini-stream module in `crates/execution/src/javascript.rs`; fixing `require("stream")` parity there is separate from the stdlib-backed `v8-bridge.source.js` path.
 
 ## 2026-04-09 06:12:40 PDT - US-CC-001
 - Implemented the remaining workspace/package rename cleanup for `@rivet-dev/agent-os-core`, including the last manifest dependency, benchmark imports, secure-exec/dev-shell subpath aliases, registry test imports, and the root instruction note to keep future changes on the new package name.
@@ -20,4 +21,13 @@ Started: Thu Apr  9 06:09:31 AM PDT 2026
   - Module-shape regressions for builtins are easier to catch by extending the host-vs-guest conformance probe than by writing guest-only assertions.
   - When a story is primarily about runtime parity, tightening the conformance test to exercise the exact import/require pattern from a real SDK is usually enough to make the acceptance criteria durable.
   - `require("events")` and `require("node:events")` should be exercised together because the bridge normalizes builtin specifiers and regressions can hide if only one path is covered.
+---
+
+## 2026-04-09 06:29:44 PDT - US-CC-003
+- Implemented async iteration for the inline guest `node:stream` `Readable` builtin and expanded builtin conformance coverage to verify `Symbol.asyncIterator`, `for await` chunk delivery, and CommonJS `require("stream")` parity against host Node.
+- Files changed: `crates/execution/src/javascript.rs`, `crates/execution/assets/v8-bridge.js`, `crates/execution/CLAUDE.md`, `crates/sidecar/tests/builtin_conformance.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The sidecar/shared-runtime `node:stream` implementation lives in the inline module emitted from `crates/execution/src/javascript.rs`, so stream parity fixes need to land there even if the stdlib-backed bridge already has similar logic.
+  - For the mini-stream builtin, async iteration must actively drive `_read()` from the iterator path; adding only `Symbol.asyncIterator` without pulling data leaves custom `Readable` subclasses stalled.
+  - The fastest way to validate builtin-stream parity is the host-vs-guest conformance probe plus `cargo test -p agent-os-sidecar -- --test-threads=1`, because the broader package suite catches runtime-path mismatches that a single focused test can miss.
 ---
