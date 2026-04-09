@@ -2,6 +2,7 @@
 Started: Thu Apr  9 06:09:31 AM PDT 2026
 ## Codebase Patterns
 - The renamed core workspace package is `@rivet-dev/agent-os-core`; use that name for both package dependencies and TypeScript subpath imports like `@rivet-dev/agent-os-core/test/*` and `@rivet-dev/agent-os-core/internal/runtime-compat`.
+- Root install reproducibility is best verified with the three-part probe `pnpm install --frozen-lockfile`, `pnpm check-types`, and a package-local `pnpm --dir <pkg> exec <bin> --version` check to prove the root install materialized script binaries for workspace packages.
 - Node builtin compatibility regressions are best covered in `crates/sidecar/tests/builtin_conformance.rs`, which runs the same probe under host Node and guest V8 and compares the JSON output directly.
 - The shared-runtime `node:stream` path exercised by sidecar builtin conformance comes from the inline mini-stream module in `crates/execution/src/javascript.rs`; fixing `require("stream")` parity there is separate from the stdlib-backed `v8-bridge.source.js` path.
 - In the WASM host-process bridge, synthetic pipes must initialize both `producers` and `consumers`, and consumer registration must flush any chunks buffered before the child attaches; shell builtins can write into a pipe before a spawned reader like `wc` registers stdin.
@@ -83,4 +84,13 @@ Started: Thu Apr  9 06:09:31 AM PDT 2026
   - If guest `fetch()` succeeds only when TLS trace logging is enabled, suspect lock starvation in the sidecar TLS reader/writer path before blaming undici; both sides share one `rustls::StreamOwned` mutex.
   - The main `v8-bridge.js` bundle must alias `node:zlib` back to the builtin bridge module for undici; bundling a second copy can leave `zlib.constants` incomplete and break compressed HTTPS responses.
   - Focused verification for guest fetch regressions is `cargo test -p agent-os-sidecar --test fetch_via_undici -- --test-threads=1` plus the real integration gate `cd examples/quickstart && source ~/misc/env.txt && npx tsx src/agent-session.ts`.
+---
+
+## 2026-04-09 10:39:24 PDT - US-001
+- Verified the workspace install baseline is now reproducible on `finish-ts-rust-migration`: `pnpm install --frozen-lockfile` passes from the repo root, `pnpm check-types` passes, and root-installed package binaries resolve correctly via `pnpm --dir packages/core exec vitest --version` and `pnpm --dir packages/core exec tsx --version`.
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - This story can be re-verified quickly without touching source by pairing the frozen root install with one root-driven typecheck and one package-local binary probe.
+  - `pnpm --dir <workspace> exec <bin>` is a useful guard that the root install actually materialized package script dependencies, not just the lockfile metadata.
+  - The current branch no longer needs source changes for root install consistency; the remaining TypeScript install/path issues move to `US-002`.
 ---
