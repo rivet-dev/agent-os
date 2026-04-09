@@ -8931,7 +8931,7 @@ function writeGuestBytes(ptr, maxLen, bytes, actualLenPtr) {
 }
 
 const hostProcessImport =
-  permissionTier === 'full'
+  permissionTier !== 'isolated'
     ? {
         proc_spawn(
           argvPtr,
@@ -9270,16 +9270,48 @@ const hostUserImport = {
 
 const HOST_FS_MODE_REGULAR = 0o100644;
 const HOST_FS_MODE_CHARACTER = 0o020666;
+const HOST_FS_MODE_FIFO = 0o010600;
+
+function hostFsModeFromStat(stat) {
+  const mode = Number(stat?.mode);
+  return Number.isInteger(mode) && mode > 0 ? mode >>> 0 : 0;
+}
 
 const hostFsImport = {
-  fd_mode(fd, retModePtr) {
+  fd_mode(fd) {
     const descriptor = Number(fd) >>> 0;
-    const mode = descriptor <= 2 ? HOST_FS_MODE_CHARACTER : HOST_FS_MODE_REGULAR;
-    return writeGuestUint32(retModePtr, mode);
+    if (descriptor <= 2) {
+      return HOST_FS_MODE_CHARACTER;
+    }
+
+    const handle = lookupFdHandle(descriptor);
+    if (handle?.kind === 'pipe-read' || handle?.kind === 'pipe-write') {
+      return HOST_FS_MODE_FIFO;
+    }
+
+    try {
+      return hostFsModeFromStat(callSyncRpc('fs.fstatSync', [descriptor])) || HOST_FS_MODE_REGULAR;
+    } catch {
+      return HOST_FS_MODE_REGULAR;
+    }
   },
-  path_mode(...args) {
-    const retModePtr = args[args.length - 1];
-    return writeGuestUint32(retModePtr, HOST_FS_MODE_REGULAR);
+  path_mode(pathPtr, pathLen, followSymlinks) {
+    try {
+      const target = readGuestString(pathPtr, pathLen);
+      const method = Number(followSymlinks) === 0 ? 'fs.lstatSync' : 'fs.statSync';
+      return hostFsModeFromStat(callSyncRpc(method, [target]));
+    } catch {
+      return 0;
+    }
+  },
+  chmod(pathPtr, pathLen, mode) {
+    try {
+      const target = readGuestString(pathPtr, pathLen);
+      callSyncRpc('fs.chmodSync', [target, Number(mode) >>> 0]);
+      return 0;
+    } catch {
+      return 1;
+    }
   },
 };
 

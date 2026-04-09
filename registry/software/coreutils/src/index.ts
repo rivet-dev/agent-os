@@ -55,7 +55,7 @@ const pkg = {
 		{ name: "pathchk", permissionTier: "read-only" as const },
 
 		// Text processing
-		{ name: "tee", permissionTier: "read-only" as const },
+		{ name: "tee", permissionTier: "read-write" as const },
 		{ name: "echo", permissionTier: "read-only" as const },
 		{ name: "printf", permissionTier: "read-only" as const },
 		{ name: "wc", permissionTier: "read-only" as const },

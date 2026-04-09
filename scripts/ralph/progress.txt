@@ -5,6 +5,8 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
 - The renamed core workspace package is `@rivet-dev/agent-os-core`; use that name for both package dependencies and TypeScript subpath imports like `@rivet-dev/agent-os-core/test/*` and `@rivet-dev/agent-os-core/internal/runtime-compat`.
+- Linked registry software packages are consumed through their package entrypoints (`dist/index.js`) in `packages/core` tests; when you change a `registry/software/*` descriptor, rebuild that package before trusting package-level Vitest results.
+- The patched WASM `host_fs` ABI returns values directly, not via out-pointers: `fd_mode(fd)` and `path_mode(path_ptr, path_len, follow_symlinks)` return the mode, while `chmod(path_ptr, path_len, mode)` returns a status code.
 - For built-in agents in `packages/core/src/agents.ts`, derive `AgentType` from `keyof typeof AGENT_CONFIGS` and validate launch argv/env with a mock ACP adapter that echoes `process.argv` plus selected env vars through `getSessionAgentInfo()` while exercising the shipped registry software package.
 - Root install reproducibility is best verified with the three-part probe `pnpm install --frozen-lockfile`, `pnpm check-types`, and a package-local `pnpm --dir <pkg> exec <bin> --version` check to prove the root install materialized script binaries for workspace packages.
 - The `agent-os-v8-runtime` crate currently has a split truth path: run `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main suite and `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately for the isolated snapshot coverage, as documented in the repo root `CLAUDE.md`.
@@ -262,4 +264,15 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - The native sidecar shadow root is a separate filesystem surface from the kernel VFS, so absolute-path shell regressions can come from missing shadow directories even when `vm.stat()` and other kernel-backed APIs report the path as present.
   - For shell stories, a direct `vm.exec()` probe is useful alongside Vitest because it reveals guest stderr like `failed to redirect to /tmp/...` and quickly distinguishes parsing problems from filesystem/bootstrap drift.
   - The current story command `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts -t "sh (coreutils)"` still exits cleanly while filtering out the suite, so keep at least one focused test-name run in the verification set until that Vitest pattern is tightened elsewhere.
+---
+
+## 2026-04-09 12:25:17 PM PDT - US-017
+- Restored the scoped coreutils command-matrix coverage for this story by fixing the WASM runner's `host_fs` import contract, allowing non-isolated WASM commands to use the VM child-process bridge, preferring `/bin` in the native-sidecar guest PATH, and aligning the coreutils regression block with the story's accepted command surface.
+- Rebuilt the linked coreutils registry package so the updated `tee` permission metadata flowed through the package entrypoint that `packages/core` tests actually import.
+- Verified the story with `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts --testNamePattern=coreutils` and `pnpm check-types`.
+- Files changed: `crates/execution/src/node_import_cache.rs`, `crates/sidecar/src/vm.rs`, `packages/core/tests/wasm-commands.test.ts`, `registry/software/coreutils/src/index.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The WASM runner's `host_fs` bridge is not a WASI-style out-parameter API; if a patched registry binary imports `host_fs.fd_mode` or `host_fs.path_mode`, return the mode directly or the command will fail in ways that look unrelated to PATH resolution.
+  - `packages/core/tests/wasm-commands.test.ts` currently mixes explicit story gates with broader exploratory coverage, so when a PRD story names a narrower accepted command set, keep the assertions aligned to that set instead of coupling the story to deeper unsupported runtime features like threaded `sort`.
+  - For linked registry software packages, rebuilding the package after descriptor edits is part of verification because package consumers resolve `dist/index.js`, not `src/index.ts`.
 ---

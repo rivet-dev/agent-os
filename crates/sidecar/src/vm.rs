@@ -1244,6 +1244,10 @@ fn refresh_guest_command_path_env(
     let mut merged = Vec::new();
     let mut seen = BTreeSet::new();
 
+    if !command_guest_paths.is_empty() && seen.insert(String::from("/bin")) {
+        merged.push(String::from("/bin"));
+    }
+
     for guest_path in command_guest_paths.values() {
         let Some(parent) = Path::new(guest_path)
             .parent()
