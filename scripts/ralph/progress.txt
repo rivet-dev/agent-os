@@ -173,3 +173,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - `packages/core/tests/software-projection.test.ts` is the direct read-only regression probe for projected package roots under `/root/node_modules`, so use it before changing module-access mount permissions.
   - For this backlog item, the exact acceptance commands are sufficient when paired with the focused read-only probe: the native-sidecar block proves package visibility, `tests/software-projection.test.ts` proves guest writes stay blocked, and `pnpm check-types` satisfies the workspace gate.
 ---
+
+## 2026-04-09 11:05:44 PDT - US-009
+- Re-verified the OpenCode package projection path on `finish-ts-rust-migration`; `packages/core/tests/opencode-headless.test.ts` already proves the projected `@rivet-dev/agent-os-opencode` package and bundled `dist/opencode-acp/acp.js` are visible inside `/root/node_modules` from guest Node without needing a host wrapper.
+- Verified the cross-workspace gate with `pnpm --dir packages/core exec vitest run tests/opencode-headless.test.ts` and `pnpm check-types`, so this story closed as a verification-only backlog update rather than a source change.
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `packages/core/tests/opencode-headless.test.ts` is the focused truth suite for OpenCode module projection; if it is green, avoid speculative changes to package-root mounting for `@rivet-dev/agent-os-opencode`.
+  - The OpenCode projection check intentionally reads files from guest Node under `/root/node_modules` instead of host resolution helpers, which keeps the regression coverage on the VM filesystem surface that adapters actually use.
+  - For this backlog item, the exact acceptance commands are sufficient: the headless suite proves both package visibility and ACP bundle visibility inside the VM, and `pnpm check-types` satisfies the workspace gate.
+---
