@@ -29,6 +29,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- For `crates/sidecar/tests` POSIX compliance coverage, prefer direct `agent_os_kernel` / `ProcessTable` assertions for deterministic `/proc`, `/dev`, `waitpid`, and process-group behavior, and use the sidecar/V8 harness only for guest-observable signal delivery that needs the full runtime bridge.
 - Shared V8 host shutdown has three alignment points: when the runtime reader thread dies it must clear the per-session sender map, the execution bridge must synthesize an `Exited(...)` event on unexpected channel shutdown, and the sidecar ACP request loop must treat process exit as a terminal error and run `terminate_acp_process(...)` so close/session cleanup cannot hang behind a dead runtime.
 - JavaScript child-process launches must reuse `prepare_javascript_runtime_env(...)` and set `AGENT_OS_SANDBOX_ROOT` the same way top-level `execute()` does; otherwise spawned V8 children lose guest-path mappings, ESM package resolution falls back to `/unknown/...`, and npm CLIs behave differently when launched through `child_process`.
 - Pyodide `micropip` support in `crates/execution/assets/runners/python-runner.mjs` must keep guest `js` / `pyodide_js` imports blocked for user code while exposing only a narrow internal compat module to `micropip` and `pyodide.http`; if the runner or bundled import-cache assets change, bump `NODE_IMPORT_CACHE_ASSET_VERSION` in `crates/execution/src/node_import_cache.rs` so stale `/tmp/agent-os-node-import-cache-*` materializations do not hide the update.
@@ -77,6 +78,15 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Guest CommonJS resolution regressions can hide if tests only exercise `createRequire(import.meta.url)` from ESM; add coverage that loads an actual `.cjs` module so the `_compile()`-created `require` path is exercised too
   - In `javascript_v8.rs`, the shared `write_fixture()` helper should create parent directories so nested runtime fixtures stay declarative and individual tests do not reimplement setup logic
   - `cargo test -p agent-os-execution -- --test-threads=1` is green for this story and is a practical acceptance command for execution-only resolver changes on this branch
+---
+## 2026-04-08 20:48:03 PDT - US-066
+- Added `crates/sidecar/tests/posix_compliance.rs` with focused POSIX compliance coverage for procfs identity/metadata, special device nodes, guest SIGTERM delivery, SIGCHLD/waitpid zombie cleanup, and process-group signal fanout
+- Recorded the test-structure pattern in the `## Codebase Patterns` section so future sidecar conformance work keeps deterministic kernel/process-table assertions separate from full sidecar/V8 signal-delivery checks
+- Files changed: `crates/sidecar/tests/posix_compliance.rs`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - `/proc/self/pid` is best validated through the proc identity surfaces that actually exist here: `/proc/self` and the first field of `/proc/self/stat`, which both report the kernel-assigned PID
+  - Sidecar POSIX stories stay much more stable when `/proc`, `/dev`, `waitpid`, and process-group semantics are tested directly through `agent_os_kernel`, while guest-visible signal delivery uses the sidecar harness
+  - The scoped acceptance command for this story is `cargo test -p agent-os-sidecar --test posix_compliance -- --test-threads=1`; it stays isolated from unrelated sidecar integration failures on this branch
 ---
 - Generated node-import-cache builtin assets need a `NODE_IMPORT_CACHE_ASSET_VERSION` bump in `crates/execution/src/node_import_cache.rs` whenever their source changes, or old `/tmp/agent-os-node-import-cache-*` materializations will keep serving stale code
 - If guest CommonJS must `require("node:...")`, update both `Module.builtinModules` and `loadBuiltinModule()` in `crates/execution/assets/v8-bridge.source.js`; registering only one side leaves `_requireFrom()` recursing or hanging on the builtin
