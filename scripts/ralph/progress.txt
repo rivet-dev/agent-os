@@ -5,6 +5,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
 - The renamed core workspace package is `@rivet-dev/agent-os-core`; use that name for both package dependencies and TypeScript subpath imports like `@rivet-dev/agent-os-core/test/*` and `@rivet-dev/agent-os-core/internal/runtime-compat`.
+- For vendored Rust command fixes under `registry/native/vendor/`, add a matching patch under `registry/native/patches/crates/<crate>/` or `native/scripts/patch-vendor.sh` will drop the fix on the next rebuild.
 - Linked registry software packages are consumed through their package entrypoints (`dist/index.js`) in `packages/core` tests; when you change a `registry/software/*` descriptor, rebuild that package before trusting package-level Vitest results.
 - In `packages/core/tests/wasm-commands.test.ts`, broad Vitest name filters like `-t "grep"` or `-t "sed"` also match ripgrep, gzip, and cross-package pipeline cases; use explicit command-case names or a tighter `--testNamePattern` when a story only gates one command block.
 - The patched WASM `host_fs` ABI returns values directly, not via out-pointers: `fd_mode(fd)` and `path_mode(path_ptr, path_len, follow_symlinks)` return the mode, while `chmod(path_ptr, path_len, mode)` returns a status code.
@@ -352,4 +353,14 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Permission-changing guest RPCs that target shadow-backed files must update the shadow root immediately; otherwise later host-to-kernel reconciliation can silently restore stale modes.
   - For locally rebuilt Rust command packages, copy `registry/native/target/wasm32-wasip1/release/<command>.wasm` into the published `registry/software/*/wasm/<command>` path; `release/commands/<command>` can remain stale until a separate packaging step runs.
   - WASI command permission displays need the `host_fs.path_mode` bridge for exact mode bits; metadata-only fallbacks are enough for file type detection but not for chmod/stat parity.
+---
+
+## 2026-04-09 14:40:45 PDT - US-025
+- Restored the cross-package pipeline matrix by patching `uu_sort`'s WASI path to avoid Rayon-backed parallel sorting, fixing the existing WASI single-thread helper signature/inference drift in `ext_sort.rs`, and refreshing the published `sort` Wasm artifact used by the coreutils package.
+- Verified with `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts --testNamePattern 'cross-package pipelines'` and `pnpm check-types`.
+- Files changed: `registry/native/vendor/uu_sort/src/sort.rs`, `registry/native/vendor/uu_sort/src/ext_sort.rs`, `registry/native/patches/crates/uu_sort/0001-wasi-serial-sort.patch`, `registry/software/coreutils/wasm/sort`, `registry/CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `uu_sort` still contains non-WASI-friendly parallel code paths; on the VM target, keep the in-memory sort path serial unless the runtime gains real thread support.
+  - The vendored `uu_sort` WASI fallback already exists but currently needs an explicit `WriteablePlainTmpFile` type and no owned `Output` argument to compile on the pinned nightly toolchain.
+  - Updating `registry/native/target/wasm32-wasip1/release/<command>.wasm` is not enough for package tests when `registry/software/*/wasm/<command>` already exists; refresh the published package artifact too.
 ---

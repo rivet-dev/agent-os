@@ -1,0 +1,51 @@
+--- a/src/ext_sort.rs
++++ b/src/ext_sort.rs
+@@ -114,10 +114,9 @@
+     tmp_dir: &mut TmpDirWrapper,
+ ) -> UResult<()> {
+     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+-    let read_result = read_write_loop_single_thread(
++    let read_result = read_write_loop_single_thread::<WriteablePlainTmpFile>(
+         files,
+         settings,
+-        output,
+         tmp_dir,
+         sender,
+         receiver,
+@@ -366,7 +365,6 @@
+ fn read_write_loop_single_thread<I: WriteableTmpFile>(
+     mut files: &mut impl Iterator<Item = UResult<Box<dyn Read + Send>>>,
+     settings: &GlobalSettings,
+-    _output: Output,
+     tmp_dir: &mut TmpDirWrapper,
+     sender: SyncSender<Chunk>,
+     receiver: Receiver<Chunk>,
+--- a/src/sort.rs
++++ b/src/sort.rs
+@@ -2591,10 +2591,22 @@
+ }
+ 
+ fn sort_by<'a>(unsorted: &mut Vec<Line<'a>>, settings: &GlobalSettings, line_data: &LineData<'a>) {
+-    if settings.stable || settings.unique {
+-        unsorted.par_sort_by(|a, b| compare_by(a, b, settings, line_data, line_data));
+-    } else {
+-        unsorted.par_sort_unstable_by(|a, b| compare_by(a, b, settings, line_data, line_data));
++    #[cfg(target_os = "wasi")]
++    {
++        if settings.stable || settings.unique {
++            unsorted.sort_by(|a, b| compare_by(a, b, settings, line_data, line_data));
++        } else {
++            unsorted.sort_unstable_by(|a, b| compare_by(a, b, settings, line_data, line_data));
++        }
++    }
++
++    #[cfg(not(target_os = "wasi"))]
++    {
++        if settings.stable || settings.unique {
++            unsorted.par_sort_by(|a, b| compare_by(a, b, settings, line_data, line_data));
++        } else {
++            unsorted.par_sort_unstable_by(|a, b| compare_by(a, b, settings, line_data, line_data));
++        }
+     }
+ }
+ 

@@ -83,6 +83,7 @@ Commands declare a default permission tier that controls WASI host imports:
 - Rust command source lives in `native/crates/commands/` with shared libraries in `native/crates/libs/`.
 - C command source lives in `native/c/programs/`.
 - All WASM binaries are built in-repo via `make build-wasm`. No external dependencies except Rust toolchain and wasi-sdk.
+- If you patch a vendored Rust dependency under `native/vendor/`, add the same patch under `native/patches/crates/<crate>/` so `native/scripts/patch-vendor.sh` reapplies it on future rebuilds instead of silently losing the fix.
 - When you rebuild a Rust command locally, the fresh artifacts are the top-level `native/target/wasm32-wasip1/release/<command>.wasm` files. `release/commands/<command>` can lag until the packaging/copy step rewrites the published command directory.
 
 ### Descriptor Format
