@@ -50,7 +50,7 @@ Node.js agent and tool packages that are projected into the VM via the ModuleAcc
 |---------|---------------|-------------|--------|---------------|---------|
 | `@rivet-dev/agent-os-codex` | codex | OpenAI Codex integration (codex, codex-exec) | rust | 274 KiB | 118 KiB |
 | `@rivet-dev/agent-os-coreutils` | coreutils | GNU coreutils: sh, cat, ls, cp, sort, and 80+ commands | rust | 51.4 MiB | 23.5 MiB |
-| `@rivet-dev/agent-os-curl` | curl | curl HTTP client | c | - | - |
+| `@rivet-dev/agent-os-curl` | curl | curl-compatible HTTP client | rust | - | - |
 | `@rivet-dev/agent-os-diffutils` | diffutils | GNU diffutils (diff) | rust | 120 KiB | 54.0 KiB |
 | `@rivet-dev/agent-os-fd` | fd-find | fd fast file finder | rust | 901 KiB | 328 KiB |
 | `@rivet-dev/agent-os-file` | file | file type detection | rust | 117 KiB | 49.9 KiB |

@@ -12,6 +12,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - For built-in agents in `packages/core/src/agents.ts`, derive `AgentType` from `keyof typeof AGENT_CONFIGS` and validate launch argv/env with a mock ACP adapter that echoes `process.argv` plus selected env vars through `getSessionAgentInfo()` while exercising the shipped registry software package.
 - Root install reproducibility is best verified with the three-part probe `pnpm install --frozen-lockfile`, `pnpm check-types`, and a package-local `pnpm --dir <pkg> exec <bin> --version` check to prove the root install materialized script binaries for workspace packages.
 - The `agent-os-v8-runtime` crate currently has a split truth path: run `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main suite and `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately for the isolated snapshot coverage, as documented in the repo root `CLAUDE.md`.
+- For `packages/core/tests/wasm-commands.test.ts` curl round-trip coverage, use a guest `net.createServer()` HTTP fixture when the target is the curl/WASM client path; guest `http.createServer()` exercises a separate transport-wrapper compatibility surface and can hide curl-specific regressions.
 - `US-007` is gated by verification, not broad runtime churn: `cargo test -p agent-os-sidecar --test kill_cleanup -- --test-threads=1` plus root `pnpm check-types` is the acceptance path for VM/process teardown semantics on the current branch.
 - Node builtin compatibility regressions are best covered in `crates/sidecar/tests/builtin_conformance.rs`, which runs the same probe under host Node and guest V8 and compares the JSON output directly.
 - The shared-runtime `node:stream` path exercised by sidecar builtin conformance comes from the inline mini-stream module in `crates/execution/src/javascript.rs`; fixing `require("stream")` parity there is separate from the stdlib-backed `v8-bridge.source.js` path.
@@ -328,4 +329,15 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - For command-matrix verification stories, target the concrete test names when describe-name regexes get brittle around parentheses; the ripgrep and fd blocks are easy to mis-filter if the pattern is over-escaped.
   - The exact acceptance path for this story is the focused `packages/core/tests/wasm-commands.test.ts` probes for ripgrep, fd, and tree plus root `pnpm check-types`; if those are already green, avoid unnecessary registry or runtime edits.
   - This story is verification-only on the current branch, so keep the commit limited to Ralph tracking artifacts unless a focused probe actually fails.
+---
+
+## 2026-04-09 13:47:29 PDT - US-023
+- Restored the `curl` registry package with a Rust/WASI implementation backed by `crates/libs/wasi-http`, wired the sidecar/guest networking bridge so the WASM command reaches VM-local listeners through the guest network surface, and exercised the command directly via `vm.spawn("curl", ...)` plus `waitProcess()` in the focused package tests.
+- Tightened the `packages/core` curl coverage to use a guest raw-HTTP fixture for GET/POST plus the existing keep-alive probe, and made the published `@rivet-dev/agent-os-curl` descriptor fall back to `registry/native/target/wasm32-wasip1/release/commands` when the copied `software/curl/wasm/` artifact is absent.
+- Verified with `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts -t "curl"`, `pnpm check-types`, and `cargo build -p agent-os-sidecar`.
+- Files changed: `registry/native/Cargo.toml`, `registry/native/Cargo.lock`, `registry/native/crates/commands/curl/Cargo.toml`, `registry/native/crates/commands/curl/src/main.rs`, `registry/software/curl/src/index.ts`, `packages/core/tests/wasm-commands.test.ts`, `packages/core/AGENTS.md`, `crates/execution/src/node_import_cache.rs`, `crates/sidecar/src/execution.rs`, `registry/CLAUDE.md`, `registry/README.md`, `crates/execution/CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The `curl` package descriptor may need to fall back to `registry/native/target/wasm32-wasip1/release/commands` because `registry/software/*/wasm/` is generated and can be absent in a clean checkout.
+  - VM-local loopback ownership for guest networking needs to account for HTTP-facing listeners bound to unspecified guest addresses (`0.0.0.0` / `::`), not just explicit loopback binds.
+  - For curl/client regressions, raw guest HTTP fixtures are more reliable than guest `http.createServer()` because they avoid conflating client bugs with the separate Node HTTP transport wrapper.
 ---

@@ -8933,6 +8933,103 @@ function callSyncRpc(method, args = []) {
   throw error;
 }
 
+const hostNetSockets = new Map();
+let nextHostNetSocketFd = 0x40000000;
+
+function getHostNetSocket(fd) {
+  return hostNetSockets.get(Number(fd) >>> 0) ?? null;
+}
+
+function dequeueHostNetBytes(socket, maxBytes) {
+  const requested = Math.max(0, Number(maxBytes) >>> 0);
+  if (requested === 0 || socket.readChunks.length === 0) {
+    return Buffer.alloc(0);
+  }
+
+  const parts = [];
+  let remaining = requested;
+  while (remaining > 0 && socket.readChunks.length > 0) {
+    const chunk = socket.readChunks[0];
+    if (chunk.length <= remaining) {
+      parts.push(chunk);
+      socket.readChunks.shift();
+      remaining -= chunk.length;
+      continue;
+    }
+
+    parts.push(chunk.subarray(0, remaining));
+    socket.readChunks[0] = chunk.subarray(remaining);
+    remaining = 0;
+  }
+
+  return Buffer.concat(parts);
+}
+
+function pollHostNetSocket(socket, waitMs) {
+  if (!socket?.socketId || socket.closed) {
+    return null;
+  }
+
+  const event = callSyncRpc('net.poll', [socket.socketId, Math.max(0, Number(waitMs) >>> 0)]);
+  if (!event) {
+    return null;
+  }
+
+  if (event.type === 'data') {
+    const chunk = decodeSyncRpcValue(event.data);
+    if (chunk?.length > 0) {
+      socket.readChunks.push(Buffer.from(chunk));
+    }
+    return event;
+  }
+
+  if (event.type === 'end' || event.type === 'close') {
+    socket.readableEnded = true;
+    if (event.type === 'close') {
+      socket.closed = true;
+      socket.socketId = null;
+    }
+    return event;
+  }
+
+  if (event.type === 'error') {
+    socket.lastError = String(event.message || event.code || 'socket error');
+    socket.closed = true;
+    socket.socketId = null;
+    return event;
+  }
+
+  return event;
+}
+
+function parseHostNetAddress(raw) {
+  const value = String(raw ?? '').trim();
+  if (!value) {
+    throw new Error('host_net address is required');
+  }
+
+  if (value.startsWith('[')) {
+    const end = value.indexOf(']');
+    if (end < 0 || value.charCodeAt(end + 1) !== 58) {
+      throw new Error(`invalid host_net address ${value}`);
+    }
+    return {
+      host: value.slice(1, end),
+      port: Number.parseInt(value.slice(end + 2), 10),
+    };
+  }
+
+  const separator = value.lastIndexOf(':');
+  if (separator <= 0 || separator === value.length - 1) {
+    throw new Error(`invalid host_net address ${value}`);
+  }
+
+  return {
+    host: value.slice(0, separator),
+    port: Number.parseInt(value.slice(separator + 1), 10),
+  };
+}
+
 function signalNumberFromName(signal) {
   switch (String(signal)) {
     case 'SIGHUP':
@@ -8983,6 +9080,145 @@ function writeGuestBytes(ptr, maxLen, bytes, actualLenPtr) {
     return WASI_ERRNO_FAULT;
   }
 }
+
+const hostNetImport = {
+  net_socket(domain, sockType, protocol, retFdPtr) {
+    try {
+      const numericType = Number(sockType) >>> 0;
+      if (numericType !== 1) {
+        return WASI_ERRNO_FAULT;
+      }
+
+      const fd = nextHostNetSocketFd++;
+      hostNetSockets.set(fd, {
+        domain: Number(domain) >>> 0,
+        sockType: numericType,
+        protocol: Number(protocol) >>> 0,
+        socketId: null,
+        readChunks: [],
+        readableEnded: false,
+        closed: false,
+        lastError: null,
+      });
+      return writeGuestUint32(retFdPtr, fd);
+    } catch {
+      return WASI_ERRNO_FAULT;
+    }
+  },
+  net_connect(fd, addrPtr, addrLen) {
+    const socket = getHostNetSocket(fd);
+    if (!socket) {
+      return WASI_ERRNO_BADF;
+    }
+
+    try {
+      const { host, port } = parseHostNetAddress(readGuestString(addrPtr, addrLen));
+      if (!Number.isInteger(port) || port < 0 || port > 65535) {
+        return WASI_ERRNO_FAULT;
+      }
+
+      const result = callSyncRpc('net.connect', [{ host, port }]);
+      if (!result || typeof result.socketId !== 'string') {
+        return WASI_ERRNO_FAULT;
+      }
+
+      socket.socketId = result.socketId;
+      socket.readChunks.length = 0;
+      socket.readableEnded = false;
+      socket.closed = false;
+      socket.lastError = null;
+      return WASI_ERRNO_SUCCESS;
+    } catch {
+      return WASI_ERRNO_FAULT;
+    }
+  },
+  net_send(fd, bufPtr, bufLen, flags, retSentPtr) {
+    const socket = getHostNetSocket(fd);
+    if (!socket?.socketId || socket.closed) {
+      return WASI_ERRNO_BADF;
+    }
+
+    try {
+      const chunk = readGuestBytes(bufPtr, bufLen);
+      if ((Number(flags) >>> 0) !== 0) {
+        // Non-zero send flags are currently ignored in the WASM host_net shim.
+      }
+      const written =
+        Number(callSyncRpc('net.write', [socket.socketId, Buffer.from(chunk).toString('base64')])) >>>
+        0;
+      return writeGuestUint32(retSentPtr, written);
+    } catch {
+      return WASI_ERRNO_FAULT;
+    }
+  },
+  net_recv(fd, bufPtr, bufLen, flags, retReceivedPtr) {
+    const socket = getHostNetSocket(fd);
+    if (!socket) {
+      return WASI_ERRNO_BADF;
+    }
+
+    try {
+      if ((Number(flags) >>> 0) !== 0) {
+        // Non-zero recv flags are currently ignored in the WASM host_net shim.
+      }
+
+      while (true) {
+        const queued = dequeueHostNetBytes(socket, bufLen);
+        if (queued.length > 0) {
+          return writeGuestBytes(bufPtr, bufLen, queued, retReceivedPtr);
+        }
+
+        if (socket.lastError) {
+          return WASI_ERRNO_FAULT;
+        }
+
+        if (socket.readableEnded || socket.closed || !socket.socketId) {
+          return writeGuestUint32(retReceivedPtr, 0);
+        }
+
+        pollHostNetSocket(socket, 50);
+      }
+    } catch {
+      return WASI_ERRNO_FAULT;
+    }
+  },
+  net_close(fd) {
+    const numericFd = Number(fd) >>> 0;
+    const socket = hostNetSockets.get(numericFd);
+    if (!socket) {
+      return WASI_ERRNO_BADF;
+    }
+
+    hostNetSockets.delete(numericFd);
+    if (!socket.socketId || socket.closed) {
+      return WASI_ERRNO_SUCCESS;
+    }
+
+    try {
+      callSyncRpc('net.destroy', [socket.socketId]);
+      return WASI_ERRNO_SUCCESS;
+    } catch {
+      return WASI_ERRNO_FAULT;
+    }
+  },
+  net_tls_connect(fd, hostnamePtr, hostnameLen) {
+    const socket = getHostNetSocket(fd);
+    if (!socket?.socketId || socket.closed) {
+      return WASI_ERRNO_BADF;
+    }
+
+    try {
+      const servername = readGuestString(hostnamePtr, hostnameLen);
+      callSyncRpc('net.socket_upgrade_tls', [
+        socket.socketId,
+        JSON.stringify({ servername }),
+      ]);
+      return WASI_ERRNO_SUCCESS;
+    } catch {
+      return WASI_ERRNO_FAULT;
+    }
+  },
+};
 
 const hostProcessImport =
   permissionTier !== 'isolated'
@@ -9746,6 +9982,7 @@ const instance = await WebAssembly.instantiate(module, {
   wasi_snapshot_preview1: wasiImport,
   wasi_unstable: wasiImport,
   host_process: hostProcessImport,
+  host_net: hostNetImport,
   host_user: hostUserImport,
   host_fs: hostFsImport,
 });
@@ -9756,9 +9993,7 @@ if (instance.exports.memory instanceof WebAssembly.Memory) {
 
 if (typeof instance.exports._start === 'function') {
   const exitCode = wasi.start(instance);
-  if (typeof exitCode === 'number' && exitCode !== 0) {
-    process.exitCode = exitCode;
-  }
+  process.exit(typeof exitCode === 'number' ? exitCode : 0);
 } else if (typeof instance.exports.run === 'function') {
   const result = await instance.exports.run();
   if (typeof result !== 'undefined') {

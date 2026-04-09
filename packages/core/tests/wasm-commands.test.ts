@@ -584,20 +584,86 @@ EOF`);
 		const hasCurl = existsSync(join(curlPackage.commandDir, "curl"));
 
 		const CURL_SCRIPT = `
-const http = require("http");
-const server = http.createServer((req, res) => {
-  if (req.method === "POST") {
-    let body = "";
-    req.on("data", (chunk) => body += chunk);
-    req.on("end", () => {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ echo: body }));
-    });
-  } else {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("hello from server");
+const net = require("net");
+
+function tryParseHttpRequest(buffer) {
+  const headerEnd = buffer.indexOf("\\r\\n\\r\\n");
+  if (headerEnd === -1) {
+    return null;
   }
+
+  const headerText = buffer.subarray(0, headerEnd).toString("utf8");
+  const [requestLine, ...headerLines] = headerText.split("\\r\\n");
+  const [method = "GET"] = requestLine.split(" ");
+
+  let contentLength = 0;
+  for (const line of headerLines) {
+    const separator = line.indexOf(":");
+    if (separator === -1) {
+      continue;
+    }
+    const name = line.slice(0, separator).trim().toLowerCase();
+    if (name === "content-length") {
+      const parsed = Number(line.slice(separator + 1).trim());
+      if (Number.isFinite(parsed) && parsed >= 0) {
+        contentLength = parsed;
+      }
+    }
+  }
+
+  const bodyOffset = headerEnd + 4;
+  if (buffer.length < bodyOffset + contentLength) {
+    return null;
+  }
+
+  return {
+    method,
+    body: buffer.subarray(bodyOffset, bodyOffset + contentLength).toString("utf8"),
+  };
+}
+
+function sendResponse(socket, status, headers, body) {
+  const payload = Buffer.from(body, "utf8");
+  const responseHeaders = [
+    "HTTP/1.1 " + status,
+    ...headers,
+    "Content-Length: " + payload.length,
+    "Connection: close",
+    "",
+    "",
+  ].join("\\r\\n");
+
+  socket.end(Buffer.concat([Buffer.from(responseHeaders, "utf8"), payload]));
+}
+
+const server = net.createServer((socket) => {
+  let buffered = Buffer.alloc(0);
+  socket.on("data", (chunk) => {
+    buffered = Buffer.concat([buffered, chunk]);
+    const request = tryParseHttpRequest(buffered);
+    if (!request) {
+      return;
+    }
+
+    if (request.method === "POST") {
+      sendResponse(
+        socket,
+        "200 OK",
+        ["Content-Type: application/json"],
+        JSON.stringify({ echo: request.body }),
+      );
+      return;
+    }
+
+    sendResponse(
+      socket,
+      "200 OK",
+      ["Content-Type: text/plain"],
+      "hello from server",
+    );
+  });
 });
+
 server.listen(0, "0.0.0.0", () => {
   console.log("PORT:" + server.address().port);
 });
@@ -646,12 +712,31 @@ server.listen(0, "0.0.0.0", () => {
 			return { pid, port };
 		}
 
+		async function runCurl(args: string[]): Promise<{
+			exitCode: number;
+			stdout: string;
+			stderr: string;
+		}> {
+			let stdout = "";
+			let stderr = "";
+			const { pid } = vm.spawn("curl", args, {
+				onStdout: (data) => {
+					stdout += Buffer.from(data).toString("utf8");
+				},
+				onStderr: (data) => {
+					stderr += Buffer.from(data).toString("utf8");
+				},
+			});
+			const exitCode = await vm.waitProcess(pid);
+			return { exitCode, stdout, stderr };
+		}
+
 		test("curl GET request", async () => {
 			expect(hasCurl).toBe(true);
 
 			const { pid, port } = await startServer(vm);
 			try {
-				const r = await vm.exec(`curl -s http://localhost:${port}/`);
+				const r = await runCurl(["-s", `http://localhost:${port}/`]);
 				expect(r.exitCode).toBe(0);
 				expect(r.stdout).toContain("hello from server");
 			} finally {
@@ -664,9 +749,14 @@ server.listen(0, "0.0.0.0", () => {
 
 			const { pid, port } = await startServer(vm);
 			try {
-				const r = await vm.exec(
-					`curl -s -X POST -d 'test-body' http://localhost:${port}/`,
-				);
+				const r = await runCurl([
+					"-s",
+					"-X",
+					"POST",
+					"-d",
+					"test-body",
+					`http://localhost:${port}/`,
+				]);
 				expect(r.exitCode).toBe(0);
 				const json = JSON.parse(r.stdout);
 				expect(json.echo).toBe("test-body");
@@ -681,7 +771,7 @@ server.listen(0, "0.0.0.0", () => {
 				const { pid, port } = await startServer(vm, CURL_KEEPALIVE_SCRIPT);
 				try {
 					const startedAt = Date.now();
-					const r = await vm.exec(`curl -s http://localhost:${port}/`);
+					const r = await runCurl(["-s", `http://localhost:${port}/`]);
 					const elapsedMs = Date.now() - startedAt;
 					expect(r.exitCode).toBe(0);
 					expect(r.stdout).toContain("hello from keepalive");

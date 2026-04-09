@@ -5787,15 +5787,32 @@ fn collect_javascript_socket_port_state(
     used_tcp_ports: &mut BTreeMap<JavascriptSocketFamily, BTreeSet<u16>>,
     used_udp_ports: &mut BTreeMap<JavascriptSocketFamily, BTreeSet<u16>>,
 ) {
-    for listener in process.tcp_listeners.values() {
-        let guest_addr = listener.guest_local_addr();
+    let mut record_tcp_listener = |guest_addr: SocketAddr, host_port: u16| {
         let family = JavascriptSocketFamily::from_ip(guest_addr.ip());
         used_tcp_ports
             .entry(family)
             .or_default()
             .insert(guest_addr.port());
-        if is_loopback_ip(guest_addr.ip()) {
-            tcp_guest_to_host.insert((family, guest_addr.port()), listener.local_addr().port());
+        // VM-local loopback connects should also resolve listeners bound to
+        // unspecified guest addresses like 0.0.0.0/::.
+        tcp_guest_to_host.insert((family, guest_addr.port()), host_port);
+    };
+
+    for listener in process.tcp_listeners.values() {
+        record_tcp_listener(listener.guest_local_addr(), listener.local_addr().port());
+    }
+
+    for server in process.http_servers.values() {
+        let host_port = match server.listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(_) => continue,
+        };
+        record_tcp_listener(server.guest_local_addr, host_port);
+    }
+
+    if let Ok(http2) = process.http2.shared.lock() {
+        for server in http2.servers.values() {
+            record_tcp_listener(server.guest_local_addr, server.actual_local_addr.port());
         }
     }
 

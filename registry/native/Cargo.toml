@@ -136,6 +136,7 @@ members = [
     "crates/libs/wasi-pty",
     # US-102: WASI HTTP client via host_net TCP/TLS
     "crates/libs/wasi-http",
+    "crates/commands/curl",
     "crates/commands/http-test",
     # US-104: codex-exec headless agent binary
     "crates/commands/codex-exec",

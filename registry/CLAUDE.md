@@ -49,12 +49,13 @@ The following packages exist but **cannot be compiled** until a patched wasi-lib
 
 | Package | Reason |
 |---|---|
-| @rivet-dev/agent-os-curl | Needs `<netdb.h>` (patched wasi-libc) |
 | @rivet-dev/agent-os-wget | Needs `<netdb.h>` (patched wasi-libc) |
 | @rivet-dev/agent-os-sqlite3 | Needs patched wasi-libc |
 | @rivet-dev/agent-os-git | WASM binary not yet built |
 
-To unblock: run `cd native && ./scripts/patch-wasi-libc.sh` to build the patched sysroot, then `cd .. && make build-wasm-c copy-wasm`.
+To unblock the remaining C packages: run `cd native && ./scripts/patch-wasi-libc.sh` to build the patched sysroot, then `cd .. && make build-wasm-c copy-wasm`.
+
+The published `@rivet-dev/agent-os-curl` package is currently backed by the Rust `native/crates/commands/curl/` binary built on `crates/libs/wasi-http`. Keep curl CLI compatibility fixes there until the patched-sysroot C curl path is restored.
 
 ### Meta-packages
 
