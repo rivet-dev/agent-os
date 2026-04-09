@@ -127,7 +127,7 @@ fn javascript_execution_uses_v8_runtime_without_spawning_guest_node_binary() {
         compile_cache_root: None,
     });
 
-    let execution = engine
+    let mut execution = engine
         .start_execution(StartJavascriptExecutionRequest {
             vm_id: String::from("vm-js"),
             context_id: context.context_id,
@@ -166,7 +166,7 @@ fn javascript_execution_virtualizes_process_metadata_for_inline_v8_code() {
         compile_cache_root: None,
     });
 
-    let execution = engine
+    let mut execution = engine
         .start_execution(StartJavascriptExecutionRequest {
             vm_id: String::from("vm-js"),
             context_id: context.context_id,
@@ -198,10 +198,154 @@ if (process.ppid !== 41) throw new Error(`ppid=${process.ppid}`);
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(
-        result.stderr.is_empty(),
-        "unexpected stderr: {stderr}"
-    );
+    assert!(result.stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn javascript_execution_stream_consumers_text_reads_live_stdin() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::from([(
+                String::from("AGENT_OS_KEEP_STDIN_OPEN"),
+                String::from("1"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+import { text } from "node:stream/consumers";
+
+const body = await text(process.stdin);
+console.log(JSON.stringify({ body }));
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    execution
+        .write_stdin(b"alpha\nbeta\n")
+        .expect("write JavaScript stdin");
+    execution.close_stdin().expect("close JavaScript stdin");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(result.stderr.is_empty(), "unexpected stderr: {stderr}");
+
+    let output: Value = serde_json::from_slice(&result.stdout).expect("parse guest stdout as JSON");
+    assert_eq!(output, json!({ "body": "alpha\nbeta\n" }));
+}
+
+#[test]
+fn javascript_execution_process_stdin_async_iterator_finishes_with_live_stdin() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::from([(
+                String::from("AGENT_OS_KEEP_STDIN_OPEN"),
+                String::from("1"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+let body = "";
+for await (const chunk of process.stdin) {
+  body += chunk;
+}
+console.log(JSON.stringify({ body }));
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    execution
+        .write_stdin(b"{\"request_id\":\"init1\"}\n")
+        .expect("write JavaScript stdin");
+    execution.close_stdin().expect("close JavaScript stdin");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(result.stderr.is_empty(), "unexpected stderr: {stderr}");
+
+    let output: Value =
+        serde_json::from_slice(&result.stdout).expect("parse guest stdout as JSON");
+    assert_eq!(output, json!({ "body": "{\"request_id\":\"init1\"}\n" }));
+}
+
+#[test]
+fn javascript_execution_live_stdin_replays_end_after_late_listener_registration() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::from([(
+                String::from("AGENT_OS_KEEP_STDIN_OPEN"),
+                String::from("1"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+setTimeout(() => {
+  process.stdin.setEncoding("utf8");
+  let body = "";
+  process.stdin.on("data", (chunk) => {
+    body += chunk;
+  });
+  process.stdin.on("end", () => {
+    console.log(JSON.stringify({ body }));
+  });
+  process.stdin.resume();
+}, 50);
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    execution
+        .write_stdin(b"hello-delayed\n")
+        .expect("write JavaScript stdin");
+    execution.close_stdin().expect("close JavaScript stdin");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(result.stderr.is_empty(), "unexpected stderr: {stderr}");
+
+    let output: Value = serde_json::from_slice(&result.stdout).expect("parse guest stdout as JSON");
+    assert_eq!(output, json!({ "body": "hello-delayed\n" }));
 }
 
 #[test]
@@ -243,10 +387,7 @@ if (fileURLToPath(href) !== guestPath) {
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(
-        result.stderr.is_empty(),
-        "unexpected stderr: {stderr}"
-    );
+    assert!(result.stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
 #[test]

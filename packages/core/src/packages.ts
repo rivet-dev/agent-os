@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import type { PermissionTier } from "./runtime.js";
 
 /**
@@ -158,6 +158,64 @@ export interface CommandPackageMetadata {
 	commandDir: string;
 	declaredCommands: string[];
 	aliases: Record<string, string>;
+}
+
+function readPackageName(packageDir: string): string {
+	const pkg = JSON.parse(
+		readFileSync(join(packageDir, "package.json"), "utf-8"),
+	) as {
+		name?: unknown;
+	};
+	if (typeof pkg.name !== "string" || pkg.name.length === 0) {
+		throw new Error(`Package at ${packageDir} is missing a valid name`);
+	}
+	return pkg.name;
+}
+
+function pushSoftwareRoot(
+	softwareRoots: SoftwareRoot[],
+	seenVmPaths: Set<string>,
+	hostPath: string,
+	vmPath: string,
+): void {
+	if (seenVmPaths.has(vmPath)) {
+		return;
+	}
+	seenVmPaths.add(vmPath);
+	softwareRoots.push({ hostPath, vmPath });
+}
+
+function findPnpmStoreRoot(hostPath: string): string | null {
+	const marker = `${sep}node_modules${sep}.pnpm${sep}`;
+	const markerIndex = hostPath.indexOf(marker);
+	if (markerIndex === -1) {
+		return null;
+	}
+
+	const nodeModulesRoot = `${hostPath.slice(0, markerIndex)}${sep}node_modules`;
+	const pnpmStoreRoot = join(nodeModulesRoot, ".pnpm");
+	return existsSync(pnpmStoreRoot) ? pnpmStoreRoot : null;
+}
+
+function pushPackageSoftwareRoot(
+	softwareRoots: SoftwareRoot[],
+	seenVmPaths: Set<string>,
+	hostPath: string,
+	vmPath: string,
+): void {
+	pushSoftwareRoot(softwareRoots, seenVmPaths, hostPath, vmPath);
+
+	const pnpmStoreRoot = findPnpmStoreRoot(hostPath);
+	if (!pnpmStoreRoot) {
+		return;
+	}
+
+	pushSoftwareRoot(
+		softwareRoots,
+		seenVmPaths,
+		pnpmStoreRoot,
+		"/root/node_modules/.pnpm",
+	);
 }
 
 /**
@@ -426,6 +484,7 @@ export function processSoftware(software: SoftwareInput[]): ProcessedSoftware {
 	const commandPackages: CommandPackageMetadata[] = [];
 	const commandPermissions: Record<string, PermissionTier> = {};
 	const softwareRoots: SoftwareRoot[] = [];
+	const seenSoftwareVmPaths = new Set<string>();
 	const agentConfigs = new Map<string, AgentConfig>();
 
 	// Flatten nested arrays (meta-packages export arrays of sub-packages).
@@ -452,10 +511,22 @@ export function processSoftware(software: SoftwareInput[]): ProcessedSoftware {
 				// Collect module roots for all required npm packages.
 				// Walks up directory tree to support flat (npm) and nested (pnpm) layouts.
 				const ctx = createSoftwareContext(pkg.packageDir, pkg.requires);
+				const declaringPackageName = readPackageName(pkg.packageDir);
+				pushPackageSoftwareRoot(
+					softwareRoots,
+					seenSoftwareVmPaths,
+					pkg.packageDir,
+					`/root/node_modules/${declaringPackageName}`,
+				);
 				for (const reqPkg of pkg.requires) {
 					const hostDir = resolvePackageDir(pkg.packageDir, reqPkg);
 					const vmDir = `/root/node_modules/${reqPkg}`;
-					softwareRoots.push({ hostPath: hostDir, vmPath: vmDir });
+					pushPackageSoftwareRoot(
+						softwareRoots,
+						seenSoftwareVmPaths,
+						hostDir,
+						vmDir,
+					);
 				}
 
 				// Compute static + dynamic env vars.
@@ -481,10 +552,22 @@ export function processSoftware(software: SoftwareInput[]): ProcessedSoftware {
 			case "tool": {
 				// Collect module roots for all required npm packages.
 				// Walks up directory tree to support flat (npm) and nested (pnpm) layouts.
+				const declaringPackageName = readPackageName(pkg.packageDir);
+				pushPackageSoftwareRoot(
+					softwareRoots,
+					seenSoftwareVmPaths,
+					pkg.packageDir,
+					`/root/node_modules/${declaringPackageName}`,
+				);
 				for (const reqPkg of pkg.requires) {
 					const hostDir = resolvePackageDir(pkg.packageDir, reqPkg);
 					const vmDir = `/root/node_modules/${reqPkg}`;
-					softwareRoots.push({ hostPath: hostDir, vmPath: vmDir });
+					pushPackageSoftwareRoot(
+						softwareRoots,
+						seenSoftwareVmPaths,
+						hostDir,
+						vmDir,
+					);
 				}
 				// Tool bin registration is handled by the caller (AgentOs.create)
 				// since it requires kernel access.

@@ -10,14 +10,21 @@ function getNetModule() {
 
 const exported = {};
 for (const key of [
+	"BlockList",
 	"Socket",
+	"SocketAddress",
 	"Server",
+	"Stream",
 	"connect",
 	"createConnection",
 	"createServer",
+	"getDefaultAutoSelectFamily",
+	"getDefaultAutoSelectFamilyAttemptTimeout",
 	"isIP",
 	"isIPv4",
 	"isIPv6",
+	"setDefaultAutoSelectFamily",
+	"setDefaultAutoSelectFamilyAttemptTimeout",
 ]) {
 	Object.defineProperty(exported, key, {
 		enumerable: true,

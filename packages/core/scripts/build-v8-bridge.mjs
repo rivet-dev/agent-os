@@ -474,6 +474,8 @@ const zlibResult = await build({
 			"const assertModule = assertStdlibModuleNs.default ?? assertStdlibModuleNs;",
 			"const utilModule = utilStdlibModuleNs.default ?? utilStdlibModuleNs;",
 			"const zlibModule = zlibStdlibModuleNs.default ?? zlibStdlibModuleNs;",
+			'const zlibConstants = typeof zlibModule.constants === "object" && zlibModule.constants !== null ? zlibModule.constants : Object.fromEntries(Object.entries(zlibModule).filter(([key, value]) => /^[A-Z0-9_]+$/.test(key) && typeof value === "number"));',
+			'if(typeof zlibModule.constants === "undefined"){zlibModule.constants = zlibConstants;}',
 			'if(typeof utilModule.TextEncoder==="undefined"&&typeof globalThis.TextEncoder==="function"){utilModule.TextEncoder=globalThis.TextEncoder;}',
 			'if(typeof utilModule.TextDecoder==="undefined"&&typeof globalThis.TextDecoder==="function"){utilModule.TextDecoder=globalThis.TextDecoder;}',
 			"globalThis.__agentOsBuiltinAssertModule = assertModule;",

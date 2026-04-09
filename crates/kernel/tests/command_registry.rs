@@ -1,4 +1,6 @@
 use agent_os_kernel::command_registry::{CommandDriver, CommandRegistry};
+use agent_os_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
+use agent_os_kernel::permissions::Permissions;
 use agent_os_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
 
 #[test]
@@ -78,4 +80,43 @@ fn populate_bin_creates_stub_entries() {
         vfs.stat("/bin/grep").expect("stat stub").mode & 0o777,
         0o755
     );
+}
+
+#[test]
+fn mounted_agentos_command_paths_resolve_to_registered_drivers() {
+    let mut config = KernelVmConfig::new("vm-mounted-command-path");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("wasmvm", ["sh", "xu"]))
+        .expect("register drivers");
+
+    kernel
+        .mkdir("/__agentos/commands/0", true)
+        .expect("create mounted command root");
+    kernel
+        .write_file(
+            "/__agentos/commands/0/xu",
+            b"#!/bin/sh\n# kernel command stub\n".to_vec(),
+        )
+        .expect("write mounted command stub");
+    kernel
+        .chmod("/__agentos/commands/0/xu", 0o755)
+        .expect("chmod mounted command stub");
+
+    let process = kernel
+        .spawn_process(
+            "/__agentos/commands/0/xu",
+            vec![String::from("hello-agent-os")],
+            SpawnOptions::default(),
+        )
+        .expect("spawn mounted command path");
+
+    let info = kernel
+        .list_processes()
+        .get(&process.pid())
+        .cloned()
+        .expect("process info");
+    assert_eq!(info.command, "xu");
+    assert_eq!(info.driver, "wasmvm");
 }

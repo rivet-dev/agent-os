@@ -1453,7 +1453,7 @@
         "pnpm --dir packages/core exec vitest run tests/claude-session.test.ts passes with 0 failures and 0 skipped"
       ],
       "priority": 93,
-      "passes": false,
+      "passes": true,
       "notes": "BLOCKED BY: (1) Claude adapter config \u2014 default shell, env flags, CLI patching need to be committed and tested. (2) Claude SDK cli.js patching \u2014 build-patched-cli.mjs needs to work. Most underlying WASM/child-process issues are RESOLVED (argv, proc_spawn, stdout routing, pipe bookkeeping, stdin EOF, FD lifetime, path resolution). See US-109/110/111 for the remaining breakdown."
     },
     {

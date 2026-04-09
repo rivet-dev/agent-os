@@ -4,10 +4,10 @@ use crate::node_import_cache::{
 };
 use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
-    encode_json_string_array, env_builtin_enabled, harden_node_command, node_binary,
-    node_resolution_read_paths, resolve_path_like_specifier, spawn_node_control_reader,
-    spawn_stream_reader, spawn_waiter, ExportedChildFds, LinePrefixFilter, NodeControlMessage,
-    NodeSignalHandlerRegistration,
+    encode_json_string_array, ensure_host_cwd_exists, env_builtin_enabled, harden_node_command,
+    node_binary, node_resolution_read_paths, resolve_path_like_specifier,
+    spawn_node_control_reader, spawn_stream_reader, spawn_waiter, ExportedChildFds,
+    LinePrefixFilter, NodeControlMessage, NodeSignalHandlerRegistration,
 };
 use crate::runtime_support::{
     configure_compile_cache, env_flag_enabled, import_cache_root, sandbox_root, warmup_marker_path,
@@ -1497,6 +1497,7 @@ fn prewarm_node_import_path(
         .map(|specifier| (*specifier).to_string())
         .collect::<Vec<_>>();
 
+    ensure_host_cwd_exists(&request.cwd).map_err(JavascriptExecutionError::WarmupSpawn)?;
     let mut command = Command::new(node_binary());
     configure_node_sandbox(&mut command, import_cache, context, request)?;
     command
@@ -1552,6 +1553,7 @@ fn create_node_child(
     ),
     JavascriptExecutionError,
 > {
+    ensure_host_cwd_exists(&request.cwd).map_err(JavascriptExecutionError::Spawn)?;
     let guest_argv = encode_json_string_array(&request.argv[1..]);
     let mut command = Command::new(node_binary());
     configure_node_sandbox(&mut command, import_cache, context, request)?;
@@ -3133,7 +3135,7 @@ export {
         );
     }
 
-    if module_name == "path" {
+    if module_name == "path" || module_name == "path/posix" || module_name == "path/win32" {
         return String::from(
             r#"const sep = "/";
 const delimiter = ":";
@@ -3384,6 +3386,18 @@ export default { URL: NativeURL, fileURLToPath, format, parse, pathToFileURL };
     return this;
   }
 
+  addListener(event, listener) {
+    return this.on(event, listener);
+  }
+
+  once(event, listener) {
+    const wrapped = (...args) => {
+      this.off(event, wrapped);
+      listener(...args);
+    };
+    return this.on(event, wrapped);
+  }
+
   off(event, listener) {
     const listeners = this.listeners.get(event) ?? [];
     this.listeners.set(
@@ -3391,6 +3405,10 @@ export default { URL: NativeURL, fileURLToPath, format, parse, pathToFileURL };
       listeners.filter((candidate) => candidate !== listener),
     );
     return this;
+  }
+
+  removeListener(event, listener) {
+    return this.off(event, listener);
   }
 
   emit(event, ...args) {
@@ -3403,14 +3421,29 @@ export default { URL: NativeURL, fileURLToPath, format, parse, pathToFileURL };
 }
 
 export function createInterface(options = {}) {
-  const input = options.input;
+  const input = options.input ?? null;
+  const output = options.output ?? null;
   const emitter = new MiniEmitter();
   let buffer = "";
   let closed = false;
+  let ended = false;
+  const queuedLines = [];
+  let pendingResolve = null;
+
+  const enqueueLine = (line) => {
+    if (pendingResolve) {
+      const resolve = pendingResolve;
+      pendingResolve = null;
+      resolve({ done: false, value: line });
+      return;
+    }
+    queuedLines.push(line);
+  };
 
   const flush = () => {
     if (buffer.length > 0) {
       emitter.emit("line", buffer);
+      enqueueLine(buffer);
       buffer = "";
     }
   };
@@ -3423,13 +3456,20 @@ export function createInterface(options = {}) {
       const line = buffer.slice(0, index).replace(/\r$/, "");
       buffer = buffer.slice(index + 1);
       emitter.emit("line", line);
+      enqueueLine(line);
     }
   };
 
   const onEnd = () => {
-    if (closed) return;
+    if (ended) return;
+    ended = true;
     flush();
     emitter.emit("close");
+    if (pendingResolve) {
+      const resolve = pendingResolve;
+      pendingResolve = null;
+      resolve({ done: true, value: void 0 });
+    }
   };
 
   if (input && typeof input.on === "function") {
@@ -3448,7 +3488,42 @@ export function createInterface(options = {}) {
     }
     flush();
     emitter.emit("close");
+    if (pendingResolve) {
+      const resolve = pendingResolve;
+      pendingResolve = null;
+      resolve({ done: true, value: void 0 });
+    }
   };
+
+  emitter.question = (prompt, callback) => {
+    if (output && typeof output.write === "function" && prompt) {
+      output.write(String(prompt));
+    }
+    if (typeof callback === "function") {
+      callback("");
+    }
+  };
+
+  emitter[Symbol.asyncIterator] = () => ({
+    next() {
+      if (queuedLines.length > 0) {
+        return Promise.resolve({ done: false, value: queuedLines.shift() });
+      }
+      if (closed || ended) {
+        return Promise.resolve({ done: true, value: void 0 });
+      }
+      return new Promise((resolve) => {
+        pendingResolve = resolve;
+      });
+    },
+    return() {
+      emitter.close();
+      return Promise.resolve({ done: true, value: void 0 });
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+  });
 
   return emitter;
 }
@@ -3520,7 +3595,26 @@ function queueResult(callback, error = null) {
   queueMicrotask(() => callback(error));
 }
 
-class Readable extends MiniEmitter {
+class Stream extends MiniEmitter {
+  pipe(destination) {
+    this.on("data", (chunk) => destination.write(chunk));
+    this.once("end", () => destination.end());
+    return destination;
+  }
+
+  destroy(error) {
+    if (this.destroyed) return this;
+    this.destroyed = true;
+    if (error) {
+      this.errored = error;
+      queueMicrotask(() => this.emit("error", error));
+    }
+    queueMicrotask(() => this.emit("close"));
+    return this;
+  }
+}
+
+class Readable extends Stream {
   constructor() {
     super();
     this.readable = true;
@@ -3541,22 +3635,6 @@ class Readable extends MiniEmitter {
     }
     this.emit("data", Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk ?? []));
     return true;
-  }
-
-  pipe(destination) {
-    this.on("data", (chunk) => destination.write(chunk));
-    this.once("end", () => destination.end());
-    return destination;
-  }
-
-  destroy(error) {
-    if (this.destroyed) return this;
-    this.destroyed = true;
-    if (error) {
-      queueMicrotask(() => this.emit("error", error));
-    }
-    queueMicrotask(() => this.emit("close"));
-    return this;
   }
 
   static fromWeb(stream) {
@@ -3580,7 +3658,7 @@ class Readable extends MiniEmitter {
   }
 }
 
-class Writable extends MiniEmitter {
+class Writable extends Stream {
   constructor() {
     super();
     this.writable = true;
@@ -3619,16 +3697,6 @@ class Writable extends MiniEmitter {
       this.emit("finish");
       this.emit("close");
     });
-    return this;
-  }
-
-  destroy(error) {
-    if (this.destroyed) return this;
-    this.destroyed = true;
-    if (error) {
-      queueMicrotask(() => this.emit("error", error));
-    }
-    queueMicrotask(() => this.emit("close"));
     return this;
   }
 }
@@ -3749,15 +3817,23 @@ function isErrored(stream) {
   return Boolean(stream && stream.errored);
 }
 
+function isDisturbed(stream) {
+  return Boolean(
+    stream && (stream.disturbed === true || stream.locked || stream.readableDidRead === true),
+  );
+}
+
 const streamModule = {
   Duplex,
   PassThrough,
   Readable,
+  Stream,
   Transform,
   Writable,
   addAbortSignal,
   compose,
   finished,
+  isDisturbed,
   isErrored,
   isReadable,
   isWritable,
@@ -3768,11 +3844,13 @@ export {
   Duplex,
   PassThrough,
   Readable,
+  Stream,
   Transform,
   Writable,
   addAbortSignal,
   compose,
   finished,
+  isDisturbed,
   isErrored,
   isReadable,
   isWritable,
@@ -3790,6 +3868,37 @@ export default streamModule;
 export default _m;
 export const finished = _m.finished;
 export const pipeline = _m.pipeline;
+"#,
+        );
+    }
+
+    if module_name == "zlib" {
+        return String::from(
+            r#"const _m = globalThis._requireFrom("node:zlib", "/");
+const zlibConstants =
+  typeof _m.constants === "object" && _m.constants !== null
+    ? _m.constants
+    : Object.fromEntries(
+        Object.entries(_m).filter(
+          ([key, value]) => /^[A-Z0-9_]+$/.test(key) && typeof value === "number",
+        ),
+      );
+
+if (typeof _m.constants === "undefined") {
+  Object.defineProperty(_m, "constants", {
+    configurable: true,
+    enumerable: true,
+    value: zlibConstants,
+    writable: true,
+  });
+}
+
+export default _m;
+export const constants = _m.constants;
+export const createDeflate = _m.createDeflate;
+export const createInflate = _m.createInflate;
+export const deflateSync = _m.deflateSync;
+export const inflateSync = _m.inflateSync;
 "#,
         );
     }
@@ -3854,6 +3963,86 @@ export const unlink = _m.unlink;
 export const utimes = _m.utimes;
 export const watch = _m.watch;
 export const writeFile = _m.writeFile;
+"#,
+        );
+    }
+
+    if module_name == "readline" {
+        return String::from(
+            r#"const _m = globalThis._requireFrom("node:readline", "/");
+
+function createInterface(...args) {
+  const interfaceValue = _m.createInterface(...args);
+  if (
+    interfaceValue &&
+    typeof interfaceValue === "object" &&
+    typeof interfaceValue[Symbol.asyncIterator] !== "function"
+  ) {
+    const originalOn = typeof interfaceValue.on === "function"
+      ? interfaceValue.on.bind(interfaceValue)
+      : null;
+    const originalOff = typeof interfaceValue.off === "function"
+      ? interfaceValue.off.bind(interfaceValue)
+      : typeof interfaceValue.removeListener === "function"
+        ? interfaceValue.removeListener.bind(interfaceValue)
+        : null;
+    const originalClose = typeof interfaceValue.close === "function"
+      ? interfaceValue.close.bind(interfaceValue)
+      : null;
+    const queued = [];
+    let pendingResolve = null;
+    let done = false;
+    const enqueue = (line) => {
+      if (pendingResolve) {
+        const resolve = pendingResolve;
+        pendingResolve = null;
+        resolve({ done: false, value: line });
+        return;
+      }
+      queued.push(line);
+    };
+    const finish = () => {
+      if (done) {
+        return;
+      }
+      done = true;
+      if (pendingResolve) {
+        const resolve = pendingResolve;
+        pendingResolve = null;
+        resolve({ done: true, value: void 0 });
+      }
+    };
+    originalOn?.("line", enqueue);
+    originalOn?.("close", finish);
+    interfaceValue[Symbol.asyncIterator] = () => ({
+      next() {
+        if (queued.length > 0) {
+          return Promise.resolve({ done: false, value: queued.shift() });
+        }
+        if (done) {
+          return Promise.resolve({ done: true, value: void 0 });
+        }
+        return new Promise((resolve) => {
+          pendingResolve = resolve;
+        });
+      },
+      return() {
+        originalOff?.("line", enqueue);
+        originalOff?.("close", finish);
+        originalClose?.();
+        finish();
+        return Promise.resolve({ done: true, value: void 0 });
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    });
+  }
+  return interfaceValue;
+}
+
+export default _m;
+export { createInterface };
 "#,
         );
     }
@@ -4255,6 +4444,7 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "isUtf8",
         ],
         "child_process" => &[
+            "ChildProcess",
             "exec",
             "execFile",
             "execFileSync",
@@ -4292,6 +4482,7 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
         ],
         "crypto" => &[
             "createHash",
+            "createPrivateKey",
             "getHashes",
             "getRandomValues",
             "randomBytes",
@@ -4299,7 +4490,18 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "subtle",
         ],
         "diagnostics_channel" => &["channel", "hasSubscribers", "subscribe", "unsubscribe"],
-        "events" => &["EventEmitter", "once"],
+        "events" => &[
+            "EventEmitter",
+            "addAbortListener",
+            "defaultMaxListeners",
+            "errorMonitor",
+            "getEventListeners",
+            "getMaxListeners",
+            "on",
+            "once",
+            "setMaxListeners",
+        ],
+        "dns" => &["lookup", "promises", "resolve", "resolve4", "resolve6"],
         "fs" => &[
             "access",
             "accessSync",
@@ -4312,6 +4514,9 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "createReadStream",
             "createWriteStream",
             "existsSync",
+            "fstat",
+            "fstatSync",
+            "fsyncSync",
             "lstat",
             "lstatSync",
             "mkdir",
@@ -4335,8 +4540,11 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "unlink",
             "unlinkSync",
             "watch",
+            "watchFile",
+            "unwatchFile",
             "writeFile",
             "writeFileSync",
+            "writeSync",
         ],
         "fs/promises" => &[
             "access",
@@ -4391,16 +4599,27 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "wrap",
         ],
         "net" => &[
+            "BlockList",
             "Socket",
+            "SocketAddress",
             "Server",
+            "Stream",
             "connect",
             "createConnection",
             "createServer",
+            "getDefaultAutoSelectFamily",
+            "getDefaultAutoSelectFamilyAttemptTimeout",
+            "isIP",
+            "isIPv4",
+            "isIPv6",
+            "setDefaultAutoSelectFamily",
+            "setDefaultAutoSelectFamilyAttemptTimeout",
         ],
         "os" => &[
             "EOL",
             "arch",
             "availableParallelism",
+            "constants",
             "cpus",
             "endianness",
             "freemem",
@@ -4413,6 +4632,7 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "tmpdir",
             "type",
             "userInfo",
+            "version",
         ],
         "path" | "path/posix" | "path/win32" => &[
             "basename",
@@ -4442,6 +4662,21 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
         ],
         "readline" => &["createInterface"],
         "sqlite" => &["DatabaseSync", "StatementSync", "constants"],
+        "stream" => &[
+            "Duplex",
+            "PassThrough",
+            "Readable",
+            "Stream",
+            "Transform",
+            "Writable",
+            "addAbortSignal",
+            "compose",
+            "finished",
+            "isDisturbed",
+            "isErrored",
+            "isReadable",
+            "pipeline",
+        ],
         "stream/consumers" => &["arrayBuffer", "blob", "buffer", "json", "text"],
         "sys" => &[
             "MIMEType",
@@ -4450,6 +4685,7 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "TextEncoder",
             "callbackify",
             "debug",
+            "debuglog",
             "deprecate",
             "format",
             "inherits",
@@ -4486,10 +4722,12 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "TextEncoder",
             "callbackify",
             "debug",
+            "debuglog",
             "deprecate",
             "format",
             "inherits",
             "inspect",
+            "isDeepStrictEqual",
             "parseArgs",
             "promisify",
             "stripVTControlCharacters",
@@ -4579,6 +4817,13 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "isMainThread",
             "parentPort",
             "workerData",
+        ],
+        "zlib" => &[
+            "constants",
+            "createDeflate",
+            "createInflate",
+            "deflateSync",
+            "inflateSync",
         ],
         _ => &[],
     }

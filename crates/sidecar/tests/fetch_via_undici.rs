@@ -295,12 +295,18 @@ console.log(JSON.stringify({{
     assert_eq!(payload["timeoutSignalAborted"], true);
     assert_eq!(payload["timeoutSignalEvents"], 1);
     assert_eq!(payload["timeoutSignalReasonName"], "AbortError");
-    assert_ne!(payload["timeoutResult"]["message"], "timeout unexpectedly resolved");
+    assert_ne!(
+        payload["timeoutResult"]["message"],
+        "timeout unexpectedly resolved"
+    );
 
     assert_eq!(payload["manualSignalAborted"], true);
     assert_eq!(payload["manualSignalEvents"], 1);
     assert_eq!(payload["manualSignalReason"], "manual-stop");
-    assert_ne!(payload["manualResult"]["message"], "manual unexpectedly resolved");
+    assert_ne!(
+        payload["manualResult"]["message"],
+        "manual unexpectedly resolved"
+    );
 
     server_result
         .unwrap_or_else(|_| panic!("server thread failed\nstdout:\n{stdout}\nstderr:\n{stderr}"));

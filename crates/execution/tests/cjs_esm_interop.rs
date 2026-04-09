@@ -235,6 +235,25 @@ console.log(JSON.stringify({ answer, label, extra, defaultAnswer: dep.answer }))
 }
 
 #[test]
+fn runtime_minified_type_module_js_is_not_misclassified_as_cjs() {
+    let fixture = Fixture::new();
+    fixture.write_json("package.json", json!({ "type": "module" }));
+    fixture.write(
+        "cli.js",
+        r#"import{createRequire as H}from"node:module";const require=H(import.meta.url);console.log(JSON.stringify({argv:process.argv.slice(1),fsType:typeof require("node:fs").readFileSync}))"#,
+    );
+
+    let output = run_guest_json(&fixture, "./cli.js");
+    assert_eq!(
+        output,
+        json!({
+            "argv": ["/root/cli.js"],
+            "fsType": "function"
+        })
+    );
+}
+
+#[test]
 fn runtime_object_define_property_exports_are_available_to_esm_imports() {
     let fixture = Fixture::new();
     fixture.write(
@@ -418,10 +437,7 @@ console.log(JSON.stringify({ alpha, beta, defaultAlpha: dep.alpha }));
     );
 
     let output = run_guest_json(&fixture, "./entry.mjs");
-    assert_eq!(
-        output,
-        json!({ "alpha": 1, "beta": 2, "defaultAlpha": 1 })
-    );
+    assert_eq!(output, json!({ "alpha": 1, "beta": 2, "defaultAlpha": 1 }));
 }
 
 #[test]

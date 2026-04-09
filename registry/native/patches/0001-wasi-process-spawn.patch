@@ -65,6 +65,15 @@
 +    io::Error::from_raw_os_error(errno as i32)
 +}
 +
++/// Encode host raw exit status into POSIX wait-status bits expected by ExitStatus.
++fn encode_wait_status(raw_status: u32) -> i32 {
++    if raw_status > 128 && raw_status < 256 {
++        (raw_status - 128) as i32
++    } else {
++        ((raw_status & 0xff) << 8) as i32
++    }
++}
++
 +/// Create a pipe, returning (read_fd, write_fd) as raw fd numbers.
 +fn create_pipe() -> io::Result<(u32, u32)> {
 +    let mut read_fd: u32 = 0;
@@ -564,7 +573,7 @@
 +        if errno != 0 {
 +            return Err(wasi_err(errno));
 +        }
-+        let status = ExitStatus(exit_code as i32);
++        let status = ExitStatus(encode_wait_status(exit_code));
 +        self.status = Some(status);
 +        Ok(status)
 +    }
@@ -578,7 +587,7 @@
 +        let mut ret_pid: u32 = 0;
 +        let errno = unsafe { proc_waitpid(self.pid, 1, &mut exit_code, &mut ret_pid) };
 +        if errno == 0 {
-+            let status = ExitStatus(exit_code as i32);
++            let status = ExitStatus(encode_wait_status(exit_code));
 +            self.status = Some(status);
 +            Ok(Some(status))
 +        } else if errno == 10 {

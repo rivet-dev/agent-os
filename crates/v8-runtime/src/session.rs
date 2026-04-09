@@ -298,7 +298,8 @@ fn session_thread(
             count = next_count;
 
             match rx.try_recv() {
-                Ok(SessionCommand::Shutdown) | Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Ok(SessionCommand::Shutdown)
+                | Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     break false;
                 }
                 Ok(command) => deferred_commands.push_back(command),

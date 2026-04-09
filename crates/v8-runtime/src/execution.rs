@@ -5413,43 +5413,156 @@ fn is_likely_cjs(source: &str, resolved_path: &str) -> bool {
 }
 
 fn has_probable_esm_syntax(source: &str) -> bool {
-    let mut in_block_comment = false;
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ScanState {
+        Code,
+        LineComment,
+        BlockComment,
+        SingleQuote,
+        DoubleQuote,
+        Template,
+    }
 
-    for line in source.lines() {
-        let trimmed = line.trim_start();
+    let bytes = source.as_bytes();
+    let mut state = ScanState::Code;
+    let mut index = 0usize;
+    let mut brace_depth = 0u32;
+    let mut paren_depth = 0u32;
+    let mut bracket_depth = 0u32;
 
-        if in_block_comment {
-            if trimmed.contains("*/") {
-                in_block_comment = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+
+        match state {
+            ScanState::Code => {
+                if index == 0 && byte == b'#' && next == Some(b'!') {
+                    state = ScanState::LineComment;
+                    index += 2;
+                    continue;
+                }
+                if byte == b'/' && next == Some(b'/') {
+                    state = ScanState::LineComment;
+                    index += 2;
+                    continue;
+                }
+                if byte == b'/' && next == Some(b'*') {
+                    state = ScanState::BlockComment;
+                    index += 2;
+                    continue;
+                }
+                if byte == b'\'' {
+                    state = ScanState::SingleQuote;
+                    index += 1;
+                    continue;
+                }
+                if byte == b'"' {
+                    state = ScanState::DoubleQuote;
+                    index += 1;
+                    continue;
+                }
+                if byte == b'`' {
+                    state = ScanState::Template;
+                    index += 1;
+                    continue;
+                }
+
+                match byte {
+                    b'{' => brace_depth = brace_depth.saturating_add(1),
+                    b'}' => brace_depth = brace_depth.saturating_sub(1),
+                    b'(' => paren_depth = paren_depth.saturating_add(1),
+                    b')' => paren_depth = paren_depth.saturating_sub(1),
+                    b'[' => bracket_depth = bracket_depth.saturating_add(1),
+                    b']' => bracket_depth = bracket_depth.saturating_sub(1),
+                    _ => {}
+                }
+
+                if brace_depth == 0
+                    && paren_depth == 0
+                    && bracket_depth == 0
+                    && is_js_ident_start(byte)
+                {
+                    let start = index;
+                    index += 1;
+                    while index < bytes.len() && is_js_ident_continue(bytes[index]) {
+                        index += 1;
+                    }
+
+                    let token = &source[start..index];
+                    if token == "export" {
+                        return true;
+                    }
+                    if token == "import" {
+                        let mut cursor = index;
+                        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                            cursor += 1;
+                        }
+                        if bytes.get(cursor).copied() != Some(b'(') {
+                            return true;
+                        }
+                    }
+
+                    continue;
+                }
+
+                index += 1;
             }
-            continue;
-        }
-
-        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('*') {
-            continue;
-        }
-
-        if trimmed.starts_with("/*") {
-            if !trimmed.contains("*/") {
-                in_block_comment = true;
+            ScanState::LineComment => {
+                if byte == b'\n' {
+                    state = ScanState::Code;
+                }
+                index += 1;
             }
-            continue;
-        }
-
-        if trimmed.starts_with("export default")
-            || trimmed.starts_with("export {")
-            || trimmed.starts_with("export const")
-            || trimmed.starts_with("export function")
-            || trimmed.starts_with("export class")
-            || trimmed.starts_with("export var")
-            || trimmed.starts_with("export let")
-            || trimmed.starts_with("import ")
-        {
-            return true;
+            ScanState::BlockComment => {
+                if byte == b'*' && next == Some(b'/') {
+                    state = ScanState::Code;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            ScanState::SingleQuote => {
+                if byte == b'\\' {
+                    index += 2;
+                } else if byte == b'\'' {
+                    state = ScanState::Code;
+                    index += 1;
+                } else {
+                    index += 1;
+                }
+            }
+            ScanState::DoubleQuote => {
+                if byte == b'\\' {
+                    index += 2;
+                } else if byte == b'"' {
+                    state = ScanState::Code;
+                    index += 1;
+                } else {
+                    index += 1;
+                }
+            }
+            ScanState::Template => {
+                if byte == b'\\' {
+                    index += 2;
+                } else if byte == b'`' {
+                    state = ScanState::Code;
+                    index += 1;
+                } else {
+                    index += 1;
+                }
+            }
         }
     }
 
     false
+}
+
+fn is_js_ident_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$'
+}
+
+fn is_js_ident_continue(byte: u8) -> bool {
+    is_js_ident_start(byte) || byte.is_ascii_digit()
 }
 
 /// Extract named export names from CJS source by scanning for `exports.X =` and

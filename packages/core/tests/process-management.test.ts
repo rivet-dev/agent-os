@@ -112,4 +112,77 @@ describe("process management", () => {
 		// Should not throw — just a no-op
 		expect(() => vm.stopProcess(pid)).not.toThrow();
 	}, 30_000);
+
+	test("nested child_process.spawn executes the requested child entrypoint", async () => {
+		await vm.writeFile(
+			"/tmp/child.mjs",
+			[
+				"const chunks = [];",
+				"process.stdin.on('data', (chunk) => chunks.push(Buffer.from(chunk)));",
+				"process.stdin.on('end', () => {",
+				"  const stdin = Buffer.concat(chunks).toString('utf8');",
+				"  process.stdout.write(JSON.stringify({ tag: 'child', stdin }));",
+				"});",
+				"",
+			].join("\n"),
+		);
+		await vm.writeFile(
+			"/tmp/parent.mjs",
+			[
+				"import { spawn } from 'node:child_process';",
+				"const child = spawn('node', ['/tmp/child.mjs'], { stdio: ['pipe', 'pipe', 'pipe'] });",
+				"let stdout = '';",
+				"let stderr = '';",
+				"child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });",
+				"child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });",
+				"child.on('error', (error) => { stderr += String(error?.stack ?? error); });",
+				"child.stdin.write(JSON.stringify({ request_id: 'abc', type: 'control_request' }) + '\\n');",
+				"child.stdin.write(JSON.stringify({ type: 'user', message: { text: 'hello' } }) + '\\n');",
+				"child.stdin.end();",
+				"child.on('close', (code) => {",
+				"  process.stdout.write(JSON.stringify({ stdout, stderr, code }));",
+				"  process.exit(code ?? 0);",
+				"});",
+				"",
+			].join("\n"),
+		);
+
+		let stdout = "";
+		let stderr = "";
+		const { pid } = vm.spawn("node", ["/tmp/parent.mjs"], {
+			env: { HOME: "/home/user" },
+			onStdout: (chunk) => {
+				stdout += Buffer.from(chunk).toString("utf8");
+			},
+			onStderr: (chunk) => {
+				stderr += Buffer.from(chunk).toString("utf8");
+			},
+		});
+
+		const exitCode = await vm.waitProcess(pid);
+		expect(exitCode).toBe(0);
+		expect(stderr).toBe("");
+
+		const parentResult = JSON.parse(stdout) as {
+			stdout: string;
+			stderr: string;
+			code: number;
+		};
+		expect(parentResult.code).toBe(0);
+		expect(parentResult.stderr).toBe("");
+
+		const childResult = JSON.parse(parentResult.stdout) as {
+			tag: string;
+			stdin: string;
+		};
+		expect(childResult.tag).toBe("child");
+		expect(childResult.stdin).toBe(
+			[
+				JSON.stringify({ request_id: "abc", type: "control_request" }),
+				JSON.stringify({ type: "user", message: { text: "hello" } }),
+				"",
+			].join("\n"),
+		);
+	}, 30_000);
+
 });

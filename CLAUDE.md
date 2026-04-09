@@ -55,6 +55,11 @@ The Rust sidecar kernel was migrated from a working JavaScript kernel (`@secure-
 - **Circular dependencies must terminate.** The module cache must prevent re-evaluation. Test with A→B→A and A→B→C→A chains.
 - **Every polyfill addition needs a conformance test.** When adding a new builtin method or module, add a test that verifies the return value matches real Node.js behavior. Tests go in `crates/execution/tests/` or `crates/sidecar/tests/`.
 
+## npm Package Compatibility
+
+- **npm packages must work UNMODIFIED inside the VM.** The V8 module resolver must load published npm packages from `node_modules/` as-is — no esbuild, no bundling, no transpilation, no preprocessing. If `require('some-package')` or `import 'some-package'` doesn't work, fix the module resolver or polyfills, don't add a build step to transform the package. The goal is: `npm install` a package on the host, mount `node_modules/` into the VM, and it just works.
+- **Agent SDKs must run unmodified.** Pi SDK (`@mariozechner/pi-coding-agent`), Anthropic SDK (`@anthropic-ai/sdk`), and any other agent SDK must load and execute inside V8 without modification. Our custom ACP adapters (`registry/agent/*/`) are thin wrappers that import the SDK — the SDK itself is never patched or bundled.
+
 ## Agent Adapters
 
 - **Agent adapters MUST use the real agent SDK.** Each agent adapter (`registry/agent/*/src/adapter.ts`) must call the agent's SDK directly (e.g., `createAgentSession()` from `@mariozechner/pi-coding-agent`). **NEVER replace an SDK adapter with a minimal/stub adapter that makes direct API calls** (e.g., direct `fetch` to `/v1/messages`). If the SDK doesn't work in V8, fix the V8 compatibility — don't bypass the SDK.

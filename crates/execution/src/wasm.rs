@@ -1,9 +1,10 @@
 use crate::common::{encode_json_string, frozen_time_ms};
+use crate::javascript::JavascriptSyncRpcRequest;
 use crate::node_import_cache::{NodeImportCache, NodeImportCacheCleanup};
 use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
-    encode_json_string_array, encode_json_string_map, env_builtin_enabled, harden_node_command,
-    node_binary, node_resolution_read_paths, resolve_path_like_specifier,
+    encode_json_string_array, encode_json_string_map, ensure_host_cwd_exists, env_builtin_enabled,
+    harden_node_command, node_binary, node_resolution_read_paths, resolve_path_like_specifier,
     spawn_node_control_reader, spawn_stream_reader, ExportedChildFds, LinePrefixFilter,
     NodeControlMessage, NodeSignalDispositionAction, NodeSignalHandlerRegistration,
 };
@@ -12,11 +13,16 @@ use crate::runtime_support::{
     warmup_marker_path, NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV,
     NODE_FROZEN_TIME_ENV, NODE_SANDBOX_ROOT_ENV,
 };
+use nix::fcntl::OFlag;
+use nix::unistd::pipe2;
+use serde::Deserialize;
+use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
-use std::io::{Read, Write};
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{
@@ -36,6 +42,9 @@ const WASM_GUEST_ENV_ENV: &str = "AGENT_OS_GUEST_ENV";
 const WASM_PERMISSION_TIER_ENV: &str = "AGENT_OS_WASM_PERMISSION_TIER";
 const WASM_PREWARM_ONLY_ENV: &str = "AGENT_OS_WASM_PREWARM_ONLY";
 const WASM_WARMUP_DEBUG_ENV: &str = "AGENT_OS_WASM_WARMUP_DEBUG";
+const NODE_SYNC_RPC_ENABLE_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_ENABLE";
+const NODE_SYNC_RPC_REQUEST_FD_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_REQUEST_FD";
+const NODE_SYNC_RPC_RESPONSE_FD_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_RESPONSE_FD";
 pub const WASM_PREWARM_TIMEOUT_MS_ENV: &str = "AGENT_OS_WASM_PREWARM_TIMEOUT_MS";
 pub const WASM_MAX_FUEL_ENV: &str = "AGENT_OS_WASM_MAX_FUEL";
 pub const WASM_MAX_MEMORY_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_MEMORY_BYTES";
@@ -58,6 +67,9 @@ const RESERVED_WASM_ENV_KEYS: &[&str] = &[
     WASM_MAX_STACK_BYTES_ENV,
     WASM_PREWARM_TIMEOUT_MS_ENV,
     WASM_PREWARM_ONLY_ENV,
+    NODE_SYNC_RPC_ENABLE_ENV,
+    NODE_SYNC_RPC_REQUEST_FD_ENV,
+    NODE_SYNC_RPC_RESPONSE_FD_ENV,
 ];
 const WASM_PAGE_BYTES: u64 = 65_536;
 const WASM_TIMEOUT_EXIT_CODE: i32 = 124;
@@ -137,6 +149,7 @@ pub struct StartWasmExecutionRequest {
 pub enum WasmExecutionEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
+    SyncRpcRequest(JavascriptSyncRpcRequest),
     SignalState {
         signal: u32,
         registration: WasmSignalHandlerRegistration,
@@ -148,8 +161,49 @@ pub enum WasmExecutionEvent {
 enum WasmProcessEvent {
     Stdout(Vec<u8>),
     RawStderr(Vec<u8>),
+    SyncRpcRequest(JavascriptSyncRpcRequest),
     Control(NodeControlMessage),
     Exited(i32),
+}
+
+#[derive(Debug, Deserialize)]
+struct WasmSyncRpcRequestWire {
+    id: u64,
+    method: String,
+    #[serde(default)]
+    args: Vec<Value>,
+}
+
+struct WasmSyncRpcChannels {
+    parent_request_reader: File,
+    parent_response_writer: File,
+    child_request_writer: OwnedFd,
+    child_response_reader: OwnedFd,
+}
+
+#[derive(Debug, Clone)]
+struct WasmSyncRpcResponseWriter {
+    writer: Arc<Mutex<BufWriter<File>>>,
+}
+
+impl WasmSyncRpcResponseWriter {
+    fn new(writer: File) -> Self {
+        Self {
+            writer: Arc::new(Mutex::new(BufWriter::new(writer))),
+        }
+    }
+
+    fn send(&self, payload: Vec<u8>) -> Result<(), WasmExecutionError> {
+        let mut writer = self.writer.lock().map_err(|_| {
+            WasmExecutionError::RpcResponse(String::from(
+                "WASM sync RPC response writer lock poisoned",
+            ))
+        })?;
+        writer
+            .write_all(&payload)
+            .and_then(|()| writer.flush())
+            .map_err(|error| WasmExecutionError::RpcResponse(error.to_string()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +233,8 @@ pub enum WasmExecutionError {
     WarmupTimeout(Duration),
     WarmupFailed { exit_code: i32, stderr: String },
     Spawn(std::io::Error),
+    RpcChannel(String),
+    RpcResponse(String),
     StdinClosed,
     Stdin(std::io::Error),
     EventChannelClosed,
@@ -227,6 +283,18 @@ impl fmt::Display for WasmExecutionError {
                 }
             }
             Self::Spawn(err) => write!(f, "failed to start guest WebAssembly runtime: {err}"),
+            Self::RpcChannel(message) => {
+                write!(
+                    f,
+                    "failed to configure guest WebAssembly sync RPC: {message}"
+                )
+            }
+            Self::RpcResponse(message) => {
+                write!(
+                    f,
+                    "failed to write guest WebAssembly sync RPC response: {message}"
+                )
+            }
             Self::StdinClosed => f.write_str("guest WebAssembly stdin is already closed"),
             Self::Stdin(err) => write!(f, "failed to write guest stdin: {err}"),
             Self::EventChannelClosed => {
@@ -244,6 +312,7 @@ pub struct WasmExecution {
     child_pid: u32,
     stdin: Option<ChildStdin>,
     events: RefCell<UnboundedReceiver<WasmExecutionEvent>>,
+    sync_rpc_responses: Option<WasmSyncRpcResponseWriter>,
     _import_cache_guard: Arc<NodeImportCacheCleanup>,
 }
 
@@ -269,6 +338,50 @@ impl WasmExecution {
             drop(stdin);
         }
         Ok(())
+    }
+
+    pub fn respond_sync_rpc_success(
+        &mut self,
+        id: u64,
+        result: Value,
+    ) -> Result<(), WasmExecutionError> {
+        let writer = self.sync_rpc_responses.as_ref().ok_or_else(|| {
+            WasmExecutionError::RpcResponse(String::from(
+                "guest WebAssembly execution does not have a sync RPC response channel",
+            ))
+        })?;
+        write_wasm_sync_rpc_response(
+            writer,
+            json!({
+                "id": id,
+                "ok": true,
+                "result": result,
+            }),
+        )
+    }
+
+    pub fn respond_sync_rpc_error(
+        &mut self,
+        id: u64,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<(), WasmExecutionError> {
+        let writer = self.sync_rpc_responses.as_ref().ok_or_else(|| {
+            WasmExecutionError::RpcResponse(String::from(
+                "guest WebAssembly execution does not have a sync RPC response channel",
+            ))
+        })?;
+        write_wasm_sync_rpc_response(
+            writer,
+            json!({
+                "id": id,
+                "ok": false,
+                "error": {
+                    "code": code.into(),
+                    "message": message.into(),
+                },
+            }),
+        )
     }
 
     pub async fn poll_event(
@@ -323,6 +436,7 @@ impl WasmExecution {
             match events.blocking_recv() {
                 Some(WasmExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
                 Some(WasmExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+                Some(WasmExecutionEvent::SyncRpcRequest(_)) => {}
                 Some(WasmExecutionEvent::SignalState { .. }) => {}
                 Some(WasmExecutionEvent::Exited(exit_code)) => {
                     return Ok(WasmExecutionResult {
@@ -405,6 +519,7 @@ impl WasmExecutionEngine {
         self.next_execution_id += 1;
         let execution_id = format!("exec-{}", self.next_execution_id);
         let guest_argv = guest_argv(&context, &request)?;
+        let sync_rpc_channels = create_wasm_sync_rpc_channels()?;
         let control_channel = create_node_control_channel().map_err(WasmExecutionError::Spawn)?;
         let mut child = create_node_child(
             import_cache,
@@ -412,6 +527,7 @@ impl WasmExecutionEngine {
             &request,
             &guest_argv,
             frozen_time_ms,
+            Some(&sync_rpc_channels),
             &control_channel.child_writer,
         )?;
         let child_pid = child.id();
@@ -434,6 +550,8 @@ impl WasmExecutionEngine {
         let stdout_reader = spawn_stream_reader(stdout, sender.clone(), WasmProcessEvent::Stdout);
         let stderr_reader =
             spawn_stream_reader(stderr, sender.clone(), WasmProcessEvent::RawStderr);
+        let _sync_rpc_reader =
+            spawn_wasm_sync_rpc_reader(sync_rpc_channels.parent_request_reader, sender.clone());
         let _control_reader = spawn_node_control_reader(
             control_channel.parent_reader,
             sender.clone(),
@@ -456,6 +574,9 @@ impl WasmExecutionEngine {
             child_pid,
             stdin,
             events: RefCell::new(events),
+            sync_rpc_responses: Some(WasmSyncRpcResponseWriter::new(
+                sync_rpc_channels.parent_response_writer,
+            )),
             _import_cache_guard: import_cache_guard,
         })
     }
@@ -487,6 +608,9 @@ fn spawn_wasm_event_bridge(
                         Some(WasmExecutionEvent::Stderr(filtered))
                     }
                 }
+                WasmProcessEvent::SyncRpcRequest(request) => {
+                    Some(WasmExecutionEvent::SyncRpcRequest(request))
+                }
                 WasmProcessEvent::Control(NodeControlMessage::SignalState {
                     signal,
                     registration,
@@ -506,6 +630,96 @@ fn spawn_wasm_event_bridge(
         }
     });
     forwarded
+}
+
+fn create_wasm_sync_rpc_channels() -> Result<WasmSyncRpcChannels, WasmExecutionError> {
+    let fd_reservations = (0..64)
+        .map(|_| File::open("/dev/null"))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(WasmExecutionError::PrepareWarmPath)?;
+    let (parent_request_reader, child_request_writer) = pipe2(OFlag::O_CLOEXEC)
+        .map_err(|error| WasmExecutionError::RpcChannel(error.to_string()))?;
+    let (child_response_reader, parent_response_writer) = pipe2(OFlag::O_CLOEXEC)
+        .map_err(|error| WasmExecutionError::RpcChannel(error.to_string()))?;
+    drop(fd_reservations);
+
+    Ok(WasmSyncRpcChannels {
+        parent_request_reader: File::from(parent_request_reader),
+        parent_response_writer: File::from(parent_response_writer),
+        child_request_writer,
+        child_response_reader,
+    })
+}
+
+fn spawn_wasm_sync_rpc_reader(
+    reader: File,
+    sender: mpsc::Sender<WasmProcessEvent>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => return,
+                Ok(_) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    match parse_wasm_sync_rpc_request(trimmed) {
+                        Ok(request) => {
+                            if sender
+                                .send(WasmProcessEvent::SyncRpcRequest(request))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Err(message) => {
+                            if sender
+                                .send(WasmProcessEvent::RawStderr(
+                                    format!("{message}\n").into_bytes(),
+                                ))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(WasmProcessEvent::RawStderr(
+                        format!("failed to read WebAssembly sync RPC request: {error}\n")
+                            .into_bytes(),
+                    ));
+                    return;
+                }
+            }
+        }
+    })
+}
+
+fn parse_wasm_sync_rpc_request(line: &str) -> Result<JavascriptSyncRpcRequest, String> {
+    let wire: WasmSyncRpcRequestWire =
+        serde_json::from_str(line).map_err(|error| error.to_string())?;
+    Ok(JavascriptSyncRpcRequest {
+        id: wire.id,
+        method: wire.method,
+        args: wire.args,
+    })
+}
+
+fn write_wasm_sync_rpc_response(
+    writer: &WasmSyncRpcResponseWriter,
+    response: Value,
+) -> Result<(), WasmExecutionError> {
+    let mut payload = serde_json::to_vec(&response)
+        .map_err(|error| WasmExecutionError::RpcResponse(error.to_string()))?;
+    payload.push(b'\n');
+    writer.send(payload)
 }
 
 fn guest_argv(
@@ -542,8 +756,10 @@ fn create_node_child(
     request: &StartWasmExecutionRequest,
     guest_argv: &[String],
     frozen_time_ms: u128,
+    sync_rpc_channels: Option<&WasmSyncRpcChannels>,
     control_fd: &std::os::fd::OwnedFd,
 ) -> Result<std::process::Child, WasmExecutionError> {
+    ensure_host_cwd_exists(&request.cwd).map_err(WasmExecutionError::Spawn)?;
     let mut command = Command::new(node_binary());
     let mut exported_fds = ExportedChildFds::default();
     configure_wasm_node_sandbox(&mut command, import_cache, resolved_module, request)?;
@@ -569,6 +785,24 @@ fn create_node_child(
             WASM_PERMISSION_TIER_ENV,
             request.permission_tier.as_env_value(),
         );
+
+    if let Some(channels) = sync_rpc_channels {
+        command.env(NODE_SYNC_RPC_ENABLE_ENV, "1");
+        exported_fds
+            .export(
+                &mut command,
+                NODE_SYNC_RPC_REQUEST_FD_ENV,
+                &channels.child_request_writer,
+            )
+            .map_err(|error| WasmExecutionError::RpcChannel(error.to_string()))?;
+        exported_fds
+            .export(
+                &mut command,
+                NODE_SYNC_RPC_RESPONSE_FD_ENV,
+                &channels.child_response_reader,
+            )
+            .map_err(|error| WasmExecutionError::RpcChannel(error.to_string()))?;
+    }
 
     configure_node_control_channel(&mut command, control_fd, &mut exported_fds)
         .map_err(WasmExecutionError::Spawn)?;
@@ -604,6 +838,7 @@ fn prewarm_wasm_path(
     }
 
     let guest_argv = warmup_guest_argv(resolved_module, request);
+    ensure_host_cwd_exists(&request.cwd).map_err(WasmExecutionError::WarmupSpawn)?;
     let mut command = Command::new(node_binary());
     configure_wasm_node_sandbox(&mut command, import_cache, resolved_module, request)?;
     command

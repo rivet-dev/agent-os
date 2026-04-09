@@ -4,7 +4,7 @@ use nix::unistd::{close, pipe2};
 use serde::{Deserialize, Serialize};
 use serde_json::from_str;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
@@ -77,6 +77,10 @@ pub fn node_binary() -> String {
     let configured =
         std::env::var(NODE_BINARY_ENV).unwrap_or_else(|_| String::from(DEFAULT_NODE_BINARY));
     resolve_executable_path(&configured).unwrap_or(configured)
+}
+
+pub fn ensure_host_cwd_exists(cwd: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(cwd)
 }
 
 pub fn create_node_control_channel() -> std::io::Result<NodeControlChannel> {

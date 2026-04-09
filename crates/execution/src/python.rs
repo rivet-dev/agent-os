@@ -4,8 +4,8 @@ use crate::node_import_cache::{
 };
 use crate::node_process::{
     apply_guest_env, configure_node_control_channel, create_node_control_channel,
-    harden_node_command, node_binary, spawn_node_control_reader, spawn_stream_reader,
-    ExportedChildFds, LinePrefixFilter, NodeControlMessage,
+    ensure_host_cwd_exists, harden_node_command, node_binary, spawn_node_control_reader,
+    spawn_stream_reader, ExportedChildFds, LinePrefixFilter, NodeControlMessage,
 };
 use crate::runtime_support::{
     compile_cache_ready, configure_compile_cache, env_flag_enabled, file_fingerprint,
@@ -144,9 +144,15 @@ pub struct PythonVfsRpcStat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PythonVfsRpcResponsePayload {
     Empty,
-    Read { content_base64: String },
-    Stat { stat: PythonVfsRpcStat },
-    ReadDir { entries: Vec<String> },
+    Read {
+        content_base64: String,
+    },
+    Stat {
+        stat: PythonVfsRpcStat,
+    },
+    ReadDir {
+        entries: Vec<String>,
+    },
     Http {
         status: u16,
         reason: String,
@@ -1133,6 +1139,7 @@ fn create_node_child(
     control_fd: &OwnedFd,
     frozen_time_ms: u128,
 ) -> Result<(std::process::Child, File, Arc<Mutex<BufWriter<File>>>), PythonExecutionError> {
+    ensure_host_cwd_exists(&request.cwd).map_err(PythonExecutionError::Spawn)?;
     let mut command = Command::new(node_binary());
     let mut exported_fds = ExportedChildFds::default();
     configure_python_node_sandbox(&mut command, import_cache, context, request);
@@ -1279,6 +1286,7 @@ fn prewarm_python_path(
     }
 
     let warmup_started = Instant::now();
+    ensure_host_cwd_exists(&request.cwd).map_err(PythonExecutionError::WarmupSpawn)?;
     let mut command = Command::new(node_binary());
     configure_python_node_sandbox(&mut command, import_cache, context, request);
     command

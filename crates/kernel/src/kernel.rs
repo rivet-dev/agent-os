@@ -2010,7 +2010,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
     fn resolve_registered_command_path(&self, path: &str) -> Option<String> {
         let normalized = normalize_path(path);
-        for prefix in ["/bin/", "/usr/bin/"] {
+        for prefix in ["/bin/", "/usr/bin/", "/usr/local/bin/"] {
             let Some(name) = normalized.strip_prefix(prefix) else {
                 continue;
             };
@@ -2018,6 +2018,16 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 return Some(name.to_owned());
             }
         }
+
+        if let Some(name) = normalized
+            .strip_prefix("/__agentos/commands/")
+            .and_then(|suffix| suffix.rsplit('/').next())
+        {
+            if !name.is_empty() && !name.contains('/') && self.commands.resolve(name).is_some() {
+                return Some(name.to_owned());
+            }
+        }
+
         None
     }
 

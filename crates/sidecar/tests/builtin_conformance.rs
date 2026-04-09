@@ -397,6 +397,10 @@ fn events_conformance_matches_host_node() {
         "events",
         r#"
 import { EventEmitter } from "node:events";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const events = require("node:events");
 
 const emitter = new EventEmitter();
 const seen = [];
@@ -414,6 +418,9 @@ emitter.removeListener("tick", persistent);
 emitter.emit("tick", "beta");
 
 console.log(JSON.stringify({
+  cjsEqualsEventEmitter: events === EventEmitter,
+  cjsType: typeof events,
+  eventEmitterPropEqualsSelf: events.EventEmitter === events,
   seen,
   listenerCount: emitter.listenerCount("tick"),
 }));
@@ -634,6 +641,7 @@ const streamPromises = require("node:stream/promises");
 const timersPromises = require("node:timers/promises");
 const tty = require("node:tty");
 const zlib = require("node:zlib");
+const { constants: zlibConstants } = await import("node:zlib");
 
 perfHooks.performance.clearMarks?.();
 perfHooks.performance.clearMeasures?.();
@@ -750,6 +758,7 @@ process.stdout.write(`${JSON.stringify({
     userInfoHomedir: os.userInfo().homedir,
   },
   perf: {
+    entriesByType: perfHooks.performance.getEntriesByType?.("measure")?.length ?? 0,
     entriesByName: perfHooks.performance.getEntriesByName?.("delta", "measure")?.length ?? 0,
     hasNow: typeof perfHooks.performance.now === "function",
     hasObserver: typeof perfHooks.PerformanceObserver === "function",
@@ -780,6 +789,8 @@ process.stdout.write(`${JSON.stringify({
     writeStreamType: typeof tty.WriteStream,
   },
   zlib: {
+    constantsHasSyncFlush: typeof zlib.constants?.Z_SYNC_FLUSH === "number",
+    importConstantsHasSyncFlush: typeof zlibConstants?.Z_SYNC_FLUSH === "number",
     createDeflateType: typeof zlib.createDeflate,
     createInflateType: typeof zlib.createInflate,
     inflated,
@@ -814,6 +825,7 @@ process.exit(0);
     assert_eq!(result["perf"]["hasNow"], true);
     assert_eq!(result["perf"]["hasObserver"], true);
     assert_eq!(result["perf"]["measureDurationFinite"], true);
+    assert_eq!(result["perf"]["entriesByType"], 1);
     assert_eq!(result["perf"]["entriesByName"], 1);
     assert_eq!(result["timersPromises"]["immediateValue"], "tick");
     assert_eq!(result["timersPromises"]["timeoutValue"], "done");
@@ -836,6 +848,8 @@ process.exit(0);
     assert_eq!(result["tty"]["isatty0"], false);
     assert_eq!(result["tty"]["isatty1"], false);
     assert_eq!(result["tty"]["isatty2"], false);
+    assert_eq!(result["zlib"]["constantsHasSyncFlush"], true);
+    assert_eq!(result["zlib"]["importConstantsHasSyncFlush"], true);
     assert_eq!(result["zlib"]["createDeflateType"], "function");
     assert_eq!(result["zlib"]["createInflateType"], "function");
     assert_eq!(result["zlib"]["inflated"], "agent-os");

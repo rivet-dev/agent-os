@@ -401,11 +401,11 @@ where
                     .map_err(kernel_error),
                 PythonVfsRpcMethod::HttpRequest
                 | PythonVfsRpcMethod::DnsLookup
-                | PythonVfsRpcMethod::SubprocessRun => Err(SidecarError::InvalidState(
-                    String::from(
+                | PythonVfsRpcMethod::SubprocessRun => {
+                    Err(SidecarError::InvalidState(String::from(
                         "python non-filesystem RPC reached filesystem dispatcher unexpectedly",
-                    ),
-                )),
+                    )))
+                }
             }
         }
         Err(error) => Err(error),
