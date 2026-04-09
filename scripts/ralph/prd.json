@@ -1436,8 +1436,59 @@
         "pnpm --dir packages/core exec vitest run tests/pi-cli-headless.test.ts passes"
       ],
       "priority": 99,
-      "passes": false,
+      "passes": true,
       "notes": "US-053 verified our custom SDK adapter (registry/agent/pi/src/adapter.ts) works. But that adapter uses createAgentSession() which is OUR wrapper. pi-cli uses pi-acp which spawns the REAL unmodified Pi CLI binary (pi --mode rpc). If pi-cli works, it proves that arbitrary npm packages with Node.js binaries work inside the VM without modification. This is the ultimate compatibility test. The existing pi-acp-adapter.test.ts only tests package projection, not actual E2E execution."
+    },
+    {
+      "id": "US-076",
+      "title": "Verify Claude agent (claude-agent-sdk) works E2E via createSession('claude')",
+      "description": "As a developer, I want the Claude agent to boot and run E2E inside V8 isolates using the UNMODIFIED @anthropic-ai/claude-agent-sdk npm package.",
+      "acceptanceCriteria": [
+        "createSession('claude') boots the Claude agent adapter inside the VM",
+        "The @anthropic-ai/claude-agent-sdk npm package loads UNMODIFIED from node_modules/ \u2014 no esbuild, no bundling",
+        "Agent receives a prompt, makes tool calls (write file, run bash), and returns a response",
+        "ACP JSON-RPC session lifecycle works: session/start \u2192 task/start \u2192 events \u2192 task/finish",
+        "Test uses @copilotkit/llmock with ANTHROPIC_API_KEY='mock-key' \u2014 no real API tokens",
+        "All existing skip/todo annotations in claude-session.test.ts are resolved or documented with specific blocker",
+        "pnpm --dir packages/core exec vitest run tests/claude-session.test.ts passes with 0 failures and 0 skipped"
+      ],
+      "priority": 96,
+      "passes": false,
+      "notes": "claude-session.test.ts exists with 8 tests but has skip/todo/FIXME references. The Claude adapter uses @anthropic-ai/claude-agent-sdk which is an npm package that must load unmodified inside V8. If it fails, fix the V8 polyfills or module resolver \u2014 do NOT modify the SDK. Check what builtins claude-agent-sdk uses that might be missing. The adapter is at registry/agent/claude/."
+    },
+    {
+      "id": "US-077",
+      "title": "Verify OpenCode agent works E2E via createSession('opencode')",
+      "description": "As a developer, I want the OpenCode agent to boot and run E2E inside V8 isolates using the UNMODIFIED @rivet-dev/agent-os-opencode package.",
+      "acceptanceCriteria": [
+        "createSession('opencode') boots the OpenCode agent adapter inside the VM",
+        "The OpenCode adapter and its dependencies load UNMODIFIED from node_modules/",
+        "Agent receives a prompt, makes tool calls, and returns a response",
+        "ACP JSON-RPC session lifecycle works: session/start \u2192 task/start \u2192 events \u2192 task/finish",
+        "Test uses @copilotkit/llmock with mock API key \u2014 no real API tokens",
+        "All existing skip/todo annotations in opencode-session.test.ts are resolved or documented with specific blocker",
+        "pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts passes with 0 failures and 0 skipped"
+      ],
+      "priority": 97,
+      "passes": false,
+      "notes": "opencode-session.test.ts exists with 7 tests but has skip/todo/FIXME references. OpenCode uses @rivet-dev/agent-os-opencode which runs a source-built Node ACP bundle entirely inside the VM. If it fails, fix the V8 polyfills \u2014 do NOT modify the OpenCode package. The adapter is at registry/agent/opencode/."
+    },
+    {
+      "id": "US-078",
+      "title": "Verify Codex agent works E2E via createSession('codex')",
+      "description": "As a developer, I want the Codex agent to boot and run E2E inside V8 isolates.",
+      "acceptanceCriteria": [
+        "createSession('codex') boots the Codex agent adapter inside the VM",
+        "The Codex adapter and its dependencies load UNMODIFIED from node_modules/",
+        "Agent receives a prompt, makes tool calls, and returns a response",
+        "ACP JSON-RPC session lifecycle works",
+        "Test uses mock API key \u2014 no real API tokens",
+        "Test file exists and passes: packages/core/tests/codex-session.test.ts or equivalent",
+        "pnpm --dir packages/core exec vitest run tests/codex-session.test.ts passes"
+      ],
+      "priority": 98,
+      "passes": false,
+      "notes": "The Codex adapter is at registry/agent/codex/. If no E2E test exists, create one following the same pattern as pi-headless.test.ts. All agent SDKs must work unmodified inside V8 \u2014 if Codex fails, fix the V8 runtime, not the SDK."
     }
   ]
 }

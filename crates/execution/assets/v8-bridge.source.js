@@ -8116,10 +8116,20 @@ var __bridge = (() => {
       return;
     }
     if (eventTypeOrSessionId === "child_stdout" || eventTypeOrSessionId === "child_stderr") {
-      const encoded = typeof payload?.dataBase64 === "string" ? payload.dataBase64 : typeof payload?.data === "string" ? payload.data : payload?.data?.__agentOsType === "bytes" && typeof payload?.data?.base64 === "string" ? payload.data.base64 : "";
-      const bytes = typeof Buffer !== "undefined" ? Buffer.from(encoded, "base64") : new Uint8Array(
-        atob(encoded).split("").map((char) => char.charCodeAt(0))
-      );
+      const directData = payload?.data;
+      let bytes;
+      if (typeof Buffer !== "undefined" && Buffer.isBuffer(directData)) {
+        bytes = Buffer.from(directData);
+      } else if (directData instanceof Uint8Array) {
+        bytes = typeof Buffer !== "undefined" ? Buffer.from(directData.buffer, directData.byteOffset, directData.byteLength) : directData;
+      } else if (ArrayBuffer.isView(directData)) {
+        bytes = typeof Buffer !== "undefined" ? Buffer.from(directData.buffer, directData.byteOffset, directData.byteLength) : new Uint8Array(directData.buffer, directData.byteOffset, directData.byteLength);
+      } else {
+        const encoded = typeof payload?.dataBase64 === "string" ? payload.dataBase64 : typeof directData === "string" ? directData : directData?.__agentOsType === "bytes" && typeof directData?.base64 === "string" ? directData.base64 : "";
+        bytes = typeof Buffer !== "undefined" ? Buffer.from(encoded, "base64") : new Uint8Array(
+          atob(encoded).split("").map((char) => char.charCodeAt(0))
+        );
+      }
       routeChildProcessEvent(
         sessionId,
         eventTypeOrSessionId === "child_stdout" ? "stdout" : "stderr",
@@ -8153,6 +8163,20 @@ var __bridge = (() => {
         const payload = { sessionId };
         if (typeof next.data === "string") {
           payload.data = next.data;
+        } else if (typeof Buffer !== "undefined" && Buffer.isBuffer(next.data)) {
+          payload.dataBase64 = next.data.toString("base64");
+        } else if (next.data instanceof Uint8Array) {
+          payload.dataBase64 = Buffer.from(
+            next.data.buffer,
+            next.data.byteOffset,
+            next.data.byteLength
+          ).toString("base64");
+        } else if (ArrayBuffer.isView(next.data)) {
+          payload.dataBase64 = Buffer.from(
+            next.data.buffer,
+            next.data.byteOffset,
+            next.data.byteLength
+          ).toString("base64");
         } else if (next.data?.__agentOsType === "bytes" && typeof next.data.base64 === "string") {
           payload.dataBase64 = next.data.base64;
         }
@@ -8650,7 +8674,7 @@ var __bridge = (() => {
       };
       child.kill = (signal) => {
         if (typeof _childProcessKill === "undefined") return false;
-        const sig = signal === "SIGKILL" || signal === 9 ? 9 : signal === "SIGINT" || signal === 2 ? 2 : 15;
+        const sig = signal === "SIGKILL" || signal === 9 ? "SIGKILL" : signal === "SIGINT" || signal === 2 ? "SIGINT" : signal === 0 ? "0" : signal === "SIGTERM" || signal === 15 || signal == null ? "SIGTERM" : String(signal);
         _childProcessKill.applySync(void 0, [sessionId, sig]);
         child.killed = true;
         child.signalCode = typeof signal === "string" ? signal : "SIGTERM";
@@ -19180,36 +19204,361 @@ ${headerLines}\r
   function formatConsoleArgs(args) {
     return args.map((value) => formatConsoleValue(value)).join(" ");
   }
-  globalThis.console = {
+  class Console {
+    constructor(stdout = _stdout, stderr = _stderr) {
+      this._stdout = stdout;
+      this._stderr = stderr;
+      this._counts = new Map();
+      this._times = new Map();
+    }
     log(...args) {
-      _stdout.write(formatConsoleArgs(args));
-    },
+      this._stdout.write(formatConsoleArgs(args));
+    }
     info(...args) {
-      _stdout.write(formatConsoleArgs(args));
-    },
+      this._stdout.write(formatConsoleArgs(args));
+    }
     debug(...args) {
-      _stdout.write(formatConsoleArgs(args));
-    },
+      this._stdout.write(formatConsoleArgs(args));
+    }
     warn(...args) {
-      _stderr.write(formatConsoleArgs(args));
-    },
+      this._stderr.write(formatConsoleArgs(args));
+    }
     error(...args) {
-      _stderr.write(formatConsoleArgs(args));
-    },
+      this._stderr.write(formatConsoleArgs(args));
+    }
     dir(value) {
-      _stdout.write(formatConsoleArgs([value]));
-    },
+      this._stdout.write(formatConsoleArgs([value]));
+    }
+    dirxml(...args) {
+      this.log(...args);
+    }
     trace(...args) {
       const message = formatConsoleArgs(args);
       const error = new Error(message);
-      _stderr.write(error.stack || message);
-    },
+      this._stderr.write(error.stack || message);
+    }
     assert(condition, ...args) {
       if (!condition) {
         const message = args.length > 0 ? formatConsoleArgs(args) : "Assertion failed";
-        _stderr.write(message);
+        this._stderr.write(message);
       }
     }
+    clear() {
+    }
+    count(label = "default") {
+      const next = (this._counts.get(label) ?? 0) + 1;
+      this._counts.set(label, next);
+      this.log(`${label}: ${next}`);
+    }
+    countReset(label = "default") {
+      this._counts.delete(label);
+    }
+    group(...args) {
+      if (args.length > 0) {
+        this.log(...args);
+      }
+    }
+    groupCollapsed(...args) {
+      if (args.length > 0) {
+        this.log(...args);
+      }
+    }
+    groupEnd() {
+    }
+    table(tabularData) {
+      this.log(tabularData);
+    }
+    time(label = "default") {
+      this._times.set(label, Date.now());
+    }
+    timeEnd(label = "default") {
+      if (!this._times.has(label)) {
+        return;
+      }
+      const startedAt = this._times.get(label);
+      this._times.delete(label);
+      this.log(`${label}: ${Date.now() - startedAt}ms`);
+    }
+    timeLog(label = "default", ...args) {
+      if (!this._times.has(label)) {
+        return;
+      }
+      const startedAt = this._times.get(label);
+      this.log(`${label}: ${Date.now() - startedAt}ms`, ...args);
+    }
+    timeStamp() {
+    }
+    profile() {
+    }
+    profileEnd() {
+    }
+  }
+  const defaultConsole = new Console();
+  globalThis.console = defaultConsole;
+  function createConsoleTask() {
+    return {
+      run(callback, ...args) {
+        return typeof callback === "function" ? callback(...args) : void 0;
+      }
+    };
+  }
+  function consoleContext(stdout = _stdout, stderr = _stderr) {
+    return new Console(stdout, stderr);
+  }
+  var builtinConsoleModule = {
+    Console,
+    assert: defaultConsole.assert.bind(defaultConsole),
+    clear: defaultConsole.clear.bind(defaultConsole),
+    context: consoleContext,
+    count: defaultConsole.count.bind(defaultConsole),
+    countReset: defaultConsole.countReset.bind(defaultConsole),
+    createTask: createConsoleTask,
+    debug: defaultConsole.debug.bind(defaultConsole),
+    dir: defaultConsole.dir.bind(defaultConsole),
+    dirxml: defaultConsole.dirxml.bind(defaultConsole),
+    error: defaultConsole.error.bind(defaultConsole),
+    group: defaultConsole.group.bind(defaultConsole),
+    groupCollapsed: defaultConsole.groupCollapsed.bind(defaultConsole),
+    groupEnd: defaultConsole.groupEnd.bind(defaultConsole),
+    info: defaultConsole.info.bind(defaultConsole),
+    log: defaultConsole.log.bind(defaultConsole),
+    profile: defaultConsole.profile.bind(defaultConsole),
+    profileEnd: defaultConsole.profileEnd.bind(defaultConsole),
+    table: defaultConsole.table.bind(defaultConsole),
+    time: defaultConsole.time.bind(defaultConsole),
+    timeEnd: defaultConsole.timeEnd.bind(defaultConsole),
+    timeLog: defaultConsole.timeLog.bind(defaultConsole),
+    timeStamp: defaultConsole.timeStamp.bind(defaultConsole),
+    trace: defaultConsole.trace.bind(defaultConsole),
+    warn: defaultConsole.warn.bind(defaultConsole)
+  };
+  function v8Serialize(value) {
+    const encoded = JSON.stringify(value ?? null);
+    return Buffer.from(encoded, "utf8");
+  }
+  function v8Deserialize(value) {
+    const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value ?? []);
+    return JSON.parse(buffer.toString("utf8"));
+  }
+  class V8Serializer {
+    constructor() {
+      this._value = null;
+    }
+    writeHeader() {
+    }
+    writeValue(value) {
+      this._value = value;
+    }
+    releaseBuffer() {
+      return v8Serialize(this._value);
+    }
+    transferArrayBuffer() {
+    }
+  }
+  class V8Deserializer {
+    constructor(buffer) {
+      this._buffer = buffer;
+    }
+    readHeader() {
+    }
+    readValue() {
+      return v8Deserialize(this._buffer);
+    }
+    transferArrayBuffer() {
+    }
+  }
+  function getHeapStatistics() {
+    return {
+      total_heap_size: 0,
+      total_heap_size_executable: 0,
+      total_physical_size: 0,
+      total_available_size: 0,
+      used_heap_size: 0,
+      heap_size_limit: 0,
+      malloced_memory: 0,
+      peak_malloced_memory: 0,
+      does_zap_garbage: 0,
+      number_of_native_contexts: 0,
+      number_of_detached_contexts: 0,
+      total_global_handles_size: 0,
+      used_global_handles_size: 0,
+      external_memory: 0
+    };
+  }
+  function getHeapSpaceStatistics() {
+    return [];
+  }
+  function getHeapCodeStatistics() {
+    return {
+      code_and_metadata_size: 0,
+      bytecode_and_metadata_size: 0,
+      external_script_source_size: 0,
+      cpu_profiler_metadata_size: 0
+    };
+  }
+  function getCppHeapStatistics() {
+    return {
+      committed_size_bytes: 0,
+      resident_size_bytes: 0,
+      used_size_bytes: 0,
+      space_statistics: []
+    };
+  }
+  function getHeapSnapshot() {
+    return Readable.fromWeb(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(Buffer.from("{}"));
+          controller.close();
+        }
+      })
+    );
+  }
+  var builtinV8Module = {
+    cachedDataVersionTag() {
+      return 0;
+    },
+    DefaultDeserializer: V8Deserializer,
+    DefaultSerializer: V8Serializer,
+    Deserializer: V8Deserializer,
+    GCProfiler: class GCProfiler {
+      start() {
+      }
+      stop() {
+        return [];
+      }
+    },
+    Serializer: V8Serializer,
+    deserialize: v8Deserialize,
+    getCppHeapStatistics,
+    getHeapCodeStatistics,
+    getHeapSnapshot,
+    getHeapSpaceStatistics,
+    getHeapStatistics,
+    isStringOneByteRepresentation(value) {
+      return typeof value === "string" && !/[^\x00-\xff]/.test(value);
+    },
+    promiseHooks: {},
+    queryObjects() {
+      return [];
+    },
+    serialize: v8Serialize,
+    setFlagsFromString() {
+    },
+    setHeapSnapshotNearHeapLimit() {
+      return [];
+    },
+    startCpuProfile() {
+      return {
+        stop() {
+          return {};
+        }
+      };
+    },
+    startupSnapshot: {},
+    stopCoverage() {
+      return [];
+    },
+    takeCoverage() {
+      return [];
+    },
+    writeHeapSnapshot() {
+      return "";
+    }
+  };
+  function vmRunInThisContext(code) {
+    return (0, eval)(String(code));
+  }
+  function vmCreateContext(context = {}) {
+    return context;
+  }
+  function vmIsContext(context) {
+    return Boolean(context) && typeof context === "object";
+  }
+  function vmRunInNewContext(code, context = {}) {
+    const params = Object.keys(context);
+    const values = Object.values(context);
+    return Function(...params, `return (${String(code)});`)(...values);
+  }
+  class VmScript {
+    constructor(code) {
+      this.code = String(code);
+    }
+    runInThisContext() {
+      return vmRunInThisContext(this.code);
+    }
+    runInNewContext(context = {}) {
+      return vmRunInNewContext(this.code, context);
+    }
+  }
+  var builtinVmModule = {
+    Script: VmScript,
+    createContext: vmCreateContext,
+    isContext: vmIsContext,
+    runInNewContext: vmRunInNewContext,
+    runInThisContext: vmRunInThisContext
+  };
+  function createWorkerThreadsNotImplementedError(feature) {
+    const error = new Error(`node:worker_threads ${feature} is not available in the Agent OS guest runtime`);
+    error.code = "ERR_NOT_IMPLEMENTED";
+    return error;
+  }
+  class WorkerThreadPort extends EventEmitter {
+    postMessage() {
+    }
+    start() {
+    }
+    close() {
+      this.emit("close");
+    }
+    unref() {
+      return this;
+    }
+    ref() {
+      return this;
+    }
+  }
+  class WorkerThreadMessageChannel {
+    constructor() {
+      this.port1 = new WorkerThreadPort();
+      this.port2 = new WorkerThreadPort();
+    }
+  }
+  class WorkerThreadWorker extends EventEmitter {
+    constructor() {
+      super();
+      throw createWorkerThreadsNotImplementedError("Worker");
+    }
+  }
+  var builtinWorkerThreadsModule = {
+    BroadcastChannel: globalThis.BroadcastChannel,
+    MessageChannel: globalThis.MessageChannel ?? WorkerThreadMessageChannel,
+    MessagePort: globalThis.MessagePort ?? WorkerThreadPort,
+    SHARE_ENV: Symbol.for("agent-os.worker_threads.SHARE_ENV"),
+    Worker: WorkerThreadWorker,
+    getEnvironmentData() {
+      return void 0;
+    },
+    isMainThread: true,
+    markAsUncloneable() {
+    },
+    markAsUntransferable() {
+    },
+    moveMessagePortToContext() {
+      throw createWorkerThreadsNotImplementedError("moveMessagePortToContext");
+    },
+    parentPort: null,
+    postMessageToThread() {
+      throw createWorkerThreadsNotImplementedError("postMessageToThread");
+    },
+    receiveMessageOnPort() {
+      return void 0;
+    },
+    resourceLimits: {},
+    setEnvironmentData() {
+    },
+    threadId: 0,
+    workerData: null
   };
   var _stdinListeners = {};
   var _stdinOnceListeners = {};
@@ -20547,6 +20896,13 @@ ${headerLines}\r
     error.code = code;
     return error;
   }
+  class SandboxDOMException extends Error {
+    constructor(message = "", name = "Error") {
+      super(message);
+      this.name = String(name);
+      this.code = 0;
+    }
+  }
   function createDomLikeError(name, code, message) {
     const error = new Error(message);
     error.name = name;
@@ -21014,6 +21370,9 @@ ${headerLines}\r
     getFips() {
       return 0;
     },
+    getHashes() {
+      return ["md5", "sha1", "sha224", "sha256", "sha384", "sha512"];
+    },
     getRandomValues(array) {
       return cryptoPolyfill.getRandomValues(array);
     },
@@ -21100,18 +21459,17 @@ ${headerLines}\r
     if (typeof g.CryptoKey === "undefined") {
       g.CryptoKey = SandboxCryptoKey;
     }
+    if (typeof g.DOMException === "undefined") {
+      g.DOMException = SandboxDOMException;
+    }
     if (typeof g.crypto === "undefined") {
-      g.crypto = cryptoPolyfill;
+      g.crypto = builtinCryptoModule;
     } else {
       const cryptoObj = g.crypto;
-      if (typeof cryptoObj.getRandomValues === "undefined") {
-        cryptoObj.getRandomValues = cryptoPolyfill.getRandomValues;
-      }
-      if (typeof cryptoObj.randomUUID === "undefined") {
-        cryptoObj.randomUUID = cryptoPolyfill.randomUUID;
-      }
-      if (typeof cryptoObj.subtle === "undefined") {
-        cryptoObj.subtle = cryptoPolyfill.subtle;
+      for (const [name, value] of Object.entries(builtinCryptoModule)) {
+        if (typeof cryptoObj[name] === "undefined") {
+          cryptoObj[name] = value;
+        }
       }
     }
     g.fetch = fetch;
@@ -21292,6 +21650,7 @@ ${headerLines}\r
       "async_hooks",
       "buffer",
       "child_process",
+      "console",
       "cluster",
       "constants",
       "crypto",
@@ -21332,6 +21691,7 @@ ${headerLines}\r
       "tty",
       "url",
       "util",
+      "util/types",
       "v8",
       "wasi",
       "worker_threads",
@@ -21602,8 +21962,12 @@ ${headerLines}\r
         return globalThis.__agentOsBuiltinUtilModule;
       case "util":
         return globalThis.__agentOsBuiltinUtilModule;
+      case "util/types":
+        return globalThis.__agentOsBuiltinUtilModule.types;
       case "child_process":
         return _childProcessModule;
+      case "console":
+        return builtinConsoleModule;
       case "constants":
         return builtinConstantsStdlibModule;
       case "dns":
@@ -21629,9 +21993,11 @@ ${headerLines}\r
       case "zlib":
         return globalThis.__agentOsBuiltinZlibModule;
       case "v8":
+        return builtinV8Module;
       case "vm":
+        return builtinVmModule;
       case "worker_threads":
-        throw createAccessDeniedBuiltinError(request);
+        return builtinWorkerThreadsModule;
       default: {
         const error = new Error(`Cannot find module '${request}'`);
         error.code = "MODULE_NOT_FOUND";

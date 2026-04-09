@@ -52,10 +52,10 @@ The Rust sidecar kernel already has the VFS, process table, pipe manager, PTY ma
 | `http` / `https` / `http2` | Built on kernel `net` polyfill | **No wrapper -- falls through to real module** | Port: builds on `net` polyfill |
 | `tls` | Kernel TLS polyfill | Guest-owned polyfill in `node_import_cache.rs` wraps the existing guest `net` transport with host TLS state | Keep client/server entrypoints on guest sockets and avoid direct host `node:tls` listeners/connections |
 | `os` | Kernel-provided values | Guest-owned polyfill in `node_import_cache.rs` virtualizes hostname, CPU, memory, loopback networking, home, and user info | Keep future `os` additions aligned with VM defaults |
-| `vm` | Must be denied | **No wrapper -- falls through to real `node:vm`** | Must stay denied |
-| `worker_threads` | Must be denied | **No wrapper -- falls through to real module** | Must stay denied |
+| `vm` | Guest-owned compatibility shim for package loading | Guest-owned compatibility builtin for `Script`, `createContext`, `isContext`, `runInNewContext`, `runInThisContext` | Keep it limited to the compatibility surface; do not fall through to host `node:vm` |
+| `worker_threads` | Guest-owned compatibility shim for package loading | Guest-owned compatibility builtin exposing `isMainThread` plus inert ports; `Worker` construction stays unavailable | Keep it importable for feature detection, but never spawn real threads |
 | `inspector` | Must be denied | **No wrapper -- falls through to real module** | Must stay denied |
-| `v8` | Must be denied | **No wrapper -- falls through to real module** | Must stay denied |
+| `v8` | Guest-owned compatibility shim for package loading | Guest-owned compatibility builtin for safe inspection/serialization helpers | Keep it limited to the compatibility surface; do not fall through to host `node:v8` |
 
 ### Loader interception (`node_import_cache.rs`)
 
@@ -135,6 +135,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 - Strip all `AGENT_OS_*` keys from the RPC `options.env` payload in `node_import_cache.rs`.
 - Carry only the Node runtime bootstrap allowlist in `options.internalBootstrapEnv`.
 - Re-inject that allowlisted map only when `crates/sidecar/src/service.rs` starts a nested JavaScript runtime.
+- JavaScript child-process launches in `crates/sidecar/src/execution.rs` must call `prepare_javascript_runtime_env(...)` and set `AGENT_OS_SANDBOX_ROOT` just like top-level `execute()` does. If child V8 executions miss those runtime env entries, stack traces fall back to `/unknown/...`, bare-package ESM imports like `undici` stop resolving, and spawned JS CLIs (including `pi-acp` -> `pi --mode rpc`) silently diverge from top-level behavior.
 
 ## Guest Networking Rules
 

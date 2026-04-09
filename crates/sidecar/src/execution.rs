@@ -19,8 +19,8 @@ use crate::protocol::{
 };
 use crate::service::{
     audit_fields, dirname, emit_security_audit_event, emit_structured_event, javascript_error,
-    kernel_error, normalize_host_path, normalize_path, path_is_within_root, python_error,
-    wasm_error,
+    kernel_error, normalize_host_path, normalize_path, parse_javascript_child_process_spawn_request,
+    path_is_within_root, python_error, wasm_error,
 };
 use crate::state::{
     ActiveCipherSession, ActiveDhSession, ActiveDiffieHellmanSession, ActiveEcdhSession,
@@ -2219,6 +2219,109 @@ where
         Ok(emitted_any)
     }
 
+    fn drain_queued_javascript_child_process_events(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        child_process_id: &str,
+    ) -> Result<(), SidecarError> {
+        let mut deferred = VecDeque::new();
+        while let Some(envelope) = self.pending_process_events.pop_front() {
+            if envelope.vm_id == vm_id && envelope.process_id == child_process_id {
+                if let Some(child) = self
+                    .vms
+                    .get_mut(vm_id)
+                    .and_then(|vm| vm.active_processes.get_mut(process_id))
+                    .and_then(|process| process.child_processes.get_mut(child_process_id))
+                {
+                    child.pending_execution_events.push_back(envelope.event);
+                }
+            } else {
+                deferred.push_back(envelope);
+            }
+        }
+        self.pending_process_events = deferred;
+
+        let mut queued = Vec::new();
+        {
+            let receiver = self.process_event_receiver.as_mut().ok_or_else(|| {
+                SidecarError::InvalidState(String::from("process event receiver unavailable"))
+            })?;
+            while let Ok(envelope) = receiver.try_recv() {
+                queued.push(envelope);
+            }
+        }
+        for envelope in queued {
+            if envelope.vm_id == vm_id && envelope.process_id == child_process_id {
+                if let Some(child) = self
+                    .vms
+                    .get_mut(vm_id)
+                    .and_then(|vm| vm.active_processes.get_mut(process_id))
+                    .and_then(|process| process.child_processes.get_mut(child_process_id))
+                {
+                    child.pending_execution_events.push_back(envelope.event);
+                }
+            } else {
+                self.pending_process_events.push_back(envelope);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn drain_queued_nested_javascript_child_process_events(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        parent_child_process_id: &str,
+        child_process_id: &str,
+    ) -> Result<(), SidecarError> {
+        let mut deferred = VecDeque::new();
+        while let Some(envelope) = self.pending_process_events.pop_front() {
+            if envelope.vm_id == vm_id && envelope.process_id == child_process_id {
+                if let Some(child) = self
+                    .vms
+                    .get_mut(vm_id)
+                    .and_then(|vm| vm.active_processes.get_mut(process_id))
+                    .and_then(|process| process.child_processes.get_mut(parent_child_process_id))
+                    .and_then(|process| process.child_processes.get_mut(child_process_id))
+                {
+                    child.pending_execution_events.push_back(envelope.event);
+                }
+            } else {
+                deferred.push_back(envelope);
+            }
+        }
+        self.pending_process_events = deferred;
+
+        let mut queued = Vec::new();
+        {
+            let receiver = self.process_event_receiver.as_mut().ok_or_else(|| {
+                SidecarError::InvalidState(String::from("process event receiver unavailable"))
+            })?;
+            while let Ok(envelope) = receiver.try_recv() {
+                queued.push(envelope);
+            }
+        }
+        for envelope in queued {
+            if envelope.vm_id == vm_id && envelope.process_id == child_process_id {
+                if let Some(child) = self
+                    .vms
+                    .get_mut(vm_id)
+                    .and_then(|vm| vm.active_processes.get_mut(process_id))
+                    .and_then(|process| process.child_processes.get_mut(parent_child_process_id))
+                    .and_then(|process| process.child_processes.get_mut(child_process_id))
+                {
+                    child.pending_execution_events.push_back(envelope.event);
+                }
+            } else {
+                self.pending_process_events.push_back(envelope);
+            }
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn handle_execution_event(
         &mut self,
         vm_id: &str,
@@ -2759,6 +2862,8 @@ where
             };
             env.entry(String::from("AGENT_OS_GUEST_ENTRYPOINT"))
                 .or_insert(guest_entrypoint);
+            let guest_entrypoint = env.get("AGENT_OS_GUEST_ENTRYPOINT").cloned();
+            prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
 
             return Ok(ResolvedChildProcessExecution {
                 command,
@@ -2830,6 +2935,8 @@ where
                         process_args.iter().skip(1).cloned().collect(),
                     )
                 };
+            let guest_entrypoint = env.get("AGENT_OS_GUEST_ENTRYPOINT").cloned();
+            prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
 
             return Ok(ResolvedChildProcessExecution {
                 command,
@@ -2909,11 +3016,17 @@ where
             (process.kernel_pid, process.allocate_child_process_id())
         };
 
+        let kernel_command = match resolved.runtime {
+            GuestRuntimeKind::JavaScript => JAVASCRIPT_COMMAND,
+            GuestRuntimeKind::WebAssembly => WASM_COMMAND,
+            GuestRuntimeKind::Python => unreachable!("python child_process execution is rejected"),
+        };
+
         let vm = self.vms.get_mut(vm_id).expect("VM should exist");
         let kernel_handle = vm
             .kernel
             .spawn_process(
-                &resolved.command,
+                kernel_command,
                 resolved.process_args.clone(),
                 SpawnOptions {
                     requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
@@ -2926,6 +3039,10 @@ where
         let kernel_pid = kernel_handle.pid();
 
         let mut execution_env = resolved.env.clone();
+        execution_env.insert(
+            String::from(EXECUTION_SANDBOX_ROOT_ENV),
+            normalize_host_path(&vm.cwd).to_string_lossy().into_owned(),
+        );
 
         let execution = match resolved.runtime {
             GuestRuntimeKind::JavaScript => {
@@ -3000,6 +3117,165 @@ where
         vm.active_processes
             .get_mut(process_id)
             .expect("process should still exist")
+            .child_processes
+            .insert(
+                child_process_id.clone(),
+                ActiveProcess::new(kernel_pid, kernel_handle, resolved.runtime, execution)
+                    .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
+                    .with_host_cwd(resolved.host_cwd.clone()),
+            );
+
+        Ok(json!({
+            "childId": child_process_id,
+            "pid": kernel_pid,
+            "command": resolved.command,
+            "args": resolved.process_args,
+        }))
+    }
+
+    fn spawn_nested_javascript_child_process(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        parent_child_process_id: &str,
+        request: JavascriptChildProcessSpawnRequest,
+    ) -> Result<Value, SidecarError> {
+        let (resolved, parent_kernel_pid) = {
+            let vm = self.vms.get(vm_id).expect("VM should exist");
+            let parent = vm
+                .active_processes
+                .get(process_id)
+                .expect("process should still exist")
+                .child_processes
+                .get(parent_child_process_id)
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(format!(
+                        "unknown child process {parent_child_process_id} during nested spawn"
+                    ))
+                })?;
+            (
+                self.resolve_javascript_child_process_execution(vm, &parent.host_cwd, &request)?,
+                parent.kernel_pid,
+            )
+        };
+
+        let kernel_command = match resolved.runtime {
+            GuestRuntimeKind::JavaScript => JAVASCRIPT_COMMAND,
+            GuestRuntimeKind::WebAssembly => WASM_COMMAND,
+            GuestRuntimeKind::Python => unreachable!("python child_process execution is rejected"),
+        };
+
+        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let child_process_id = {
+            let parent = vm
+                .active_processes
+                .get_mut(process_id)
+                .expect("process should still exist")
+                .child_processes
+                .get_mut(parent_child_process_id)
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(format!(
+                        "unknown child process {parent_child_process_id} during nested spawn"
+                    ))
+                })?;
+            parent.allocate_child_process_id()
+        };
+        let kernel_handle = vm
+            .kernel
+            .spawn_process(
+                kernel_command,
+                resolved.process_args.clone(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    parent_pid: Some(parent_kernel_pid),
+                    env: resolved.env.clone(),
+                    cwd: Some(resolved.guest_cwd.clone()),
+                },
+            )
+            .map_err(kernel_error)?;
+        let kernel_pid = kernel_handle.pid();
+
+        let mut execution_env = resolved.env.clone();
+        execution_env.insert(
+            String::from(EXECUTION_SANDBOX_ROOT_ENV),
+            normalize_host_path(&vm.cwd).to_string_lossy().into_owned(),
+        );
+        let execution = match resolved.runtime {
+            GuestRuntimeKind::JavaScript => {
+                execution_env.extend(sanitize_javascript_child_process_internal_bootstrap_env(
+                    &request.options.internal_bootstrap_env,
+                ));
+                execution_env.insert(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"));
+                execution_env.insert(
+                    String::from("AGENT_OS_VIRTUAL_PROCESS_PID"),
+                    kernel_pid.to_string(),
+                );
+                execution_env.insert(
+                    String::from("AGENT_OS_VIRTUAL_PROCESS_PPID"),
+                    parent_kernel_pid.to_string(),
+                );
+                let context =
+                    self.javascript_engine
+                        .create_context(CreateJavascriptContextRequest {
+                            vm_id: vm_id.to_owned(),
+                            bootstrap_module: None,
+                            compile_cache_root: Some(self.cache_root.join("node-compile-cache")),
+                        });
+                let inline_code = load_javascript_entrypoint_source(
+                    vm,
+                    &resolved.host_cwd,
+                    &resolved.entrypoint,
+                    &execution_env,
+                );
+
+                let execution = self
+                    .javascript_engine
+                    .start_execution(StartJavascriptExecutionRequest {
+                        vm_id: vm_id.to_owned(),
+                        context_id: context.context_id,
+                        argv: std::iter::once(resolved.entrypoint.clone())
+                            .chain(resolved.execution_args.clone())
+                            .collect(),
+                        env: execution_env,
+                        cwd: resolved.host_cwd.clone(),
+                        inline_code,
+                    })
+                    .map_err(javascript_error)?;
+                ActiveExecution::Javascript(execution)
+            }
+            GuestRuntimeKind::WebAssembly => {
+                apply_wasm_limit_env(&mut execution_env, vm.kernel.resource_limits());
+                let context = self.wasm_engine.create_context(CreateWasmContextRequest {
+                    vm_id: vm_id.to_owned(),
+                    module_path: Some(resolved.entrypoint.clone()),
+                });
+                let execution = self
+                    .wasm_engine
+                    .start_execution(StartWasmExecutionRequest {
+                        vm_id: vm_id.to_owned(),
+                        context_id: context.context_id,
+                        argv: resolved.execution_args.clone(),
+                        env: execution_env,
+                        cwd: resolved.host_cwd.clone(),
+                        permission_tier: execution_wasm_permission_tier(
+                            resolved
+                                .wasm_permission_tier
+                                .unwrap_or(WasmPermissionTier::Full),
+                        ),
+                    })
+                    .map_err(wasm_error)?;
+                ActiveExecution::Wasm(execution)
+            }
+            GuestRuntimeKind::Python => unreachable!("python child_process execution is rejected"),
+        };
+        let kernel_stdin_writer_fd = install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?;
+
+        vm.active_processes
+            .get_mut(process_id)
+            .expect("process should still exist")
+            .child_processes
+            .get_mut(parent_child_process_id)
+            .expect("child process should still exist")
             .child_processes
             .insert(
                 child_process_id.clone(),
@@ -3105,6 +3381,434 @@ where
         }))
     }
 
+    fn spawn_nested_javascript_child_process_sync(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        parent_child_process_id: &str,
+        request: JavascriptChildProcessSpawnRequest,
+        max_buffer: Option<usize>,
+    ) -> Result<Value, SidecarError> {
+        let spawned = self.spawn_nested_javascript_child_process(
+            vm_id,
+            process_id,
+            parent_child_process_id,
+            request,
+        )?;
+        let child_process_id = spawned
+            .get("childId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                SidecarError::InvalidState(String::from(
+                    "child_process.spawn_sync response is missing childId",
+                ))
+            })?
+            .to_owned();
+
+        let max_buffer = max_buffer.unwrap_or(1024 * 1024);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut exit_code = 0_i32;
+        let mut max_buffer_exceeded = false;
+        let mut kill_sent = false;
+
+        loop {
+            let event = self.poll_nested_javascript_child_process(
+                vm_id,
+                process_id,
+                parent_child_process_id,
+                &child_process_id,
+                50,
+            )?;
+            if event.is_null() {
+                continue;
+            }
+
+            match event.get("type").and_then(Value::as_str) {
+                Some("stdout") => {
+                    let chunk = javascript_sync_rpc_bytes_arg(
+                        &[event.get("data").cloned().unwrap_or(Value::Null)],
+                        0,
+                        "child_process.spawn_sync stdout",
+                    )?;
+                    stdout.extend_from_slice(&chunk);
+                    if stdout.len() > max_buffer && !kill_sent {
+                        max_buffer_exceeded = true;
+                        self.kill_nested_javascript_child_process(
+                            vm_id,
+                            process_id,
+                            parent_child_process_id,
+                            &child_process_id,
+                            "SIGTERM",
+                        )?;
+                        kill_sent = true;
+                    }
+                }
+                Some("stderr") => {
+                    let chunk = javascript_sync_rpc_bytes_arg(
+                        &[event.get("data").cloned().unwrap_or(Value::Null)],
+                        0,
+                        "child_process.spawn_sync stderr",
+                    )?;
+                    stderr.extend_from_slice(&chunk);
+                    if stderr.len() > max_buffer && !kill_sent {
+                        max_buffer_exceeded = true;
+                        self.kill_nested_javascript_child_process(
+                            vm_id,
+                            process_id,
+                            parent_child_process_id,
+                            &child_process_id,
+                            "SIGTERM",
+                        )?;
+                        kill_sent = true;
+                    }
+                }
+                Some("exit") => {
+                    exit_code = event
+                        .get("exitCode")
+                        .and_then(Value::as_i64)
+                        .map(|value| value as i32)
+                        .unwrap_or(1);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        Ok(json!({
+            "stdout": String::from_utf8_lossy(&stdout),
+            "stderr": String::from_utf8_lossy(&stderr),
+            "code": exit_code,
+            "maxBufferExceeded": max_buffer_exceeded,
+        }))
+    }
+
+    fn poll_nested_javascript_child_process(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        parent_child_process_id: &str,
+        child_process_id: &str,
+        wait_ms: u64,
+    ) -> Result<Value, SidecarError> {
+        loop {
+            self.drain_queued_nested_javascript_child_process_events(
+                vm_id,
+                process_id,
+                parent_child_process_id,
+                child_process_id,
+            )?;
+            let event = {
+                let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                let child = vm
+                    .active_processes
+                    .get_mut(process_id)
+                    .expect("process should still exist")
+                    .child_processes
+                    .get_mut(parent_child_process_id)
+                    .ok_or_else(|| {
+                        SidecarError::InvalidState(format!(
+                            "unknown child process {parent_child_process_id} during nested poll"
+                        ))
+                    })?
+                    .child_processes
+                    .get_mut(child_process_id)
+                    .ok_or_else(|| {
+                        SidecarError::InvalidState(format!(
+                            "unknown child process {child_process_id} during nested poll"
+                        ))
+                    });
+                let Ok(child) = child else {
+                    return Ok(json!({
+                        "type": "exit",
+                        "exitCode": 1,
+                    }));
+                };
+                if let Some(event) = child.pending_execution_events.pop_front() {
+                    Some(event)
+                } else {
+                    child
+                        .execution
+                        .poll_event_blocking(Duration::from_millis(wait_ms))?
+                }
+            };
+
+            let Some(event) = event else {
+                return Ok(Value::Null);
+            };
+
+            match event {
+                ActiveExecutionEvent::Stdout(chunk) => {
+                    return Ok(json!({
+                        "type": "stdout",
+                        "data": javascript_sync_rpc_bytes_value(&chunk),
+                    }));
+                }
+                ActiveExecutionEvent::Stderr(chunk) => {
+                    return Ok(json!({
+                        "type": "stderr",
+                        "data": javascript_sync_rpc_bytes_value(&chunk),
+                    }));
+                }
+                ActiveExecutionEvent::Exited(exit_code) => {
+                    let had_trailing_events = {
+                        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                        let child = vm
+                            .active_processes
+                            .get_mut(process_id)
+                            .expect("process should still exist")
+                            .child_processes
+                            .get_mut(parent_child_process_id)
+                            .expect("child process should still exist")
+                            .child_processes
+                            .get_mut(child_process_id)
+                            .expect("child process should still exist");
+                        let deadline = Instant::now() + Duration::from_millis(150);
+                        loop {
+                            let wait = deadline.saturating_duration_since(Instant::now());
+                            let next = child.execution.poll_event_blocking(wait)?;
+                            let Some(next) = next else {
+                                break;
+                            };
+                            if matches!(next, ActiveExecutionEvent::Exited(_)) {
+                                continue;
+                            }
+                            child.pending_execution_events.push_back(next);
+                            if Instant::now() >= deadline {
+                                break;
+                            }
+                        }
+                        if !child.pending_execution_events.is_empty() {
+                            child
+                                .pending_execution_events
+                                .push_back(ActiveExecutionEvent::Exited(exit_code));
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if had_trailing_events {
+                        continue;
+                    }
+                    let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                    let parent_runtime_pid = vm
+                        .active_processes
+                        .get(process_id)
+                        .expect("process should still exist")
+                        .child_processes
+                        .get(parent_child_process_id)
+                        .expect("child process should still exist")
+                        .execution
+                        .child_pid();
+                    let parent_uses_v8_signal_bridge = vm
+                        .active_processes
+                        .get(process_id)
+                        .and_then(|process| process.child_processes.get(parent_child_process_id))
+                        .is_some_and(|process| match &process.execution {
+                            ActiveExecution::Javascript(execution) => {
+                                execution.uses_shared_v8_runtime()
+                            }
+                            _ => false,
+                        });
+                    let should_signal_parent = vm
+                        .signal_states
+                        .get(parent_child_process_id)
+                        .and_then(|handlers| handlers.get(&(libc::SIGCHLD as u32)))
+                        .is_some_and(|registration| {
+                            registration.action != SignalDispositionAction::Default
+                        });
+                    let child = vm
+                        .active_processes
+                        .get_mut(process_id)
+                        .expect("process should still exist")
+                        .child_processes
+                        .get_mut(parent_child_process_id)
+                        .expect("child process should still exist")
+                        .child_processes
+                        .remove(child_process_id)
+                        .expect("child process should still exist");
+                    child.kernel_handle.finish(exit_code);
+                    let _ = vm.kernel.wait_and_reap(child.kernel_pid);
+                    if should_signal_parent {
+                        if parent_uses_v8_signal_bridge {
+                            let parent = vm
+                                .active_processes
+                                .get(process_id)
+                                .and_then(|process| process.child_processes.get(parent_child_process_id))
+                                .expect("child process should still exist");
+                            dispatch_v8_process_signal(parent, libc::SIGCHLD)?;
+                        } else {
+                            signal_runtime_process(parent_runtime_pid, libc::SIGCHLD)?;
+                        }
+                    }
+                    return Ok(json!({
+                        "type": "exit",
+                        "exitCode": exit_code,
+                    }));
+                }
+                ActiveExecutionEvent::JavascriptSyncRpcRequest(request) => {
+                    let response = {
+                        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                        let resource_limits = vm.kernel.resource_limits().clone();
+                        let network_counts = vm_network_resource_counts(vm);
+                        let socket_paths = build_javascript_socket_path_context(vm)?;
+                        let child = vm
+                            .active_processes
+                            .get_mut(process_id)
+                            .expect("process should still exist")
+                            .child_processes
+                            .get_mut(parent_child_process_id)
+                            .expect("child process should still exist")
+                            .child_processes
+                            .get_mut(child_process_id)
+                            .expect("child process should still exist");
+                        service_javascript_sync_rpc(
+                            &self.bridge,
+                            vm_id,
+                            &vm.dns,
+                            &socket_paths,
+                            &mut vm.kernel,
+                            child,
+                            &request,
+                            &resource_limits,
+                            network_counts,
+                        )
+                    };
+
+                    let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                    let child = vm
+                        .active_processes
+                        .get_mut(process_id)
+                        .expect("process should still exist")
+                        .child_processes
+                        .get_mut(parent_child_process_id)
+                        .expect("child process should still exist")
+                        .child_processes
+                        .get_mut(child_process_id)
+                        .expect("child process should still exist");
+                    match response {
+                        Ok(result) => child
+                            .execution
+                            .respond_javascript_sync_rpc_success(request.id, result)
+                            .or_else(ignore_stale_javascript_sync_rpc_response)?,
+                        Err(error) => child
+                            .execution
+                            .respond_javascript_sync_rpc_error(
+                                request.id,
+                                "ERR_AGENT_OS_NODE_SYNC_RPC",
+                                error.to_string(),
+                            )
+                            .or_else(ignore_stale_javascript_sync_rpc_response)?,
+                    }
+                }
+                ActiveExecutionEvent::PythonVfsRpcRequest(_) => {
+                    return Err(SidecarError::InvalidState(String::from(
+                        "nested Python child_process execution is not supported yet",
+                    )));
+                }
+                ActiveExecutionEvent::SignalState { .. } => {}
+            }
+        }
+    }
+
+    fn write_nested_javascript_child_process_stdin(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        parent_child_process_id: &str,
+        child_process_id: &str,
+        chunk: &[u8],
+    ) -> Result<(), SidecarError> {
+        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let Some(child) = vm
+            .active_processes
+            .get_mut(process_id)
+            .expect("process should still exist")
+            .child_processes
+            .get_mut(parent_child_process_id)
+            .and_then(|process| process.child_processes.get_mut(child_process_id))
+        else {
+            return Ok(());
+        };
+        child.execution.write_stdin(chunk)?;
+        write_kernel_process_stdin(&mut vm.kernel, child, chunk)
+    }
+
+    fn close_nested_javascript_child_process_stdin(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        parent_child_process_id: &str,
+        child_process_id: &str,
+    ) -> Result<(), SidecarError> {
+        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let Some(child) = vm
+            .active_processes
+            .get_mut(process_id)
+            .expect("process should still exist")
+            .child_processes
+            .get_mut(parent_child_process_id)
+            .and_then(|process| process.child_processes.get_mut(child_process_id))
+        else {
+            return Ok(());
+        };
+        child.execution.close_stdin()?;
+        close_kernel_process_stdin(&mut vm.kernel, child)
+    }
+
+    fn kill_nested_javascript_child_process(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        parent_child_process_id: &str,
+        child_process_id: &str,
+        signal: &str,
+    ) -> Result<(), SidecarError> {
+        let signal_name = signal.to_owned();
+        let signal = parse_signal(signal)?;
+        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let process = vm
+            .active_processes
+            .get_mut(process_id)
+            .expect("process should still exist")
+            .child_processes
+            .get_mut(parent_child_process_id)
+            .ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "unknown child process {parent_child_process_id} during nested kill"
+                ))
+            })?;
+        let source_pid = process.kernel_pid;
+        let child = process
+            .child_processes
+            .get_mut(child_process_id)
+            .ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "unknown child process {child_process_id} during nested kill"
+                ))
+            })?;
+        vm.kernel
+            .kill_process(EXECUTION_DRIVER_NAME, child.kernel_pid, signal)
+            .map_err(kernel_error)?;
+        emit_security_audit_event(
+            &self.bridge,
+            vm_id,
+            "security.process.kill",
+            audit_fields([
+                (String::from("source"), String::from("guest_child_process")),
+                (String::from("source_pid"), source_pid.to_string()),
+                (String::from("target_pid"), child.kernel_pid.to_string()),
+                (String::from("process_id"), process_id.to_owned()),
+                (
+                    String::from("child_process_id"),
+                    format!("{parent_child_process_id}/{child_process_id}"),
+                ),
+                (String::from("signal"), signal_name),
+            ]),
+        );
+        Ok(())
+    }
+
     pub(crate) fn poll_javascript_child_process(
         &mut self,
         vm_id: &str,
@@ -3113,6 +3817,11 @@ where
         wait_ms: u64,
     ) -> Result<Value, SidecarError> {
         loop {
+            self.drain_queued_javascript_child_process_events(
+                vm_id,
+                process_id,
+                child_process_id,
+            )?;
             let event = {
                 let vm = self.vms.get_mut(vm_id).expect("VM should exist");
                 let child = vm
@@ -3168,7 +3877,7 @@ where
                             .child_processes
                             .get_mut(child_process_id)
                             .expect("child process should still exist");
-                        let deadline = Instant::now() + Duration::from_millis(25);
+                        let deadline = Instant::now() + Duration::from_millis(150);
                         loop {
                             let wait = deadline.saturating_duration_since(Instant::now());
                             let next = child.execution.poll_event_blocking(wait)?;
@@ -3244,13 +3953,119 @@ where
                     }));
                 }
                 ActiveExecutionEvent::JavascriptSyncRpcRequest(request) => {
-                    let response = {
-                        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                    let response: Result<Value, SidecarError> = {
                         if request.method.starts_with("child_process.") {
-                            Err(SidecarError::InvalidState(String::from(
-                                "nested child_process calls from a child process are not supported yet",
-                            )))
+                            match request.method.as_str() {
+                                "child_process.spawn" => {
+                                    let vm = self.vms.get(vm_id).expect("VM should exist");
+                                    let (payload, _) =
+                                        parse_javascript_child_process_spawn_request(
+                                            vm,
+                                            &request.args,
+                                        )?;
+                                    self.spawn_nested_javascript_child_process(
+                                        vm_id,
+                                        process_id,
+                                        child_process_id,
+                                        payload,
+                                    )
+                                }
+                                "child_process.spawn_sync" => {
+                                    let vm = self.vms.get(vm_id).expect("VM should exist");
+                                    let (payload, max_buffer) =
+                                        parse_javascript_child_process_spawn_request(
+                                            vm,
+                                            &request.args,
+                                        )?;
+                                    self.spawn_nested_javascript_child_process_sync(
+                                        vm_id,
+                                        process_id,
+                                        child_process_id,
+                                        payload,
+                                        max_buffer,
+                                    )
+                                }
+                                "child_process.poll" => {
+                                    let nested_child_process_id = javascript_sync_rpc_arg_str(
+                                        &request.args,
+                                        0,
+                                        "child_process.poll child id",
+                                    )?;
+                                    let wait_ms = javascript_sync_rpc_arg_u64_optional(
+                                        &request.args,
+                                        1,
+                                        "child_process.poll wait ms",
+                                    )?
+                                    .unwrap_or_default();
+                                    self.poll_nested_javascript_child_process(
+                                        vm_id,
+                                        process_id,
+                                        child_process_id,
+                                        nested_child_process_id,
+                                        wait_ms,
+                                    )
+                                }
+                                "child_process.write_stdin" => {
+                                    let nested_child_process_id = javascript_sync_rpc_arg_str(
+                                        &request.args,
+                                        0,
+                                        "child_process.write_stdin child id",
+                                    )?;
+                                    let chunk = javascript_sync_rpc_bytes_arg(
+                                        &request.args,
+                                        1,
+                                        "child_process.write_stdin chunk",
+                                    )?;
+                                    self.write_nested_javascript_child_process_stdin(
+                                        vm_id,
+                                        process_id,
+                                        child_process_id,
+                                        nested_child_process_id,
+                                        &chunk,
+                                    )?;
+                                    Ok(Value::Null)
+                                }
+                                "child_process.close_stdin" => {
+                                    let nested_child_process_id = javascript_sync_rpc_arg_str(
+                                        &request.args,
+                                        0,
+                                        "child_process.close_stdin child id",
+                                    )?;
+                                    self.close_nested_javascript_child_process_stdin(
+                                        vm_id,
+                                        process_id,
+                                        child_process_id,
+                                        nested_child_process_id,
+                                    )?;
+                                    Ok(Value::Null)
+                                }
+                                "child_process.kill" => {
+                                    let nested_child_process_id = javascript_sync_rpc_arg_str(
+                                        &request.args,
+                                        0,
+                                        "child_process.kill child id",
+                                    )?;
+                                    let signal = javascript_sync_rpc_arg_str(
+                                        &request.args,
+                                        1,
+                                        "child_process.kill signal",
+                                    )?;
+                                    self.kill_nested_javascript_child_process(
+                                        vm_id,
+                                        process_id,
+                                        child_process_id,
+                                        nested_child_process_id,
+                                        signal,
+                                    )?;
+                                    Ok(Value::Null)
+                                }
+                                _ => Err(SidecarError::InvalidState(format!(
+                                    "unsupported nested child process RPC method {}",
+                                    request.method
+                                ))),
+                            }
                         } else {
+                            let vm = self.vms.get_mut(vm_id).expect("VM should exist");
                             let resource_limits = vm.kernel.resource_limits().clone();
                             let network_counts = vm_network_resource_counts(vm);
                             let socket_paths = build_javascript_socket_path_context(vm)?;

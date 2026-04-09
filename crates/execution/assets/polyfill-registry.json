@@ -7,6 +7,7 @@
         "assert",
         "buffer",
         "constants",
+        "console",
         "events",
         "path",
         "path/posix",
@@ -19,6 +20,7 @@
         "timers",
         "url",
         "util",
+        "util/types",
         "zlib"
       ]
     },
@@ -48,7 +50,10 @@
         "stream/web",
         "timers/promises",
         "tls",
-        "tty"
+        "tty",
+        "v8",
+        "vm",
+        "worker_threads"
       ]
     },
     {
@@ -60,10 +65,7 @@
         "inspector",
         "repl",
         "trace_events",
-        "vm",
-        "v8",
-        "wasi",
-        "worker_threads"
+        "wasi"
       ]
     }
   ]

@@ -198,6 +198,53 @@ console.log(JSON.stringify({
 }
 
 #[test]
+fn console_conformance_matches_host_node() {
+    assert_conformance(
+        "console",
+        r#"
+import * as consoleModule from "node:console";
+const consoleInstance = new consoleModule.Console(process.stdout, process.stderr);
+const task = consoleModule.createTask("demo-task");
+
+console.log(JSON.stringify({
+  types: {
+    Console: typeof consoleModule.Console,
+    context: typeof consoleModule.context,
+    createTask: typeof consoleModule.createTask,
+    log: typeof consoleModule.log,
+    table: typeof consoleModule.table,
+  },
+  taskRunType: typeof task.run,
+  consoleMethods: {
+    assert: typeof consoleInstance.assert,
+    clear: typeof consoleInstance.clear,
+    count: typeof consoleInstance.count,
+    countReset: typeof consoleInstance.countReset,
+    debug: typeof consoleInstance.debug,
+    dir: typeof consoleInstance.dir,
+    dirxml: typeof consoleInstance.dirxml,
+    error: typeof consoleInstance.error,
+    group: typeof consoleInstance.group,
+    groupCollapsed: typeof consoleInstance.groupCollapsed,
+    groupEnd: typeof consoleInstance.groupEnd,
+    info: typeof consoleInstance.info,
+    log: typeof consoleInstance.log,
+    profile: typeof consoleInstance.profile,
+    profileEnd: typeof consoleInstance.profileEnd,
+    table: typeof consoleInstance.table,
+    time: typeof consoleInstance.time,
+    timeEnd: typeof consoleInstance.timeEnd,
+    timeLog: typeof consoleInstance.timeLog,
+    timeStamp: typeof consoleInstance.timeStamp,
+    trace: typeof consoleInstance.trace,
+    warn: typeof consoleInstance.warn,
+  },
+}));
+"#,
+    );
+}
+
+#[test]
 fn child_process_conformance_matches_host_node() {
     assert_conformance(
         "child-process",
@@ -332,6 +379,7 @@ const random = crypto.randomBytes(16);
 const uuid = crypto.randomUUID();
 
 console.log(JSON.stringify({
+  hashesIncludeSha256: crypto.getHashes().includes("sha256"),
   sha256: crypto.createHash("sha256").update("agent-os").digest("hex"),
   hmacSha256: crypto.createHmac("sha256", "shared-secret").update("agent-os").digest("hex"),
   randomBytesLength: random.length,
@@ -499,6 +547,7 @@ const punycode = require("node:punycode");
 const querystring = require("node:querystring");
 const stringDecoder = require("node:string_decoder");
 const util = require("node:util");
+const utilTypes = require("node:util/types");
 const zlib = require("node:zlib");
 
 assert.deepStrictEqual(path.normalize?.("/alpha/../beta"), "/beta");
@@ -554,6 +603,9 @@ console.log(JSON.stringify({
   formatted,
   inflated,
   isArrayBufferView: util.types.isArrayBufferView(textBytes),
+  isDateViaUtilTypes: utilTypes.isDate(new Date("2024-01-01T00:00:00Z")),
+  isMapViaUtilTypes: utilTypes.isMap(new Map([["alpha", 1]])),
+  isUint8ArrayViaUtilTypes: utilTypes.isUint8Array(textBytes),
   promisified,
   punycodeAscii: punycode.toASCII("mañana.com"),
   punycodeUnicode: punycode.toUnicode("xn--maana-pta.com"),

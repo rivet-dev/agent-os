@@ -2888,6 +2888,7 @@ fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
         | "buffer"
         | "child_process"
         | "cluster"
+        | "console"
         | "constants"
         | "crypto"
         | "dgram"
@@ -2926,6 +2927,7 @@ fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
         | "tty"
         | "url"
         | "util"
+        | "util/types"
         | "domain"
         | "vm"
         | "v8"
@@ -3882,7 +3884,70 @@ export default { StringDecoder };
 
     if module_name == "v8" {
         return String::from(
-            r#"function getHeapStatistics() {
+            r#"function serialize(value) {
+  return Buffer.from(JSON.stringify(value ?? null), "utf8");
+}
+
+function deserialize(value) {
+  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value ?? []);
+  return JSON.parse(buffer.toString("utf8"));
+}
+
+class Serializer {
+  constructor() {
+    this._value = null;
+  }
+
+  writeHeader() {}
+
+  writeValue(value) {
+    this._value = value;
+  }
+
+  releaseBuffer() {
+    return serialize(this._value);
+  }
+
+  transferArrayBuffer() {}
+}
+
+class Deserializer {
+  constructor(buffer) {
+    this._buffer = buffer;
+  }
+
+  readHeader() {}
+
+  readValue() {
+    return deserialize(this._buffer);
+  }
+
+  transferArrayBuffer() {}
+}
+
+function cachedDataVersionTag() {
+  return 0;
+}
+
+function getCppHeapStatistics() {
+  return {
+    committed_size_bytes: 0,
+    resident_size_bytes: 0,
+    used_size_bytes: 0,
+    space_statistics: [],
+  };
+}
+
+function getHeapCodeStatistics() {
+  return {
+    code_and_metadata_size: 0,
+    bytecode_and_metadata_size: 0,
+    external_script_source_size: 0,
+    cpu_profiler_metadata_size: 0,
+  };
+}
+
+function getHeapStatistics() {
   return {
     total_heap_size: 0,
     total_heap_size_executable: 0,
@@ -3916,8 +3981,229 @@ function getHeapSnapshot() {
   );
 }
 
-export { getHeapSnapshot, getHeapSpaceStatistics, getHeapStatistics };
-export default { getHeapSnapshot, getHeapSpaceStatistics, getHeapStatistics };
+function isStringOneByteRepresentation(value) {
+  return typeof value === "string" && !/[^\x00-\xff]/.test(value);
+}
+
+function queryObjects() {
+  return [];
+}
+
+function setFlagsFromString() {}
+
+function setHeapSnapshotNearHeapLimit() {
+  return [];
+}
+
+function startCpuProfile() {
+  return {
+    stop() {
+      return {};
+    },
+  };
+}
+
+function stopCoverage() {
+  return [];
+}
+
+function takeCoverage() {
+  return [];
+}
+
+function writeHeapSnapshot() {
+  return "";
+}
+
+class GCProfiler {
+  start() {}
+
+  stop() {
+    return [];
+  }
+}
+
+const promiseHooks = {};
+const startupSnapshot = {};
+
+export {
+  GCProfiler,
+  cachedDataVersionTag,
+  Deserializer,
+  deserialize,
+  getCppHeapStatistics,
+  getHeapCodeStatistics,
+  getHeapSnapshot,
+  getHeapSpaceStatistics,
+  getHeapStatistics,
+  isStringOneByteRepresentation,
+  promiseHooks,
+  queryObjects,
+  serialize,
+  Serializer,
+  setFlagsFromString,
+  setHeapSnapshotNearHeapLimit,
+  startCpuProfile,
+  startupSnapshot,
+  stopCoverage,
+  takeCoverage,
+  writeHeapSnapshot,
+};
+export {
+  Deserializer as DefaultDeserializer,
+  Serializer as DefaultSerializer,
+};
+export default {
+  GCProfiler,
+  cachedDataVersionTag,
+  DefaultDeserializer: Deserializer,
+  DefaultSerializer: Serializer,
+  Deserializer,
+  deserialize,
+  getCppHeapStatistics,
+  getHeapCodeStatistics,
+  getHeapSnapshot,
+  getHeapSpaceStatistics,
+  getHeapStatistics,
+  isStringOneByteRepresentation,
+  promiseHooks,
+  queryObjects,
+  serialize,
+  Serializer,
+  setFlagsFromString,
+  setHeapSnapshotNearHeapLimit,
+  startCpuProfile,
+  startupSnapshot,
+  stopCoverage,
+  takeCoverage,
+  writeHeapSnapshot,
+};
+"#,
+        );
+    }
+
+    if module_name == "vm" {
+        return String::from(
+            r#"function runInThisContext(code) {
+  return (0, eval)(String(code));
+}
+
+function createContext(context = {}) {
+  return context;
+}
+
+function isContext(context) {
+  return Boolean(context) && typeof context === "object";
+}
+
+function runInNewContext(code, context = {}) {
+  const params = Object.keys(context);
+  const values = Object.values(context);
+  return Function(...params, `return (${String(code)});`)(...values);
+}
+
+class Script {
+  constructor(code) {
+    this.code = String(code);
+  }
+
+  runInThisContext() {
+    return runInThisContext(this.code);
+  }
+
+  runInNewContext(context = {}) {
+    return runInNewContext(this.code, context);
+  }
+}
+
+export { Script, createContext, isContext, runInNewContext, runInThisContext };
+export default { Script, createContext, isContext, runInNewContext, runInThisContext };
+"#,
+        );
+    }
+
+    if module_name == "worker_threads" {
+        return String::from(
+            r#"function createNotImplementedError(feature) {
+  const error = new Error(`node:worker_threads ${feature} is not available in the Agent OS guest runtime`);
+  error.code = "ERR_NOT_IMPLEMENTED";
+  return error;
+}
+
+class MessagePort {
+  postMessage() {}
+  start() {}
+  close() {}
+  unref() {
+    return this;
+  }
+  ref() {
+    return this;
+  }
+}
+
+class MessageChannel {
+  constructor() {
+    this.port1 = new MessagePort();
+    this.port2 = new MessagePort();
+  }
+}
+
+class Worker {
+  constructor() {
+    throw createNotImplementedError("Worker");
+  }
+}
+
+function getEnvironmentData() {
+  return undefined;
+}
+
+function markAsUncloneable() {}
+
+function markAsUntransferable() {}
+
+function moveMessagePortToContext() {
+  throw createNotImplementedError("moveMessagePortToContext");
+}
+
+function postMessageToThread() {
+  throw createNotImplementedError("postMessageToThread");
+}
+
+function receiveMessageOnPort() {
+  return undefined;
+}
+
+function setEnvironmentData() {}
+
+export const BroadcastChannel = globalThis.BroadcastChannel;
+export { MessageChannel, MessagePort, Worker, getEnvironmentData, markAsUncloneable, markAsUntransferable, moveMessagePortToContext, postMessageToThread, receiveMessageOnPort, setEnvironmentData };
+export const SHARE_ENV = Symbol.for("agent-os.worker_threads.SHARE_ENV");
+export const isMainThread = true;
+export const parentPort = null;
+export const resourceLimits = {};
+export const threadId = 0;
+export const workerData = null;
+export default {
+  BroadcastChannel: globalThis.BroadcastChannel,
+  MessageChannel,
+  MessagePort,
+  SHARE_ENV,
+  Worker,
+  getEnvironmentData,
+  isMainThread,
+  markAsUncloneable,
+  markAsUntransferable,
+  moveMessagePortToContext,
+  parentPort,
+  postMessageToThread,
+  receiveMessageOnPort,
+  resourceLimits,
+  setEnvironmentData,
+  threadId,
+  workerData,
+};
 "#,
         );
     }
@@ -3967,8 +4253,36 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "spawn",
             "spawnSync",
         ],
+        "console" => &[
+            "Console",
+            "assert",
+            "clear",
+            "context",
+            "count",
+            "countReset",
+            "createTask",
+            "debug",
+            "dir",
+            "dirxml",
+            "error",
+            "group",
+            "groupCollapsed",
+            "groupEnd",
+            "info",
+            "log",
+            "profile",
+            "profileEnd",
+            "table",
+            "time",
+            "timeEnd",
+            "timeLog",
+            "timeStamp",
+            "trace",
+            "warn",
+        ],
         "crypto" => &[
             "createHash",
+            "getHashes",
             "getRandomValues",
             "randomBytes",
             "randomUUID",
@@ -4171,11 +4485,82 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "stripVTControlCharacters",
             "types",
         ],
-        "vm" => &["Script", "createContext", "isContext", "runInThisContext"],
+        "util/types" => &[
+            "isAnyArrayBuffer",
+            "isArgumentsObject",
+            "isArrayBuffer",
+            "isArrayBufferView",
+            "isAsyncFunction",
+            "isBigInt64Array",
+            "isBigIntObject",
+            "isBigUint64Array",
+            "isBooleanObject",
+            "isBoxedPrimitive",
+            "isCryptoKey",
+            "isDataView",
+            "isDate",
+            "isExternal",
+            "isFloat16Array",
+            "isFloat32Array",
+            "isFloat64Array",
+            "isGeneratorFunction",
+            "isGeneratorObject",
+            "isInt16Array",
+            "isInt32Array",
+            "isInt8Array",
+            "isKeyObject",
+            "isMap",
+            "isMapIterator",
+            "isModuleNamespaceObject",
+            "isNativeError",
+            "isNumberObject",
+            "isPromise",
+            "isProxy",
+            "isRegExp",
+            "isSet",
+            "isSetIterator",
+            "isSharedArrayBuffer",
+            "isStringObject",
+            "isSymbolObject",
+            "isTypedArray",
+            "isUint16Array",
+            "isUint32Array",
+            "isUint8Array",
+            "isUint8ClampedArray",
+            "isWeakMap",
+            "isWeakSet",
+        ],
+        "vm" => &[
+            "Script",
+            "createContext",
+            "isContext",
+            "runInNewContext",
+            "runInThisContext",
+        ],
         "v8" => &[
+            "cachedDataVersionTag",
+            "DefaultDeserializer",
+            "DefaultSerializer",
+            "Deserializer",
+            "GCProfiler",
+            "Serializer",
+            "deserialize",
+            "getCppHeapStatistics",
+            "getHeapCodeStatistics",
             "getHeapSnapshot",
             "getHeapSpaceStatistics",
             "getHeapStatistics",
+            "isStringOneByteRepresentation",
+            "promiseHooks",
+            "queryObjects",
+            "serialize",
+            "setFlagsFromString",
+            "setHeapSnapshotNearHeapLimit",
+            "startCpuProfile",
+            "startupSnapshot",
+            "stopCoverage",
+            "takeCoverage",
+            "writeHeapSnapshot",
         ],
         "worker_threads" => &[
             "MessageChannel",

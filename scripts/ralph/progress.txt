@@ -29,6 +29,7 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- JavaScript child-process launches must reuse `prepare_javascript_runtime_env(...)` and set `AGENT_OS_SANDBOX_ROOT` the same way top-level `execute()` does; otherwise spawned V8 children lose guest-path mappings, ESM package resolution falls back to `/unknown/...`, and npm CLIs behave differently when launched through `child_process`.
 - Pyodide `micropip` support in `crates/execution/assets/runners/python-runner.mjs` must keep guest `js` / `pyodide_js` imports blocked for user code while exposing only a narrow internal compat module to `micropip` and `pyodide.http`; if the runner or bundled import-cache assets change, bump `NODE_IMPORT_CACHE_ASSET_VERSION` in `crates/execution/src/node_import_cache.rs` so stale `/tmp/agent-os-node-import-cache-*` materializations do not hide the update.
 - `fs.promises` bridge work needs separate async V8 globals plus matching `map_bridge_method()` and `ASYNC_BRIDGE_FNS` updates; wrapping `fs.*Sync` in `async` functions still serializes `Promise.all(...)` behind the first sidecar response.
 - `AbortSignal` support in `crates/execution/assets/v8-bridge.source.js` needs explicit static helper coverage (`abort`, `timeout`, `any`) even when a native constructor exists; preserving the constructor alone is not enough to guarantee fetch cancellation APIs survive bridge bootstrap.
@@ -769,4 +770,14 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - `micropip` depends on `js` and `pyodide_js` internals, so Python hardening has to preserve the user-facing import block while giving only trusted runtime modules a scoped compat shim
   - Explicit wheel URLs are the safest test shape for Python package-install permission checks because they guarantee the install path exercises bridge-backed network access instead of a local preload shortcut
   - If `python-runner.mjs` or bundled Pyodide assets change and tests still behave like the old code, clear that by bumping `NODE_IMPORT_CACHE_ASSET_VERSION` before chasing nonexistent logic bugs
+---
+## 2026-04-08 17:35:12 PDT - US-075
+- Verified the unmodified `pi-cli` ACP path end-to-end with `packages/core/tests/pi-cli-headless.test.ts`, booting `pi-acp`, spawning the real `@mariozechner/pi-coding-agent` CLI in RPC mode, and asserting the write-tool turn updates the VM filesystem through `createSession("pi-cli")`
+- Fixed guest JavaScript child-process parity by preserving streamed child stdout/stderr bytes in the V8 bridge, rebuilding the top-level runtime env for spawned JS children, and adding focused `pi-acp` regression coverage for direct and child `undici` imports plus basic child `node` execution
+- Updated `crates/execution/AGENTS.md` with the child-runtime-env requirement and marked `US-075` complete in `scripts/ralph/prd.json`
+- Files changed: `crates/execution/{AGENTS.md,assets/v8-bridge.source.js,assets/v8-bridge.js}`, `crates/sidecar/src/execution.rs`, `packages/core/tests/{pi-acp-adapter.test.ts,pi-cli-headless.test.ts}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - If a spawned JavaScript child can execute simple code but ESM imports fail with `/unknown/...` or `'_resolveModule returned non-string'`, check whether the child launch path rebuilt the same runtime env (`AGENT_OS_GUEST_PATH_MAPPINGS`, allowed builtins, sandbox root) that top-level `execute()` uses
+  - The V8 bridge `child_process` shim has to preserve byte payloads that arrive as actual `Buffer`/`Uint8Array` values, not just base64-tagged RPC payloads, or guest parents will see child exit without the child stdout that real npm CLIs depend on
+  - For the upstream `pi-cli` compatibility story, absolute workspace paths make the E2E assertion stable without depending on separate relative-path semantics in the upstream tool layer
 ---

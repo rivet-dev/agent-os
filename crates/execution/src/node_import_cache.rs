@@ -15,7 +15,7 @@ const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
 const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "7";
-const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "7";
+const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "10";
 const NODE_IMPORT_CACHE_DIR_PREFIX: &str = "agent-os-node-import-cache";
 const DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const PYODIDE_DIST_DIR: &str = "pyodide-dist";
@@ -8329,6 +8329,21 @@ const BUILTIN_ASSETS: &[BuiltinAsset] = &[
         init_counter_key: "__agentOsBuiltinUtilInitCount",
     },
     BuiltinAsset {
+        name: "v8",
+        module_specifier: "node:v8",
+        init_counter_key: "__agentOsBuiltinV8InitCount",
+    },
+    BuiltinAsset {
+        name: "vm",
+        module_specifier: "node:vm",
+        init_counter_key: "__agentOsBuiltinVmInitCount",
+    },
+    BuiltinAsset {
+        name: "worker-threads",
+        module_specifier: "node:worker_threads",
+        init_counter_key: "__agentOsBuiltinWorkerThreadsInitCount",
+    },
+    BuiltinAsset {
         name: "zlib",
         module_specifier: "node:zlib",
         init_counter_key: "__agentOsBuiltinZlibInitCount",
@@ -8375,18 +8390,6 @@ const DENIED_BUILTIN_ASSETS: &[DeniedBuiltinAsset] = &[
     DeniedBuiltinAsset {
         name: "trace_events",
         module_specifier: "node:trace_events",
-    },
-    DeniedBuiltinAsset {
-        name: "v8",
-        module_specifier: "node:v8",
-    },
-    DeniedBuiltinAsset {
-        name: "vm",
-        module_specifier: "node:vm",
-    },
-    DeniedBuiltinAsset {
-        name: "worker_threads",
-        module_specifier: "node:worker_threads",
     },
 ];
 
@@ -8781,6 +8784,9 @@ fn render_builtin_asset_source(asset: &BuiltinAsset) -> String {
         "https" => render_https_builtin_asset_source(asset.init_counter_key),
         "tls" => render_tls_builtin_asset_source(asset.init_counter_key),
         "os" => render_os_builtin_asset_source(asset.init_counter_key),
+        "v8" => render_v8_builtin_asset_source(asset.init_counter_key),
+        "vm" => render_vm_builtin_asset_source(asset.init_counter_key),
+        "worker-threads" => render_worker_threads_builtin_asset_source(asset.init_counter_key),
         _ => {
             render_passthrough_builtin_asset_source(asset.module_specifier, asset.init_counter_key)
         }
@@ -9337,6 +9343,164 @@ export const type = mod.type;\n\
 export const uptime = mod.uptime;\n\
 export const userInfo = mod.userInfo;\n\
 export const version = mod.version;\n"
+    )
+}
+
+fn render_v8_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+const mod = process.getBuiltinModule?.(\"node:v8\");\n\
+if (!mod) {{\n\
+  throw new Error(\"Agent OS guest v8 compatibility module was not initialized\");\n\
+}}\n\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export const GCProfiler = mod.GCProfiler;\n\
+export const Deserializer = mod.Deserializer;\n\
+export const Serializer = mod.Serializer;\n\
+export const cachedDataVersionTag = mod.cachedDataVersionTag;\n\
+export const deserialize = mod.deserialize;\n\
+export const getCppHeapStatistics = mod.getCppHeapStatistics;\n\
+export const getHeapCodeStatistics = mod.getHeapCodeStatistics;\n\
+export const getHeapSnapshot = mod.getHeapSnapshot;\n\
+export const getHeapSpaceStatistics = mod.getHeapSpaceStatistics;\n\
+export const getHeapStatistics = mod.getHeapStatistics;\n\
+export const isStringOneByteRepresentation = mod.isStringOneByteRepresentation;\n\
+export const promiseHooks = mod.promiseHooks;\n\
+export const queryObjects = mod.queryObjects;\n\
+export const serialize = mod.serialize;\n\
+export const setFlagsFromString = mod.setFlagsFromString;\n\
+export const setHeapSnapshotNearHeapLimit = mod.setHeapSnapshotNearHeapLimit;\n\
+export const startCpuProfile = mod.startCpuProfile;\n\
+export const startupSnapshot = mod.startupSnapshot;\n\
+export const stopCoverage = mod.stopCoverage;\n\
+export const takeCoverage = mod.takeCoverage;\n\
+export const writeHeapSnapshot = mod.writeHeapSnapshot;\n"
+    )
+}
+
+fn render_vm_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+const mod = process.getBuiltinModule?.(\"node:vm\");\n\
+if (!mod) {{\n\
+  throw new Error(\"Agent OS guest vm compatibility module was not initialized\");\n\
+}}\n\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export const Script = mod.Script;\n\
+export const createContext = mod.createContext;\n\
+export const isContext = mod.isContext;\n\
+export const runInNewContext = mod.runInNewContext;\n\
+export const runInThisContext = mod.runInThisContext;\n"
+    )
+}
+
+fn render_worker_threads_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+\n\
+function createNotImplementedError(feature) {{\n\
+  const error = new Error(`node:worker_threads ${{feature}} is not available in the Agent OS guest runtime`);\n\
+  error.code = \"ERR_NOT_IMPLEMENTED\";\n\
+  return error;\n\
+}}\n\
+\n\
+class MessagePort {{\n\
+  postMessage() {{}}\n\
+  start() {{}}\n\
+  close() {{}}\n\
+  unref() {{\n\
+    return this;\n\
+  }}\n\
+  ref() {{\n\
+    return this;\n\
+  }}\n\
+}}\n\
+\n\
+class MessageChannel {{\n\
+  constructor() {{\n\
+    this.port1 = new MessagePort();\n\
+    this.port2 = new MessagePort();\n\
+  }}\n\
+}}\n\
+\n\
+class Worker {{\n\
+  constructor() {{\n\
+    throw createNotImplementedError(\"Worker\");\n\
+  }}\n\
+}}\n\
+\n\
+function getEnvironmentData() {{\n\
+  return undefined;\n\
+}}\n\
+\n\
+function markAsUncloneable() {{}}\n\
+\n\
+function markAsUntransferable() {{}}\n\
+\n\
+function moveMessagePortToContext() {{\n\
+  throw createNotImplementedError(\"moveMessagePortToContext\");\n\
+}}\n\
+\n\
+function postMessageToThread() {{\n\
+  throw createNotImplementedError(\"postMessageToThread\");\n\
+}}\n\
+\n\
+function receiveMessageOnPort() {{\n\
+  return undefined;\n\
+}}\n\
+\n\
+function setEnvironmentData() {{}}\n\
+\n\
+const mod = {{\n\
+  BroadcastChannel: globalThis.BroadcastChannel,\n\
+  MessageChannel,\n\
+  MessagePort,\n\
+  SHARE_ENV: Symbol.for(\"agent-os.worker_threads.SHARE_ENV\"),\n\
+  Worker,\n\
+  getEnvironmentData,\n\
+  isMainThread: true,\n\
+  markAsUncloneable,\n\
+  markAsUntransferable,\n\
+  moveMessagePortToContext,\n\
+  parentPort: null,\n\
+  postMessageToThread,\n\
+  receiveMessageOnPort,\n\
+  resourceLimits: {{}},\n\
+  setEnvironmentData,\n\
+  threadId: 0,\n\
+  workerData: null,\n\
+}};\n\
+\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export const BroadcastChannel = mod.BroadcastChannel;\n\
+export const MessageChannel = mod.MessageChannel;\n\
+export const MessagePort = mod.MessagePort;\n\
+export const SHARE_ENV = mod.SHARE_ENV;\n\
+export const Worker = mod.Worker;\n\
+export const getEnvironmentData = mod.getEnvironmentData;\n\
+export const isMainThread = mod.isMainThread;\n\
+export const markAsUncloneable = mod.markAsUncloneable;\n\
+export const markAsUntransferable = mod.markAsUntransferable;\n\
+export const moveMessagePortToContext = mod.moveMessagePortToContext;\n\
+export const parentPort = mod.parentPort;\n\
+export const postMessageToThread = mod.postMessageToThread;\n\
+export const receiveMessageOnPort = mod.receiveMessageOnPort;\n\
+export const resourceLimits = mod.resourceLimits;\n\
+export const setEnvironmentData = mod.setEnvironmentData;\n\
+export const threadId = mod.threadId;\n\
+export const workerData = mod.workerData;\n"
     )
 }
 
@@ -10174,9 +10338,6 @@ export async function loadPyodide(options) {
             String::from("module"),
             String::from("net"),
             String::from("trace_events"),
-            String::from("v8"),
-            String::from("vm"),
-            String::from("worker_threads"),
         ]);
 
         assert_eq!(actual, expected);
@@ -10188,6 +10349,29 @@ export async function loadPyodide(options) {
 
         assert!(module_asset.contains("node:module is not available"));
         assert!(trace_events_asset.contains("ERR_ACCESS_DENIED"));
+    }
+
+    #[test]
+    fn ensure_materialized_writes_v8_vm_and_worker_threads_builtin_assets() {
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let builtins_root = import_cache.asset_root().join("builtins");
+        let v8_asset =
+            fs::read_to_string(builtins_root.join("v8.mjs")).expect("read v8 builtin asset");
+        let vm_asset =
+            fs::read_to_string(builtins_root.join("vm.mjs")).expect("read vm builtin asset");
+        let worker_threads_asset = fs::read_to_string(builtins_root.join("worker-threads.mjs"))
+            .expect("read worker_threads builtin asset");
+
+        assert!(v8_asset.contains("process.getBuiltinModule?.(\"node:v8\")"));
+        assert!(v8_asset.contains("export const cachedDataVersionTag = mod.cachedDataVersionTag;"));
+        assert!(vm_asset.contains("process.getBuiltinModule?.(\"node:vm\")"));
+        assert!(vm_asset.contains("export const runInThisContext = mod.runInThisContext;"));
+        assert!(worker_threads_asset.contains("class Worker"));
+        assert!(worker_threads_asset.contains("export const isMainThread = mod.isMainThread;"));
     }
 
     #[test]

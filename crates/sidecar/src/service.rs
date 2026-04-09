@@ -135,7 +135,7 @@ struct LegacyJavascriptChildProcessSpawnOptions {
     max_buffer: Option<usize>,
 }
 
-fn parse_javascript_child_process_spawn_request(
+pub(crate) fn parse_javascript_child_process_spawn_request(
     vm: &VmState,
     args: &[Value],
 ) -> Result<(JavascriptChildProcessSpawnRequest, Option<usize>), SidecarError> {
