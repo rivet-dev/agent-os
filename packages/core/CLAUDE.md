@@ -52,6 +52,7 @@ Each agent type needs:
   - `pnpm --dir packages/core exec vitest run tests/path/to/file.test.ts` or `pnpm --dir packages/core exec vitest run -t "test name pattern"`
   - Never run bare `pnpm test` without a filter -- integration tests can hang indefinitely.
   - Use low timeouts for test commands (60000ms max).
+- For `tests/wasm-commands.test.ts`, broad `-t "grep"` or `-t "sed"` filters can pull in unrelated `rg`, `gzip`, or cross-package pipeline coverage via substring matches. When a story only gates the `grep`/`sed` blocks, use the explicit case names or a narrower `--testNamePattern` that only matches those block entries.
 - **Always verify related tests pass before considering work done.**
 - **All tests run inside the VM** -- network servers, file I/O, agent processes.
 - For `vm.exec()` cwd/path tests, prefer setting up files from inside the guest shell when the assertion is about command resolution or relative paths. VM filesystem API writes becoming visible to host-backed runtimes is a separate shadow-sync surface and should be tested independently.

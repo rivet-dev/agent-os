@@ -6,6 +6,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
 - The renamed core workspace package is `@rivet-dev/agent-os-core`; use that name for both package dependencies and TypeScript subpath imports like `@rivet-dev/agent-os-core/test/*` and `@rivet-dev/agent-os-core/internal/runtime-compat`.
 - Linked registry software packages are consumed through their package entrypoints (`dist/index.js`) in `packages/core` tests; when you change a `registry/software/*` descriptor, rebuild that package before trusting package-level Vitest results.
+- In `packages/core/tests/wasm-commands.test.ts`, broad Vitest name filters like `-t "grep"` or `-t "sed"` also match ripgrep, gzip, and cross-package pipeline cases; use explicit command-case names or a tighter `--testNamePattern` when a story only gates one command block.
 - The patched WASM `host_fs` ABI returns values directly, not via out-pointers: `fd_mode(fd)` and `path_mode(path_ptr, path_len, follow_symlinks)` return the mode, while `chmod(path_ptr, path_len, mode)` returns a status code.
 - For built-in agents in `packages/core/src/agents.ts`, derive `AgentType` from `keyof typeof AGENT_CONFIGS` and validate launch argv/env with a mock ACP adapter that echoes `process.argv` plus selected env vars through `getSessionAgentInfo()` while exercising the shipped registry software package.
 - Root install reproducibility is best verified with the three-part probe `pnpm install --frozen-lockfile`, `pnpm check-types`, and a package-local `pnpm --dir <pkg> exec <bin> --version` check to prove the root install materialized script binaries for workspace packages.
@@ -275,4 +276,15 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - The WASM runner's `host_fs` bridge is not a WASI-style out-parameter API; if a patched registry binary imports `host_fs.fd_mode` or `host_fs.path_mode`, return the mode directly or the command will fail in ways that look unrelated to PATH resolution.
   - `packages/core/tests/wasm-commands.test.ts` currently mixes explicit story gates with broader exploratory coverage, so when a PRD story names a narrower accepted command set, keep the assertions aligned to that set instead of coupling the story to deeper unsupported runtime features like threaded `sort`.
   - For linked registry software packages, rebuilding the package after descriptor edits is part of verification because package consumers resolve `dist/index.js`, not `src/index.ts`.
+---
+
+## 2026-04-09 12:28:13 PDT - US-018
+- Verified the scoped `grep` and `sed` command-package acceptance surface is already green on `finish-ts-rust-migration`; no runtime or package code changes were required for this story.
+- Recorded the Vitest name-filter gotcha in `packages/core/CLAUDE.md` so future command-matrix stories do not misread unrelated `rg`, `gzip`, or cross-package pipeline failures as `grep`/`sed` regressions.
+- Verified the story with `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts -t "basic pattern match|grep -c counts matches|grep -i case insensitive|grep -v inverts match|grep with regex|egrep extended regex|grep pipe from stdin|substitute first occurrence|global substitution|delete lines matching pattern|print specific line with -n and p"` and `pnpm check-types`.
+- Files changed: `packages/core/CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `tests/wasm-commands.test.ts` uses shared wording across multiple command families, so substring-based Vitest filters are not reliable proof of a single command package story.
+  - When a PRD story names a specific command block, verify against the exact block entries instead of a broad keyword filter that can pull in known-red neighboring coverage.
+  - Verification-only story closures should still update the local instructions and progress log when the backlog lag comes from stale `passes: false` state rather than missing code.
 ---
