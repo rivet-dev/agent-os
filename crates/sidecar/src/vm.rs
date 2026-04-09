@@ -22,8 +22,8 @@ use crate::service::{
 };
 use crate::state::{
     BridgeError, VmConfiguration, VmDnsConfig, VmLayer, VmLayerStore, VmOverlayLayer, VmState,
-    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME, JAVASCRIPT_COMMAND,
-    PYTHON_COMMAND, WASM_COMMAND,
+    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME,
+    JAVASCRIPT_COMMAND, WASM_COMMAND,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -100,7 +100,6 @@ where
         refresh_guest_command_path_env(&mut guest_env, &command_guest_paths);
         let mut execution_commands = vec![
             String::from(JAVASCRIPT_COMMAND),
-            String::from(PYTHON_COMMAND),
             String::from(WASM_COMMAND),
         ];
         execution_commands.extend(command_guest_paths.keys().cloned());
@@ -247,7 +246,6 @@ where
         refresh_guest_command_path_env(&mut vm.guest_env, &vm.command_guest_paths);
         let mut execution_commands = vec![
             String::from(JAVASCRIPT_COMMAND),
-            String::from(PYTHON_COMMAND),
             String::from(WASM_COMMAND),
         ];
         execution_commands.extend(vm.command_guest_paths.keys().cloned());

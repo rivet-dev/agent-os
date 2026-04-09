@@ -19,6 +19,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - The sidecar TLS reader and writer share one `rustls::StreamOwned` mutex, so timed-out TLS read loops must yield briefly or guest HTTPS request writes can be starved and undici/fetch will see EOF before the request leaves the VM.
 - For `moduleAccessCwd` regressions, use `packages/core/tests/native-sidecar-process.test.ts` for the real-sidecar `/root/node_modules` visibility probe and `packages/core/tests/software-projection.test.ts` for guest read-only enforcement on projected package roots.
 - Projected native assets under `/root/node_modules` are a visibility-only contract today; guest `child_process.spawn*()` still routes those paths through the VM resolver, so native ELF probes fail deterministically during WASM warmup instead of running host-native code.
+- The native sidecar's shell-visible builtin runtime stubs should mirror the compat runtime surface: keep `node` and `wasm` seeded for guest command resolution, but do not materialize extra `/bin/*` runtime stubs like `python` unless a lower snapshot or installed software explicitly provides them; direct runtime dispatch still covers non-shell-visible runtimes.
 
 ## 2026-04-09 06:12:40 PDT - US-CC-001
 - Implemented the remaining workspace/package rename cleanup for `@rivet-dev/agent-os-core`, including the last manifest dependency, benchmark imports, secure-exec/dev-shell subpath aliases, registry test imports, and the root instruction note to keep future changes on the new package name.
@@ -205,4 +206,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - `listAgents()` can expose agent IDs beyond the built-in core union, so the public registry entry type should not assume only a manual `AgentType` list.
   - The right regression test for adapter launch config is a real `createSession()` call with the shipped registry software descriptor plus a mock ACP adapter that echoes `argv` and env, not a unit test that only inspects static config objects.
   - Codex is now part of the shipped built-in agent surface in `packages/core`, so future agent-metadata changes need to update both the core config map and the package docs/tests in the same change.
+---
+
+## 2026-04-09 11:21:25 PDT - US-012
+- Restored read-only preseeded-lower behavior by stopping the native sidecar from materializing a shell-visible `/bin/python` runtime stub during VM bootstrap/config refresh. The sidecar now mirrors the compat runtime surface and only seeds `node` plus `wasm` unless a lower snapshot or installed software explicitly provides additional commands.
+- Files changed: `crates/sidecar/src/vm.rs`, `crates/AGENTS.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Sidecar/runtime drift can show up as guest filesystem shape regressions, not just execution failures; compare the native sidecar bootstrap surface against `packages/core/src/runtime-compat.ts` before adding more `/bin/*` stubs.
+  - Direct runtime dispatch and shell-visible command stubs are separate contracts: a runtime can remain executable via `ExecuteRequest { runtime: ... }` without appearing in the guest filesystem.
+  - The exact acceptance path for this story is sufficient: `pnpm --dir packages/core exec vitest run tests/agent-os-base-filesystem.test.ts` catches the unexpected lower-surface leak, and `pnpm check-types` confirms the sidecar/core drift fix stays type-safe across the workspace.
 ---
