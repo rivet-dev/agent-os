@@ -8224,6 +8224,77 @@ var __bridge = (() => {
       }
     }
   }
+  function createOutputAsyncIterator(stream) {
+    const queuedChunks = [];
+    const queuedErrors = [];
+    const pendingResolves = [];
+    let finished = false;
+    const settlePending = () => {
+      while (pendingResolves.length > 0) {
+        const resolve = pendingResolves.shift();
+        if (queuedErrors.length > 0) {
+          resolve(Promise.reject(queuedErrors.shift()));
+          continue;
+        }
+        if (queuedChunks.length > 0) {
+          resolve(Promise.resolve({ done: false, value: queuedChunks.shift() }));
+          continue;
+        }
+        if (finished) {
+          resolve(Promise.resolve({ done: true, value: void 0 }));
+          continue;
+        }
+        pendingResolves.unshift(resolve);
+        break;
+      }
+    };
+    const onData = (chunk) => {
+      queuedChunks.push(chunk);
+      settlePending();
+    };
+    const onEnd = () => {
+      finished = true;
+      settlePending();
+    };
+    const onError = (error) => {
+      queuedErrors.push(error);
+      finished = true;
+      settlePending();
+    };
+    stream.on("data", onData);
+    stream.on("end", onEnd);
+    stream.on("close", onEnd);
+    stream.on("error", onError);
+    scheduleOutputFlush(stream);
+    return {
+      next() {
+        if (queuedErrors.length > 0) {
+          return Promise.reject(queuedErrors.shift());
+        }
+        if (queuedChunks.length > 0) {
+          return Promise.resolve({ done: false, value: queuedChunks.shift() });
+        }
+        if (finished) {
+          return Promise.resolve({ done: true, value: void 0 });
+        }
+        return new Promise((resolve) => {
+          pendingResolves.push(resolve);
+        });
+      },
+      return() {
+        stream.off("data", onData);
+        stream.off("end", onEnd);
+        stream.off("close", onEnd);
+        stream.off("error", onError);
+        finished = true;
+        settlePending();
+        return Promise.resolve({ done: true, value: void 0 });
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      }
+    };
+  }
   var _nextChildPid = 1e3;
   var ChildProcess = class {
     _listeners = {};
@@ -8344,6 +8415,9 @@ var __bridge = (() => {
         },
         resume() {
           return this;
+        },
+        [Symbol.asyncIterator]() {
+          return createOutputAsyncIterator(this);
         }
       };
       this.stderr = {
@@ -8429,6 +8503,9 @@ var __bridge = (() => {
         },
         resume() {
           return this;
+        },
+        [Symbol.asyncIterator]() {
+          return createOutputAsyncIterator(this);
         }
       };
       this.stdio = [this.stdin, this.stdout, this.stderr];
@@ -15005,6 +15082,199 @@ ${headerLines}\r
     }
     return 0;
   }
+  function normalizeIpFamilyLabel(address, family) {
+    if (family === "ipv4" || family === 4) {
+      return "ipv4";
+    }
+    if (family === "ipv6" || family === 6) {
+      return "ipv6";
+    }
+    const detected = classifyIpAddress(address);
+    if (detected === 4) {
+      return "ipv4";
+    }
+    if (detected === 6) {
+      return "ipv6";
+    }
+    throw new TypeError(`Invalid IP address: ${address}`);
+  }
+  function ipv4ToBigInt(address) {
+    return address.split(".").reduce((value, segment) => (value << 8n) + BigInt(Number(segment)), 0n);
+  }
+  function expandIpv6Address(address) {
+    let normalized = String(address);
+    const zoneIndex = normalized.indexOf("%");
+    if (zoneIndex !== -1) {
+      normalized = normalized.slice(0, zoneIndex);
+    }
+    if (normalized.includes(".")) {
+      const lastColonIndex = normalized.lastIndexOf(":");
+      const ipv4Part = normalized.slice(lastColonIndex + 1);
+      const ipv4Value = ipv4ToBigInt(ipv4Part);
+      const high = Number((ipv4Value >> 16n) & 65535n).toString(16);
+      const low = Number(ipv4Value & 65535n).toString(16);
+      normalized = `${normalized.slice(0, lastColonIndex)}:${high}:${low}`;
+    }
+    const hasDoubleColon = normalized.includes("::");
+    const [leftRaw, rightRaw] = hasDoubleColon ? normalized.split("::") : [normalized, ""];
+    const left = leftRaw.length > 0 ? leftRaw.split(":") : [];
+    const right = rightRaw.length > 0 ? rightRaw.split(":") : [];
+    const fill = hasDoubleColon ? Math.max(0, 8 - (left.length + right.length)) : 0;
+    const parts = [...left, ...new Array(fill).fill("0"), ...right];
+    if (parts.length !== 8) {
+      throw new TypeError(`Invalid IPv6 address: ${address}`);
+    }
+    return parts.map((part) => part.length === 0 ? "0" : part);
+  }
+  function ipv6ToBigInt(address) {
+    return expandIpv6Address(address).reduce((value, part) => (value << 16n) + BigInt(parseInt(part, 16)), 0n);
+  }
+  function ipAddressToBigInt(address, family) {
+    return family === "ipv4" ? ipv4ToBigInt(address) : ipv6ToBigInt(address);
+  }
+  function formatBlockListRule(rule) {
+    if (rule.type === "address") {
+      return `Address: ${rule.family === "ipv4" ? "IPv4" : "IPv6"} ${rule.address}`;
+    }
+    if (rule.type === "range") {
+      return `Range: ${rule.family === "ipv4" ? "IPv4" : "IPv6"} ${rule.start}-${rule.end}`;
+    }
+    return `Subnet: ${rule.family === "ipv4" ? "IPv4" : "IPv6"} ${rule.network}/${rule.prefix}`;
+  }
+  var BlockList = class {
+    _rules = [];
+    addAddress(address, family) {
+      const normalizedFamily = normalizeIpFamilyLabel(address, family);
+      this._rules.push({ type: "address", family: normalizedFamily, address: String(address) });
+      return this;
+    }
+    addRange(start, end, family) {
+      const normalizedFamily = normalizeIpFamilyLabel(start, family);
+      if (normalizeIpFamilyLabel(end, normalizedFamily) !== normalizedFamily) {
+        throw new TypeError("BlockList range family mismatch");
+      }
+      this._rules.push({
+        type: "range",
+        family: normalizedFamily,
+        start: String(start),
+        end: String(end)
+      });
+      return this;
+    }
+    addSubnet(network, prefix, family) {
+      const normalizedFamily = normalizeIpFamilyLabel(network, family);
+      const numericPrefix = Number(prefix);
+      const maxPrefix = normalizedFamily === "ipv4" ? 32 : 128;
+      if (!Number.isInteger(numericPrefix) || numericPrefix < 0 || numericPrefix > maxPrefix) {
+        throw new RangeError(`Invalid subnet prefix: ${prefix}`);
+      }
+      this._rules.push({
+        type: "subnet",
+        family: normalizedFamily,
+        network: String(network),
+        prefix: numericPrefix
+      });
+      return this;
+    }
+    check(address, family) {
+      const normalizedFamily = normalizeIpFamilyLabel(address, family);
+      const value = ipAddressToBigInt(String(address), normalizedFamily);
+      for (const rule of this._rules) {
+        if (rule.family !== normalizedFamily) {
+          continue;
+        }
+        if (rule.type === "address" && value === ipAddressToBigInt(rule.address, normalizedFamily)) {
+          return true;
+        }
+        if (rule.type === "range") {
+          const start = ipAddressToBigInt(rule.start, normalizedFamily);
+          const end = ipAddressToBigInt(rule.end, normalizedFamily);
+          if (value >= start && value <= end) {
+            return true;
+          }
+        }
+        if (rule.type === "subnet") {
+          const bits = normalizedFamily === "ipv4" ? 32n : 128n;
+          const prefixBits = BigInt(rule.prefix);
+          const shift = bits - prefixBits;
+          const mask = prefixBits === 0n ? 0n : ((1n << bits) - 1n) ^ ((1n << shift) - 1n);
+          const network = ipAddressToBigInt(rule.network, normalizedFamily);
+          if ((value & mask) === (network & mask)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+    toJSON() {
+      return this._rules.map((rule) => ({ ...rule }));
+    }
+    fromJSON(value) {
+      if (!Array.isArray(value)) {
+        throw new TypeError("BlockList JSON must be an array");
+      }
+      this._rules = value.map((rule) => ({ ...rule }));
+      return this;
+    }
+    get rules() {
+      return this._rules.map((rule) => formatBlockListRule(rule));
+    }
+  };
+  var defaultAutoSelectFamily = true;
+  var defaultAutoSelectFamilyAttemptTimeout = 250;
+  var SocketAddress = class _SocketAddress {
+    constructor(options = {}) {
+      const address = String(options.address ?? "");
+      const family = normalizeIpFamilyLabel(address, options.family);
+      const port = Number(options.port ?? 0);
+      const flowlabel = Number(options.flowlabel ?? 0);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) {
+        throw new RangeError(`Invalid port: ${options.port}`);
+      }
+      if (!Number.isInteger(flowlabel) || flowlabel < 0) {
+        throw new RangeError(`Invalid flowlabel: ${options.flowlabel}`);
+      }
+      this.address = address;
+      this.port = port;
+      this.family = family;
+      this.flowlabel = flowlabel;
+    }
+    toJSON() {
+      return {
+        address: this.address,
+        port: this.port,
+        family: this.family,
+        flowlabel: this.flowlabel
+      };
+    }
+    static isSocketAddress(value) {
+      return value instanceof _SocketAddress;
+    }
+    static parse(value) {
+      const input = String(value);
+      if (input.startsWith("[")) {
+        const closingIndex = input.indexOf("]");
+        if (closingIndex === -1) {
+          return void 0;
+        }
+        const address = input.slice(1, closingIndex);
+        const port = input[closingIndex + 1] === ":" ? Number(input.slice(closingIndex + 2)) : 0;
+        return new _SocketAddress({ address, family: "ipv6", port });
+      }
+      const lastColonIndex = input.lastIndexOf(":");
+      if (lastColonIndex !== -1 && input.indexOf(":") === lastColonIndex) {
+        const address = input.slice(0, lastColonIndex);
+        const port = Number(input.slice(lastColonIndex + 1));
+        if (classifyIpAddress(address) !== 0 && Number.isInteger(port)) {
+          return new _SocketAddress({ address, port });
+        }
+      }
+      if (classifyIpAddress(input) !== 0) {
+        return new _SocketAddress({ address: input });
+      }
+      return void 0;
+    }
+  };
   function normalizeSocketTimeout(timeout) {
     if (typeof timeout !== "number") {
       throw createTimeoutArgTypeError("timeout", timeout);
@@ -16280,12 +16550,21 @@ ${headerLines}\r
     return null;
   }
   var netModule = {
+    BlockList,
     Socket: NetSocket,
+    SocketAddress,
     Server: NetServerCallable,
+    Stream: NetSocket,
     connect: netConnect,
     createConnection: netConnect,
     createServer(optionsOrListener, maybeListener) {
       return new NetServer(optionsOrListener, maybeListener);
+    },
+    getDefaultAutoSelectFamily() {
+      return defaultAutoSelectFamily;
+    },
+    getDefaultAutoSelectFamilyAttemptTimeout() {
+      return defaultAutoSelectFamilyAttemptTimeout;
     },
     isIP(input) {
       return classifyIpAddress(input);
@@ -16295,6 +16574,16 @@ ${headerLines}\r
     },
     isIPv6(input) {
       return classifyIpAddress(input) === 6;
+    },
+    setDefaultAutoSelectFamily(value) {
+      defaultAutoSelectFamily = value !== false;
+    },
+    setDefaultAutoSelectFamilyAttemptTimeout(value) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric < 0) {
+        throw new RangeError(`Invalid auto-select family attempt timeout: ${value}`);
+      }
+      defaultAutoSelectFamilyAttemptTimeout = Math.trunc(numeric);
     }
   };
   function createSecureContextWrapper(options) {
@@ -19286,12 +19575,6 @@ ${headerLines}\r
       const startedAt = this._times.get(label);
       this.log(`${label}: ${Date.now() - startedAt}ms`, ...args);
     }
-    timeStamp() {
-    }
-    profile() {
-    }
-    profileEnd() {
-    }
   }
   const defaultConsole = new Console();
   globalThis.console = defaultConsole;
@@ -19322,13 +19605,13 @@ ${headerLines}\r
     groupEnd: defaultConsole.groupEnd.bind(defaultConsole),
     info: defaultConsole.info.bind(defaultConsole),
     log: defaultConsole.log.bind(defaultConsole),
-    profile: defaultConsole.profile.bind(defaultConsole),
-    profileEnd: defaultConsole.profileEnd.bind(defaultConsole),
+    profile: void 0,
+    profileEnd: void 0,
     table: defaultConsole.table.bind(defaultConsole),
     time: defaultConsole.time.bind(defaultConsole),
     timeEnd: defaultConsole.timeEnd.bind(defaultConsole),
     timeLog: defaultConsole.timeLog.bind(defaultConsole),
-    timeStamp: defaultConsole.timeStamp.bind(defaultConsole),
+    timeStamp: void 0,
     trace: defaultConsole.trace.bind(defaultConsole),
     warn: defaultConsole.warn.bind(defaultConsole)
   };
@@ -19567,6 +19850,8 @@ ${headerLines}\r
   var _stdinLiveBuffer = "";
   var _stdinLiveStarted = false;
   var _stdinLiveHandleRegistered = false;
+  var _stdinLiveTerminalEventsScheduled = false;
+  var _stdinLiveTerminalEventsEmitted = false;
   exposeMutableRuntimeStateGlobal(
     "_stdinData",
     typeof _processConfig !== "undefined" && _processConfig.stdin || ""
@@ -19653,14 +19938,32 @@ ${headerLines}\r
     _stdinLiveBuffer = "";
     const data = _stdin.encoding ? chunk : import_buffer2.Buffer.from(chunk);
     emitStdinListeners("data", data);
+    maybeEmitLiveStdinTerminalEvents();
+  }
+  function maybeEmitLiveStdinTerminalEvents() {
+    if (!getStdinEnded() || _stdinLiveTerminalEventsEmitted || _stdinLiveBuffer.length > 0) {
+      return;
+    }
+    if (_stdinLiveTerminalEventsScheduled) {
+      return;
+    }
+    _stdinLiveTerminalEventsScheduled = true;
+    queueMicrotask(() => {
+      _stdinLiveTerminalEventsScheduled = false;
+      if (!getStdinEnded() || _stdinLiveTerminalEventsEmitted || _stdinLiveBuffer.length > 0) {
+        return;
+      }
+      _stdinLiveTerminalEventsEmitted = true;
+      emitStdinListeners("end");
+      emitStdinListeners("close");
+      syncLiveStdinHandle(false);
+    });
   }
   function finishLiveStdin() {
     if (getStdinEnded()) return;
     setStdinEnded(true);
     flushLiveStdinBuffer();
-    emitStdinListeners("end");
-    emitStdinListeners("close");
-    syncLiveStdinHandle(false);
+    maybeEmitLiveStdinTerminalEvents();
   }
   function _getStreamStdin() {
     return typeof __runtimeStreamStdin !== "undefined" && !!__runtimeStreamStdin;
@@ -19747,6 +20050,9 @@ ${headerLines}\r
       if (event === "data" && this.paused) {
         this.resume();
       }
+      if ((event === "end" || event === "close") && (_getStdinIsTTY() || _getStreamStdin())) {
+        maybeEmitLiveStdinTerminalEvents();
+      }
       if (event === "end" && getStdinData() && !getStdinEnded()) {
         setStdinFlowMode(true);
         _emitStdinData();
@@ -19761,6 +20067,9 @@ ${headerLines}\r
       }
       if (event === "data" && this.paused) {
         this.resume();
+      }
+      if ((event === "end" || event === "close") && (_getStdinIsTTY() || _getStreamStdin())) {
+        maybeEmitLiveStdinTerminalEvents();
       }
       if (event === "end" && getStdinData() && !getStdinEnded()) {
         setStdinFlowMode(true);
@@ -19801,6 +20110,7 @@ ${headerLines}\r
       setStdinFlowMode(true);
       flushLiveStdinBuffer();
       _emitStdinData();
+      maybeEmitLiveStdinTerminalEvents();
       return this;
     },
     setEncoding(enc) {
@@ -19820,12 +20130,75 @@ ${headerLines}\r
     get isTTY() {
       return _getStdinIsTTY();
     },
-    // For readline compatibility
-    [Symbol.asyncIterator]: async function* () {
-      const lines = getStdinData().split("\n");
-      for (const line of lines) {
-        if (line) yield line;
-      }
+    [Symbol.asyncIterator]: function() {
+      const stream = this;
+      const queuedChunks = [];
+      const pendingResolves = [];
+      let done = false;
+      let error = null;
+      const flush = () => {
+        while (pendingResolves.length > 0) {
+          if (error) {
+            pendingResolves.shift()(Promise.reject(error));
+            continue;
+          }
+          if (queuedChunks.length > 0) {
+            pendingResolves.shift()(Promise.resolve({ done: false, value: queuedChunks.shift() }));
+            continue;
+          }
+          if (done) {
+            pendingResolves.shift()(Promise.resolve({ done: true, value: void 0 }));
+            continue;
+          }
+          break;
+        }
+      };
+      const onData = (chunk) => {
+        queuedChunks.push(chunk);
+        flush();
+      };
+      const onEnd = () => {
+        done = true;
+        flush();
+      };
+      const onError = (reason) => {
+        error = reason;
+        done = true;
+        flush();
+      };
+      stream.on("end", onEnd);
+      stream.on("close", onEnd);
+      stream.on("error", onError);
+      stream.on("data", onData);
+      stream.resume();
+      return {
+        next() {
+          if (error) {
+            return Promise.reject(error);
+          }
+          if (queuedChunks.length > 0) {
+            return Promise.resolve({ done: false, value: queuedChunks.shift() });
+          }
+          if (done) {
+            return Promise.resolve({ done: true, value: void 0 });
+          }
+          return new Promise((resolve) => {
+            pendingResolves.push(resolve);
+          });
+        },
+        return() {
+          done = true;
+          stream.off?.("data", onData);
+          stream.off?.("end", onEnd);
+          stream.off?.("close", onEnd);
+          stream.off?.("error", onError);
+          flush();
+          return Promise.resolve({ done: true, value: void 0 });
+        },
+        [Symbol.asyncIterator]() {
+          return this;
+        }
+      };
     }
   };
   exposeCustomGlobal("_stdinDispatch", stdinDispatch);
@@ -20199,6 +20572,8 @@ ${headerLines}\r
     _stdinLiveBuffer = "";
     _stdinLiveStarted = false;
     _stdinLiveDecoder = new TextDecoder();
+    _stdinLiveTerminalEventsScheduled = false;
+    _stdinLiveTerminalEventsEmitted = false;
     for (const key of Object.keys(_stdinListeners)) {
       _stdinListeners[key] = [];
     }
@@ -20353,6 +20728,17 @@ ${headerLines}\r
           return combined.filter((entry) => entry.entryType === type);
         }
         return combined;
+      };
+    }
+    if (typeof perf.getEntries !== "function") {
+      perf.getEntries = function() {
+        return [...marks.values()].flatMap((entries) => [...entries]).concat(measures);
+      };
+    }
+    if (typeof perf.getEntriesByType !== "function") {
+      perf.getEntriesByType = function(type) {
+        const normalizedType = String(type ?? "");
+        return perf.getEntries().filter((entry) => entry.entryType === normalizedType);
       };
     }
     if (typeof perf.clearMarks !== "function") {
@@ -21810,6 +22196,16 @@ ${headerLines}\r
   var builtinBufferStdlibModule = cloneStdlibModule(bufferStdlibModuleNs);
   var builtinConstantsStdlibModule = cloneStdlibModule(constantsStdlibModuleNs);
   var builtinEventsStdlibModule = cloneStdlibModule(eventsStdlibModuleNs);
+  if (typeof builtinEventsStdlibModule?.EventEmitter === "function") {
+    Object.assign(builtinEventsStdlibModule.EventEmitter, builtinEventsStdlibModule, eventsModule);
+    builtinEventsStdlibModule = builtinEventsStdlibModule.EventEmitter;
+    builtinEventsStdlibModule.EventEmitter = builtinEventsStdlibModule;
+  } else {
+    builtinEventsStdlibModule = {
+      ...builtinEventsStdlibModule,
+      ...eventsModule
+    };
+  }
   var builtinPathStdlibModule = cloneStdlibModule(pathStdlibModuleNs);
   if (builtinPathStdlibModule?.normalize) {
     const builtinPathNormalize = builtinPathStdlibModule.normalize.bind(builtinPathStdlibModule);
@@ -21820,6 +22216,88 @@ ${headerLines}\r
   var builtinPunycodeStdlibModule = cloneStdlibModule(punycodeStdlibModuleNs);
   var builtinQuerystringStdlibModule = cloneStdlibModule(querystringStdlibModuleNs);
   var builtinStreamStdlibModule = cloneStdlibModule(streamStdlibModuleNs);
+  function defineReadableAsyncIterator(target) {
+    if (!target || typeof target[Symbol.asyncIterator] === "function") {
+      return;
+    }
+    Object.defineProperty(target, Symbol.asyncIterator, {
+      configurable: true,
+      value: function() {
+        const stream = this;
+        const queuedChunks = [];
+        const pendingResolves = [];
+        let done = false;
+        let error = null;
+        const flush = () => {
+          while (pendingResolves.length > 0) {
+            if (error) {
+              pendingResolves.shift()(Promise.reject(error));
+              continue;
+            }
+            if (queuedChunks.length > 0) {
+              pendingResolves.shift()(Promise.resolve({ done: false, value: queuedChunks.shift() }));
+              continue;
+            }
+            if (done) {
+              pendingResolves.shift()(Promise.resolve({ done: true, value: void 0 }));
+              continue;
+            }
+            break;
+          }
+        };
+        const onData = (chunk) => {
+          queuedChunks.push(chunk);
+          flush();
+        };
+        const onEnd = () => {
+          done = true;
+          flush();
+        };
+        const onError = (reason) => {
+          error = reason;
+          done = true;
+          flush();
+        };
+        stream.on?.("data", onData);
+        stream.on?.("end", onEnd);
+        stream.on?.("close", onEnd);
+        stream.on?.("error", onError);
+        stream.resume?.();
+        return {
+          next() {
+            if (error) {
+              return Promise.reject(error);
+            }
+            if (queuedChunks.length > 0) {
+              return Promise.resolve({ done: false, value: queuedChunks.shift() });
+            }
+            if (done) {
+              return Promise.resolve({ done: true, value: void 0 });
+            }
+            return new Promise((resolve) => {
+              pendingResolves.push(resolve);
+            });
+          },
+          return() {
+            done = true;
+            stream.off?.("data", onData);
+            stream.off?.("end", onEnd);
+            stream.off?.("close", onEnd);
+            stream.off?.("error", onError);
+            flush();
+            return Promise.resolve({ done: true, value: void 0 });
+          },
+          [Symbol.asyncIterator]() {
+            return this;
+          }
+        };
+      }
+    });
+  }
+  defineReadableAsyncIterator(builtinStreamStdlibModule?.Readable?.prototype);
+  defineReadableAsyncIterator(builtinStreamStdlibModule?.PassThrough?.prototype);
+  defineReadableAsyncIterator(builtinStreamStdlibModule?.Transform?.prototype);
+  defineReadableAsyncIterator(builtinStreamStdlibModule?.Duplex?.prototype);
   defineMissingModuleProperty(builtinStreamStdlibModule, "isReadable", (stream) => {
     return Boolean(stream) && stream.readable !== false && stream.destroyed !== true;
   });
@@ -21884,10 +22362,115 @@ ${headerLines}\r
       case "readline":
         return {
           createInterface(options = {}) {
+            const input = options.input ?? null;
             const output = options.output ?? null;
             const listeners = new Map();
             let closed = false;
-            return {
+            let ended = false;
+            let lineBuffer = "";
+            const queuedLines = [];
+            let pendingLineResolve = null;
+            const textDecoder = new TextDecoder();
+            const emit = (event, ...args) => {
+              const current = listeners.get(event) ?? [];
+              for (const listener of [...current]) {
+                listener(...args);
+              }
+            };
+            const enqueueLine = (line) => {
+              if (pendingLineResolve) {
+                const resolve = pendingLineResolve;
+                pendingLineResolve = null;
+                resolve({ done: false, value: line });
+                return;
+              }
+              queuedLines.push(line);
+            };
+            const emitLine = (line) => {
+              emit("line", line);
+              enqueueLine(line);
+            };
+            const flushBufferedLines = () => {
+              let newlineIndex = lineBuffer.indexOf("\n");
+              while (newlineIndex !== -1) {
+                let line = lineBuffer.slice(0, newlineIndex);
+                if (line.endsWith("\r")) {
+                  line = line.slice(0, -1);
+                }
+                lineBuffer = lineBuffer.slice(newlineIndex + 1);
+                emitLine(line);
+                newlineIndex = lineBuffer.indexOf("\n");
+              }
+            };
+            const detachInput = () => {
+              if (!input || typeof input.off !== "function") {
+                return;
+              }
+              input.off("data", onData);
+              input.off("end", onEnd);
+              input.off("close", onEnd);
+            };
+            const onData = (chunk) => {
+              if (closed) {
+                return;
+              }
+              if (typeof chunk === "string") {
+                lineBuffer += chunk;
+              } else if (chunk instanceof Uint8Array) {
+                lineBuffer += textDecoder.decode(chunk, { stream: true });
+              } else if (chunk != null) {
+                lineBuffer += String(chunk);
+              }
+              flushBufferedLines();
+            };
+            const onEnd = () => {
+              if (ended) {
+                return;
+              }
+              ended = true;
+              const trailing = textDecoder.decode();
+              if (trailing) {
+                lineBuffer += trailing;
+              }
+              flushBufferedLines();
+              if (lineBuffer.length > 0) {
+                emitLine(lineBuffer);
+                lineBuffer = "";
+              }
+              api.close();
+            };
+            if (input && typeof input.on === "function") {
+              input.on("data", onData);
+              input.on("end", onEnd);
+              input.on("close", onEnd);
+            }
+            const iterator = {
+              next() {
+                if (queuedLines.length > 0) {
+                  return Promise.resolve({
+                    done: false,
+                    value: queuedLines.shift(),
+                  });
+                }
+                if (closed || ended) {
+                  return Promise.resolve({ done: true, value: void 0 });
+                }
+                return new Promise((resolve) => {
+                  pendingLineResolve = resolve;
+                });
+              },
+              return() {
+                api.close();
+                return Promise.resolve({ done: true, value: void 0 });
+              },
+              [Symbol.asyncIterator]() {
+                return this;
+              },
+            };
+            const api = {
+              addListener(event, listener) {
+                return this.on(event, listener);
+              },
               on(event, listener) {
                 const current = listeners.get(event) ?? [];
                 current.push(listener);
@@ -21909,15 +22492,21 @@ ${headerLines}\r
                 );
                 return this;
               },
+              removeListener(event, listener) {
+                return this.off(event, listener);
+              },
               close() {
                 if (closed) {
                   return;
                 }
                 closed = true;
-                const current = listeners.get("close") ?? [];
-                for (const listener of current) {
-                  listener();
+                detachInput();
+                if (pendingLineResolve) {
+                  const resolve = pendingLineResolve;
+                  pendingLineResolve = null;
+                  resolve({ done: true, value: void 0 });
                 }
+                emit("close");
               },
               question(prompt, callback) {
                 if (output && typeof output.write === "function" && prompt) {
@@ -21926,8 +22515,12 @@ ${headerLines}\r
                 if (typeof callback === "function") {
                   callback("");
                 }
-              }
+              },
+              [Symbol.asyncIterator]() {
+                return iterator;
+              },
             };
+            return api;
           }
         };
       case "repl":

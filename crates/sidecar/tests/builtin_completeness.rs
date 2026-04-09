@@ -92,6 +92,10 @@ const BUILTIN_EXPECTATIONS: &[BuiltinExpectation] = &[
         status: BuiltinStatus::Polyfilled,
     },
     BuiltinExpectation {
+        name: "util/types",
+        status: BuiltinStatus::Polyfilled,
+    },
+    BuiltinExpectation {
         name: "url",
         status: BuiltinStatus::Polyfilled,
     },
@@ -117,6 +121,10 @@ const BUILTIN_EXPECTATIONS: &[BuiltinExpectation] = &[
     },
     BuiltinExpectation {
         name: "constants",
+        status: BuiltinStatus::Polyfilled,
+    },
+    BuiltinExpectation {
+        name: "console",
         status: BuiltinStatus::Polyfilled,
     },
     BuiltinExpectation {
@@ -161,11 +169,11 @@ const BUILTIN_EXPECTATIONS: &[BuiltinExpectation] = &[
     },
     BuiltinExpectation {
         name: "vm",
-        status: BuiltinStatus::Denied,
+        status: BuiltinStatus::Polyfilled,
     },
     BuiltinExpectation {
         name: "worker_threads",
-        status: BuiltinStatus::Denied,
+        status: BuiltinStatus::StubOk,
     },
     BuiltinExpectation {
         name: "inspector",
@@ -173,7 +181,7 @@ const BUILTIN_EXPECTATIONS: &[BuiltinExpectation] = &[
     },
     BuiltinExpectation {
         name: "v8",
-        status: BuiltinStatus::Denied,
+        status: BuiltinStatus::Polyfilled,
     },
     BuiltinExpectation {
         name: "cluster",
@@ -215,6 +223,7 @@ const EXPECTED_RUNTIME_BUILTINS: &[&str] = &[
     "buffer",
     "child_process",
     "cluster",
+    "console",
     "constants",
     "crypto",
     "dgram",
@@ -254,6 +263,7 @@ const EXPECTED_RUNTIME_BUILTINS: &[&str] = &[
     "tty",
     "url",
     "util",
+    "util/types",
     "v8",
     "vm",
     "wasi",

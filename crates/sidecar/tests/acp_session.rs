@@ -83,6 +83,7 @@ fn session(agent_type: &str) -> AcpSessionState {
         String::from("vm-1"),
         String::from(agent_type),
         String::from("acp-agent-1"),
+        None,
         &sample_init_result(),
         &sample_session_result(),
     )

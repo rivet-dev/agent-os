@@ -10,14 +10,16 @@ const sdkPath = require.resolve("@anthropic-ai/claude-agent-sdk");
 const cliPath = resolvePath(dirname(sdkPath), "cli.js");
 const distDir = resolvePath(import.meta.dirname, "..", "dist");
 const manifestPath = resolvePath(distDir, "claude-cli-patched.json");
+const sdkManifestPath = resolvePath(distDir, "claude-sdk-patched.json");
 
 const source = readFileSync(cliPath, "utf-8");
+const sdkSource = readFileSync(sdkPath, "utf-8");
 const patches = [
 	{
 		name: "inject stdout normalization helpers",
 		needle: 'import{createRequire as H15}from"node:module";',
 		replacement:
-			'import{createRequire as H15}from"node:module";function __agentOsTrimOutput(q){if(typeof q==="string")return q.trim();if(q==null)return"";if(typeof q.trim==="function")return q.trim();if(typeof Buffer!=="undefined"&&Buffer.isBuffer(q))return q.toString("utf8").trim();if(q instanceof Uint8Array)return Buffer.from(q).toString("utf8").trim();return String(q).trim()}function __agentOsTrimStdout(q){return __agentOsTrimOutput(q?.stdout)}function __agentOsTrimStderr(q){return __agentOsTrimOutput(q?.stderr)}async function __agentOsRealpath(q){return typeof Nkq==="function"?Nkq(q):q}',
+			'import{createRequire as H15}from"node:module";if(process.env.CLAUDE_CODE_TRACE_STARTUP==="1")process.stderr.write("[agent-os-claude] bootstrap_loaded\\n");function __agentOsTrimOutput(q){if(typeof q==="string")return q.trim();if(q==null)return"";if(typeof q.trim==="function")return q.trim();if(typeof Buffer!=="undefined"&&Buffer.isBuffer(q))return q.toString("utf8").trim();if(q instanceof Uint8Array)return Buffer.from(q).toString("utf8").trim();return String(q).trim()}function __agentOsTrimStdout(q){return __agentOsTrimOutput(q?.stdout)}function __agentOsTrimStderr(q){return __agentOsTrimOutput(q?.stderr)}const __agentOsOriginalRealpath=globalThis["Nkq"];async function __agentOsRealpath(q){return typeof __agentOsOriginalRealpath==="function"?__agentOsOriginalRealpath(q):q}function __agentOsEnsureAsyncIterable(q){if(q&&typeof q[Symbol.asyncIterator]==="function")return q;if(q&&typeof q[Symbol.iterator]==="function")return(async function*(){for(let K of q)yield K})();if(q&&typeof q.on==="function"){return{[Symbol.asyncIterator](){let K=[],_=[],Y=!1,z=null;let A=(X)=>{K.push(X);O()};let O=()=>{for(;_.length>0;){if(z){_.shift().reject(z);continue}if(K.length>0){_.shift().resolve({done:!1,value:K.shift()});continue}if(Y){_.shift().resolve({done:!0,value:void 0});continue}break}};let $=()=>{Y=!0;w()};let w=()=>{q.off?.("data",A);q.off?.("end",$);q.off?.("close",$);q.off?.("error",j)};let j=(X)=>{z=X,Y=!0,w(),O()};q.on("data",A);q.on("end",$);q.on("close",$);q.on("error",j);q.resume?.();return{next(){if(z)return Promise.reject(z);if(K.length>0)return Promise.resolve({done:!1,value:K.shift()});if(Y)return Promise.resolve({done:!0,value:void 0});return new Promise((X,M)=>{_.push({resolve:X,reject:M})})},return(){Y=!0,w(),O();return Promise.resolve({done:!0,value:void 0})},[Symbol.asyncIterator](){return this}}}}}throw new TypeError("expected input to be async iterable")}',
 	},
 	{
 		name: "ignore startup exit code in headless mode",
@@ -74,6 +76,46 @@ const patches = [
 			'L=await J.getEnvironmentOverrides(q),S=!!j||process.env.CLAUDE_CODE_USE_PIPE_OUTPUT==="1",h=JL("local_bash"),x=new iA(h,A??null,!S);',
 	},
 	{
+		name: "disable /dev/null shell redirection under Agent OS",
+		needle: 'if(K)return Gq([q,"<","/dev/null"]);return Gq([q])',
+		replacement:
+			'if(process.env.CLAUDE_CODE_DISABLE_DEV_NULL_REDIRECT==="1")return Gq([q]);if(K)return Gq([q,"<","/dev/null"]);return Gq([q])',
+	},
+	{
+		name: "disable cwd persistence checkpoint under Agent OS",
+		needle: 'let Z=await lNq();if(Z)W.push(Z);let f=v9Y(q);if(f)W.push(f);W.push(`eval ${P}`),W.push(`pwd -P >| ${Gq([J])}`);let G=W.join(" && ");',
+		replacement:
+			'let Z=await lNq();if(Z)W.push(Z);let f=v9Y(q);if(f)W.push(f);W.push(`eval ${P}`),process.env.CLAUDE_CODE_DISABLE_CWD_PERSIST!=="1"&&W.push(`pwd -P >| ${Gq([J])}`);let G=W.join(" && ");',
+	},
+	{
+		name: "use direct shell command execution under Agent OS",
+		needle:
+			'let G=W.join(" && ");if(process.env.CLAUDE_CODE_SHELL_PREFIX)G=rN8(process.env.CLAUDE_CODE_SHELL_PREFIX,G);',
+		replacement:
+			'let G=W.join(" && ");if(process.env.CLAUDE_CODE_SIMPLE_SHELL_EXEC==="1")G=A;if(process.env.CLAUDE_CODE_SHELL_PREFIX)G=rN8(process.env.CLAUDE_CODE_SHELL_PREFIX,G);',
+	},
+	{
+		name: "trace bash shell spawn configuration",
+		needle:
+			'let V=G?"/bin/sh":f,N=G?["-c",W]:J.getSpawnArgs(W),L=await J.getEnvironmentOverrides(q),S=!!j||process.env.CLAUDE_CODE_USE_PIPE_OUTPUT==="1",h=JL("local_bash"),x=new iA(h,A??null,!S);',
+		replacement:
+			'let V=G?"/bin/sh":f,N=G?["-c",W]:J.getSpawnArgs(W),L=await J.getEnvironmentOverrides(q),S=!!j||process.env.CLAUDE_CODE_USE_PIPE_OUTPUT==="1";if(!G&&process.env.CLAUDE_CODE_FORCE_SH_FOR_BASH==="1")V="/bin/sh",N=["-c",W];if(process.env.CLAUDE_CODE_TRACE_BASH_SHELL==="1")process.stderr.write("[agent-os-claude] bash_spawn_config "+JSON.stringify({shell:V,args:N,cwd:Z,command:W,envOverrides:L,pipeOutput:S})+"\\n");let h=JL("local_bash"),x=new iA(h,A??null,!S);',
+	},
+	{
+		name: "trace bash shell child process output",
+		needle:
+			'try{let p=h9Y(V,N,{env:{...Vu(),SHELL:_==="bash"?f:void 0,GIT_EDITOR:"true",CLAUDECODE:"1",...L,...{}},cwd:Z,stdio:S?["pipe","pipe","pipe"]:["pipe",I?.fd,I?.fd],detached:J.detached,windowsHide:!0}),B=aN8(p,K,H,x,w);',
+		replacement:
+			'try{let BA=Vu(),BB=Object.entries(BA).filter(([Q,i])=>typeof i!=="string"&&i!==void 0),BC=Object.fromEntries(Object.entries(BA).filter(([Q,i])=>typeof i==="string")),BD={...BC,SHELL:_==="bash"?f:void 0,GIT_EDITOR:"true",CLAUDECODE:"1",...L,...{}};if(process.env.CLAUDE_CODE_TRACE_DIRECT_XU==="1"){let Q=h9Y("xu",["hello-agent-os"],{env:BD,cwd:Z,stdio:["pipe","pipe","pipe"],detached:!1,windowsHide:!0}),i="",R="";Q.stdout?.on("data",(k)=>i+=String(k)),Q.stderr?.on("data",(k)=>R+=String(k));let se=await new Promise((k)=>Q.on("close",(ve,ye)=>k({code:ve,signal:ye})));process.stderr.write("[agent-os-claude] direct_xu "+JSON.stringify({stdout:i,stderr:R,...se})+"\\n")}let BE=V,BF=N,BG=BD;if(process.env.CLAUDE_CODE_NODE_SHELL_WRAPPER==="1"){let Q=\'const{spawn}=require("child_process");const cmd=process.env.CLAUDE_CODE_NODE_SHELL_COMMAND||"";const child=spawn(cmd,[],{cwd:process.env.CLAUDE_CODE_NODE_SHELL_CWD||process.cwd(),env:process.env,shell:true,stdio:["ignore","pipe","pipe"],windowsHide:true});child.stdout?.on("data",(c)=>process.stdout.write(c));child.stderr?.on("data",(c)=>process.stderr.write(c));child.on("close",(code)=>process.exit(typeof code==="number"?code:1));child.on("error",(error)=>{process.stderr.write(String(error?.stack??error)+"\\\\n");process.exit(126)});\';BE=process.execPath||"node",BF=["-e",Q],BG={...BD,CLAUDE_CODE_NODE_SHELL_COMMAND:W,CLAUDE_CODE_NODE_SHELL_CWD:Z};if(process.env.CLAUDE_CODE_TRACE_BASH_SHELL==="1")process.stderr.write("[agent-os-claude] bash_node_wrapper "+JSON.stringify({command:W,cwd:Z,exec:BE})+"\\n")}let p=h9Y(BE,BF,{env:BG,cwd:Z,stdio:S?["pipe","pipe","pipe"]:["pipe",I?.fd,I?.fd],detached:J.detached,windowsHide:!0});if(process.env.CLAUDE_CODE_TRACE_BASH_SHELL==="1")(BB.length>0&&process.stderr.write("[agent-os-claude] bash_non_string_env "+JSON.stringify(BB.map(([Q,i])=>[Q,typeof i]))+"\\n"),process.stderr.write("[agent-os-claude] bash_spawned "+JSON.stringify({pid:p.pid,shell:BE,args:BF})+"\\n"),p.stdout?.on("data",(Q)=>process.stderr.write("[agent-os-claude] bash_stdout "+JSON.stringify(String(Q))+"\\n")),p.stderr?.on("data",(Q)=>process.stderr.write("[agent-os-claude] bash_stderr "+JSON.stringify(String(Q))+"\\n")),p.on("exit",(Q,i)=>process.stderr.write("[agent-os-claude] bash_exit "+JSON.stringify({code:Q,signal:i})+"\\n")));let B=aN8(p,K,H,x,w);',
+	},
+	{
+		name: "skip special CLI entrypoints under Agent OS",
+		needle:
+			'if(K("cli_entry"),process.argv[2]==="--claude-in-chrome-mcp"){',
+		replacement:
+			'let __agentOsArg2=process.argv[2];if(process.env.CLAUDE_CODE_TRACE_STARTUP==="1")process.stderr.write("[agent-os-claude] cli_argv "+JSON.stringify(process.argv)+"\\n");if(K("cli_entry"),process.env.CLAUDE_CODE_SKIP_SPECIAL_ENTRYPOINTS==="1"&&(__agentOsArg2==="--claude-in-chrome-mcp"||__agentOsArg2==="--chrome-native-host"||__agentOsArg2==="--computer-use-mcp"))process.stderr.write("[agent-os-claude] skip_special_entrypoint "+String(__agentOsArg2)+"\\n");else if(process.argv[2]==="--claude-in-chrome-mcp"){',
+	},
+	{
 		name: "trace message loop startup",
 		needle: 'n8("info","cli_message_loop_started");',
 		replacement:
@@ -84,6 +126,12 @@ const patches = [
 		needle: 'if(z)n8("info","cli_stdin_message_parsed",{type:z.type}),yield z',
 		replacement:
 			'if(z)(process.stderr.write("[agent-os-claude] cli_stdin_message_parsed "+z.type+"\\n"),n8("info","cli_stdin_message_parsed",{type:z.type}),yield z)',
+	},
+	{
+		name: "coerce structured IO input streams into async iterables",
+		needle: "yield*K();for await(let _ of this.input)q+=_,yield*K();if(q){",
+		replacement:
+			"yield*K();for await(let _ of __agentOsEnsureAsyncIterable(this.input))q+=_,yield*K();if(q){",
 	},
 	{
 		name: "trace initialize request handling",
@@ -219,6 +267,13 @@ const patches = [
 		replacement:
 			'process.stderr.write("[agent-os-claude] after_print_import\\n"),xq("after_print_import"),OK(',
 	},
+	{
+		name: "trace early input capture and main import",
+		needle:
+			'if(q.includes("--bare"))process.env.CLAUDE_CODE_SIMPLE="1";let{startCapturingEarlyInput:Y}=await Promise.resolve().then(() => (Jd6(),Dn4));Y(),K("cli_before_main_import");let{main:z}=await Promise.resolve().then(() => (eY7(),C65));K("cli_after_main_import"),await z(),K("cli_after_main_complete")',
+		replacement:
+			'if(q.includes("--bare"))process.env.CLAUDE_CODE_SIMPLE="1";process.stderr.write("[agent-os-claude] before_early_input_import\\n");let{startCapturingEarlyInput:Y}=await Promise.resolve().then(() => (Jd6(),Dn4));process.stderr.write("[agent-os-claude] after_early_input_import\\n");if(process.env.CLAUDE_CODE_SKIP_EARLY_INPUT_CAPTURE==="1")process.stderr.write("[agent-os-claude] skip_early_input_capture\\n");else{process.stderr.write("[agent-os-claude] before_early_input_start\\n");Y();process.stderr.write("[agent-os-claude] after_early_input_start\\n")}K("cli_before_main_import");process.stderr.write("[agent-os-claude] before_main_import\\n");let{main:z}=await Promise.resolve().then(() => (eY7(),C65));process.stderr.write("[agent-os-claude] after_main_import\\n");K("cli_after_main_import"),await z(),K("cli_after_main_complete")',
+	},
 ];
 
 let patched = source;
@@ -239,14 +294,36 @@ patched = patched.replace(
 );
 patched = patched.replace(/\bNkq\(/g, "__agentOsRealpath(");
 
+const sdkNeedle =
+	'function y1($=AL){let X=new AbortController;return ML($,X.signal),X}';
+const sdkReplacement =
+	'function y1($=AL){let X=new AbortController;return typeof ML==="function"&&ML($,X.signal),X}';
+const patchedSdk = sdkSource.includes(sdkNeedle)
+	? sdkSource.replace(sdkNeedle, sdkReplacement)
+	: sdkSource;
+
 mkdirSync(distDir, { recursive: true });
 const hash = createHash("sha256").update(patched).digest("hex").slice(0, 16);
 const fileName = `claude-cli-patched-${hash}.mjs`;
 const outputPath = resolvePath(distDir, fileName);
 writeFileSync(outputPath, patched, "utf-8");
+
+const sdkHash = createHash("sha256")
+	.update(patchedSdk)
+	.digest("hex")
+	.slice(0, 16);
+const sdkFileName = `claude-sdk-patched-${sdkHash}.mjs`;
+const sdkOutputPath = resolvePath(distDir, sdkFileName);
+writeFileSync(sdkOutputPath, patchedSdk, "utf-8");
+
 writeFileSync(
 	manifestPath,
 	JSON.stringify({ entry: `./${fileName}` }, null, 2) + "\n",
+	"utf-8",
+);
+writeFileSync(
+	sdkManifestPath,
+	JSON.stringify({ entry: `./${sdkFileName}` }, null, 2) + "\n",
 	"utf-8",
 );
 process.stdout.write(`Wrote ${outputPath}\n`);

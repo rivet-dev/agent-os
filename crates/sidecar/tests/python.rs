@@ -945,7 +945,7 @@ with open("/workspace/from-kernel.txt", "r", encoding="utf-8") as handle:
 with open("/workspace/from-python.txt", "w", encoding="utf-8") as handle:
     handle.write("from python")
 
-print(json.dumps({{
+print(json.dumps({
     "original": original,
     "entries": sorted(os.listdir("/workspace")),
 }))
@@ -1877,9 +1877,7 @@ await micropip.install("http://127.0.0.1:{port}/click-8.3.1-py3-none-any.whl")
     let _ = server.join();
     assert_ne!(exit_code, 0);
     assert!(
-        stderr.contains("permission")
-            || stderr.contains("denied")
-            || stderr.contains("EACCES"),
+        stderr.contains("permission") || stderr.contains("denied") || stderr.contains("EACCES"),
         "expected micropip permission error, got: {stderr}"
     );
 }
@@ -1915,8 +1913,7 @@ fn python_runtime_routes_dns_and_http_through_sidecar_bridge() {
         BTreeMap::from([
             (
                 String::from("env.AGENT_OS_LOOPBACK_EXEMPT_PORTS"),
-                serde_json::to_string(&vec![port.to_string()])
-                    .expect("serialize exempt ports"),
+                serde_json::to_string(&vec![port.to_string()]).expect("serialize exempt ports"),
             ),
             (
                 String::from("network.dns.override.example.test"),
@@ -1964,7 +1961,10 @@ print(json.dumps({{
     let _ = server;
     assert_eq!(exit_code, 0, "stderr: {stderr}");
     let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse python network JSON");
-    assert_eq!(parsed["lookup"][0], Value::String(String::from("127.0.0.1")));
+    assert_eq!(
+        parsed["lookup"][0],
+        Value::String(String::from("127.0.0.1"))
+    );
     assert_eq!(parsed["urllib"]["status"], Value::from(200));
     assert_eq!(
         parsed["urllib"]["body"],
@@ -2003,8 +2003,7 @@ fn python_runtime_routes_requests_through_sidecar_bridge() {
         BTreeMap::from([
             (
                 String::from("env.AGENT_OS_LOOPBACK_EXEMPT_PORTS"),
-                serde_json::to_string(&vec![port.to_string()])
-                    .expect("serialize exempt ports"),
+                serde_json::to_string(&vec![port.to_string()]).expect("serialize exempt ports"),
             ),
             (
                 String::from("network.dns.override.example.test"),
@@ -2048,10 +2047,7 @@ print(json.dumps({{
     assert_eq!(exit_code, 0, "stderr: {stderr}");
     let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse requests JSON");
     assert_eq!(parsed["status"], Value::from(200));
-    assert_eq!(
-        parsed["body"],
-        Value::String(String::from("hello world"))
-    );
+    assert_eq!(parsed["body"], Value::String(String::from("hello world")));
 }
 
 #[test]
@@ -2141,10 +2137,7 @@ fn python_runtime_runs_node_subprocesses_through_sidecar_bridge() {
 
     let mut sidecar = new_sidecar("python-subprocess-bridge");
     let cwd = temp_dir("python-subprocess-bridge-cwd");
-    write_fixture(
-        &cwd.join("child.mjs"),
-        "console.log('child-ready')\n",
-    );
+    write_fixture(&cwd.join("child.mjs"), "console.log('child-ready')\n");
     let connection_id = authenticate(&mut sidecar, "conn-python");
     let session_id = open_session(&mut sidecar, 2, &connection_id);
     let (vm_id, _) = create_vm(
@@ -2186,13 +2179,9 @@ print(json.dumps({
     );
 
     assert_eq!(exit_code, 0, "stderr: {stderr}");
-    let parsed: Value =
-        serde_json::from_str(stdout.trim()).expect("parse python subprocess JSON");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse python subprocess JSON");
     assert_eq!(parsed["code"], Value::from(0));
-    assert_eq!(
-        parsed["stdout"],
-        Value::String(String::from("child-ready"))
-    );
+    assert_eq!(parsed["stdout"], Value::String(String::from("child-ready")));
     assert_eq!(parsed["stderr"], Value::String(String::new()));
 }
 

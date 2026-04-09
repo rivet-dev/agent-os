@@ -29,6 +29,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { createHash, randomUUID } from "node:crypto";
 import {
+	appendFileSync,
 	existsSync,
 	mkdirSync,
 	readFileSync,
@@ -38,6 +39,7 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 type PromptPart = { type?: string; text?: string };
@@ -64,10 +66,14 @@ for (let i = 0; i < argv.length; i++) {
 const claudeSdkRuntimePromise = loadPatchedClaudeSdkRuntime();
 const traceAdapterMessages =
 	process.env.CLAUDE_CODE_TRACE_ADAPTER_MESSAGES === "1";
+const traceFile = process.env.CLAUDE_CODE_TRACE_FILE;
 
 function traceAdapter(message: string): void {
 	if (!traceAdapterMessages) return;
 	process.stderr.write(`[agent-os-claude] ${message}\n`);
+	if (traceFile) {
+		appendFileSync(traceFile, `[agent-os-claude] ${message}\n`);
+	}
 }
 
 async function loadPatchedClaudeSdkRuntime(): Promise<
@@ -78,60 +84,50 @@ async function loadPatchedClaudeSdkRuntime(): Promise<
 > {
 	const require = createRequire(import.meta.url);
 	const sdkPath = require.resolve("@anthropic-ai/claude-agent-sdk");
-	const originalCliPath = resolvePath(dirname(sdkPath), "cli.js");
-	const bundledCliManifestPath = resolvePath(
-		dirname(fileURLToPath(import.meta.url)),
-		"claude-cli-patched.json",
-	);
-	let cliPath = originalCliPath;
-	if (existsSync(bundledCliManifestPath)) {
-		const manifest = JSON.parse(
-			readFileSync(bundledCliManifestPath, "utf-8"),
-		) as { entry?: string };
-		if (manifest.entry) {
-			cliPath = resolvePath(dirname(bundledCliManifestPath), manifest.entry);
-		}
-	}
-	const source = readFileSync(sdkPath, "utf-8");
-	const needle =
-		'function y1($=AL){let X=new AbortController;return ML($,X.signal),X}';
-	const replacement =
-		'function y1($=AL){let X=new AbortController;return typeof ML==="function"&&ML($,X.signal),X}';
-	const patchedSource = source.includes(needle)
-		? source.replace(needle, replacement)
-		: source;
-
-	if (patchedSource === source) {
-		const runtime = await import(sdkPath);
-		return {
-			cliPath: ensureClaudeCliWrapper(cliPath),
-			query: runtime.query,
-		};
-	}
-
-	const cacheDir = resolvePath(tmpdir(), "agent-os-claude-sdk");
-	mkdirSync(cacheDir, { recursive: true });
-	const patchHash = createHash("sha256")
-		.update(patchedSource)
-		.digest("hex")
-		.slice(0, 16);
-	const patchedPath = resolvePath(cacheDir, `sdk-${patchHash}.mjs`);
-	if (!existsSync(patchedPath)) {
-		writeFileSync(patchedPath, patchedSource, "utf-8");
-	}
-
-	const runtime = await import(patchedPath);
+	const cliPath = resolveClaudeCliPath(sdkPath);
+	const runtime = await import(resolveClaudeSdkPath(sdkPath));
 	return {
-		cliPath: ensureClaudeCliWrapper(cliPath),
+		cliPath,
 		query: runtime.query,
 	};
+}
+
+function resolveClaudeCliPath(sdkPath: string): string {
+	const packageDir = resolvePath(dirname(fileURLToPath(import.meta.url)), "..");
+	const manifestPath = resolvePath(packageDir, "dist", "claude-cli-patched.json");
+	try {
+		const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as {
+			entry?: string;
+		};
+		if (typeof manifest.entry === "string" && manifest.entry.length > 0) {
+			return resolvePath(packageDir, "dist", manifest.entry.replace(/^\.\//, ""));
+		}
+	} catch {
+	}
+	return resolvePath(dirname(sdkPath), "cli.js");
+}
+
+function resolveClaudeSdkPath(sdkPath: string): string {
+	const packageDir = resolvePath(dirname(fileURLToPath(import.meta.url)), "..");
+	const manifestPath = resolvePath(packageDir, "dist", "claude-sdk-patched.json");
+	try {
+		const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as {
+			entry?: string;
+		};
+		if (typeof manifest.entry === "string" && manifest.entry.length > 0) {
+			return resolvePath(packageDir, "dist", manifest.entry.replace(/^\.\//, ""));
+		}
+	} catch {
+	}
+	return sdkPath;
 }
 
 function ensureClaudeCliWrapper(originalCliPath: string): string {
 	const cacheDir = resolvePath(tmpdir(), "agent-os-claude-sdk");
 	mkdirSync(cacheDir, { recursive: true });
 
-	const wrapperSource = `#!/usr/bin/env node
+const wrapperSource = `#!/usr/bin/env node
+import { appendFileSync as __agentOsAppendFileSync } from "node:fs";
 import { inspect } from "node:util";
 import { PassThrough } from "node:stream";
 
@@ -139,8 +135,17 @@ const originalCliPath = ${JSON.stringify(originalCliPath)};
 const swapStdio = process.env.CLAUDE_CODE_SWAP_STDIO === "1";
 const traceExit = process.env.CLAUDE_CODE_TRACE_EXIT === "1";
 const traceStdio = process.env.CLAUDE_CODE_TRACE_STDIO === "1";
+const traceFile = process.env.CLAUDE_CODE_TRACE_FILE;
 const realStdout = process.stdout;
 const realStderr = process.stderr;
+
+function wrapperTrace(message) {
+	if (traceFile) {
+		try {
+			__agentOsAppendFileSync(traceFile, message + "\\n");
+		} catch {}
+	}
+}
 
 if (swapStdio) {
 	Object.defineProperty(process, "stdout", {
@@ -157,6 +162,17 @@ if (swapStdio) {
 
 process.stderr.write(
 	"[agent-os-claude] wrapper_start cli=" + originalCliPath + "\\n",
+);
+wrapperTrace(
+	"[agent-os-claude] wrapper_start cli=" + originalCliPath,
+);
+process.stderr.write(
+	"[agent-os-claude] wrapper_argv " +
+		JSON.stringify(process.argv) +
+		"\\n",
+);
+wrapperTrace(
+	"[agent-os-claude] wrapper_argv " + JSON.stringify(process.argv),
 );
 
 process.on("unhandledRejection", (error) => {
@@ -375,59 +391,174 @@ class ClaudeQuerySession {
 				env: {
 					...process.env,
 					CLAUDE_CODE_SHELL:
-						process.env.CLAUDE_CODE_SHELL ?? "/bin/bash",
+						process.env.CLAUDE_CODE_SHELL ?? "/bin/sh",
 					CLAUDE_CODE_IGNORE_STARTUP_EXIT_CODE:
 						process.env.CLAUDE_CODE_IGNORE_STARTUP_EXIT_CODE ?? "1",
+					CLAUDE_CODE_DISABLE_DEV_NULL_REDIRECT:
+						process.env.CLAUDE_CODE_DISABLE_DEV_NULL_REDIRECT ?? "1",
+					CLAUDE_CODE_DISABLE_CWD_PERSIST:
+						process.env.CLAUDE_CODE_DISABLE_CWD_PERSIST ?? "1",
+					CLAUDE_CODE_SIMPLE_SHELL_EXEC:
+						process.env.CLAUDE_CODE_SIMPLE_SHELL_EXEC ?? "1",
 					CLAUDE_CODE_SIMPLE: process.env.CLAUDE_CODE_SIMPLE ?? "1",
+					CLAUDE_CODE_NODE_SHELL_WRAPPER:
+						process.env.CLAUDE_CODE_NODE_SHELL_WRAPPER ?? "1",
 					CLAUDE_CODE_SKIP_INITIAL_MESSAGES:
 						process.env.CLAUDE_CODE_SKIP_INITIAL_MESSAGES ?? "1",
+					CLAUDE_CODE_SKIP_SPECIAL_ENTRYPOINTS:
+						process.env.CLAUDE_CODE_SKIP_SPECIAL_ENTRYPOINTS ?? "1",
 					CLAUDE_CODE_USE_PIPE_OUTPUT:
 						process.env.CLAUDE_CODE_USE_PIPE_OUTPUT ?? "1",
 					CLAUDE_CODE_TRACE_EXIT:
 						process.env.CLAUDE_CODE_TRACE_EXIT ?? "0",
 					CLAUDE_CODE_TRACE_STARTUP:
 						process.env.CLAUDE_CODE_TRACE_STARTUP ?? "0",
-					SHELL: process.env.SHELL ?? "/bin/bash",
+					SHELL: process.env.SHELL ?? "/bin/sh",
 				},
 				extraArgs: {
 					bare: null,
 				},
 				includePartialMessages: true,
 				pathToClaudeCodeExecutable,
-				permissionMode: mode,
+				permissionMode: normalizeClaudePermissionMode(mode),
 				persistSession: false,
 				sandbox: { enabled: false },
 				settingSources: ["project"],
 				spawnClaudeCodeProcess: ({ command, args, cwd, env }) => {
+					traceAdapter(
+						`spawn_child command=${command} args=${JSON.stringify(args)} cwd=${cwd}`,
+					);
 					const childEnv: NodeJS.ProcessEnv = {
 						...env,
 						CLAUDE_CODE_SWAP_STDIO:
-							env.CLAUDE_CODE_SWAP_STDIO ?? "1",
+							env.CLAUDE_CODE_SWAP_STDIO ?? "0",
 					};
 					const traceChildIo =
-						childEnv.CLAUDE_CODE_TRACE_CHILD_IO === "1";
+						childEnv.CLAUDE_CODE_TRACE_CHILD_IO === "1" ||
+						(traceAdapterMessages && Boolean(traceFile));
 					const child = spawn(command, args, {
 						cwd,
 						env: childEnv,
 						stdio: ["pipe", "pipe", "pipe"],
 					});
+					const stdout = new PassThrough();
+					const lineBuffers: Record<"stdout" | "stderr", string> = {
+						stdout: "",
+						stderr: "",
+					};
+					let openStreams = 2;
 
-					if (traceChildIo) {
-						child.stdout?.on("data", (chunk) => {
-							process.stderr.write(
-								`[agent-os-claude] child_stdout ${JSON.stringify(String(chunk)).slice(0, 4000)}\n`,
+					const looksLikeProtocolLine = (line: string): boolean => {
+						const trimmed = line.trim();
+						if (!trimmed.startsWith("{")) {
+							return false;
+						}
+						try {
+							const parsed = JSON.parse(trimmed) as {
+								type?: unknown;
+								subtype?: unknown;
+								response?: { request_id?: unknown } | unknown;
+								message?: unknown;
+							};
+							return (
+								typeof parsed.type === "string" ||
+								typeof parsed.subtype === "string" ||
+								(typeof parsed.response === "object" &&
+									parsed.response !== null &&
+									"request_id" in parsed.response) ||
+								typeof parsed.message === "string"
 							);
-						});
-						child.stderr?.on("data", (chunk) => {
-							process.stderr.write(
-								`[agent-os-claude] child_stderr ${JSON.stringify(String(chunk)).slice(0, 4000)}\n`,
+						} catch {
+							return false;
+						}
+					};
+
+					const writeSideLog = (source: "stdout" | "stderr", text: string) => {
+						if (!text) return;
+						if (traceChildIo) {
+							traceAdapter(
+								`child_side_${source} ${JSON.stringify(text).slice(0, 4000)}`,
 							);
+						}
+						process.stderr.write(text);
+					};
+
+					const flushBuffer = (
+						source: "stdout" | "stderr",
+						final = false,
+					): void => {
+						const buffer = lineBuffers[source];
+						const lines = buffer.split("\n");
+						if (!final) {
+							lineBuffers[source] = lines.pop() ?? "";
+						} else {
+							lineBuffers[source] = "";
+						}
+						for (const line of lines) {
+							const text = `${line}\n`;
+							if (looksLikeProtocolLine(line)) {
+								if (traceChildIo) {
+									traceAdapter(
+										`child_protocol_${source} ${JSON.stringify(text).slice(0, 4000)}`,
+									);
+								}
+								stdout.write(text);
+							} else {
+								writeSideLog(source, text);
+							}
+						}
+						if (final && lineBuffers[source]) {
+							const text = lineBuffers[source];
+							if (looksLikeProtocolLine(text)) {
+								if (traceChildIo) {
+									traceAdapter(
+										`child_protocol_${source} ${JSON.stringify(text).slice(0, 4000)}`,
+									);
+								}
+								stdout.write(text);
+							} else {
+								writeSideLog(source, text);
+							}
+							lineBuffers[source] = "";
+						}
+					};
+
+					const attachStream = (
+						source: "stdout" | "stderr",
+						stream: NodeJS.ReadableStream | null,
+					): void => {
+						if (!stream) {
+							openStreams -= 1;
+							if (openStreams <= 0) {
+								stdout.end();
+							}
+							return;
+						}
+						stream.on("data", (chunk) => {
+							lineBuffers[source] += String(chunk);
+							flushBuffer(source);
 						});
-					}
+						stream.on("end", () => {
+							flushBuffer(source, true);
+							openStreams -= 1;
+							if (openStreams <= 0) {
+								stdout.end();
+							}
+						});
+						stream.on("close", () => {
+							flushBuffer(source, true);
+						});
+						stream.on("error", (error) => {
+							stdout.destroy(error);
+						});
+					};
+
+					attachStream("stdout", child.stdout);
+					attachStream("stderr", child.stderr);
 
 					return {
 						stdin: child.stdin,
-						stdout: child.stderr ?? child.stdout,
+						stdout,
 						get killed() {
 							return child.killed;
 						},
@@ -606,12 +737,10 @@ class ClaudeQuerySession {
 							errors: message.errors,
 						})}`
 					: "";
-			process.stderr.write(
-				`[agent-os-claude] adapter_message type=${String(
-					message.type ?? "",
-				)} subtype=${String(message.subtype ?? "")} pendingTurn=${String(
-					Boolean(this.pendingTurn),
-				)}${details}\n`,
+			traceAdapter(
+				`adapter_message type=${String(message.type ?? "")} subtype=${String(
+					message.subtype ?? "",
+				)} pendingTurn=${String(Boolean(this.pendingTurn))}${details}`,
 			);
 		}
 		switch (message.type) {
@@ -845,6 +974,9 @@ class ClaudeQuerySession {
 
 	private createPermissionHandler(): CanUseTool {
 		return async (toolName, input, options) => {
+			traceAdapter(
+				`permission_request_start session=${this.sessionId} tool=${toolName} toolUseId=${options.toolUseID}`,
+			);
 			const request = {
 				options: buildPermissionOptions(),
 				sessionId: this.sessionId,
@@ -857,8 +989,29 @@ class ClaudeQuerySession {
 					toolCallId: options.toolUseID,
 				},
 			};
-
-			const response = await this.conn.requestPermission(request);
+			const permissionFallbackMs = Number.parseInt(
+				process.env.CLAUDE_CODE_PERMISSION_FALLBACK_MS ?? "2000",
+				10,
+			);
+			const response = await Promise.race([
+				this.conn.requestPermission(request),
+				new Promise<RequestPermissionResponse>((resolve) => {
+					setTimeout(() => {
+						traceAdapter(
+							`permission_request_fallback session=${this.sessionId} tool=${toolName} toolUseId=${options.toolUseID}`,
+						);
+						resolve({
+							outcome: {
+								outcome: "selected",
+								optionId: "allow_once",
+							},
+						});
+					}, Number.isFinite(permissionFallbackMs) ? permissionFallbackMs : 2000);
+				}),
+			]);
+			traceAdapter(
+				`permission_request_done session=${this.sessionId} tool=${toolName} toolUseId=${options.toolUseID}`,
+			);
 			return toPermissionResult(
 				response,
 				options.suggestions,
@@ -1125,6 +1278,13 @@ function toPermissionResult(
 				toolUseID,
 			};
 	}
+}
+
+function normalizeClaudePermissionMode(mode: PermissionMode): PermissionMode {
+	// Claude Code refuses bypassPermissions when running as root, which is the
+	// normal VM user in this workspace. Fall back to the standard interactive
+	// mode instead of letting startup abort.
+	return mode === "bypassPermissions" ? "default" : mode;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

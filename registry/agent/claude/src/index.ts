@@ -20,9 +20,12 @@ const claude = defineSoftware({
 			CLAUDE_CODE_FORCE_AGENT_OS_RIPGREP: "1",
 			CLAUDE_CODE_DEFER_GROWTHBOOK_INIT: "1",
 			CLAUDE_CODE_DISABLE_STREAM_JSON_HOOK_EVENTS: "1",
+			CLAUDE_CODE_SHELL: "/bin/sh",
 			CLAUDE_CODE_SKIP_INITIAL_MESSAGES: "1",
 			CLAUDE_CODE_SKIP_SANDBOX_INIT: "1",
+			CLAUDE_CODE_USE_PIPE_OUTPUT: "1",
 			DISABLE_TELEMETRY: "1",
+			SHELL: "/bin/sh",
 			USE_BUILTIN_RIPGREP: "0",
 		},
 		prepareInstructions: async (kernel, _cwd, additionalInstructions, opts) => {

@@ -995,6 +995,7 @@ ykAheWCsAteSEWVc0w==\n\
                     String::from(vm_id),
                     String::from("pi"),
                     process_id,
+                    None,
                     &Map::new(),
                     &Map::new(),
                 ),
@@ -4537,7 +4538,11 @@ ykAheWCsAteSEWVc0w==\n\
                         args: vec![String::from("-c"), String::from("echo hello")],
                         options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
                     },
-                    vec![String::from("-c"), String::from("echo hello")],
+                    vec![
+                        String::from("sh"),
+                        String::from("-c"),
+                        String::from("echo hello"),
+                    ],
                 ),
                 (
                     "ls",
@@ -4546,7 +4551,7 @@ ykAheWCsAteSEWVc0w==\n\
                         args: vec![String::from("/")],
                         options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
                     },
-                    vec![String::from("/")],
+                    vec![String::from("ls"), String::from("/")],
                 ),
                 (
                     "cat",
@@ -4555,7 +4560,7 @@ ykAheWCsAteSEWVc0w==\n\
                         args: vec![String::from("/tmp/file")],
                         options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
                     },
-                    vec![String::from("/tmp/file")],
+                    vec![String::from("cat"), String::from("/tmp/file")],
                 ),
                 (
                     "grep",
@@ -4564,7 +4569,11 @@ ykAheWCsAteSEWVc0w==\n\
                         args: vec![String::from("pattern"), String::from("/tmp/file")],
                         options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
                     },
-                    vec![String::from("pattern"), String::from("/tmp/file")],
+                    vec![
+                        String::from("grep"),
+                        String::from("pattern"),
+                        String::from("/tmp/file"),
+                    ],
                 ),
                 (
                     "echo",
@@ -4573,7 +4582,7 @@ ykAheWCsAteSEWVc0w==\n\
                         args: vec![String::from("hello")],
                         options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
                     },
-                    vec![String::from("hello")],
+                    vec![String::from("echo"), String::from("hello")],
                 ),
                 (
                     "sed",
@@ -4582,11 +4591,21 @@ ykAheWCsAteSEWVc0w==\n\
                         args: vec![String::from("s/a/b/"), String::from("/tmp/file")],
                         options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
                     },
-                    vec![String::from("s/a/b/"), String::from("/tmp/file")],
+                    vec![
+                        String::from("sed"),
+                        String::from("s/a/b/"),
+                        String::from("/tmp/file"),
+                    ],
                 ),
             ] {
                 let resolved = sidecar
-                    .resolve_javascript_child_process_execution(vm, &vm.host_cwd, &request)
+                    .resolve_javascript_child_process_execution(
+                        vm,
+                        &vm.guest_env,
+                        &vm.guest_cwd,
+                        &vm.host_cwd,
+                        &request,
+                    )
                     .unwrap_or_else(|error| panic!("failed to resolve {command}: {error}"));
                 assert_eq!(
                     resolved.runtime,
@@ -4606,6 +4625,8 @@ ykAheWCsAteSEWVc0w==\n\
 
             let missing = sidecar.resolve_javascript_child_process_execution(
                 vm,
+                &vm.guest_env,
+                &vm.guest_cwd,
                 &vm.host_cwd,
                 &crate::protocol::JavascriptChildProcessSpawnRequest {
                     command: String::from("definitely-not-a-command"),

@@ -132,6 +132,23 @@ function writeStream(stream, message) {
   stream.write(value.endsWith('\n') ? value : `${value}\n`);
 }
 
+function writePyodideStdout(message) {
+  if (message == null) {
+    return;
+  }
+
+  const value = typeof message === 'string' ? message : String(message);
+  const trimmed = value.trim();
+  if (
+    trimmed.startsWith('Loading ') ||
+    trimmed.startsWith('Loaded ')
+  ) {
+    return;
+  }
+
+  writeStream(process.stdout, value);
+}
+
 function formatError(error) {
   if (error instanceof Error) {
     return error.stack || error.message || String(error);
@@ -1362,7 +1379,7 @@ try {
     indexURL: indexPath,
     lockFileContents,
     packageBaseUrl: indexPath,
-    stdout: (message) => writeStream(process.stdout, message),
+    stdout: writePyodideStdout,
     stderr: (message) => writeStream(process.stderr, message),
   });
   const loadPyodideMs = realPerformance.now() - loadPyodideStarted;
