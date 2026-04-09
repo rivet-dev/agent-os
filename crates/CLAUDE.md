@@ -80,6 +80,7 @@ These are hard rules with no exceptions:
 ## Testing
 
 - Rust tests go in `tests/` directories, not inline. Integration and functional tests belong in `crates/*/tests/*.rs`, not as `#[cfg(test)] mod tests` blocks inside source files. Inline `#[cfg(test)]` is only acceptable for trivial unit tests of private helper functions.
+- Node builtin compatibility regressions should usually land in `crates/sidecar/tests/builtin_conformance.rs`: that harness runs the same probe script under host Node and guest V8 and asserts exact JSON parity, which is the fastest way to catch module-shape mismatches like `require("events")`.
 - For sidecar POSIX conformance coverage, keep `/proc`, `/dev`, `waitpid`, and process-group assertions as direct `agent_os_kernel` / `ProcessTable` tests where possible, and reserve the sidecar/V8 harness for guest-observable behaviors such as signal delivery that require the full runtime bridge.
 - Run scoped tests: `cargo test -p agent-os-sidecar -- test_name_filter` or `cargo test -p agent-os-sidecar --lib` (lib unit tests only, skip integration tests).
 - Never run bare `cargo test -p agent-os-sidecar` without a filter -- integration tests spawn real processes and can hang.

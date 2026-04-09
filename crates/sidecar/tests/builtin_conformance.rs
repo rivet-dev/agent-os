@@ -400,10 +400,16 @@ import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const events = require("node:events");
+const events = require("events");
+const nodeEvents = require("node:events");
 
 const emitter = new EventEmitter();
+class DerivedEmitter extends require("events") {}
+const derived = new DerivedEmitter();
+const constructed = new (require("events"))();
 const seen = [];
+const constructedSeen = [];
+const derivedSeen = [];
 
 function persistent(value) {
   seen.push(`on:${value}`);
@@ -417,10 +423,29 @@ emitter.emit("tick", "alpha");
 emitter.removeListener("tick", persistent);
 emitter.emit("tick", "beta");
 
+constructed.on("ready", (value) => {
+  constructedSeen.push(`constructed:${value}`);
+});
+const constructedEmitHandled = constructed.emit("ready", "gamma");
+
+derived.on("tick", (value) => {
+  derivedSeen.push(`derived:${value}`);
+});
+const derivedEmitHandled = derived.emit("tick", "delta");
+
 console.log(JSON.stringify({
+  bareEqualsNode: events === nodeEvents,
   cjsEqualsEventEmitter: events === EventEmitter,
-  cjsType: typeof events,
+  bareType: typeof events,
+  nodeType: typeof nodeEvents,
   eventEmitterPropEqualsSelf: events.EventEmitter === events,
+  nodeEventEmitterPropEqualsSelf: nodeEvents.EventEmitter === nodeEvents,
+  constructedInstanceWorks: constructed instanceof EventEmitter,
+  constructedEmitHandled,
+  constructedSeen,
+  derivedInstanceWorks: derived instanceof EventEmitter,
+  derivedEmitHandled,
+  derivedSeen,
   seen,
   listenerCount: emitter.listenerCount("tick"),
 }));

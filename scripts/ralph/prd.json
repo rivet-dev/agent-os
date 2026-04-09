@@ -31,7 +31,7 @@
         "cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1 passes"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Found in step-23 codex session. Claude SDK and many npm packages use `extends require('events')`. The v8-bridge.js events module from node-stdlib-browser returns the constructor correctly but the bridge wrapper may be wrapping it in an object. Check v8-bridge.source.js events import and how it's exposed to guest code."
     },
     {

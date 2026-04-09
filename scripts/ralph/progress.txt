@@ -2,6 +2,7 @@
 Started: Thu Apr  9 06:09:31 AM PDT 2026
 ## Codebase Patterns
 - The renamed core workspace package is `@rivet-dev/agent-os-core`; use that name for both package dependencies and TypeScript subpath imports like `@rivet-dev/agent-os-core/test/*` and `@rivet-dev/agent-os-core/internal/runtime-compat`.
+- Node builtin compatibility regressions are best covered in `crates/sidecar/tests/builtin_conformance.rs`, which runs the same probe under host Node and guest V8 and compares the JSON output directly.
 
 ## 2026-04-09 06:12:40 PDT - US-CC-001
 - Implemented the remaining workspace/package rename cleanup for `@rivet-dev/agent-os-core`, including the last manifest dependency, benchmark imports, secure-exec/dev-shell subpath aliases, registry test imports, and the root instruction note to keep future changes on the new package name.
@@ -10,4 +11,13 @@ Started: Thu Apr  9 06:09:31 AM PDT 2026
   - Package rename fallout includes TypeScript subpath aliases, not just bare dependencies; stale `@rivet-dev/agent-os/test/*` and `.../internal/runtime-compat` imports will still break workspace resolution and local package builds.
   - `pnpm install --frozen-lockfile` at the repo root is a fast truth check for whether the rename surface and lockfile are aligned before running broader workspace builds.
   - Root instructions are the right place to record cross-repo package naming rules when the same mistake can recur in examples, registry packages, tests, and compatibility packages.
+---
+
+## 2026-04-09 06:15:52 PDT - US-CC-002
+- Expanded the `events` builtin conformance probe to verify both `require("events")` and `require("node:events")` return the `EventEmitter` constructor, that `EventEmitter` is self-referential on the CommonJS export, and that both `extends require("events")` and `new (require("events"))()` behave like host Node.
+- Files changed: `crates/sidecar/tests/builtin_conformance.rs`, `crates/AGENTS.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Module-shape regressions for builtins are easier to catch by extending the host-vs-guest conformance probe than by writing guest-only assertions.
+  - When a story is primarily about runtime parity, tightening the conformance test to exercise the exact import/require pattern from a real SDK is usually enough to make the acceptance criteria durable.
+  - `require("events")` and `require("node:events")` should be exercised together because the bridge normalizes builtin specifiers and regressions can hide if only one path is covered.
 ---
