@@ -6,6 +6,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
 - The renamed core workspace package is `@rivet-dev/agent-os-core`; use that name for both package dependencies and TypeScript subpath imports like `@rivet-dev/agent-os-core/test/*` and `@rivet-dev/agent-os-core/internal/runtime-compat`.
 - Root install reproducibility is best verified with the three-part probe `pnpm install --frozen-lockfile`, `pnpm check-types`, and a package-local `pnpm --dir <pkg> exec <bin> --version` check to prove the root install materialized script binaries for workspace packages.
+- The `agent-os-v8-runtime` crate currently has a split truth path: run `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main suite and `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately for the isolated snapshot coverage, as documented in the repo root `CLAUDE.md`.
 - Node builtin compatibility regressions are best covered in `crates/sidecar/tests/builtin_conformance.rs`, which runs the same probe under host Node and guest V8 and compares the JSON output directly.
 - The shared-runtime `node:stream` path exercised by sidecar builtin conformance comes from the inline mini-stream module in `crates/execution/src/javascript.rs`; fixing `require("stream")` parity there is separate from the stdlib-backed `v8-bridge.source.js` path.
 - In the WASM host-process bridge, synthetic pipes must initialize both `producers` and `consumers`, and consumer registration must flush any chunks buffered before the child attaches; shell builtins can write into a pipe before a spawned reader like `wc` registers stdin.
@@ -138,4 +139,15 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Async `fs.promises` bridge globals belong in `crates/bridge/bridge-contract.json` just like the sync filesystem globals; the V8 runtime test will catch omissions there before guest `fs/promises` regressions show up elsewhere.
   - `crates/execution/assets/v8-bridge.source.js`, `crates/execution/src/v8_runtime.rs`, and `crates/v8-runtime/src/session.rs` are all consumers of the same bridge surface, so contract drift can hide even when only one of those layers changes.
   - For this story, the focused bridge-contract test plus root `pnpm check-types` is enough to prove the canonical inventory and runtime registration lists are back in sync.
+---
+
+## 2026-04-09 10:58:42 PDT - US-006
+- Re-verified the full `agent-os-v8-runtime` crate suite on `finish-ts-rust-migration`; the main suite passes with `cargo test -p agent-os-v8-runtime -- --test-threads=1`, and the isolated ignored snapshot coverage also passes with `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored`.
+- Confirmed the required isolated snapshot workflow is already documented in the repo root `CLAUDE.md`, so this story closed as a verification-only backlog update rather than a source change in the crate itself.
+- Verified the cross-workspace gate with `pnpm check-types`.
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `US-006` should be treated as a two-command Rust verification path plus root `pnpm check-types`; the ignored snapshot coverage is intentionally not part of the default crate test invocation.
+  - If the normal `agent-os-v8-runtime` suite is green but the story is still open, check whether the isolated snapshot command was run explicitly before assuming more code work is needed.
+  - The canonical place documenting the temporary split snapshot workflow is the repo root `CLAUDE.md`, not a crate-local instruction file.
 ---
