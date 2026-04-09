@@ -94,3 +94,12 @@ Started: Thu Apr  9 06:09:31 AM PDT 2026
   - `pnpm --dir <workspace> exec <bin>` is a useful guard that the root install actually materialized package script dependencies, not just the lockfile metadata.
   - The current branch no longer needs source changes for root install consistency; the remaining TypeScript install/path issues move to `US-002`.
 ---
+
+## 2026-04-09 10:40:53 PDT - US-002
+- Verified the package-local `pnpm exec` path is healthy across the targeted workspaces: `pnpm --dir packages/core exec vitest --version`, `pnpm --dir packages/secure-exec exec vitest --version`, and `pnpm --dir packages/dev-shell exec vitest --version` all resolve `vitest/2.1.9` from the root install, and `pnpm check-types` passes from the repo root.
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The three-package probe in `packages/core`, `packages/secure-exec`, and `packages/dev-shell` is the fastest truth check that root installation restored normal `pnpm exec` binary resolution across both renamed Agent OS packages and the `secure-exec` compatibility workspace.
+  - If these commands already pass on the target branch, this story is verification-only and should be completed by recording the exact probe results rather than forcing unrelated source churn.
+  - This repo currently has no tracked `AGENTS.md` files, so Ralph iterations should not spend time searching for nearby agent docs unless new ones are added.
+---
