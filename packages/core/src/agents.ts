@@ -74,70 +74,71 @@ export interface AgentConfig {
 	): Promise<{ args?: string[]; env?: Record<string, string> }>;
 }
 
-export type AgentType = "pi" | "pi-cli" | "opencode" | "claude";
+async function prepareAppendedInstructions(
+	flag: "--append-system-prompt" | "--append-developer-instructions",
+	kernel: Kernel,
+	additionalInstructions?: string,
+	options?: PrepareInstructionsOptions,
+): Promise<{ args?: string[]; env?: Record<string, string> }> {
+	const instructions = await readVmInstructions(
+		kernel,
+		additionalInstructions,
+		options?.toolReference,
+		options?.skipBase,
+	);
+	if (!instructions) return {};
+	return { args: [flag, instructions] };
+}
 
-export const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
+const OPENCODE_CONTEXT_PATHS = [
+	".github/copilot-instructions.md",
+	".cursorrules",
+	".cursor/rules/",
+	"CLAUDE.md",
+	"CLAUDE.local.md",
+	"opencode.md",
+	"opencode.local.md",
+	"OpenCode.md",
+	"OpenCode.local.md",
+	"OPENCODE.md",
+	"OPENCODE.local.md",
+	INSTRUCTIONS_PATH,
+] as const;
+
+export const AGENT_CONFIGS = {
 	pi: {
 		acpAdapter: "@rivet-dev/agent-os-pi",
 		agentPackage: "@mariozechner/pi-coding-agent",
-		// OS instructions injection keeps the Pi session self-contained inside the VM.
-		prepareInstructions: async (kernel, _cwd, additionalInstructions, opts) => {
-			const instructions = await readVmInstructions(
+		prepareInstructions: async (kernel, _cwd, additionalInstructions, opts) =>
+			prepareAppendedInstructions(
+				"--append-system-prompt",
 				kernel,
 				additionalInstructions,
-				opts?.toolReference,
-				opts?.skipBase,
-			);
-			if (!instructions) return {};
-			return { args: ["--append-system-prompt", instructions] };
-		},
+				opts,
+			),
 	},
 	"pi-cli": {
 		acpAdapter: "pi-acp",
 		agentPackage: "@mariozechner/pi-coding-agent",
-		// Full CLI-based ACP adapter: spawns pi --mode rpc as a subprocess.
-		// Higher memory overhead but provides full CLI feature set.
-		prepareInstructions: async (kernel, _cwd, additionalInstructions, opts) => {
-			const instructions = await readVmInstructions(
+		prepareInstructions: async (kernel, _cwd, additionalInstructions, opts) =>
+			prepareAppendedInstructions(
+				"--append-system-prompt",
 				kernel,
 				additionalInstructions,
-				opts?.toolReference,
-				opts?.skipBase,
-			);
-			if (!instructions) return {};
-			return { args: ["--append-system-prompt", instructions] };
-		},
+				opts,
+			),
 	},
 	opencode: {
-		// OpenCode speaks ACP natively. Agent OS runs a source-built ACP bundle
-		// from @rivet-dev/agent-os-opencode entirely inside the VM.
 		acpAdapter: "@rivet-dev/agent-os-opencode",
 		agentPackage: "@rivet-dev/agent-os-opencode",
 		defaultEnv: {
 			OPENCODE_DISABLE_CONFIG_DEP_INSTALL: "1",
 			OPENCODE_DISABLE_EMBEDDED_WEB_UI: "1",
 		},
-		// OS instructions injection: OPENCODE_CONTEXTPATHS env var with absolute
-		// path to /etc/agentos/instructions.md. No cwd file writes needed; the
-		// file is already on disk from VM boot. /etc/agentos/ is read-only, so we
-		// only write additional session-level prompt fragments into /tmp/.
 		prepareInstructions: async (kernel, _cwd, additionalInstructions, opts) => {
-			const contextPaths = opts?.skipBase
+			const contextPaths: string[] = opts?.skipBase
 				? []
-				: [
-						".github/copilot-instructions.md",
-						".cursorrules",
-						".cursor/rules/",
-						"CLAUDE.md",
-						"CLAUDE.local.md",
-						"opencode.md",
-						"opencode.local.md",
-						"OpenCode.md",
-						"OpenCode.local.md",
-						"OPENCODE.md",
-						"OPENCODE.local.md",
-						INSTRUCTIONS_PATH,
-					];
+				: [...OPENCODE_CONTEXT_PATHS];
 			if (additionalInstructions) {
 				const additionalPath = "/tmp/agentos-additional-instructions.md";
 				await kernel.writeFile(additionalPath, additionalInstructions);
@@ -175,46 +176,25 @@ export const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
 			SHELL: "/bin/sh",
 			USE_BUILTIN_RIPGREP: "0",
 		},
-		prepareInstructions: async (kernel, _cwd, additionalInstructions, opts) => {
-			const instructions = await readVmInstructions(
+		prepareInstructions: async (kernel, _cwd, additionalInstructions, opts) =>
+			prepareAppendedInstructions(
+				"--append-system-prompt",
 				kernel,
 				additionalInstructions,
-				opts?.toolReference,
-				opts?.skipBase,
-			);
-			if (!instructions) return {};
-			return { args: ["--append-system-prompt", instructions] };
-		},
+				opts,
+			),
 	},
-};
+	codex: {
+		acpAdapter: "@rivet-dev/agent-os-codex-agent",
+		agentPackage: "@rivet-dev/agent-os-codex",
+		prepareInstructions: async (kernel, _cwd, additionalInstructions, opts) =>
+			prepareAppendedInstructions(
+				"--append-developer-instructions",
+				kernel,
+				additionalInstructions,
+				opts,
+			),
+	},
+} satisfies Record<string, AgentConfig>;
 
-// ── Agents not yet in AGENT_CONFIGS ─────────────────────────────────────
-//
-// Claude Code (@anthropic-ai/claude-code)
-//   Cannot run in VM: native ripgrep dep, complex async startup, no TTY.
-//   Speaks ACP natively (cli.js, no separate adapter).
-//   Injection approach: reads /etc/agentos/instructions.md from VM,
-//   passes via --append-system-prompt <text> CLI flag.
-//   Zero filesystem writes. User's CLAUDE.md still loads normally.
-//   Config when runnable:
-//     acpAdapter: "@anthropic-ai/claude-code"
-//     agentPackage: "@anthropic-ai/claude-code"
-//     prepareInstructions: async (kernel, _cwd, additionalInstructions) => {
-//       const instructions = await readVmInstructions(kernel, additionalInstructions);
-//       return { args: ["--append-system-prompt", instructions] };
-//     }
-//
-// Codex (@openai/codex)
-//   Not yet investigated for VM compatibility (Rust binary).
-//   Injection approach: reads /etc/agentos/instructions.md from VM,
-//   passes via -c developer_instructions="..." CLI flag.
-//   Injected as additive developer role message — does not replace built-in
-//   system instructions. User's AGENTS.md still loads normally.
-//   Zero filesystem writes.
-//   Config when runnable:
-//     acpAdapter: "@openai/codex" (or dedicated ACP adapter TBD)
-//     agentPackage: "@openai/codex"
-//     prepareInstructions: async (kernel, _cwd, additionalInstructions) => {
-//       const instructions = await readVmInstructions(kernel, additionalInstructions);
-//       return { args: ["-c", `developer_instructions=${instructions}`] };
-//     }
+export type AgentType = keyof typeof AGENT_CONFIGS;

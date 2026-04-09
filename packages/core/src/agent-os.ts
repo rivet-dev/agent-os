@@ -113,7 +113,7 @@ export interface BatchReadResult {
 
 /** Entry in the agent registry, describing an available agent type. */
 export interface AgentRegistryEntry {
-	id: AgentType;
+	id: string;
 	acpAdapter: string;
 	agentPackage: string;
 	installed: boolean;
@@ -2315,7 +2315,7 @@ export class AgentOs {
 					// Package not installed
 				}
 				return {
-					id: id as AgentType,
+					id,
 					acpAdapter: config.acpAdapter,
 					agentPackage: config.agentPackage,
 					installed,

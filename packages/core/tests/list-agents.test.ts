@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/agent-os.js";
+import { AGENT_CONFIGS } from "../src/agents.js";
 
 describe("listAgents()", () => {
 	let vm: AgentOs;
@@ -12,32 +13,32 @@ describe("listAgents()", () => {
 		await vm.dispose();
 	});
 
-	test("returns pi, opencode, and claude agents", () => {
+	test("returns the shipped built-in agents", () => {
 		const agents = vm.listAgents();
 		const ids = agents.map((a) => a.id);
 		expect(ids).toContain("pi");
+		expect(ids).toContain("pi-cli");
 		expect(ids).toContain("opencode");
 		expect(ids).toContain("claude");
+		expect(ids).toContain("codex");
 	});
 
-	test("each entry has correct fields from AGENT_CONFIGS", () => {
+	test("each entry exposes the current built-in adapter metadata", () => {
 		const agents = vm.listAgents();
-		const pi = agents.find((a) => a.id === "pi");
-		expect(pi).toBeDefined();
-		expect(pi?.acpAdapter).toBe("pi-acp");
-		expect(pi?.agentPackage).toBe("@mariozechner/pi-coding-agent");
-		expect(typeof pi?.installed).toBe("boolean");
+		for (const [id, config] of Object.entries(AGENT_CONFIGS)) {
+			const agent = agents.find((entry) => entry.id === id);
+			expect(agent).toBeDefined();
+			expect(agent?.acpAdapter).toBe(config.acpAdapter);
+			expect(agent?.agentPackage).toBe(config.agentPackage);
+			expect(typeof agent?.installed).toBe("boolean");
+		}
 	});
 
 	test("installed is true when adapter package exists", () => {
-		// Built-in adapters installed for the workspace should resolve from node_modules.
 		const agents = vm.listAgents();
-		const pi = agents.find((a) => a.id === "pi");
-		const opencode = agents.find((a) => a.id === "opencode");
-		const claude = agents.find((a) => a.id === "claude");
-		expect(pi?.installed).toBe(true);
-		expect(opencode?.installed).toBe(true);
-		expect(claude?.installed).toBe(true);
+		for (const id of Object.keys(AGENT_CONFIGS)) {
+			expect(agents.find((agent) => agent.id === id)?.installed).toBe(true);
+		}
 	});
 
 	test("installed is false when adapter package is missing", async () => {

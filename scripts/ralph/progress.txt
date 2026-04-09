@@ -5,6 +5,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
 - The renamed core workspace package is `@rivet-dev/agent-os-core`; use that name for both package dependencies and TypeScript subpath imports like `@rivet-dev/agent-os-core/test/*` and `@rivet-dev/agent-os-core/internal/runtime-compat`.
+- For built-in agents in `packages/core/src/agents.ts`, derive `AgentType` from `keyof typeof AGENT_CONFIGS` and validate launch argv/env with a mock ACP adapter that echoes `process.argv` plus selected env vars through `getSessionAgentInfo()` while exercising the shipped registry software package.
 - Root install reproducibility is best verified with the three-part probe `pnpm install --frozen-lockfile`, `pnpm check-types`, and a package-local `pnpm --dir <pkg> exec <bin> --version` check to prove the root install materialized script binaries for workspace packages.
 - The `agent-os-v8-runtime` crate currently has a split truth path: run `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main suite and `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately for the isolated snapshot coverage, as documented in the repo root `CLAUDE.md`.
 - `US-007` is gated by verification, not broad runtime churn: `cargo test -p agent-os-sidecar --test kill_cleanup -- --test-threads=1` plus root `pnpm check-types` is the acceptance path for VM/process teardown semantics on the current branch.
@@ -191,7 +192,17 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Verified the story with `pnpm --dir packages/core exec vitest run tests/claude-code-investigate.test.ts` and `pnpm check-types`.
 - Files changed: `packages/core/tests/claude-code-investigate.test.ts`, `packages/core/CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
 - **Learnings for future iterations:**
-  - `packages/core/tests/claude-code-investigate.test.ts` is an investigation/regression suite for module-access visibility, so keep its assertions anchored to projected-file access and deterministic failure signatures rather than pretending projected native assets are runnable.
-  - For projected native binaries under `/root/node_modules`, guest `child_process.spawnSync()` currently fails during WASM warmup (`expected magic word`) because the VM resolver does not execute ELF binaries directly.
-  - `pnpm --dir packages/core exec vitest run tests/claude-code-investigate.test.ts` plus root `pnpm check-types` is the exact acceptance path for the Claude projection story.
+- `packages/core/tests/claude-code-investigate.test.ts` is an investigation/regression suite for module-access visibility, so keep its assertions anchored to projected-file access and deterministic failure signatures rather than pretending projected native assets are runnable.
+- For projected native binaries under `/root/node_modules`, guest `child_process.spawnSync()` currently fails during WASM warmup (`expected magic word`) because the VM resolver does not execute ELF binaries directly.
+- `pnpm --dir packages/core exec vitest run tests/claude-code-investigate.test.ts` plus root `pnpm check-types` is the exact acceptance path for the Claude projection story.
+---
+
+## 2026-04-09 11:17:00 PDT - US-011
+- Restored the built-in agent registry surface by deriving `AgentType` from `AGENT_CONFIGS`, adding the shipped Codex adapter to `packages/core/src/agents.ts`, removing the stale "not yet in AGENT_CONFIGS" commentary, and widening `listAgents()` entry IDs so package-provided agent configs no longer rely on a stale hardcoded union.
+- Added `packages/core/tests/agent-config-environment.test.ts`, which boots each shipped registry agent package behind a mock ACP adapter and verifies the launch argv/env contract for `pi`, `pi-cli`, `claude`, `opencode`, and `codex` through `getSessionAgentInfo()`. Updated `tests/list-agents.test.ts` to assert against the live built-in metadata instead of the stale Pi CLI adapter expectation.
+- Files changed: `packages/core/src/agents.ts`, `packages/core/src/agent-os.ts`, `packages/core/tests/list-agents.test.ts`, `packages/core/tests/agent-config-environment.test.ts`, `packages/core/CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `listAgents()` can expose agent IDs beyond the built-in core union, so the public registry entry type should not assume only a manual `AgentType` list.
+  - The right regression test for adapter launch config is a real `createSession()` call with the shipped registry software descriptor plus a mock ACP adapter that echoes `argv` and env, not a unit test that only inspects static config objects.
+  - Codex is now part of the shipped built-in agent surface in `packages/core`, so future agent-metadata changes need to update both the core config map and the package docs/tests in the same change.
 ---
