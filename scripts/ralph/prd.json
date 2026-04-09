@@ -63,7 +63,7 @@
         "Test: vitest run tests/process-management.test.ts passes"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "ROOT CAUSE: WASM calls proc_waitpid \u2192 callSyncRpc('child_process.poll') \u2192 blocks in readSync(). Child stdout needs to flow through WASM fd_read \u2192 which calls callSyncRpc AGAIN \u2192 DEADLOCK (single-threaded WASM). Secure-exec solved this with async event dispatch via _childProcessDispatch callback. The sidecar should PUSH child events to WASM guest via StreamCallback instead of waiting for guest to poll. See .agent/recovery/secure-exec/nodejs/src/bridge/child-process.ts for the working pattern. Step-26 codex made partial fixes (synthetic pipe bookkeeping, stdin EOF, FD lifetime) but the core deadlock remains."
     },
     {

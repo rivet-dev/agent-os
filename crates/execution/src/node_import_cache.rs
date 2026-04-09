@@ -8393,10 +8393,19 @@ function enqueuePipeBytes(pipe, bytes) {
 }
 
 function unregisterPipeProducer(pipe, producerKey) {
+  if (!pipe || typeof pipe.producers?.delete !== 'function') {
+    return;
+  }
   pipe.producers.delete(producerKey);
+  if (pipe.producers.size === 0 && (pipe.writeHandleCount ?? 0) === 0) {
+    closePipeConsumers(pipe);
+  }
 }
 
 function unregisterPipeConsumer(pipe, consumerKey) {
+  if (!pipe || typeof pipe.consumers?.delete !== 'function') {
+    return;
+  }
   pipe.consumers.delete(consumerKey);
 }
 
@@ -8453,12 +8462,22 @@ function registerPipeConsumer(fd, childId, stream) {
     return null;
   }
   handle.pipe.consumers.set(`${childId}:${stream}`, { childId, stream });
+  flushPipeConsumers(handle.pipe);
+  if (handle.pipe.producers.size === 0 && (handle.pipe.writeHandleCount ?? 0) === 0) {
+    closePipeConsumers(handle.pipe);
+  }
   traceHostProcess('register-consumer', { fd: Number(fd) >>> 0, childId, stream, pipeId: handle.pipe.id });
   return handle.pipe;
 }
 
 function flushPipeConsumers(pipe) {
-  if (!pipe || pipe.consumers.size === 0 || pipe.chunks.length === 0) {
+  if (
+    !pipe ||
+    typeof pipe.consumers?.size !== 'number' ||
+    !Array.isArray(pipe.chunks) ||
+    pipe.consumers.size === 0 ||
+    pipe.chunks.length === 0
+  ) {
     return false;
   }
 
@@ -8483,7 +8502,7 @@ function flushPipeConsumers(pipe) {
 }
 
 function closePipeConsumers(pipe) {
-  if (!pipe || pipe.consumers.size === 0) {
+  if (!pipe || typeof pipe.consumers?.size !== 'number' || pipe.consumers.size === 0) {
     return false;
   }
 
@@ -9076,6 +9095,7 @@ const hostProcessImport =
             const pipe = {
               id: nextSyntheticPipeId++,
               chunks: [],
+              consumers: new Map(),
               producers: new Map(),
               readHandleCount: 0,
               writeHandleCount: 0,
