@@ -20,6 +20,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - For `moduleAccessCwd` regressions, use `packages/core/tests/native-sidecar-process.test.ts` for the real-sidecar `/root/node_modules` visibility probe and `packages/core/tests/software-projection.test.ts` for guest read-only enforcement on projected package roots.
 - Projected native assets under `/root/node_modules` are a visibility-only contract today; guest `child_process.spawn*()` still routes those paths through the VM resolver, so native ELF probes fail deterministically during WASM warmup instead of running host-native code.
 - The native sidecar's shell-visible builtin runtime stubs should mirror the compat runtime surface: keep `node` and `wasm` seeded for guest command resolution, but do not materialize extra `/bin/*` runtime stubs like `python` unless a lower snapshot or installed software explicitly provides them; direct runtime dispatch still covers non-shell-visible runtimes.
+- WASI guest commands only see mounted guest roots that are mirrored into the embedded runner's `buildPreopens()` map. If `vm.readFile()` can see a `host_dir` mount but `vm.exec("cat ...")` cannot, check `AGENT_OS_GUEST_PATH_MAPPINGS` -> WASI preopen propagation before changing the TypeScript mount setup.
 
 ## 2026-04-09 06:12:40 PDT - US-CC-001
 - Implemented the remaining workspace/package rename cleanup for `@rivet-dev/agent-os-core`, including the last manifest dependency, benchmark imports, secure-exec/dev-shell subpath aliases, registry test imports, and the root instruction note to keep future changes on the new package name.
@@ -215,4 +216,15 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Sidecar/runtime drift can show up as guest filesystem shape regressions, not just execution failures; compare the native sidecar bootstrap surface against `packages/core/src/runtime-compat.ts` before adding more `/bin/*` stubs.
   - Direct runtime dispatch and shell-visible command stubs are separate contracts: a runtime can remain executable via `ExecuteRequest { runtime: ... }` without appearing in the guest filesystem.
   - The exact acceptance path for this story is sufficient: `pnpm --dir packages/core exec vitest run tests/agent-os-base-filesystem.test.ts` catches the unexpected lower-surface leak, and `pnpm check-types` confirms the sidecar/core drift fix stays type-safe across the workspace.
+---
+
+## 2026-04-09 11:37:19 PDT - US-013
+- Restored `/etc/agentos/instructions.md` visibility from guest shell commands by materializing the instructions into a real sidecar-visible `/etc/agentos` mount, carrying host-dir guest-path mappings through sidecar runtime env preparation, and teaching the embedded WASM runner to preopen mapped guest roots for mounted read-only paths.
+- Added a host-dir regression test proving mounted files are readable from `vm.exec("cat ...")`, which covers the same execution path that had been breaking the `/etc/agentos` instructions block.
+- Verified the story with `pnpm --dir packages/core exec vitest run tests/os-instructions.test.ts tests/host-dir-backend.test.ts` and `pnpm check-types`.
+- Files changed: `packages/core/src/agent-os.ts`, `packages/core/tests/host-dir-backend.test.ts`, `packages/core/CLAUDE.md`, `crates/sidecar/src/execution.rs`, `crates/execution/src/wasm.rs`, `crates/execution/src/node_import_cache.rs`, `crates/execution/CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - A path being readable through `vm.readFile()` does not prove guest command execution can see it; mounted guest roots also need to propagate through the WASI runner's preopen map.
+  - The sidecar runtime env prep for guest executions is shared infrastructure, not JavaScript-only plumbing; mounted guest path mappings and extra host read roots need to follow WASM command launches too.
+  - A focused `host_dir` exec regression test is a good canary for mount-vs-exec drift because it reproduces the same failure mode as `/etc/agentos` without depending on agent-specific instruction wiring.
 ---

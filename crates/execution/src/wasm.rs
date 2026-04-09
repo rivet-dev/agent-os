@@ -45,6 +45,8 @@ const WASM_WARMUP_DEBUG_ENV: &str = "AGENT_OS_WASM_WARMUP_DEBUG";
 const NODE_SYNC_RPC_ENABLE_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_ENABLE";
 const NODE_SYNC_RPC_REQUEST_FD_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_REQUEST_FD";
 const NODE_SYNC_RPC_RESPONSE_FD_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_RESPONSE_FD";
+const NODE_EXTRA_FS_READ_PATHS_ENV: &str = "AGENT_OS_EXTRA_FS_READ_PATHS";
+const NODE_EXTRA_FS_WRITE_PATHS_ENV: &str = "AGENT_OS_EXTRA_FS_WRITE_PATHS";
 pub const WASM_PREWARM_TIMEOUT_MS_ENV: &str = "AGENT_OS_WASM_PREWARM_TIMEOUT_MS";
 pub const WASM_MAX_FUEL_ENV: &str = "AGENT_OS_WASM_MAX_FUEL";
 pub const WASM_MAX_MEMORY_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_MEMORY_BYTES";
@@ -912,6 +914,11 @@ fn configure_wasm_node_sandbox(
                 .map(Path::to_path_buf),
         ),
     ));
+    read_paths.extend(parse_env_path_list(&request.env, NODE_EXTRA_FS_READ_PATHS_ENV));
+    write_paths.extend(parse_env_path_list(
+        &request.env,
+        NODE_EXTRA_FS_WRITE_PATHS_ENV,
+    ));
 
     harden_node_command(
         command,
@@ -924,6 +931,15 @@ fn configure_wasm_node_sandbox(
         false,
     );
     Ok(())
+}
+
+fn parse_env_path_list(env: &BTreeMap<String, String>, key: &str) -> Vec<PathBuf> {
+    env.get(key)
+        .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+        .into_iter()
+        .flatten()
+        .map(PathBuf::from)
+        .collect()
 }
 
 fn configure_node_command(

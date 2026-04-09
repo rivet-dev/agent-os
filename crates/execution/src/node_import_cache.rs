@@ -7905,6 +7905,30 @@ function resolveModulePath(specifier) {
   return specifier;
 }
 
+function parseGuestPathMappings(value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    return [];
+  }
+  try {
+    return JSON.parse(value)
+      .map((entry) => {
+        const guestPath =
+          entry && typeof entry.guestPath === 'string'
+            ? path.posix.normalize(entry.guestPath)
+            : null;
+        const hostPath =
+          entry && typeof entry.hostPath === 'string'
+            ? path.resolve(entry.hostPath)
+            : null;
+        return guestPath && hostPath ? { guestPath, hostPath } : null;
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.guestPath.length - left.guestPath.length);
+  } catch {
+    return [];
+  }
+}
+
 const modulePath = process.env.AGENT_OS_WASM_MODULE_PATH;
 if (!modulePath) {
   throw new Error('AGENT_OS_WASM_MODULE_PATH is required');
@@ -7912,6 +7936,7 @@ if (!modulePath) {
 
 const guestArgv = JSON.parse(process.env.AGENT_OS_GUEST_ARGV ?? '[]');
 const guestEnv = JSON.parse(process.env.AGENT_OS_GUEST_ENV ?? '{}');
+const GUEST_PATH_MAPPINGS = parseGuestPathMappings(process.env.AGENT_OS_GUEST_PATH_MAPPINGS);
 const permissionTier = process.env.AGENT_OS_WASM_PERMISSION_TIER ?? 'full';
 const prewarmOnly = process.env.AGENT_OS_WASM_PREWARM_ONLY === '1';
 const maxMemoryBytesValue = Number(process.env.AGENT_OS_WASM_MAX_MEMORY_BYTES);
@@ -7963,10 +7988,23 @@ function buildPreopens() {
     case 'read-write':
     case 'full':
     default:
-      return {
+      const preopens = {
         '.': process.cwd(),
         '/workspace': process.cwd(),
       };
+      const seen = new Set(Object.keys(preopens));
+      for (const mapping of GUEST_PATH_MAPPINGS) {
+        if (!mapping || typeof mapping.guestPath !== 'string' || typeof mapping.hostPath !== 'string') {
+          continue;
+        }
+        const guestPath = path.posix.normalize(mapping.guestPath);
+        if (!path.posix.isAbsolute(guestPath) || seen.has(guestPath)) {
+          continue;
+        }
+        preopens[guestPath] = mapping.hostPath;
+        seen.add(guestPath);
+      }
+      return preopens;
   }
 }
 
@@ -9291,7 +9329,7 @@ if (delegatePathOpen) {
   ) => {
     if (
       isWorkspaceReadOnly() &&
-      (Number(oflags) !== 0 || hasWriteRights(rightsBase) || hasWriteRights(rightsInheriting))
+      (Number(oflags) !== 0 || hasWriteRights(rightsBase))
     ) {
       return denyReadOnlyMutation();
     }

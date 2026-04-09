@@ -2996,7 +2996,7 @@ where
             };
             env.insert(String::from("AGENT_OS_GUEST_ENTRYPOINT"), guest_entrypoint);
             let guest_entrypoint = env.get("AGENT_OS_GUEST_ENTRYPOINT").cloned();
-            prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
+            prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
 
             return Ok(ResolvedChildProcessExecution {
                 command: command.clone(),
@@ -3070,7 +3070,7 @@ where
                     )
                 };
             let guest_entrypoint = env.get("AGENT_OS_GUEST_ENTRYPOINT").cloned();
-            prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
+            prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
 
             return Ok(ResolvedChildProcessExecution {
                 command: command.clone(),
@@ -3102,6 +3102,13 @@ where
                 .and_then(|name| name.to_str())
                 .and_then(|name| vm.command_permissions.get(name).copied())
         });
+        prepare_guest_runtime_env(
+            vm,
+            &mut env,
+            &guest_cwd,
+            &host_cwd,
+            Some(guest_entrypoint.clone()),
+        )?;
 
         Ok(ResolvedChildProcessExecution {
             command: command.clone(),
@@ -4350,12 +4357,12 @@ fn resolve_execute_request(
         .then(|| resolve_host_entrypoint_within_vm_host_cwd(vm, &entrypoint))
         .flatten();
 
-    if runtime == GuestRuntimeKind::JavaScript {
+    if runtime != GuestRuntimeKind::Python {
         let guest_entrypoint = host_entrypoint_override
             .as_ref()
             .map(|(guest_entrypoint, _)| guest_entrypoint.clone())
             .or_else(|| guest_entrypoint_for_specifier(&guest_cwd, &entrypoint));
-        prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
+        prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
     }
 
     Ok(ResolvedChildProcessExecution {
@@ -4446,7 +4453,7 @@ fn resolve_command_execution(
                 )
             };
 
-        prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
+        prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
 
         return Ok(ResolvedChildProcessExecution {
             command: String::from(JAVASCRIPT_COMMAND),
@@ -4492,7 +4499,7 @@ fn resolve_command_execution(
             },
             |(_, host_entrypoint)| host_entrypoint,
         );
-        prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
+        prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
 
         return Ok(ResolvedChildProcessExecution {
             command: String::from(JAVASCRIPT_COMMAND),
@@ -4525,6 +4532,13 @@ fn resolve_command_execution(
         });
 
     let host_entrypoint = resolve_vm_guest_path_to_host(vm, &guest_entrypoint);
+    prepare_guest_runtime_env(
+        vm,
+        &mut env,
+        &guest_cwd,
+        &host_cwd,
+        Some(guest_entrypoint.clone()),
+    )?;
 
     Ok(ResolvedChildProcessExecution {
         command: String::from(WASM_COMMAND),
@@ -4720,7 +4734,7 @@ fn resolve_host_entrypoint_within_vm_host_cwd(
     ))
 }
 
-fn prepare_javascript_runtime_env(
+fn prepare_guest_runtime_env(
     vm: &VmState,
     env: &mut BTreeMap<String, String>,
     guest_cwd: &str,

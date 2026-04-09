@@ -34,7 +34,6 @@ import { zodToJsonSchema } from "./host-tools-zod.js";
 import type { JsonRpcNotification, JsonRpcResponse } from "./json-rpc.js";
 import {
 	type ConnectTerminalOptions,
-	createInMemoryFileSystem,
 	type Kernel,
 	type KernelExecOptions,
 	type KernelExecResult,
@@ -136,6 +135,7 @@ import type {
 } from "./cron/types.js";
 import {
 	type FilesystemEntry,
+	sortFilesystemEntries,
 	snapshotVirtualFilesystem,
 } from "./filesystem-snapshot.js";
 import { createHostDirBackend } from "./host-dir-mount.js";
@@ -945,6 +945,7 @@ function collectConfiguredLowerPaths(
 function createKernelBootstrapLower(
 	config: RootFilesystemConfig | undefined,
 	commandNames: string[],
+	extraEntries: FilesystemEntry[] = [],
 ): RootSnapshotExport | null {
 	const existingPaths = collectConfiguredLowerPaths(config);
 	const entries: FilesystemEntry[] = [
@@ -1001,7 +1002,30 @@ function createKernelBootstrapLower(
 		});
 	}
 
+	for (const entry of sortFilesystemEntries(extraEntries)) {
+		if (existingPaths.has(entry.path)) {
+			continue;
+		}
+		entries.push(entry);
+	}
+
 	return entries.length > 1 ? createSnapshotExport(entries) : null;
+}
+
+function buildOsInstructionsBootstrapEntries(
+	additionalInstructions?: string,
+): FilesystemEntry[] {
+	return [
+		{
+			path: "/etc/agentos/instructions.md",
+			type: "file",
+			mode: "0644",
+			uid: 0,
+			gid: 0,
+			content: buildOsInstructions(additionalInstructions),
+			encoding: "utf8",
+		},
+	];
 }
 
 function toSnapshotModeString(
@@ -1289,6 +1313,17 @@ function materializeToolShimDir(toolKits: ToolKit[]): string {
 	return shimDir;
 }
 
+function materializeOsInstructionsDir(additionalInstructions?: string): string {
+	const instructionsDir = mkdtempSync(
+		join(tmpdir(), "agent-os-os-instructions-"),
+	);
+	writeFileSync(
+		join(instructionsDir, "instructions.md"),
+		buildOsInstructions(additionalInstructions),
+	);
+	return instructionsDir;
+}
+
 function validationMessage(error: unknown): string {
 	if (
 		typeof error === "object" &&
@@ -1537,11 +1572,13 @@ export class AgentOs {
 					...collectBootstrapWasmCommands(preparedCommandDirs.commandDirs),
 					...NODE_RUNTIME_BOOTSTRAP_COMMANDS,
 				],
+				buildOsInstructionsBootstrapEntries(options?.additionalInstructions),
 			);
 			let toolReference = "";
 			let rootBridge: NativeSidecarKernelProxy | null = null;
 			let kernel: Kernel | null = null;
 			let client: NativeSidecarProcessClient | null = null;
+			let osInstructionsDir: string | null = null;
 			let toolShimDir: string | null = null;
 			let cleanedUp = false;
 
@@ -1554,6 +1591,10 @@ export class AgentOs {
 					rmSync(toolShimDir, { recursive: true, force: true });
 					toolShimDir = null;
 				}
+				if (osInstructionsDir) {
+					rmSync(osInstructionsDir, { recursive: true, force: true });
+					osInstructionsDir = null;
+				}
 				preparedCommandDirs.dispose();
 			};
 
@@ -1562,6 +1603,9 @@ export class AgentOs {
 				if (toolKits && toolKits.length > 0) {
 					toolShimDir = materializeToolShimDir(toolKits);
 				}
+				osInstructionsDir = materializeOsInstructionsDir(
+					options?.additionalInstructions,
+				);
 				const commandGuestPaths = collectGuestCommandPaths(
 					preparedCommandDirs.commandDirs,
 				);
@@ -1573,6 +1617,16 @@ export class AgentOs {
 						commandDirs: preparedCommandDirs.commandDirs,
 						shimDir: toolShimDir,
 					});
+				sidecarMounts.push(
+					serializeMountConfigForSidecar({
+						path: "/etc/agentos",
+						plugin: createHostDirBackend({
+							hostPath: osInstructionsDir,
+							readOnly: true,
+						}),
+						readOnly: true,
+					}),
+				);
 
 				client = NativeSidecarProcessClient.spawn({
 					cwd: REPO_ROOT,
@@ -1639,13 +1693,6 @@ export class AgentOs {
 				});
 
 				kernel = rootBridge as unknown as Kernel;
-
-				const etcAgentosFs = createInMemoryFileSystem();
-				await etcAgentosFs.writeFile(
-					"instructions.md",
-					buildOsInstructions(options?.additionalInstructions),
-				);
-				kernel.mountFs("/etc/agentos", etcAgentosFs, { readOnly: true });
 				const snapshotClient = client;
 
 				return {
