@@ -6,6 +6,7 @@ Started: Thu Apr  9 06:09:31 AM PDT 2026
 - The shared-runtime `node:stream` path exercised by sidecar builtin conformance comes from the inline mini-stream module in `crates/execution/src/javascript.rs`; fixing `require("stream")` parity there is separate from the stdlib-backed `v8-bridge.source.js` path.
 - In the WASM host-process bridge, synthetic pipes must initialize both `producers` and `consumers`, and consumer registration must flush any chunks buffered before the child attaches; shell builtins can write into a pipe before a spawned reader like `wc` registers stdin.
 - Package-provided agent descriptors registered via `processSoftware()` override the hardcoded `AGENT_CONFIGS` entries, so launch-critical defaults like Claude shell/env flags need to stay mirrored across both config surfaces.
+- Claude’s patched SDK/CLI artifacts are located through `registry/agent/claude/dist/claude-*-patched.json`; regression tests should validate those manifests and fallback resolution with a temp package dir instead of mutating the real built artifacts.
 
 ## 2026-04-09 06:12:40 PDT - US-CC-001
 - Implemented the remaining workspace/package rename cleanup for `@rivet-dev/agent-os-core`, including the last manifest dependency, benchmark imports, secure-exec/dev-shell subpath aliases, registry test imports, and the root instruction note to keep future changes on the new package name.
@@ -51,4 +52,15 @@ Started: Thu Apr  9 06:09:31 AM PDT 2026
   - The packaged Claude software descriptor is the config surface exercised by `AgentOs.create({ software: [claude] })`, so a fix that lands only in `packages/core/src/agents.ts` can still miss the real session path.
   - For agent launch regressions, pair a small config assertion with the existing end-to-end agent session test instead of relying on either one alone.
   - `pnpm --dir registry/agent/claude build`, `pnpm --dir packages/core check-types`, and `pnpm --dir packages/core exec vitest run tests/claude-session.test.ts` are the focused truth checks for Claude adapter shell/env changes.
+---
+
+## 2026-04-09 07:01:07 PDT - US-CC-006
+- Extracted Claude patched-artifact resolution into `registry/agent/claude/src/patched-cli.ts` so the adapter’s manifest lookup and fallback behavior are testable instead of being embedded inline.
+- Added `registry/agent/claude/tests/patched-cli.test.mjs` to verify that `build-patched-cli.mjs` leaves valid CLI/SDK manifests in `dist/`, that manifest-based resolution wins when present, and that the adapter falls back to the upstream SDK paths when manifests are missing.
+- Re-verified the end-to-end Claude V8 path with `pnpm --dir packages/core exec vitest run tests/claude-session.test.ts`, which still passes all nine session tests including valid `getSessionAgentInfo()` coverage.
+- Files changed: `registry/agent/claude/src/adapter.ts`, `registry/agent/claude/src/patched-cli.ts`, `registry/agent/claude/tests/patched-cli.test.mjs`, `CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Claude patch discovery should stay centralized in one helper module so manifest-shape regressions can be unit-tested without booting a full agent session.
+  - The build artifact contract is the pair of manifest files in `registry/agent/claude/dist/`; tests should assert the manifests point at existing outputs instead of depending on specific hashed filenames.
+  - The fastest focused verification for Claude CLI patching is `pnpm --dir registry/agent/claude build`, `node --test registry/agent/claude/tests/patched-cli.test.mjs`, and `pnpm --dir packages/core exec vitest run tests/claude-session.test.ts`.
 ---

@@ -94,7 +94,7 @@
         "createSession('claude') + getSessionAgentInfo() returns valid agent info"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "US-110 from old PRD. The Claude SDK CLI needs patching to work in V8 (shell defaults, stdio handling). Step-26 added this but may need re-verification."
     },
     {

@@ -65,6 +65,7 @@ The Rust sidecar kernel was migrated from a working JavaScript kernel (`@secure-
 
 - **Agent adapters MUST use the real agent SDK.** Each agent adapter (`registry/agent/*/src/adapter.ts`) must call the agent's SDK directly (e.g., `createAgentSession()` from `@mariozechner/pi-coding-agent`). **NEVER replace an SDK adapter with a minimal/stub adapter that makes direct API calls** (e.g., direct `fetch` to `/v1/messages`). If the SDK doesn't work in V8, fix the V8 compatibility — don't bypass the SDK.
 - **No host agent exceptions.** Host-native wrappers and host binary launch paths are not allowed.
+- **Claude patched SDK/CLI artifacts are discovered via dist manifests.** `registry/agent/claude/scripts/build-patched-cli.mjs` writes `dist/claude-cli-patched.json` and `dist/claude-sdk-patched.json`; the adapter resolves those manifests first and only falls back to the upstream SDK files when they are missing. Update the build script/manifests rather than hardcoding hashed artifact paths in the adapter.
 
 ## VM System Tools
 

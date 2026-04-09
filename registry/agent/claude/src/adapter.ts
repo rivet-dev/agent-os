@@ -32,7 +32,6 @@ import {
 	appendFileSync,
 	existsSync,
 	mkdirSync,
-	readFileSync,
 	writeFileSync,
 } from "node:fs";
 import { spawn } from "node:child_process";
@@ -41,6 +40,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { resolveClaudeCliPath, resolveClaudeSdkPath } from "./patched-cli.js";
 
 type PromptPart = { type?: string; text?: string };
 type ClaudeSdkRuntime = Awaited<typeof claudeSdkRuntimePromise>;
@@ -84,42 +84,13 @@ async function loadPatchedClaudeSdkRuntime(): Promise<
 > {
 	const require = createRequire(import.meta.url);
 	const sdkPath = require.resolve("@anthropic-ai/claude-agent-sdk");
-	const cliPath = resolveClaudeCliPath(sdkPath);
-	const runtime = await import(resolveClaudeSdkPath(sdkPath));
+	const packageDir = resolvePath(dirname(fileURLToPath(import.meta.url)), "..");
+	const cliPath = resolveClaudeCliPath({ packageDir, sdkPath });
+	const runtime = await import(resolveClaudeSdkPath({ packageDir, sdkPath }));
 	return {
 		cliPath,
 		query: runtime.query,
 	};
-}
-
-function resolveClaudeCliPath(sdkPath: string): string {
-	const packageDir = resolvePath(dirname(fileURLToPath(import.meta.url)), "..");
-	const manifestPath = resolvePath(packageDir, "dist", "claude-cli-patched.json");
-	try {
-		const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as {
-			entry?: string;
-		};
-		if (typeof manifest.entry === "string" && manifest.entry.length > 0) {
-			return resolvePath(packageDir, "dist", manifest.entry.replace(/^\.\//, ""));
-		}
-	} catch {
-	}
-	return resolvePath(dirname(sdkPath), "cli.js");
-}
-
-function resolveClaudeSdkPath(sdkPath: string): string {
-	const packageDir = resolvePath(dirname(fileURLToPath(import.meta.url)), "..");
-	const manifestPath = resolvePath(packageDir, "dist", "claude-sdk-patched.json");
-	try {
-		const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as {
-			entry?: string;
-		};
-		if (typeof manifest.entry === "string" && manifest.entry.length > 0) {
-			return resolvePath(packageDir, "dist", manifest.entry.replace(/^\.\//, ""));
-		}
-	} catch {
-	}
-	return sdkPath;
 }
 
 function ensureClaudeCliWrapper(originalCliPath: string): string {
