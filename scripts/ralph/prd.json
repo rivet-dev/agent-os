@@ -80,7 +80,7 @@
         "Agent info returns valid name/title/version"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "US-109 from old PRD. Step-26 made these changes but they may need to be re-committed after the PRD rewrite. Check git log for commit with these changes."
     },
     {

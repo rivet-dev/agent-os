@@ -41,6 +41,7 @@ Each agent type needs:
 - `acpAdapter`: npm package name for the ACP adapter (e.g., `@rivet-dev/agent-os-pi`)
 - `agentPackage`: npm package name for the underlying agent (e.g., `@mariozechner/pi-coding-agent`)
 - Any environment variables or flags needed
+- Package-provided agent descriptors registered through `processSoftware()` override the hardcoded `AGENT_CONFIGS` entries at session launch time. If a default shell/env tweak matters for both built-in and packaged flows, keep the two config surfaces in sync.
 
 ## Testing
 

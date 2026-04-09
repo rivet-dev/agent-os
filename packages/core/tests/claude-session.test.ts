@@ -21,6 +21,8 @@ import {
 	REGISTRY_SOFTWARE,
 	registrySkipReason,
 } from "./helpers/registry-commands.js";
+import { AGENT_CONFIGS } from "../src/agents.js";
+import { processSoftware } from "../src/packages.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 const XU_COMMAND = "xu hello-agent-os";
@@ -93,6 +95,22 @@ function createToolFixtures(toolCall: ToolCall, finalText: string): Fixture[] {
 		),
 	];
 }
+
+test("Claude config defaults to /bin/sh and V8-safe shell env flags", () => {
+	const processed = processSoftware([claude]);
+	const processedConfig = processed.agentConfigs.get("claude");
+	const expectedEnv = {
+		CLAUDE_CODE_DISABLE_CWD_PERSIST: "1",
+		CLAUDE_CODE_DISABLE_DEV_NULL_REDIRECT: "1",
+		CLAUDE_CODE_SHELL: "/bin/sh",
+		CLAUDE_CODE_SIMPLE_SHELL_EXEC: "1",
+		CLAUDE_CODE_SWAP_STDIO: "0",
+		SHELL: "/bin/sh",
+	};
+
+	expect(AGENT_CONFIGS.claude.defaultEnv).toMatchObject(expectedEnv);
+	expect(processedConfig?.defaultEnv).toMatchObject(expectedEnv);
+});
 
 async function writeAsyncSpawnScript(vm: AgentOs): Promise<void> {
 	await vm.writeFile(NODE_ASYNC_SPAWN_SCRIPT_PATH, NODE_ASYNC_SPAWN_SCRIPT);

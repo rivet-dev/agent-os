@@ -5,6 +5,7 @@ Started: Thu Apr  9 06:09:31 AM PDT 2026
 - Node builtin compatibility regressions are best covered in `crates/sidecar/tests/builtin_conformance.rs`, which runs the same probe under host Node and guest V8 and compares the JSON output directly.
 - The shared-runtime `node:stream` path exercised by sidecar builtin conformance comes from the inline mini-stream module in `crates/execution/src/javascript.rs`; fixing `require("stream")` parity there is separate from the stdlib-backed `v8-bridge.source.js` path.
 - In the WASM host-process bridge, synthetic pipes must initialize both `producers` and `consumers`, and consumer registration must flush any chunks buffered before the child attaches; shell builtins can write into a pipe before a spawned reader like `wc` registers stdin.
+- Package-provided agent descriptors registered via `processSoftware()` override the hardcoded `AGENT_CONFIGS` entries, so launch-critical defaults like Claude shell/env flags need to stay mirrored across both config surfaces.
 
 ## 2026-04-09 06:12:40 PDT - US-CC-001
 - Implemented the remaining workspace/package rename cleanup for `@rivet-dev/agent-os-core`, including the last manifest dependency, benchmark imports, secure-exec/dev-shell subpath aliases, registry test imports, and the root instruction note to keep future changes on the new package name.
@@ -40,4 +41,14 @@ Started: Thu Apr  9 06:09:31 AM PDT 2026
   - Shell builtins can write into a synthetic pipe before a spawned child has registered its stdin consumer, so buffered chunks must flush on consumer registration rather than only on later writes.
   - Producer teardown must consider the synthetic write-handle count too; once both producer registrations and write handles reach zero, attached child stdin should be closed immediately or readers like `wc` will block forever waiting for EOF.
   - Focused validation for this path is `cargo test -p agent-os-sidecar -- --test-threads=1 wasm`, `pnpm --dir packages/core exec vitest run tests/process-management.test.ts`, and the `tests/wasm-commands.test.ts` command-substitution coverage.
+---
+
+## 2026-04-09 06:54:42 PDT - US-CC-005
+- Aligned Claude launch defaults across the hardcoded core agent config and the package-provided Claude descriptor so both paths now use `/bin/sh` and explicitly set the V8-safe shell flags (`CLAUDE_CODE_SIMPLE_SHELL_EXEC=1`, `CLAUDE_CODE_SWAP_STDIO=0`, `CLAUDE_CODE_DISABLE_DEV_NULL_REDIRECT=1`, `CLAUDE_CODE_DISABLE_CWD_PERSIST=1`).
+- Added a focused Claude config test in `packages/core/tests/claude-session.test.ts` and preserved the existing end-to-end `createSession('claude')` runtime coverage, which passed with valid agent metadata from the real adapter.
+- Files changed: `packages/core/src/agents.ts`, `registry/agent/claude/src/index.ts`, `packages/core/tests/claude-session.test.ts`, `packages/core/AGENTS.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The packaged Claude software descriptor is the config surface exercised by `AgentOs.create({ software: [claude] })`, so a fix that lands only in `packages/core/src/agents.ts` can still miss the real session path.
+  - For agent launch regressions, pair a small config assertion with the existing end-to-end agent session test instead of relying on either one alone.
+  - `pnpm --dir registry/agent/claude build`, `pnpm --dir packages/core check-types`, and `pnpm --dir packages/core exec vitest run tests/claude-session.test.ts` are the focused truth checks for Claude adapter shell/env changes.
 ---
