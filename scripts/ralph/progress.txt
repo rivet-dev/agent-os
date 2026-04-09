@@ -129,3 +129,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - The two polling smoke tests in `crates/execution/tests/wasm.rs` are the first place compile failures show up when `WasmExecutionEvent` gains a new variant, so they are a useful canary for enum drift.
   - For this story, the exact acceptance commands are sufficient: the focused Rust suite catches the enum mismatch, and `pnpm check-types` satisfies the cross-workspace typecheck gate without adding unrelated runtime coverage.
 ---
+
+## 2026-04-09 10:51:31 PDT - US-005
+- Added the missing async filesystem bridge globals to `crates/bridge/bridge-contract.json` so the canonical contract now matches the V8 runtime registration surface, including the binary `fs.promises` read/write helpers still exposed by the guest bridge.
+- Verified the contract drift fix with the exact story commands: `cargo test -p agent-os-v8-runtime -- --test-threads=1 bridge_contract_globals_are_registered` and `pnpm check-types`.
+- Files changed: `crates/bridge/bridge-contract.json`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Async `fs.promises` bridge globals belong in `crates/bridge/bridge-contract.json` just like the sync filesystem globals; the V8 runtime test will catch omissions there before guest `fs/promises` regressions show up elsewhere.
+  - `crates/execution/assets/v8-bridge.source.js`, `crates/execution/src/v8_runtime.rs`, and `crates/v8-runtime/src/session.rs` are all consumers of the same bridge surface, so contract drift can hide even when only one of those layers changes.
+  - For this story, the focused bridge-contract test plus root `pnpm check-types` is enough to prove the canonical inventory and runtime registration lists are back in sync.
+---
