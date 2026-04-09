@@ -8353,9 +8353,44 @@ function closeSyntheticFd(fd) {
   if (!handle) {
     return false;
   }
-  syntheticFdEntries.delete(numericFd);
+
+  const shouldRetainMapping =
+    ((handle.kind === 'pipe-write' && (handle.pipe.producers?.size ?? 0) > 0) ||
+      (handle.kind === 'pipe-read' && (handle.pipe.consumers?.size ?? 0) > 0));
+  if (!shouldRetainMapping) {
+    syntheticFdEntries.delete(numericFd);
+  }
   releaseFdHandle(handle);
+  if (shouldRetainMapping) {
+    collectInactivePipeHandles(handle.pipe);
+  }
   return true;
+}
+
+function collectInactivePipeHandles(pipe) {
+  if (!pipe) {
+    return;
+  }
+
+  if (
+    (pipe.readHandleCount ?? 0) > 0 ||
+    (pipe.writeHandleCount ?? 0) > 0 ||
+    (pipe.producers?.size ?? 0) > 0 ||
+    (pipe.consumers?.size ?? 0) > 0
+  ) {
+    return;
+  }
+
+  for (const [fd, handle] of Array.from(syntheticFdEntries.entries())) {
+    if (
+      (handle.kind === 'pipe-read' || handle.kind === 'pipe-write') &&
+      handle.pipe === pipe &&
+      !handle.open &&
+      handle.refCount === 0
+    ) {
+      syntheticFdEntries.delete(fd);
+    }
+  }
 }
 
 function resolveSpawnFd(fd) {
@@ -8440,7 +8475,9 @@ function dequeuePipeBytes(pipe, maxBytes) {
 
 function enqueuePipeBytes(pipe, bytes) {
   const chunk = Buffer.from(bytes ?? []);
-  if (chunk.length === 0 || pipe.readHandleCount === 0) {
+  const hasReaders =
+    (pipe.readHandleCount ?? 0) > 0 || (pipe.consumers?.size ?? 0) > 0;
+  if (chunk.length === 0 || !hasReaders) {
     return;
   }
   pipe.chunks.push(chunk);
@@ -8454,6 +8491,7 @@ function unregisterPipeProducer(pipe, producerKey) {
   if (pipe.producers.size === 0 && (pipe.writeHandleCount ?? 0) === 0) {
     closePipeConsumers(pipe);
   }
+  collectInactivePipeHandles(pipe);
 }
 
 function unregisterPipeConsumer(pipe, consumerKey) {
@@ -8461,6 +8499,7 @@ function unregisterPipeConsumer(pipe, consumerKey) {
     return;
   }
   pipe.consumers.delete(consumerKey);
+  collectInactivePipeHandles(pipe);
 }
 
 function unregisterChildPipeProducers(record) {
@@ -8571,6 +8610,7 @@ function closePipeConsumers(pipe) {
     pipe.consumers.delete(consumerKey);
   }
 
+  collectInactivePipeHandles(pipe);
   return closed;
 }
 
@@ -8611,6 +8651,7 @@ function routeChunkToFd(fd, bytes) {
 
   if (handle.kind === 'pipe-write') {
     enqueuePipeBytes(handle.pipe, bytes);
+    flushPipeConsumers(handle.pipe);
     return;
   }
 

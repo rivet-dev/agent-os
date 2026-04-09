@@ -10,8 +10,8 @@ const pkg = {
 	description: "GNU gzip compression (gzip, gunzip, zcat)",
 	source: "rust" as const,
 	commands: [
-		{ name: "gzip", permissionTier: "read-only" as const },
-		{ name: "gunzip", permissionTier: "read-only" as const, aliasOf: "gzip" },
+		{ name: "gzip", permissionTier: "read-write" as const },
+		{ name: "gunzip", permissionTier: "read-write" as const, aliasOf: "gzip" },
 		{ name: "zcat", permissionTier: "read-only" as const, aliasOf: "gzip" },
 	],
 	get commandDir() {

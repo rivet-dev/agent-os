@@ -425,6 +425,10 @@ fn poll_child_execution_after_exit(
     }
 }
 
+fn is_broken_pipe_error(error: &SidecarError) -> bool {
+    matches!(error, SidecarError::Execution(message) if message.contains("Broken pipe") || message.contains("os error 32") || message.contains("EPIPE"))
+}
+
 // TCP types moved to crate::state
 
 impl ActiveTcpSocket {
@@ -4095,7 +4099,12 @@ where
         let Some(child) = parent.child_processes.get_mut(child_process_id) else {
             return Ok(());
         };
-        child.execution.write_stdin(chunk)?;
+        if let Err(error) = child.execution.write_stdin(chunk) {
+            if is_broken_pipe_error(&error) {
+                return Ok(());
+            }
+            return Err(error);
+        }
         write_kernel_process_stdin(&mut vm.kernel, child, chunk)
     }
 
@@ -4210,7 +4219,12 @@ where
         else {
             return Ok(());
         };
-        child.execution.write_stdin(chunk)?;
+        if let Err(error) = child.execution.write_stdin(chunk) {
+            if is_broken_pipe_error(&error) {
+                return Ok(());
+            }
+            return Err(error);
+        }
         write_kernel_process_stdin(&mut vm.kernel, child, chunk)
     }
 

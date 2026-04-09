@@ -8,6 +8,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Linked registry software packages are consumed through their package entrypoints (`dist/index.js`) in `packages/core` tests; when you change a `registry/software/*` descriptor, rebuild that package before trusting package-level Vitest results.
 - In `packages/core/tests/wasm-commands.test.ts`, broad Vitest name filters like `-t "grep"` or `-t "sed"` also match ripgrep, gzip, and cross-package pipeline cases; use explicit command-case names or a tighter `--testNamePattern` when a story only gates one command block.
 - The patched WASM `host_fs` ABI returns values directly, not via out-pointers: `fd_mode(fd)` and `path_mode(path_ptr, path_len, follow_symlinks)` return the mode, while `chmod(path_ptr, path_len, mode)` returns a status code.
+- In `crates/execution/src/node_import_cache.rs`, synthetic pipe bookkeeping must keep active producer/consumer FD mappings alive after the shell closes its local duplicate, and pipe buffers should treat registered consumers as active readers even when `readHandleCount` has dropped to zero.
 - For built-in agents in `packages/core/src/agents.ts`, derive `AgentType` from `keyof typeof AGENT_CONFIGS` and validate launch argv/env with a mock ACP adapter that echoes `process.argv` plus selected env vars through `getSessionAgentInfo()` while exercising the shipped registry software package.
 - Root install reproducibility is best verified with the three-part probe `pnpm install --frozen-lockfile`, `pnpm check-types`, and a package-local `pnpm --dir <pkg> exec <bin> --version` check to prove the root install materialized script binaries for workspace packages.
 - The `agent-os-v8-runtime` crate currently has a split truth path: run `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main suite and `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately for the isolated snapshot coverage, as documented in the repo root `CLAUDE.md`.
@@ -307,4 +308,15 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Read-only WASI guards should treat `O_DIRECTORY` as non-mutating; denying every non-zero `path_open` flag breaks traversal commands even when they only need directory reads.
   - `findutils` package tests in `packages/core` use the package-local `commandDir`, so a targeted Rust rebuild must refresh `registry/software/findutils/wasm/xargs` from `registry/native/target/wasm32-wasip1/release/xargs.wasm` before rerunning Vitest.
   - The exact acceptance path for this story is `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts -t "find and xargs"`, `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts -t "diff \\(diffutils\\)"`, and root `pnpm check-types`.
+---
+
+## 2026-04-09 12:58:58 PDT - US-021
+- Restored the `tar`/`gzip` command-package slice by fixing WASM synthetic-pipe lifetime rules in `node_import_cache.rs`, treating registered consumers as active readers for buffered pipe output, and making downstream child `stdin` broken pipes non-fatal so archive pipelines can finish cleanly.
+- Updated the gzip package descriptor so `gzip` and `gunzip` run with `read-write` permissions while `zcat` stays `read-only`, matching the story's file-compression and decompression requirements.
+- Verified the story with `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts --testNamePattern "gzip|tar \\+ gzip round trip|create and extract archive|list archive contents"` and `pnpm check-types`.
+- Files changed: `crates/execution/src/node_import_cache.rs`, `crates/sidecar/src/execution.rs`, `crates/execution/CLAUDE.md`, `registry/software/gzip/src/index.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - In the WASM host-process bridge, shell pipeline FDs are bookkeeping handles, not the lifetime authority for a live producer/consumer path; keep the synthetic pipe mapping alive until the registered child endpoints are gone.
+  - Buffered pipe writes must consider registered consumers in addition to `readHandleCount`, or data will be dropped as soon as the shell closes its duplicate of the read end after spawning the downstream command.
+  - Sidecar `child_process.write_stdin` broken pipes should be treated like normal downstream pipeline closure, not a fatal transport error, or archive/list pipelines such as `cat file.tar | tar tf -` will crash the VM-side session instead of exiting cleanly.
 ---
