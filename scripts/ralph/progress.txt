@@ -16,6 +16,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Claude’s patched SDK/CLI artifacts are located through `registry/agent/claude/dist/claude-*-patched.json`; regression tests should validate those manifests and fallback resolution with a temp package dir instead of mutating the real built artifacts.
 - `packages/core/tests/claude-session.test.ts` is the end-to-end Claude truth suite; it exercises the real SDK path with llmock, PATH-backed `xu`, nested `node` child processes, metadata, modes, and lifecycle APIs.
 - The sidecar TLS reader and writer share one `rustls::StreamOwned` mutex, so timed-out TLS read loops must yield briefly or guest HTTPS request writes can be starved and undici/fetch will see EOF before the request leaves the VM.
+- For `moduleAccessCwd` regressions, use `packages/core/tests/native-sidecar-process.test.ts` for the real-sidecar `/root/node_modules` visibility probe and `packages/core/tests/software-projection.test.ts` for guest read-only enforcement on projected package roots.
 
 ## 2026-04-09 06:12:40 PDT - US-CC-001
 - Implemented the remaining workspace/package rename cleanup for `@rivet-dev/agent-os-core`, including the last manifest dependency, benchmark imports, secure-exec/dev-shell subpath aliases, registry test imports, and the root instruction note to keep future changes on the new package name.
@@ -161,4 +162,14 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - `crates/sidecar/tests/kill_cleanup.rs` is the focused truth suite for active guest execution teardown; if it is green, avoid speculative cleanup refactors outside that coverage.
   - On the current branch, `disposeVm` with a running guest already returns `VmDisposed` and emits a `ProcessExited` event in the same response frame, which is the key acceptance signal for this story.
   - For this backlog item, the exact acceptance commands are sufficient: `cargo test -p agent-os-sidecar --test kill_cleanup -- --test-threads=1` exercises the cleanup semantics directly, and `pnpm check-types` satisfies the workspace gate.
+---
+
+## 2026-04-09 11:03:33 PDT - US-008
+- Re-verified the module-access projection path on `finish-ts-rust-migration`; the real-sidecar moduleAccess/layer block already reads `/root/node_modules/vitest/package.json` successfully when `moduleAccessCwd` points at `packages/core`, and the focused software-projection suite confirms projected package files remain read-only to guest code.
+- Verified the cross-workspace gate with `pnpm check-types`, so this story closed as a verification-only backlog update rather than a source change.
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `packages/core/tests/native-sidecar-process.test.ts` is the focused truth suite for the real sidecar's `configureVm({ moduleAccessCwd })` plus layer RPC path; if that block is green, avoid speculative sidecar mount changes.
+  - `packages/core/tests/software-projection.test.ts` is the direct read-only regression probe for projected package roots under `/root/node_modules`, so use it before changing module-access mount permissions.
+  - For this backlog item, the exact acceptance commands are sufficient when paired with the focused read-only probe: the native-sidecar block proves package visibility, `tests/software-projection.test.ts` proves guest writes stay blocked, and `pnpm check-types` satisfies the workspace gate.
 ---
