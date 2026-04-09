@@ -21,6 +21,8 @@ use agent_os_kernel::vfs::VirtualStat;
 use base64::Engine;
 use serde_json::{json, Value};
 use std::fmt;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 
 pub(crate) async fn guest_filesystem_call<B>(
     sidecar: &mut NativeSidecar<B>,
@@ -57,8 +59,9 @@ where
                 payload.encoding,
             )?;
             vm.kernel
-                .write_file(&payload.path, bytes)
+                .write_file(&payload.path, bytes.clone())
                 .map_err(kernel_error)?;
+            mirror_guest_file_write_to_shadow(vm, &payload.path, &bytes)?;
             GuestFilesystemResultResponse {
                 operation: payload.operation,
                 path: payload.path,
@@ -785,4 +788,49 @@ fn javascript_sync_rpc_readdir_value(entries: Vec<String>) -> Value {
         .into_iter()
         .filter(|entry| entry != "." && entry != "..")
         .collect::<Vec<_>>())
+}
+
+fn mirror_guest_file_write_to_shadow(
+    vm: &mut crate::state::VmState,
+    guest_path: &str,
+    bytes: &[u8],
+) -> Result<(), SidecarError> {
+    let guest_path = normalize_path(guest_path);
+    let shadow_path = if guest_path == "/" {
+        vm.cwd.clone()
+    } else {
+        vm.cwd.join(guest_path.trim_start_matches('/'))
+    };
+
+    if let Some(parent) = shadow_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            SidecarError::Io(format!(
+                "failed to create shadow parent for {}: {error}",
+                guest_path
+            ))
+        })?;
+    }
+
+    let _ = fs::remove_file(&shadow_path);
+    let _ = fs::remove_dir_all(&shadow_path);
+    fs::write(&shadow_path, bytes).map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to mirror guest file {} into shadow root: {error}",
+            guest_path
+        ))
+    })?;
+
+    let stat = vm.kernel.lstat(&guest_path).map_err(kernel_error)?;
+    fs::set_permissions(
+        &shadow_path,
+        fs::Permissions::from_mode(stat.mode & 0o7777),
+    )
+    .map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to set shadow mode for {}: {error}",
+            guest_path
+        ))
+    })?;
+
+    Ok(())
 }

@@ -5,6 +5,36 @@
   "testPolicy": "Treat the old April 7-8, 2026 Ralph progress claims as stale. Use only the exact scoped commands listed in each story. US-001 and US-002 restore reproducible workspace install and normal pnpm/Vitest execution; no TypeScript-package story should be marked complete before those land. The final story requires root `pnpm test`, targeted crate suites (`agent-os-kernel`, `agent-os-bridge`, `agent-os-execution`, `agent-os-v8-runtime`, `agent-os-sidecar`), and the package/registry suites to pass with no first-party ignored Rust tests and no product-debt skips remaining.",
   "userStories": [
     {
+      "id": "US-CC-009",
+      "title": "Fix VFS layer visibility: vm.writeFile() must be visible to WASM guest processes (sh, ls, cat)",
+      "description": "vm.writeFile() writes to a VFS layer that V8/Node guest processes can see but WASM processes cannot. Files written via the host API are invisible to sh, ls, cat running inside the VM.",
+      "acceptanceCriteria": [
+        "vm.writeFile('/tmp/test.txt', 'hello') followed by vm.exec('cat /tmp/test.txt') returns 'hello'",
+        "vm.writeFile('/tmp/test.txt', 'hello') followed by vm.exec('ls /tmp/') lists test.txt",
+        "Files written via host API are on the same VFS layer as files visible to WASM processes",
+        "Test added to packages/core/tests/ verifying cross-layer visibility",
+        "pnpm --dir packages/core exec vitest run tests/filesystem.test.ts passes"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Reproduced: vm.writeFile writes to kernel upper VFS layer. Node guest processes see it (they use the kernel VFS bridge). But WASM processes (sh, ls, cat) apparently read from a different overlay or shadow directory that doesn't include the host-written upper layer. The fix likely needs WASM process mounts to include the same upper layer that the host API writes to."
+    },
+    {
+      "id": "US-CC-010",
+      "title": "Fix VFS layer visibility: agent session writes (Claude bash tool) must be visible to vm.readFile()",
+      "description": "Files written by agent tools (via WASM sh/cat inside a session) are invisible to vm.readFile(). The agent confirms the file was written, exec cat sees it, ls lists it, but the host readFile API returns ENOENT.",
+      "acceptanceCriteria": [
+        "After Claude agent writes /tmp/file.txt via bash tool, vm.readFile('/tmp/file.txt') returns the content",
+        "After vm.exec('echo x > /tmp/file.txt'), vm.readFile('/tmp/file.txt') returns 'x' (this already works)",
+        "After agent session writes, host API sees the same filesystem state as WASM processes",
+        "Test: quickstart agent-session.ts completes without ENOENT on readFile after agent write",
+        "pnpm --dir packages/core exec vitest run tests/filesystem.test.ts passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Reproduced: Claude bash tool writes via WASM sh \u2192 cat > file. exec('cat file') sees it, exec('ls') lists it, but vm.readFile() returns ENOENT. This is the REVERSE of US-CC-009 \u2014 the agent session's WASM child process writes to a shadow/overlay that the host readFile API doesn't query. The host API may only look at the kernel upper layer while WASM processes write to a separate shadow directory on the host filesystem. The fix needs vm.readFile() to check both the kernel upper layer AND any shadow directories where WASM processes wrote."
+    },
+    {
       "id": "US-CC-001",
       "title": "Fix @rivet-dev/agent-os workspace name \u2192 @rivet-dev/agent-os-core across all packages",
       "description": "The core package was renamed from @rivet-dev/agent-os to @rivet-dev/agent-os-core during migration but many package.json deps and TS imports still reference the old name, breaking pnpm install.",
@@ -14,7 +44,7 @@
         "pnpm install --frozen-lockfile passes from repo root",
         "pnpm build passes (all 46 workspace packages)"
       ],
-      "priority": 1,
+      "priority": 3,
       "passes": true,
       "notes": "BLOCKER for everything. The rename broke the workspace. Files already partially fixed in working tree but need lockfile regeneration. Check: package.json, all src/*.ts imports in packages/, registry/, examples/."
     },
@@ -30,7 +60,7 @@
         "Test in crates/sidecar/tests/builtin_conformance.rs verifies this",
         "cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1 passes"
       ],
-      "priority": 2,
+      "priority": 4,
       "passes": true,
       "notes": "Found in step-23 codex session. Claude SDK and many npm packages use `extends require('events')`. The v8-bridge.js events module from node-stdlib-browser returns the constructor correctly but the bridge wrapper may be wrapping it in an object. Check v8-bridge.source.js events import and how it's exposed to guest code."
     },
@@ -45,7 +75,7 @@
         "Test verifies async iteration on a Readable stream",
         "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
       ],
-      "priority": 3,
+      "priority": 5,
       "passes": true,
       "notes": "Found in step-23. Claude SDK uses `for await (const event of response.stream)`. node-stdlib-browser's readable-stream package should have this, but it may need explicit wiring in the v8-bridge. Check if readable-stream v3+ is bundled (it has native async iterator support)."
     },
@@ -62,7 +92,7 @@
         "Test: cargo test -p agent-os-sidecar -- --test-threads=1 wasm passes",
         "Test: vitest run tests/process-management.test.ts passes"
       ],
-      "priority": 4,
+      "priority": 6,
       "passes": true,
       "notes": "ROOT CAUSE: WASM calls proc_waitpid \u2192 callSyncRpc('child_process.poll') \u2192 blocks in readSync(). Child stdout needs to flow through WASM fd_read \u2192 which calls callSyncRpc AGAIN \u2192 DEADLOCK (single-threaded WASM). Secure-exec solved this with async event dispatch via _childProcessDispatch callback. The sidecar should PUSH child events to WASM guest via StreamCallback instead of waiting for guest to poll. See .agent/recovery/secure-exec/nodejs/src/bridge/child-process.ts for the working pattern. Step-26 codex made partial fixes (synthetic pipe bookkeeping, stdin EOF, FD lifetime) but the core deadlock remains."
     },
@@ -79,7 +109,7 @@
         "createSession('claude') boots without crashing",
         "Agent info returns valid name/title/version"
       ],
-      "priority": 5,
+      "priority": 7,
       "passes": true,
       "notes": "US-109 from old PRD. Step-26 made these changes but they may need to be re-committed after the PRD rewrite. Check git log for commit with these changes."
     },
@@ -93,7 +123,7 @@
         "Patched CLI runs inside V8 without import errors",
         "createSession('claude') + getSessionAgentInfo() returns valid agent info"
       ],
-      "priority": 6,
+      "priority": 8,
       "passes": true,
       "notes": "US-110 from old PRD. The Claude SDK CLI needs patching to work in V8 (shell defaults, stdio handling). Step-26 added this but may need re-verification."
     },
@@ -112,7 +142,7 @@
         "All 8 tests in claude-session.test.ts pass with 0 failures and 0 skipped",
         "pnpm --dir packages/core exec vitest run tests/claude-session.test.ts passes"
       ],
-      "priority": 7,
+      "priority": 9,
       "passes": true,
       "notes": "Depends on US-CC-001 through US-CC-006. This is the final Claude validation. Was US-111 in old PRD and passed \u2014 needs re-verification."
     },
@@ -129,7 +159,7 @@
         "No modifications to agent-session.ts needed (works as checked in)",
         "Total runtime under 60 seconds"
       ],
-      "priority": 8,
+      "priority": 10,
       "passes": true,
       "notes": "INTEGRATION TEST. This exercises the full stack: workspace install \u2192 build \u2192 AgentOs.create() \u2192 sidecar spawn \u2192 V8 runtime \u2192 Claude adapter \u2192 Anthropic API \u2192 tool execution \u2192 response. When we tried this, it got Session ID printed but then timed out waiting for sidecar protocol frame for session_request. The V8 runtime binary was missing (needed cargo build -p agent-os-v8-runtime). After building, it still timed out \u2014 likely the Claude adapter boot issue (US-CC-005/006). This story should pass after all CC prerequisites are fixed."
     },
