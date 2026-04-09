@@ -113,6 +113,7 @@ use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
     UdpSocket,
 };
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{SocketAddr as UnixSocketAddr, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -4680,6 +4681,12 @@ fn sync_host_directory_tree_to_kernel_inner(
                 host_path.display()
             ))
         })?;
+        let metadata = entry.metadata().map_err(|error| {
+            SidecarError::Io(format!(
+                "failed to read host shadow metadata {}: {error}",
+                host_path.display()
+            ))
+        })?;
         let relative_path = host_path
             .strip_prefix(host_root)
             .map_err(|error| {
@@ -4702,11 +4709,18 @@ fn sync_host_directory_tree_to_kernel_inner(
         };
 
         if file_type.is_dir() {
+            if !is_shadow_bootstrap_dir(&guest_path) {
+                vm.kernel.mkdir(&guest_path, true).map_err(kernel_error)?;
+                vm.kernel
+                    .chmod(&guest_path, host_shadow_mode(&metadata))
+                    .map_err(kernel_error)?;
+            }
             sync_host_directory_tree_to_kernel_inner(vm, host_root, &host_path, guest_root)?;
             continue;
         }
 
         if file_type.is_file() {
+            let desired_mode = host_shadow_mode(&metadata);
             let bytes = fs::read(&host_path).map_err(|error| {
                 SidecarError::Io(format!(
                     "failed to read host shadow file {}: {error}",
@@ -4716,6 +4730,17 @@ fn sync_host_directory_tree_to_kernel_inner(
             vm.kernel
                 .write_file(&guest_path, bytes)
                 .map_err(kernel_error)?;
+            vm.kernel
+                .chmod(&guest_path, desired_mode)
+                .map_err(kernel_error)?;
+            fs::set_permissions(&host_path, fs::Permissions::from_mode(desired_mode)).map_err(
+                |error| {
+                    SidecarError::Io(format!(
+                        "failed to set host shadow file mode on {}: {error}",
+                        host_path.display()
+                    ))
+                },
+            )?;
             continue;
         }
 
@@ -4742,6 +4767,54 @@ fn sync_host_directory_tree_to_kernel_inner(
     }
 
     Ok(())
+}
+
+fn host_shadow_mode(metadata: &fs::Metadata) -> u32 {
+    metadata.permissions().mode() & 0o7777
+}
+
+fn is_shadow_bootstrap_dir(path: &str) -> bool {
+    matches!(
+        path,
+        "/dev"
+            | "/proc"
+            | "/tmp"
+            | "/bin"
+            | "/lib"
+            | "/sbin"
+            | "/boot"
+            | "/etc"
+            | "/root"
+            | "/run"
+            | "/srv"
+            | "/sys"
+            | "/opt"
+            | "/mnt"
+            | "/media"
+            | "/home"
+            | "/usr"
+            | "/usr/bin"
+            | "/usr/games"
+            | "/usr/include"
+            | "/usr/lib"
+            | "/usr/libexec"
+            | "/usr/man"
+            | "/usr/local"
+            | "/usr/local/bin"
+            | "/usr/sbin"
+            | "/usr/share"
+            | "/usr/share/man"
+            | "/var"
+            | "/var/cache"
+            | "/var/empty"
+            | "/var/lib"
+            | "/var/lock"
+            | "/var/log"
+            | "/var/run"
+            | "/var/spool"
+            | "/var/tmp"
+            | "/etc/agentos"
+    )
 }
 
 fn resolve_path_like_guest_specifier(cwd: &str, specifier: &str) -> String {
@@ -5213,6 +5286,16 @@ fn materialize_guest_path_to_shadow(
         fs::create_dir_all(&shadow_path).map_err(|error| {
             SidecarError::Io(format!("failed to create shadow directory: {error}"))
         })?;
+        fs::set_permissions(
+            &shadow_path,
+            fs::Permissions::from_mode(stat.mode & 0o7777),
+        )
+        .map_err(|error| {
+            SidecarError::Io(format!(
+                "failed to set shadow directory mode on {}: {error}",
+                shadow_path.display()
+            ))
+        })?;
         return Ok(());
     }
 
@@ -5227,6 +5310,14 @@ fn materialize_guest_path_to_shadow(
             "failed to mirror guest file into shadow root: {error}"
         ))
     })?;
+    fs::set_permissions(&shadow_path, fs::Permissions::from_mode(stat.mode & 0o7777)).map_err(
+        |error| {
+            SidecarError::Io(format!(
+                "failed to set shadow file mode on {}: {error}",
+                shadow_path.display()
+            ))
+        },
+    )?;
     Ok(())
 }
 
@@ -8595,7 +8686,61 @@ where
                 .map(|mask| json!(mask))
                 .map_err(kernel_error)
         }
+        "fs.chmodSync" | "fs.promises.chmod" => {
+            let response = service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request)?;
+            mirror_process_chmod_to_host(process, request)?;
+            Ok(response)
+        }
         _ => service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request),
+    }
+}
+
+fn mirror_process_chmod_to_host(
+    process: &ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<(), SidecarError> {
+    let guest_path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem chmod path")?;
+    let mode = javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem chmod mode")? & 0o7777;
+    let Some(host_path) = resolve_process_guest_path_to_host(process, guest_path) else {
+        return Ok(());
+    };
+    if !host_path.exists() {
+        return Ok(());
+    }
+    fs::set_permissions(&host_path, fs::Permissions::from_mode(mode)).map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to mirror chmod to host path {}: {error}",
+            host_path.display()
+        ))
+    })
+}
+
+fn resolve_process_guest_path_to_host(
+    process: &ActiveProcess,
+    guest_path: &str,
+) -> Option<PathBuf> {
+    let normalized_guest_path = if guest_path.starts_with('/') {
+        normalize_path(guest_path)
+    } else {
+        normalize_path(&format!(
+            "{}/{}",
+            process.guest_cwd.trim_end_matches('/'),
+            guest_path
+        ))
+    };
+    let normalized_guest_cwd = normalize_path(&process.guest_cwd);
+    let mut host_root = normalize_host_path(&process.host_cwd);
+    for _ in normalized_guest_cwd
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+    {
+        host_root = host_root.parent()?.to_path_buf();
+    }
+    if normalized_guest_path == "/" {
+        Some(host_root)
+    } else {
+        Some(host_root.join(normalized_guest_path.trim_start_matches('/')))
     }
 }
 

@@ -1,0 +1,67 @@
+--- a/src/ls.rs
++++ b/src/ls.rs
+@@ -64,7 +64,7 @@
+     format::human::{SizeFormat, human_readable},
+     format_usage,
+     fs::FileInformation,
+-    fs::display_permissions,
++    fs::{display_permissions, display_permissions_unix},
+     fsext::{MetadataTimeField, metadata_get_time},
+     line_ending::LineEnding,
+     os_str_as_bytes_lossy,
+@@ -77,6 +77,38 @@
+     translate,
+     version_cmp::version_cmp,
+ };
++#[cfg(target_os = "wasi")]
++use uucore::fs::mode_t;
++
++#[cfg(target_os = "wasi")]
++mod wasi_host_fs {
++    use super::{Metadata, Path};
++
++    mod host_fs {
++        #[link(wasm_import_module = "host_fs")]
++        unsafe extern "C" {
++            pub fn path_mode(path_ptr: *const u8, path_len: u32, follow_symlinks: u32) -> u32;
++        }
++    }
++
++    pub fn mode_for_path(path: &Path, metadata: &Metadata, follow_symlinks: bool) -> u32 {
++        let Some(path_str) = path.to_str() else {
++            return if metadata.is_dir() { 0o040755 } else { 0o100644 };
++        };
++        let mode = unsafe {
++            host_fs::path_mode(
++                path_str.as_ptr(),
++                path_str.len() as u32,
++                if follow_symlinks { 1 } else { 0 },
++            )
++        };
++        if mode == 0 {
++            if metadata.is_dir() { 0o040755 } else { 0o100644 }
++        } else {
++            mode
++        }
++    }
++}
+ 
+ mod dired;
+ use dired::{DiredOutput, is_dired_arg_present};
+@@ -2982,7 +3014,15 @@
+         let is_acl_set = false;
+         #[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
+         let is_acl_set = has_acl(item.path());
+-        output_display.extend(display_permissions(md, true).as_bytes());
++        #[cfg(target_os = "wasi")]
++        {
++            let mode = wasi_host_fs::mode_for_path(item.path(), md, item.must_dereference);
++            output_display.extend(display_permissions_unix(mode as mode_t, true).as_bytes());
++        }
++        #[cfg(not(target_os = "wasi"))]
++        {
++            output_display.extend(display_permissions(md, true).as_bytes());
++        }
+         if item.security_context(config).len() > 1 {
+             // GNU `ls` uses a "." character to indicate a file with a security context,
+             // but not other alternate access method.

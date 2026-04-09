@@ -1,6 +1,6 @@
 --- a/src/stat.rs
 +++ b/src/stat.rs
-@@ -4,6 +4,9 @@
+@@ -4,17 +4,23 @@
  // file that was distributed with this source code.
  // spell-checker:ignore datetime
  
@@ -10,7 +10,11 @@
  use uucore::error::{UError, UResult, USimpleError};
  use uucore::translate;
  
-@@ -14,7 +17,10 @@
+ use clap::builder::ValueParser;
+ use uucore::display::Quotable;
+-use uucore::fs::{display_permissions, major, minor};
++use uucore::fs::{display_permissions_unix, major, minor};
+ use uucore::fsext::{
      FsMeta, MetadataTimeField, StatFs, metadata_get_time, pretty_filetype, pretty_fstype,
      read_fs_list, statfs,
  };
@@ -21,7 +25,7 @@
  use uucore::{entries, format_usage, show_error, show_warning};
  
  use clap::{Arg, ArgAction, ArgMatches, Command};
-@@ -23,10 +29,49 @@
+@@ -23,10 +29,79 @@
  use std::ffi::{OsStr, OsString};
  use std::fs::{FileType, Metadata};
  use std::io::Write;
@@ -68,6 +72,67 @@
 +#[cfg(target_os = "wasi")]
 +use wasi_stat_compat::{MetadataExt, FileTypeIsExt};
 +
++#[cfg(target_os = "wasi")]
++mod wasi_host_fs {
++    use super::{Metadata, MetadataExt, Path};
++
++    mod host_fs {
++        #[link(wasm_import_module = "host_fs")]
++        unsafe extern "C" {
++            pub fn path_mode(path_ptr: *const u8, path_len: u32, follow_symlinks: u32) -> u32;
++        }
++    }
++
++    pub fn mode_for_path(path: &Path, meta: &Metadata, follow_symlinks: bool) -> u32 {
++        let Some(path_str) = path.to_str() else {
++            return meta.mode();
++        };
++        let mode = unsafe {
++            host_fs::path_mode(
++                path_str.as_ptr(),
++                path_str.len() as u32,
++                if follow_symlinks { 1 } else { 0 },
++            )
++        };
++        if mode == 0 {
++            meta.mode()
++        } else {
++            mode
++        }
++    }
++}
++
  use thiserror::Error;
  use uucore::time::{FormatSystemTimeFallback, format_system_time, system_time_to_sec};
  
+@@ -1048,11 +1123,16 @@
+                 precision,
+                 format,
+             } => {
++                #[cfg(target_os = "wasi")]
++                let effective_mode =
++                    wasi_host_fs::mode_for_path(Path::new(file), meta, self.follow);
++                #[cfg(not(target_os = "wasi"))]
++                let effective_mode = meta.mode();
+                 let output = match format {
+                     // access rights in octal
+-                    'a' => OutputType::UnsignedOct(0o7777 & meta.mode()),
++                    'a' => OutputType::UnsignedOct(0o7777 & effective_mode),
+                     // access rights in human readable form
+-                    'A' => OutputType::Str(display_permissions(meta, true)),
++                    'A' => OutputType::Str(display_permissions_unix(effective_mode as mode_t, true)),
+                     // number of blocks allocated (see %B)
+                     'b' => OutputType::Unsigned(meta.blocks()),
+ 
+@@ -1096,9 +1176,9 @@
+                     // device number in hex
+                     'D' => OutputType::UnsignedHex(meta.dev()),
+                     // raw mode in hex
+-                    'f' => OutputType::UnsignedHex(meta.mode() as u64),
++                    'f' => OutputType::UnsignedHex(effective_mode as u64),
+                     // file type
+-                    'F' => OutputType::Str(pretty_filetype(meta.mode() as mode_t, meta.len())),
++                    'F' => OutputType::Str(pretty_filetype(effective_mode as mode_t, meta.len())),
+                     // group ID of owner
+                     'g' => OutputType::Unsigned(meta.gid() as u64),
+                     // group name of owner

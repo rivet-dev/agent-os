@@ -22,6 +22,14 @@
 +#[cfg(target_os = "wasi")]
 +mod wasi_compat {
 +    use std::fs;
++    use std::path::Path;
++
++    mod host_fs {
++        #[link(wasm_import_module = "host_fs")]
++        unsafe extern "C" {
++            pub fn chmod(path_ptr: *const u8, path_len: u32, mode: u32) -> u32;
++        }
++    }
 +
 +    /// Extension trait to provide mode() on WASI Metadata.
 +    pub trait MetadataMode {
@@ -40,9 +48,20 @@
 +    }
 +
 +    /// Set POSIX-style permissions on a file (best-effort on WASI).
-+    pub fn set_permissions_from_mode(path: &std::path::Path, mode: u32) -> std::io::Result<()> {
-+        let mut perms = path.metadata()?.permissions();
-+        perms.set_readonly(mode & 0o200 == 0);
++    pub fn set_permissions_from_mode(path: &Path, mode: u32) -> std::io::Result<()> {
++        use std::io::{Error, ErrorKind};
++
++        let bytes = path
++            .to_str()
++            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "path is not valid UTF-8"))?
++            .as_bytes();
++        let status = unsafe { host_fs::chmod(bytes.as_ptr(), bytes.len() as u32, mode) };
++        if status == 0 {
++            return Ok(());
++        }
++
++        let mut perms = fs::metadata(path)?.permissions();
++        perms.set_readonly(mode & 0o222 == 0);
 +        fs::set_permissions(path, perms)
 +    }
 +}

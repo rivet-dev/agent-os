@@ -8,6 +8,8 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Linked registry software packages are consumed through their package entrypoints (`dist/index.js`) in `packages/core` tests; when you change a `registry/software/*` descriptor, rebuild that package before trusting package-level Vitest results.
 - In `packages/core/tests/wasm-commands.test.ts`, broad Vitest name filters like `-t "grep"` or `-t "sed"` also match ripgrep, gzip, and cross-package pipeline cases; use explicit command-case names or a tighter `--testNamePattern` when a story only gates one command block.
 - The patched WASM `host_fs` ABI returns values directly, not via out-pointers: `fd_mode(fd)` and `path_mode(path_ptr, path_len, follow_symlinks)` return the mode, while `chmod(path_ptr, path_len, mode)` returns a status code.
+- Guest chmod flows that operate on shadow-backed files need an immediate shadow-root permission update in addition to kernel state changes, or later host-write reconciliation can revert the mode back to the stale shadow value.
+- For locally rebuilt Rust registry commands, refresh published package artifacts from `registry/native/target/wasm32-wasip1/release/<command>.wasm`; the `release/commands/<command>` wrappers can lag behind the real rebuilt WASM payloads.
 - In `crates/execution/src/node_import_cache.rs`, synthetic pipe bookkeeping must keep active producer/consumer FD mappings alive after the shell closes its local duplicate, and pipe buffers should treat registered consumers as active readers even when `readHandleCount` has dropped to zero.
 - For built-in agents in `packages/core/src/agents.ts`, derive `AgentType` from `keyof typeof AGENT_CONFIGS` and validate launch argv/env with a mock ACP adapter that echoes `process.argv` plus selected env vars through `getSessionAgentInfo()` while exercising the shipped registry software package.
 - Root install reproducibility is best verified with the three-part probe `pnpm install --frozen-lockfile`, `pnpm check-types`, and a package-local `pnpm --dir <pkg> exec <bin> --version` check to prove the root install materialized script binaries for workspace packages.
@@ -339,5 +341,15 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - **Learnings for future iterations:**
   - The `curl` package descriptor may need to fall back to `registry/native/target/wasm32-wasip1/release/commands` because `registry/software/*/wasm/` is generated and can be absent in a clean checkout.
   - VM-local loopback ownership for guest networking needs to account for HTTP-facing listeners bound to unspecified guest addresses (`0.0.0.0` / `::`), not just explicit loopback binds.
-  - For curl/client regressions, raw guest HTTP fixtures are more reliable than guest `http.createServer()` because they avoid conflating client bugs with the separate Node HTTP transport wrapper.
+- For curl/client regressions, raw guest HTTP fixtures are more reliable than guest `http.createServer()` because they avoid conflating client bugs with the separate Node HTTP transport wrapper.
+---
+
+## 2026-04-09 14:27:13 PDT - US-024
+- Restored permission parity for the WASM command path by making the sidecar mirror successful guest `fs.chmodSync` calls into the VM shadow root, by trusting current shadow-file modes during host-write resync, and by updating the tracked `uu_stat`/`uu_ls` patch layer so WASI `stat` and long `ls` render permission bits from the `host_fs` mode bridge.
+- Verified with `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts -t "file permissions"` and `pnpm check-types`.
+- Files changed: `crates/sidecar/src/execution.rs`, `crates/sidecar/src/service.rs`, `registry/native/patches/crates/uu_chmod/0001-wasi-compat.patch`, `registry/native/patches/crates/uu_stat/0001-wasi-metadata-compat.patch`, `registry/native/patches/crates/uu_ls/0001-wasi-host-fs-mode-display.patch`, `registry/CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Permission-changing guest RPCs that target shadow-backed files must update the shadow root immediately; otherwise later host-to-kernel reconciliation can silently restore stale modes.
+  - For locally rebuilt Rust command packages, copy `registry/native/target/wasm32-wasip1/release/<command>.wasm` into the published `registry/software/*/wasm/<command>` path; `release/commands/<command>` can remain stale until a separate packaging step runs.
+  - WASI command permission displays need the `host_fs.path_mode` bridge for exact mode bits; metadata-only fallbacks are enough for file type detection but not for chmod/stat parity.
 ---

@@ -106,6 +106,7 @@ use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
     UdpSocket,
 };
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{SocketAddr as UnixSocketAddr, UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1885,10 +1886,31 @@ where
         };
 
         let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let shadow_root = vm.cwd.clone();
         let process = vm
             .active_processes
             .get_mut(process_id)
             .expect("process should still exist");
+
+        if response.is_ok() && matches!(request.method.as_str(), "fs.chmodSync" | "fs.promises.chmod")
+        {
+            let guest_path =
+                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem chmod path")?;
+            let mode =
+                javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem chmod mode")? & 0o7777;
+            let host_path =
+                shadow_host_path_for_process(&shadow_root, &process.guest_cwd, guest_path);
+            if host_path.exists() {
+                fs::set_permissions(&host_path, fs::Permissions::from_mode(mode)).map_err(
+                    |error| {
+                        SidecarError::Io(format!(
+                            "failed to mirror chmod to shadow path {}: {error}",
+                            host_path.display()
+                        ))
+                    },
+                )?;
+            }
+        }
 
         match response {
             Ok(result) => process
@@ -2597,16 +2619,16 @@ where
         process_id: &str,
     ) -> Result<(), SidecarError> {
         let shared_runtime_child_pid = self.vms.get(vm_id).and_then(|vm| {
-            vm.active_processes.get(process_id).and_then(|process| {
-                match &process.execution {
+            vm.active_processes
+                .get(process_id)
+                .and_then(|process| match &process.execution {
                     ActiveExecution::Javascript(execution)
                         if execution.uses_shared_v8_runtime() && execution.child_pid() != 0 =>
                     {
                         Some(execution.child_pid())
                     }
                     _ => None,
-                }
-            })
+                })
         });
         if !self
             .vms
@@ -3192,6 +3214,28 @@ where
         }
 
         Ok(())
+    }
+
+}
+
+fn shadow_host_path_for_process(
+    shadow_root: &Path,
+    process_guest_cwd: &str,
+    guest_path: &str,
+) -> PathBuf {
+    let normalized_guest_path = if guest_path.starts_with('/') {
+        normalize_path(guest_path)
+    } else {
+        normalize_path(&format!(
+            "{}/{}",
+            process_guest_cwd.trim_end_matches('/'),
+            guest_path
+        ))
+    };
+    if normalized_guest_path == "/" {
+        shadow_root.to_path_buf()
+    } else {
+        shadow_root.join(normalized_guest_path.trim_start_matches('/'))
     }
 }
 
