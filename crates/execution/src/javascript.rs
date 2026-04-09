@@ -1245,8 +1245,12 @@ impl JavascriptExecutionEngine {
         let execution_id = format!("exec-{}", self.next_execution_id);
         let sync_rpc_timeout = javascript_sync_rpc_timeout(&request);
 
-        // Lazily spawn the V8 runtime host
-        if self.v8_host.is_none() {
+        // Lazily spawn the V8 runtime host, or replace a dead shared host.
+        let should_spawn_v8_host = match self.v8_host.as_mut() {
+            Some(v8_host) => !v8_host.is_alive().map_err(JavascriptExecutionError::Spawn)?,
+            None => true,
+        };
+        if should_spawn_v8_host {
             self.v8_host = Some(V8RuntimeHost::spawn().map_err(JavascriptExecutionError::Spawn)?);
         }
         let v8_host = self.v8_host.as_ref().unwrap();
@@ -2120,6 +2124,7 @@ fn spawn_v8_event_bridge(
     let (sender, receiver) = unbounded_channel();
 
     thread::spawn(move || {
+        let mut emitted_exit = false;
         while let Ok(frame) = frame_receiver.recv() {
             let event = match frame {
                 BinaryFrame::BridgeCall {
@@ -2230,6 +2235,7 @@ fn spawn_v8_event_bridge(
                         let _ =
                             sender.send(JavascriptExecutionEvent::Stderr(error_msg.into_bytes()));
                     }
+                    emitted_exit = true;
                     Some(JavascriptExecutionEvent::Exited(resolved_exit_code))
                 }
                 BinaryFrame::StreamCallback { .. } => None,
@@ -2241,6 +2247,10 @@ fn spawn_v8_event_bridge(
                     break;
                 }
             }
+        }
+
+        if !emitted_exit {
+            let _ = sender.send(JavascriptExecutionEvent::Exited(1));
         }
     });
 

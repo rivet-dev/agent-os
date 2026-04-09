@@ -406,6 +406,7 @@ interface ResponseFrame {
 		| {
 				type: "session_created";
 				session_id: string;
+				pid?: number;
 				modes?: unknown;
 				config_options: unknown[];
 				agent_capabilities?: unknown;
@@ -421,6 +422,7 @@ interface ResponseFrame {
 				session_id: string;
 				agent_type: string;
 				process_id: string;
+				pid?: number;
 				closed: boolean;
 				modes?: unknown;
 				config_options: unknown[];
@@ -591,6 +593,7 @@ export interface SidecarSequencedNotification {
 
 export interface SidecarSessionCreated {
 	sessionId: string;
+	pid?: number;
 	modes?: unknown;
 	configOptions: unknown[];
 	agentCapabilities?: unknown;
@@ -601,6 +604,7 @@ export interface SidecarSessionState {
 	sessionId: string;
 	agentType: string;
 	processId: string;
+	pid?: number;
 	closed: boolean;
 	modes?: unknown;
 	configOptions: unknown[];
@@ -887,6 +891,7 @@ export class NativeSidecarProcessClient {
 		}
 		return {
 			sessionId: response.payload.session_id,
+			...(response.payload.pid !== undefined ? { pid: response.payload.pid } : {}),
 			modes: response.payload.modes,
 			configOptions: response.payload.config_options ?? [],
 			agentCapabilities: response.payload.agent_capabilities,
@@ -951,6 +956,7 @@ export class NativeSidecarProcessClient {
 			sessionId: response.payload.session_id,
 			agentType: response.payload.agent_type,
 			processId: response.payload.process_id,
+			...(response.payload.pid !== undefined ? { pid: response.payload.pid } : {}),
 			closed: response.payload.closed,
 			modes: response.payload.modes,
 			configOptions: response.payload.config_options ?? [],

@@ -1288,6 +1288,10 @@ where
             )
             .await?;
         let mut events = execute_result.events;
+        let session_pid = match &execute_result.response.payload {
+            ResponsePayload::ProcessStarted(payload) => payload.pid,
+            _ => None,
+        };
 
         let initialize = JsonRpcRequest {
             jsonrpc: String::from("2.0"),
@@ -1383,6 +1387,7 @@ where
             vm_id.clone(),
             payload.agent_type,
             process_id,
+            session_pid,
             &init_result,
             &session_result,
         );
@@ -1606,7 +1611,7 @@ where
                 }
             }
         }
-        self.kill_acp_process(&vm_id, &process_id);
+        self.terminate_acp_process(&vm_id, &process_id).await?;
         self.acp_sessions.remove(&payload.session_id);
         Ok(DispatchResult {
             response: self.respond(
@@ -2586,6 +2591,77 @@ where
         }
     }
 
+    async fn terminate_acp_process(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+    ) -> Result<(), SidecarError> {
+        let shared_runtime_child_pid = self.vms.get(vm_id).and_then(|vm| {
+            vm.active_processes.get(process_id).and_then(|process| {
+                match &process.execution {
+                    ActiveExecution::Javascript(execution)
+                        if execution.uses_shared_v8_runtime() && execution.child_pid() != 0 =>
+                    {
+                        Some(execution.child_pid())
+                    }
+                    _ => None,
+                }
+            })
+        });
+        if !self
+            .vms
+            .get(vm_id)
+            .is_some_and(|vm| vm.active_processes.contains_key(process_id))
+        {
+            self.acp_process_stdout_buffers.remove(process_id);
+            if let Some(vm) = self.vms.get_mut(vm_id) {
+                vm.signal_states.remove(process_id);
+            }
+            return Ok(());
+        }
+
+        let _ = self.kill_process_internal(vm_id, process_id, "SIGKILL");
+        let ownership = self.vm_ownership(vm_id)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        while self
+            .vms
+            .get(vm_id)
+            .is_some_and(|vm| vm.active_processes.contains_key(process_id))
+            && Instant::now() < deadline
+        {
+            let remaining = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(10));
+            let _ = self.poll_event(&ownership, remaining).await?;
+        }
+
+        if let Some(child_pid) = shared_runtime_child_pid {
+            let other_shared_runtime_users = self.vms.get(vm_id).is_some_and(|vm| {
+                vm.active_processes.iter().any(|(candidate_id, process)| {
+                    candidate_id != process_id && process.execution.child_pid() == child_pid
+                })
+            });
+            if !other_shared_runtime_users {
+                if runtime_child_is_alive(child_pid)? {
+                    signal_runtime_process(child_pid, SIGKILL)?;
+                    let child_deadline = Instant::now() + Duration::from_secs(5);
+                    while runtime_child_is_alive(child_pid)? && Instant::now() < child_deadline {
+                        time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+                reap_runtime_child_if_exited(child_pid)?;
+            }
+        }
+
+        self.acp_process_stdout_buffers.remove(process_id);
+        if let Some(vm) = self.vms.get_mut(vm_id) {
+            vm.active_processes.remove(process_id);
+            vm.signal_states.remove(process_id);
+        }
+        Ok(())
+    }
+
     fn session_timeout_error(
         session: &AcpSessionState,
         method: &str,
@@ -2627,6 +2703,10 @@ where
             while let Some(envelope) =
                 self.take_matching_process_event_envelope(vm_id, process_id)?
             {
+                let exited = match envelope.event {
+                    ActiveExecutionEvent::Exited(exit_code) => Some(exit_code),
+                    _ => None,
+                };
                 if let Some(response) = self.handle_acp_process_event(
                     vm_id,
                     process_id,
@@ -2638,6 +2718,25 @@ where
                     if response.id == request.id {
                         return Ok((response, events));
                     }
+                }
+                if let Some(exit_code) = exited {
+                    self.terminate_acp_process(vm_id, process_id).await?;
+                    return Ok((
+                        JsonRpcResponse {
+                            jsonrpc: String::from("2.0"),
+                            id: request.id.clone(),
+                            result: None,
+                            error: Some(JsonRpcError {
+                                code: -32000,
+                                message: format!(
+                                    "ACP process exited while handling {} (exit code {exit_code})",
+                                    request.method
+                                ),
+                                data: None,
+                            }),
+                        },
+                        events,
+                    ));
                 }
             }
 
@@ -2657,6 +2756,10 @@ where
             };
 
             if let Some(event) = event {
+                let exited = match event {
+                    ActiveExecutionEvent::Exited(exit_code) => Some(exit_code),
+                    _ => None,
+                };
                 if let Some(response) = self.handle_acp_process_event(
                     vm_id,
                     process_id,
@@ -2668,6 +2771,25 @@ where
                     if response.id == request.id {
                         return Ok((response, events));
                     }
+                }
+                if let Some(exit_code) = exited {
+                    self.terminate_acp_process(vm_id, process_id).await?;
+                    return Ok((
+                        JsonRpcResponse {
+                            jsonrpc: String::from("2.0"),
+                            id: request.id.clone(),
+                            result: None,
+                            error: Some(JsonRpcError {
+                                code: -32000,
+                                message: format!(
+                                    "ACP process exited while handling {} (exit code {exit_code})",
+                                    request.method
+                                ),
+                                data: None,
+                            }),
+                        },
+                        events,
+                    ));
                 }
             }
 
@@ -2681,6 +2803,7 @@ where
                             String::from(vm_id),
                             String::from(agent_type),
                             String::from(process_id),
+                            None,
                             &Map::new(),
                             &Map::new(),
                         )
@@ -3100,6 +3223,29 @@ fn audit_timestamp() -> String {
         .expect("system time before unix epoch")
         .as_millis()
         .to_string()
+}
+
+fn reap_runtime_child_if_exited(child_pid: u32) -> Result<(), SidecarError> {
+    if child_pid == 0 {
+        return Ok(());
+    }
+
+    let wait_flags = WaitPidFlag::WNOHANG
+        | WaitPidFlag::WEXITED
+        | WaitPidFlag::WUNTRACED
+        | WaitPidFlag::WCONTINUED;
+    match wait_on_child(WaitId::Pid(Pid::from_raw(child_pid as i32)), wait_flags) {
+        Ok(WaitStatus::StillAlive)
+        | Ok(WaitStatus::Stopped(_, _))
+        | Ok(WaitStatus::Continued(_)) => Ok(()),
+        Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => Ok(()),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        Ok(WaitStatus::PtraceEvent(_, _, _) | WaitStatus::PtraceSyscall(_)) => Ok(()),
+        Err(nix::errno::Errno::ECHILD) => Ok(()),
+        Err(error) => Err(SidecarError::Execution(format!(
+            "failed to reap guest runtime process {child_pid}: {error}"
+        ))),
+    }
 }
 
 pub(crate) fn audit_fields<I, K, V>(fields: I) -> BTreeMap<String, String>

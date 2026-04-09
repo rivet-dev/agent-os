@@ -4,6 +4,7 @@
 //! incoming frames to the correct session channel.
 
 use crate::v8_ipc::{self, BinaryFrame};
+use nix::libc;
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -29,7 +30,7 @@ pub struct V8RuntimeHost {
     writer: Arc<Mutex<BufWriter<UnixStream>>>,
     sessions: Arc<Mutex<HashMap<String, mpsc::Sender<BinaryFrame>>>>,
     child_pid: u32,
-    _child: Child,
+    child: Child,
     _reader_handle: thread::JoinHandle<()>,
 }
 
@@ -93,6 +94,7 @@ impl V8RuntimeHost {
                         if e.kind() != io::ErrorKind::UnexpectedEof {
                             eprintln!("V8 runtime reader error: {e}");
                         }
+                        sessions_clone.lock().expect("sessions lock").clear();
                         break;
                     }
                 }
@@ -103,7 +105,7 @@ impl V8RuntimeHost {
             writer,
             sessions,
             child_pid: child.id(),
-            _child: child,
+            child,
             _reader_handle: reader_handle,
         })
     }
@@ -146,6 +148,15 @@ impl V8RuntimeHost {
 
     pub fn child_pid(&self) -> u32 {
         self.child_pid
+    }
+
+    pub fn is_alive(&mut self) -> io::Result<bool> {
+        match self.child.try_wait() {
+            Ok(Some(_)) => Ok(false),
+            Ok(None) => Ok(true),
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 }
 

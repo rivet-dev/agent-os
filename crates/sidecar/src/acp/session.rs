@@ -62,6 +62,7 @@ pub(crate) struct AcpSessionState {
     pub(crate) vm_id: String,
     pub(crate) agent_type: String,
     pub(crate) process_id: String,
+    pub(crate) pid: Option<u32>,
     pub(crate) stdout_buffer: String,
     pub(crate) next_request_id: i64,
     pub(crate) next_sequence_number: u64,
@@ -86,6 +87,7 @@ impl AcpSessionState {
         vm_id: String,
         agent_type: String,
         process_id: String,
+        pid: Option<u32>,
         init_result: &Map<String, Value>,
         session_result: &Map<String, Value>,
     ) -> Self {
@@ -108,6 +110,7 @@ impl AcpSessionState {
             vm_id,
             agent_type,
             process_id,
+            pid,
             stdout_buffer: String::new(),
             // The sidecar already used request ids 1 and 2 on this ACP
             // connection for initialize and session/new before the session
@@ -137,6 +140,7 @@ impl AcpSessionState {
     pub(crate) fn created_response(&self) -> SessionCreatedResponse {
         SessionCreatedResponse {
             session_id: self.session_id.clone(),
+            pid: self.pid,
             modes: self.modes.clone(),
             config_options: self.config_options.clone(),
             agent_capabilities: self.agent_capabilities.clone(),
@@ -149,6 +153,7 @@ impl AcpSessionState {
             session_id: self.session_id.clone(),
             agent_type: self.agent_type.clone(),
             process_id: self.process_id.clone(),
+            pid: self.pid,
             closed: self.closed,
             modes: self.modes.clone(),
             config_options: self.config_options.clone(),

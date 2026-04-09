@@ -246,6 +246,7 @@ interface AgentSessionEntry {
 	sessionId: string;
 	agentType: string;
 	processId: string;
+	pid: number | null;
 	closed: boolean;
 	modes: SessionModeState | null;
 	configOptions: SessionConfigOption[];
@@ -509,6 +510,7 @@ function sessionEntryFromInit(
 		sessionId,
 		agentType,
 		processId: "",
+		pid: null,
 		closed: false,
 		modes: initData.modes ?? null,
 		configOptions: initData.configOptions ?? [],
@@ -1431,6 +1433,12 @@ export class AgentOs {
 	#kernel: Kernel;
 	readonly sidecar: AgentOsSidecar;
 	private _sessions = new Map<string, AgentSessionEntry>();
+	private _closedSessionIds = new Set<string>();
+	private _sessionClosePromises = new Map<string, Promise<void>>();
+	private _pendingSessionRequestResolvers = new Map<
+		string,
+		Set<(response: JsonRpcResponse) => void>
+	>();
 	private _processes = new Map<
 		number,
 		{
@@ -2321,6 +2329,7 @@ export class AgentOs {
 		state: Pick<
 			SidecarSessionState,
 			| "processId"
+			| "pid"
 			| "closed"
 			| "modes"
 			| "configOptions"
@@ -2330,6 +2339,7 @@ export class AgentOs {
 		>,
 	): void {
 		session.processId = state.processId;
+		session.pid = state.pid ?? null;
 		session.closed = state.closed;
 		session.modes = toSessionModes(state.modes);
 		session.configOptions = toSessionConfigOptions(state.configOptions);
@@ -2482,15 +2492,34 @@ export class AgentOs {
 		params?: Record<string, unknown>,
 	): Promise<JsonRpcResponse> {
 		const session = this._requireSession(sessionId);
-		const response = await this._sidecarClient.sessionRequest(
-			this._sidecarSession,
-			this._sidecarVm,
-			{
-				sessionId,
-				method,
-				params,
-			},
-		);
+		const response = await new Promise<JsonRpcResponse>((resolve, reject) => {
+			const resolvers =
+				this._pendingSessionRequestResolvers.get(sessionId) ?? new Set();
+			const abortRequest = (response: JsonRpcResponse) => {
+				resolve(response);
+			};
+			resolvers.add(abortRequest);
+			this._pendingSessionRequestResolvers.set(sessionId, resolvers);
+
+			void this._sidecarClient
+				.sessionRequest(this._sidecarSession, this._sidecarVm, {
+					sessionId,
+					method,
+					params,
+				})
+				.then(resolve, reject)
+				.finally(() => {
+					const nextResolvers =
+						this._pendingSessionRequestResolvers.get(sessionId);
+					if (!nextResolvers) {
+						return;
+					}
+					nextResolvers.delete(abortRequest);
+					if (nextResolvers.size === 0) {
+						this._pendingSessionRequestResolvers.delete(sessionId);
+					}
+				});
+		});
 		await this._hydrateSessionState(session).catch(() => {});
 		if (!response.error) {
 			if (
@@ -2541,14 +2570,70 @@ export class AgentOs {
 		this._sessions.delete(sessionId);
 	}
 
+	private _abortPendingSessionRequests(sessionId: string): void {
+		const resolvers = this._pendingSessionRequestResolvers.get(sessionId);
+		if (!resolvers) {
+			return;
+		}
+		this._pendingSessionRequestResolvers.delete(sessionId);
+		const response: JsonRpcResponse = {
+			jsonrpc: "2.0",
+			id: null,
+			error: {
+				code: -32_000,
+				message: `Session closed: ${sessionId}`,
+			},
+		};
+		for (const resolve of resolvers) {
+			resolve(response);
+		}
+	}
+
+	private _tryForceCloseSessionProcess(sessionId: string): void {
+		const session = this._sessions.get(sessionId);
+		if (!session?.pid) {
+			return;
+		}
+		const sharedPidUsers = [...this._sessions.values()].filter(
+			(candidate) => candidate.sessionId !== sessionId && candidate.pid === session.pid,
+		);
+		if (sharedPidUsers.length > 0) {
+			return;
+		}
+		try {
+			process.kill(session.pid, "SIGKILL");
+		} catch {
+			// Ignore ESRCH and permission errors; close_agent_session remains the source of truth.
+		}
+	}
+
 	private async _closeSessionInternal(sessionId: string): Promise<void> {
+		const closing = this._sessionClosePromises.get(sessionId);
+		if (closing) {
+			return closing;
+		}
+		if (this._closedSessionIds.has(sessionId)) {
+			return;
+		}
+
+		const hasPendingRequests =
+			(this._pendingSessionRequestResolvers.get(sessionId)?.size ?? 0) > 0;
+		this._abortPendingSessionRequests(sessionId);
+		if (hasPendingRequests) {
+			this._tryForceCloseSessionProcess(sessionId);
+		}
+
 		this._requireSession(sessionId);
 		this._removeSession(sessionId);
-		await this._sidecarClient.closeAgentSession(
-			this._sidecarSession,
-			this._sidecarVm,
-			sessionId,
-		);
+		this._closedSessionIds.add(sessionId);
+
+		const closePromise = this._sidecarClient
+			.closeAgentSession(this._sidecarSession, this._sidecarVm, sessionId)
+			.finally(() => {
+				this._sessionClosePromises.delete(sessionId);
+			});
+		this._sessionClosePromises.set(sessionId, closePromise);
+		await closePromise;
 	}
 
 	private async _hydrateSessionState(
@@ -2630,6 +2715,7 @@ export class AgentOs {
 			String(agentType),
 			initData,
 		);
+		this._closedSessionIds.delete(created.sessionId);
 		this._sessions.set(created.sessionId, session);
 
 		try {
@@ -2758,7 +2844,13 @@ export class AgentOs {
 	}
 
 	closeSession(sessionId: string): void {
-		this._requireSession(sessionId);
+		if (
+			!this._sessions.has(sessionId) &&
+			!this._closedSessionIds.has(sessionId) &&
+			!this._sessionClosePromises.has(sessionId)
+		) {
+			throw new Error(`Session not found: ${sessionId}`);
+		}
 		void this._closeSessionInternal(sessionId);
 	}
 

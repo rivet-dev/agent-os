@@ -1489,6 +1489,28 @@
       "priority": 98,
       "passes": false,
       "notes": "The Codex adapter is at registry/agent/codex/. If no E2E test exists, create one following the same pattern as pi-headless.test.ts. All agent SDKs must work unmodified inside V8 \u2014 if Codex fails, fix the V8 runtime, not the SDK."
+    },
+    {
+      "id": "US-079",
+      "title": "Test session cleanup and resource leak prevention for all agent types",
+      "description": "As a developer, I want tests verifying that closeSession() properly cleans up all resources (processes, file descriptors, sockets, memory) so long-running VMs don't leak.",
+      "acceptanceCriteria": [
+        "Test creates a Pi session via createSession('pi'), runs a prompt, then calls closeSession()",
+        "After closeSession(), verify: no orphaned child processes remain in the kernel process table",
+        "After closeSession(), verify: no open file descriptors from the session remain",
+        "After closeSession(), verify: no open sockets from the session remain",
+        "After closeSession(), verify: no pending timers from the session remain",
+        "Test creates 5 sessions sequentially, closes each, verifies resource counts return to baseline after each close",
+        "Test creates 3 concurrent sessions, closes all, verifies all resources freed",
+        "Test verifies closeSession() on an already-closed session is a no-op (not an error)",
+        "Test verifies closeSession() during an active prompt cancels the prompt and cleans up",
+        "Resource counts checked via kernel process table, FD table, and socket table queries",
+        "Tests cover at least Pi SDK and Pi CLI session types",
+        "pnpm --dir packages/core exec vitest run tests/session-cleanup.test.ts passes"
+      ],
+      "priority": 95,
+      "passes": true,
+      "notes": "Found in Pi E2E review: closeSession() is never tested for resource cleanup. In a production VM running multiple agent sessions over time, leaked processes/FDs/sockets would accumulate and eventually hit resource limits. This is especially important for the Pi CLI adapter which spawns a real child process (pi --mode rpc) \u2014 if that process isn't killed on closeSession(), it persists indefinitely."
     }
   ]
 }

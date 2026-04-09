@@ -835,6 +835,8 @@ pub struct VmCreatedResponse {
 pub struct SessionCreatedResponse {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_options: Vec<Value>,
@@ -861,6 +863,8 @@ pub struct SessionStateResponse {
     pub session_id: String,
     pub agent_type: String,
     pub process_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
     pub closed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<Value>,
