@@ -31,7 +31,7 @@
         "pnpm --dir packages/core exec vitest run tests/filesystem.test.ts passes"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Reproduced: Claude bash tool writes via WASM sh \u2192 cat > file. exec('cat file') sees it, exec('ls') lists it, but vm.readFile() returns ENOENT. This is the REVERSE of US-CC-009 \u2014 the agent session's WASM child process writes to a shadow/overlay that the host readFile API doesn't query. The host API may only look at the kernel upper layer while WASM processes write to a separate shadow directory on the host filesystem. The fix needs vm.readFile() to check both the kernel upper layer AND any shadow directories where WASM processes wrote."
     },
     {

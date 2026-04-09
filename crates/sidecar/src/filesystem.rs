@@ -10,7 +10,10 @@ use crate::service::{
     javascript_sync_rpc_bytes_arg, javascript_sync_rpc_bytes_value, javascript_sync_rpc_encoding,
     javascript_sync_rpc_option_bool, javascript_sync_rpc_option_u32, kernel_error, normalize_path,
 };
-use crate::state::{BridgeError, SidecarKernel, EXECUTION_DRIVER_NAME, PYTHON_VFS_RPC_GUEST_ROOT};
+use crate::state::{
+    ActiveProcess, BridgeError, SidecarKernel, VmState, EXECUTION_DRIVER_NAME,
+    PYTHON_VFS_RPC_GUEST_ROOT,
+};
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
 use agent_os_execution::{
@@ -20,9 +23,11 @@ use agent_os_execution::{
 use agent_os_kernel::vfs::VirtualStat;
 use base64::Engine;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 pub(crate) async fn guest_filesystem_call<B>(
     sidecar: &mut NativeSidecar<B>,
@@ -39,6 +44,7 @@ where
     let vm = sidecar.vms.get_mut(&vm_id).expect("owned VM should exist");
     let response = match payload.operation {
         GuestFilesystemOperation::ReadFile => {
+            sync_active_shadow_path_to_kernel(vm, &payload.path)?;
             let bytes = vm.kernel.read_file(&payload.path).map_err(kernel_error)?;
             let (content, encoding) = encode_guest_filesystem_content(bytes);
             GuestFilesystemResultResponse {
@@ -101,40 +107,49 @@ where
                 target: None,
             }
         }
-        GuestFilesystemOperation::Exists => GuestFilesystemResultResponse {
-            operation: payload.operation,
-            path: payload.path.clone(),
-            content: None,
-            encoding: None,
-            entries: None,
-            stat: None,
-            exists: Some(vm.kernel.exists(&payload.path).map_err(kernel_error)?),
-            target: None,
-        },
-        GuestFilesystemOperation::Stat => GuestFilesystemResultResponse {
-            operation: payload.operation,
-            path: payload.path.clone(),
-            content: None,
-            encoding: None,
-            entries: None,
-            stat: Some(guest_filesystem_stat(
-                vm.kernel.stat(&payload.path).map_err(kernel_error)?,
-            )),
-            exists: None,
-            target: None,
-        },
-        GuestFilesystemOperation::Lstat => GuestFilesystemResultResponse {
-            operation: payload.operation,
-            path: payload.path.clone(),
-            content: None,
-            encoding: None,
-            entries: None,
-            stat: Some(guest_filesystem_stat(
-                vm.kernel.lstat(&payload.path).map_err(kernel_error)?,
-            )),
-            exists: None,
-            target: None,
-        },
+        GuestFilesystemOperation::Exists => {
+            sync_active_shadow_path_to_kernel(vm, &payload.path)?;
+            GuestFilesystemResultResponse {
+                operation: payload.operation,
+                path: payload.path.clone(),
+                content: None,
+                encoding: None,
+                entries: None,
+                stat: None,
+                exists: Some(vm.kernel.exists(&payload.path).map_err(kernel_error)?),
+                target: None,
+            }
+        }
+        GuestFilesystemOperation::Stat => {
+            sync_active_shadow_path_to_kernel(vm, &payload.path)?;
+            GuestFilesystemResultResponse {
+                operation: payload.operation,
+                path: payload.path.clone(),
+                content: None,
+                encoding: None,
+                entries: None,
+                stat: Some(guest_filesystem_stat(
+                    vm.kernel.stat(&payload.path).map_err(kernel_error)?,
+                )),
+                exists: None,
+                target: None,
+            }
+        }
+        GuestFilesystemOperation::Lstat => {
+            sync_active_shadow_path_to_kernel(vm, &payload.path)?;
+            GuestFilesystemResultResponse {
+                operation: payload.operation,
+                path: payload.path.clone(),
+                content: None,
+                encoding: None,
+                entries: None,
+                stat: Some(guest_filesystem_stat(
+                    vm.kernel.lstat(&payload.path).map_err(kernel_error)?,
+                )),
+                exists: None,
+                target: None,
+            }
+        }
         GuestFilesystemOperation::ReadDir => GuestFilesystemResultResponse {
             operation: payload.operation,
             path: payload.path.clone(),
@@ -791,7 +806,7 @@ fn javascript_sync_rpc_readdir_value(entries: Vec<String>) -> Value {
 }
 
 fn mirror_guest_file_write_to_shadow(
-    vm: &mut crate::state::VmState,
+    vm: &mut VmState,
     guest_path: &str,
     bytes: &[u8],
 ) -> Result<(), SidecarError> {
@@ -832,5 +847,178 @@ fn mirror_guest_file_write_to_shadow(
         ))
     })?;
 
+    Ok(())
+}
+
+fn sync_active_shadow_path_to_kernel(
+    vm: &mut VmState,
+    guest_path: &str,
+) -> Result<(), SidecarError> {
+    let guest_path = normalize_path(guest_path);
+    for host_path in active_shadow_host_paths_for_guest(vm, &guest_path) {
+        let metadata = match fs::symlink_metadata(&host_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(SidecarError::Io(format!(
+                    "failed to stat host shadow path {}: {error}",
+                    host_path.display()
+                )))
+            }
+        };
+
+        if metadata.file_type().is_symlink() {
+            sync_host_symlink_to_kernel(vm, &guest_path, &host_path)?;
+            return Ok(());
+        }
+
+        if metadata.is_dir() {
+            sync_host_directory_to_kernel(vm, &guest_path, &metadata)?;
+            return Ok(());
+        }
+
+        if metadata.is_file() {
+            sync_host_file_to_kernel(vm, &guest_path, &host_path, &metadata)?;
+            return Ok(());
+        }
+    }
+
+    Ok(())
+}
+
+fn active_shadow_host_paths_for_guest(vm: &VmState, guest_path: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for process in vm.active_processes.values() {
+        if let Some(host_path) = resolve_process_guest_path_to_host(process, guest_path) {
+            push_unique_host_path(&mut candidates, &mut seen, host_path);
+        }
+    }
+
+    push_unique_host_path(
+        &mut candidates,
+        &mut seen,
+        shadow_host_path_for_guest(&vm.cwd, guest_path),
+    );
+
+    candidates
+}
+
+fn push_unique_host_path(
+    candidates: &mut Vec<PathBuf>,
+    seen: &mut BTreeSet<PathBuf>,
+    host_path: PathBuf,
+) {
+    if seen.insert(host_path.clone()) {
+        candidates.push(host_path);
+    }
+}
+
+fn shadow_host_path_for_guest(shadow_root: &Path, guest_path: &str) -> PathBuf {
+    if guest_path == "/" {
+        shadow_root.to_path_buf()
+    } else {
+        shadow_root.join(guest_path.trim_start_matches('/'))
+    }
+}
+
+fn resolve_process_guest_path_to_host(
+    process: &ActiveProcess,
+    guest_path: &str,
+) -> Option<PathBuf> {
+    let normalized_guest_path = if guest_path.starts_with('/') {
+        normalize_path(guest_path)
+    } else {
+        normalize_path(&format!(
+            "{}/{}",
+            process.guest_cwd.trim_end_matches('/'),
+            guest_path
+        ))
+    };
+    let normalized_guest_cwd = normalize_path(&process.guest_cwd);
+    let mut host_root = process.host_cwd.clone();
+    for _ in normalized_guest_cwd
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+    {
+        host_root = host_root.parent()?.to_path_buf();
+    }
+    Some(shadow_host_path_for_guest(&host_root, &normalized_guest_path))
+}
+
+fn sync_host_directory_to_kernel(
+    vm: &mut VmState,
+    guest_path: &str,
+    metadata: &fs::Metadata,
+) -> Result<(), SidecarError> {
+    vm.kernel.mkdir(guest_path, true).map_err(kernel_error)?;
+    vm.kernel
+        .chmod(guest_path, metadata.permissions().mode() & 0o7777)
+        .map_err(kernel_error)?;
+    Ok(())
+}
+
+fn sync_host_file_to_kernel(
+    vm: &mut VmState,
+    guest_path: &str,
+    host_path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), SidecarError> {
+    ensure_guest_parent_dir(vm, guest_path)?;
+    let bytes = fs::read(host_path).map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to read host shadow file {}: {error}",
+            host_path.display()
+        ))
+    })?;
+    vm.kernel.write_file(guest_path, bytes).map_err(kernel_error)?;
+    vm.kernel
+        .chmod(guest_path, metadata.permissions().mode() & 0o7777)
+        .map_err(kernel_error)?;
+    Ok(())
+}
+
+fn sync_host_symlink_to_kernel(
+    vm: &mut VmState,
+    guest_path: &str,
+    host_path: &Path,
+) -> Result<(), SidecarError> {
+    ensure_guest_parent_dir(vm, guest_path)?;
+    let target = fs::read_link(host_path).map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to read host shadow symlink {}: {error}",
+            host_path.display()
+        ))
+    })?;
+
+    match vm.kernel.lstat(guest_path) {
+        Ok(stat) if stat.is_directory => {
+            let _ = vm.kernel.remove_dir(guest_path);
+        }
+        Ok(_) => {
+            let _ = vm.kernel.remove_file(guest_path);
+        }
+        Err(_) => {}
+    }
+
+    vm.kernel
+        .symlink(&target.to_string_lossy(), guest_path)
+        .map_err(kernel_error)?;
+    Ok(())
+}
+
+fn ensure_guest_parent_dir(vm: &mut VmState, guest_path: &str) -> Result<(), SidecarError> {
+    let Some(parent) = Path::new(guest_path).parent() else {
+        return Ok(());
+    };
+    let parent = parent.to_string_lossy();
+    if parent.is_empty() || parent == "/" {
+        return Ok(());
+    }
+    vm.kernel
+        .mkdir(&normalize_path(&parent), true)
+        .map_err(kernel_error)?;
     Ok(())
 }

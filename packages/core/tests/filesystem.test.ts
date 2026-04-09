@@ -1,9 +1,54 @@
+import { resolve } from "node:path";
+import type { Fixture, ToolCall } from "@copilotkit/llmock";
+import claude from "@rivet-dev/agent-os-claude";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/index.js";
+import {
+	createAnthropicFixture,
+	startLlmock,
+	stopLlmock,
+} from "./helpers/llmock-helper.js";
 import {
 	REGISTRY_SOFTWARE,
 	registrySkipReason,
 } from "./helpers/registry-commands.js";
+
+const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
+
+function hasToolResult(req: unknown): boolean {
+	const directMessages = (
+		req as {
+			messages?: Array<{ role?: string }>;
+			body?: { messages?: Array<{ role?: string }> };
+		}
+	).messages;
+	const bodyMessages = (
+		req as { body?: { messages?: Array<{ role?: string }> } }
+	).body?.messages;
+	const messages = Array.isArray(directMessages)
+		? directMessages
+		: Array.isArray(bodyMessages)
+			? bodyMessages
+			: [];
+	return messages.some((message) => message.role === "tool");
+}
+
+function createToolFixtures(toolCall: ToolCall, finalText: string): Fixture[] {
+	return [
+		createAnthropicFixture(
+			{
+				predicate: (req) => !hasToolResult(req),
+			},
+			{ toolCalls: [toolCall] },
+		),
+		createAnthropicFixture(
+			{
+				predicate: (req) => hasToolResult(req),
+			},
+			{ content: finalText },
+		),
+	];
+}
 
 describe("filesystem operations", () => {
 	let vm: AgentOs;
@@ -38,6 +83,58 @@ describe("filesystem operations", () => {
 			const ls = await vm.exec("ls /tmp/");
 			expect(ls.exitCode, ls.stderr || ls.stdout).toBe(0);
 			expect(ls.stdout).toContain("test.txt");
+		},
+	);
+
+	test.skipIf(registrySkipReason)(
+		"agent bash tool writes are visible to readFile before the session exits",
+		async () => {
+			const { mock, url } = await startLlmock(
+				createToolFixtures(
+					{
+						name: "Bash",
+						arguments: JSON.stringify({
+							command: "printf 'agent-shadow-ok' > /tmp/agent-shadow.txt",
+						}),
+					},
+					"done",
+				),
+			);
+			const mockPort = Number(new URL(url).port);
+
+			await vm.dispose();
+			vm = await AgentOs.create({
+				loopbackExemptPorts: [mockPort],
+				moduleAccessCwd: MODULE_ACCESS_CWD,
+				software: [claude, ...REGISTRY_SOFTWARE],
+			});
+
+			let sessionId: string | undefined;
+			try {
+				sessionId = (
+					await vm.createSession("claude", {
+						env: {
+							ANTHROPIC_API_KEY: "mock-key",
+							ANTHROPIC_BASE_URL: url,
+						},
+					})
+				).sessionId;
+
+				const { response } = await vm.prompt(
+					sessionId,
+					"Use bash to write agent-shadow-ok into /tmp/agent-shadow.txt.",
+				);
+
+				expect(response.error).toBeUndefined();
+				expect(
+					new TextDecoder().decode(await vm.readFile("/tmp/agent-shadow.txt")),
+				).toBe("agent-shadow-ok");
+			} finally {
+				if (sessionId) {
+					vm.closeSession(sessionId);
+				}
+				await stopLlmock(mock);
+			}
 		},
 	);
 

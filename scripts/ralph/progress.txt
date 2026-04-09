@@ -31,6 +31,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Native-sidecar WASM commands read and write through the VM shadow root rather than the kernel VFS directly, so keep the POSIX bootstrap directories (`/tmp`, `/var/tmp`, `/bin`, `/usr`, etc.) seeded there during VM creation or shell redirects and absolute-path checks will fail even when `vm.stat()` sees the path in the kernel filesystem.
 - Host filesystem API writes that must be visible to WASM shell commands need immediate shadow-root mirroring in addition to the kernel write; otherwise `vm.writeFile()` and guest `sh`/`cat`/`ls` observe different filesystem states.
 - When guest commands write files through the sidecar shadow root, mirror those host-side shadow writes back into the kernel on process exit or `vm.exec("... > /tmp/file")` can succeed while a later `vm.readFile("/tmp/file")` still returns `ENOENT`.
+- Long-lived agent sessions can keep running after a bash/tool child exits, so host read APIs must reconcile active shadow-root paths before session shutdown; `packages/core/tests/filesystem.test.ts` now covers that path with a Claude llmock prompt.
 - WASI guest commands only see mounted guest roots that are mirrored into the embedded runner's `buildPreopens()` map. If `vm.readFile()` can see a `host_dir` mount but `vm.exec("cat ...")` cannot, check `AGENT_OS_GUEST_PATH_MAPPINGS` -> WASI preopen propagation before changing the TypeScript mount setup.
 - In the embedded WASM runner's read-only `path_open` guard, allow non-mutating flags like `O_DIRECTORY`; only create/truncate/exclusive flags and write rights should return `EROFS`, or read-only traversal commands like `find`, `fd`, and `ls <dir>` will fail.
 - For individually rebuilt registry/native command crates, the fresh Wasm binary is `registry/native/target/wasm32-wasip1/release/<cmd>.wasm`; package-level Vitest coverage that uses package `commandDir` still needs that artifact copied into `registry/software/*/wasm/<cmd>`.
@@ -375,4 +376,15 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - The native sidecar has two filesystem views in play for WASM flows: kernel VFS for host APIs and the shadow root for guest shell commands; cross-runtime visibility bugs often mean one side updated without mirroring the other.
   - Exec-based TypeScript regressions in `packages/core` need the registry command packages provisioned (`REGISTRY_SOFTWARE`) or the native sidecar path will fail early because no guest `sh` is installed.
   - `packages/core/tests/filesystem.test.ts` is now the focused acceptance suite for host-write visibility into WASM shell commands.
+---
+
+## 2026-04-09 14:56:57 PDT - US-CC-010
+- Reconciled active shadow-root paths back into the kernel on host `readFile`/`exists`/`stat`/`lstat` requests, so files written by a still-running agent session become visible to VM filesystem APIs before the session process exits.
+- Added a focused Claude llmock regression to `packages/core/tests/filesystem.test.ts` that drives a bash tool write to `/tmp/agent-shadow.txt` and immediately verifies `vm.readFile()` can read it back.
+- Verified with `pnpm --dir packages/core exec vitest run tests/filesystem.test.ts --reporter=verbose`.
+- Files changed: `crates/sidecar/src/filesystem.rs`, `packages/core/tests/filesystem.test.ts`, `packages/core/AGENTS.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Process-exit reconciliation is too late for long-lived agent sessions; host filesystem reads need an active shadow-path sync path when bash/tool children finish but the adapter process stays alive.
+  - `packages/core/tests/filesystem.test.ts` now covers both directions of the shadow/kernel visibility bug: host writes visible to guest shell commands and guest bash-tool writes visible to host `vm.readFile()`.
+  - For Claude filesystem regressions, llmock plus `REGISTRY_SOFTWARE` gives a deterministic bash-tool probe without relying on real API keys.
 ---
