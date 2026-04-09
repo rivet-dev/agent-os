@@ -99,6 +99,7 @@ See `.agent/specs/test-structure.md` for the full restructuring plan. Target lay
 - `allProcesses()` / `processTree()` on the native sidecar path only surface the top-level tracked runtime processes. Guest-local `child_process.spawn()` children still report guest PIDs to user code, but they do not appear as separate kernel process-tree nodes yet.
 - `kernel.readFile()` does NOT see the ModuleAccessFileSystem overlay -- read host files directly with `readFileSync` for package.json resolution
 - Native ELF binaries cannot execute in the VM -- the kernel's command resolver only handles `.js`/`.mjs`/`.cjs` scripts and WASM commands.
+- Projected native assets under `/root/node_modules` are readable through module access, but guest `child_process.spawn*()` still routes them through the VM command resolver; spawning a projected ELF currently fails during WASM warmup instead of executing host-native code.
 - The native sidecar framed stdio client is bidirectional: host-originated `request`/`response` frames use positive `request_id` values, and sidecar-originated `sidecar_request`/`sidecar_response` frames use negative IDs. When adding host callbacks, register a sidecar request handler instead of assuming stdout only carries events plus responses.
 
 ### Debugging Policy

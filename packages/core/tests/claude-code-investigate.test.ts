@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/index.js";
 
 /**
- * US-015: Investigate Claude Code SDK in the Agent OS VM
+ * US-010: Investigate Claude Code SDK projection in the Agent OS VM
  *
  * FINDINGS SUMMARY:
  * The @anthropic-ai/claude-code package is a ~13MB bundled ESM JavaScript file (cli.js).
@@ -130,10 +130,10 @@ if (exists) {
 		expect(stdout).toContain("has-shebang:true");
 	}, 30_000);
 
-	test("vendor ripgrep binary is mounted but not directly executable in VM", async () => {
+	test("vendor ripgrep binary is projected and fails deterministically if executed in the VM", async () => {
 		// Claude Code bundles native ripgrep (ELF) for code search.
-		// The binary file is accessible via ModuleAccessFileSystem overlay
-		// and can now be spawned on the native sidecar path.
+		// The binary file is accessible via the ModuleAccessFileSystem overlay,
+		// but projected native binaries are not executable guest-side.
 		// Production Claude sessions still force Agent OS ripgrep via env.
 		// Note: .node native addons (audio-capture) are blocked by the
 		// overlay itself (ERR_MODULE_ACCESS_NATIVE_ADDON).
@@ -181,7 +181,12 @@ if (rgExists) {
 		expect(exitCode, `Failed. stderr: ${stderr}`).toBe(0);
 		expect(stdout).toContain("rg-exists:true");
 		expect(stdout).toContain("rg-status:1");
-		expect(stdout).toContain("rg-stderr:command not found:");
+		expect(
+			/rg-stderr:(command not found:|WebAssembly warmup exited with status 1:)/.test(
+				stdout,
+			),
+			`Expected projected native binary execution to fail deterministically.\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+		).toBe(true);
 	}, 30_000);
 
 	test("import.meta.url works correctly in VM ESM modules", async () => {
