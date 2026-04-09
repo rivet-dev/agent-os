@@ -136,6 +136,8 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 - Carry only the Node runtime bootstrap allowlist in `options.internalBootstrapEnv`.
 - Re-inject that allowlisted map only when `crates/sidecar/src/service.rs` starts a nested JavaScript runtime.
 - JavaScript child-process launches in `crates/sidecar/src/execution.rs` must call `prepare_javascript_runtime_env(...)` and set `AGENT_OS_SANDBOX_ROOT` just like top-level `execute()` does. If child V8 executions miss those runtime env entries, stack traces fall back to `/unknown/...`, bare-package ESM imports like `undici` stop resolving, and spawned JS CLIs (including `pi-acp` -> `pi --mode rpc`) silently diverge from top-level behavior.
+- In `crates/execution/src/node_import_cache.rs`, WASM child-process stdio can target delegate-managed guest fds rather than real host OS fds. Keep synthetic-pipe routing aligned with `delegateManagedFdWrite`/`delegateManagedFdClose`, retain those delegate fds for the child lifetime, and only release the final close after child exit; writing streamed stdout/stderr with raw host `writeSync(fd, ...)` breaks redirected shell output.
+- The host WASI runner's full-permission preopens must include both `'.'` and `'/workspace'` mapped to `process.cwd()`. Child commands that receive `cwd: "/workspace"` from the sidecar still resolve relative paths through the WASI `.` preopen, so omitting it makes `cat note.txt`/redirects fail even when the guest cwd is otherwise correct.
 
 ## Guest Networking Rules
 

@@ -1294,7 +1294,7 @@
         "cargo test -p agent-os-sidecar --test isolation_audit -- --test-threads=1 passes"
       ],
       "priority": 122,
-      "passes": false,
+      "passes": true,
       "notes": "Found in audit: security_hardening.rs has a key test marked #[ignore] due to V8 sidecar flakiness. No systematic isolation audit exists. The existing tests check individual boundaries but don't verify the complete attack surface. This overlaps with US-044 but is more specific and actionable."
     },
     {
@@ -1310,7 +1310,7 @@
         "cargo test passes"
       ],
       "priority": 123,
-      "passes": false,
+      "passes": true,
       "notes": "Found in audit: ftruncate is missing (truncate exists but not fd-based), mkdtemp is missing, access() is a stub using only stat(), flock structure exists in kernel but API not wired. These are used by real packages \u2014 e.g., proper-lockfile (Pi SDK dep) uses flock."
     },
     {
@@ -1511,6 +1511,528 @@
       "priority": 95,
       "passes": true,
       "notes": "Found in Pi E2E review: closeSession() is never tested for resource cleanup. In a production VM running multiple agent sessions over time, leaked processes/FDs/sockets would accumulate and eventually hit resource limits. This is especially important for the Pi CLI adapter which spawns a real child process (pi --mode rpc) \u2014 if that process isn't killed on closeSession(), it persists indefinitely."
+    },
+    {
+      "id": "US-081",
+      "title": "Test agent configuration produces correct launch environment",
+      "description": "As a developer, I want tests verifying each agent type's configuration is correctly applied during session creation.",
+      "acceptanceCriteria": [
+        "Test: Pi agent session includes --append-system-prompt in launch args",
+        "Test: Claude agent session includes all 12 default env vars",
+        "Test: OpenCode agent session creates context path files and sets OPENCODE_CONTEXTPATHS",
+        "Test: Unknown agent type falls back to Generic config",
+        "Test: toolReference parameter is correctly injected into instructions",
+        "Test: skipBase option suppresses base OS instructions",
+        "Test file: crates/sidecar/tests/agent_config.rs",
+        "cargo test -p agent-os-sidecar --test agent_config passes"
+      ],
+      "priority": 125,
+      "passes": false,
+      "notes": "Reference: /tmp/a5-typescript/packages/core/src/agents.ts \u2014 expected env vars and args per agent type. Depends on US-080."
+    },
+    {
+      "id": "US-082",
+      "title": "Implement kernel SocketTable with TCP support (AF_INET, SOCK_STREAM)",
+      "description": "As a developer, I want a kernel-level socket table so all runtimes (JS, WASM, Python) can create TCP sockets through the kernel instead of only JS getting networking via the V8 bridge.",
+      "acceptanceCriteria": [
+        "crates/kernel/src/socket_table.rs exists with SocketTable struct",
+        "socket() creates AF_INET + SOCK_STREAM entries, returns socket ID",
+        "bind(addr, port) assigns local address (port 0 = ephemeral)",
+        "listen(backlog) transitions to listening state",
+        "accept() returns new connected socket + peer address",
+        "connect(host, port) initiates outbound TCP connection",
+        "send(data) / recv(max_len) for data transfer with non-blocking support",
+        "shutdown(how) for half-close (SHUT_RD, SHUT_WR, SHUT_RDWR)",
+        "close() releases socket resources",
+        "Socket options: SO_REUSEADDR, SO_KEEPALIVE, TCP_NODELAY via setsockopt/getsockopt",
+        "Sockets integrated with FD table \u2014 open_socket_fd() returns usable file descriptor",
+        "HostNetworkAdapter trait for actual I/O delegation to host",
+        "Resource accounting: check_socket_allocation() enforced from resource_accounting.rs",
+        "cargo test -p agent-os-kernel passes"
+      ],
+      "priority": 126,
+      "passes": false,
+      "notes": "Reference: /home/nathan/secure-exec-1/packages/core/src/kernel/socket-table.ts (~1,500 lines) \u2014 full SocketTable. /home/nathan/secure-exec-1/packages/nodejs/src/bridge/network.ts (11,149 lines) \u2014 polyfill using socket table. This is the single largest missing kernel subsystem \u2014 WASM guests currently have ZERO networking."
+    },
+    {
+      "id": "US-083",
+      "title": "Add UDP datagram support to kernel SocketTable",
+      "description": "As a developer, I want the kernel socket table to support SOCK_DGRAM so guest code can send/receive UDP datagrams.",
+      "acceptanceCriteria": [
+        "socket() supports AF_INET + SOCK_DGRAM",
+        "bind(addr, port) assigns local UDP address",
+        "sendto(data, dest_addr, dest_port) sends datagram",
+        "recvfrom(max_len) receives datagram with source address",
+        "Message boundary preservation (each send = one recv)",
+        "MAX_DATAGRAM_SIZE = 65535 enforced",
+        "Non-blocking mode support (EAGAIN on empty receive)",
+        "cargo test -p agent-os-kernel passes"
+      ],
+      "priority": 127,
+      "passes": false,
+      "notes": "Reference: /home/nathan/secure-exec-1/packages/core/src/kernel/socket-table.ts \u2014 UDP handling with datagram queue and message boundaries. Depends on US-082."
+    },
+    {
+      "id": "US-084",
+      "title": "Add Unix domain socket support to kernel SocketTable",
+      "description": "As a developer, I want AF_UNIX socket support so guest processes can use path-based local IPC.",
+      "acceptanceCriteria": [
+        "socket() supports AF_UNIX + SOCK_STREAM and SOCK_DGRAM",
+        "bind(path) creates socket file in VFS",
+        "connect(path) connects to path-based socket",
+        "listen() + accept() work for SOCK_STREAM",
+        "Socket file cleaned up on close (or unlink)",
+        "Permissions checked via kernel VFS permission system",
+        "cargo test -p agent-os-kernel passes"
+      ],
+      "priority": 128,
+      "passes": false,
+      "notes": "Reference: /home/nathan/secure-exec-1/packages/core/src/kernel/socket-table.ts \u2014 AF_UNIX handling. Depends on US-082."
+    },
+    {
+      "id": "US-085",
+      "title": "Implement kernel DNS resolver",
+      "description": "As a developer, I want a kernel-level DNS resolution interface so all runtimes can resolve hostnames without host fallthrough.",
+      "acceptanceCriteria": [
+        "Kernel exposes dns_resolve(hostname, family) returning list of IP addresses",
+        "Kernel exposes dns_reverse(ip) returning list of hostnames",
+        "Resolution delegates to a DnsAdapter trait (host provides real DNS; tests can mock)",
+        "Network permissions checked before resolution (NetworkAccessRequest::Dns)",
+        "Integration with socket table: connect(hostname, port) resolves automatically",
+        "cargo test -p agent-os-kernel passes"
+      ],
+      "priority": 129,
+      "passes": false,
+      "notes": "Reference: /home/nathan/secure-exec-1/packages/nodejs/src/bridge/network.ts \u2014 DNS resolution via kernel adapter. Rust existing: crates/sidecar/src/execution.rs ~line 8236 has dns.lookup/dns.resolve but they use host hickory-resolver directly, not through kernel. Depends on US-082."
+    },
+    {
+      "id": "US-086",
+      "title": "Implement kernel loopback routing for 127.0.0.1",
+      "description": "As a developer, I want guest-to-guest TCP/UDP connections via 127.0.0.1 to route in-kernel without touching host networking.",
+      "acceptanceCriteria": [
+        "Kernel socket table maintains a listener registry (port -> socket ID)",
+        "connect('127.0.0.1', port) checks listener registry first, routes in-kernel if found",
+        "In-kernel connection creates a pair of bidirectional buffers (like socketpair)",
+        "If no kernel listener, falls through to HostNetworkAdapter",
+        "Works for both TCP and UDP",
+        "Test: two guest processes communicate via loopback TCP",
+        "Test: loopback connection does not touch host network",
+        "cargo test -p agent-os-kernel passes"
+      ],
+      "priority": 130,
+      "passes": false,
+      "notes": "Reference: /home/nathan/secure-exec-1/packages/core/src/kernel/socket-table.ts \u2014 in-kernel loopback routing. Rust existing: crates/sidecar/src/execution.rs has loopback routing for JS only via V8 bridge. Depends on US-082."
+    },
+    {
+      "id": "US-087",
+      "title": "Wire V8 bridge net.* calls through kernel SocketTable",
+      "description": "As a developer, I want V8 bridge net/dgram/dns syscalls to go through the kernel socket table instead of creating real host sockets directly.",
+      "acceptanceCriteria": [
+        "net.socket_create calls kernel.socket_table.create_socket() instead of host socket",
+        "net.socket_connect calls kernel.socket_table.connect() which delegates to host adapter",
+        "net.socket_listen calls kernel.socket_table.listen() which host adapter binds real port",
+        "net.socket_read/write go through kernel socket buffers",
+        "dgram.* calls use kernel UDP sockets",
+        "dns.* calls use kernel DNS resolver",
+        "Network permissions enforced at kernel level, not sidecar level",
+        "Existing V8 networking tests still pass",
+        "cargo test -p agent-os-sidecar passes"
+      ],
+      "priority": 131,
+      "passes": false,
+      "notes": "Reference: /home/nathan/secure-exec-1/packages/nodejs/src/bridge/network.ts \u2014 all net calls go through kernel. Rust current: crates/sidecar/src/execution.rs lines 8239-8329 net/dgram handlers create host sockets directly. Depends on US-082 + US-083 + US-085."
+    },
+    {
+      "id": "US-088",
+      "title": "Wire WASM WASI sock_* calls through kernel SocketTable",
+      "description": "As a developer, I want WASM guest processes to have networking via kernel socket table so commands like curl and git work.",
+      "acceptanceCriteria": [
+        "WASI sock_open, sock_bind, sock_listen, sock_accept, sock_connect routed to kernel SocketTable",
+        "WASI sock_send, sock_recv use kernel socket buffers",
+        "WASI sock_shutdown maps to kernel shutdown",
+        "Test: WASM curl command can fetch an HTTP URL",
+        "Test: WASM git clone over HTTP works",
+        "Permission tier checked: only WASM commands at appropriate tier get network access",
+        "cargo test -p agent-os-execution passes"
+      ],
+      "priority": 132,
+      "passes": false,
+      "notes": "Reference: /home/nathan/secure-exec-1/packages/posix/src/driver.ts \u2014 WASM syscall routing through kernel. Rust current: crates/execution/src/wasm.rs has no socket support. Depends on US-082."
+    },
+    {
+      "id": "US-089",
+      "title": "Cross-runtime networking test suite",
+      "description": "As a developer, I want tests verifying that networking works identically across JS, WASM, and Python runtimes and that cross-runtime loopback communication works.",
+      "acceptanceCriteria": [
+        "Test: JS guest creates TCP server, WASM guest connects to it via 127.0.0.1",
+        "Test: WASM guest creates TCP server, JS guest connects to it",
+        "Test: JS guest sends UDP datagram, WASM guest receives it",
+        "Test: Python guest can make HTTP request through kernel TCP",
+        "Test: Two JS guests in the same VM communicate via loopback",
+        "Test: DNS resolution returns same results from JS, WASM, and Python",
+        "Test file: crates/sidecar/tests/cross_runtime_networking.rs",
+        "cargo test -p agent-os-sidecar --test cross_runtime_networking -- --test-threads=1 passes"
+      ],
+      "priority": 133,
+      "passes": false,
+      "notes": "Depends on US-087 + US-088. This is the comprehensive validation that the kernel socket table unifies networking across all runtimes."
+    },
+    {
+      "id": "US-090",
+      "title": "Implement centralized kernel poll(2) syscall",
+      "description": "As a developer, I want a kernel-level poll() that multiplexes across all FD types (pipes, PTYs, sockets, files) so guest code can do I/O multiplexing.",
+      "acceptanceCriteria": [
+        "kernel.poll(fds: &mut [PollFd], timeout_ms: i32) -> Result<usize> implemented",
+        "Multiplexes across: pipes, PTYs, sockets (once socket table exists), regular files",
+        "POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL set correctly per FD type",
+        "Timeout semantics: -1 = block forever, 0 = non-blocking, >0 = ms timeout",
+        "Returns number of ready FDs",
+        "Wakes up when any monitored FD becomes ready (via PollNotifier)",
+        "Test: poll pipe read end after write",
+        "Test: poll PTY master after slave write",
+        "Test: poll with timeout expiry",
+        "Test: poll returns POLLNVAL for closed FD",
+        "cargo test -p agent-os-kernel passes"
+      ],
+      "priority": 134,
+      "passes": false,
+      "notes": "Reference: TS kernel had poll across pipes, sockets, PTYs. Rust existing: crates/kernel/src/poll.rs (157 lines) has PollEvents/PollFd/PollNotifier primitives. crates/kernel/src/pipe_manager.rs and pty.rs have internal poll methods. Missing: centralized kernel poll() that dispatches to all subsystems."
+    },
+    {
+      "id": "US-091",
+      "title": "Wire poll(2) to V8 bridge and WASM WASI",
+      "description": "As a developer, I want guest runtimes to use kernel poll(2) for I/O multiplexing.",
+      "acceptanceCriteria": [
+        "V8 bridge: __kernel_poll sync RPC method calls kernel.poll()",
+        "WASM: poll_oneoff WASI syscall routes through kernel poll",
+        "Test: JS guest code uses poll to wait on multiple pipes",
+        "Test: WASM command uses poll_oneoff for I/O multiplexing",
+        "cargo test -p agent-os-sidecar passes"
+      ],
+      "priority": 135,
+      "passes": false,
+      "notes": "Depends on US-090. Exposes kernel poll to guest code via existing sync RPC and WASI mechanisms."
+    },
+    {
+      "id": "US-092",
+      "title": "Implement LayerStore with create/seal/import/compose operations",
+      "description": "As a developer, I want a LayerStore API enabling Docker-like layer lifecycle management \u2014 create writable layers, seal them into snapshots, import snapshots, and compose multi-layer overlay stacks.",
+      "acceptanceCriteria": [
+        "LayerStore struct in kernel with create_writable_layer() -> WritableLayerHandle",
+        "import_snapshot(source) -> SnapshotLayerHandle creates immutable layer from entries",
+        "open_snapshot_layer(layer_id) -> SnapshotLayerHandle reopens existing snapshot",
+        "seal_layer(writable) -> SnapshotLayerHandle freezes writable into immutable, invalidates lease",
+        "create_overlay_filesystem(upper, lowers) -> OverlayFilesystem composes layer stack",
+        "Lease tracking prevents concurrent writes to same layer",
+        "Layer identified by {store_id, layer_id, kind}",
+        "Sidecar exposes layer RPCs matching TypeScript API",
+        "cargo test -p agent-os-kernel passes"
+      ],
+      "priority": 136,
+      "passes": false,
+      "notes": "Reference: /tmp/a5-typescript/packages/core/src/layers.ts (314 lines) \u2014 LayerStore, WritableLayerHandle, SnapshotLayerHandle, createWritableLayer(), importSnapshot(), sealLayer(), createOverlayFilesystem(). Rust existing: crates/kernel/src/root_fs.rs has RootFileSystem with single overlay but no layer lifecycle management."
+    },
+    {
+      "id": "US-093",
+      "title": "Test multi-layer composition and snapshot lifecycle",
+      "description": "As a developer, I want tests verifying layer operations produce correct filesystem state.",
+      "acceptanceCriteria": [
+        "Test: create writable layer, write files, seal -> snapshot contains written files",
+        "Test: import snapshot, overlay with new writable -> reads see snapshot + new files",
+        "Test: seal writable with deletes -> snapshot has whiteouts for deleted files",
+        "Test: compose 3-layer stack -> reads correctly merge all layers",
+        "Test: double-seal same writable -> error (lease invalidated)",
+        "Test: concurrent writable layers on same store -> independent writes",
+        "Test file: crates/kernel/tests/layer_store.rs",
+        "cargo test -p agent-os-kernel --test layer_store passes"
+      ],
+      "priority": 137,
+      "passes": false,
+      "notes": "Depends on US-092. Reference: /tmp/a5-typescript/packages/core/src/layers.ts \u2014 API implies these test scenarios."
+    },
+    {
+      "id": "US-094",
+      "title": "Implement full user/group identity syscalls in kernel",
+      "description": "As a developer, I want the kernel to provide POSIX user identity syscalls so guest code sees virtualized uid/gid.",
+      "acceptanceCriteria": [
+        "kernel.getuid() / kernel.getgid() return process UID/GID",
+        "kernel.geteuid() / kernel.getegid() return effective UID/GID",
+        "kernel.setuid() / kernel.setgid() change identity (root only)",
+        "kernel.isatty(fd) checks if FD is a PTY",
+        "Default user: uid=0, gid=0 (root) matching TS behavior",
+        "User info queryable: username, homedir, shell",
+        "Wire to V8 bridge as process.getuid() etc.",
+        "Wire to WASM WASI as getuid import",
+        "cargo test -p agent-os-kernel passes"
+      ],
+      "priority": 138,
+      "passes": false,
+      "notes": "Reference: /home/nathan/secure-exec-1/packages/posix/src/user.ts \u2014 full user identity. Rust existing: crates/kernel/src/user.rs is only 49 lines with a basic User struct."
+    },
+    {
+      "id": "US-095",
+      "title": "Test user/group identity from guest code",
+      "description": "As a developer, I want tests verifying guest processes see correct virtualized identity.",
+      "acceptanceCriteria": [
+        "Test: JS guest process.getuid() returns kernel UID (0), not host UID",
+        "Test: JS guest process.getgid() returns kernel GID (0), not host GID",
+        "Test: JS guest os.userInfo() returns kernel user info",
+        "Test: WASM id command returns uid=0(root) gid=0(root)",
+        "Test: isatty(fd) returns true for PTY FDs, false for pipe FDs",
+        "Test file: crates/sidecar/tests/user_identity.rs",
+        "cargo test -p agent-os-sidecar --test user_identity -- --test-threads=1 passes"
+      ],
+      "priority": 139,
+      "passes": false,
+      "notes": "Depends on US-094."
+    },
+    {
+      "id": "US-096",
+      "title": "Add bootstrap path suppression for kernel-reserved directories",
+      "description": "As a developer, I want the kernel to suppress writes to specific directories during bootstrap, matching the TypeScript behavior.",
+      "acceptanceCriteria": [
+        "During bootstrap, writes to /boot, /usr/games, /usr/include, /usr/libexec, /usr/man are silently suppressed",
+        "During bootstrap, writes to /usr/bin/env are suppressed",
+        "After finish_bootstrap(), all paths writable again (unless read-only mode)",
+        "Test: bootstrap snapshot with suppressed paths -> suppressed entries absent",
+        "Test: post-bootstrap writes to previously-suppressed paths succeed",
+        "cargo test -p agent-os-kernel passes"
+      ],
+      "priority": 140,
+      "passes": false,
+      "notes": "Reference: /tmp/a5-typescript/packages/core/src/base-filesystem.ts (253 lines) \u2014 SUPPRESSED_KERNEL_BOOTSTRAP_DIRS, SUPPRESSED_KERNEL_BOOTSTRAP_FILES at lines 32-40. Rust target: crates/kernel/src/root_fs.rs currently only does mode-level locking."
+    },
+    {
+      "id": "US-097",
+      "title": "Add fcntl operations to kernel FD table",
+      "description": "As a developer, I want fcntl(F_GETFL, F_SETFL, F_GETFD, F_SETFD, F_DUPFD) so guest code can query and modify file descriptor flags.",
+      "acceptanceCriteria": [
+        "fcntl(fd, F_GETFL) returns status flags (O_NONBLOCK, O_APPEND, etc.)",
+        "fcntl(fd, F_SETFL, flags) modifies status flags",
+        "fcntl(fd, F_GETFD) returns FD flags (FD_CLOEXEC)",
+        "fcntl(fd, F_SETFD, flags) modifies FD flags",
+        "fcntl(fd, F_DUPFD, min_fd) duplicates to lowest available >= min_fd",
+        "Wire to V8 bridge and WASM WASI",
+        "cargo test -p agent-os-kernel passes"
+      ],
+      "priority": 141,
+      "passes": false,
+      "notes": "Rust existing: crates/kernel/src/fd_table.rs (588 lines) has no fcntl. POSIX programs expect these \u2014 e.g., setting O_NONBLOCK on sockets."
+    },
+    {
+      "id": "US-098",
+      "title": "Add pwrite to HostDirFilesystem",
+      "description": "As a developer, I want the host directory mount plugin to have a proper pwrite() instead of the default read-modify-write fallback.",
+      "acceptanceCriteria": [
+        "HostDirFilesystem::pwrite(path, data, offset) writes directly at offset without reading the entire file",
+        "Handles sparse files correctly (seek + write)",
+        "Test: pwrite at offset 1000 in a 500-byte file extends it",
+        "cargo test -p agent-os-sidecar passes"
+      ],
+      "priority": 142,
+      "passes": false,
+      "notes": "Reference: /tmp/a5-typescript/packages/core/src/backends/host-dir-backend.ts:326-338 \u2014 explicit pwrite. Rust target: crates/sidecar/src/plugins/host_dir.rs currently relies on VirtualFileSystem trait default impl."
+    },
+    {
+      "id": "US-099",
+      "title": "Add MAX_TOOL_DESCRIPTION_LENGTH enforcement in Rust tools.rs",
+      "description": "As a developer, I want tool/toolkit descriptions exceeding 200 characters to be rejected, preventing agent context bloat.",
+      "acceptanceCriteria": [
+        "Tool descriptions exceeding 200 characters are rejected with a clear error",
+        "Toolkit descriptions exceeding 200 characters are rejected",
+        "Test: registering a tool with 201-char description returns error",
+        "cargo test -p agent-os-sidecar passes"
+      ],
+      "priority": 143,
+      "passes": false,
+      "notes": "Reference: /tmp/a5-typescript/packages/core/src/host-tools.ts:58-73 \u2014 validateToolkits() with MAX_TOOL_DESCRIPTION_LENGTH = 200. Rust target: crates/sidecar/src/tools.rs lines 49-68 checks non-empty but has no length limit."
+    },
+    {
+      "id": "US-100",
+      "title": "Test shell invocation of agentos-* tools from guest scripts",
+      "description": "As a developer, I want to verify that guest shell scripts can invoke agentos-* tools and get correct results.",
+      "acceptanceCriteria": [
+        "Test: guest JS child_process.execSync('agentos --help') returns master help text",
+        "Test: guest JS child_process.execSync('agentos-{toolkit} {tool} --json \"{...}\"') executes and returns result",
+        "Test: guest WASM sh command can invoke agentos-{toolkit} {tool} via PATH",
+        "If shell invocation fails because kernel doesn't intercept execve(/bin/agentos), fix the COMMAND_STUB or ensure kernel intercepts before filesystem lookup",
+        "Test file: crates/sidecar/tests/tool_shell_invocation.rs",
+        "cargo test -p agent-os-sidecar --test tool_shell_invocation -- --test-threads=1 passes"
+      ],
+      "priority": 144,
+      "passes": false,
+      "notes": "Reference: /tmp/a5-typescript/packages/core/src/host-tools-shims.ts (195 lines) \u2014 generated Node.js shims in /usr/local/bin/. Rust existing: crates/sidecar/src/tools.rs has resolve_tool_command(), crates/kernel/src/command_registry.rs has COMMAND_STUB. The question is whether shell invocation via execve reaches the command resolver."
+    },
+    {
+      "id": "US-101",
+      "title": "Restore missing public type exports in packages/core/src/index.ts",
+      "description": "As a developer, I want all necessary types exported from @rivet-dev/agent-os-core so downstream consumers can import them.",
+      "acceptanceCriteria": [
+        "Session types exported: Session, CreateSessionOptions, SessionInfo, SessionMode, SessionConfigOption, AgentCapabilities, AgentInfo, PermissionRequest, PermissionReply",
+        "Protocol types exported: JsonRpcRequest, JsonRpcResponse, JsonRpcNotification, JsonRpcError, serializeMessage, deserializeMessage",
+        "Mount types exported: MountConfig, PlainMountConfig, OverlayMountConfig, RootFilesystemConfig, RootLowerInput",
+        "Batch ops exported: BatchReadResult, BatchWriteResult, BatchWriteEntry",
+        "OS instructions exported: getOsInstructions",
+        "Other: DirEntry, ReaddirRecursiveOptions, SpawnedProcessInfo, ProcessTreeNode",
+        "Types that no longer exist in the new architecture are NOT re-added",
+        "pnpm check-types passes",
+        "pnpm build passes"
+      ],
+      "priority": 145,
+      "passes": false,
+      "notes": "Reference: /tmp/a5-typescript/packages/core/src/index.ts (132 lines) \u2014 full export list with 60+ types. Current: /home/nathan/a5/packages/core/src/index.ts (~20 lines). Only restore types that still exist in types.ts or other source files."
+    },
+    {
+      "id": "US-102",
+      "title": "Verify SQLite works from guest V8 code via sidecar rusqlite",
+      "description": "As a developer, I want tests proving SQLite is fully functional from guest JS code through the sidecar's rusqlite RPC.",
+      "acceptanceCriteria": [
+        "Test: guest JS new DatabaseSync('/tmp/test.db') creates database file visible in kernel VFS",
+        "Test: guest JS executes SQL (CREATE TABLE, INSERT, SELECT) and gets correct results",
+        "Test: prepared statements work (prepare, bind, step, finalize)",
+        "Test: database file persists across multiple open/close cycles within same VM",
+        "Test: database file is visible via fs.existsSync('/tmp/test.db') from guest code",
+        "Test: BLOB and INTEGER types correctly round-trip (matching TS bigint/Uint8Array encoding)",
+        "Test: WAL checkpoint works (sqlite.checkpoint RPC)",
+        "Test file: crates/sidecar/tests/sqlite_guest.rs",
+        "cargo test -p agent-os-sidecar --test sqlite_guest -- --test-threads=1 passes"
+      ],
+      "priority": 146,
+      "passes": false,
+      "notes": "Reference: /tmp/a5-typescript/packages/core/src/sqlite-bindings.ts (471 lines) \u2014 kernel-backed SQLite with VFS sync, statement pooling, bigint/Uint8Array encoding at lines 44-133. Rust existing: US-026 embedded rusqlite with sqlite.* sync RPC handlers at crates/sidecar/src/execution.rs lines 8330-8346."
+    },
+    {
+      "id": "US-103",
+      "title": "Filter AGENT_OS_* env vars and virtualize host identity in guest environment",
+      "description": "As a developer, I want all three runtimes to apply consistent env filtering so guests never see internal control variables or host identity.",
+      "acceptanceCriteria": [
+        "Guest process.env does not contain any key starting with AGENT_OS_",
+        "Guest process.env does not contain NODE_SYNC_RPC_*, NODE_SANDBOX_ROOT, or other internal control vars",
+        "Guest process.env.HOME returns /root (or kernel-configured home), not host home",
+        "Guest process.env.USER returns root (or kernel-configured user), not host user",
+        "Guest process.env.PATH returns kernel PATH, not host PATH",
+        "All three runtimes (JS, Python, WASM) apply the same filtering",
+        "Centralized in a single function in runtime_support.rs (not duplicated per runtime)",
+        "cargo test -p agent-os-sidecar passes"
+      ],
+      "priority": 147,
+      "passes": false,
+      "notes": "Reference: /home/nathan/secure-exec-1/packages/nodejs/src/bridge/process.ts (2,251 lines) \u2014 full process.env filtering. US-045 ported env virtualization for V8 but Python/WASM may still leak. Verify all runtimes are covered."
+    },
+    {
+      "id": "US-104",
+      "title": "Add process exit code to ACP client timeout diagnostics",
+      "description": "As a developer, I want ACP timeout errors to include the agent process exit code and killed status for better debugging.",
+      "acceptanceCriteria": [
+        "AcpClientError::Timeout message includes agent process exit code (if exited)",
+        "AcpClientError::Timeout message includes whether process was killed vs. exited naturally",
+        "Transport state tracks exit_code: Option<i32> and killed: bool separately (not just a string)",
+        "cargo test -p agent-os-sidecar passes"
+      ],
+      "priority": 148,
+      "passes": false,
+      "notes": "Reference: /tmp/a5-typescript/packages/core/src/acp-client.ts:370-384 \u2014 exit code and killed flag in timeout error. Rust current: crates/sidecar/src/acp/client.rs lines 85-88 only tracks transport_state as a String."
+    },
+    {
+      "id": "US-105",
+      "title": "Implement synthetic session/update for agents that don't emit notifications",
+      "description": "As a developer, I want the session layer to emit synthetic session/update notifications when agents like OpenCode don't send them after setMode/setModel succeeds.",
+      "acceptanceCriteria": [
+        "After a successful setMode() RPC, if no session/update notification arrives within 500ms, emit a synthetic one",
+        "Synthetic notification contains current_mode_update with the new mode",
+        "Dedup check: if a real notification arrived in the meantime, suppress the synthetic one",
+        "Same logic for setModel() and setThoughtLevel() RPCs",
+        "cargo test -p agent-os-sidecar passes"
+      ],
+      "priority": 149,
+      "passes": false,
+      "notes": "Reference: /tmp/a5-typescript/packages/core/src/session.ts:350-469 \u2014 synthetic update generation with event stream dedup check at lines 456-463. Rust target: crates/sidecar/src/acp/session.rs \u2014 apply_request_success() exists but needs synthetic notification emission."
+    },
+    {
+      "id": "US-106",
+      "title": "End-to-end migration parity test \u2014 exercise every major subsystem",
+      "description": "As a developer, I want a comprehensive integration test that exercises every subsystem migrated from TypeScript, confirming the full stack works together.",
+      "acceptanceCriteria": [
+        "Test creates a VM with base filesystem, overlay layer, and host directory mount",
+        "Test registers a toolkit with 3 tools, verifies help/describe/invoke all work",
+        "Test spawns a JS guest process that: reads/writes files via fs (kernel VFS), creates a TCP server and connects via loopback (kernel socket table), resolves DNS, spawns a child process via pipe, opens a PTY, uses poll() on multiple FDs, creates and queries a SQLite database, calls process.getuid(), invokes agentos-{toolkit} via child_process.exec",
+        "Test spawns a WASM command that reads a file and writes output (kernel VFS via WASI)",
+        "Test creates an ACP session with a mock agent, sends a prompt, receives events",
+        "Test seals the writable layer into a snapshot, imports it as a new layer",
+        "Test verifies resource cleanup after dispose",
+        "Test file: crates/sidecar/tests/migration_parity.rs",
+        "cargo test -p agent-os-sidecar --test migration_parity -- --test-threads=1 passes"
+      ],
+      "priority": 150,
+      "passes": false,
+      "notes": "This is the final gate story. Depends on all previous migration gap stories (US-080 through US-105). Should be the last story executed."
+    },
+    {
+      "id": "US-107",
+      "title": "Migrate sidecar IPC wire protocol from JSON-RPC NDJSON to BARE encoding",
+      "description": "As a developer, I want the sidecar<->host and sidecar<->guest IPC protocol to use BARE (Binary Application Record Encoding, draft-devault-bare-11) instead of JSON-RPC over NDJSON for lower overhead, deterministic encoding, and zero-copy decode of fixed-width fields.",
+      "acceptanceCriteria": [
+        "BARE schema file (.bare) defines all IPC message types: requests, responses, notifications, sync RPC calls, and process events",
+        "Rust side: bare-rs (or hand-rolled encoder/decoder) replaces serde_json for IPC frame encoding/decoding",
+        "TypeScript side: a BARE codec (e.g. @aspect-build/bare or hand-rolled) replaces JSON.parse/JSON.stringify for sidecar communication",
+        "V8 bridge sync RPC: SharedArrayBuffer payloads use BARE instead of JSON for request/response bodies",
+        "Framing: length-prefixed BARE messages (u32 little-endian length prefix + BARE payload) replace newline-delimited JSON",
+        "All existing IPC message types preserved \u2014 union tags for request/response/notification discrimination",
+        "Schema uses BARE union for top-level message type, struct for each message variant",
+        "Variable-length fields (strings, byte arrays) use BARE str/data with length prefix",
+        "Backward compatibility: version handshake on connection so old TypeScript clients fail fast with a clear error",
+        "All sidecar integration tests pass with the new encoding",
+        "Performance: measure encode/decode latency for typical RPC round-trip (expect >2x improvement over JSON)",
+        "cargo test -p agent-os-sidecar passes",
+        "pnpm test passes"
+      ],
+      "priority": 151,
+      "passes": false,
+      "notes": "BARE spec: https://www.ietf.org/archive/id/draft-devault-bare-11.html \u2014 Binary Application Record Encoding. Key advantages over JSON-RPC NDJSON: no field names on wire (schema-driven), ULEB128 varints instead of decimal ASCII, no escaping for binary data, deterministic encoding (one valid encoding per schema). Current protocol: crates/sidecar/src/acp/json_rpc.rs + crates/sidecar/src/protocol.rs (JSON-RPC 2.0 over NDJSON). TypeScript codec: packages/core/src/ sidecar communication uses JSON.parse/stringify. V8 bridge sync RPC: crates/execution/assets/v8-bridge.source.js uses JSON for SharedArrayBuffer payloads. Affects: stdio.rs framing, protocol.rs message types, acp/json_rpc.rs codec, bridge.rs host communication, and all TypeScript sidecar client code."
+    },
+    {
+      "id": "US-108",
+      "title": "Remove all legacy host node binary spawning code and associated infrastructure",
+      "description": "As a developer, I want all code that spawns real host node processes for guest execution removed, since guest JS now runs in V8 isolates (US-008a) and Python/WASM need to be migrated to non-host-node execution. This eliminates ~11K lines of legacy code and closes the isolation violation for Python and WASM runtimes.",
+      "acceptanceCriteria": [
+        "crates/execution/src/node_process.rs DELETED \u2014 node_binary(), Command::new('node'), control pipe FD setup, stream readers, signal state, env hardening all removed",
+        "crates/execution/src/node_import_cache.rs DELETED \u2014 ~10K lines of ESM loader template, require/import patching, fork() polyfill that spawns node all removed",
+        "crates/execution/src/lib.rs no longer declares node_process or node_import_cache modules, no longer re-exports NodeSignalDispositionAction or NodeSignalHandlerRegistration",
+        "crates/execution/src/javascript.rs: all code behind #[cfg(feature = 'legacy-js-tests')] DELETED, ~40 AGENT_OS_* env var constants removed, translate_v8_bridge_value_to_legacy()/translate_legacy_bridge_value_to_v8() bridge shims removed, all Command::new(node_binary()) calls removed",
+        "crates/execution/src/python.rs: rewritten to run Pyodide inside a V8 isolate session (not Command::new(node_binary())), all host node spawning removed",
+        "crates/execution/src/wasm.rs: rewritten to use wasmtime or V8-hosted WASM execution (not Command::new(node_binary())), all host node spawning removed",
+        "crates/execution/Cargo.toml: legacy-js-tests feature flag DELETED",
+        "crates/execution/tests/permission_flags.rs DELETED (purely legacy host-node test)",
+        "crates/execution/tests/python.rs updated to test new non-host-node Python execution",
+        "crates/execution/tests/wasm.rs updated to test new non-host-node WASM execution",
+        "All legacy env vars removed from codebase: AGENT_OS_NODE_BINARY, AGENT_OS_CONTROL_PIPE_FD, AGENT_OS_KEEP_STDIN_OPEN, AGENT_OS_ENTRYPOINT, AGENT_OS_BOOTSTRAP_MODULE, AGENT_OS_GUEST_ARGV, AGENT_OS_GUEST_ENTRYPOINT, AGENT_OS_GUEST_PATH_MAPPINGS, AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH, AGENT_OS_NODE_IMPORT_CACHE_PATH, AGENT_OS_NODE_PREWARM_IMPORTS, AGENT_OS_ALLOWED_NODE_BUILTINS, AGENT_OS_NODE_SYNC_RPC_ENABLE, AGENT_OS_NODE_SYNC_RPC_REQUEST_FD, AGENT_OS_NODE_SYNC_RPC_RESPONSE_FD, AGENT_OS_NODE_SYNC_RPC_DATA_BYTES, AGENT_OS_NODE_SYNC_RPC_WAIT_TIMEOUT_MS, AGENT_OS_EXTRA_FS_READ_PATHS, AGENT_OS_EXTRA_FS_WRITE_PATHS, AGENT_OS_VIRTUAL_PROCESS_PID, AGENT_OS_VIRTUAL_PROCESS_UID, AGENT_OS_VIRTUAL_PROCESS_GID, AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH, AGENT_OS_PARENT_NODE_ALLOW_CHILD_PROCESS, AGENT_OS_PARENT_NODE_ALLOW_WORKER",
+        "NodeControlMessage, NodeControlChannel, NodeSignalDispositionAction, NodeSignalHandlerRegistration types DELETED",
+        "No remaining references to node_binary() or Command::new('node') in crates/execution/",
+        "NOT deleted (new V8 path, keep): v8-bridge.source.js, v8-bridge.js, v8-bridge-zlib.js, crates/v8-runtime/, crates/execution/tests/javascript_v8.rs",
+        "cargo test -p agent-os-execution passes",
+        "cargo test -p agent-os-sidecar passes"
+      ],
+      "priority": 152,
+      "passes": false,
+      "notes": "Legacy surface: node_process.rs + node_import_cache.rs (~10.5K lines), ~500 lines of legacy-gated code in javascript.rs, plus Python and WASM both actively spawn host node. The JS path already has the legacy-js-tests feature gate (US-008a migrated JS to V8 isolates), but Python and WASM haven't been migrated yet \u2014 they need alternative execution strategies (Pyodide in V8, wasmtime or V8-hosted WASM). This story is large and may need to be split into sub-stories: (a) delete JS legacy code, (b) migrate Python to V8-hosted Pyodide, (c) migrate WASM to wasmtime/V8-hosted, (d) delete remaining infrastructure."
+    },
+    {
+      "id": "US-080",
+      "title": "Test suite for POSIX path edge cases from agent-os-posix-path-repro",
+      "description": "As a developer, I want a test suite covering the POSIX path edge cases documented in https://github.com/bdsqqq/agent-os-posix-path-repro to verify they work correctly in the VM.",
+      "acceptanceCriteria": [
+        "Clone or reference the reproduction cases from https://github.com/bdsqqq/agent-os-posix-path-repro",
+        "Create test file packages/core/tests/posix-path-repro.test.ts (or crates/sidecar/tests/posix_path_repro.rs) covering all reproduction cases from the repo",
+        "Each reproduction case from the repo has a corresponding test that runs inside the VM via V8 isolates",
+        "All tests pass \u2014 if any fail, fix the underlying path handling in the kernel or V8 module resolver",
+        "Tests cover: path.resolve(), path.join(), path.normalize(), path.relative(), path.dirname(), path.basename() with edge cases from the repro",
+        "Tests cover any filesystem path edge cases from the repro (symlinks, relative paths, .. traversal, trailing slashes)",
+        "If the repro includes cases that fail, document the root cause and fix it",
+        "pnpm --dir packages/core exec vitest run tests/posix-path-repro.test.ts passes OR cargo test -p agent-os-sidecar --test posix_path_repro -- --test-threads=1 passes"
+      ],
+      "priority": 94,
+      "passes": true,
+      "notes": "External reproduction repo: https://github.com/bdsqqq/agent-os-posix-path-repro. This repo contains specific POSIX path edge cases that may fail in the VM's path handling. Clone the repo, extract the test cases, and verify they all pass inside our V8 isolate runtime. The path module comes from node-stdlib-browser (US-056) \u2014 if any cases fail, the issue is either in our module resolver (javascript.rs) or in how we wire the path polyfill."
     }
   ]
 }

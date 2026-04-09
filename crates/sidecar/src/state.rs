@@ -388,6 +388,8 @@ pub(crate) struct ActiveProcess {
     pub(crate) kernel_stdin_writer_fd: Option<u32>,
     pub(crate) runtime: GuestRuntimeKind,
     pub(crate) execution: ActiveExecution,
+    pub(crate) guest_cwd: String,
+    pub(crate) env: BTreeMap<String, String>,
     pub(crate) host_cwd: PathBuf,
     pub(crate) pending_execution_events: VecDeque<ActiveExecutionEvent>,
     pub(crate) child_processes: BTreeMap<String, ActiveProcess>,

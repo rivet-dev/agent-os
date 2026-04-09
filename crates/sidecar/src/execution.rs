@@ -19,8 +19,8 @@ use crate::protocol::{
 };
 use crate::service::{
     audit_fields, dirname, emit_security_audit_event, emit_structured_event, javascript_error,
-    kernel_error, normalize_host_path, normalize_path, parse_javascript_child_process_spawn_request,
-    path_is_within_root, python_error, wasm_error,
+    kernel_error, normalize_host_path, normalize_path,
+    parse_javascript_child_process_spawn_request, path_is_within_root, python_error, wasm_error,
 };
 use crate::state::{
     ActiveCipherSession, ActiveDhSession, ActiveDiffieHellmanSession, ActiveEcdhSession,
@@ -45,7 +45,7 @@ use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
 use agent_os_bridge::LifecycleState;
 use agent_os_execution::wasm::{
-    WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV,
+    WasmExecutionError, WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV,
 };
 use agent_os_execution::{
     CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
@@ -304,6 +304,8 @@ impl ActiveProcess {
             kernel_stdin_writer_fd: None,
             runtime,
             execution,
+            guest_cwd: String::from("/"),
+            env: BTreeMap::new(),
             host_cwd: PathBuf::from("/"),
             pending_execution_events: VecDeque::new(),
             child_processes: BTreeMap::new(),
@@ -334,6 +336,16 @@ impl ActiveProcess {
 
     pub(crate) fn with_host_cwd(mut self, host_cwd: PathBuf) -> Self {
         self.host_cwd = host_cwd;
+        self
+    }
+
+    pub(crate) fn with_guest_cwd(mut self, guest_cwd: String) -> Self {
+        self.guest_cwd = guest_cwd;
+        self
+    }
+
+    pub(crate) fn with_env(mut self, env: BTreeMap<String, String>) -> Self {
+        self.env = env;
         self
     }
 
@@ -394,6 +406,22 @@ impl ActiveProcess {
         }
 
         counts
+    }
+}
+
+fn poll_child_execution_after_exit(
+    child: &ActiveProcess,
+    wait: Duration,
+) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+    match child.execution.poll_event_blocking(wait) {
+        Ok(event) => Ok(event),
+        Err(SidecarError::Execution(message))
+            if child.runtime == GuestRuntimeKind::WebAssembly
+                && message == WasmExecutionError::EventChannelClosed.to_string() =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -1355,8 +1383,11 @@ impl ActiveExecution {
             Self::Javascript(execution) => execution
                 .respond_sync_rpc_success(id, result)
                 .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Wasm(execution) => execution
+                .respond_sync_rpc_success(id, result)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
             _ => Err(SidecarError::InvalidState(String::from(
-                "only JavaScript executions can service JavaScript sync RPC responses",
+                "only JavaScript and WebAssembly executions can service JavaScript sync RPC responses",
             ))),
         }
     }
@@ -1371,8 +1402,11 @@ impl ActiveExecution {
             Self::Javascript(execution) => execution
                 .respond_sync_rpc_error(id, code, message)
                 .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Wasm(execution) => execution
+                .respond_sync_rpc_error(id, code, message)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
             _ => Err(SidecarError::InvalidState(String::from(
-                "only JavaScript executions can service JavaScript sync RPC responses",
+                "only JavaScript and WebAssembly executions can service JavaScript sync RPC responses",
             ))),
         }
     }
@@ -1430,6 +1464,9 @@ impl ActiveExecution {
                     event.map(|event| match event {
                         WasmExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
                         WasmExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
+                        WasmExecutionEvent::SyncRpcRequest(request) => {
+                            ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
+                        }
                         WasmExecutionEvent::SignalState {
                             signal,
                             registration,
@@ -1498,6 +1535,9 @@ impl ActiveExecution {
                     event.map(|event| match event {
                         WasmExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
                         WasmExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
+                        WasmExecutionEvent::SyncRpcRequest(request) => {
+                            ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
+                        }
                         WasmExecutionEvent::SignalState {
                             signal,
                             registration,
@@ -1842,7 +1882,7 @@ where
                     .start_execution(StartWasmExecutionRequest {
                         vm_id: vm_id.clone(),
                         context_id: context.context_id,
-                        argv: resolved.execution_args.clone(),
+                        argv: resolved.process_args.clone(),
                         env,
                         cwd: resolved.host_cwd.clone(),
                         permission_tier: execution_wasm_permission_tier(wasm_permission_tier),
@@ -1858,6 +1898,8 @@ where
             payload.process_id.clone(),
             ActiveProcess::new(kernel_pid, kernel_handle, resolved.runtime, execution)
                 .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
+                .with_guest_cwd(resolved.guest_cwd.clone())
+                .with_env(resolved.env.clone())
                 .with_host_cwd(resolved.host_cwd.clone()),
         );
         self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
@@ -2755,10 +2797,12 @@ where
     pub(crate) fn resolve_javascript_child_process_execution(
         &self,
         vm: &VmState,
+        parent_env: &BTreeMap<String, String>,
+        parent_guest_cwd: &str,
         parent_host_cwd: &Path,
         request: &JavascriptChildProcessSpawnRequest,
     ) -> Result<ResolvedChildProcessExecution, SidecarError> {
-        let mut runtime_env = vm.guest_env.clone();
+        let mut runtime_env = parent_env.clone();
         runtime_env.extend(request.options.internal_bootstrap_env.clone());
         let (guest_cwd, host_cwd_override) = request
             .options
@@ -2782,7 +2826,7 @@ where
                     (normalize_path(cwd), None)
                 }
             })
-            .unwrap_or_else(|| (String::from("/"), None));
+            .unwrap_or_else(|| (parent_guest_cwd.to_owned(), None));
         let host_cwd = host_cwd_override
             .or_else(|| {
                 host_runtime_path_for_guest_path_with_env(
@@ -2800,7 +2844,7 @@ where
                     vm.host_cwd.clone()
                 }
             });
-        let mut env = vm.guest_env.clone();
+        let mut env = parent_env.clone();
         env.extend(request.options.env.clone());
 
         let (command, process_args) = if request.options.shell {
@@ -2866,8 +2910,10 @@ where
             prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
 
             return Ok(ResolvedChildProcessExecution {
-                command,
-                process_args: process_args.clone(),
+                command: command.clone(),
+                process_args: std::iter::once(command)
+                    .chain(process_args.iter().cloned())
+                    .collect(),
                 runtime: GuestRuntimeKind::JavaScript,
                 entrypoint: host_entrypoint.to_string_lossy().into_owned(),
                 execution_args: process_args,
@@ -2878,7 +2924,7 @@ where
             });
         }
 
-        if matches!(command.as_str(), "node" | "npm" | "npx") {
+        if is_node_runtime_command(&command) {
             let Some(entrypoint_specifier) = process_args.first() else {
                 return Err(SidecarError::InvalidState(format!(
                     "{command} child_process spawn requires an entrypoint"
@@ -2939,8 +2985,10 @@ where
             prepare_javascript_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
 
             return Ok(ResolvedChildProcessExecution {
-                command,
-                process_args: process_args.clone(),
+                command: command.clone(),
+                process_args: std::iter::once(command)
+                    .chain(process_args.iter().cloned())
+                    .collect(),
                 runtime: GuestRuntimeKind::JavaScript,
                 entrypoint,
                 execution_args,
@@ -2959,20 +3007,7 @@ where
 
         let guest_entrypoint = resolve_guest_command_entrypoint(vm, &guest_cwd, &command)
             .ok_or_else(|| SidecarError::InvalidState(format!("command not found: {command}")))?;
-        let host_entrypoint = host_runtime_path_for_guest_path_with_env(
-            vm,
-            &runtime_env,
-            &guest_entrypoint,
-            parent_host_cwd,
-        )
-        .unwrap_or_else(|| {
-            let candidate = PathBuf::from(&guest_entrypoint);
-            if candidate.is_absolute() {
-                candidate
-            } else {
-                host_cwd.join(&guest_entrypoint)
-            }
-        });
+        let host_entrypoint = resolve_vm_guest_path_to_host(vm, &guest_entrypoint);
         let wasm_permission_tier = vm.command_permissions.get(&command).copied().or_else(|| {
             Path::new(&guest_entrypoint)
                 .file_name()
@@ -2981,8 +3016,10 @@ where
         });
 
         Ok(ResolvedChildProcessExecution {
-            command,
-            process_args: process_args.clone(),
+            command: command.clone(),
+            process_args: std::iter::once(command)
+                .chain(process_args.iter().cloned())
+                .collect(),
             runtime: GuestRuntimeKind::WebAssembly,
             entrypoint: host_entrypoint.to_string_lossy().into_owned(),
             execution_args: process_args,
@@ -3005,7 +3042,13 @@ where
                 .active_processes
                 .get(process_id)
                 .expect("process should still exist");
-            self.resolve_javascript_child_process_execution(vm, &parent.host_cwd, &request)?
+            self.resolve_javascript_child_process_execution(
+                vm,
+                &parent.env,
+                &parent.guest_cwd,
+                &parent.host_cwd,
+                &request,
+            )?
         };
         let (parent_kernel_pid, child_process_id) = {
             let vm = self.vms.get_mut(vm_id).expect("VM should exist");
@@ -3098,7 +3141,7 @@ where
                     .start_execution(StartWasmExecutionRequest {
                         vm_id: vm_id.to_owned(),
                         context_id: context.context_id,
-                        argv: resolved.execution_args.clone(),
+                        argv: resolved.process_args.clone(),
                         env: execution_env,
                         cwd: resolved.host_cwd.clone(),
                         permission_tier: execution_wasm_permission_tier(
@@ -3122,6 +3165,8 @@ where
                 child_process_id.clone(),
                 ActiveProcess::new(kernel_pid, kernel_handle, resolved.runtime, execution)
                     .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
+                    .with_guest_cwd(resolved.guest_cwd.clone())
+                    .with_env(resolved.env.clone())
                     .with_host_cwd(resolved.host_cwd.clone()),
             );
 
@@ -3154,7 +3199,13 @@ where
                     ))
                 })?;
             (
-                self.resolve_javascript_child_process_execution(vm, &parent.host_cwd, &request)?,
+                self.resolve_javascript_child_process_execution(
+                    vm,
+                    &parent.env,
+                    &parent.guest_cwd,
+                    &parent.host_cwd,
+                    &request,
+                )?,
                 parent.kernel_pid,
             )
         };
@@ -3254,7 +3305,7 @@ where
                     .start_execution(StartWasmExecutionRequest {
                         vm_id: vm_id.to_owned(),
                         context_id: context.context_id,
-                        argv: resolved.execution_args.clone(),
+                        argv: resolved.process_args.clone(),
                         env: execution_env,
                         cwd: resolved.host_cwd.clone(),
                         permission_tier: execution_wasm_permission_tier(
@@ -3281,6 +3332,8 @@ where
                 child_process_id.clone(),
                 ActiveProcess::new(kernel_pid, kernel_handle, resolved.runtime, execution)
                     .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
+                    .with_guest_cwd(resolved.guest_cwd.clone())
+                    .with_env(resolved.env.clone())
                     .with_host_cwd(resolved.host_cwd.clone()),
             );
 
@@ -3519,10 +3572,7 @@ where
                         ))
                     });
                 let Ok(child) = child else {
-                    return Ok(json!({
-                        "type": "exit",
-                        "exitCode": 1,
-                    }));
+                    return Ok(Value::Null);
                 };
                 if let Some(event) = child.pending_execution_events.pop_front() {
                     Some(event)
@@ -3566,7 +3616,7 @@ where
                         let deadline = Instant::now() + Duration::from_millis(150);
                         loop {
                             let wait = deadline.saturating_duration_since(Instant::now());
-                            let next = child.execution.poll_event_blocking(wait)?;
+                            let next = poll_child_execution_after_exit(child, wait)?;
                             let Some(next) = next else {
                                 break;
                             };
@@ -3634,7 +3684,9 @@ where
                             let parent = vm
                                 .active_processes
                                 .get(process_id)
-                                .and_then(|process| process.child_processes.get(parent_child_process_id))
+                                .and_then(|process| {
+                                    process.child_processes.get(parent_child_process_id)
+                                })
                                 .expect("child process should still exist");
                             dispatch_v8_process_signal(parent, libc::SIGCHLD)?;
                         } else {
@@ -3817,11 +3869,7 @@ where
         wait_ms: u64,
     ) -> Result<Value, SidecarError> {
         loop {
-            self.drain_queued_javascript_child_process_events(
-                vm_id,
-                process_id,
-                child_process_id,
-            )?;
+            self.drain_queued_javascript_child_process_events(vm_id, process_id, child_process_id)?;
             let event = {
                 let vm = self.vms.get_mut(vm_id).expect("VM should exist");
                 let child = vm
@@ -3836,10 +3884,7 @@ where
                         ))
                     });
                 let Ok(child) = child else {
-                    return Ok(json!({
-                        "type": "exit",
-                        "exitCode": 1,
-                    }));
+                    return Ok(Value::Null);
                 };
                 if let Some(event) = child.pending_execution_events.pop_front() {
                     Some(event)
@@ -3880,7 +3925,7 @@ where
                         let deadline = Instant::now() + Duration::from_millis(150);
                         loop {
                             let wait = deadline.saturating_duration_since(Instant::now());
-                            let next = child.execution.poll_event_blocking(wait)?;
+                            let next = poll_child_execution_after_exit(child, wait)?;
                             let Some(next) = next else {
                                 break;
                             };
@@ -4329,7 +4374,7 @@ fn resolve_command_execution(
     let mut env = vm.guest_env.clone();
     env.extend(extra_env.clone());
 
-    if matches!(command, "node" | "npm" | "npx") {
+    if is_node_runtime_command(command) {
         let Some(entrypoint_specifier) = args.first() else {
             return Err(SidecarError::InvalidState(format!(
                 "{command} execution requires an entrypoint"
@@ -4540,6 +4585,14 @@ fn resolve_path_like_guest_specifier(cwd: &str, specifier: &str) -> String {
 
 fn guest_entrypoint_for_specifier(cwd: &str, specifier: &str) -> Option<String> {
     is_path_like_specifier(specifier).then(|| resolve_path_like_guest_specifier(cwd, specifier))
+}
+
+fn is_node_runtime_command(command: &str) -> bool {
+    matches!(command, "node" | "npm" | "npx")
+        || Path::new(command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, "node" | "npm" | "npx"))
 }
 
 fn resolve_guest_command_entrypoint(
