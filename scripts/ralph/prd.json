@@ -113,7 +113,7 @@
         "pnpm --dir packages/core exec vitest run tests/claude-session.test.ts passes"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-CC-001 through US-CC-006. This is the final Claude validation. Was US-111 in old PRD and passed \u2014 needs re-verification."
     },
     {

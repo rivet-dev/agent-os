@@ -7,6 +7,7 @@ Started: Thu Apr  9 06:09:31 AM PDT 2026
 - In the WASM host-process bridge, synthetic pipes must initialize both `producers` and `consumers`, and consumer registration must flush any chunks buffered before the child attaches; shell builtins can write into a pipe before a spawned reader like `wc` registers stdin.
 - Package-provided agent descriptors registered via `processSoftware()` override the hardcoded `AGENT_CONFIGS` entries, so launch-critical defaults like Claude shell/env flags need to stay mirrored across both config surfaces.
 - Claude’s patched SDK/CLI artifacts are located through `registry/agent/claude/dist/claude-*-patched.json`; regression tests should validate those manifests and fallback resolution with a temp package dir instead of mutating the real built artifacts.
+- `packages/core/tests/claude-session.test.ts` is the end-to-end Claude truth suite; it exercises the real SDK path with llmock, PATH-backed `xu`, nested `node` child processes, metadata, modes, and lifecycle APIs.
 
 ## 2026-04-09 06:12:40 PDT - US-CC-001
 - Implemented the remaining workspace/package rename cleanup for `@rivet-dev/agent-os-core`, including the last manifest dependency, benchmark imports, secure-exec/dev-shell subpath aliases, registry test imports, and the root instruction note to keep future changes on the new package name.
@@ -63,4 +64,13 @@ Started: Thu Apr  9 06:09:31 AM PDT 2026
   - Claude patch discovery should stay centralized in one helper module so manifest-shape regressions can be unit-tested without booting a full agent session.
   - The build artifact contract is the pair of manifest files in `registry/agent/claude/dist/`; tests should assert the manifests point at existing outputs instead of depending on specific hashed filenames.
   - The fastest focused verification for Claude CLI patching is `pnpm --dir registry/agent/claude build`, `node --test registry/agent/claude/tests/patched-cli.test.mjs`, and `pnpm --dir packages/core exec vitest run tests/claude-session.test.ts`.
+---
+
+## 2026-04-09 07:05:12 PDT - US-CC-007
+- Re-verified the full Claude Agent SDK end-to-end suite on `finish-ts-rust-migration`; the real V8-backed session path passed the `xu`, text-only, nested `node` `execSync`, nested `node` `spawn`, metadata, lifecycle, mode, and raw-send coverage in `packages/core/tests/claude-session.test.ts`.
+- Files changed: `packages/core/AGENTS.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `packages/core/tests/claude-session.test.ts` is the focused regression suite for the real Claude SDK path, not a mocked adapter shim.
+  - Running that suite with `--reporter=verbose` makes it obvious which Claude E2E case is stalling if the runtime regresses.
+  - Current verification result on this branch is `9 passed` because the file also includes the Claude config-defaults guard in addition to the eight acceptance-criteria session tests.
 ---
