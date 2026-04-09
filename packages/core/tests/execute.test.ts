@@ -38,8 +38,7 @@ describe.skipIf(registrySkipReason)("command execution", () => {
 
 	test("exec with cwd sets working directory", async () => {
 		await vm.mkdir("/tmp/testdir");
-		await vm.writeFile("/tmp/testdir/marker.txt", "found");
-		const result = await vm.exec("cat /tmp/testdir/marker.txt", {
+		const result = await vm.exec("printf found > marker.txt && cat marker.txt", {
 			cwd: "/tmp/testdir",
 		});
 		expect(result.exitCode).toBe(0);

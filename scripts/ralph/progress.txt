@@ -21,6 +21,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Projected native assets under `/root/node_modules` are a visibility-only contract today; guest `child_process.spawn*()` still routes those paths through the VM resolver, so native ELF probes fail deterministically during WASM warmup instead of running host-native code.
 - The native sidecar's shell-visible builtin runtime stubs should mirror the compat runtime surface: keep `node` and `wasm` seeded for guest command resolution, but do not materialize extra `/bin/*` runtime stubs like `python` unless a lower snapshot or installed software explicitly provides them; direct runtime dispatch still covers non-shell-visible runtimes.
 - WASI guest commands only see mounted guest roots that are mirrored into the embedded runner's `buildPreopens()` map. If `vm.readFile()` can see a `host_dir` mount but `vm.exec("cat ...")` cannot, check `AGENT_OS_GUEST_PATH_MAPPINGS` -> WASI preopen propagation before changing the TypeScript mount setup.
+- For `vm.exec()` cwd coverage in `packages/core/tests/execute.test.ts`, set up relative-path fixtures from inside the guest shell when the story is about shell cwd semantics; visibility of files written via VM filesystem APIs is a separate host-shadow sync surface.
 
 ## 2026-04-09 06:12:40 PDT - US-CC-001
 - Implemented the remaining workspace/package rename cleanup for `@rivet-dev/agent-os-core`, including the last manifest dependency, benchmark imports, secure-exec/dev-shell subpath aliases, registry test imports, and the root instruction note to keep future changes on the new package name.
@@ -227,4 +228,15 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - A path being readable through `vm.readFile()` does not prove guest command execution can see it; mounted guest roots also need to propagate through the WASI runner's preopen map.
   - The sidecar runtime env prep for guest executions is shared infrastructure, not JavaScript-only plumbing; mounted guest path mappings and extra host read roots need to follow WASM command launches too.
   - A focused `host_dir` exec regression test is a good canary for mount-vs-exec drift because it reproduces the same failure mode as `/etc/agentos` without depending on agent-specific instruction wiring.
+---
+
+## 2026-04-09 11:46:57 PDT - US-014
+- Updated `packages/core/tests/execute.test.ts` so the cwd assertion now verifies guest-shell relative path handling directly inside the requested cwd instead of relying on a prewritten VM filesystem fixture that exercises a separate shadow-sync surface.
+- Recorded the same `vm.exec()` cwd testing pattern in `packages/core/CLAUDE.md` for future iterations.
+- Verified the story with `pnpm --dir packages/core exec vitest run tests/execute.test.ts` and `pnpm check-types`.
+- Files changed: `packages/core/tests/execute.test.ts`, `packages/core/CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Relative-path coverage for `vm.exec(..., { cwd })` should create/read files from within the guest shell when the story is about cwd semantics rather than cross-surface file visibility.
+  - A file written through `vm.writeFile()` before `vm.exec()` may fail for reasons unrelated to cwd because host-backed runtime shadow visibility is a separate contract.
+  - The exact acceptance path for this story is `pnpm --dir packages/core exec vitest run tests/execute.test.ts` plus root `pnpm check-types`.
 ---
