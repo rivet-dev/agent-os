@@ -601,6 +601,7 @@ fn wasm_execution_streams_exit_event() {
             Some(WasmExecutionEvent::Stderr(chunk)) => {
                 panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
             }
+            Some(WasmExecutionEvent::SyncRpcRequest(_)) => {}
             Some(WasmExecutionEvent::SignalState { .. }) => {}
             None => panic!("timed out waiting for wasm execution event"),
         }
@@ -667,6 +668,7 @@ fn wasm_execution_emits_signal_state_from_control_channel() {
             Some(WasmExecutionEvent::Stderr(chunk)) => {
                 panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
             }
+            Some(WasmExecutionEvent::SyncRpcRequest(_)) => {}
             None => panic!("timed out waiting for wasm execution event"),
         }
     }
