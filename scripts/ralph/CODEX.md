@@ -6,6 +6,7 @@ You are an autonomous coding agent working on a software project.
 
 1. Read the PRD at `prd.json` (in the same directory as this file)
 2. Read the progress log at `progress.txt` (check Codebase Patterns section first)
+   - Treat `archive/` as historical-only context. The active `prd.json` and its exact story acceptance commands are the only current test policy.
 3. Check you're on the correct branch from PRD `branchName`. If not, check it out or create from main.
 4. Pick the **highest priority** user story where `passes: false`
 5. Implement that single user story
@@ -63,6 +64,7 @@ Before committing, check if any edited files have learnings worth preserving in 
 ## Quality Requirements
 
 - ALL commits must pass your project's quality checks
+- For verification, use the exact scoped commands named in the active story or `prd.json` test policy instead of substituting older generic `pnpm test` or bare Vitest commands from archived Ralph artifacts.
 - Do NOT commit broken code
 - Keep changes focused and minimal
 - Follow existing code patterns
@@ -86,6 +88,5 @@ If there are still stories with `passes: false`, end your response normally.
 - Commit frequently
 - Keep CI green
 - Read the Codebase Patterns section in progress.txt before starting
-
 
 

@@ -1,0 +1,15 @@
+# Ralph Progress Log
+Archived status: Historical snapshot only. Superseded by `scripts/ralph/prd.json` on 2026-04-09.
+Current truth: Entries below may mention stale green states or generic pnpm/Vitest guidance that no longer defines the active backlog.
+## Codebase Patterns
+- Read .agent/specs/typescript-to-rust-migration.md for the full design spec before starting any story
+- service.rs is at crates/sidecar/src/service.rs (~14,247 lines) — this is the monolith being split
+- Rust tests go in crates/*/tests/*.rs, NOT inline #[cfg(test)] blocks (except trivial unit tests)
+- No polling — fully async event-driven I/O via tokio::select!
+- Single-task concurrency model: &mut self sufficient, no Arc<Mutex> needed
+- handle_javascript_sync_rpc_request is a cross-cutting dispatch hub (~700 lines) that stays in service.rs
+- TypeScript acceptance criteria always include: pnpm check-types passes, pnpm test passes
+- Rust acceptance criteria always include: cargo check -p agent-os-sidecar passes, cargo test -p agent-os-sidecar passes
+- Commit messages: single-line conventional commits (e.g., feat: US-001 - Extract state.rs and protocol.rs)
+- No co-author trailers in commit messages
+---

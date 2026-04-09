@@ -1,5 +1,10 @@
 {
   "project": "agentOS",
+  "archived": true,
+  "archiveStatus": "superseded-historical-snapshot",
+  "supersededOn": "2026-04-09",
+  "supersededBy": "../../prd.json",
+  "archiveNote": "Historical Ralph plan retained for reference only. Do not use its passes state or generic test commands as current truth; use scripts/ralph/prd.json instead.",
   "branchName": "ralph/runtime-isolation-hardening",
   "description": "Port the original JS kernel's proven isolation model to the Rust sidecar — kernel-backed polyfills for all Node.js builtins, virtualized process global, Pyodide sandbox hardening, and defense-in-depth resource limits",
   "userStories": [

@@ -40,6 +40,18 @@ ARCHIVE_DIR="$SCRIPT_DIR/archive"
 LAST_BRANCH_FILE="$SCRIPT_DIR/.last-branch"
 CODEX_STREAM_DIR="$SCRIPT_DIR/codex-streams"
 
+write_progress_header() {
+  cat > "$PROGRESS_FILE" <<EOF
+# Ralph Progress Log
+Started: $(date)
+Current branch target: ${CURRENT_BRANCH:-unknown}
+Reality check: Only the active scripts/ralph/prd.json backlog and each story's exact verification commands count as current truth. Anything under scripts/ralph/archive/ is historical and may describe stale green states or obsolete pnpm/Vitest guidance.
+## Codebase Patterns
+- Treat \`scripts/ralph/archive/\` as historical context only; use the active \`scripts/ralph/prd.json\` test policy and per-story acceptance commands to decide what is green.
+
+EOF
+}
+
 # Archive previous run if branch changed
 if [ -f "$PRD_FILE" ] && [ -f "$LAST_BRANCH_FILE" ]; then
   CURRENT_BRANCH=$(jq -r '.branchName // empty' "$PRD_FILE" 2>/dev/null || echo "")
@@ -59,9 +71,7 @@ if [ -f "$PRD_FILE" ] && [ -f "$LAST_BRANCH_FILE" ]; then
     echo "   Archived to: $ARCHIVE_FOLDER"
     
     # Reset progress file for new run
-    echo "# Ralph Progress Log" > "$PROGRESS_FILE"
-    echo "Started: $(date)" >> "$PROGRESS_FILE"
-    echo "---" >> "$PROGRESS_FILE"
+    write_progress_header
   fi
 fi
 
@@ -75,9 +85,7 @@ fi
 
 # Initialize progress file if it doesn't exist
 if [ ! -f "$PROGRESS_FILE" ]; then
-  echo "# Ralph Progress Log" > "$PROGRESS_FILE"
-  echo "Started: $(date)" >> "$PROGRESS_FILE"
-  echo "---" >> "$PROGRESS_FILE"
+  write_progress_header
 fi
 
 mkdir -p "$CODEX_STREAM_DIR"
