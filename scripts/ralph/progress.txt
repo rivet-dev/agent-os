@@ -20,6 +20,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - For `moduleAccessCwd` regressions, use `packages/core/tests/native-sidecar-process.test.ts` for the real-sidecar `/root/node_modules` visibility probe and `packages/core/tests/software-projection.test.ts` for guest read-only enforcement on projected package roots.
 - Projected native assets under `/root/node_modules` are a visibility-only contract today; guest `child_process.spawn*()` still routes those paths through the VM resolver, so native ELF probes fail deterministically during WASM warmup instead of running host-native code.
 - The native sidecar's shell-visible builtin runtime stubs should mirror the compat runtime surface: keep `node` and `wasm` seeded for guest command resolution, but do not materialize extra `/bin/*` runtime stubs like `python` unless a lower snapshot or installed software explicitly provides them; direct runtime dispatch still covers non-shell-visible runtimes.
+- Native-sidecar WASM commands read and write through the VM shadow root rather than the kernel VFS directly, so keep the POSIX bootstrap directories (`/tmp`, `/var/tmp`, `/bin`, `/usr`, etc.) seeded there during VM creation or shell redirects and absolute-path checks will fail even when `vm.stat()` sees the path in the kernel filesystem.
 - WASI guest commands only see mounted guest roots that are mirrored into the embedded runner's `buildPreopens()` map. If `vm.readFile()` can see a `host_dir` mount but `vm.exec("cat ...")` cannot, check `AGENT_OS_GUEST_PATH_MAPPINGS` -> WASI preopen propagation before changing the TypeScript mount setup.
 - For `vm.exec()` cwd coverage in `packages/core/tests/execute.test.ts`, set up relative-path fixtures from inside the guest shell when the story is about shell cwd semantics; visibility of files written via VM filesystem APIs is a separate host-shadow sync surface.
 
@@ -239,4 +240,15 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Relative-path coverage for `vm.exec(..., { cwd })` should create/read files from within the guest shell when the story is about cwd semantics rather than cross-surface file visibility.
   - A file written through `vm.writeFile()` before `vm.exec()` may fail for reasons unrelated to cwd because host-backed runtime shadow visibility is a separate contract.
   - The exact acceptance path for this story is `pnpm --dir packages/core exec vitest run tests/execute.test.ts` plus root `pnpm check-types`.
+---
+
+## 2026-04-09 11:57:32 PDT - US-015
+- Seeded the native sidecar shadow root with the standard POSIX directory tree so WASM shell commands now see `/tmp`, `/var/tmp`, `/bin`, `/usr`, and related absolute paths before execution begins; this restores shell redirects to `/tmp/*` while keeping command substitution and heredoc flows green.
+- Added a focused Rust unit test covering shadow-root bootstrap directory creation and `/tmp` mode preservation, and recorded the same shadow-root requirement in `crates/CLAUDE.md` / `crates/AGENTS.md`.
+- Verified the story with `cargo test -p agent-os-sidecar bootstrap_shadow_root_seeds_standard_directories -- --test-threads=1`, `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts -t "redirect to file and read back"`, `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts -t "command substitution"`, `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts -t "heredoc"`, `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts -t "sh (coreutils)"`, and `pnpm check-types`.
+- Files changed: `crates/sidecar/src/vm.rs`, `crates/CLAUDE.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The native sidecar shadow root is a separate filesystem surface from the kernel VFS, so absolute-path shell regressions can come from missing shadow directories even when `vm.stat()` and other kernel-backed APIs report the path as present.
+  - For shell stories, a direct `vm.exec()` probe is useful alongside Vitest because it reveals guest stderr like `failed to redirect to /tmp/...` and quickly distinguishes parsing problems from filesystem/bootstrap drift.
+  - The current story command `pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts -t "sh (coreutils)"` still exits cleanly while filtering out the suite, so keep at least one focused test-name run in the verification set until that Vitest pattern is tightened elsewhere.
 ---

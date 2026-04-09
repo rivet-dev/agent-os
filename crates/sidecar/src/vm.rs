@@ -22,8 +22,8 @@ use crate::service::{
 };
 use crate::state::{
     BridgeError, VmConfiguration, VmDnsConfig, VmLayer, VmLayerStore, VmOverlayLayer, VmState,
-    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME,
-    JAVASCRIPT_COMMAND, WASM_COMMAND,
+    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME, JAVASCRIPT_COMMAND,
+    WASM_COMMAND,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -46,8 +46,50 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const SHADOW_ROOT_BOOTSTRAP_DIRS: &[(&str, u32)] = &[
+    ("/dev", 0o755),
+    ("/proc", 0o755),
+    ("/tmp", 0o1777),
+    ("/bin", 0o755),
+    ("/lib", 0o755),
+    ("/sbin", 0o755),
+    ("/boot", 0o755),
+    ("/etc", 0o755),
+    ("/root", 0o755),
+    ("/run", 0o755),
+    ("/srv", 0o755),
+    ("/sys", 0o755),
+    ("/opt", 0o755),
+    ("/mnt", 0o755),
+    ("/media", 0o755),
+    ("/home", 0o755),
+    ("/usr", 0o755),
+    ("/usr/bin", 0o755),
+    ("/usr/games", 0o755),
+    ("/usr/include", 0o755),
+    ("/usr/lib", 0o755),
+    ("/usr/libexec", 0o755),
+    ("/usr/man", 0o755),
+    ("/usr/local", 0o755),
+    ("/usr/local/bin", 0o755),
+    ("/usr/sbin", 0o755),
+    ("/usr/share", 0o755),
+    ("/usr/share/man", 0o755),
+    ("/var", 0o755),
+    ("/var/cache", 0o755),
+    ("/var/empty", 0o755),
+    ("/var/lib", 0o755),
+    ("/var/lock", 0o755),
+    ("/var/log", 0o755),
+    ("/var/run", 0o755),
+    ("/var/spool", 0o755),
+    ("/var/tmp", 0o1777),
+    ("/etc/agentos", 0o755),
+];
 
 // ---------------------------------------------------------------------------
 // NativeSidecar VM lifecycle methods
@@ -98,10 +140,8 @@ where
         );
         let command_guest_paths = discover_command_guest_paths(&mut kernel);
         refresh_guest_command_path_env(&mut guest_env, &command_guest_paths);
-        let mut execution_commands = vec![
-            String::from(JAVASCRIPT_COMMAND),
-            String::from(WASM_COMMAND),
-        ];
+        let mut execution_commands =
+            vec![String::from(JAVASCRIPT_COMMAND), String::from(WASM_COMMAND)];
         execution_commands.extend(command_guest_paths.keys().cloned());
         kernel
             .register_driver(CommandDriver::new(
@@ -244,10 +284,8 @@ where
         )?;
         vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);
         refresh_guest_command_path_env(&mut vm.guest_env, &vm.command_guest_paths);
-        let mut execution_commands = vec![
-            String::from(JAVASCRIPT_COMMAND),
-            String::from(WASM_COMMAND),
-        ];
+        let mut execution_commands =
+            vec![String::from(JAVASCRIPT_COMMAND), String::from(WASM_COMMAND)];
         execution_commands.extend(vm.command_guest_paths.keys().cloned());
         vm.kernel
             .register_driver(CommandDriver::new(
@@ -938,7 +976,28 @@ fn create_vm_shadow_root(vm_id: &str) -> Result<PathBuf, SidecarError> {
     let root = std::env::temp_dir().join(format!("agent-os-sidecar-shadow-{vm_id}-{nonce}"));
     fs::create_dir_all(&root)
         .map_err(|error| SidecarError::Io(format!("failed to create VM shadow root: {error}")))?;
+    bootstrap_shadow_root(&root)?;
     Ok(root)
+}
+
+fn bootstrap_shadow_root(root: &Path) -> Result<(), SidecarError> {
+    for (guest_path, mode) in SHADOW_ROOT_BOOTSTRAP_DIRS {
+        let host_path = shadow_path_for_guest(root, guest_path);
+        fs::create_dir_all(&host_path).map_err(|error| {
+            SidecarError::Io(format!(
+                "failed to create shadow directory {}: {error}",
+                host_path.display()
+            ))
+        })?;
+        fs::set_permissions(&host_path, fs::Permissions::from_mode(*mode)).map_err(|error| {
+            SidecarError::Io(format!(
+                "failed to set shadow directory mode {} on {}: {error}",
+                format!("{mode:o}"),
+                host_path.display()
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 fn shadow_path_for_guest(shadow_root: &std::path::Path, guest_path: &str) -> PathBuf {
@@ -970,6 +1029,51 @@ fn normalize_guest_path(path: &str) -> String {
         String::from("/")
     } else {
         format!("/{}", segments.join("/"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bootstrap_shadow_root, shadow_path_for_guest};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn bootstrap_shadow_root_seeds_standard_directories() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("agent-os-sidecar-shadow-test-{unique}"));
+        fs::create_dir_all(&root).expect("temp shadow root should be created");
+
+        bootstrap_shadow_root(&root).expect("shadow bootstrap should succeed");
+
+        let tmp = shadow_path_for_guest(&root, "/tmp");
+        let etc_agentos = shadow_path_for_guest(&root, "/etc/agentos");
+        let usr_local_bin = shadow_path_for_guest(&root, "/usr/local/bin");
+
+        assert!(tmp.is_dir(), "/tmp should exist in the shadow root");
+        assert!(
+            etc_agentos.is_dir(),
+            "/etc/agentos should exist in the shadow root"
+        );
+        assert!(
+            usr_local_bin.is_dir(),
+            "/usr/local/bin should exist in the shadow root"
+        );
+        assert_eq!(
+            fs::metadata(&tmp)
+                .expect("/tmp metadata should be readable")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o1777,
+            "/tmp should preserve its sticky-bit mode in the shadow root"
+        );
+
+        fs::remove_dir_all(&root).expect("temp shadow root should be removed");
     }
 }
 
