@@ -288,3 +288,12 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - When a PRD story names a specific command block, verify against the exact block entries instead of a broad keyword filter that can pull in known-red neighboring coverage.
   - Verification-only story closures should still update the local instructions and progress log when the backlog lag comes from stale `passes: false` state rather than missing code.
 ---
+
+## 2026-04-09 12:31:30 PDT - US-019
+- Re-verified the structured-text command parity block on `finish-ts-rust-migration`: the focused `awk (gawk)` tests, the four `jq` transformation tests, and the `yq` pipe extraction test in `packages/core/tests/wasm-commands.test.ts` all pass on the current branch without source changes.
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - For command-matrix verification stories, explicit test-name patterns are more reliable than describe-name filters; `awk (gawk)` matched a suite regex, but `jq`/`yq` were easiest to target by their individual test names.
+  - The exact acceptance path for this story is the focused `packages/core/tests/wasm-commands.test.ts` cases plus root `pnpm check-types`; if those pass, avoid speculative registry-package churn.
+  - This story is verification-only on the current branch, so future iterations should record the scoped probe results instead of forcing unrelated edits.
+---
