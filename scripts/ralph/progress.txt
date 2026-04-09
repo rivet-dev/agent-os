@@ -29,6 +29,9 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - If a helper module only wraps `agent-os.ts` behavior during a migration, delete it once the logic is stable instead of leaving a second indirection layer behind
 ---
 ## Codebase Patterns
+- Claude adapter patch work is manifest-driven: after changing `registry/agent/claude/scripts/build-patched-cli.mjs`, rerun `pnpm --dir registry/agent/claude build` and validate `createSession("claude")` from `packages/core/tests/claude-session.test.ts`, because `resolveClaudeCliPath()` and `resolveClaudeSdkPath()` read `dist/*.json` manifests rather than guessing the latest hashed artifact.
+- `crates/execution/assets/runners/python-runner.mjs` must keep Pyodide bootstrap progress lines (`Loading ...`, `Loaded ...`) out of guest stdout; sidecar tests and callers often parse stdout as JSON or exact program output.
+- Mounted WASM command resolution in `crates/sidecar/src/execution.rs` keeps the guest command name in `argv[0]`; `ResolvedChildProcessExecution.execution_args` is only the suffix after that command name, so child-process PATH tests should assert the full argv vector.
 - For `crates/sidecar/tests` POSIX compliance coverage, prefer direct `agent_os_kernel` / `ProcessTable` assertions for deterministic `/proc`, `/dev`, `waitpid`, and process-group behavior, and use the sidecar/V8 harness only for guest-observable signal delivery that needs the full runtime bridge.
 - Shared V8 host shutdown has three alignment points: when the runtime reader thread dies it must clear the per-session sender map, the execution bridge must synthesize an `Exited(...)` event on unexpected channel shutdown, and the sidecar ACP request loop must treat process exit as a terminal error and run `terminate_acp_process(...)` so close/session cleanup cannot hang behind a dead runtime.
 - JavaScript child-process launches must reuse `prepare_javascript_runtime_env(...)` and set `AGENT_OS_SANDBOX_ROOT` the same way top-level `execute()` does; otherwise spawned V8 children lose guest-path mappings, ESM package resolution falls back to `/unknown/...`, and npm CLIs behave differently when launched through `child_process`.
@@ -211,7 +214,17 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - The struct definitions in state.rs are currently separate from their impl blocks (which remain in service.rs). Later stories (US-002 through US-005) will move impl blocks alongside types to domain modules.
   - lib.rs re-exports through service.rs which re-exports from state.rs: lib.rs → service.rs `pub use crate::state::*` → state.rs
   - HostFilesystem, ScopedHostFilesystem, MountPluginContext, MemoryMountPlugin, JsBridgeMountPlugin were NOT moved to state.rs — they are bridge/plugin types that will go to bridge.rs (US-003) and plugins/ (US-006)
-  - security_hardening tests are flaky in parallel due to Node import cache races — not a regression
+- security_hardening tests are flaky in parallel due to Node import cache races — not a regression
+---
+
+## 2026-04-09 04:46:22 PDT - US-109
+- Verified the Claude adapter config changes already in the branch work inside the VM: `/bin/sh` is the default shell, the Claude env flags are set to the V8-safe values, the Claude package builds, and a direct `createSession('claude')` boot plus `getSessionAgentInfo()` round-trip succeeds.
+- Fixed the remaining sidecar acceptance regressions uncovered while validating the adapter work: aligned sidecar tests with the current ACP/session helper signatures, completed the builtin completeness/conformance expectations, suppressed Pyodide bootstrap noise from guest stdout, corrected the Python workspace fixture JSON, and updated the mounted-WASM child-process PATH test to assert the full argv contract.
+- Files changed: `crates/execution/{AGENTS.md,assets/runners/python-runner.mjs,assets/v8-bridge.source.js,assets/v8-bridge.js}`, `crates/sidecar/tests/{acp_session.rs,builtin_completeness.rs,python.rs,service.rs}`, `crates/sidecar/tests/service.rs`, `registry/agent/claude/{scripts/build-patched-cli.mjs,src/adapter.ts,src/index.ts}`, `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - Claude adapter boot verification is fastest with a direct `AgentOs.create(...)` + `createSession('claude')` smoke script when the package-local Vitest shim is missing; `getSessionAgentInfo()` is enough to prove the ACP handshake completed.
+  - Pyodide bootstrap progress logs are not harmless noise in this repo; they break tests and call sites that treat stdout as structured program output.
+  - Mounted WASM command PATH resolution and WASI launch semantics use the full argv vector including `argv[0]`, so service-path tests need to match that launch contract instead of only checking trailing args.
 ---
 ## 2026-04-07 11:59:31 PDT - US-022
 - Added a new Rust ACP module under `crates/sidecar/src/acp/` with a JSON-RPC 2.0 NDJSON codec plus an async ACP client that correlates requests, tracks recent activity for timeout diagnostics, deduplicates repeated inbound permission requests, shims legacy permission methods and option IDs, falls back from cancel requests to notifications on `-32601`, and applies a 50ms exit-drain grace period before rejecting pending work
@@ -812,4 +825,13 @@ Started: Mon Apr  6 01:03:18 PM PDT 2026
   - Nested child-process cwd bugs can be split between the sidecar and the WASI host runner: the sidecar must inherit parent guest cwd/env, and the runner still needs `.` preopened to that cwd for relative shell paths to work
   - Redirected WASM child stdout/stderr is not guaranteed to be a host OS fd; when the guest points stdio at a delegate-managed fd, the host runner has to write back through the delegate fd bridge instead of raw `writeSync`
   - This story’s acceptance command is `cargo test -p agent-os-sidecar --test posix_path_repro -- --test-threads=1`; it stays focused on the imported repro cases without conflating unrelated sidecar warning noise or broader conformance debt
+---
+## 2026-04-09 04:51:17 PDT - US-110
+- Revalidated the Claude adapter's manifest-based patched CLI flow end-to-end: `pnpm --dir registry/agent/claude build` regenerated `dist/claude-cli-patched.json` and `dist/claude-sdk-patched.json`, and the existing adapter/runtime logic resolved those artifacts cleanly without falling back to the upstream SDK CLI
+- Ran the focused Claude session smoke test with the workspace-installed Vitest binary to confirm `createSession("claude")` plus `getSessionAgentInfo()` succeeds against the patched CLI path inside the VM
+- Files changed: `scripts/ralph/{prd.json,progress.txt}`
+- **Learnings for future iterations:**
+  - The Claude package already wires patch generation into its `build` script, so story validation starts with rebuilding `registry/agent/claude` rather than hand-editing `dist/` artifacts
+  - The most direct acceptance check for Claude patching is the metadata test in `packages/core/tests/claude-session.test.ts`; it proves session boot and adapter metadata without depending on tool-call behavior from later Claude stories
+  - In this workspace, `packages/core` may lack a local `.bin/vitest` shim even when Vitest is installed under `.pnpm`, so a direct `node .../vitest/vitest.mjs` invocation is a safe fallback for focused validation
 ---

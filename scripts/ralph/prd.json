@@ -1452,9 +1452,9 @@
         "All existing skip/todo annotations in claude-session.test.ts are resolved or documented with specific blocker",
         "pnpm --dir packages/core exec vitest run tests/claude-session.test.ts passes with 0 failures and 0 skipped"
       ],
-      "priority": 96,
+      "priority": 93,
       "passes": false,
-      "notes": "claude-session.test.ts exists with 8 tests but has skip/todo/FIXME references. The Claude adapter uses @anthropic-ai/claude-agent-sdk which is an npm package that must load unmodified inside V8. If it fails, fix the V8 polyfills or module resolver \u2014 do NOT modify the SDK. Check what builtins claude-agent-sdk uses that might be missing. The adapter is at registry/agent/claude/."
+      "notes": "BLOCKED BY: (1) Claude adapter config \u2014 default shell, env flags, CLI patching need to be committed and tested. (2) Claude SDK cli.js patching \u2014 build-patched-cli.mjs needs to work. Most underlying WASM/child-process issues are RESOLVED (argv, proc_spawn, stdout routing, pipe bookkeeping, stdin EOF, FD lifetime, path resolution). See US-109/110/111 for the remaining breakdown."
     },
     {
       "id": "US-077",
@@ -2033,6 +2033,60 @@
       "priority": 94,
       "passes": true,
       "notes": "External reproduction repo: https://github.com/bdsqqq/agent-os-posix-path-repro. This repo contains specific POSIX path edge cases that may fail in the VM's path handling. Clone the repo, extract the test cases, and verify they all pass inside our V8 isolate runtime. The path module comes from node-stdlib-browser (US-056) \u2014 if any cases fail, the issue is either in our module resolver (javascript.rs) or in how we wire the path polyfill."
+    },
+    {
+      "id": "US-109",
+      "title": "Commit and verify Claude adapter configuration changes (shell, env flags, stdio)",
+      "description": "As a developer, I want the Claude adapter's uncommitted configuration changes committed and verified so the adapter boots correctly inside V8.",
+      "acceptanceCriteria": [
+        "registry/agent/claude/src/adapter.ts uses /bin/sh as default shell (not /bin/bash)",
+        "CLAUDE_CODE_SIMPLE_SHELL_EXEC=1 is set in adapter env",
+        "CLAUDE_CODE_SWAP_STDIO default is '0' (not '1')",
+        "CLAUDE_CODE_DISABLE_DEV_NULL_REDIRECT=1 is set",
+        "CLAUDE_CODE_DISABLE_CWD_PERSIST=1 is set",
+        "Adapter boots inside VM without crashing \u2014 createSession('claude') returns a session ID",
+        "Agent info query returns valid name, title, version",
+        "cargo test -p agent-os-sidecar -- --test-threads=1 passes (no regressions)",
+        "Changes committed to branch"
+      ],
+      "priority": 90,
+      "passes": true,
+      "notes": "Step-26 codex session made these changes but didn't commit them. The changes are in the working tree. This story just needs to verify, clean up, and commit. If the adapter fails to boot, debug the specific startup error \u2014 don't revert to a stub adapter."
+    },
+    {
+      "id": "US-110",
+      "title": "Fix Claude SDK CLI patching for V8 runtime (build-patched-cli.mjs)",
+      "description": "As a developer, I want the Claude SDK's CLI to be properly patched for the V8 runtime so it can execute tools inside the VM.",
+      "acceptanceCriteria": [
+        "build-patched-cli.mjs produces a working patched CLI at dist/claude-cli-patched.json or equivalent",
+        "resolveClaudeCliPath() in adapter.ts correctly finds the patched CLI",
+        "If patched CLI is not available, adapter falls back to original SDK cli.js gracefully",
+        "The patched CLI runs inside V8 without import errors or missing builtins",
+        "Test: createSession('claude') + getSessionAgentInfo() returns valid agent info"
+      ],
+      "priority": 91,
+      "passes": true,
+      "notes": "The Claude adapter needs to patch the SDK's CLI to work in the V8 environment (e.g., replacing shell defaults, adjusting stdio handling). Step-26 added resolveClaudeCliPath() but it's uncommitted. The build script may need to be run as part of the adapter package build step."
+    },
+    {
+      "id": "US-111",
+      "title": "Claude agent E2E: text response, xu command, nested node spawn all pass",
+      "description": "As a developer, I want all 8 Claude session tests passing end-to-end with the real @anthropic-ai/claude-agent-sdk running unmodified inside V8.",
+      "acceptanceCriteria": [
+        "createSession('claude') boots the Claude agent with real SDK",
+        "Text-only response test passes (no tool calls, just text)",
+        "xu command test passes \u2014 agent calls xu tool, output captured correctly",
+        "Nested node execSync test passes \u2014 agent runs node -e via child_process",
+        "Nested node spawn test passes \u2014 agent spawns node process with piped stdio",
+        "Session metadata test passes \u2014 agent info, capabilities, modes correct",
+        "Session lifecycle test passes \u2014 prompt, events, close all work",
+        "Mode/permission management test passes",
+        "All 8 tests in claude-session.test.ts pass with 0 failures and 0 skipped",
+        "pnpm --dir packages/core exec vitest run tests/claude-session.test.ts passes"
+      ],
+      "priority": 92,
+      "passes": false,
+      "notes": "Depends on US-109 (adapter config) and US-110 (CLI patching). This is the final validation story for Claude. If individual tests fail, the error should be specific (not a generic timeout) \u2014 debug the specific tool/flow that fails. The WASM child process fixes from step-26 should have resolved the proc_spawn/waitpid/stdout routing issues."
     }
   ]
 }
