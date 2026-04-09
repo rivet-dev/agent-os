@@ -87,6 +87,7 @@ See `.agent/specs/test-structure.md` for the full restructuring plan. Target lay
 - `wasm/` -- WASM command and permission tier tests
 - `network/` -- connectivity and fetch behavior inside the VM
 - Host tool command-path coverage belongs with VM-backed sidecar tests such as `tests/sidecar-tool-dispatch.test.ts`, not a standalone TypeScript RPC server suite.
+- Shell-backed host-tool dispatch coverage in `tests/sidecar-tool-dispatch.test.ts` needs the `@rivet-dev/agent-os-common` software package in the test VM so `/bin/sh` exists; otherwise the suite only proves direct spawn/RPC dispatch and misses the guest-shell path.
 - `sidecar/` -- sidecar client, native process
 - `cron/` -- cron integration
 
