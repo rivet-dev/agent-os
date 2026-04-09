@@ -8,6 +8,7 @@ Started: Thu Apr  9 06:09:31 AM PDT 2026
 - Package-provided agent descriptors registered via `processSoftware()` override the hardcoded `AGENT_CONFIGS` entries, so launch-critical defaults like Claude shell/env flags need to stay mirrored across both config surfaces.
 - Claude’s patched SDK/CLI artifacts are located through `registry/agent/claude/dist/claude-*-patched.json`; regression tests should validate those manifests and fallback resolution with a temp package dir instead of mutating the real built artifacts.
 - `packages/core/tests/claude-session.test.ts` is the end-to-end Claude truth suite; it exercises the real SDK path with llmock, PATH-backed `xu`, nested `node` child processes, metadata, modes, and lifecycle APIs.
+- The sidecar TLS reader and writer share one `rustls::StreamOwned` mutex, so timed-out TLS read loops must yield briefly or guest HTTPS request writes can be starved and undici/fetch will see EOF before the request leaves the VM.
 
 ## 2026-04-09 06:12:40 PDT - US-CC-001
 - Implemented the remaining workspace/package rename cleanup for `@rivet-dev/agent-os-core`, including the last manifest dependency, benchmark imports, secure-exec/dev-shell subpath aliases, registry test imports, and the root instruction note to keep future changes on the new package name.
@@ -73,4 +74,13 @@ Started: Thu Apr  9 06:09:31 AM PDT 2026
   - `packages/core/tests/claude-session.test.ts` is the focused regression suite for the real Claude SDK path, not a mocked adapter shim.
   - Running that suite with `--reporter=verbose` makes it obvious which Claude E2E case is stalling if the runtime regresses.
   - Current verification result on this branch is `9 passed` because the file also includes the Claude config-defaults guard in addition to the eight acceptance-criteria session tests.
+---
+
+## 2026-04-09 10:32:50 PDT - US-CC-008
+- Restored the quickstart Claude session path by fixing guest fetch/TLS compatibility in the V8 bridge and sidecar transport layer: the main undici bundle now resolves `node:zlib` through the builtin bridge module, guest TLS sockets preserve half-close semantics instead of forcing an immediate close on EOF, and the sidecar TLS reader yields after timed-out reads so request writes are not starved behind the shared rustls stream mutex.
+- Files changed: `crates/execution/assets/v8-bridge.source.js`, `crates/execution/assets/v8-bridge.js`, `crates/execution/assets/undici-shims/zlib.js`, `crates/execution/src/node_import_cache.rs`, `packages/core/scripts/build-v8-bridge.mjs`, `crates/sidecar/src/execution.rs`, `crates/AGENTS.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - If guest `fetch()` succeeds only when TLS trace logging is enabled, suspect lock starvation in the sidecar TLS reader/writer path before blaming undici; both sides share one `rustls::StreamOwned` mutex.
+  - The main `v8-bridge.js` bundle must alias `node:zlib` back to the builtin bridge module for undici; bundling a second copy can leave `zlib.constants` incomplete and break compressed HTTPS responses.
+  - Focused verification for guest fetch regressions is `cargo test -p agent-os-sidecar --test fetch_via_undici -- --test-threads=1` plus the real integration gate `cd examples/quickstart && source ~/misc/env.txt && npx tsx src/agent-session.ts`.
 ---

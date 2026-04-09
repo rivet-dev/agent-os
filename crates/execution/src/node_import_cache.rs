@@ -4901,6 +4901,9 @@ function createRpcBackedTlsModule(tlsModule, netModule) {
     return error;
   };
   const defineSocketMetadataPassthrough = (tlsSocket, rawSocket) => {
+    if (tlsSocket === rawSocket) {
+      return;
+    }
     for (const key of ['localAddress', 'localPort', 'remoteAddress', 'remotePort', 'remoteFamily']) {
       try {
         Object.defineProperty(tlsSocket, key, {

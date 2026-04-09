@@ -6470,6 +6470,9 @@ where
             let family = JavascriptSocketFamily::from_ip(*candidate);
             context.translate_tcp_loopback_port(family, port).is_some()
         })
+        // We do not implement Happy Eyeballs yet, so prefer IPv4 over a
+        // verbatim IPv6-first DNS answer for general outbound TCP connects.
+        .or_else(|| allowed.iter().copied().find(IpAddr::is_ipv4))
         .or_else(|| allowed.first().copied())
         .ok_or_else(|| {
             SidecarError::Execution(format!("failed to resolve TCP address {host}:{port}"))
@@ -7093,7 +7096,20 @@ fn spawn_tls_socket_reader(
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                     ) =>
                 {
+                    // The TLS reader and writer share one rustls stream mutex. Yield after
+                    // timed-out reads so request writes can acquire the lock promptly.
+                    std::thread::sleep(Duration::from_millis(1));
                     continue;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    saw_remote_end.store(true, Ordering::SeqCst);
+                    let _ = sender.send(JavascriptTcpSocketEvent::End);
+                    if saw_local_shutdown.load(Ordering::SeqCst)
+                        && !close_notified.swap(true, Ordering::SeqCst)
+                    {
+                        let _ = sender.send(JavascriptTcpSocketEvent::Close { had_error: false });
+                    }
+                    break;
                 }
                 Err(error) => {
                     let code = io_error_code(&error);
@@ -10484,7 +10500,18 @@ fn issue_outbound_http_request(
     headers: &HttpHeaderCollection,
 ) -> Result<Value, SidecarError> {
     let method = options.method.as_deref().unwrap_or("GET");
-    let mut request = ureq::request(method, url.as_str());
+    let mut agent_builder = ureq::AgentBuilder::new();
+    if url.scheme() == "https" {
+        let tls_options = JavascriptTlsBridgeOptions {
+            is_server: false,
+            servername: url.host_str().map(str::to_owned),
+            reject_unauthorized: options.reject_unauthorized,
+            ..JavascriptTlsBridgeOptions::default()
+        };
+        agent_builder = agent_builder.tls_config(Arc::new(build_client_tls_config(&tls_options)?));
+    }
+    let agent = agent_builder.build();
+    let mut request = agent.request_url(method, url);
     for (name, values) in &headers.normalized {
         let header_value = values.join(", ");
         request = request.set(name, &header_value);

@@ -86,6 +86,11 @@ for (const [name, modulePath] of Object.entries(stdLibBrowser)) {
 		}
 	}
 }
+const mainBundleAlias = {
+	...alias,
+	zlib: path.join(undiciShimDir, "zlib.js"),
+	"node:zlib": path.join(undiciShimDir, "zlib.js"),
+};
 
 let bridgeSourceText = await readFile(bridgeSource, "utf8");
 bridgeSourceText = bridgeSourceText.replace(/\n\s*rationale:\s*"[^"]*",?/g, "");
@@ -445,7 +450,7 @@ const result = await build({
 	platform: "browser",
 	target: "es2020",
 	minify: true,
-	alias,
+	alias: mainBundleAlias,
 	define: {
 		"process.env.NODE_ENV": '"production"',
 		global: "globalThis",
@@ -499,6 +504,7 @@ const zlibResult = await build({
 		global: "globalThis",
 	},
 	plugins: createUndiciBuildPlugins(),
+	alias,
 	banner: {
 			js: [
 				'if(typeof globalThis.global==="undefined"){globalThis.global=globalThis;}',

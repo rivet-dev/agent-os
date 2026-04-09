@@ -9184,23 +9184,77 @@ var __bridge = (() => {
       return new _Response(null, { status, headers: { Location: url } });
     }
   };
+  function normalizeDnsLookupInvocation(hostname, options, callback) {
+    let normalizedOptions = {};
+    let done = callback;
+    if (typeof options === "function") {
+      done = options;
+    } else if (typeof options === "number") {
+      normalizedOptions = { family: options };
+    } else if (options == null) {
+      normalizedOptions = {};
+    } else if (typeof options === "object") {
+      normalizedOptions = { ...options };
+    } else {
+      throw new TypeError("dns.lookup options must be a number, object, or callback");
+    }
+    const family = normalizedOptions.family === 4 || normalizedOptions.family === 6 ? normalizedOptions.family : void 0;
+    return {
+      callback: done,
+      options: {
+        hostname: String(hostname),
+        family,
+        all: normalizedOptions.all === true
+      }
+    };
+  }
+  function parseDnsLookupRecords(resultJson) {
+    let parsed = resultJson;
+    if (typeof parsed === "string") {
+      parsed = JSON.parse(parsed);
+    } else if (parsed && typeof parsed === "object" && Array.isArray(parsed.records)) {
+      parsed = parsed.records;
+    } else if (parsed && typeof parsed === "object" && typeof parsed.address === "string") {
+      parsed = [parsed];
+    }
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((record) => record && typeof record.address === "string").map((record) => ({
+      address: record.address,
+      family: record.family === 6 ? 6 : 4
+    }));
+  }
+  function lookupDnsRecords(hostname, options, callback) {
+    const invocation = normalizeDnsLookupInvocation(hostname, options, callback);
+    return _networkDnsLookupRaw.apply(
+      void 0,
+      [invocation.options],
+      { result: { promise: true } }
+    ).then((resultJson) => {
+      const records = parseDnsLookupRecords(resultJson);
+      if (typeof invocation.callback === "function") {
+        if (invocation.options.all) {
+          invocation.callback(null, records);
+        } else {
+          const first = records[0] ?? {
+            address: null,
+            family: invocation.options.family ?? 0
+          };
+          invocation.callback(null, first.address, first.family);
+        }
+      }
+      return invocation.options.all ? records : records[0] ?? {
+        address: "",
+        family: invocation.options.family ?? 0
+      };
+    });
+  }
   var dns = {
     lookup(hostname, options, callback) {
-      let cb = callback;
-      if (typeof options === "function") {
-        cb = options;
-      }
-      _networkDnsLookupRaw.apply(void 0, [hostname], { result: { promise: true } }).then((resultJson) => {
-        const result = JSON.parse(resultJson);
-        if (result.error) {
-          const err = new Error(result.error);
-          err.code = result.code || "ENOTFOUND";
-          cb?.(err);
-        } else {
-          cb?.(null, result.address, result.family);
-        }
-      }).catch((err) => {
-        cb?.(err);
+      lookupDnsRecords(hostname, options, callback).catch((err) => {
+        const done = typeof options === "function" ? options : callback;
+        done?.(err);
       });
     },
     resolve(hostname, rrtype, callback) {
@@ -9224,12 +9278,7 @@ var __bridge = (() => {
     },
     promises: {
       lookup(hostname, _options) {
-        return new Promise((resolve, reject) => {
-          dns.lookup(hostname, _options, (err, address, family) => {
-            if (err) reject(err);
-            else resolve({ address: address || "", family: family || 4 });
-          });
-        });
+        return lookupDnsRecords(hostname, _options);
       },
       resolve(hostname, rrtype) {
         return new Promise((resolve, reject) => {
@@ -15432,6 +15481,31 @@ ${headerLines}\r
     );
     return deserializeTlsBridgeValue(JSON.parse(payload));
   }
+  function finalizeTlsUpgrade(socket, eventName = "secureConnect") {
+    socket._tlsUpgrading = false;
+    socket.encrypted = true;
+    socket.authorized = socket.authorizationError == null;
+    const protocol = queryTlsSocket(socket._socketId, "getProtocol");
+    if (typeof protocol === "string" || protocol === null) {
+      socket._tlsProtocol = protocol;
+    }
+    const cipher = queryTlsSocket(socket._socketId, "getCipher");
+    if (cipher !== void 0) {
+      socket._tlsCipher = cipher;
+    }
+    const reused = queryTlsSocket(socket._socketId, "isSessionReused");
+    if (typeof reused === "boolean") {
+      socket._tlsSessionReused = reused;
+    }
+    socket._touchTimeout();
+    socket._emitNet(eventName);
+    if (eventName !== "secure") {
+      socket._emitNet("secure");
+    }
+    if (!socket.destroyed && !socket._bridgeReadLoopRunning) {
+      void socket._pumpBridgeReads();
+    }
+  }
   function createConnectedSocketHandle(socketId) {
     return {
       socketId,
@@ -15514,7 +15588,6 @@ ${headerLines}\r
       case "secureConnect":
       case "secure": {
         const state = parseTlsState(data);
-        socket.encrypted = true;
         if (state) {
           socket.authorized = state.authorized === true;
           socket.authorizationError = state.authorizationError;
@@ -15524,7 +15597,7 @@ ${headerLines}\r
           socket._tlsSessionReused = state.sessionReused === true;
           socket._tlsCipher = state.cipher ?? null;
         }
-        socket._emitNet(event);
+        finalizeTlsUpgrade(socket, event);
         break;
       }
       case "data": {
@@ -15534,7 +15607,7 @@ ${headerLines}\r
         break;
       }
       case "end":
-        socket._emitNet("end");
+        socket._handleRemoteReadableEnd();
         break;
       case "session": {
         const session = typeof Buffer !== "undefined" ? Buffer.from(data ?? "", "base64") : new Uint8Array(0);
@@ -15554,11 +15627,7 @@ ${headerLines}\r
         socket._emitNet("error", createBridgedTlsError(data));
         break;
       case "close":
-        unregisterNetSocket(socketId);
-        socket._connected = false;
-        socket.connecting = false;
-        socket._clearTimeoutTimer();
-        socket._emitNet("close");
+        socket._emitSocketClose(false);
         break;
     }
   }
@@ -15582,6 +15651,9 @@ ${headerLines}\r
     _timeoutMs = 0;
     _timeoutTimer = null;
     _tlsUpgrading = false;
+    _remoteEnded = false;
+    _writableEnded = false;
+    _closeEmitted = false;
     _connected = false;
     connecting = false;
     destroyed = false;
@@ -15706,6 +15778,19 @@ ${headerLines}\r
       } else if (dataOrCallback != null) {
         this.write(dataOrCallback, encodingOrCallback, callback);
       }
+      if (this._writableEnded || this.destroyed) {
+        return this;
+      }
+      this._writableEnded = true;
+      this.writable = false;
+      queueMicrotask(() => {
+        if (!this.destroyed) {
+          this._emitNet("finish");
+          if (this._remoteEnded) {
+            this._emitSocketClose(false);
+          }
+        }
+      });
       if (this._loopbackServer) {
         if (!this._loopbackReadableEnded) {
           queueMicrotask(() => {
@@ -15725,6 +15810,7 @@ ${headerLines}\r
       if (this.destroyed) return this;
       debugBridgeNetwork("socket destroy", this._socketId, error?.message ?? null);
       this.destroyed = true;
+      this._writableEnded = true;
       this.writable = false;
       this.readable = false;
       this._clearTimeoutTimer();
@@ -15737,18 +15823,58 @@ ${headerLines}\r
         if (error) {
           this._emitNet("error", error);
         }
-        this._emitNet("close");
+        this._emitSocketClose(Boolean(error));
         return this;
       }
       if (typeof _netSocketDestroyRaw !== "undefined" && this._socketId) {
         _netSocketDestroyRaw.applySync(void 0, [this._socketId]);
-        unregisterNetSocket(this._socketId);
       }
       if (error) {
         this._emitNet("error", error);
       }
-      this._emitNet("close");
+      this._emitSocketClose(Boolean(error));
       return this;
+    }
+    _emitSocketClose(hadError = false) {
+      if (this._closeEmitted) {
+        return;
+      }
+      this._closeEmitted = true;
+      this._connected = false;
+      this.connecting = false;
+      this.pending = false;
+      this.readable = false;
+      this.writable = false;
+      this._clearTimeoutTimer();
+      if (this._socketId) {
+        unregisterNetSocket(this._socketId);
+      }
+      this._emitNet("close", hadError);
+    }
+    _handleRemoteReadableEnd() {
+      if (this.destroyed || this._remoteEnded) {
+        return;
+      }
+      debugBridgeNetwork("socket remote end", this._socketId);
+      this._remoteEnded = true;
+      this.readable = false;
+      this._readableState.endEmitted = true;
+      queueMicrotask(() => {
+        if (this.destroyed) {
+          return;
+        }
+        this._emitNet("end");
+        if (this.destroyed) {
+          return;
+        }
+        if (!this.allowHalfOpen && !this._writableEnded) {
+          this.end();
+          return;
+        }
+        if (this._writableEnded) {
+          this._emitSocketClose(false);
+        }
+      });
     }
     _applySocketInfo(info) {
       if (!info) {
@@ -16089,14 +16215,7 @@ ${headerLines}\r
             return;
           }
           if (chunkBase64 === null) {
-            debugBridgeNetwork("socket remote end", this._socketId);
-            this.readable = false;
-            this._readableState.endEmitted = true;
-            this._emitNet("end");
-            if (!this.destroyed) {
-              unregisterNetSocket(this._socketId);
-              this._emitNet("close");
-            }
+            this._handleRemoteReadableEnd();
             return;
           }
           const payload = Buffer.from(chunkBase64, "base64");
@@ -16249,6 +16368,11 @@ ${headerLines}\r
       }
       this._tlsUpgrading = true;
       _netSocketUpgradeTlsRaw.applySync(void 0, [this._socketId, JSON.stringify(options ?? {})]);
+      queueMicrotask(() => {
+        if (!this.destroyed) {
+          finalizeTlsUpgrade(this);
+        }
+      });
     }
     _touchTimeout() {
       if (this._timeoutMs === 0 || this.destroyed) {
@@ -16592,25 +16716,70 @@ ${headerLines}\r
       context: {}
     };
   }
-  function tlsConnect(portOrOptions, hostOrCallback, callback) {
+  function adoptRawTlsSocket(rawSocket, options) {
+    if (!(rawSocket instanceof NetSocket)) {
+      throw new TypeError("tls.TLSSocket requires a net.Socket instance");
+    }
+    const normalizedOptions = options && typeof options === "object" ? { ...options } : {};
+    Object.setPrototypeOf(rawSocket, TLSSocket.prototype);
+    const upgradeOptions = buildSerializedTlsOptions(
+      normalizedOptions,
+      {
+        isServer: normalizedOptions.isServer === true,
+        servername: normalizedOptions.servername ?? rawSocket.servername ?? rawSocket.remoteAddress ?? "127.0.0.1"
+      }
+    );
+    if (!upgradeOptions.isServer) {
+      rawSocket.servername = upgradeOptions.servername;
+    }
+    if (rawSocket._connected) {
+      rawSocket._upgradeTls(upgradeOptions);
+    } else {
+      rawSocket.once("connect", () => {
+        rawSocket._upgradeTls(upgradeOptions);
+      });
+    }
+    return rawSocket;
+  }
+  class TLSSocket extends NetSocket {
+    constructor(socketOrOptions, options) {
+      if (socketOrOptions instanceof NetSocket) {
+        super({ allowHalfOpen: socketOrOptions.allowHalfOpen === true });
+        return adoptRawTlsSocket(socketOrOptions, options);
+      }
+      super(
+        socketOrOptions && typeof socketOrOptions === "object" ? socketOrOptions : options
+      );
+    }
+  }
+  function tlsConnect(...args) {
     let socket;
-    let options = {};
-    let cb;
-    if (typeof portOrOptions === "object") {
-      options = { ...portOrOptions };
-      cb = typeof hostOrCallback === "function" ? hostOrCallback : callback;
-      if (portOrOptions.socket) {
-        socket = portOrOptions.socket;
+    let options;
+    const values = [...args];
+    const cb = typeof values[values.length - 1] === "function" ? values.pop() : void 0;
+    if (values[0] != null && typeof values[0] === "object") {
+      options = { ...values[0] };
+      if (options.socket) {
+        socket = options.socket;
       } else {
         socket = new NetSocket();
-        socket.connect({ host: portOrOptions.host ?? "127.0.0.1", port: portOrOptions.port });
+        socket.connect({ host: options.host ?? "127.0.0.1", port: options.port });
       }
     } else {
-      const host = typeof hostOrCallback === "string" ? hostOrCallback : "127.0.0.1";
-      cb = typeof hostOrCallback === "function" ? hostOrCallback : callback;
-      options = { host };
+      const positional = {};
+      if (values.length > 0) {
+        positional.port = values.shift();
+      }
+      if (typeof values[0] === "string") {
+        positional.host = values.shift();
+      }
+      const providedOptions = values[0] != null && typeof values[0] === "object" ? { ...values[0] } : {};
+      options = { ...providedOptions, ...positional };
       socket = new NetSocket();
-      socket.connect(portOrOptions, host);
+      socket.connect({
+        host: options.host ?? "127.0.0.1",
+        port: options.port
+      });
     }
     if (cb) socket.once("secureConnect", cb);
     const upgradeOptions = buildSerializedTlsOptions(
@@ -16873,8 +17042,7 @@ ${headerLines}\r
   }
   var tlsModule = {
     connect: tlsConnect,
-    TLSSocket: NetSocket,
-    // Alias — TLSSocket is just a NetSocket after upgrade
+    TLSSocket,
     Server: TLSServerCallable,
     createServer(optionsOrListener, maybeListener) {
       return new TLSServer(optionsOrListener, maybeListener);
