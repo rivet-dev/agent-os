@@ -320,3 +320,12 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Buffered pipe writes must consider registered consumers in addition to `readHandleCount`, or data will be dropped as soon as the shell closes its duplicate of the read end after spawning the downstream command.
   - Sidecar `child_process.write_stdin` broken pipes should be treated like normal downstream pipeline closure, not a fatal transport error, or archive/list pipelines such as `cat file.tar | tar tf -` will crash the VM-side session instead of exiting cleanly.
 ---
+
+## 2026-04-09 13:01:41 PDT - US-022
+- Re-verified the `rg`, `fd`, and `tree` command-package slice on `finish-ts-rust-migration`: the focused ripgrep recursive search tests, the fd pattern-match test, and the tree directory-structure test in `packages/core/tests/wasm-commands.test.ts` all pass on the current branch without source changes.
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - For command-matrix verification stories, target the concrete test names when describe-name regexes get brittle around parentheses; the ripgrep and fd blocks are easy to mis-filter if the pattern is over-escaped.
+  - The exact acceptance path for this story is the focused `packages/core/tests/wasm-commands.test.ts` probes for ripgrep, fd, and tree plus root `pnpm check-types`; if those are already green, avoid unnecessary registry or runtime edits.
+  - This story is verification-only on the current branch, so keep the commit limited to Ralph tracking artifacts unless a focused probe actually fails.
+---
