@@ -1313,6 +1313,17 @@ function materializeToolShimDir(toolKits: ToolKit[]): string {
 	return shimDir;
 }
 
+function collectToolkitBootstrapCommands(toolKits: ToolKit[]): string[] {
+	if (toolKits.length === 0) {
+		return [];
+	}
+
+	return [
+		"agentos",
+		...toolKits.map((toolKit) => `agentos-${toolKit.name}`),
+	];
+}
+
 function materializeOsInstructionsDir(additionalInstructions?: string): string {
 	const instructionsDir = mkdtempSync(
 		join(tmpdir(), "agent-os-os-instructions-"),
@@ -1566,11 +1577,13 @@ export class AgentOs {
 
 		const createVmAdmin = async (): Promise<AgentOsVmAdmin> => {
 			const preparedCommandDirs = prepareCommandDirs(processed.commandPackages);
+			const toolBootstrapCommands = collectToolkitBootstrapCommands(toolKits ?? []);
 			const bootstrapLower = createKernelBootstrapLower(
 				options?.rootFilesystem,
 				[
 					...collectBootstrapWasmCommands(preparedCommandDirs.commandDirs),
 					...NODE_RUNTIME_BOOTSTRAP_COMMANDS,
+					...toolBootstrapCommands,
 				],
 				buildOsInstructionsBootstrapEntries(options?.additionalInstructions),
 			);

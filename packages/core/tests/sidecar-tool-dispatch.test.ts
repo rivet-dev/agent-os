@@ -1,3 +1,4 @@
+import common from "@rivet-dev/agent-os-common";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { z } from "zod";
 import { AgentOs, hostTool, toolKit } from "../src/index.js";
@@ -41,9 +42,10 @@ describe("native sidecar tool dispatch", () => {
 
 	beforeEach(async () => {
 		vm = await AgentOs.create({
+			software: [common],
 			toolKits: [mathToolKit],
 		});
-	});
+	}, 20_000);
 
 	afterEach(async () => {
 		await vm?.dispose();
@@ -78,6 +80,24 @@ describe("native sidecar tool dispatch", () => {
 		expect(JSON.parse(result.stdout)).toEqual({
 			ok: true,
 			result: { sum: 12 },
+		});
+	});
+
+	test("guest shell scripts can invoke agentos-* commands through PATH", async () => {
+		await vm.writeFile(
+			"/tmp/run-tool.sh",
+			[
+				"#!/bin/sh",
+				"set -eu",
+				"agentos-math add --a 2 --b 3 > /tmp/tool-output.json",
+			].join("\n"),
+		);
+
+		const result = await vm.exec("sh /tmp/run-tool.sh && cat /tmp/tool-output.json");
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.stdout)).toEqual({
+			ok: true,
+			result: { sum: 5 },
 		});
 	});
 

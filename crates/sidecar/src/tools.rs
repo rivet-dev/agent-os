@@ -9,10 +9,12 @@ use agent_os_kernel::command_registry::CommandDriver;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
 
+#[derive(Debug)]
 pub(crate) enum ToolCommandResolution {
     Immediate {
         stdout: Vec<u8>,
@@ -129,14 +131,34 @@ pub(crate) fn resolve_tool_command(
     Ok(Some(resolution))
 }
 
+pub(crate) fn is_tool_command(vm: &VmState, command: &str) -> bool {
+    identify_tool_command(vm, command).is_some()
+}
+
 fn identify_tool_command(vm: &VmState, command: &str) -> Option<ToolCommand> {
-    if command == TOOL_MASTER_COMMAND {
+    let command_name = tool_command_name_from_specifier(command).unwrap_or(command);
+
+    if command_name == TOOL_MASTER_COMMAND {
         return Some(ToolCommand::Master);
     }
-    command
+
+    command_name
         .strip_prefix(&format!("{TOOL_MASTER_COMMAND}-"))
         .filter(|toolkit_name| vm.toolkits.contains_key(*toolkit_name))
         .map(|toolkit_name| ToolCommand::Toolkit(toolkit_name.to_owned()))
+}
+
+fn tool_command_name_from_specifier<'a>(command: &'a str) -> Option<&'a str> {
+    let file_name = Path::new(command).file_name()?.to_str()?;
+    if !matches!(
+        normalize_path(command).as_str(),
+        path if path == format!("/bin/{file_name}")
+            || path == format!("/usr/bin/{file_name}")
+            || path == format!("/usr/local/bin/{file_name}")
+    ) {
+        return None;
+    }
+    Some(file_name)
 }
 
 fn resolve_master_command(

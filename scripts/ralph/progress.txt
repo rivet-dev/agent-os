@@ -18,6 +18,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - For `packages/core/tests/wasm-commands.test.ts` curl round-trip coverage, use a guest `net.createServer()` HTTP fixture when the target is the curl/WASM client path; guest `http.createServer()` exercises a separate transport-wrapper compatibility surface and can hide curl-specific regressions.
 - `US-007` is gated by verification, not broad runtime churn: `cargo test -p agent-os-sidecar --test kill_cleanup -- --test-threads=1` plus root `pnpm check-types` is the acceptance path for VM/process teardown semantics on the current branch.
 - Node builtin compatibility regressions are best covered in `crates/sidecar/tests/builtin_conformance.rs`, which runs the same probe under host Node and guest V8 and compares the JSON output directly.
+- Guest shell invocations of `agentos` / `agentos-*` should only be tagged during child-process command resolution and fully resolved at spawn time with a mutable `VmState`; tool CLI parsing can read VM files (`--json-file`), and treating those commands as ordinary WASM modules breaks shell `exec` handoff.
 - The shared-runtime `node:stream` path exercised by sidecar builtin conformance comes from the inline mini-stream module in `crates/execution/src/javascript.rs`; fixing `require("stream")` parity there is separate from the stdlib-backed `v8-bridge.source.js` path.
 - In the WASM host-process bridge, synthetic pipes must initialize both `producers` and `consumers`, and consumer registration must flush any chunks buffered before the child attaches; shell builtins can write into a pipe before a spawned reader like `wc` registers stdin.
 - WASM tests that consume `poll_event_blocking()` directly need to match `WasmExecutionEvent::SyncRpcRequest(_)` explicitly unless they are intentionally asserting the control-plane payload; the runtime now surfaces sync RPC traffic in the same stream as stdout/stderr/signal/exit events.
@@ -387,4 +388,16 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Process-exit reconciliation is too late for long-lived agent sessions; host filesystem reads need an active shadow-path sync path when bash/tool children finish but the adapter process stays alive.
   - `packages/core/tests/filesystem.test.ts` now covers both directions of the shadow/kernel visibility bug: host writes visible to guest shell commands and guest bash-tool writes visible to host `vm.readFile()`.
   - For Claude filesystem regressions, llmock plus `REGISTRY_SOFTWARE` gives a deterministic bash-tool probe without relying on real API keys.
+---
+
+## 2026-04-09 15:22:00 PDT - US-026
+- Restored guest-shell invocation of `agentos` and `agentos-*` by teaching the native sidecar's JavaScript child-process path to detect tool commands and launch them as sidecar-dispatched virtual tool processes instead of trying to execute `/bin/agentos*` as WASM modules.
+- Added focused shell-path coverage in `packages/core/tests/sidecar-tool-dispatch.test.ts`, including a guest `sh` script that runs `agentos-math add --a 2 --b 3 > /tmp/tool-output.json`, and provisioned `@rivet-dev/agent-os-common` plus a longer setup timeout so the suite exercises the real guest shell path.
+- Recorded the reusable sidecar/tool-shell pattern in `crates/AGENTS.md` and the guest-shell test requirement in `packages/core/AGENTS.md`.
+- Verified with `pnpm --dir packages/core exec vitest run tests/sidecar-tool-dispatch.test.ts` and `pnpm check-types`.
+- Files changed: `crates/AGENTS.md`, `crates/sidecar/src/execution.rs`, `crates/sidecar/src/state.rs`, `crates/sidecar/src/tools.rs`, `packages/core/AGENTS.md`, `packages/core/tests/sidecar-tool-dispatch.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Shell-visible `agentos` commands are virtual sidecar tools, not guest WASM binaries; detect them during child-process command resolution but defer full tool resolution until spawn time so CLI parsing can still read VM files such as `--json-file`.
+  - `packages/core/tests/sidecar-tool-dispatch.test.ts` is the focused truth suite for direct spawn plus guest-shell tool invocation; include `@rivet-dev/agent-os-common` when that suite needs a real guest `/bin/sh`.
+  - The exact acceptance path for this story is `pnpm --dir packages/core exec vitest run tests/sidecar-tool-dispatch.test.ts` plus root `pnpm check-types`.
 ---

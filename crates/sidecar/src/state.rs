@@ -917,6 +917,7 @@ pub(crate) struct ResolvedChildProcessExecution {
     pub(crate) guest_cwd: String,
     pub(crate) host_cwd: PathBuf,
     pub(crate) wasm_permission_tier: Option<WasmPermissionTier>,
+    pub(crate) tool_command: bool,
 }
 
 // ---------------------------------------------------------------------------
