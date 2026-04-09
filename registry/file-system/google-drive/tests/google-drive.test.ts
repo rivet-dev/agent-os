@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { AgentOs } from "@rivet-dev/agent-os";
+import { AgentOs } from "@rivet-dev/agent-os-core";
 import { createGoogleDriveBackend } from "../src/index.js";
 
 const clientEmail = process.env.GOOGLE_DRIVE_CLIENT_EMAIL;

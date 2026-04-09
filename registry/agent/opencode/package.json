@@ -20,7 +20,7 @@
 		"check-types": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@rivet-dev/agent-os": "workspace:*"
+		"@rivet-dev/agent-os-core": "workspace:*"
 	},
 	"devDependencies": {
 		"bun": "1.3.11",

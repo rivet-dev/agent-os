@@ -45,7 +45,7 @@ import {
 	type StdioHook,
 	type TimingMitigation,
 	type VirtualFileSystem,
-} from "@rivet-dev/agent-os/internal/runtime-compat";
+} from "@rivet-dev/agent-os-core/internal/runtime-compat";
 import * as secureExec from "secure-exec";
 import { describe, expect, it } from "vitest";
 

@@ -1,7 +1,7 @@
 import type {
 	MountConfigJsonObject,
 	NativeMountPluginDescriptor,
-} from "@rivet-dev/agent-os";
+} from "@rivet-dev/agent-os-core";
 import type { SandboxAgent } from "sandbox-agent";
 
 export interface SandboxFsOptions {

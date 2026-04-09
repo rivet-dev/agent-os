@@ -10,7 +10,7 @@
 //
 // NOTE: Requires ANTHROPIC_API_KEY to be set.
 
-import { AgentOs } from "@rivet-dev/agent-os";
+import { AgentOs } from "@rivet-dev/agent-os-core";
 import common from "@rivet-dev/agent-os-common";
 import pi from "@rivet-dev/agent-os-pi";
 

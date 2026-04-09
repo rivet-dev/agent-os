@@ -18,6 +18,7 @@ Agent OS is a **fully virtualized operating system**. The kernel, written as a R
 
 - **Monorepo**: pnpm workspaces + Turborepo + TypeScript + Biome
 - **Core package**: `@rivet-dev/agent-os-core` in `packages/core/` -- contains everything (VM ops, ACP client, session management)
+- **Use the renamed core package everywhere**: workspace dependencies and TypeScript subpath imports must reference `@rivet-dev/agent-os-core` (including `@rivet-dev/agent-os-core/internal/runtime-compat` and `@rivet-dev/agent-os-core/test/*`). The legacy `@rivet-dev/agent-os` name is stale and breaks pnpm workspace resolution.
 - **Registry types**: `@rivet-dev/agent-os-registry-types` in `packages/registry-types/` -- shared type definitions for WASM command package descriptors. The registry software packages link to this package. When changing descriptor types, update here and rebuild the registry.
 - **npm scope**: `@rivet-dev/agent-os-*`
 - **Actor integration** lives in the Rivet repo at `rivetkit-typescript/packages/rivetkit/src/agent-os/`, not as a separate package

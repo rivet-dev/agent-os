@@ -31,7 +31,7 @@ export type {
 	StdioHook,
 	TimingMitigation,
 	VirtualFileSystem,
-} from "@rivet-dev/agent-os/internal/runtime-compat";
+} from "@rivet-dev/agent-os-core/internal/runtime-compat";
 export {
 	allowAll,
 	allowAllChildProcess,
@@ -54,4 +54,4 @@ export {
 	readDirWithTypes,
 	rename,
 	stat,
-} from "@rivet-dev/agent-os/internal/runtime-compat";
+} from "@rivet-dev/agent-os-core/internal/runtime-compat";

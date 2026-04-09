@@ -19,7 +19,7 @@
 	"devDependencies": {
 		"@biomejs/biome": "^2.3",
 		"@copilotkit/llmock": "^1.6.0",
-		"@rivet-dev/agent-os": "workspace:*",
+		"@rivet-dev/agent-os-core": "workspace:*",
 		"@rivet-dev/agent-os-claude": "workspace:*",
 		"@rivet-dev/agent-os-codex-agent": "workspace:*",
 		"@rivet-dev/agent-os-common": "workspace:*",
@@ -31,6 +31,6 @@
 		"typescript": "^5.9.2"
 	},
 	"resolutions": {
-		"@rivet-dev/agent-os": "workspace:*"
+		"@rivet-dev/agent-os-core": "workspace:*"
 	}
 }

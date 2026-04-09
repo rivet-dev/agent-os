@@ -11,10 +11,10 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
-import { AgentOs } from "@rivet-dev/agent-os";
+import { AgentOs } from "@rivet-dev/agent-os-core";
 import common, { coreutils } from "@rivet-dev/agent-os-common";
-import type { SandboxAgentContainerHandle } from "@rivet-dev/agent-os/test/docker";
-import { startSandboxAgentContainer } from "@rivet-dev/agent-os/test/docker";
+import type { SandboxAgentContainerHandle } from "@rivet-dev/agent-os-core/test/docker";
+import { startSandboxAgentContainer } from "@rivet-dev/agent-os-core/test/docker";
 import { createSandboxFs, createSandboxToolkit } from "../src/index.js";
 
 let sandbox: SandboxAgentContainerHandle;

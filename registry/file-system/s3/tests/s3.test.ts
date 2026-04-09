@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { AgentOs } from "@rivet-dev/agent-os";
-import type { MinioContainerHandle } from "@rivet-dev/agent-os/test/docker";
-import { startMinioContainer } from "@rivet-dev/agent-os/test/docker";
+import { AgentOs } from "@rivet-dev/agent-os-core";
+import type { MinioContainerHandle } from "@rivet-dev/agent-os-core/test/docker";
+import { startMinioContainer } from "@rivet-dev/agent-os-core/test/docker";
 import { createS3Backend } from "../src/index.js";
 
 let minio: MinioContainerHandle;

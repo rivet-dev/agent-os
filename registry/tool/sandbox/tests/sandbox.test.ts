@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { AgentOs } from "@rivet-dev/agent-os";
-import type { SandboxAgentContainerHandle } from "@rivet-dev/agent-os/test/docker";
-import { startSandboxAgentContainer } from "@rivet-dev/agent-os/test/docker";
+import { AgentOs } from "@rivet-dev/agent-os-core";
+import type { SandboxAgentContainerHandle } from "@rivet-dev/agent-os-core/test/docker";
+import { startSandboxAgentContainer } from "@rivet-dev/agent-os-core/test/docker";
 import { createSandboxFs, createSandboxToolkit } from "../src/index.js";
 
 let sandbox: SandboxAgentContainerHandle;

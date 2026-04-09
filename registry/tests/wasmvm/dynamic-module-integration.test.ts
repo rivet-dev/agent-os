@@ -10,8 +10,8 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { createWasmVmRuntime, WASMVM_COMMANDS } from '@rivet-dev/agent-os/test/runtime';
-import type { WasmVmRuntimeOptions } from '@rivet-dev/agent-os/test/runtime';
+import { createWasmVmRuntime, WASMVM_COMMANDS } from '@rivet-dev/agent-os-core/test/runtime';
+import type { WasmVmRuntimeOptions } from '@rivet-dev/agent-os-core/test/runtime';
 import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
 import type {
   DriverProcess,

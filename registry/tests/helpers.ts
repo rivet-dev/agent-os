@@ -48,7 +48,7 @@ export {
   SIGTERM,
   SOCK_DGRAM,
   SOCK_STREAM,
-} from "@rivet-dev/agent-os/test/runtime";
+} from "@rivet-dev/agent-os-core/test/runtime";
 export type {
   DriverProcess,
   Kernel,
@@ -56,17 +56,17 @@ export type {
   KernelRuntimeDriver,
   ProcessContext,
   VirtualFileSystem,
-} from "@rivet-dev/agent-os/test/runtime";
+} from "@rivet-dev/agent-os-core/test/runtime";
 export {
 	createWasmVmRuntime,
 	DEFAULT_FIRST_PARTY_TIERS,
 	WASMVM_COMMANDS,
 	type PermissionTier,
 	type WasmVmRuntimeOptions,
-} from "@rivet-dev/agent-os/test/runtime";
+} from "@rivet-dev/agent-os-core/test/runtime";
 export {
   createNodeHostNetworkAdapter,
   createNodeRuntime,
   NodeFileSystem,
   TerminalHarness,
-} from "@rivet-dev/agent-os/test/runtime";
+} from "@rivet-dev/agent-os-core/test/runtime";

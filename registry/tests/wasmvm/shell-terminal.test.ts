@@ -8,7 +8,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { TerminalHarness } from './terminal-harness.js';
-import { createWasmVmRuntime } from '@rivet-dev/agent-os/test/runtime';
+import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
 import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
 import type { Kernel } from "../helpers.js";
 

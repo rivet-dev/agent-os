@@ -4,7 +4,7 @@
  */
 
 import type { SandboxAgent } from "sandbox-agent";
-import type { HostTool, ToolKit } from "@rivet-dev/agent-os";
+import type { HostTool, ToolKit } from "@rivet-dev/agent-os-core";
 import { z } from "zod";
 
 export interface SandboxToolkitOptions {

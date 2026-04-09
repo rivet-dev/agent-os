@@ -11,8 +11,8 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "paths": {
-      "@rivet-dev/agent-os/internal/runtime-compat": ["../core/dist/runtime-compat.d.ts"],
-      "@rivet-dev/agent-os/test/runtime": ["../core/dist/test/runtime.d.ts"]
+      "@rivet-dev/agent-os-core/internal/runtime-compat": ["../core/dist/runtime-compat.d.ts"],
+      "@rivet-dev/agent-os-core/test/runtime": ["../core/dist/test/runtime.d.ts"]
     }
   },
   "include": ["src/**/*"],

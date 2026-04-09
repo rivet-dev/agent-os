@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { createWasmVmRuntime } from '@rivet-dev/agent-os/test/runtime';
+import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
 import {
   COMMANDS_DIR,
   C_BUILD_DIR,

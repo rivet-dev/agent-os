@@ -8,7 +8,7 @@
 // Optional:
 //   S3_ENDPOINT (for MinIO or other S3-compatible services)
 
-import { AgentOs } from "@rivet-dev/agent-os";
+import { AgentOs } from "@rivet-dev/agent-os-core";
 import { createS3Backend } from "@rivet-dev/agent-os-s3";
 
 const {

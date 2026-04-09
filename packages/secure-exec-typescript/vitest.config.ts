@@ -4,7 +4,7 @@ export default {
 	resolve: {
 		alias: [
 			{
-				find: "@rivet-dev/agent-os/internal/runtime-compat",
+				find: "@rivet-dev/agent-os-core/internal/runtime-compat",
 				replacement: resolve(__dirname, "../core/dist/runtime-compat.js"),
 			},
 			{

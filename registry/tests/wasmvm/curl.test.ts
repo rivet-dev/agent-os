@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
-import { createWasmVmRuntime } from '@rivet-dev/agent-os/test/runtime';
+import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
 import {
   allowAll,
   COMMANDS_DIR,

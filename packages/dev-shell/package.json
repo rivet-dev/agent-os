@@ -12,7 +12,7 @@
     "test": "NODE_OPTIONS=--max-old-space-size=256 vitest run --fileParallelism=false"
   },
   "dependencies": {
-    "@rivet-dev/agent-os": "workspace:*",
+    "@rivet-dev/agent-os-core": "workspace:*",
     "pino": "^10.3.1"
   },
   "devDependencies": {

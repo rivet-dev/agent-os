@@ -11,7 +11,7 @@
 //     }],
 //   });
 
-import { AgentOs } from "@rivet-dev/agent-os";
+import { AgentOs } from "@rivet-dev/agent-os-core";
 
 const vm = await AgentOs.create();
 

@@ -11,7 +11,7 @@ import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer, type Server as HttpServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { createWasmVmRuntime } from '@rivet-dev/agent-os/test/runtime';
+import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
 import {
   allowAll,
   COMMANDS_DIR,

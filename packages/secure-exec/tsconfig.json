@@ -9,7 +9,7 @@
 		"outDir": "./dist",
 		"rootDir": "./src",
 		"paths": {
-			"@rivet-dev/agent-os/internal/runtime-compat": [
+			"@rivet-dev/agent-os-core/internal/runtime-compat": [
 				"../core/dist/runtime-compat.d.ts"
 			]
 		}
