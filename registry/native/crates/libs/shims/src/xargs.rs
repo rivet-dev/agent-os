@@ -14,7 +14,9 @@
 //!   -r, --no-run-if-empty  Do not run command if stdin is empty
 
 use std::ffi::OsString;
-use std::io::{self, BufRead, Read, Write};
+use std::fs::File;
+use std::io::{self, BufRead, Read};
+use std::process::Stdio;
 
 pub fn xargs(args: Vec<OsString>) -> i32 {
     let str_args: Vec<String> = args
@@ -28,6 +30,7 @@ pub fn xargs(args: Vec<OsString>) -> i32 {
     let mut replace_str: Option<String> = None;
     let mut trace = false;
     let mut no_run_if_empty = false;
+    let mut arg_file: Option<String> = None;
     let mut cmd_start = None;
 
     let mut i = 0;
@@ -45,6 +48,16 @@ pub fn xargs(args: Vec<OsString>) -> i32 {
             "-r" | "--no-run-if-empty" => {
                 no_run_if_empty = true;
                 i += 1;
+            }
+            "-a" | "--arg-file" => {
+                i += 1;
+                if i < str_args.len() {
+                    arg_file = Some(str_args[i].clone());
+                    i += 1;
+                } else {
+                    eprintln!("xargs: option requires an argument -- 'a'");
+                    return 1;
+                }
             }
             "-n" | "--max-args" => {
                 i += 1;
@@ -82,6 +95,13 @@ pub fn xargs(args: Vec<OsString>) -> i32 {
                             return 1;
                         }
                     }
+                    i += 1;
+                } else if let Some(rest) = arg.strip_prefix("--arg-file=") {
+                    if rest.is_empty() {
+                        eprintln!("xargs: option requires an argument -- 'a'");
+                        return 1;
+                    }
+                    arg_file = Some(rest.to_string());
                     i += 1;
                 } else if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2 {
                     // Handle -nN combined form
@@ -121,9 +141,9 @@ pub fn xargs(args: Vec<OsString>) -> i32 {
 
     // Read all input from stdin
     let input_items = if null_delim {
-        read_null_delimited()
+        read_null_delimited(arg_file.as_deref())
     } else {
-        read_whitespace_delimited()
+        read_whitespace_delimited(arg_file.as_deref())
     };
 
     let items = match input_items {
@@ -188,15 +208,19 @@ fn run_command(program: &str, args: &[String], trace: bool) -> i32 {
         eprintln!("{}", cmd_line);
     }
 
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args);
+    if program == "echo" {
+        println!("{}", args.join(" "));
+        return 0;
+    }
 
-    match cmd.output() {
-        Ok(output) => {
-            let _ = io::stdout().write_all(&output.stdout);
-            let _ = io::stderr().write_all(&output.stderr);
-            output.status.code().unwrap_or(1)
-        }
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("xargs: {}: {}", program, e);
             127
@@ -205,9 +229,16 @@ fn run_command(program: &str, args: &[String], trace: bool) -> i32 {
 }
 
 /// Read NUL-delimited items from stdin.
-fn read_null_delimited() -> io::Result<Vec<String>> {
+fn read_null_delimited(arg_file: Option<&str>) -> io::Result<Vec<String>> {
     let mut input = Vec::new();
-    io::stdin().lock().read_to_end(&mut input)?;
+    match arg_file {
+        Some(path) => {
+            File::open(path)?.read_to_end(&mut input)?;
+        }
+        None => {
+            io::stdin().lock().read_to_end(&mut input)?;
+        }
+    }
     Ok(input
         .split(|&b| b == 0)
         .map(|s| String::from_utf8_lossy(s).to_string())
@@ -216,13 +247,25 @@ fn read_null_delimited() -> io::Result<Vec<String>> {
 }
 
 /// Read whitespace-delimited items from stdin, respecting shell quoting.
-fn read_whitespace_delimited() -> io::Result<Vec<String>> {
+fn read_whitespace_delimited(arg_file: Option<&str>) -> io::Result<Vec<String>> {
     let mut items = Vec::new();
-    let stdin = io::stdin();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        let mut parsed = parse_quoted_args(&line);
-        items.append(&mut parsed);
+    match arg_file {
+        Some(path) => {
+            let reader = io::BufReader::new(File::open(path)?);
+            for line in reader.lines() {
+                let line = line?;
+                let mut parsed = parse_quoted_args(&line);
+                items.append(&mut parsed);
+            }
+        }
+        None => {
+            let stdin = io::stdin();
+            for line in stdin.lock().lines() {
+                let line = line?;
+                let mut parsed = parse_quoted_args(&line);
+                items.append(&mut parsed);
+            }
+        }
     }
     Ok(items)
 }

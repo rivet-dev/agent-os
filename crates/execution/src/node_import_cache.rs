@@ -7889,6 +7889,10 @@ const WASI_ERRNO_ROFS = 69;
 const WASI_ERRNO_SRCH = 71;
 const WASI_ERRNO_FAULT = 21;
 const WASI_RIGHT_FD_WRITE = 64n;
+const WASI_OFLAGS_CREAT = 1;
+const WASI_OFLAGS_DIRECTORY = 2;
+const WASI_OFLAGS_EXCL = 4;
+const WASI_OFLAGS_TRUNC = 8;
 const WASM_PAGE_BYTES = 65536;
 
 function isPathLike(specifier) {
@@ -8220,6 +8224,15 @@ function hasWriteRights(rights) {
   } catch {
     return true;
   }
+}
+
+function hasMutationOpenFlags(oflags) {
+  const normalized = Number(oflags) >>> 0;
+  return (
+    (normalized & WASI_OFLAGS_CREAT) !== 0 ||
+    (normalized & WASI_OFLAGS_EXCL) !== 0 ||
+    (normalized & WASI_OFLAGS_TRUNC) !== 0
+  );
 }
 
 function denyReadOnlyMutation() {
@@ -9361,7 +9374,7 @@ if (delegatePathOpen) {
   ) => {
     if (
       isWorkspaceReadOnly() &&
-      (Number(oflags) !== 0 || hasWriteRights(rightsBase))
+      (hasMutationOpenFlags(oflags) || hasWriteRights(rightsBase))
     ) {
       return denyReadOnlyMutation();
     }

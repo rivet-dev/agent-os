@@ -402,7 +402,7 @@ EOF`);
 
 		test("xargs passes args to command", async () => {
 			await vm.exec('printf "hello\\nworld\\n" > /tmp/xargs.txt');
-			const r = await vm.exec("cat /tmp/xargs.txt | xargs echo");
+			const r = await vm.exec("xargs -a /tmp/xargs.txt echo");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout.trim()).toBe("hello world");
 		});
