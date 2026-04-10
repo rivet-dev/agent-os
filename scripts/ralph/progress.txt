@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- For the OpenCode ACP Node bundle in `registry/agent/opencode/scripts/build-opencode-acp.mjs`, run result-returning SQLite PRAGMAs through `db.$client.exec(...)` instead of drizzle `db.run(...)`; the VM `node:sqlite` shim treats `journal_mode`, `busy_timeout`, `foreign_keys`, and `wal_checkpoint` as row-returning queries and will break `createSession("opencode")` otherwise.
 - The current Pi SDK truth path is `pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts tests/session-cleanup.test.ts -t "Pi SDK"` plus root `pnpm check-types`; if those pass, the write-tool, bash-tool, prompt lifecycle, and cleanup coverage for `US-029` is green on this branch.
 - Pi CLI concurrent `createSession()` coverage can report the same host PID for multiple sessions because the ACP adapter shares one V8 runtime child; in `packages/core/tests/session-cleanup.test.ts`, only unique host PIDs should be treated as dedicated session roots when asserting post-close cleanup.
 - The renamed core workspace package is `@rivet-dev/agent-os-core`; use that name for both package dependencies and TypeScript subpath imports like `@rivet-dev/agent-os-core/test/*` and `@rivet-dev/agent-os-core/internal/runtime-compat`.
@@ -66,4 +67,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Pi CLI can multiplex multiple ACP sessions through one shared V8 host child, so `getSessionState().pid` is not guaranteed to be unique per session during concurrent cleanup tests.
   - For session-cleanup assertions, only host PIDs unique to a session should be treated as dedicated session roots; otherwise the test can mistake shared runtime context for leaked per-session processes.
   - The active truth path for this story is `pnpm --dir packages/core exec vitest run tests/pi-cli-headless.test.ts tests/session-cleanup.test.ts -t "Pi CLI"` plus root `pnpm check-types`.
+---
+## 2026-04-09 20:22:43 PDT - US-031
+- Fixed the OpenCode `session/new` handshake inside the VM by patching the generated Node ACP source rewrite so its SQLite bootstrap uses `db.$client.exec(...)` for PRAGMA setup statements instead of drizzle `db.run(...)`. This avoids the VM `node:sqlite` shim throwing on row-returning PRAGMAs during OpenCode database initialization.
+- Scoped the OpenCode session test names so the PRD acceptance command now selects a single createSession happy-path test instead of pulling in later write/bash/lifecycle stories, while keeping the broader OpenCode integration coverage in the same file for follow-on work.
+- Files changed: `packages/core/tests/opencode-session.test.ts`, `registry/AGENTS.md`, `registry/agent/opencode/scripts/build-opencode-acp.mjs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - OpenCode `createSession("opencode")` failures can be debugged quickest by manually spawning `/root/node_modules/@rivet-dev/agent-os-opencode/dist/adapter.js` inside a VM and sending raw ACP `initialize` / `session/new` messages; the adapter stderr exposes the real underlying error instead of the sidecar's generic `Internal error`.
+  - The VM `node:sqlite` path is stricter than the host path for PRAGMAs that return rows, so OpenCode bundle patches should prefer the raw `$client.exec(...)` API for bootstrap PRAGMA statements.
+  - Vitest `-t` filters are regexes, so story-gated test names should avoid unescaped literal parentheses when the PRD acceptance command includes them verbatim.
 ---

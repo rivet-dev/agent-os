@@ -86,10 +86,62 @@ async function createOpenCodeVm(mockUrl: string): Promise<AgentOs> {
 	});
 }
 
-describe.skipIf(registrySkipReason)(
-	"full createSession('opencode') inside the VM",
-	() => {
-		test("runs the real OpenCode ACP flow end-to-end for write tool calls", async () => {
+describe.skipIf(registrySkipReason)("OpenCode session API integration", () => {
+	test("full createSession'opencode' inside the VM", async () => {
+		const { mock, url } = await startLlmock([DEFAULT_TEXT_FIXTURE]);
+		const vm = await createOpenCodeVm(url);
+
+		let sessionId: string | undefined;
+		try {
+			const homeDir = await createVmOpenCodeHome(vm, url);
+			const workspaceDir = await createVmWorkspace(vm);
+			sessionId = (
+				await vm.createSession("opencode", {
+					cwd: workspaceDir,
+					env: {
+						HOME: homeDir,
+						ANTHROPIC_API_KEY: "mock-key",
+					},
+				})
+			).sessionId;
+
+			const agentInfo = vm.getSessionAgentInfo(sessionId) as AgentInfo;
+			expect(agentInfo.name).toBe("OpenCode");
+			expect(agentInfo.version).toBeTruthy();
+
+			const capabilities = vm.getSessionCapabilities(
+				sessionId,
+			) as AgentCapabilities;
+			expect(capabilities.promptCapabilities).toMatchObject({
+				embeddedContext: true,
+				image: true,
+			});
+
+			const modes = vm.getSessionModes(sessionId);
+			expect(modes?.currentModeId).toBe("build");
+			expect(modes?.availableModes.map((mode) => mode.id)).toEqual(
+				expect.arrayContaining(["build", "plan"]),
+			);
+
+			const configOptions = vm.getSessionConfigOptions(sessionId);
+			expect(
+				configOptions.some((option) => option.category === "model"),
+			).toBe(true);
+
+			expect(vm.listSessions()).toContainEqual({
+				sessionId,
+				agentType: "opencode",
+			});
+		} finally {
+			if (sessionId) {
+				vm.closeSession(sessionId);
+			}
+			await vm.dispose();
+			await stopLlmock(mock);
+		}
+	}, 120_000);
+
+	test("runs the real OpenCode ACP flow end-to-end for write tool calls", async () => {
 			const fixtures = createToolFixtures(
 				{
 					name: "write",
@@ -170,9 +222,9 @@ describe.skipIf(registrySkipReason)(
 				await vm.dispose();
 				await stopLlmock(mock);
 			}
-		}, 120_000);
+	}, 120_000);
 
-		test("runs the real OpenCode ACP flow end-to-end for bash tool calls", async () => {
+	test("runs the real OpenCode ACP flow end-to-end for bash tool calls", async () => {
 			const fixtures = createToolFixtures(
 				{
 					name: "bash",
@@ -218,9 +270,9 @@ describe.skipIf(registrySkipReason)(
 				await vm.dispose();
 				await stopLlmock(mock);
 			}
-		}, 120_000);
+	}, 120_000);
 
-		test("integrates OpenCode session metadata, plan mode, and lifecycle into the Agent OS session API", async () => {
+	test("integrates OpenCode session metadata, plan mode, and lifecycle into the Agent OS session API", async () => {
 			const { mock, url } = await startLlmock([DEFAULT_TEXT_FIXTURE]);
 			const vm = await createOpenCodeVm(url);
 
@@ -308,9 +360,9 @@ describe.skipIf(registrySkipReason)(
 				await vm.dispose();
 				await stopLlmock(mock);
 			}
-		}, 120_000);
+	}, 120_000);
 
-		test("surfaces OpenCode cancelSession() honestly through the Agent OS session API", async () => {
+	test("surfaces OpenCode cancelSession() honestly through the Agent OS session API", async () => {
 			const { mock, url } = await startLlmock([
 				{
 					match: { predicate: () => true },
@@ -378,9 +430,9 @@ describe.skipIf(registrySkipReason)(
 				await vm.dispose();
 				await stopLlmock(mock);
 			}
-		}, 120_000);
+	}, 120_000);
 
-		test("supports real OpenCode permission approval through the Agent OS session API", async () => {
+	test("supports real OpenCode permission approval through the Agent OS session API", async () => {
 			const fixtures = createToolFixtures(
 				{
 					name: "bash",
@@ -447,9 +499,9 @@ describe.skipIf(registrySkipReason)(
 				await vm.dispose();
 				await stopLlmock(mock);
 			}
-		}, 120_000);
+	}, 120_000);
 
-		test("supports real OpenCode permission rejection through the Agent OS session API", async () => {
+	test("supports real OpenCode permission rejection through the Agent OS session API", async () => {
 			const toolCall = {
 				name: "bash",
 				arguments: JSON.stringify({
@@ -528,9 +580,9 @@ describe.skipIf(registrySkipReason)(
 				await vm.dispose();
 				await stopLlmock(mock);
 			}
-		}, 120_000);
+	}, 120_000);
 
-		test("supports rawSend() mode changes through the Agent OS session API", async () => {
+	test("supports rawSend() mode changes through the Agent OS session API", async () => {
 			const { mock, url } = await startLlmock([DEFAULT_TEXT_FIXTURE]);
 			const vm = await createOpenCodeVm(url);
 
@@ -639,6 +691,5 @@ describe.skipIf(registrySkipReason)(
 				await vm.dispose();
 				await stopLlmock(mock);
 			}
-		}, 120_000);
-	},
-);
+	}, 120_000);
+});

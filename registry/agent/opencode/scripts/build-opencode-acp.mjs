@@ -1888,8 +1888,28 @@ export function makeRuntime<I, S, E>(service: ServiceMap.Service<I, S>, layer: L
         return toolInfo
 `,
 				),
+		);
+
+	await rewriteSourceFile(
+		sourceRoot,
+		"packages/opencode/src/storage/db.ts",
+		(contents) =>
+			contents.replace(
+				`    db.run("PRAGMA journal_mode = WAL")
+    db.run("PRAGMA synchronous = NORMAL")
+    db.run("PRAGMA busy_timeout = 5000")
+    db.run("PRAGMA cache_size = -64000")
+    db.run("PRAGMA foreign_keys = ON")
+    db.run("PRAGMA wal_checkpoint(PASSIVE)")`,
+				`    db.$client.exec("PRAGMA journal_mode = WAL")
+    db.$client.exec("PRAGMA synchronous = NORMAL")
+    db.$client.exec("PRAGMA busy_timeout = 5000")
+    db.$client.exec("PRAGMA cache_size = -64000")
+    db.$client.exec("PRAGMA foreign_keys = ON")
+    db.$client.exec("PRAGMA wal_checkpoint(PASSIVE)")`,
+			),
 	);
-	}
+}
 
 	await rewriteSourceFile(
 		sourceRoot,

@@ -56,6 +56,7 @@ The following packages exist but **cannot be compiled** until a patched wasi-lib
 To unblock the remaining C packages: run `cd native && ./scripts/patch-wasi-libc.sh` to build the patched sysroot, then `cd .. && make build-wasm-c copy-wasm`.
 
 The published `@rivet-dev/agent-os-curl` package is currently backed by the Rust `native/crates/commands/curl/` binary built on `crates/libs/wasi-http`. Keep curl CLI compatibility fixes there until the patched-sysroot C curl path is restored.
+When patching the OpenCode ACP Node bundle in `registry/agent/opencode/scripts/build-opencode-acp.mjs`, run result-returning SQLite PRAGMAs through `db.$client.exec(...)` instead of drizzle `db.run(...)`. The VM `node:sqlite` shim treats `journal_mode`, `busy_timeout`, `foreign_keys`, and `wal_checkpoint` as queries with rows, so `db.run(...)` breaks `createSession("opencode")` during database bootstrap.
 
 ### Meta-packages
 
