@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- The host-tool description limit is a shared boundary contract: keep the 200-character maximum aligned between `packages/core/src/host-tools.ts` and Rust sidecar `register_toolkit` validation in `crates/sidecar/src/tools.rs`, and cover boundary acceptance/rejection on both sides.
 - `HostDirFilesystem` mutations should stay on the anchored `openat2(... RESOLVE_BENEATH ...)` path and then operate through the `/proc/self/fd/<fd>` handle; that keeps direct operations like `pwrite` host-backed without reintroducing path-escape races or falling back to whole-file rewrites.
 - For `RootFilesystemDescriptor`, order `lowers` from highest to lowest precedence and let `bootstrap_entries` act like the single writable upper; bootstrap directory entries must be applied with `mkdir`-style semantics so upper snapshots can repeat lower directories without failing on `EEXIST`.
 - Cross-workspace Vitest suites such as `registry/tests/*` load `@rivet-dev/agent-os-core` from `packages/core/dist`; after changing exported runtime-compat/test-runtime code, rebuild `packages/core` before trusting those results.
@@ -401,4 +402,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Host-dir positional writes should use `FileExt::write_at` on an already anchored handle instead of the generic `VirtualFileSystem::pwrite` fallback, because the fallback rewrites the whole file and bypasses the host-backed direct-write path this plugin is supposed to exercise.
   - Escape hardening for host-dir writes is best verified with an actual symlink out of the mounted root; using `openat2` with `RESOLVE_BENEATH` keeps both ordinary writes and `pwrite` on the same fail-closed path.
   - The active truth path for this story is `cargo test -p agent-os-sidecar --test host_dir` and root `pnpm check-types`.
+---
+## 2026-04-10 06:29:41 PDT - US-063
+- Enforced the 200-character host-tool description limit in Rust sidecar toolkit registration so oversized toolkit and tool metadata are rejected before `register_toolkit` publishes CLI metadata or prompt markdown.
+- Added focused boundary coverage on both sides of the boundary: Rust `tools.rs` unit tests now cover exact-limit acceptance plus toolkit/tool rejection, and `packages/core/tests/host-tools.test.ts` locks the exported TypeScript limit and matching rejection behavior.
+- Files changed: `crates/sidecar/src/tools.rs`, `packages/core/AGENTS.md`, `packages/core/tests/host-tools.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Host-tool metadata limits are a cross-boundary compatibility rule, not just a TypeScript convenience check; if Rust accepts longer descriptions than `validateToolkits()`, the sidecar CLI and prompt docs drift from the public SDK contract.
+  - Boundary coverage needs both toolkit-level and per-tool rejection cases, because both descriptions flow into `agentos list-tools` output and prompt reference generation.
+  - The active truth path for this story is `cargo test -p agent-os-sidecar --lib tools::tests::`, `pnpm --dir packages/core exec vitest run tests/host-tools.test.ts`, and root `pnpm check-types`.
 ---

@@ -16,6 +16,7 @@
 - Native sidecar `exec()` should stay a thin `sh -c` wrapper when the guest shell exists. Do not reintroduce TypeScript tokenization or `node` special-casing in `src/sidecar/rpc-client.ts`.
 - If a file must be visible to both `vm.readFile()` and guest shell commands, it cannot live only in a local compat mount. Put it on a real sidecar-visible path or mount, and keep any read-only guarantees enforced below the TypeScript proxy layer.
 - Host tool registration is split across the boundary: TypeScript converts Zod schemas to JSON Schema, validates sidecar tool invocations, and runs the local `execute()` callbacks, while the sidecar owns CLI flag parsing, `agentos` command dispatch, and prompt-markdown generation via `register_toolkit`.
+- The host-tool description limit is a cross-boundary contract: keep the 200-character maximum aligned between `src/host-tools.ts` and Rust `register_toolkit` validation in `crates/sidecar/src/tools.rs`, with boundary tests on both sides when changing it.
 - `src/sidecar/rpc-client.ts` is the consolidated home for framed sidecar I/O, compat proxy helpers, and sidecar descriptor serializers. Keep shared/explicit sidecar pool and VM lease bookkeeping in `src/agent-os.ts` rather than reintroducing another sidecar lifecycle layer.
 - Public SDK type exports now funnel through `src/types.ts`; keep legacy kernel/runtime implementation helpers behind `src/runtime-compat.ts` and avoid adding new public root exports directly from runtime internals.
 

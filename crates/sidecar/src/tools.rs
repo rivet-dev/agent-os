@@ -13,6 +13,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const MAX_TOOL_DESCRIPTION_LENGTH: usize = 200;
 
 #[derive(Debug)]
 pub(crate) enum ToolCommandResolution {
@@ -47,28 +48,7 @@ where
     let (connection_id, session_id, vm_id) = sidecar.vm_scope_for(&request.ownership)?;
     sidecar.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
-    validate_toolkit_name(&payload.name)?;
-    if payload.description.is_empty() {
-        return Err(SidecarError::InvalidState(format!(
-            "toolkit {} is missing a description",
-            payload.name
-        )));
-    }
-    if payload.tools.is_empty() {
-        return Err(SidecarError::InvalidState(format!(
-            "toolkit {} must define at least one tool",
-            payload.name
-        )));
-    }
-    for (tool_name, tool) in &payload.tools {
-        validate_tool_name(tool_name)?;
-        if tool.description.is_empty() {
-            return Err(SidecarError::InvalidState(format!(
-                "tool {} in toolkit {} is missing a description",
-                tool_name, payload.name
-            )));
-        }
-    }
+    validate_toolkit_registration(&payload)?;
 
     let registered_name = payload.name.clone();
     let (command_count, prompt_markdown) = {
@@ -828,6 +808,50 @@ fn validate_tool_name(name: &str) -> Result<(), SidecarError> {
     Ok(())
 }
 
+fn validate_toolkit_registration(payload: &RegisterToolkitRequest) -> Result<(), SidecarError> {
+    validate_toolkit_name(&payload.name)?;
+    if payload.description.is_empty() {
+        return Err(SidecarError::InvalidState(format!(
+            "toolkit {} is missing a description",
+            payload.name
+        )));
+    }
+    validate_description_length(
+        &format!("Toolkit \"{}\"", payload.name),
+        &payload.description,
+    )?;
+    if payload.tools.is_empty() {
+        return Err(SidecarError::InvalidState(format!(
+            "toolkit {} must define at least one tool",
+            payload.name
+        )));
+    }
+    for (tool_name, tool) in &payload.tools {
+        validate_tool_name(tool_name)?;
+        if tool.description.is_empty() {
+            return Err(SidecarError::InvalidState(format!(
+                "tool {} in toolkit {} is missing a description",
+                tool_name, payload.name
+            )));
+        }
+        validate_description_length(
+            &format!("Tool \"{}/{}\"", payload.name, tool_name),
+            &tool.description,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_description_length(label: &str, description: &str) -> Result<(), SidecarError> {
+    if description.len() > MAX_TOOL_DESCRIPTION_LENGTH {
+        return Err(SidecarError::InvalidState(format!(
+            "{label} description is {} characters, max is {MAX_TOOL_DESCRIPTION_LENGTH}",
+            description.len()
+        )));
+    }
+    Ok(())
+}
+
 enum ToolCommand {
     Master,
     Toolkit(String),
@@ -836,6 +860,7 @@ enum ToolCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn screenshot_schema() -> Value {
         json!({
@@ -900,5 +925,72 @@ mod tests {
         assert!(markdown.contains("agentos list-tools"));
         assert!(markdown.contains("agentos-browser screenshot"));
         assert!(markdown.contains("--url <string>"));
+    }
+
+    fn registered_tool(description: String) -> RegisteredToolDefinition {
+        RegisteredToolDefinition {
+            description,
+            input_schema: screenshot_schema(),
+            timeout_ms: None,
+            examples: Vec::new(),
+        }
+    }
+
+    fn toolkit_with_descriptions(
+        toolkit_description: String,
+        tool_description: String,
+    ) -> RegisterToolkitRequest {
+        RegisterToolkitRequest {
+            name: String::from("browser"),
+            description: toolkit_description,
+            tools: BTreeMap::from([(
+                String::from("screenshot"),
+                registered_tool(tool_description),
+            )]),
+        }
+    }
+
+    #[test]
+    fn accepts_toolkit_and_tool_descriptions_at_length_limit() {
+        let description = "a".repeat(MAX_TOOL_DESCRIPTION_LENGTH);
+        let payload = toolkit_with_descriptions(description.clone(), description);
+
+        validate_toolkit_registration(&payload).expect("description at limit should pass");
+    }
+
+    #[test]
+    fn rejects_toolkit_description_longer_than_limit() {
+        let payload = toolkit_with_descriptions(
+            "a".repeat(MAX_TOOL_DESCRIPTION_LENGTH + 1),
+            String::from("Take a screenshot"),
+        );
+
+        let error = validate_toolkit_registration(&payload).expect_err("long toolkit rejected");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Toolkit \"browser\" description is {} characters, max is {}",
+                MAX_TOOL_DESCRIPTION_LENGTH + 1,
+                MAX_TOOL_DESCRIPTION_LENGTH
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_tool_description_longer_than_limit() {
+        let payload = toolkit_with_descriptions(
+            String::from("Browser automation"),
+            "a".repeat(MAX_TOOL_DESCRIPTION_LENGTH + 1),
+        );
+
+        let error = validate_toolkit_registration(&payload).expect_err("long tool rejected");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Tool \"browser/screenshot\" description is {} characters, max is {}",
+                MAX_TOOL_DESCRIPTION_LENGTH + 1,
+                MAX_TOOL_DESCRIPTION_LENGTH
+            )
+        );
     }
 }
