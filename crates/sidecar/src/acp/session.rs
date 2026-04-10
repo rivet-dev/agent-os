@@ -103,7 +103,16 @@ impl AcpSessionState {
         {
             config_options = overrides.clone();
         }
-        config_options.extend(derive_config_options(&agent_type, session_result));
+        let has_model_option = config_options.iter().any(|option| {
+            option.as_object().is_some_and(|map| {
+                map.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == "model")
+            })
+        });
+        if !has_model_option {
+            config_options.extend(derive_config_options(&agent_type, session_result));
+        }
 
         Self {
             session_id,

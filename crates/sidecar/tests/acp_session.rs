@@ -89,6 +89,53 @@ fn session(agent_type: &str) -> AcpSessionState {
     )
 }
 
+fn codex_session_with_standard_model_option() -> AcpSessionState {
+    AcpSessionState::new(
+        String::from("mock-agent-session"),
+        String::from("vm-1"),
+        String::from("codex"),
+        String::from("acp-agent-1"),
+        None,
+        &sample_init_result(),
+        &Map::from_iter([
+            (String::from("sessionId"), json!("mock-agent-session")),
+            (
+                String::from("configOptions"),
+                json!([
+                    {
+                        "id": "model",
+                        "category": "model",
+                        "label": "Model",
+                        "currentValue": "gpt-5-codex",
+                    },
+                    {
+                        "id": "thought_level",
+                        "category": "thought_level",
+                        "label": "Thought Level",
+                        "currentValue": "medium",
+                    },
+                ]),
+            ),
+            (
+                String::from("models"),
+                json!({
+                    "currentModelId": "gpt-5-codex",
+                    "availableModels": [
+                        {
+                            "modelId": "gpt-5-codex",
+                            "name": "Codex Default",
+                        },
+                        {
+                            "modelId": "gpt-5.4",
+                            "name": "GPT-5.4",
+                        },
+                    ],
+                }),
+            ),
+        ]),
+    )
+}
+
 #[test]
 fn session_state_tracks_metadata_and_derived_model_option() {
     let session = session("pi");
@@ -114,6 +161,26 @@ fn session_state_tracks_metadata_and_derived_model_option() {
     assert_eq!(state.process_id, "acp-agent-1");
     assert!(!state.closed);
     assert!(state.events.is_empty());
+}
+
+#[test]
+fn session_state_does_not_duplicate_existing_model_options() {
+    let session = codex_session_with_standard_model_option();
+    let model_options = session
+        .created_response()
+        .config_options
+        .into_iter()
+        .filter(|option| {
+            option
+                .get("category")
+                .and_then(Value::as_str)
+                .is_some_and(|category| category == "model")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(model_options.len(), 1);
+    assert_eq!(model_options[0]["id"], "model");
+    assert_eq!(model_options[0]["currentValue"], "gpt-5-codex");
 }
 
 #[test]

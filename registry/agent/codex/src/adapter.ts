@@ -332,6 +332,11 @@ class CodexAgent implements Agent {
 	private readonly sessions = new Map<string, CodexSessionState>();
 
 	constructor(private readonly conn: AgentSideConnection) {
+		this.setSessionMode = this.setSessionMode.bind(this);
+		this.setSessionConfigOption = this.setSessionConfigOption.bind(this);
+		this.prompt = this.prompt.bind(this);
+		this.cancel = this.cancel.bind(this);
+
 		setTimeout(() => {
 			void this.conn.closed.then(() => {
 				for (const session of this.sessions.values()) {
@@ -461,6 +466,23 @@ class CodexAgent implements Agent {
 				{ sessionId: session.sessionId },
 				"session already has an active prompt",
 			);
+		}
+
+		const meta =
+			params._meta && typeof params._meta === "object"
+				? (params._meta as Record<string, unknown>)
+				: null;
+		const config =
+			meta?.agentOsCodexConfig &&
+			typeof meta.agentOsCodexConfig === "object" &&
+			!Array.isArray(meta.agentOsCodexConfig)
+				? (meta.agentOsCodexConfig as Record<string, unknown>)
+				: null;
+		if (typeof config?.model === "string") {
+			session.model = config.model;
+		}
+		if (typeof config?.thought_level === "string") {
+			session.thoughtLevel = config.thought_level;
 		}
 
 		const promptText = (params.prompt ?? [])

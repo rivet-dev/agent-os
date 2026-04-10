@@ -255,6 +255,7 @@ interface AgentSessionEntry {
 	events: SequencedEvent[];
 	eventHandlers: Set<SessionEventHandler>;
 	permissionHandlers: Set<PermissionRequestHandler>;
+	configOverrides: Map<string, string>;
 	pendingPermissionReplies: Map<
 		string,
 		{
@@ -527,6 +528,7 @@ function sessionEntryFromInit(
 		events: [],
 		eventHandlers: new Set(),
 		permissionHandlers: new Set(),
+		configOverrides: new Map(),
 		pendingPermissionReplies: new Map(),
 	};
 }
@@ -2411,6 +2413,7 @@ export class AgentOs {
 		session.closed = state.closed;
 		session.modes = toSessionModes(state.modes);
 		session.configOptions = toSessionConfigOptions(state.configOptions);
+		this._applySyntheticConfigOverrides(session);
 		session.capabilities = toAgentCapabilities(state.agentCapabilities);
 		session.agentInfo = toAgentInfo(state.agentInfo);
 		session.events = mergeSequencedEvents(
@@ -2495,6 +2498,104 @@ export class AgentOs {
 		}
 	}
 
+	private _nextSyntheticSequenceNumber(session: AgentSessionEntry): number {
+		return (
+			Math.min(0, ...session.events.map((event) => event.sequenceNumber)) - 1
+		);
+	}
+
+	private _applySyntheticConfigOverrides(session: AgentSessionEntry): void {
+		if (session.configOverrides.size === 0) {
+			return;
+		}
+
+		session.configOptions = session.configOptions.map((option) => {
+			const override =
+				session.configOverrides.get(option.id) ??
+				(typeof option.category === "string"
+					? session.configOverrides.get(option.category)
+					: undefined);
+			return override === undefined
+				? option
+				: { ...option, currentValue: override };
+		});
+	}
+
+	private _recordSyntheticConfigUpdate(session: AgentSessionEntry): void {
+		this._recordSessionNotification(
+			session,
+			this._nextSyntheticSequenceNumber(session),
+			{
+				jsonrpc: "2.0",
+				method: "session/update",
+				params: {
+					update: {
+						sessionUpdate: "config_option_update",
+						configOptions: session.configOptions,
+					},
+				},
+			},
+		);
+	}
+
+	private _applyCodexConfigFallback(
+		session: AgentSessionEntry,
+		category: string,
+		value: string,
+	): JsonRpcResponse {
+		const option = session.configOptions.find(
+			(entry) => entry.category === category,
+		);
+		if (option) {
+			session.configOverrides.set(option.id, value);
+		}
+		session.configOverrides.set(category, value);
+		this._applySyntheticConfigOverrides(session);
+		this._recordSyntheticConfigUpdate(session);
+		return {
+			jsonrpc: "2.0",
+			id: null,
+			result: {
+				configOptions: session.configOptions,
+				via: "codex-config-fallback",
+			},
+		};
+	}
+
+	private _augmentPromptParams(
+		session: AgentSessionEntry,
+		params?: Record<string, unknown>,
+	): Record<string, unknown> | undefined {
+		if (session.agentType !== "codex") {
+			return params;
+		}
+
+		const model = session.configOptions.find(
+			(option) => option.category === "model",
+		)?.currentValue;
+		const thoughtLevel = session.configOptions.find(
+			(option) => option.category === "thought_level",
+		)?.currentValue;
+		if (!model && !thoughtLevel) {
+			return params;
+		}
+
+		const meta =
+			params?._meta && typeof params._meta === "object" && !Array.isArray(params._meta)
+				? { ...(params._meta as Record<string, unknown>) }
+				: {};
+		meta.agentOsCodexConfig = {
+			...(typeof model === "string" ? { model } : {}),
+			...(typeof thoughtLevel === "string"
+				? { thought_level: thoughtLevel }
+				: {}),
+		};
+		return {
+			...(params ?? {}),
+			_meta: meta,
+		};
+	}
+
 	private _handleSidecarEvent(
 		event: Parameters<NativeSidecarProcessClient["onEvent"]>[0] extends (
 			event: infer T,
@@ -2560,6 +2661,10 @@ export class AgentOs {
 		params?: Record<string, unknown>,
 	): Promise<JsonRpcResponse> {
 		const session = this._requireSession(sessionId);
+		const requestParams =
+			method === "session/prompt"
+				? this._augmentPromptParams(session, params)
+				: params;
 		const response = await new Promise<JsonRpcResponse>((resolve, reject) => {
 			const resolvers =
 				this._pendingSessionRequestResolvers.get(sessionId) ?? new Set();
@@ -2573,7 +2678,7 @@ export class AgentOs {
 				.sessionRequest(this._sidecarSession, this._sidecarVm, {
 					sessionId,
 					method,
-					params,
+					params: requestParams,
 				})
 				.then(resolve, reject)
 				.finally(() => {
@@ -2592,22 +2697,22 @@ export class AgentOs {
 		if (!response.error) {
 			if (
 				method === "session/set_mode" &&
-				typeof params?.modeId === "string" &&
+				typeof requestParams?.modeId === "string" &&
 				session.modes
 			) {
 				session.modes = {
 					...session.modes,
-					currentModeId: params.modeId,
+					currentModeId: requestParams.modeId,
 				};
 			}
 			if (
 				method === "session/set_config_option" &&
-				typeof params?.configId === "string" &&
-				typeof params?.value === "string"
+				typeof requestParams?.configId === "string" &&
+				typeof requestParams?.value === "string"
 			) {
-				const nextValue = params.value;
+				const nextValue = requestParams.value;
 				session.configOptions = session.configOptions.map((option) =>
-					option.id === params.configId
+					option.id === requestParams.configId
 						? { ...option, currentValue: nextValue }
 						: option,
 				);
@@ -2628,10 +2733,22 @@ export class AgentOs {
 		if (option?.readOnly) {
 			return this._unsupportedConfigResponse(session.agentType, category);
 		}
-		return this._sendSessionRequest(sessionId, "session/set_config_option", {
-			configId: option?.id ?? category,
-			value,
-		});
+		const response = await this._sendSessionRequest(
+			sessionId,
+			"session/set_config_option",
+			{
+				configId: option?.id ?? category,
+				value,
+			},
+		);
+		if (
+			session.agentType === "codex" &&
+			response.error?.code === -32601 &&
+			toRecord(response.error.data).method === "session/set_config_option"
+		) {
+			return this._applyCodexConfigFallback(session, category, value);
+		}
+		return response;
 	}
 
 	private _removeSession(sessionId: string): void {
