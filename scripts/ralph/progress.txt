@@ -37,6 +37,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - In the embedded WASM runner's read-only `path_open` guard, allow non-mutating flags like `O_DIRECTORY`; only create/truncate/exclusive flags and write rights should return `EROFS`, or read-only traversal commands like `find`, `fd`, and `ls <dir>` will fail.
 - For individually rebuilt registry/native command crates, the fresh Wasm binary is `registry/native/target/wasm32-wasip1/release/<cmd>.wasm`; package-level Vitest coverage that uses package `commandDir` still needs that artifact copied into `registry/software/*/wasm/<cmd>`.
 - For `vm.exec()` cwd coverage in `packages/core/tests/execute.test.ts`, set up relative-path fixtures from inside the guest shell when the story is about shell cwd semantics; visibility of files written via VM filesystem APIs is a separate host-shadow sync surface.
+- Pi SDK `createAgentSession({ tools })` only uses the passed tools to seed active built-in tool names; if the adapter must override Pi's default `bash`/`read`/`edit`/`write` implementations, rebuild the returned `AgentSession` with `_baseToolsOverride` or construct `AgentSession` directly.
 
 ## 2026-04-09 06:12:40 PDT - US-CC-001
 - Implemented the remaining workspace/package rename cleanup for `@rivet-dev/agent-os-core`, including the last manifest dependency, benchmark imports, secure-exec/dev-shell subpath aliases, registry test imports, and the root instruction note to keep future changes on the new package name.
@@ -400,4 +401,14 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Shell-visible `agentos` commands are virtual sidecar tools, not guest WASM binaries; detect them during child-process command resolution but defer full tool resolution until spawn time so CLI parsing can still read VM files such as `--json-file`.
   - `packages/core/tests/sidecar-tool-dispatch.test.ts` is the focused truth suite for direct spawn plus guest-shell tool invocation; include `@rivet-dev/agent-os-common` when that suite needs a real guest `/bin/sh`.
   - The exact acceptance path for this story is `pnpm --dir packages/core exec vitest run tests/sidecar-tool-dispatch.test.ts` plus root `pnpm check-types`.
+---
+
+## 2026-04-09 19:41:01 PDT - US-027
+- Restored Pi SDK bash-tool file writes in end-to-end sessions by fixing native sidecar guest-cwd/shadow-directory sync paths and rebuilding the returned Pi `AgentSession` with a base-tool override so the bash tool runs with a filtered `PATH`.
+- Verified the bash-tool regression and the write-tool control case with `pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts`, and re-verified the workspace typecheck gate with `pnpm check-types`.
+- Files changed: `crates/sidecar/src/execution.rs`, `crates/sidecar/src/filesystem.rs`, `crates/CLAUDE.md`, `registry/agent/pi/src/adapter.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Pi SDK `createAgentSession()` constructs its own built-in tools after session creation; adapter-level tool customization needs `_baseToolsOverride` on the returned `AgentSession`, not just `tools: createCodingTools(...)`.
+  - In the native sidecar, host-created directories must mirror into the shadow root and top-level/nested shell executions must inherit the resolved guest cwd, or bash redirections inside long-lived agent sessions can write to the wrong place or leave empty files behind.
+  - The focused acceptance path for this regression is `pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts` plus root `pnpm check-types`.
 ---

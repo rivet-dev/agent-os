@@ -81,6 +81,7 @@ where
         }
         GuestFilesystemOperation::CreateDir => {
             vm.kernel.create_dir(&payload.path).map_err(kernel_error)?;
+            mirror_guest_directory_write_to_shadow(vm, &payload.path)?;
             GuestFilesystemResultResponse {
                 operation: payload.operation,
                 path: payload.path,
@@ -96,6 +97,7 @@ where
             vm.kernel
                 .mkdir(&payload.path, payload.recursive)
                 .map_err(kernel_error)?;
+            mirror_guest_directory_write_to_shadow(vm, &payload.path)?;
             GuestFilesystemResultResponse {
                 operation: payload.operation,
                 path: payload.path,
@@ -843,6 +845,35 @@ fn mirror_guest_file_write_to_shadow(
     .map_err(|error| {
         SidecarError::Io(format!(
             "failed to set shadow mode for {}: {error}",
+            guest_path
+        ))
+    })?;
+
+    Ok(())
+}
+
+fn mirror_guest_directory_write_to_shadow(
+    vm: &mut VmState,
+    guest_path: &str,
+) -> Result<(), SidecarError> {
+    let guest_path = normalize_path(guest_path);
+    let shadow_path = shadow_host_path_for_guest(&vm.cwd, &guest_path);
+
+    fs::create_dir_all(&shadow_path).map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to mirror guest directory {} into shadow root: {error}",
+            guest_path
+        ))
+    })?;
+
+    let stat = vm.kernel.lstat(&guest_path).map_err(kernel_error)?;
+    fs::set_permissions(
+        &shadow_path,
+        fs::Permissions::from_mode(stat.mode & 0o7777),
+    )
+    .map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to set shadow mode for directory {}: {error}",
             guest_path
         ))
     })?;

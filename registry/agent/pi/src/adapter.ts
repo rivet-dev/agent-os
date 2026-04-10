@@ -41,7 +41,7 @@ import {
 	readdirSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { isAbsolute, join, resolve as resolvePath } from "node:path";
+import { delimiter, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { PassThrough } from "node:stream";
 
 const PI_SDK_PACKAGE = "@mariozechner/pi-coding-agent";
@@ -70,6 +70,16 @@ Object.defineProperty(process, "stdin", {
 type SessionManagerLike = {
 	inMemory(cwd?: string): unknown;
 };
+
+type PiBashSpawnContext = {
+	command: string;
+	cwd: string;
+	env: NodeJS.ProcessEnv;
+};
+
+type PiBashSpawnHook = (
+	context: PiBashSpawnContext,
+) => PiBashSpawnContext;
 
 type ModelLike = {
 	id: string;
@@ -193,6 +203,16 @@ type PiSessionLike = {
 	setThinkingLevel(level: string): void;
 };
 
+type PiSessionWithToolOverrides = PiSessionLike & {
+	_baseToolsOverride?: Record<string, PiToolLike>;
+	_buildRuntime?: (options?: {
+		activeToolNames?: string[];
+		flagValues?: Map<string, unknown>;
+		includeAllExtensionTools?: boolean;
+	}) => void;
+	getActiveToolNames?(): string[];
+};
+
 type PiSdkRuntime = {
 	Agent: PiAgentCoreLike;
 	AuthStorage: {
@@ -225,14 +245,20 @@ type PiSdkRuntime = {
 		cwd: string,
 		options?: {
 			read?: { autoResizeImages?: boolean };
-			bash?: { commandPrefix?: string };
+			bash?: {
+				commandPrefix?: string;
+				spawnHook?: PiBashSpawnHook;
+			};
 		},
 	): PiToolLike[];
 	createAllTools(
 		cwd: string,
 		options?: {
 			read?: { autoResizeImages?: boolean };
-			bash?: { commandPrefix?: string };
+			bash?: {
+				commandPrefix?: string;
+				spawnHook?: PiBashSpawnHook;
+			};
 		},
 	): Record<string, PiToolLike>;
 };
@@ -309,6 +335,7 @@ class MinimalPiSession implements PiSessionLike {
 			},
 			bash: {
 				commandPrefix: this.settingsManager.getShellCommandPrefix(),
+				spawnHook: createAgentOsBashSpawnHook(),
 			},
 		});
 		const activeToolNames = ["read", "bash", "edit", "write"].filter(
@@ -335,6 +362,64 @@ function buildAdapterSystemPrompt(
 		"Be concise, prefer direct file and shell operations, and describe file paths clearly." +
 		`${extra}\nCurrent date: ${date}\nCurrent working directory: ${cwd}`
 	);
+}
+
+function createAgentOsBashSpawnHook(): PiBashSpawnHook {
+	return (context) => ({
+		...context,
+		env: stripPiAgentBinFromPath(context.env),
+	});
+}
+
+function stripPiAgentBinFromPath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+	const pathKey =
+		Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+	const currentPath = env[pathKey];
+	if (!currentPath) {
+		return env;
+	}
+
+	const piAgentBinDir = join(process.env.HOME || "/home/user", ".pi", "agent", "bin");
+	const filteredPath = currentPath
+		.split(delimiter)
+		.filter((entry) => entry && entry !== piAgentBinDir)
+		.join(delimiter);
+
+	if (filteredPath === currentPath) {
+		return env;
+	}
+
+	return {
+		...env,
+		[pathKey]: filteredPath,
+	};
+}
+
+function installAgentOsToolOverrides(
+	session: PiSessionLike,
+	cwd: string,
+	settingsManager: SettingsManagerInstanceLike,
+	runtime: Pick<PiSdkRuntime, "createAllTools">,
+): void {
+	const internalSession = session as PiSessionWithToolOverrides;
+	const baseTools = runtime.createAllTools(cwd, {
+		read: {
+			autoResizeImages: settingsManager.getImageAutoResize(),
+		},
+		bash: {
+			commandPrefix: settingsManager.getShellCommandPrefix(),
+			spawnHook: createAgentOsBashSpawnHook(),
+		},
+	});
+	const activeToolNames =
+		internalSession.getActiveToolNames?.() ??
+		["read", "bash", "edit", "write"].filter((name) => name in baseTools);
+
+	internalSession._baseToolsOverride = baseTools;
+	internalSession._buildRuntime?.call(internalSession, {
+		activeToolNames,
+		includeAllExtensionTools: true,
+	});
 }
 
 class MinimalResourceLoader implements MinimalResourceLoaderLike {
@@ -488,6 +573,7 @@ async function createAgentSession(options: {
 }): Promise<{ session: PiSessionLike; modelFallbackMessage?: string }> {
 	const {
 		createAgentSession: createPiAgentSession,
+		createAllTools,
 		SettingsManager,
 	} = await loadPiSdkRuntime();
 
@@ -502,6 +588,9 @@ async function createAgentSession(options: {
 		resourceLoader: options.resourceLoader,
 		settingsManager,
 		tools: options.tools,
+	});
+	installAgentOsToolOverrides(result.session, cwd, settingsManager, {
+		createAllTools,
 	});
 	return result;
 }
@@ -589,6 +678,7 @@ class PiSdkAgent implements Agent {
 					},
 					bash: {
 						commandPrefix: settingsManager.getShellCommandPrefix(),
+						spawnHook: createAgentOsBashSpawnHook(),
 					},
 				}),
 			),

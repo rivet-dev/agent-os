@@ -1818,7 +1818,7 @@ where
                 argv,
                 SpawnOptions {
                     requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
-                    cwd: Some(String::from("/")),
+                    cwd: Some(resolved.guest_cwd.clone()),
                     ..SpawnOptions::default()
                 },
             )
@@ -2984,6 +2984,7 @@ where
         } else {
             (request.command.clone(), request.args.clone())
         };
+        let process_args = apply_shell_cwd_prefix(&command, process_args, &guest_cwd);
         if is_tool_command(vm, &command) {
             return Ok(ResolvedChildProcessExecution {
                 command: command.clone(),
@@ -4080,10 +4081,12 @@ where
                         .expect("process should still exist");
                     let parent = Self::active_process_by_path_mut(root, current_process_path)
                         .expect("child process should still exist");
-                    let child = parent
+                    let mut child = parent
                         .child_processes
                         .remove(child_process_id)
                         .expect("child process should still exist");
+                    sync_process_host_writes_to_kernel(vm, &child)?;
+                    terminate_child_process_tree(&mut vm.kernel, &mut child);
                     child.kernel_handle.finish(exit_code);
                     let _ = vm.kernel.wait_and_reap(child.kernel_pid);
                     if should_signal_parent {
@@ -4704,6 +4707,7 @@ fn resolve_command_execution(
         });
     }
 
+    let args = apply_shell_cwd_prefix(command, args.to_vec(), &guest_cwd);
     let guest_entrypoint =
         resolve_guest_command_entrypoint(vm, &guest_cwd, command).ok_or_else(|| {
             SidecarError::InvalidState(format!(
@@ -4789,6 +4793,46 @@ fn shadow_path_for_guest(vm: &VmState, guest_path: &str) -> PathBuf {
         return vm.cwd.clone();
     }
     vm.cwd.join(relative)
+}
+
+fn apply_shell_cwd_prefix(command: &str, mut args: Vec<String>, guest_cwd: &str) -> Vec<String> {
+    if guest_cwd == "/" || !is_shell_command(command) {
+        return args;
+    }
+
+    let Some(flag) = args.first() else {
+        return args;
+    };
+    if !matches!(flag.as_str(), "-c" | "-lc") || args.len() < 2 {
+        return args;
+    }
+
+    let command_text = args[1].clone();
+    let quoted_cwd = shell_single_quote(guest_cwd);
+    args[1] = format!("cd -- {quoted_cwd} && {command_text}");
+    args
+}
+
+fn is_shell_command(command: &str) -> bool {
+    Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command)
+        .trim_end_matches(".exe")
+        .eq("sh")
+        || Path::new(command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(command)
+            .trim_end_matches(".exe")
+            .eq("bash")
+}
+
+fn shell_single_quote(value: &str) -> String {
+    if value.is_empty() {
+        return String::from("''");
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn sync_process_host_writes_to_kernel(
