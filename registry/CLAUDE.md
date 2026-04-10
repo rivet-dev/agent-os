@@ -85,6 +85,7 @@ Commands declare a default permission tier that controls WASI host imports:
 - All WASM binaries are built in-repo via `make build-wasm`. No external dependencies except Rust toolchain and wasi-sdk.
 - If you patch a vendored Rust dependency under `native/vendor/`, add the same patch under `native/patches/crates/<crate>/` so `native/scripts/patch-vendor.sh` reapplies it on future rebuilds instead of silently losing the fix.
 - When you rebuild a Rust command locally, the fresh artifacts are the top-level `native/target/wasm32-wasip1/release/<command>.wasm` files. `release/commands/<command>` can lag until the packaging/copy step rewrites the published command directory.
+- For vendored `brush-core` on WASI, command lookup must require `is_file()` before treating a PATH candidate as executable, and once the shell resolves a guest binary path (for example `/bin/printf`) it should spawn that resolved path instead of falling back to the bare command name. Pi prepends `~/.pi/agent/bin` even when it does not exist, so bare-name WASI lookup can fail on the first PATH entry.
 
 ### Descriptor Format
 

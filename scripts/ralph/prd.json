@@ -5,543 +5,6 @@
   "testPolicy": "Treat the old April 7-8, 2026 Ralph progress claims as stale. Use only the exact scoped commands listed in each story. US-001 and US-002 restore reproducible workspace install and normal pnpm/Vitest execution; no TypeScript-package story should be marked complete before those land. The final story requires root `pnpm test`, targeted crate suites (`agent-os-kernel`, `agent-os-bridge`, `agent-os-execution`, `agent-os-v8-runtime`, `agent-os-sidecar`), and the package/registry suites to pass with no first-party ignored Rust tests and no product-debt skips remaining.",
   "userStories": [
     {
-      "id": "US-CC-009",
-      "title": "Fix VFS layer visibility: vm.writeFile() must be visible to WASM guest processes (sh, ls, cat)",
-      "description": "vm.writeFile() writes to a VFS layer that V8/Node guest processes can see but WASM processes cannot. Files written via the host API are invisible to sh, ls, cat running inside the VM.",
-      "acceptanceCriteria": [
-        "vm.writeFile('/tmp/test.txt', 'hello') followed by vm.exec('cat /tmp/test.txt') returns 'hello'",
-        "vm.writeFile('/tmp/test.txt', 'hello') followed by vm.exec('ls /tmp/') lists test.txt",
-        "Files written via host API are on the same VFS layer as files visible to WASM processes",
-        "Test added to packages/core/tests/ verifying cross-layer visibility",
-        "pnpm --dir packages/core exec vitest run tests/filesystem.test.ts passes"
-      ],
-      "priority": 1,
-      "passes": true,
-      "notes": "Reproduced: vm.writeFile writes to kernel upper VFS layer. Node guest processes see it (they use the kernel VFS bridge). But WASM processes (sh, ls, cat) apparently read from a different overlay or shadow directory that doesn't include the host-written upper layer. The fix likely needs WASM process mounts to include the same upper layer that the host API writes to."
-    },
-    {
-      "id": "US-CC-010",
-      "title": "Fix VFS layer visibility: agent session writes (Claude bash tool) must be visible to vm.readFile()",
-      "description": "Files written by agent tools (via WASM sh/cat inside a session) are invisible to vm.readFile(). The agent confirms the file was written, exec cat sees it, ls lists it, but the host readFile API returns ENOENT.",
-      "acceptanceCriteria": [
-        "After Claude agent writes /tmp/file.txt via bash tool, vm.readFile('/tmp/file.txt') returns the content",
-        "After vm.exec('echo x > /tmp/file.txt'), vm.readFile('/tmp/file.txt') returns 'x' (this already works)",
-        "After agent session writes, host API sees the same filesystem state as WASM processes",
-        "Test: quickstart agent-session.ts completes without ENOENT on readFile after agent write",
-        "pnpm --dir packages/core exec vitest run tests/filesystem.test.ts passes"
-      ],
-      "priority": 2,
-      "passes": true,
-      "notes": "Reproduced: Claude bash tool writes via WASM sh \u2192 cat > file. exec('cat file') sees it, exec('ls') lists it, but vm.readFile() returns ENOENT. This is the REVERSE of US-CC-009 \u2014 the agent session's WASM child process writes to a shadow/overlay that the host readFile API doesn't query. The host API may only look at the kernel upper layer while WASM processes write to a separate shadow directory on the host filesystem. The fix needs vm.readFile() to check both the kernel upper layer AND any shadow directories where WASM processes wrote."
-    },
-    {
-      "id": "US-CC-001",
-      "title": "Fix @rivet-dev/agent-os workspace name \u2192 @rivet-dev/agent-os-core across all packages",
-      "description": "The core package was renamed from @rivet-dev/agent-os to @rivet-dev/agent-os-core during migration but many package.json deps and TS imports still reference the old name, breaking pnpm install.",
-      "acceptanceCriteria": [
-        "All package.json files reference @rivet-dev/agent-os-core (not @rivet-dev/agent-os) in dependencies",
-        "All TypeScript imports use @rivet-dev/agent-os-core",
-        "pnpm install --frozen-lockfile passes from repo root",
-        "pnpm build passes (all 46 workspace packages)"
-      ],
-      "priority": 3,
-      "passes": true,
-      "notes": "BLOCKER for everything. The rename broke the workspace. Files already partially fixed in working tree but need lockfile regeneration. Check: package.json, all src/*.ts imports in packages/, registry/, examples/."
-    },
-    {
-      "id": "US-CC-002",
-      "title": "Fix node:events module shape \u2014 EventEmitter must be the default export",
-      "description": "require('events') and require('node:events') must return the EventEmitter constructor function itself (not an object with EventEmitter as a property). Claude SDK does `class X extends require('events')` which breaks with wrong shape.",
-      "acceptanceCriteria": [
-        "require('events') returns EventEmitter constructor (typeof === 'function')",
-        "require('events').EventEmitter === require('events') (same reference)",
-        "class MyEmitter extends require('events') {} works without error",
-        "new (require('events'))() creates a working EventEmitter",
-        "Test in crates/sidecar/tests/builtin_conformance.rs verifies this",
-        "cargo test -p agent-os-sidecar --test builtin_conformance -- --test-threads=1 passes"
-      ],
-      "priority": 4,
-      "passes": true,
-      "notes": "Found in step-23 codex session. Claude SDK and many npm packages use `extends require('events')`. The v8-bridge.js events module from node-stdlib-browser returns the constructor correctly but the bridge wrapper may be wrapping it in an object. Check v8-bridge.source.js events import and how it's exposed to guest code."
-    },
-    {
-      "id": "US-CC-003",
-      "title": "Fix stream async iterator \u2014 Symbol.asyncIterator for Readable streams",
-      "description": "Readable streams must support `for await (const chunk of stream)` via Symbol.asyncIterator. Claude SDK uses this for streaming API responses.",
-      "acceptanceCriteria": [
-        "Readable streams from require('stream') have Symbol.asyncIterator method",
-        "for await (const chunk of readableStream) yields chunks correctly",
-        "Anthropic SDK response streaming works: for await (const event of stream) {...}",
-        "Test verifies async iteration on a Readable stream",
-        "cargo test -p agent-os-sidecar -- --test-threads=1 passes"
-      ],
-      "priority": 5,
-      "passes": true,
-      "notes": "Found in step-23. Claude SDK uses `for await (const event of response.stream)`. node-stdlib-browser's readable-stream package should have this, but it may need explicit wiring in the v8-bridge. Check if readable-stream v3+ is bundled (it has native async iterator support)."
-    },
-    {
-      "id": "US-CC-004",
-      "title": "Fix WASM child process stdout relay \u2014 proc_spawn/waitpid deadlock",
-      "description": "WASM processes that spawn children (sh, xu) deadlock because the synchronous RPC model blocks the WASM thread while waiting for child stdout. Replace sync poll loop with async event dispatch.",
-      "acceptanceCriteria": [
-        "vm.exec('sh -c \"echo hello\"') returns 'hello' without hanging",
-        "vm.exec('xu hello-agent-os') returns expected output without hanging",
-        "WASM sh can spawn and wait for child processes (node scripts, other WASM commands)",
-        "Child stdout/stderr flows back to parent WASM process correctly",
-        "No deadlock when parent polls for child exit while child has pending stdout",
-        "Test: cargo test -p agent-os-sidecar -- --test-threads=1 wasm passes",
-        "Test: vitest run tests/process-management.test.ts passes"
-      ],
-      "priority": 6,
-      "passes": true,
-      "notes": "ROOT CAUSE: WASM calls proc_waitpid \u2192 callSyncRpc('child_process.poll') \u2192 blocks in readSync(). Child stdout needs to flow through WASM fd_read \u2192 which calls callSyncRpc AGAIN \u2192 DEADLOCK (single-threaded WASM). Secure-exec solved this with async event dispatch via _childProcessDispatch callback. The sidecar should PUSH child events to WASM guest via StreamCallback instead of waiting for guest to poll. See .agent/recovery/secure-exec/nodejs/src/bridge/child-process.ts for the working pattern. Step-26 codex made partial fixes (synthetic pipe bookkeeping, stdin EOF, FD lifetime) but the core deadlock remains."
-    },
-    {
-      "id": "US-CC-005",
-      "title": "Fix Claude adapter shell default and environment flags",
-      "description": "Claude adapter must use /bin/sh (not /bin/bash) and set correct V8 runtime environment flags.",
-      "acceptanceCriteria": [
-        "registry/agent/claude/src/adapter.ts uses /bin/sh as default shell",
-        "CLAUDE_CODE_SIMPLE_SHELL_EXEC=1 set in adapter env",
-        "CLAUDE_CODE_SWAP_STDIO default is '0'",
-        "CLAUDE_CODE_DISABLE_DEV_NULL_REDIRECT=1 set",
-        "CLAUDE_CODE_DISABLE_CWD_PERSIST=1 set",
-        "createSession('claude') boots without crashing",
-        "Agent info returns valid name/title/version"
-      ],
-      "priority": 7,
-      "passes": true,
-      "notes": "US-109 from old PRD. Step-26 made these changes but they may need to be re-committed after the PRD rewrite. Check git log for commit with these changes."
-    },
-    {
-      "id": "US-CC-006",
-      "title": "Fix Claude SDK CLI patching for V8 runtime",
-      "description": "Claude adapter needs resolveClaudeCliPath() to find patched CLI and build-patched-cli.mjs to produce it.",
-      "acceptanceCriteria": [
-        "build-patched-cli.mjs produces patched CLI at expected location",
-        "resolveClaudeCliPath() in adapter.ts finds patched CLI or falls back to original",
-        "Patched CLI runs inside V8 without import errors",
-        "createSession('claude') + getSessionAgentInfo() returns valid agent info"
-      ],
-      "priority": 8,
-      "passes": true,
-      "notes": "US-110 from old PRD. The Claude SDK CLI needs patching to work in V8 (shell defaults, stdio handling). Step-26 added this but may need re-verification."
-    },
-    {
-      "id": "US-CC-007",
-      "title": "Claude agent full E2E \u2014 text, xu command, nested node spawn, session lifecycle",
-      "description": "All 8 Claude session tests pass end-to-end with real @anthropic-ai/claude-agent-sdk running unmodified in V8.",
-      "acceptanceCriteria": [
-        "createSession('claude') boots with real SDK (not stub)",
-        "Text-only response test passes",
-        "xu command test passes \u2014 agent calls xu tool, output captured",
-        "Nested node execSync test passes",
-        "Nested node spawn test passes with piped stdio",
-        "Session metadata test passes (info, capabilities, modes)",
-        "Session lifecycle test passes (prompt, events, close)",
-        "All 8 tests in claude-session.test.ts pass with 0 failures and 0 skipped",
-        "pnpm --dir packages/core exec vitest run tests/claude-session.test.ts passes"
-      ],
-      "priority": 9,
-      "passes": true,
-      "notes": "Depends on US-CC-001 through US-CC-006. This is the final Claude validation. Was US-111 in old PRD and passed \u2014 needs re-verification."
-    },
-    {
-      "id": "US-CC-008",
-      "title": "Quickstart agent-session.ts works E2E with Claude without modification",
-      "description": "The examples/quickstart/src/agent-session.ts file runs successfully with Claude agent, connecting to real Anthropic API, executing a prompt, and returning a response.",
-      "acceptanceCriteria": [
-        "cd examples/quickstart && source ~/misc/env.txt && npx tsx src/agent-session.ts completes without error",
-        "Session ID is printed",
-        "Events are streamed (at least one session/update event)",
-        "Response text is printed with a meaningful answer",
-        "Session closes cleanly, process exits with code 0",
-        "No modifications to agent-session.ts needed (works as checked in)",
-        "Total runtime under 60 seconds"
-      ],
-      "priority": 10,
-      "passes": true,
-      "notes": "INTEGRATION TEST. This exercises the full stack: workspace install \u2192 build \u2192 AgentOs.create() \u2192 sidecar spawn \u2192 V8 runtime \u2192 Claude adapter \u2192 Anthropic API \u2192 tool execution \u2192 response. When we tried this, it got Session ID printed but then timed out waiting for sidecar protocol frame for session_request. The V8 runtime binary was missing (needed cargo build -p agent-os-v8-runtime). After building, it still timed out \u2014 likely the Claude adapter boot issue (US-CC-005/006). This story should pass after all CC prerequisites are fixed."
-    },
-    {
-      "id": "US-001",
-      "title": "Restore root workspace install and lockfile consistency",
-      "description": "As a developer, I want `pnpm install --frozen-lockfile` to work from the repo root so Ralph iterations can start from a reproducible workspace instead of a broken install state.",
-      "acceptanceCriteria": [
-        "Root workspace dependencies, overrides, and lockfile no longer reference missing workspace packages or mismatched configuration",
-        "`pnpm install --frozen-lockfile` passes from the repo root",
-        "The root install materializes the first-party package binaries needed by package scripts after install",
-        "Typecheck passes"
-      ],
-      "priority": 11,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-002",
-      "title": "Restore package-local Vitest resolution and pnpm exec paths",
-      "description": "As a developer, I want package test scripts and `pnpm exec vitest` to work normally so targeted TypeScript package stories can use standard commands instead of store-path workarounds.",
-      "acceptanceCriteria": [
-        "`pnpm --dir packages/core exec vitest --version` succeeds",
-        "`pnpm --dir packages/secure-exec exec vitest --version` succeeds",
-        "`pnpm --dir packages/dev-shell exec vitest --version` succeeds",
-        "Typecheck passes"
-      ],
-      "priority": 12,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-003",
-      "title": "Archive stale Ralph artifacts and reset test-policy docs",
-      "description": "As a developer, I want the Ralph artifacts and nearby docs to stop claiming stale green states so future iterations read truthful instructions before touching the codebase.",
-      "acceptanceCriteria": [
-        "The superseded PRD and misleading progress narrative are archived or rewritten so they no longer claim old green states as current truth",
-        "Root/package test-policy docs no longer instruct broken pnpm or Vitest commands",
-        "The refreshed `scripts/ralph/progress.txt` header reflects the new backlog and current audit reality",
-        "Typecheck passes"
-      ],
-      "priority": 13,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-004",
-      "title": "Fix execution WASM tests for SyncRpcRequest events",
-      "description": "As a developer, I want the WASM execution tests to compile against the current event enum so the execution suite is a reliable truth source again.",
-      "acceptanceCriteria": [
-        "`crates/execution/tests/wasm.rs` handles `WasmExecutionEvent::SyncRpcRequest` explicitly",
-        "Focused WASM execution assertions still verify stdout, stderr, exit, and signal-state behavior after the update",
-        "`cargo test -p agent-os-execution --test wasm -- --test-threads=1` passes",
-        "Typecheck passes"
-      ],
-      "priority": 14,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-005",
-      "title": "Fix V8 bridge registration drift from the canonical bridge contract",
-      "description": "As a developer, I want the V8 runtime bridge registrations to match the canonical bridge contract so the runtime surface is derived from one source of truth instead of hand-maintained lists.",
-      "acceptanceCriteria": [
-        "`SYNC_BRIDGE_FNS` and `ASYNC_BRIDGE_FNS` match `crates/bridge/bridge-contract.json` with no stale or missing globals",
-        "Bridge registration tests assert the canonical contract rather than a second independently maintained surface",
-        "`cargo test -p agent-os-v8-runtime -- --test-threads=1 bridge_contract_globals_are_registered` passes",
-        "Typecheck passes"
-      ],
-      "priority": 15,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-006",
-      "title": "Restore the full agent-os-v8-runtime suite and isolated snapshot workflow",
-      "description": "As a developer, I want the full V8 runtime suite to pass, including the isolated snapshot coverage path, so V8 bridge work stops shipping with a red crate-level suite.",
-      "acceptanceCriteria": [
-        "`cargo test -p agent-os-v8-runtime -- --test-threads=1` passes",
-        "`cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` passes",
-        "If the snapshot test must remain isolated, CI/docs record the exact isolated invocation and no other V8 runtime test remains red",
-        "Typecheck passes"
-      ],
-      "priority": 16,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-007",
-      "title": "Fix sidecar VM dispose and kill cleanup semantics for active guest executions",
-      "description": "As a developer, I want `disposeVm` and related cleanup paths to succeed even when guest processes are still running so session and VM teardown are guaranteed and leak-free.",
-      "acceptanceCriteria": [
-        "Disposing a VM with an active guest process returns the expected disposed/cleaned-up result instead of surfacing an execution error",
-        "Kill/close cleanup tests cover active execution teardown without leaked processes, sockets, or file descriptors",
-        "`cargo test -p agent-os-sidecar --test kill_cleanup -- --test-threads=1` passes",
-        "Typecheck passes"
-      ],
-      "priority": 17,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-008",
-      "title": "Restore moduleAccessCwd visibility for projected node_modules packages",
-      "description": "As a developer, I want `moduleAccessCwd` to expose projected packages under `/root/node_modules` so agent packages and package-level tests can load dependencies from the VM again.",
-      "acceptanceCriteria": [
-        "The native-sidecar path can read `/root/node_modules/vitest/package.json` when `moduleAccessCwd` points at a workspace with that package installed",
-        "Projected module-access files remain read-only to guest code",
-        "`packages/core/tests/native-sidecar-process.test.ts` moduleAccess/layer block passes",
-        "Typecheck passes"
-      ],
-      "priority": 18,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-009",
-      "title": "Restore OpenCode package projection and headless package tests",
-      "description": "As a developer, I want the source-built OpenCode ACP bundle to appear under `/root/node_modules` inside the VM so OpenCode tests can verify the real adapter package instead of failing at package lookup.",
-      "acceptanceCriteria": [
-        "`/root/node_modules/@rivet-dev/agent-os-opencode/package.json` is visible inside the VM",
-        "`/root/node_modules/@rivet-dev/agent-os-opencode/dist/opencode-acp/acp.js` is visible inside the VM",
-        "`pnpm --dir packages/core exec vitest run tests/opencode-headless.test.ts` passes",
-        "Typecheck passes"
-      ],
-      "priority": 19,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-010",
-      "title": "Restore Claude Code package projection and investigation tests",
-      "description": "As a developer, I want the Claude Code SDK package, CLI bundle, and vendor assets to be visible under module access so the investigation tests reflect the intended VM projection behavior.",
-      "acceptanceCriteria": [
-        "The projected Claude Code package exists inside the VM and exposes `package.json` plus `cli.js`",
-        "The vendor `rg` asset is visible at the expected projected path inside the VM",
-        "`pnpm --dir packages/core exec vitest run tests/claude-code-investigate.test.ts` passes",
-        "Typecheck passes"
-      ],
-      "priority": 20,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-011",
-      "title": "Restore listAgents surface and add agent launch-environment coverage",
-      "description": "As a developer, I want `listAgents()` and the agent configuration surface to match the shipped adapters so package metadata, launch args, and launch env assertions stay in sync.",
-      "acceptanceCriteria": [
-        "`packages/core/src/agents.ts` and `listAgents()` no longer rely on stale hardcoded agent typing or stale comments for shipped agents",
-        "A focused launch-environment test verifies args/env for `pi`, `pi-cli`, `claude`, `opencode`, and `codex`",
-        "`pnpm --dir packages/core exec vitest run tests/list-agents.test.ts tests/agent-config-environment.test.ts` passes",
-        "Typecheck passes"
-      ],
-      "priority": 21,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-012",
-      "title": "Restore read-only base-filesystem behavior for preseeded lowers",
-      "description": "As a developer, I want read-only roots booted from preseeded lowers to expose exactly the intended files and reject writes consistently so base-filesystem semantics match the declared snapshot content.",
-      "acceptanceCriteria": [
-        "The preseeded-lower test no longer exposes unexpected binaries like `/bin/python` when they are not in the lower snapshot",
-        "Writes against read-only roots fail with the expected error instead of mutating state",
-        "`pnpm --dir packages/core exec vitest run tests/agent-os-base-filesystem.test.ts` passes",
-        "Typecheck passes"
-      ],
-      "priority": 22,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-013",
-      "title": "Restore /etc/agentos instructions readability from inside guest exec",
-      "description": "As a user, I want `/etc/agentos/instructions.md` to be readable from inside guest shell commands so OS instructions can be consumed both via direct filesystem APIs and via command execution.",
-      "acceptanceCriteria": [
-        "`vm.exec(\"cat /etc/agentos/instructions.md\")` returns exit code 0 and the expected instructions text",
-        "The `/etc/agentos/ exec from inside VM` block in `packages/core/tests/os-instructions.test.ts` passes",
-        "The read-only mount behavior for `/etc/agentos` remains intact after the fix",
-        "Typecheck passes"
-      ],
-      "priority": 23,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-014",
-      "title": "Restore vm.exec cwd handling and simple shell pipelines",
-      "description": "As a user, I want `vm.exec()` to honor the requested working directory and basic shell pipelines so command execution behaves like a normal Linux shell surface.",
-      "acceptanceCriteria": [
-        "`vm.exec(..., { cwd })` finds files relative to the requested guest cwd",
-        "Simple shell pipelines like `echo hello | cat` return exit code 0 and the expected stdout",
-        "`pnpm --dir packages/core exec vitest run tests/execute.test.ts` passes",
-        "Typecheck passes"
-      ],
-      "priority": 24,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-015",
-      "title": "Restore shell redirect, command-substitution, and heredoc semantics",
-      "description": "As a user, I want redirects, command substitution, and heredocs to work through the guest shell so complex shell-based tool flows stop failing in the command-package matrix.",
-      "acceptanceCriteria": [
-        "Redirects, `$(...)`, and heredocs behave correctly through the guest shell used by `vm.exec()`",
-        "The shell-focused assertions in `packages/core/tests/wasm-commands.test.ts` no longer fail with exit code 1",
-        "`pnpm --dir packages/core exec vitest run tests/wasm-commands.test.ts -t \"sh (coreutils)\"` passes",
-        "Typecheck passes"
-      ],
-      "priority": 25,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-016",
-      "title": "Restore cron exec actions that write inside the VM",
-      "description": "As a user, I want scheduled cron exec actions to create and update files inside the VM so cron behavior matches the public API contract.",
-      "acceptanceCriteria": [
-        "Scheduled cron exec actions can create `/tmp/cron-marker` and similar files inside the VM",
-        "Cron-triggered exec actions respect the same guest command resolution and cwd semantics as manual `vm.exec()`",
-        "`pnpm --dir packages/core exec vitest run tests/cron-integration.test.ts` passes",
-        "Typecheck passes"
-      ],
-      "priority": 26,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-017",
-      "title": "Restore coreutils command resolution and basic file-operation parity",
-      "description": "As a user, I want the core coreutils commands to resolve and run inside the VM so basic file operations stop returning `127` in the command-package matrix.",
-      "acceptanceCriteria": [
-        "Basic file-operation commands (`cp`, `mv`, `rm`, `ls`, `touch`, `head`, `tail`, `wc`, `test`, `which`, `base64`, `sha256sum`) resolve through the guest PATH and work in the VM",
-        "The `file operations (coreutils)` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "Command resolution still uses the VM/tool registry instead of host PATH fallback",
-        "Typecheck passes"
-      ],
-      "priority": 27,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-018",
-      "title": "Restore grep and sed command-package parity",
-      "description": "As a user, I want `grep` and `sed` to work in the guest shell and on guest files so text-processing flows stop failing across the command-package matrix.",
-      "acceptanceCriteria": [
-        "The `grep` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "The `sed` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "Pipe-from-stdin cases for `grep` and `sed` return exit code 0 with the expected output",
-        "Typecheck passes"
-      ],
-      "priority": 28,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-019",
-      "title": "Restore awk, jq, and yq command-package parity",
-      "description": "As a user, I want structured and field-oriented text tools to work in the VM so data-transformation flows are available to agents without host fallbacks.",
-      "acceptanceCriteria": [
-        "The `awk (gawk)` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "The `jq` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "The `yq` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "Typecheck passes"
-      ],
-      "priority": 29,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-020",
-      "title": "Restore find, xargs, and diff command-package parity",
-      "description": "As a user, I want recursive search and diff tools to work in the VM so shell-driven workflows can locate files and compare output without host workarounds.",
-      "acceptanceCriteria": [
-        "The `find and xargs (findutils)` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "The `diff (diffutils)` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "Exit-code semantics for no-match and different-file cases match the test expectations",
-        "Typecheck passes"
-      ],
-      "priority": 30,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-021",
-      "title": "Restore tar and gzip command-package parity",
-      "description": "As a user, I want archive and compression tools to work inside the VM so agents can package and unpack data without leaving the guest environment.",
-      "acceptanceCriteria": [
-        "The `tar` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "The `gzip` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "Archive creation, extraction, listing, compression, and decompression all work against guest files",
-        "Typecheck passes"
-      ],
-      "priority": 31,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-022",
-      "title": "Restore rg, fd, and tree command-package parity",
-      "description": "As a user, I want search/tree utilities to work against the VM filesystem so directory traversal and code search behave like a real Linux environment.",
-      "acceptanceCriteria": [
-        "The `rg (ripgrep)` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "The `fd (fd-find)` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "The `tree` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "Typecheck passes"
-      ],
-      "priority": 32,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-023",
-      "title": "Restore curl package availability and local HTTP round-trip parity",
-      "description": "As a user, I want `curl` to be present and usable inside the VM so guest HTTP workflows can run entirely through the guest runtime and kernel network surface.",
-      "acceptanceCriteria": [
-        "The `curl` package is discoverable in the command matrix and no longer fails the `hasCurl` expectation",
-        "The `curl` block in `packages/core/tests/wasm-commands.test.ts` passes against the local HTTP fixture",
-        "The implementation does not bypass the guest networking surface with host-only shortcuts",
-        "Typecheck passes"
-      ],
-      "priority": 33,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-024",
-      "title": "Restore permission, stat, chmod, and ls command parity",
-      "description": "As a user, I want permission-reporting and permission-changing commands to reflect guest filesystem state accurately so Linux-style permission workflows behave predictably in the VM.",
-      "acceptanceCriteria": [
-        "The `file permissions` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "Guest file and directory modes match the test expectations after create and chmod flows",
-        "Exit-code semantics for permission-related command failures match the test expectations",
-        "Typecheck passes"
-      ],
-      "priority": 34,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-025",
-      "title": "Restore cross-package pipeline coverage in the command matrix",
-      "description": "As a user, I want multi-command pipelines that combine different package families to work inside the VM so agents can compose normal shell workflows without partial failures.",
-      "acceptanceCriteria": [
-        "The `cross-package pipelines` block in `packages/core/tests/wasm-commands.test.ts` passes",
-        "Pipeline exit codes are correct for `find | grep | wc`, `awk + sort`, `tar + gzip`, and similar chains",
-        "No pipeline in the matrix fails due to missing command registration or broken guest pipe semantics",
-        "Typecheck passes"
-      ],
-      "priority": 35,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-026",
-      "title": "Restore shell invocation of agentos tools from guest scripts",
-      "description": "As a user, I want `agentos-*` commands to be invokable from guest shell scripts so toolkits behave like real guest commands instead of only working through direct RPC registration.",
-      "acceptanceCriteria": [
-        "Guest scripts can invoke the registered `agentos-*` commands through normal shell/exec paths",
-        "Focused coverage exists for shell invocation rather than only direct sidecar tool dispatch",
-        "A dedicated packages/core or registry test for guest-shell `agentos-*` invocation passes",
-        "Typecheck passes"
-      ],
-      "priority": 36,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-027",
-      "title": "Fix Pi SDK bash-tool output persistence in end-to-end sessions",
-      "description": "As a user, I want Pi SDK bash-tool turns to create the expected workspace files so the Pi adapter is fully usable for shell actions inside the VM.",
-      "acceptanceCriteria": [
-        "The Pi SDK bash-tool E2E no longer fails trying to read a missing `bash-output.txt`",
-        "The bash tool writes its output into the expected guest workspace path",
-        "`pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts` passes",
-        "Typecheck passes"
-      ],
-      "priority": 37,
-      "passes": true,
-      "notes": ""
-    },
-    {
       "id": "US-028",
       "title": "Fix Pi CLI bash-tool output persistence in end-to-end sessions",
       "description": "As a user, I want Pi CLI bash-tool turns to create the expected workspace files so the unmodified Pi CLI adapter is usable for shell actions inside the VM.",
@@ -551,8 +14,8 @@
         "`pnpm --dir packages/core exec vitest run tests/pi-cli-headless.test.ts` passes",
         "Typecheck passes"
       ],
-      "priority": 38,
-      "passes": false,
+      "priority": 1,
+      "passes": true,
       "notes": ""
     },
     {
@@ -565,7 +28,7 @@
         "`pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts tests/session-cleanup.test.ts -t \"Pi SDK\"` passes",
         "Typecheck passes"
       ],
-      "priority": 39,
+      "priority": 2,
       "passes": false,
       "notes": ""
     },
@@ -579,7 +42,7 @@
         "`pnpm --dir packages/core exec vitest run tests/pi-cli-headless.test.ts tests/session-cleanup.test.ts -t \"Pi CLI\"` passes",
         "Typecheck passes"
       ],
-      "priority": 40,
+      "priority": 3,
       "passes": false,
       "notes": ""
     },
@@ -593,7 +56,7 @@
         "`pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts -t \"full createSession('opencode') inside the VM\"` gets past session creation",
         "Typecheck passes"
       ],
-      "priority": 41,
+      "priority": 4,
       "passes": false,
       "notes": ""
     },
@@ -607,7 +70,7 @@
         "`pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts -t \"write tool\"` passes",
         "Typecheck passes"
       ],
-      "priority": 42,
+      "priority": 5,
       "passes": false,
       "notes": ""
     },
@@ -621,7 +84,7 @@
         "`pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts -t \"bash tool\"` passes",
         "Typecheck passes"
       ],
-      "priority": 43,
+      "priority": 6,
       "passes": false,
       "notes": ""
     },
@@ -635,7 +98,7 @@
         "`pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts` passes",
         "Typecheck passes"
       ],
-      "priority": 44,
+      "priority": 7,
       "passes": false,
       "notes": ""
     },
@@ -649,7 +112,7 @@
         "`pnpm --dir packages/core exec vitest run tests/codex-session.test.ts -t \"permissioned shell tools\"` gets past runner startup",
         "Typecheck passes"
       ],
-      "priority": 45,
+      "priority": 8,
       "passes": false,
       "notes": ""
     },
@@ -663,7 +126,7 @@
         "`pnpm --dir packages/core exec vitest run tests/codex-session.test.ts -t \"configurable mode/model state\"` passes",
         "Typecheck passes"
       ],
-      "priority": 46,
+      "priority": 9,
       "passes": false,
       "notes": ""
     },
@@ -677,7 +140,7 @@
         "`pnpm --dir packages/core exec vitest run tests/codex-session.test.ts -t \"permissioned shell tools\"` passes",
         "Typecheck passes"
       ],
-      "priority": 47,
+      "priority": 10,
       "passes": false,
       "notes": ""
     },
@@ -691,7 +154,7 @@
         "`pnpm --dir packages/core exec vitest run tests/codex-session.test.ts` passes",
         "Typecheck passes"
       ],
-      "priority": 48,
+      "priority": 11,
       "passes": false,
       "notes": ""
     },
@@ -705,7 +168,7 @@
         "Focused ACP/session tests for synthetic update behavior pass",
         "Typecheck passes"
       ],
-      "priority": 49,
+      "priority": 12,
       "passes": false,
       "notes": ""
     },
@@ -719,7 +182,7 @@
         "Any public TypeScript types for timeout errors are updated to reflect the extra diagnostics",
         "Typecheck passes"
       ],
-      "priority": 50,
+      "priority": 13,
       "passes": false,
       "notes": ""
     },
@@ -733,7 +196,7 @@
         "`pnpm --dir packages/core exec vitest run tests/session-cleanup.test.ts` passes",
         "Typecheck passes"
       ],
-      "priority": 51,
+      "priority": 14,
       "passes": false,
       "notes": ""
     },
@@ -747,7 +210,7 @@
         "A focused kernel test file for socket-table scaffolding/resource limits passes",
         "Typecheck passes"
       ],
-      "priority": 52,
+      "priority": 15,
       "passes": false,
       "notes": ""
     },
@@ -761,7 +224,7 @@
         "A dedicated kernel TCP-listener test file passes",
         "Typecheck passes"
       ],
-      "priority": 53,
+      "priority": 16,
       "passes": false,
       "notes": ""
     },
@@ -775,7 +238,7 @@
         "A dedicated kernel TCP data-plane test file passes",
         "Typecheck passes"
       ],
-      "priority": 54,
+      "priority": 17,
       "passes": false,
       "notes": ""
     },
@@ -790,7 +253,7 @@
         "Loopback routing no longer depends on sidecar-only listener translation for the covered path",
         "Typecheck passes"
       ],
-      "priority": 55,
+      "priority": 18,
       "passes": false,
       "notes": ""
     },
@@ -804,7 +267,7 @@
         "Focused tests for kernel-backed DNS resolution pass",
         "Typecheck passes"
       ],
-      "priority": 56,
+      "priority": 19,
       "passes": false,
       "notes": ""
     },
@@ -818,7 +281,7 @@
         "A dedicated kernel UDP test file passes",
         "Typecheck passes"
       ],
-      "priority": 57,
+      "priority": 20,
       "passes": false,
       "notes": ""
     },
@@ -832,7 +295,7 @@
         "A dedicated kernel Unix-socket test file passes",
         "Typecheck passes"
       ],
-      "priority": 58,
+      "priority": 21,
       "passes": false,
       "notes": ""
     },
@@ -846,7 +309,7 @@
         "`cargo test -p agent-os-kernel poll -- --test-threads=1` passes with the expanded poll coverage",
         "Typecheck passes"
       ],
-      "priority": 59,
+      "priority": 22,
       "passes": false,
       "notes": ""
     },
@@ -860,7 +323,7 @@
         "Focused JS and WASM tests cover waiting on multiple file descriptors through the rewired poll surface",
         "Typecheck passes"
       ],
-      "priority": 59.5,
+      "priority": 23,
       "passes": false,
       "notes": ""
     },
@@ -874,7 +337,7 @@
         "Existing JS network tests for the covered surface pass without host-socket shortcuts",
         "Typecheck passes"
       ],
-      "priority": 60,
+      "priority": 24,
       "passes": false,
       "notes": ""
     },
@@ -888,7 +351,7 @@
         "Guest outbound HTTP no longer uses host-only `ureq`/host-socket shortcuts for the covered path",
         "Typecheck passes"
       ],
-      "priority": 61,
+      "priority": 25,
       "passes": false,
       "notes": ""
     },
@@ -903,7 +366,7 @@
         "WASM guest networking no longer depends on direct host-node bridges for the covered surface",
         "Typecheck passes"
       ],
-      "priority": 62,
+      "priority": 26,
       "passes": false,
       "notes": ""
     },
@@ -917,7 +380,7 @@
         "`registry/tests/kernel/cross-runtime-network.test.ts` (or its replacement) passes for the covered runtime matrix",
         "Typecheck passes"
       ],
-      "priority": 63,
+      "priority": 27,
       "passes": false,
       "notes": ""
     },
@@ -931,7 +394,7 @@
         "Focused sidecar tests for networking state and cleanup still pass after the cleanup",
         "Typecheck passes"
       ],
-      "priority": 64,
+      "priority": 28,
       "passes": false,
       "notes": ""
     },
@@ -945,7 +408,7 @@
         "Focused layer lifecycle tests pass",
         "Typecheck passes"
       ],
-      "priority": 65,
+      "priority": 29,
       "passes": false,
       "notes": ""
     },
@@ -959,7 +422,7 @@
         "Focused overlay composition tests pass",
         "Typecheck passes"
       ],
-      "priority": 66,
+      "priority": 30,
       "passes": false,
       "notes": ""
     },
@@ -973,7 +436,7 @@
         "A dedicated layer lifecycle test suite passes",
         "Typecheck passes"
       ],
-      "priority": 67,
+      "priority": 31,
       "passes": false,
       "notes": ""
     },
@@ -987,7 +450,7 @@
         "Focused kernel identity tests pass",
         "Typecheck passes"
       ],
-      "priority": 68,
+      "priority": 32,
       "passes": false,
       "notes": ""
     },
@@ -1001,7 +464,7 @@
         "Focused guest identity test suites pass",
         "Typecheck passes"
       ],
-      "priority": 69,
+      "priority": 33,
       "passes": false,
       "notes": ""
     },
@@ -1015,7 +478,7 @@
         "The reserved-path suppression behavior is documented in the relevant crate instructions",
         "Typecheck passes"
       ],
-      "priority": 70,
+      "priority": 34,
       "passes": false,
       "notes": ""
     },
@@ -1029,7 +492,7 @@
         "Any guest-facing bridge/RPC code needed for the covered flags is wired through and tested",
         "Typecheck passes"
       ],
-      "priority": 71,
+      "priority": 35,
       "passes": false,
       "notes": ""
     },
@@ -1043,7 +506,7 @@
         "The implementation preserves existing read-only and path-escape protections",
         "Typecheck passes"
       ],
-      "priority": 72,
+      "priority": 36,
       "passes": false,
       "notes": ""
     },
@@ -1057,7 +520,7 @@
         "The TypeScript and Rust tool surfaces agree on the enforced limit after the change",
         "Typecheck passes"
       ],
-      "priority": 73,
+      "priority": 37,
       "passes": false,
       "notes": ""
     },
@@ -1071,7 +534,7 @@
         "Downstream first-party packages compile against the restored exports without reaching into runtime internals",
         "Typecheck passes"
       ],
-      "priority": 74,
+      "priority": 38,
       "passes": false,
       "notes": ""
     },
@@ -1086,7 +549,7 @@
         "Focused sqlite guest tests pass",
         "Typecheck passes"
       ],
-      "priority": 75,
+      "priority": 39,
       "passes": false,
       "notes": ""
     },
@@ -1101,7 +564,7 @@
         "Focused runtime hardening tests cover all three runtimes",
         "Typecheck passes"
       ],
-      "priority": 76,
+      "priority": 40,
       "passes": false,
       "notes": ""
     },
@@ -1115,7 +578,7 @@
         "`pnpm --dir packages/core exec vitest run tests/all-processes.test.ts tests/process-tree.test.ts` passes with the restored behavior",
         "Typecheck passes"
       ],
-      "priority": 77,
+      "priority": 41,
       "passes": false,
       "notes": ""
     },
@@ -1129,7 +592,7 @@
         "Focused JS execution/V8 tests still pass after the cleanup",
         "Typecheck passes"
       ],
-      "priority": 78,
+      "priority": 42,
       "passes": false,
       "notes": ""
     },
@@ -1143,7 +606,7 @@
         "`cargo test -p agent-os-sidecar --test python -- --test-threads=1` passes",
         "Typecheck passes"
       ],
-      "priority": 79,
+      "priority": 43,
       "passes": false,
       "notes": ""
     },
@@ -1157,7 +620,7 @@
         "`cargo test -p agent-os-execution --test wasm -- --test-threads=1` passes on the new runtime path",
         "Typecheck passes"
       ],
-      "priority": 80,
+      "priority": 44,
       "passes": false,
       "notes": ""
     },
@@ -1171,7 +634,7 @@
         "Focused runtime tests covering all three runtimes still pass after the cleanup",
         "Typecheck passes"
       ],
-      "priority": 81,
+      "priority": 45,
       "passes": false,
       "notes": ""
     },
@@ -1185,7 +648,7 @@
         "`cargo test -p agent-os-sidecar --test security_hardening -- --test-threads=1` passes with no ignored first-party test in that file",
         "Typecheck passes"
       ],
-      "priority": 82,
+      "priority": 46,
       "passes": false,
       "notes": ""
     },
@@ -1199,7 +662,7 @@
         "`cargo test -p agent-os-sidecar --test service -- --test-threads=1` passes for the filesystem/fd-stream subset",
         "Typecheck passes"
       ],
-      "priority": 83,
+      "priority": 47,
       "passes": false,
       "notes": ""
     },
@@ -1213,7 +676,7 @@
         "`cargo test -p agent-os-sidecar --test service -- --test-threads=1` passes for the transport subset",
         "Typecheck passes"
       ],
-      "priority": 84,
+      "priority": 48,
       "passes": false,
       "notes": ""
     },
@@ -1227,7 +690,7 @@
         "`cargo test -p agent-os-sidecar --test service -- --test-threads=1` and `--test socket_state_queries` pass for the covered subset",
         "Typecheck passes"
       ],
-      "priority": 85,
+      "priority": 49,
       "passes": false,
       "notes": ""
     },
@@ -1241,7 +704,7 @@
         "`cargo test -p agent-os-sidecar --test service -- --test-threads=1`, `--test stdio_binary`, and `--test vm_lifecycle` pass for the covered cases",
         "Typecheck passes"
       ],
-      "priority": 86,
+      "priority": 50,
       "passes": false,
       "notes": ""
     },
@@ -1255,7 +718,7 @@
         "`cargo test -p agent-os-execution --test javascript_v8 -- --test-threads=1` passes for the covered child-process assertions",
         "Typecheck passes"
       ],
-      "priority": 87,
+      "priority": 51,
       "passes": false,
       "notes": ""
     },
@@ -1269,7 +732,7 @@
         "Focused Pi tool coverage passes under llmock/default package test conditions",
         "Typecheck passes"
       ],
-      "priority": 88,
+      "priority": 52,
       "passes": false,
       "notes": ""
     },
@@ -1283,7 +746,7 @@
         "The node-binary suite reflects the intended guest contract after the fix",
         "Typecheck passes"
       ],
-      "priority": 89,
+      "priority": 53,
       "passes": false,
       "notes": ""
     },
@@ -1297,7 +760,7 @@
         "Any environment gating that remains is limited to explicit external-network opt-in cases, not core functionality",
         "Typecheck passes"
       ],
-      "priority": 90,
+      "priority": 54,
       "passes": false,
       "notes": ""
     },
@@ -1311,7 +774,7 @@
         "`packages/core/tests/opencode-headless.test.ts` passes",
         "Typecheck passes"
       ],
-      "priority": 91,
+      "priority": 55,
       "passes": false,
       "notes": ""
     },
@@ -1325,7 +788,7 @@
         "There is a documented compatibility plan for migrating from the current JSON framing to BARE",
         "Typecheck passes"
       ],
-      "priority": 92,
+      "priority": 56,
       "passes": false,
       "notes": ""
     },
@@ -1339,7 +802,7 @@
         "The Rust codec can coexist with the current protocol during the migration window if needed",
         "Typecheck passes"
       ],
-      "priority": 93,
+      "priority": 57,
       "passes": false,
       "notes": ""
     },
@@ -1353,7 +816,7 @@
         "Focused sidecar client tests pass on the BARE transport",
         "Typecheck passes"
       ],
-      "priority": 94,
+      "priority": 58,
       "passes": false,
       "notes": ""
     },
@@ -1367,7 +830,7 @@
         "The parity suite is documented as the final migration gate",
         "Typecheck passes"
       ],
-      "priority": 95,
+      "priority": 59,
       "passes": false,
       "notes": ""
     },
@@ -1381,7 +844,7 @@
         "Quickstart/example tests or typechecks still pass after the cleanup",
         "Typecheck passes"
       ],
-      "priority": 96,
+      "priority": 60,
       "passes": false,
       "notes": ""
     },
@@ -1395,7 +858,7 @@
         "Focused crate test runs no longer emit the cleaned-up first-party warnings",
         "Typecheck passes"
       ],
-      "priority": 97,
+      "priority": 61,
       "passes": false,
       "notes": ""
     },
@@ -1409,7 +872,7 @@
         "There are no first-party ignored Rust tests and no product-debt `skip`/`skipIf` markers left in the first-party package suites; only explicit external API/network opt-in tests may remain gated",
         "Typecheck passes"
       ],
-      "priority": 98,
+      "priority": 62,
       "passes": false,
       "notes": ""
     },
@@ -1425,9 +888,852 @@
         "The refreshed `scripts/ralph/progress.txt` reflects the final green state truthfully",
         "Typecheck passes"
       ],
-      "priority": 99,
+      "priority": 63,
       "passes": false,
       "notes": ""
+    },
+    {
+      "id": "US-CC-011",
+      "title": "Agent integration tests: multi-turn, network, error recovery, multi-agent isolation",
+      "description": "As a developer, I want comprehensive integration tests exercising real agent sessions with mock LLM covering multi-turn conversations, network access, tool error recovery, and multi-agent isolation.",
+      "acceptanceCriteria": [
+        "Test file: packages/core/tests/agent-integration.test.ts",
+        "Multi-turn: prompt1 writes file → prompt2 reads it back within same session — VFS state persists across turns",
+        "Multi-turn: prompt1 sets variable → prompt2 references it — conversation context maintained",
+        "Network: agent makes fetch() call during tool execution (e.g., curl a URL) — succeeds through kernel TCP",
+        "Error recovery: agent tool gets ENOENT (read nonexistent file) — agent receives error, retries or reports gracefully, session doesn't crash",
+        "Error recovery: agent tool gets EACCES (permission denied) — session stays alive",
+        "Multi-agent: create Pi session AND Claude session in same VM — each agent's files are visible to both, no interference",
+        "Multi-agent: agent A writes /tmp/a.txt, agent B can read it (shared VFS)",
+        "All tests use @copilotkit/llmock with mock API keys",
+        "pnpm --dir packages/core exec vitest run tests/agent-integration.test.ts passes"
+      ],
+      "priority": 64,
+      "passes": false,
+      "notes": "Found in testing gap audit. No existing tests cover multi-turn file state persistence, agent network access during sessions, tool error handling, or multi-agent isolation. These are all scenarios real users will hit."
+    },
+    {
+      "id": "US-CC-012",
+      "title": "Agent filesystem edge case tests: large files, binary round-trip, symlinks",
+      "description": "As a developer, I want tests covering VFS edge cases through both exec and host API to catch data corruption and visibility issues.",
+      "acceptanceCriteria": [
+        "Test file: packages/core/tests/agent-fs-edge-cases.test.ts",
+        "Large file: write 1MB file via vm.writeFile(), read back via vm.exec('wc -c') — size matches",
+        "Large file: write 1MB file via vm.exec('dd ...'), read back via vm.readFile() — size matches",
+        "Large file: write 5MB file via vm.writeFile(), verify no silent truncation or ENOSPC without hitting resource limit",
+        "Binary round-trip: write 1KB of random bytes via vm.writeFile(), read back via vm.readFile() — bytes identical",
+        "Binary round-trip: vm.exec writes binary via printf/xxd, vm.readFile() returns identical bytes",
+        "Symlinks: vm.exec('ln -s /tmp/target.txt /tmp/link.txt') then vm.readFile('/tmp/link.txt') follows symlink",
+        "Symlinks: vm.writeFile('/tmp/target.txt', 'data') then vm.exec('cat /tmp/link.txt') returns 'data' through symlink",
+        "Symlinks: vm.exec('readlink /tmp/link.txt') returns correct target path",
+        "pnpm --dir packages/core exec vitest run tests/agent-fs-edge-cases.test.ts passes"
+      ],
+      "priority": 65,
+      "passes": false,
+      "notes": "Found in testing gap audit. No existing tests cover large file handling through the VFS cross-layer path, binary file integrity through exec/API round-trips, or symlink visibility across VFS layers. These edge cases are common in real agent workflows (agents write config files, read binary outputs, create symlinks)."
+    },
+    {
+      "id": "US-CC-013",
+      "title": "Agent lifecycle edge case tests: concurrent sessions, mid-prompt cancellation",
+      "description": "As a developer, I want tests covering session lifecycle edge cases to prevent resource leaks and crashes.",
+      "acceptanceCriteria": [
+        "Test file: packages/core/tests/agent-lifecycle.test.ts",
+        "Concurrent sessions: create 3 Claude sessions simultaneously, send prompts to all 3, all return responses — no deadlock",
+        "Concurrent sessions: resource counts (processes, FDs) return to baseline after all 3 close",
+        "Mid-prompt cancel: start a prompt, call closeSession() after 2 seconds — session closes cleanly, no orphaned processes",
+        "Mid-prompt cancel: after cancel, creating a new session in same VM works normally",
+        "Double close: call closeSession() twice — second call is a no-op, no error",
+        "Session after dispose: call closeSession() after vm.dispose() — clear error, no crash",
+        "Rapid create/close: create and immediately close 10 sessions in sequence — no resource leak",
+        "pnpm --dir packages/core exec vitest run tests/agent-lifecycle.test.ts passes"
+      ],
+      "priority": 66,
+      "passes": false,
+      "notes": "Found in testing gap audit. session-cleanup.test.ts exists but only covers basic cleanup. No tests for concurrent sessions under load, mid-prompt cancellation, or rapid create/close cycles. These scenarios happen in production when users create multiple sessions or abort prompts."
+    },
+    {
+      "id": "US-090",
+      "title": "Implement thorough Shared Bridge Contract test coverage",
+      "description": "As a developer, I want every planned test in the Shared Bridge Contract checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/shared-bridge-contract.md is implemented as an automated test (12 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/shared-bridge-contract.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Shared Bridge Contract checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Shared Bridge Contract coverage maintainable are included with the test changes."
+      ],
+      "priority": 67,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/shared-bridge-contract.md (12 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-091",
+      "title": "Run Shared Bridge Contract tests and fix issues",
+      "description": "As a developer, I want the Shared Bridge Contract test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/shared-bridge-contract.md are executed together with the nearest existing Shared Bridge Contract subsystem suites.",
+        "Any failures uncovered while running the Shared Bridge Contract coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Shared Bridge Contract subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 68,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/shared-bridge-contract.md (12 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-092",
+      "title": "Implement thorough Kernel VM And Syscall Surface test coverage",
+      "description": "As a developer, I want every planned test in the Kernel VM And Syscall Surface checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/kernel-vm-and-syscall-surface.md is implemented as an automated test (14 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/kernel-vm-and-syscall-surface.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Kernel VM And Syscall Surface checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Kernel VM And Syscall Surface coverage maintainable are included with the test changes."
+      ],
+      "priority": 69,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/kernel-vm-and-syscall-surface.md (14 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-093",
+      "title": "Run Kernel VM And Syscall Surface tests and fix issues",
+      "description": "As a developer, I want the Kernel VM And Syscall Surface test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/kernel-vm-and-syscall-surface.md are executed together with the nearest existing Kernel VM And Syscall Surface subsystem suites.",
+        "Any failures uncovered while running the Kernel VM And Syscall Surface coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Kernel VM And Syscall Surface subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 70,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/kernel-vm-and-syscall-surface.md (14 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-094",
+      "title": "Implement thorough VFS And Filesystem Substrate test coverage",
+      "description": "As a developer, I want every planned test in the VFS And Filesystem Substrate checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/vfs-and-filesystem-substrate.md is implemented as an automated test (18 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/vfs-and-filesystem-substrate.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the VFS And Filesystem Substrate checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep VFS And Filesystem Substrate coverage maintainable are included with the test changes."
+      ],
+      "priority": 71,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/vfs-and-filesystem-substrate.md (18 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-095",
+      "title": "Run VFS And Filesystem Substrate tests and fix issues",
+      "description": "As a developer, I want the VFS And Filesystem Substrate test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/vfs-and-filesystem-substrate.md are executed together with the nearest existing VFS And Filesystem Substrate subsystem suites.",
+        "Any failures uncovered while running the VFS And Filesystem Substrate coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the VFS And Filesystem Substrate subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 72,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/vfs-and-filesystem-substrate.md (18 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-096",
+      "title": "Implement thorough Pseudo-Filesystems Dev And Proc test coverage",
+      "description": "As a developer, I want every planned test in the Pseudo-Filesystems Dev And Proc checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/pseudo-filesystems-dev-and-proc.md is implemented as an automated test (11 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/pseudo-filesystems-dev-and-proc.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Pseudo-Filesystems Dev And Proc checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Pseudo-Filesystems Dev And Proc coverage maintainable are included with the test changes."
+      ],
+      "priority": 73,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/pseudo-filesystems-dev-and-proc.md (11 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-097",
+      "title": "Run Pseudo-Filesystems Dev And Proc tests and fix issues",
+      "description": "As a developer, I want the Pseudo-Filesystems Dev And Proc test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/pseudo-filesystems-dev-and-proc.md are executed together with the nearest existing Pseudo-Filesystems Dev And Proc subsystem suites.",
+        "Any failures uncovered while running the Pseudo-Filesystems Dev And Proc coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Pseudo-Filesystems Dev And Proc subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 74,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/pseudo-filesystems-dev-and-proc.md (11 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-098",
+      "title": "Implement thorough Process, Command, FD, Pipe, PTY, And Readiness Model test coverage",
+      "description": "As a developer, I want every planned test in the Process, Command, FD, Pipe, PTY, And Readiness Model checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/process-command-fd-pipe-pty-readiness.md is implemented as an automated test (17 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/process-command-fd-pipe-pty-readiness.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Process, Command, FD, Pipe, PTY, And Readiness Model checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Process, Command, FD, Pipe, PTY, And Readiness Model coverage maintainable are included with the test changes."
+      ],
+      "priority": 75,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/process-command-fd-pipe-pty-readiness.md (17 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-099",
+      "title": "Run Process, Command, FD, Pipe, PTY, And Readiness Model tests and fix issues",
+      "description": "As a developer, I want the Process, Command, FD, Pipe, PTY, And Readiness Model test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/process-command-fd-pipe-pty-readiness.md are executed together with the nearest existing Process, Command, FD, Pipe, PTY, And Readiness Model subsystem suites.",
+        "Any failures uncovered while running the Process, Command, FD, Pipe, PTY, And Readiness Model coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Process, Command, FD, Pipe, PTY, And Readiness Model subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 76,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/process-command-fd-pipe-pty-readiness.md (17 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-100",
+      "title": "Implement thorough Permissions, Resource Limits, And User Identity test coverage",
+      "description": "As a developer, I want every planned test in the Permissions, Resource Limits, And User Identity checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/permissions-resource-limits-and-user-identity.md is implemented as an automated test (13 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/permissions-resource-limits-and-user-identity.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Permissions, Resource Limits, And User Identity checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Permissions, Resource Limits, And User Identity coverage maintainable are included with the test changes."
+      ],
+      "priority": 77,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/permissions-resource-limits-and-user-identity.md (13 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-101",
+      "title": "Run Permissions, Resource Limits, And User Identity tests and fix issues",
+      "description": "As a developer, I want the Permissions, Resource Limits, And User Identity test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/permissions-resource-limits-and-user-identity.md are executed together with the nearest existing Permissions, Resource Limits, And User Identity subsystem suites.",
+        "Any failures uncovered while running the Permissions, Resource Limits, And User Identity coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Permissions, Resource Limits, And User Identity subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 78,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/permissions-resource-limits-and-user-identity.md (13 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-102",
+      "title": "Implement thorough Execution Runtime Common Layer test coverage",
+      "description": "As a developer, I want every planned test in the Execution Runtime Common Layer checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/execution-runtime-common-layer.md is implemented as an automated test (15 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/execution-runtime-common-layer.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Execution Runtime Common Layer checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Execution Runtime Common Layer coverage maintainable are included with the test changes."
+      ],
+      "priority": 79,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/execution-runtime-common-layer.md (15 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-103",
+      "title": "Run Execution Runtime Common Layer tests and fix issues",
+      "description": "As a developer, I want the Execution Runtime Common Layer test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/execution-runtime-common-layer.md are executed together with the nearest existing Execution Runtime Common Layer subsystem suites.",
+        "Any failures uncovered while running the Execution Runtime Common Layer coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Execution Runtime Common Layer subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 80,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/execution-runtime-common-layer.md (15 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-104",
+      "title": "Implement thorough JavaScript Runtime Host Path test coverage",
+      "description": "As a developer, I want every planned test in the JavaScript Runtime Host Path checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/javascript-runtime-host-path.md is implemented as an automated test (13 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/javascript-runtime-host-path.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the JavaScript Runtime Host Path checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep JavaScript Runtime Host Path coverage maintainable are included with the test changes."
+      ],
+      "priority": 81,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/javascript-runtime-host-path.md (13 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-105",
+      "title": "Run JavaScript Runtime Host Path tests and fix issues",
+      "description": "As a developer, I want the JavaScript Runtime Host Path test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/javascript-runtime-host-path.md are executed together with the nearest existing JavaScript Runtime Host Path subsystem suites.",
+        "Any failures uncovered while running the JavaScript Runtime Host Path coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the JavaScript Runtime Host Path subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 82,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/javascript-runtime-host-path.md (13 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-106",
+      "title": "Implement thorough Loader, Materialization, And Builtin Interception test coverage",
+      "description": "As a developer, I want every planned test in the Loader, Materialization, And Builtin Interception checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/loader-materialization-and-builtin-interception.md is implemented as an automated test (16 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/loader-materialization-and-builtin-interception.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Loader, Materialization, And Builtin Interception checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Loader, Materialization, And Builtin Interception coverage maintainable are included with the test changes."
+      ],
+      "priority": 83,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/loader-materialization-and-builtin-interception.md (16 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-107",
+      "title": "Run Loader, Materialization, And Builtin Interception tests and fix issues",
+      "description": "As a developer, I want the Loader, Materialization, And Builtin Interception test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/loader-materialization-and-builtin-interception.md are executed together with the nearest existing Loader, Materialization, And Builtin Interception subsystem suites.",
+        "Any failures uncovered while running the Loader, Materialization, And Builtin Interception coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Loader, Materialization, And Builtin Interception subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 84,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/loader-materialization-and-builtin-interception.md (16 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-108",
+      "title": "Implement thorough Guest Bridge Bundles And Fetch Compatibility Shims test coverage",
+      "description": "As a developer, I want every planned test in the Guest Bridge Bundles And Fetch Compatibility Shims checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/guest-bridge-bundles-and-fetch-shims.md is implemented as an automated test (11 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/guest-bridge-bundles-and-fetch-shims.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Guest Bridge Bundles And Fetch Compatibility Shims checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Guest Bridge Bundles And Fetch Compatibility Shims coverage maintainable are included with the test changes."
+      ],
+      "priority": 85,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/guest-bridge-bundles-and-fetch-shims.md (11 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-109",
+      "title": "Run Guest Bridge Bundles And Fetch Compatibility Shims tests and fix issues",
+      "description": "As a developer, I want the Guest Bridge Bundles And Fetch Compatibility Shims test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/guest-bridge-bundles-and-fetch-shims.md are executed together with the nearest existing Guest Bridge Bundles And Fetch Compatibility Shims subsystem suites.",
+        "Any failures uncovered while running the Guest Bridge Bundles And Fetch Compatibility Shims coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Guest Bridge Bundles And Fetch Compatibility Shims subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 86,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/guest-bridge-bundles-and-fetch-shims.md (11 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-110",
+      "title": "Implement thorough Python Pyodide Runtime test coverage",
+      "description": "As a developer, I want every planned test in the Python Pyodide Runtime checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/python-pyodide-runtime.md is implemented as an automated test (11 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/python-pyodide-runtime.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Python Pyodide Runtime checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Python Pyodide Runtime coverage maintainable are included with the test changes."
+      ],
+      "priority": 87,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/python-pyodide-runtime.md (11 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-111",
+      "title": "Run Python Pyodide Runtime tests and fix issues",
+      "description": "As a developer, I want the Python Pyodide Runtime test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/python-pyodide-runtime.md are executed together with the nearest existing Python Pyodide Runtime subsystem suites.",
+        "Any failures uncovered while running the Python Pyodide Runtime coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Python Pyodide Runtime subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 88,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/python-pyodide-runtime.md (11 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-112",
+      "title": "Implement thorough WASM Runtime test coverage",
+      "description": "As a developer, I want every planned test in the WASM Runtime checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/wasm-runtime.md is implemented as an automated test (10 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/wasm-runtime.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the WASM Runtime checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep WASM Runtime coverage maintainable are included with the test changes."
+      ],
+      "priority": 89,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/wasm-runtime.md (10 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-113",
+      "title": "Run WASM Runtime tests and fix issues",
+      "description": "As a developer, I want the WASM Runtime test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/wasm-runtime.md are executed together with the nearest existing WASM Runtime subsystem suites.",
+        "Any failures uncovered while running the WASM Runtime coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the WASM Runtime subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 90,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/wasm-runtime.md (10 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-114",
+      "title": "Implement thorough Execution-Side V8 Client Transport And IPC test coverage",
+      "description": "As a developer, I want every planned test in the Execution-Side V8 Client Transport And IPC checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/execution-v8-client-transport-and-ipc.md is implemented as an automated test (9 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/execution-v8-client-transport-and-ipc.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Execution-Side V8 Client Transport And IPC checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Execution-Side V8 Client Transport And IPC coverage maintainable are included with the test changes."
+      ],
+      "priority": 91,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/execution-v8-client-transport-and-ipc.md (9 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-115",
+      "title": "Run Execution-Side V8 Client Transport And IPC tests and fix issues",
+      "description": "As a developer, I want the Execution-Side V8 Client Transport And IPC test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/execution-v8-client-transport-and-ipc.md are executed together with the nearest existing Execution-Side V8 Client Transport And IPC subsystem suites.",
+        "Any failures uncovered while running the Execution-Side V8 Client Transport And IPC coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Execution-Side V8 Client Transport And IPC subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 92,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/execution-v8-client-transport-and-ipc.md (9 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-116",
+      "title": "Implement thorough V8 Isolate Runtime Daemon test coverage",
+      "description": "As a developer, I want every planned test in the V8 Isolate Runtime Daemon checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/v8-isolate-runtime-daemon.md is implemented as an automated test (14 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/v8-isolate-runtime-daemon.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the V8 Isolate Runtime Daemon checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep V8 Isolate Runtime Daemon coverage maintainable are included with the test changes."
+      ],
+      "priority": 93,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/v8-isolate-runtime-daemon.md (14 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-117",
+      "title": "Run V8 Isolate Runtime Daemon tests and fix issues",
+      "description": "As a developer, I want the V8 Isolate Runtime Daemon test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/v8-isolate-runtime-daemon.md are executed together with the nearest existing V8 Isolate Runtime Daemon subsystem suites.",
+        "Any failures uncovered while running the V8 Isolate Runtime Daemon coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the V8 Isolate Runtime Daemon subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 94,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/v8-isolate-runtime-daemon.md (14 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-118",
+      "title": "Implement thorough Native Sidecar Transport, Protocol, And State Machine test coverage",
+      "description": "As a developer, I want every planned test in the Native Sidecar Transport, Protocol, And State Machine checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/sidecar-transport-protocol-and-state-machine.md is implemented as an automated test (12 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/sidecar-transport-protocol-and-state-machine.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Native Sidecar Transport, Protocol, And State Machine checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Native Sidecar Transport, Protocol, And State Machine coverage maintainable are included with the test changes."
+      ],
+      "priority": 95,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-transport-protocol-and-state-machine.md (12 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-119",
+      "title": "Run Native Sidecar Transport, Protocol, And State Machine tests and fix issues",
+      "description": "As a developer, I want the Native Sidecar Transport, Protocol, And State Machine test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/sidecar-transport-protocol-and-state-machine.md are executed together with the nearest existing Native Sidecar Transport, Protocol, And State Machine subsystem suites.",
+        "Any failures uncovered while running the Native Sidecar Transport, Protocol, And State Machine coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Native Sidecar Transport, Protocol, And State Machine subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 96,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-transport-protocol-and-state-machine.md (12 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-120",
+      "title": "Implement thorough Native Sidecar Dispatch Hub test coverage",
+      "description": "As a developer, I want every planned test in the Native Sidecar Dispatch Hub checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/sidecar-dispatch-hub.md is implemented as an automated test (12 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/sidecar-dispatch-hub.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Native Sidecar Dispatch Hub checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Native Sidecar Dispatch Hub coverage maintainable are included with the test changes."
+      ],
+      "priority": 97,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-dispatch-hub.md (12 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-121",
+      "title": "Run Native Sidecar Dispatch Hub tests and fix issues",
+      "description": "As a developer, I want the Native Sidecar Dispatch Hub test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/sidecar-dispatch-hub.md are executed together with the nearest existing Native Sidecar Dispatch Hub subsystem suites.",
+        "Any failures uncovered while running the Native Sidecar Dispatch Hub coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Native Sidecar Dispatch Hub subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 98,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-dispatch-hub.md (12 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-122",
+      "title": "Implement thorough Native Sidecar VM Lifecycle And Layering test coverage",
+      "description": "As a developer, I want every planned test in the Native Sidecar VM Lifecycle And Layering checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/sidecar-vm-lifecycle-and-layering.md is implemented as an automated test (12 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/sidecar-vm-lifecycle-and-layering.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Native Sidecar VM Lifecycle And Layering checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Native Sidecar VM Lifecycle And Layering coverage maintainable are included with the test changes."
+      ],
+      "priority": 99,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-vm-lifecycle-and-layering.md (12 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-123",
+      "title": "Run Native Sidecar VM Lifecycle And Layering tests and fix issues",
+      "description": "As a developer, I want the Native Sidecar VM Lifecycle And Layering test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/sidecar-vm-lifecycle-and-layering.md are executed together with the nearest existing Native Sidecar VM Lifecycle And Layering subsystem suites.",
+        "Any failures uncovered while running the Native Sidecar VM Lifecycle And Layering coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Native Sidecar VM Lifecycle And Layering subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 100,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-vm-lifecycle-and-layering.md (12 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-124",
+      "title": "Implement thorough Native Sidecar Guest Filesystem API test coverage",
+      "description": "As a developer, I want every planned test in the Native Sidecar Guest Filesystem API checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/sidecar-guest-filesystem-api.md is implemented as an automated test (10 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/sidecar-guest-filesystem-api.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Native Sidecar Guest Filesystem API checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Native Sidecar Guest Filesystem API coverage maintainable are included with the test changes."
+      ],
+      "priority": 101,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-guest-filesystem-api.md (10 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-125",
+      "title": "Run Native Sidecar Guest Filesystem API tests and fix issues",
+      "description": "As a developer, I want the Native Sidecar Guest Filesystem API test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/sidecar-guest-filesystem-api.md are executed together with the nearest existing Native Sidecar Guest Filesystem API subsystem suites.",
+        "Any failures uncovered while running the Native Sidecar Guest Filesystem API coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Native Sidecar Guest Filesystem API subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 102,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-guest-filesystem-api.md (10 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-126",
+      "title": "Implement thorough Native Sidecar Shadow-Root Reconciliation test coverage",
+      "description": "As a developer, I want every planned test in the Native Sidecar Shadow-Root Reconciliation checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/sidecar-shadow-root-reconciliation.md is implemented as an automated test (11 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/sidecar-shadow-root-reconciliation.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Native Sidecar Shadow-Root Reconciliation checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Native Sidecar Shadow-Root Reconciliation coverage maintainable are included with the test changes."
+      ],
+      "priority": 103,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-shadow-root-reconciliation.md (11 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-127",
+      "title": "Run Native Sidecar Shadow-Root Reconciliation tests and fix issues",
+      "description": "As a developer, I want the Native Sidecar Shadow-Root Reconciliation test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/sidecar-shadow-root-reconciliation.md are executed together with the nearest existing Native Sidecar Shadow-Root Reconciliation subsystem suites.",
+        "Any failures uncovered while running the Native Sidecar Shadow-Root Reconciliation coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Native Sidecar Shadow-Root Reconciliation subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 104,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-shadow-root-reconciliation.md (11 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-128",
+      "title": "Implement thorough Native Sidecar Tool Virtualization test coverage",
+      "description": "As a developer, I want every planned test in the Native Sidecar Tool Virtualization checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/sidecar-tool-virtualization.md is implemented as an automated test (12 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/sidecar-tool-virtualization.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Native Sidecar Tool Virtualization checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Native Sidecar Tool Virtualization coverage maintainable are included with the test changes."
+      ],
+      "priority": 105,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-tool-virtualization.md (12 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-129",
+      "title": "Run Native Sidecar Tool Virtualization tests and fix issues",
+      "description": "As a developer, I want the Native Sidecar Tool Virtualization test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/sidecar-tool-virtualization.md are executed together with the nearest existing Native Sidecar Tool Virtualization subsystem suites.",
+        "Any failures uncovered while running the Native Sidecar Tool Virtualization coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Native Sidecar Tool Virtualization subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 106,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-tool-virtualization.md (12 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-130",
+      "title": "Implement thorough Native Sidecar Process Runtime Dispatch test coverage",
+      "description": "As a developer, I want every planned test in the Native Sidecar Process Runtime Dispatch checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/sidecar-process-runtime-dispatch.md is implemented as an automated test (11 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/sidecar-process-runtime-dispatch.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Native Sidecar Process Runtime Dispatch checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Native Sidecar Process Runtime Dispatch coverage maintainable are included with the test changes."
+      ],
+      "priority": 107,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-process-runtime-dispatch.md (11 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-131",
+      "title": "Run Native Sidecar Process Runtime Dispatch tests and fix issues",
+      "description": "As a developer, I want the Native Sidecar Process Runtime Dispatch test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/sidecar-process-runtime-dispatch.md are executed together with the nearest existing Native Sidecar Process Runtime Dispatch subsystem suites.",
+        "Any failures uncovered while running the Native Sidecar Process Runtime Dispatch coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Native Sidecar Process Runtime Dispatch subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 108,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-process-runtime-dispatch.md (11 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-132",
+      "title": "Implement thorough Native Sidecar Networking Policy And Socket Transports test coverage",
+      "description": "As a developer, I want every planned test in the Native Sidecar Networking Policy And Socket Transports checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/sidecar-networking-policy-and-socket-transports.md is implemented as an automated test (13 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/sidecar-networking-policy-and-socket-transports.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Native Sidecar Networking Policy And Socket Transports checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Native Sidecar Networking Policy And Socket Transports coverage maintainable are included with the test changes."
+      ],
+      "priority": 109,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-networking-policy-and-socket-transports.md (13 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-133",
+      "title": "Run Native Sidecar Networking Policy And Socket Transports tests and fix issues",
+      "description": "As a developer, I want the Native Sidecar Networking Policy And Socket Transports test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/sidecar-networking-policy-and-socket-transports.md are executed together with the nearest existing Native Sidecar Networking Policy And Socket Transports subsystem suites.",
+        "Any failures uncovered while running the Native Sidecar Networking Policy And Socket Transports coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Native Sidecar Networking Policy And Socket Transports subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 110,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-networking-policy-and-socket-transports.md (13 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-134",
+      "title": "Implement thorough Native Sidecar TLS, HTTP, And HTTP/2 Planes test coverage",
+      "description": "As a developer, I want every planned test in the Native Sidecar TLS, HTTP, And HTTP/2 Planes checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/sidecar-tls-http-http2-planes.md is implemented as an automated test (12 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/sidecar-tls-http-http2-planes.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Native Sidecar TLS, HTTP, And HTTP/2 Planes checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Native Sidecar TLS, HTTP, And HTTP/2 Planes coverage maintainable are included with the test changes."
+      ],
+      "priority": 111,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-tls-http-http2-planes.md (12 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-135",
+      "title": "Run Native Sidecar TLS, HTTP, And HTTP/2 Planes tests and fix issues",
+      "description": "As a developer, I want the Native Sidecar TLS, HTTP, And HTTP/2 Planes test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/sidecar-tls-http-http2-planes.md are executed together with the nearest existing Native Sidecar TLS, HTTP, And HTTP/2 Planes subsystem suites.",
+        "Any failures uncovered while running the Native Sidecar TLS, HTTP, And HTTP/2 Planes coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Native Sidecar TLS, HTTP, And HTTP/2 Planes subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 112,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-tls-http-http2-planes.md (12 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-136",
+      "title": "Implement thorough Native Sidecar Builtin Service RPCs test coverage",
+      "description": "As a developer, I want every planned test in the Native Sidecar Builtin Service RPCs checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/sidecar-builtin-service-rpcs.md is implemented as an automated test (12 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/sidecar-builtin-service-rpcs.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Native Sidecar Builtin Service RPCs checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Native Sidecar Builtin Service RPCs coverage maintainable are included with the test changes."
+      ],
+      "priority": 113,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-builtin-service-rpcs.md (12 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-137",
+      "title": "Run Native Sidecar Builtin Service RPCs tests and fix issues",
+      "description": "As a developer, I want the Native Sidecar Builtin Service RPCs test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/sidecar-builtin-service-rpcs.md are executed together with the nearest existing Native Sidecar Builtin Service RPCs subsystem suites.",
+        "Any failures uncovered while running the Native Sidecar Builtin Service RPCs coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Native Sidecar Builtin Service RPCs subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 114,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/sidecar-builtin-service-rpcs.md (12 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-138",
+      "title": "Implement thorough Mount Plugin Bridge And Permission Glue test coverage",
+      "description": "As a developer, I want every planned test in the Mount Plugin Bridge And Permission Glue checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/mount-plugin-bridge-and-permission-glue.md is implemented as an automated test (11 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/mount-plugin-bridge-and-permission-glue.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Mount Plugin Bridge And Permission Glue checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Mount Plugin Bridge And Permission Glue coverage maintainable are included with the test changes."
+      ],
+      "priority": 115,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/mount-plugin-bridge-and-permission-glue.md (11 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-139",
+      "title": "Run Mount Plugin Bridge And Permission Glue tests and fix issues",
+      "description": "As a developer, I want the Mount Plugin Bridge And Permission Glue test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/mount-plugin-bridge-and-permission-glue.md are executed together with the nearest existing Mount Plugin Bridge And Permission Glue subsystem suites.",
+        "Any failures uncovered while running the Mount Plugin Bridge And Permission Glue coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Mount Plugin Bridge And Permission Glue subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 116,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/mount-plugin-bridge-and-permission-glue.md (11 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-140",
+      "title": "Implement thorough ACP Agent Session Layer test coverage",
+      "description": "As a developer, I want every planned test in the ACP Agent Session Layer checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/acp-agent-session-layer.md is implemented as an automated test (13 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/acp-agent-session-layer.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the ACP Agent Session Layer checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep ACP Agent Session Layer coverage maintainable are included with the test changes."
+      ],
+      "priority": 117,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/acp-agent-session-layer.md (13 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-141",
+      "title": "Run ACP Agent Session Layer tests and fix issues",
+      "description": "As a developer, I want the ACP Agent Session Layer test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/acp-agent-session-layer.md are executed together with the nearest existing ACP Agent Session Layer subsystem suites.",
+        "Any failures uncovered while running the ACP Agent Session Layer coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the ACP Agent Session Layer subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 118,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/acp-agent-session-layer.md (13 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-142",
+      "title": "Implement thorough Browser-Side Sidecar Variant test coverage",
+      "description": "As a developer, I want every planned test in the Browser-Side Sidecar Variant checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/browser-side-sidecar-variant.md is implemented as an automated test (11 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/browser-side-sidecar-variant.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the Browser-Side Sidecar Variant checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep Browser-Side Sidecar Variant coverage maintainable are included with the test changes."
+      ],
+      "priority": 119,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/browser-side-sidecar-variant.md (11 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-143",
+      "title": "Run Browser-Side Sidecar Variant tests and fix issues",
+      "description": "As a developer, I want the Browser-Side Sidecar Variant test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/browser-side-sidecar-variant.md are executed together with the nearest existing Browser-Side Sidecar Variant subsystem suites.",
+        "Any failures uncovered while running the Browser-Side Sidecar Variant coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the Browser-Side Sidecar Variant subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 120,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/browser-side-sidecar-variant.md (11 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-144",
+      "title": "Implement thorough First-Party Mount Plugins test coverage",
+      "description": "As a developer, I want every planned test in the First-Party Mount Plugins checklist implemented as automated coverage so this subsystem is enforced by CI instead of depending on manual spot checks.",
+      "acceptanceCriteria": [
+        "Every unchecked item in .agent/specs/kernel-runtime-test-checklists/first-party-mount-plugins.md is implemented as an automated test (17 checklist items).",
+        "The new tests land in the suites named under Suggested test homes in .agent/specs/kernel-runtime-test-checklists/first-party-mount-plugins.md, or in a closer-fitting adjacent suite if the layout changed.",
+        "The added tests cover the success, failure, and isolation or virtualization invariants called out by the First-Party Mount Plugins checklist without weakening assertions or adding host-only shortcuts.",
+        "Any new fixtures or helpers needed to keep First-Party Mount Plugins coverage maintainable are included with the test changes."
+      ],
+      "priority": 121,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/first-party-mount-plugins.md (17 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+    },
+    {
+      "id": "US-145",
+      "title": "Run First-Party Mount Plugins tests and fix issues",
+      "description": "As a developer, I want the First-Party Mount Plugins test suites to run cleanly after the new coverage lands so regressions are fixed in product code or tests rather than being left ignored or flaky.",
+      "acceptanceCriteria": [
+        "All tests added for .agent/specs/kernel-runtime-test-checklists/first-party-mount-plugins.md are executed together with the nearest existing First-Party Mount Plugins subsystem suites.",
+        "Any failures uncovered while running the First-Party Mount Plugins coverage are fixed in code or tests so the intended behavior is enforced end to end.",
+        "No new ignore markers, flaky retries, or downgraded assertions are introduced to get the First-Party Mount Plugins subsystem green.",
+        "The final targeted test command set for the subsystem is recorded in the implementation notes or PR context when the story is completed."
+      ],
+      "priority": 122,
+      "passes": false,
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/first-party-mount-plugins.md (17 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
     }
   ]
 }
