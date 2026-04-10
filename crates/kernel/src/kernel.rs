@@ -27,8 +27,8 @@ use crate::resource_accounting::{
 };
 use crate::root_fs::{RootFileSystem, RootFilesystemError, RootFilesystemSnapshot};
 use crate::socket_table::{
-    InetSocketAddress, SocketId, SocketRecord, SocketShutdown, SocketSpec, SocketState,
-    SocketTable, SocketTableError,
+    InetSocketAddress, ReceivedDatagram, SocketId, SocketRecord, SocketShutdown, SocketSpec,
+    SocketState, SocketTable, SocketTableError,
 };
 use crate::user::UserManager;
 use crate::vfs::{normalize_path, VfsError, VfsResult, VirtualFileSystem, VirtualStat};
@@ -1254,6 +1254,112 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.sockets.connect_pair(socket_id, peer_socket_id)?;
         self.poll_notifier.notify();
         Ok(())
+    }
+
+    pub fn socket_connect_inet_loopback(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        target_address: InetSocketAddress,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        self.sockets
+            .find_bound_inet_socket(SocketSpec::tcp(), &target_address)
+            .ok_or_else(|| {
+                KernelError::new(
+                    "ECONNREFUSED",
+                    format!(
+                        "no listening socket bound at {}:{}",
+                        target_address.host(),
+                        target_address.port()
+                    ),
+                )
+            })?;
+
+        let mut snapshot = self.resource_snapshot();
+        self.resources.check_socket_allocation(&snapshot)?;
+        for current_state in [existing.state(), SocketState::Created] {
+            self.resources.check_socket_state_transition(
+                &snapshot,
+                current_state,
+                SocketState::Connected,
+            )?;
+            if !current_state.counts_as_connection() {
+                snapshot.socket_connections = snapshot.socket_connections.saturating_add(1);
+            }
+        }
+
+        self.sockets
+            .connect_to_bound_inet_stream(socket_id, target_address)?;
+        self.poll_notifier.notify();
+        Ok(())
+    }
+
+    pub fn socket_send_to_inet_loopback(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        target_address: InetSocketAddress,
+        data: &[u8],
+    ) -> KernelResult<usize> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        let written = self
+            .sockets
+            .send_to_bound_udp_socket(socket_id, target_address, data)?;
+        if written > 0 {
+            self.poll_notifier.notify();
+        }
+        Ok(written)
+    }
+
+    pub fn socket_recv_datagram(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        max_bytes: usize,
+    ) -> KernelResult<Option<ReceivedDatagram>> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        let result = self.sockets.recv_datagram(socket_id, max_bytes)?;
+        if result.is_some() {
+            self.poll_notifier.notify();
+        }
+        Ok(result)
     }
 
     pub fn socket_set_state(
