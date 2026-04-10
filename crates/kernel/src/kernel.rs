@@ -26,6 +26,7 @@ use crate::resource_accounting::{
     ResourceSnapshot,
 };
 use crate::root_fs::{RootFileSystem, RootFilesystemError, RootFilesystemSnapshot};
+use crate::socket_table::{SocketId, SocketSpec, SocketState, SocketTable, SocketTableError};
 use crate::user::UserManager;
 use crate::vfs::{normalize_path, VfsError, VfsResult, VirtualFileSystem, VirtualStat};
 use std::any::Any;
@@ -255,6 +256,7 @@ pub struct KernelVm<F> {
     processes: ProcessTable,
     pipes: PipeManager,
     ptys: PtyManager,
+    sockets: SocketTable,
     poll_notifier: PollNotifier,
     users: UserManager,
     resources: ResourceAccountant,
@@ -268,6 +270,7 @@ fn cleanup_process_resources(
     file_locks: &FileLockManager,
     pipes: &PipeManager,
     ptys: &PtyManager,
+    sockets: &SocketTable,
     driver_pids: &Mutex<BTreeMap<String, BTreeSet<u32>>>,
     pid: u32,
 ) {
@@ -299,6 +302,8 @@ fn cleanup_process_resources(
     for (description, filetype) in cleanup {
         close_special_resource_if_needed(file_locks, pipes, ptys, &description, filetype);
     }
+
+    sockets.remove_all_for_pid(pid);
 
     let mut owners = lock_or_recover(driver_pids);
     for pids in owners.values_mut() {
@@ -359,18 +364,21 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             }),
             poll_notifier.clone(),
         );
+        let sockets = SocketTable::new();
 
         let fd_tables_for_exit = Arc::clone(&fd_tables);
         let file_locks_for_exit = file_locks.clone();
         let driver_pids_for_exit = Arc::clone(&driver_pids);
         let pipes_for_exit = pipes.clone();
         let ptys_for_exit = ptys.clone();
+        let sockets_for_exit = sockets.clone();
         process_table.set_on_process_exit(Some(Arc::new(move |pid| {
             cleanup_process_resources(
                 fd_tables_for_exit.as_ref(),
                 &file_locks_for_exit,
                 &pipes_for_exit,
                 &ptys_for_exit,
+                &sockets_for_exit,
                 driver_pids_for_exit.as_ref(),
                 pid,
             );
@@ -391,6 +399,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             processes: process_table,
             pipes,
             ptys,
+            sockets,
             poll_notifier,
             users: UserManager::new(),
             resources: ResourceAccountant::new(config.resources),
@@ -432,8 +441,13 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
     pub fn resource_snapshot(&self) -> ResourceSnapshot {
         let fd_tables = lock_or_recover(&self.fd_tables);
-        self.resources
-            .snapshot(&self.processes, &fd_tables, &self.pipes, &self.ptys)
+        self.resources.snapshot(
+            &self.processes,
+            &fd_tables,
+            &self.pipes,
+            &self.ptys,
+            &self.sockets,
+        )
     }
 
     pub fn resource_limits(&self) -> &ResourceLimits {
@@ -1082,6 +1096,69 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             .get_mut(pid)
             .ok_or_else(|| KernelError::no_such_process(pid))?;
         Ok(self.ptys.create_pty_fds(table)?)
+    }
+
+    pub fn socket_create(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        spec: SocketSpec,
+    ) -> KernelResult<SocketId> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.resources
+            .check_socket_allocation(&self.resource_snapshot())?;
+        Ok(self.sockets.allocate(pid, spec).id())
+    }
+
+    pub fn socket_set_state(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        state: SocketState,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        self.resources.check_socket_state_transition(
+            &self.resource_snapshot(),
+            existing.state(),
+            state,
+        )?;
+        self.sockets.update_state(socket_id, state)?;
+        Ok(())
+    }
+
+    pub fn socket_close(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        self.sockets.remove(socket_id)?;
+        Ok(())
     }
 
     pub fn fd_open(
@@ -1936,6 +2013,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             &self.file_locks,
             &self.pipes,
             &self.ptys,
+            &self.sockets,
             self.driver_pids.as_ref(),
             pid,
         );
@@ -2986,6 +3064,12 @@ impl From<PermissionError> for KernelError {
 
 impl From<ResourceError> for KernelError {
     fn from(error: ResourceError) -> Self {
+        map_error(error.code(), error.to_string())
+    }
+}
+
+impl From<SocketTableError> for KernelError {
+    fn from(error: SocketTableError) -> Self {
         map_error(error.code(), error.to_string())
     }
 }

@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- Kernel-owned network scaffolding should register per-process socket lifecycle state in `crates/kernel/src/socket_table.rs` and rely on `cleanup_process_resources()` for exit cleanup instead of keeping separate socket counters elsewhere.
 - Fire-and-forget session shutdown in `packages/core/src/agent-os.ts` still needs a local `.catch(() => {})` on the dropped `_closeSessionInternal()` promise; deterministic callers should await `_sessionClosePromises` instead of letting shared-runtime close races surface as unhandled rejections.
 - ACP adapters that emit live `session/request_permission` calls during `session/prompt` need the sidecar callback channel (`SidecarRequestPayload`) for replies; queued session events alone arrive too late and will deadlock the prompt.
 - Synthetic ACP `session/update` compatibility belongs in `crates/sidecar/src/acp/session.rs`: when `session/set_mode` or `session/set_config_option` succeeds without a matching agent notification, synthesize the update there so `getSessionState()` and the TypeScript session API stay agent-agnostic.
@@ -175,4 +176,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Pi CLI multi-session cleanup still shares one V8 runtime child, so concurrent `closeSession()` coverage can race the shared runtime teardown; accept the known broken-pipe/stdout-closed close errors only when baseline resource restoration is still asserted afterward.
   - Codex active-turn cleanup is more truthful with a slow OpenAI Responses mock than with a permanently hung socket, because `cancelSession()` needs the adapter/runtime loop to remain responsive enough to observe cancellation.
   - The active truth path for this story is `pnpm --dir packages/core exec vitest run tests/session-cleanup.test.ts` plus root `pnpm check-types`.
+---
+## 2026-04-09 23:28:03 PDT - US-042
+- Added a kernel-owned socket scaffold in `crates/kernel/src/socket_table.rs` and threaded it through `KernelVm` plus `ResourceAccountant`. The kernel now tracks per-process socket records, counts listeners and connected sockets in `resource_snapshot()`, exposes minimal `socket_create` / `socket_set_state` / `socket_close` helpers, enforces `max_sockets` and `max_connections`, and reclaims socket records during normal process-exit cleanup.
+- Added a dedicated kernel test file covering the scaffold and its limits, and recorded the reusable socket-table ownership rule in the shared kernel agent instructions at `crates/kernel/CLAUDE.md`.
+- Files changed: `crates/kernel/CLAUDE.md`, `crates/kernel/src/kernel.rs`, `crates/kernel/src/lib.rs`, `crates/kernel/src/resource_accounting.rs`, `crates/kernel/src/socket_table.rs`, `crates/kernel/tests/socket_table.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Kernel networking work should allocate socket ownership/state in `socket_table.rs` first and then layer bind/listen/connect semantics on top, so `resource_snapshot()` and process-exit cleanup stay authoritative from the start.
+  - `max_connections` should be enforced on state transitions into `Connected`, not only on socket allocation, because listeners and unconnected sockets still consume `max_sockets` without counting as active connections.
+  - The active truth path for this story is `cargo test -p agent-os-kernel --test socket_table -- --test-threads=1` plus root `pnpm check-types`.
 ---

@@ -17,6 +17,7 @@ pub mod process_table;
 pub mod pty;
 pub mod resource_accounting;
 pub mod root_fs;
+pub mod socket_table;
 pub mod user;
 pub mod vfs;
 

@@ -2,6 +2,7 @@ use crate::fd_table::FdTableManager;
 use crate::pipe_manager::PipeManager;
 use crate::process_table::{ProcessStatus, ProcessTable};
 use crate::pty::PtyManager;
+use crate::socket_table::{SocketState, SocketTable};
 use crate::vfs::{VfsResult, VirtualFileSystem};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -27,6 +28,9 @@ pub struct ResourceSnapshot {
     pub ptys: usize,
     pub pty_buffered_input_bytes: usize,
     pub pty_buffered_output_bytes: usize,
+    pub sockets: usize,
+    pub socket_listeners: usize,
+    pub socket_connections: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +152,7 @@ impl ResourceAccountant {
         fd_tables: &FdTableManager,
         pipes: &PipeManager,
         ptys: &PtyManager,
+        sockets: &SocketTable,
     ) -> ResourceSnapshot {
         let process_list = processes.list_processes();
         let running_processes = process_list
@@ -158,6 +163,7 @@ impl ResourceAccountant {
             .values()
             .filter(|process| process.status == ProcessStatus::Exited)
             .count();
+        let socket_snapshot = sockets.snapshot();
 
         ResourceSnapshot {
             running_processes,
@@ -169,6 +175,9 @@ impl ResourceAccountant {
             ptys: ptys.pty_count(),
             pty_buffered_input_bytes: ptys.buffered_input_bytes(),
             pty_buffered_output_bytes: ptys.buffered_output_bytes(),
+            sockets: socket_snapshot.sockets,
+            socket_listeners: socket_snapshot.listeners,
+            socket_connections: socket_snapshot.connections,
         }
     }
 
@@ -238,6 +247,36 @@ impl ResourceAccountant {
         }
 
         self.check_open_fds(snapshot, 2)
+    }
+
+    pub fn check_socket_allocation(
+        &self,
+        snapshot: &ResourceSnapshot,
+    ) -> Result<(), ResourceError> {
+        if let Some(limit) = self.limits.max_sockets {
+            if snapshot.sockets >= limit {
+                return Err(ResourceError::exhausted("maximum socket count reached"));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn check_socket_state_transition(
+        &self,
+        snapshot: &ResourceSnapshot,
+        current: SocketState,
+        next: SocketState,
+    ) -> Result<(), ResourceError> {
+        if !current.counts_as_connection() && next.counts_as_connection() {
+            if let Some(limit) = self.limits.max_connections {
+                if snapshot.socket_connections >= limit {
+                    return Err(ResourceError::exhausted("maximum connection count reached"));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn check_pread_length(&self, length: usize) -> Result<(), ResourceError> {
