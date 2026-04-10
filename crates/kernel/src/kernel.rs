@@ -1,5 +1,9 @@
 use crate::bridge::LifecycleState;
 use crate::command_registry::{CommandDriver, CommandRegistry};
+use crate::dns::{
+    format_dns_resource, resolve_dns, DnsConfig, DnsLookupPolicy, DnsResolution,
+    DnsResolverErrorKind, HickoryDnsResolver, SharedDnsResolver,
+};
 use crate::device_layer::{create_device_layer, DeviceLayer};
 use crate::fd_table::{
     FdEntry, FdStat, FdTableError, FdTableManager, FileDescription, FileLockManager,
@@ -9,7 +13,8 @@ use crate::fd_table::{
 };
 use crate::mount_table::{MountEntry, MountOptions, MountTable, MountedFileSystem};
 use crate::permissions::{
-    check_command_execution, FsOperation, PermissionError, PermissionedFileSystem, Permissions,
+    check_command_execution, check_network_access, FsOperation, NetworkOperation, PermissionError,
+    PermissionedFileSystem, Permissions,
 };
 use crate::pipe_manager::{PipeError, PipeManager};
 use crate::poll::{
@@ -101,6 +106,8 @@ pub struct KernelVmConfig {
     pub env: BTreeMap<String, String>,
     pub cwd: String,
     pub permissions: Permissions,
+    pub dns: DnsConfig,
+    pub dns_resolver: SharedDnsResolver,
     pub resources: ResourceLimits,
     pub zombie_ttl: Duration,
 }
@@ -112,6 +119,8 @@ impl KernelVmConfig {
             env: BTreeMap::new(),
             cwd: String::from("/home/user"),
             permissions: Permissions::default(),
+            dns: DnsConfig::default(),
+            dns_resolver: Arc::new(HickoryDnsResolver),
             resources: ResourceLimits::default(),
             zombie_ttl: Duration::from_secs(60),
         }
@@ -252,6 +261,8 @@ pub struct KernelVm<F> {
     vm_id: String,
     filesystem: PermissionedFileSystem<DeviceLayer<F>>,
     permissions: Permissions,
+    dns: DnsConfig,
+    dns_resolver: SharedDnsResolver,
     env: BTreeMap<String, String>,
     cwd: String,
     commands: CommandRegistry,
@@ -395,6 +406,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 permissions.clone(),
             ),
             permissions,
+            dns: config.dns,
+            dns_resolver: config.dns_resolver,
             env: config.env,
             cwd: config.cwd,
             commands: CommandRegistry::new(),
@@ -455,6 +468,20 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
     pub fn resource_limits(&self) -> &ResourceLimits {
         self.resources.limits()
+    }
+
+    pub fn resolve_dns(
+        &self,
+        hostname: &str,
+        policy: DnsLookupPolicy,
+    ) -> KernelResult<DnsResolution> {
+        self.assert_not_terminated()?;
+        if matches!(policy, DnsLookupPolicy::CheckPermissions) {
+            let resource = format_dns_resource(hostname).map_err(map_dns_resolver_error)?;
+            check_network_access(&self.vm_id, &self.permissions, NetworkOperation::Dns, &resource)?;
+        }
+
+        resolve_dns(&self.dns, self.dns_resolver.as_ref(), hostname).map_err(map_dns_resolver_error)
     }
 
     pub fn register_driver(&mut self, driver: CommandDriver) -> KernelResult<()> {
@@ -3406,6 +3433,14 @@ impl From<RootFilesystemError> for KernelError {
     fn from(error: RootFilesystemError) -> Self {
         map_error("EINVAL", error.to_string())
     }
+}
+
+fn map_dns_resolver_error(error: crate::dns::DnsResolverError) -> KernelError {
+    let code = match error.kind() {
+        DnsResolverErrorKind::InvalidInput => "EINVAL",
+        DnsResolverErrorKind::LookupFailed => "EHOSTUNREACH",
+    };
+    map_error(code, error.to_string())
 }
 
 fn map_error(code: &'static str, message: String) -> KernelError {

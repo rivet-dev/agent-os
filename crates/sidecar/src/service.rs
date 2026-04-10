@@ -50,11 +50,11 @@ use crate::protocol::{
 use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
     ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError, ConnectionState,
-    DnsResolutionSource, JavascriptSocketFamily, JavascriptSocketPathContext,
-    JavascriptTcpListenerEvent, JavascriptTcpSocketEvent, JavascriptUdpFamily,
-    JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket,
-    PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution,
-    ResolvedTcpConnectAddr, SessionState, SharedBridge, SharedSidecarRequestClient, SidecarKernel,
+    JavascriptSocketFamily, JavascriptSocketPathContext, JavascriptTcpListenerEvent,
+    JavascriptTcpSocketEvent, JavascriptUdpFamily, JavascriptUdpSocketEvent,
+    JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket, PendingUnixSocket,
+    ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution, ResolvedTcpConnectAddr,
+    SessionState, SharedBridge, SharedSidecarRequestClient, SidecarKernel,
     SidecarRequestTransport, SocketQueryKind, VmDnsConfig, VmListenPolicy, VmState,
     DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
     JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND,
@@ -91,9 +91,6 @@ use agent_os_kernel::resource_accounting::ResourceLimits;
 // root_fs types moved to crate::vm
 use agent_os_kernel::vfs::VfsError;
 use base64::Engine;
-use hickory_resolver::config::{NameServerConfig, ResolverConfig};
-use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::TokioResolver;
 use nix::libc;
 use nix::sys::signal::{kill as send_signal, Signal};
 use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};

@@ -27,9 +27,9 @@ use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveHttp2Server, ActiveHttp2Session,
     ActiveHttp2Stream, ActiveHttpServer, ActiveProcess, ActiveSqliteDatabase,
     ActiveSqliteStatement, ActiveTcpListener, ActiveTcpSocket, ActiveTlsState, ActiveTlsStream,
-    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError, DnsResolutionSource,
-    Http2BridgeEvent, Http2RuntimeSnapshot, Http2SessionCommand, Http2SessionSnapshot,
-    Http2SocketSnapshot, Http2StreamDirection, JavascriptSocketFamily, JavascriptSocketPathContext,
+    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError, Http2BridgeEvent,
+    Http2RuntimeSnapshot, Http2SessionCommand, Http2SessionSnapshot, Http2SocketSnapshot,
+    Http2StreamDirection, JavascriptSocketFamily, JavascriptSocketPathContext,
     JavascriptTcpListenerEvent, JavascriptTcpSocketEvent, JavascriptTlsBridgeOptions,
     JavascriptTlsClientHello, JavascriptTlsDataValue, JavascriptTlsMaterial, JavascriptUdpFamily,
     JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket,
@@ -58,6 +58,7 @@ use agent_os_execution::{
     StartWasmExecutionRequest, WasmExecutionEvent,
     WasmPermissionTier as ExecutionWasmPermissionTier,
 };
+use agent_os_kernel::dns::{DnsLookupPolicy, DnsResolutionSource as KernelDnsResolutionSource};
 use agent_os_kernel::kernel::{KernelProcessHandle, SpawnOptions, VirtualProcessOptions};
 use agent_os_kernel::permissions::NetworkOperation;
 use agent_os_kernel::process_table::{SIGKILL, SIGTERM};
@@ -66,9 +67,6 @@ use agent_os_kernel::resource_accounting::ResourceLimits;
 use base64::Engine;
 use bytes::Bytes;
 use h2::{client, server, Reason};
-use hickory_resolver::config::{NameServerConfig, ResolverConfig};
-use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::TokioResolver;
 use hmac::{Hmac, Mac};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri};
 use md5::Md5;
@@ -438,6 +436,7 @@ fn is_broken_pipe_error(error: &SidecarError) -> bool {
 impl ActiveTcpSocket {
     fn connect<B>(
         bridge: &SharedBridge<B>,
+        kernel: &SidecarKernel,
         vm_id: &str,
         dns: &VmDnsConfig,
         host: &str,
@@ -448,7 +447,7 @@ impl ActiveTcpSocket {
         B: NativeSidecarBridge + Send + 'static,
         BridgeError<B>: fmt::Debug + Send + Sync + 'static,
     {
-        let resolved = resolve_tcp_connect_addr(bridge, vm_id, dns, host, port, context)?;
+        let resolved = resolve_tcp_connect_addr(bridge, kernel, vm_id, dns, host, port, context)?;
         let stream = TcpStream::connect_timeout(&resolved.actual_addr, Duration::from_secs(30))
             .map_err(sidecar_net_error)?;
         let guest_local_addr = stream.local_addr().map_err(sidecar_net_error)?;
@@ -1213,6 +1212,7 @@ impl ActiveUdpSocket {
     fn send_to<B>(
         &mut self,
         bridge: &SharedBridge<B>,
+        kernel: &SidecarKernel,
         vm_id: &str,
         dns: &VmDnsConfig,
         host: &str,
@@ -1224,7 +1224,8 @@ impl ActiveUdpSocket {
         B: NativeSidecarBridge + Send + 'static,
         BridgeError<B>: fmt::Debug + Send + Sync + 'static,
     {
-        let remote_addr = resolve_udp_addr(bridge, vm_id, dns, host, port, self.family, context)?;
+        let remote_addr =
+            resolve_udp_addr(bridge, kernel, vm_id, dns, host, port, self.family, context)?;
         let local_addr = self.ensure_bound_for_send(context)?;
         let socket = self.socket.as_ref().ok_or_else(|| {
             SidecarError::InvalidState(String::from("UDP socket is not initialized"))
@@ -1576,110 +1577,87 @@ fn spawn_tool_process_events(
     cancelled: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || match tool_resolution {
-            ToolCommandResolution::Immediate {
-                stdout,
-                stderr,
-                exit_code,
-            } => {
-                if cancelled.load(Ordering::Relaxed) {
-                    return;
-                }
-                if !stdout.is_empty() {
-                    let _ = sender.send(ProcessEventEnvelope {
-                        connection_id: connection_id.clone(),
-                        session_id: session_id.clone(),
-                        vm_id: vm_id.clone(),
-                        process_id: process_id.clone(),
-                        event: ActiveExecutionEvent::Stdout(stdout),
-                    });
-                }
-                if !stderr.is_empty() {
-                    let _ = sender.send(ProcessEventEnvelope {
-                        connection_id: connection_id.clone(),
-                        session_id: session_id.clone(),
-                        vm_id: vm_id.clone(),
-                        process_id: process_id.clone(),
-                        event: ActiveExecutionEvent::Stderr(stderr),
-                    });
-                }
+        ToolCommandResolution::Immediate {
+            stdout,
+            stderr,
+            exit_code,
+        } => {
+            if cancelled.load(Ordering::Relaxed) {
+                return;
+            }
+            if !stdout.is_empty() {
                 let _ = sender.send(ProcessEventEnvelope {
-                    connection_id,
-                    session_id,
-                    vm_id,
-                    process_id,
-                    event: ActiveExecutionEvent::Exited(exit_code),
+                    connection_id: connection_id.clone(),
+                    session_id: session_id.clone(),
+                    vm_id: vm_id.clone(),
+                    process_id: process_id.clone(),
+                    event: ActiveExecutionEvent::Stdout(stdout),
                 });
             }
-            ToolCommandResolution::Invoke { request, timeout } => {
-                let response = sidecar_requests.invoke(
-                    OwnershipScope::vm(
-                        connection_id.clone(),
-                        session_id.clone(),
-                        vm_id.clone(),
-                    ),
-                    SidecarRequestPayload::ToolInvocation(request.clone()),
-                    timeout,
-                );
-                if cancelled.load(Ordering::Relaxed) {
-                    return;
-                }
+            if !stderr.is_empty() {
+                let _ = sender.send(ProcessEventEnvelope {
+                    connection_id: connection_id.clone(),
+                    session_id: session_id.clone(),
+                    vm_id: vm_id.clone(),
+                    process_id: process_id.clone(),
+                    event: ActiveExecutionEvent::Stderr(stderr),
+                });
+            }
+            let _ = sender.send(ProcessEventEnvelope {
+                connection_id,
+                session_id,
+                vm_id,
+                process_id,
+                event: ActiveExecutionEvent::Exited(exit_code),
+            });
+        }
+        ToolCommandResolution::Invoke { request, timeout } => {
+            let response = sidecar_requests.invoke(
+                OwnershipScope::vm(connection_id.clone(), session_id.clone(), vm_id.clone()),
+                SidecarRequestPayload::ToolInvocation(request.clone()),
+                timeout,
+            );
+            if cancelled.load(Ordering::Relaxed) {
+                return;
+            }
 
-                match response {
-                    Ok(crate::protocol::SidecarResponsePayload::ToolInvocationResult(result)) => {
-                        if let Some(value) = result.result {
-                            let stdout = serde_json::to_vec(&json!({
-                                "ok": true,
-                                "result": value,
-                            }))
-                            .unwrap_or_else(|error| {
-                                format_tool_failure_output(&format!(
-                                    "failed to serialize tool result: {error}"
-                                ))
-                            });
-                            let _ = sender.send(ProcessEventEnvelope {
-                                connection_id: connection_id.clone(),
-                                session_id: session_id.clone(),
-                                vm_id: vm_id.clone(),
-                                process_id: process_id.clone(),
-                                event: ActiveExecutionEvent::Stdout(stdout),
-                            });
-                            let _ = sender.send(ProcessEventEnvelope {
-                                connection_id,
-                                session_id,
-                                vm_id,
-                                process_id,
-                                event: ActiveExecutionEvent::Exited(0),
-                            });
-                        } else {
-                            let message = result.error.unwrap_or_else(|| {
-                                String::from("tool invocation returned no result")
-                            });
-                            let _ = sender.send(ProcessEventEnvelope {
-                                connection_id: connection_id.clone(),
-                                session_id: session_id.clone(),
-                                vm_id: vm_id.clone(),
-                                process_id: process_id.clone(),
-                                event: ActiveExecutionEvent::Stderr(
-                                    format_tool_failure_output(&message),
-                                ),
-                            });
-                            let _ = sender.send(ProcessEventEnvelope {
-                                connection_id,
-                                session_id,
-                                vm_id,
-                                process_id,
-                                event: ActiveExecutionEvent::Exited(1),
-                            });
-                        }
-                    }
-                    Ok(_) => {
+            match response {
+                Ok(crate::protocol::SidecarResponsePayload::ToolInvocationResult(result)) => {
+                    if let Some(value) = result.result {
+                        let stdout = serde_json::to_vec(&json!({
+                            "ok": true,
+                            "result": value,
+                        }))
+                        .unwrap_or_else(|error| {
+                            format_tool_failure_output(&format!(
+                                "failed to serialize tool result: {error}"
+                            ))
+                        });
+                        let _ = sender.send(ProcessEventEnvelope {
+                            connection_id: connection_id.clone(),
+                            session_id: session_id.clone(),
+                            vm_id: vm_id.clone(),
+                            process_id: process_id.clone(),
+                            event: ActiveExecutionEvent::Stdout(stdout),
+                        });
+                        let _ = sender.send(ProcessEventEnvelope {
+                            connection_id,
+                            session_id,
+                            vm_id,
+                            process_id,
+                            event: ActiveExecutionEvent::Exited(0),
+                        });
+                    } else {
+                        let message = result
+                            .error
+                            .unwrap_or_else(|| String::from("tool invocation returned no result"));
                         let _ = sender.send(ProcessEventEnvelope {
                             connection_id: connection_id.clone(),
                             session_id: session_id.clone(),
                             vm_id: vm_id.clone(),
                             process_id: process_id.clone(),
                             event: ActiveExecutionEvent::Stderr(format_tool_failure_output(
-                                "unexpected sidecar tool response",
+                                &message,
                             )),
                         });
                         let _ = sender.send(ProcessEventEnvelope {
@@ -1690,27 +1668,46 @@ fn spawn_tool_process_events(
                             event: ActiveExecutionEvent::Exited(1),
                         });
                     }
-                    Err(error) => {
-                        let _ = sender.send(ProcessEventEnvelope {
-                            connection_id: connection_id.clone(),
-                            session_id: session_id.clone(),
-                            vm_id: vm_id.clone(),
-                            process_id: process_id.clone(),
-                            event: ActiveExecutionEvent::Stderr(format_tool_failure_output(
-                                &error.to_string(),
-                            )),
-                        });
-                        let _ = sender.send(ProcessEventEnvelope {
-                            connection_id,
-                            session_id,
-                            vm_id,
-                            process_id,
-                            event: ActiveExecutionEvent::Exited(1),
-                        });
-                    }
+                }
+                Ok(_) => {
+                    let _ = sender.send(ProcessEventEnvelope {
+                        connection_id: connection_id.clone(),
+                        session_id: session_id.clone(),
+                        vm_id: vm_id.clone(),
+                        process_id: process_id.clone(),
+                        event: ActiveExecutionEvent::Stderr(format_tool_failure_output(
+                            "unexpected sidecar tool response",
+                        )),
+                    });
+                    let _ = sender.send(ProcessEventEnvelope {
+                        connection_id,
+                        session_id,
+                        vm_id,
+                        process_id,
+                        event: ActiveExecutionEvent::Exited(1),
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(ProcessEventEnvelope {
+                        connection_id: connection_id.clone(),
+                        session_id: session_id.clone(),
+                        vm_id: vm_id.clone(),
+                        process_id: process_id.clone(),
+                        event: ActiveExecutionEvent::Stderr(format_tool_failure_output(
+                            &error.to_string(),
+                        )),
+                    });
+                    let _ = sender.send(ProcessEventEnvelope {
+                        connection_id,
+                        session_id,
+                        vm_id,
+                        process_id,
+                        event: ActiveExecutionEvent::Exited(1),
+                    });
                 }
             }
-        });
+        }
+    });
 }
 
 impl<B> NativeSidecar<B>
@@ -2642,7 +2639,7 @@ where
     ) -> Result<(), SidecarError> {
         let response = (|| {
             let vm = self.vms.get(vm_id).expect("VM should exist");
-            let process = vm
+            let _process = vm
                 .active_processes
                 .get(process_id)
                 .expect("process should still exist");
@@ -2666,7 +2663,14 @@ where
                 Vec::new()
             } else {
                 filter_dns_safe_ip_addrs(
-                    resolve_dns_ip_addrs(&self.bridge, vm_id, &vm.dns, host)?,
+                    resolve_dns_ip_addrs(
+                        &self.bridge,
+                        &vm.kernel,
+                        vm_id,
+                        &vm.dns,
+                        host,
+                        DnsLookupPolicy::SkipPermissions,
+                    )?,
                     host,
                 )?
             };
@@ -2780,13 +2784,15 @@ where
             let hostname = request.hostname.as_deref().ok_or_else(|| {
                 SidecarError::InvalidState(String::from("python dnsLookup requires a hostname"))
             })?;
-            self.bridge.require_network_access(
-                vm_id,
-                NetworkOperation::Dns,
-                format_dns_resource(hostname),
-            )?;
             let mut addresses = filter_dns_safe_ip_addrs(
-                resolve_dns_ip_addrs(&self.bridge, vm_id, &vm.dns, hostname)?,
+                resolve_dns_ip_addrs(
+                    &self.bridge,
+                    &vm.kernel,
+                    vm_id,
+                    &vm.dns,
+                    hostname,
+                    DnsLookupPolicy::CheckPermissions,
+                )?,
                 hostname,
             )?;
             if let Some(family) = request.family {
@@ -3199,160 +3205,164 @@ where
         let process_event_sender = self.process_event_sender.clone();
         let sidecar_requests = self.sidecar_requests.clone();
         let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-        let (kernel_pid, kernel_handle, execution, kernel_stdin_writer_fd) =
-            if resolved.tool_command {
-                let tool_resolution = resolve_tool_command(
-                    vm,
+        let (kernel_pid, kernel_handle, execution, kernel_stdin_writer_fd) = if resolved
+            .tool_command
+        {
+            let tool_resolution = resolve_tool_command(
+                vm,
+                &resolved.command,
+                &resolved.execution_args,
+                Some(&resolved.guest_cwd),
+            )?
+            .ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "tool command no longer resolves: {}",
+                    resolved.command
+                ))
+            })?;
+            let kernel_handle = vm
+                .kernel
+                .create_virtual_process(
+                    EXECUTION_DRIVER_NAME,
+                    TOOL_DRIVER_NAME,
                     &resolved.command,
-                    &resolved.execution_args,
-                    Some(&resolved.guest_cwd),
-                )?
-                .ok_or_else(|| {
-                    SidecarError::InvalidState(format!(
-                        "tool command no longer resolves: {}",
-                        resolved.command
-                    ))
-                })?;
-                let kernel_handle = vm
-                    .kernel
-                    .create_virtual_process(
-                        EXECUTION_DRIVER_NAME,
-                        TOOL_DRIVER_NAME,
-                        &resolved.command,
-                        resolved.process_args.clone(),
-                        VirtualProcessOptions {
-                            env: resolved.env.clone(),
-                            cwd: Some(resolved.guest_cwd.clone()),
-                            ..VirtualProcessOptions::default()
-                        },
-                    )
-                    .map_err(kernel_error)?;
-                let kernel_pid = kernel_handle.pid();
-                let tool_execution = ToolExecution::default();
-                let cancelled = tool_execution.cancelled.clone();
-                spawn_tool_process_events(
-                    process_event_sender.clone(),
-                    sidecar_requests.clone(),
-                    vm.connection_id.clone(),
-                    vm.session_id.clone(),
-                    vm_id.to_owned(),
-                    child_process_id.clone(),
-                    tool_resolution,
-                    cancelled,
-                );
-                (
-                    kernel_pid,
-                    kernel_handle,
-                    ActiveExecution::Tool(tool_execution),
-                    None,
+                    resolved.process_args.clone(),
+                    VirtualProcessOptions {
+                        env: resolved.env.clone(),
+                        cwd: Some(resolved.guest_cwd.clone()),
+                        ..VirtualProcessOptions::default()
+                    },
                 )
-            } else {
-                let kernel_command = match resolved.runtime {
-                    GuestRuntimeKind::JavaScript => JAVASCRIPT_COMMAND,
-                    GuestRuntimeKind::WebAssembly => WASM_COMMAND,
-                    GuestRuntimeKind::Python => {
-                        unreachable!("python child_process execution is rejected")
-                    }
-                };
-                let kernel_handle = vm
-                    .kernel
-                    .spawn_process(
-                        kernel_command,
-                        resolved.process_args.clone(),
-                        SpawnOptions {
-                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
-                            parent_pid: Some(parent_kernel_pid),
-                            env: resolved.env.clone(),
-                            cwd: Some(resolved.guest_cwd.clone()),
-                        },
-                    )
-                    .map_err(kernel_error)?;
-                let kernel_pid = kernel_handle.pid();
-
-                let mut execution_env = resolved.env.clone();
-                execution_env.insert(
-                    String::from(EXECUTION_SANDBOX_ROOT_ENV),
-                    normalize_host_path(&vm.cwd).to_string_lossy().into_owned(),
-                );
-
-                let execution = match resolved.runtime {
-                    GuestRuntimeKind::JavaScript => {
-                        execution_env.extend(
-                            sanitize_javascript_child_process_internal_bootstrap_env(
-                                &request.options.internal_bootstrap_env,
-                            ),
-                        );
-                        execution_env
-                            .insert(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"));
-                        execution_env.insert(
-                            String::from("AGENT_OS_VIRTUAL_PROCESS_PID"),
-                            kernel_pid.to_string(),
-                        );
-                        execution_env.insert(
-                            String::from("AGENT_OS_VIRTUAL_PROCESS_PPID"),
-                            parent_kernel_pid.to_string(),
-                        );
-                        let context =
-                            self.javascript_engine
-                                .create_context(CreateJavascriptContextRequest {
-                                    vm_id: vm_id.to_owned(),
-                                    bootstrap_module: None,
-                                    compile_cache_root: Some(
-                                        self.cache_root.join("node-compile-cache"),
-                                    ),
-                                });
-                        let inline_code = load_javascript_entrypoint_source(
-                            vm,
-                            &resolved.host_cwd,
-                            &resolved.entrypoint,
-                            &execution_env,
-                        );
-
-                        let execution = self
-                            .javascript_engine
-                            .start_execution(StartJavascriptExecutionRequest {
-                                vm_id: vm_id.to_owned(),
-                                context_id: context.context_id,
-                                argv: std::iter::once(resolved.entrypoint.clone())
-                                    .chain(resolved.execution_args.clone())
-                                    .collect(),
-                                env: execution_env,
-                                cwd: resolved.host_cwd.clone(),
-                                inline_code,
-                            })
-                            .map_err(javascript_error)?;
-                        ActiveExecution::Javascript(execution)
-                    }
-                    GuestRuntimeKind::WebAssembly => {
-                        apply_wasm_limit_env(&mut execution_env, vm.kernel.resource_limits());
-                        let context = self.wasm_engine.create_context(CreateWasmContextRequest {
-                            vm_id: vm_id.to_owned(),
-                            module_path: Some(resolved.entrypoint.clone()),
-                        });
-                        let execution = self
-                            .wasm_engine
-                            .start_execution(StartWasmExecutionRequest {
-                                vm_id: vm_id.to_owned(),
-                                context_id: context.context_id,
-                                argv: resolved.process_args.clone(),
-                                env: execution_env,
-                                cwd: resolved.host_cwd.clone(),
-                                permission_tier: execution_wasm_permission_tier(
-                                    resolved
-                                        .wasm_permission_tier
-                                        .unwrap_or(WasmPermissionTier::Full),
-                                ),
-                            })
-                            .map_err(wasm_error)?;
-                        ActiveExecution::Wasm(execution)
-                    }
-                    GuestRuntimeKind::Python => {
-                        unreachable!("python child_process execution is rejected")
-                    }
-                };
-                let kernel_stdin_writer_fd = install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?;
-                (kernel_pid, kernel_handle, execution, Some(kernel_stdin_writer_fd))
+                .map_err(kernel_error)?;
+            let kernel_pid = kernel_handle.pid();
+            let tool_execution = ToolExecution::default();
+            let cancelled = tool_execution.cancelled.clone();
+            spawn_tool_process_events(
+                process_event_sender.clone(),
+                sidecar_requests.clone(),
+                vm.connection_id.clone(),
+                vm.session_id.clone(),
+                vm_id.to_owned(),
+                child_process_id.clone(),
+                tool_resolution,
+                cancelled,
+            );
+            (
+                kernel_pid,
+                kernel_handle,
+                ActiveExecution::Tool(tool_execution),
+                None,
+            )
+        } else {
+            let kernel_command = match resolved.runtime {
+                GuestRuntimeKind::JavaScript => JAVASCRIPT_COMMAND,
+                GuestRuntimeKind::WebAssembly => WASM_COMMAND,
+                GuestRuntimeKind::Python => {
+                    unreachable!("python child_process execution is rejected")
+                }
             };
+            let kernel_handle = vm
+                .kernel
+                .spawn_process(
+                    kernel_command,
+                    resolved.process_args.clone(),
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        parent_pid: Some(parent_kernel_pid),
+                        env: resolved.env.clone(),
+                        cwd: Some(resolved.guest_cwd.clone()),
+                    },
+                )
+                .map_err(kernel_error)?;
+            let kernel_pid = kernel_handle.pid();
+
+            let mut execution_env = resolved.env.clone();
+            execution_env.insert(
+                String::from(EXECUTION_SANDBOX_ROOT_ENV),
+                normalize_host_path(&vm.cwd).to_string_lossy().into_owned(),
+            );
+
+            let execution = match resolved.runtime {
+                GuestRuntimeKind::JavaScript => {
+                    execution_env.extend(sanitize_javascript_child_process_internal_bootstrap_env(
+                        &request.options.internal_bootstrap_env,
+                    ));
+                    execution_env
+                        .insert(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"));
+                    execution_env.insert(
+                        String::from("AGENT_OS_VIRTUAL_PROCESS_PID"),
+                        kernel_pid.to_string(),
+                    );
+                    execution_env.insert(
+                        String::from("AGENT_OS_VIRTUAL_PROCESS_PPID"),
+                        parent_kernel_pid.to_string(),
+                    );
+                    let context =
+                        self.javascript_engine
+                            .create_context(CreateJavascriptContextRequest {
+                                vm_id: vm_id.to_owned(),
+                                bootstrap_module: None,
+                                compile_cache_root: Some(
+                                    self.cache_root.join("node-compile-cache"),
+                                ),
+                            });
+                    let inline_code = load_javascript_entrypoint_source(
+                        vm,
+                        &resolved.host_cwd,
+                        &resolved.entrypoint,
+                        &execution_env,
+                    );
+
+                    let execution = self
+                        .javascript_engine
+                        .start_execution(StartJavascriptExecutionRequest {
+                            vm_id: vm_id.to_owned(),
+                            context_id: context.context_id,
+                            argv: std::iter::once(resolved.entrypoint.clone())
+                                .chain(resolved.execution_args.clone())
+                                .collect(),
+                            env: execution_env,
+                            cwd: resolved.host_cwd.clone(),
+                            inline_code,
+                        })
+                        .map_err(javascript_error)?;
+                    ActiveExecution::Javascript(execution)
+                }
+                GuestRuntimeKind::WebAssembly => {
+                    apply_wasm_limit_env(&mut execution_env, vm.kernel.resource_limits());
+                    let context = self.wasm_engine.create_context(CreateWasmContextRequest {
+                        vm_id: vm_id.to_owned(),
+                        module_path: Some(resolved.entrypoint.clone()),
+                    });
+                    let execution = self
+                        .wasm_engine
+                        .start_execution(StartWasmExecutionRequest {
+                            vm_id: vm_id.to_owned(),
+                            context_id: context.context_id,
+                            argv: resolved.process_args.clone(),
+                            env: execution_env,
+                            cwd: resolved.host_cwd.clone(),
+                            permission_tier: execution_wasm_permission_tier(
+                                resolved
+                                    .wasm_permission_tier
+                                    .unwrap_or(WasmPermissionTier::Full),
+                            ),
+                        })
+                        .map_err(wasm_error)?;
+                    ActiveExecution::Wasm(execution)
+                }
+                GuestRuntimeKind::Python => {
+                    unreachable!("python child_process execution is rejected")
+                }
+            };
+            let kernel_stdin_writer_fd = install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?;
+            (
+                kernel_pid,
+                kernel_handle,
+                execution,
+                Some(kernel_stdin_writer_fd),
+            )
+        };
 
         vm.active_processes
             .get_mut(process_id)
@@ -3553,159 +3563,163 @@ where
                 })?;
             parent.allocate_child_process_id()
         };
-        let (kernel_pid, kernel_handle, execution, kernel_stdin_writer_fd) =
-            if resolved.tool_command {
-                let tool_resolution = resolve_tool_command(
-                    vm,
+        let (kernel_pid, kernel_handle, execution, kernel_stdin_writer_fd) = if resolved
+            .tool_command
+        {
+            let tool_resolution = resolve_tool_command(
+                vm,
+                &resolved.command,
+                &resolved.execution_args,
+                Some(&resolved.guest_cwd),
+            )?
+            .ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "tool command no longer resolves: {}",
+                    resolved.command
+                ))
+            })?;
+            let kernel_handle = vm
+                .kernel
+                .create_virtual_process(
+                    EXECUTION_DRIVER_NAME,
+                    TOOL_DRIVER_NAME,
                     &resolved.command,
-                    &resolved.execution_args,
-                    Some(&resolved.guest_cwd),
-                )?
-                .ok_or_else(|| {
-                    SidecarError::InvalidState(format!(
-                        "tool command no longer resolves: {}",
-                        resolved.command
-                    ))
-                })?;
-                let kernel_handle = vm
-                    .kernel
-                    .create_virtual_process(
-                        EXECUTION_DRIVER_NAME,
-                        TOOL_DRIVER_NAME,
-                        &resolved.command,
-                        resolved.process_args.clone(),
-                        VirtualProcessOptions {
-                            env: resolved.env.clone(),
-                            cwd: Some(resolved.guest_cwd.clone()),
-                            ..VirtualProcessOptions::default()
-                        },
-                    )
-                    .map_err(kernel_error)?;
-                let kernel_pid = kernel_handle.pid();
-                let tool_execution = ToolExecution::default();
-                let cancelled = tool_execution.cancelled.clone();
-                spawn_tool_process_events(
-                    process_event_sender.clone(),
-                    sidecar_requests.clone(),
-                    vm.connection_id.clone(),
-                    vm.session_id.clone(),
-                    vm_id.to_owned(),
-                    child_process_id.clone(),
-                    tool_resolution,
-                    cancelled,
-                );
-                (
-                    kernel_pid,
-                    kernel_handle,
-                    ActiveExecution::Tool(tool_execution),
-                    None,
+                    resolved.process_args.clone(),
+                    VirtualProcessOptions {
+                        env: resolved.env.clone(),
+                        cwd: Some(resolved.guest_cwd.clone()),
+                        ..VirtualProcessOptions::default()
+                    },
                 )
-            } else {
-                let kernel_command = match resolved.runtime {
-                    GuestRuntimeKind::JavaScript => JAVASCRIPT_COMMAND,
-                    GuestRuntimeKind::WebAssembly => WASM_COMMAND,
-                    GuestRuntimeKind::Python => {
-                        unreachable!("python child_process execution is rejected")
-                    }
-                };
-                let kernel_handle = vm
-                    .kernel
-                    .spawn_process(
-                        kernel_command,
-                        resolved.process_args.clone(),
-                        SpawnOptions {
-                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
-                            parent_pid: Some(parent_kernel_pid),
-                            env: resolved.env.clone(),
-                            cwd: Some(resolved.guest_cwd.clone()),
-                        },
-                    )
-                    .map_err(kernel_error)?;
-                let kernel_pid = kernel_handle.pid();
-
-                let mut execution_env = resolved.env.clone();
-                execution_env.insert(
-                    String::from(EXECUTION_SANDBOX_ROOT_ENV),
-                    normalize_host_path(&vm.cwd).to_string_lossy().into_owned(),
-                );
-                let execution = match resolved.runtime {
-                    GuestRuntimeKind::JavaScript => {
-                        execution_env.extend(
-                            sanitize_javascript_child_process_internal_bootstrap_env(
-                                &request.options.internal_bootstrap_env,
-                            ),
-                        );
-                        execution_env
-                            .insert(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"));
-                        execution_env.insert(
-                            String::from("AGENT_OS_VIRTUAL_PROCESS_PID"),
-                            kernel_pid.to_string(),
-                        );
-                        execution_env.insert(
-                            String::from("AGENT_OS_VIRTUAL_PROCESS_PPID"),
-                            parent_kernel_pid.to_string(),
-                        );
-                        let context =
-                            self.javascript_engine
-                                .create_context(CreateJavascriptContextRequest {
-                                    vm_id: vm_id.to_owned(),
-                                    bootstrap_module: None,
-                                    compile_cache_root: Some(
-                                        self.cache_root.join("node-compile-cache"),
-                                    ),
-                                });
-                        let inline_code = load_javascript_entrypoint_source(
-                            vm,
-                            &resolved.host_cwd,
-                            &resolved.entrypoint,
-                            &execution_env,
-                        );
-
-                        let execution = self
-                            .javascript_engine
-                            .start_execution(StartJavascriptExecutionRequest {
-                                vm_id: vm_id.to_owned(),
-                                context_id: context.context_id,
-                                argv: std::iter::once(resolved.entrypoint.clone())
-                                    .chain(resolved.execution_args.clone())
-                                    .collect(),
-                                env: execution_env,
-                                cwd: resolved.host_cwd.clone(),
-                                inline_code,
-                            })
-                            .map_err(javascript_error)?;
-                        ActiveExecution::Javascript(execution)
-                    }
-                    GuestRuntimeKind::WebAssembly => {
-                        apply_wasm_limit_env(&mut execution_env, vm.kernel.resource_limits());
-                        let context = self.wasm_engine.create_context(CreateWasmContextRequest {
-                            vm_id: vm_id.to_owned(),
-                            module_path: Some(resolved.entrypoint.clone()),
-                        });
-                        let execution = self
-                            .wasm_engine
-                            .start_execution(StartWasmExecutionRequest {
-                                vm_id: vm_id.to_owned(),
-                                context_id: context.context_id,
-                                argv: resolved.process_args.clone(),
-                                env: execution_env,
-                                cwd: resolved.host_cwd.clone(),
-                                permission_tier: execution_wasm_permission_tier(
-                                    resolved
-                                        .wasm_permission_tier
-                                        .unwrap_or(WasmPermissionTier::Full),
-                                ),
-                            })
-                            .map_err(wasm_error)?;
-                        ActiveExecution::Wasm(execution)
-                    }
-                    GuestRuntimeKind::Python => {
-                        unreachable!("python child_process execution is rejected")
-                    }
-                };
-                let kernel_stdin_writer_fd = install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?;
-                (kernel_pid, kernel_handle, execution, Some(kernel_stdin_writer_fd))
+                .map_err(kernel_error)?;
+            let kernel_pid = kernel_handle.pid();
+            let tool_execution = ToolExecution::default();
+            let cancelled = tool_execution.cancelled.clone();
+            spawn_tool_process_events(
+                process_event_sender.clone(),
+                sidecar_requests.clone(),
+                vm.connection_id.clone(),
+                vm.session_id.clone(),
+                vm_id.to_owned(),
+                child_process_id.clone(),
+                tool_resolution,
+                cancelled,
+            );
+            (
+                kernel_pid,
+                kernel_handle,
+                ActiveExecution::Tool(tool_execution),
+                None,
+            )
+        } else {
+            let kernel_command = match resolved.runtime {
+                GuestRuntimeKind::JavaScript => JAVASCRIPT_COMMAND,
+                GuestRuntimeKind::WebAssembly => WASM_COMMAND,
+                GuestRuntimeKind::Python => {
+                    unreachable!("python child_process execution is rejected")
+                }
             };
+            let kernel_handle = vm
+                .kernel
+                .spawn_process(
+                    kernel_command,
+                    resolved.process_args.clone(),
+                    SpawnOptions {
+                        requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                        parent_pid: Some(parent_kernel_pid),
+                        env: resolved.env.clone(),
+                        cwd: Some(resolved.guest_cwd.clone()),
+                    },
+                )
+                .map_err(kernel_error)?;
+            let kernel_pid = kernel_handle.pid();
+
+            let mut execution_env = resolved.env.clone();
+            execution_env.insert(
+                String::from(EXECUTION_SANDBOX_ROOT_ENV),
+                normalize_host_path(&vm.cwd).to_string_lossy().into_owned(),
+            );
+            let execution = match resolved.runtime {
+                GuestRuntimeKind::JavaScript => {
+                    execution_env.extend(sanitize_javascript_child_process_internal_bootstrap_env(
+                        &request.options.internal_bootstrap_env,
+                    ));
+                    execution_env
+                        .insert(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"));
+                    execution_env.insert(
+                        String::from("AGENT_OS_VIRTUAL_PROCESS_PID"),
+                        kernel_pid.to_string(),
+                    );
+                    execution_env.insert(
+                        String::from("AGENT_OS_VIRTUAL_PROCESS_PPID"),
+                        parent_kernel_pid.to_string(),
+                    );
+                    let context =
+                        self.javascript_engine
+                            .create_context(CreateJavascriptContextRequest {
+                                vm_id: vm_id.to_owned(),
+                                bootstrap_module: None,
+                                compile_cache_root: Some(
+                                    self.cache_root.join("node-compile-cache"),
+                                ),
+                            });
+                    let inline_code = load_javascript_entrypoint_source(
+                        vm,
+                        &resolved.host_cwd,
+                        &resolved.entrypoint,
+                        &execution_env,
+                    );
+
+                    let execution = self
+                        .javascript_engine
+                        .start_execution(StartJavascriptExecutionRequest {
+                            vm_id: vm_id.to_owned(),
+                            context_id: context.context_id,
+                            argv: std::iter::once(resolved.entrypoint.clone())
+                                .chain(resolved.execution_args.clone())
+                                .collect(),
+                            env: execution_env,
+                            cwd: resolved.host_cwd.clone(),
+                            inline_code,
+                        })
+                        .map_err(javascript_error)?;
+                    ActiveExecution::Javascript(execution)
+                }
+                GuestRuntimeKind::WebAssembly => {
+                    apply_wasm_limit_env(&mut execution_env, vm.kernel.resource_limits());
+                    let context = self.wasm_engine.create_context(CreateWasmContextRequest {
+                        vm_id: vm_id.to_owned(),
+                        module_path: Some(resolved.entrypoint.clone()),
+                    });
+                    let execution = self
+                        .wasm_engine
+                        .start_execution(StartWasmExecutionRequest {
+                            vm_id: vm_id.to_owned(),
+                            context_id: context.context_id,
+                            argv: resolved.process_args.clone(),
+                            env: execution_env,
+                            cwd: resolved.host_cwd.clone(),
+                            permission_tier: execution_wasm_permission_tier(
+                                resolved
+                                    .wasm_permission_tier
+                                    .unwrap_or(WasmPermissionTier::Full),
+                            ),
+                        })
+                        .map_err(wasm_error)?;
+                    ActiveExecution::Wasm(execution)
+                }
+                GuestRuntimeKind::Python => {
+                    unreachable!("python child_process execution is rejected")
+                }
+            };
+            let kernel_stdin_writer_fd = install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?;
+            (
+                kernel_pid,
+                kernel_handle,
+                execution,
+                Some(kernel_stdin_writer_fd),
+            )
+        };
 
         let root = vm
             .active_processes
@@ -4553,11 +4567,11 @@ fn resolve_execute_request(
         prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
     }
 
-        Ok(ResolvedChildProcessExecution {
-            command: match runtime {
-                GuestRuntimeKind::JavaScript => String::from(JAVASCRIPT_COMMAND),
-                GuestRuntimeKind::Python => String::from(PYTHON_COMMAND),
-                GuestRuntimeKind::WebAssembly => String::from(WASM_COMMAND),
+    Ok(ResolvedChildProcessExecution {
+        command: match runtime {
+            GuestRuntimeKind::JavaScript => String::from(JAVASCRIPT_COMMAND),
+            GuestRuntimeKind::Python => String::from(PYTHON_COMMAND),
+            GuestRuntimeKind::WebAssembly => String::from(WASM_COMMAND),
         },
         process_args: std::iter::once(entrypoint.clone())
             .chain(payload.args.iter().cloned())
@@ -4567,12 +4581,12 @@ fn resolve_execute_request(
             .map(|(_, host_entrypoint)| host_entrypoint)
             .unwrap_or(entrypoint),
         execution_args: payload.args.clone(),
-            env,
-            guest_cwd,
-            host_cwd,
-            wasm_permission_tier: payload.wasm_permission_tier,
-            tool_command: false,
-        })
+        env,
+        guest_cwd,
+        host_cwd,
+        wasm_permission_tier: payload.wasm_permission_tier,
+        tool_command: false,
+    })
 }
 
 fn resolve_command_execution(
@@ -5514,16 +5528,14 @@ fn materialize_guest_path_to_shadow(
         fs::create_dir_all(&shadow_path).map_err(|error| {
             SidecarError::Io(format!("failed to create shadow directory: {error}"))
         })?;
-        fs::set_permissions(
-            &shadow_path,
-            fs::Permissions::from_mode(stat.mode & 0o7777),
-        )
-        .map_err(|error| {
-            SidecarError::Io(format!(
-                "failed to set shadow directory mode on {}: {error}",
-                shadow_path.display()
-            ))
-        })?;
+        fs::set_permissions(&shadow_path, fs::Permissions::from_mode(stat.mode & 0o7777)).map_err(
+            |error| {
+                SidecarError::Io(format!(
+                    "failed to set shadow directory mode on {}: {error}",
+                    shadow_path.display()
+                ))
+            },
+        )?;
         return Ok(());
     }
 
@@ -5695,92 +5707,11 @@ fn parse_loopback_exempt_ports(
     Ok(ports)
 }
 
-// parse_vm_dns_nameserver, normalize_dns_hostname moved to crate::vm
-
-fn vm_dns_resolver_config(dns: &VmDnsConfig) -> Option<ResolverConfig> {
-    if dns.name_servers.is_empty() {
-        return None;
-    }
-
-    let name_servers = dns
-        .name_servers
-        .iter()
-        .map(|server| {
-            let mut config = NameServerConfig::udp_and_tcp(server.ip());
-            for connection in &mut config.connections {
-                connection.port = server.port();
-                connection.bind_addr = Some(SocketAddr::new(
-                    if server.is_ipv6() {
-                        IpAddr::V6(Ipv6Addr::UNSPECIFIED)
-                    } else {
-                        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-                    },
-                    0,
-                ));
-            }
-            config
-        })
-        .collect();
-    Some(ResolverConfig::from_parts(None, vec![], name_servers))
-}
-
-fn resolve_dns_with_sidecar_resolver(
-    dns: &VmDnsConfig,
-    hostname: &str,
-) -> Result<Vec<IpAddr>, SidecarError> {
-    let resolver_config = vm_dns_resolver_config(dns);
-    let hostname = hostname.to_owned();
-    std::thread::spawn(move || -> Result<Vec<IpAddr>, SidecarError> {
-        let runtime = tokio::runtime::Runtime::new().map_err(|error| {
-            SidecarError::Execution(format!("failed to create DNS runtime: {error}"))
-        })?;
-
-        runtime.block_on(async move {
-            let builder = if let Some(config) = resolver_config {
-                TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
-            } else {
-                TokioResolver::builder_tokio().map_err(|error| {
-                    SidecarError::Execution(format!(
-                        "failed to initialize DNS resolver from system configuration: {error}"
-                    ))
-                })?
-            };
-
-            let resolver = builder.build().map_err(|error| {
-                SidecarError::Execution(format!("failed to build DNS resolver: {error}"))
-            })?;
-            let lookup = resolver.lookup_ip(&hostname).await.map_err(|error| {
-                SidecarError::Execution(format!(
-                    "failed to resolve DNS address {hostname}: {error}"
-                ))
-            })?;
-
-            let mut addresses = Vec::new();
-            let mut seen = BTreeSet::new();
-            for ip in lookup.iter() {
-                if seen.insert(ip) {
-                    addresses.push(ip);
-                }
-            }
-
-            if addresses.is_empty() {
-                return Err(SidecarError::Execution(format!(
-                    "failed to resolve DNS address {hostname}"
-                )));
-            }
-
-            Ok(addresses)
-        })
-    })
-    .join()
-    .map_err(|_| SidecarError::Execution(String::from("dns resolver thread panicked")))?
-}
-
 fn emit_dns_resolution_event<B>(
     bridge: &SharedBridge<B>,
     vm_id: &str,
     hostname: &str,
-    source: DnsResolutionSource,
+    source: KernelDnsResolutionSource,
     addresses: &[IpAddr],
     dns: &VmDnsConfig,
 ) where
@@ -6939,6 +6870,7 @@ fn filter_tcp_connect_ip_addrs(
 
 fn resolve_tcp_connect_addr<B>(
     bridge: &SharedBridge<B>,
+    kernel: &SidecarKernel,
     vm_id: &str,
     dns: &VmDnsConfig,
     host: &str,
@@ -6950,7 +6882,14 @@ where
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
     let allowed = filter_tcp_connect_ip_addrs(
-        resolve_dns_ip_addrs(bridge, vm_id, dns, host)?,
+        resolve_dns_ip_addrs(
+            bridge,
+            kernel,
+            vm_id,
+            dns,
+            host,
+            DnsLookupPolicy::SkipPermissions,
+        )?,
         host,
         port,
         context,
@@ -6985,56 +6924,35 @@ where
 
 fn resolve_dns_ip_addrs<B>(
     bridge: &SharedBridge<B>,
+    kernel: &SidecarKernel,
     vm_id: &str,
     dns: &VmDnsConfig,
     hostname: &str,
+    policy: DnsLookupPolicy,
 ) -> Result<Vec<IpAddr>, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    if let Ok(ip_addr) = hostname.parse::<IpAddr>() {
-        let addresses = vec![ip_addr];
-        emit_dns_resolution_event(
-            bridge,
-            vm_id,
-            hostname,
-            DnsResolutionSource::Literal,
-            &addresses,
-            dns,
-        );
-        return Ok(addresses);
-    }
-
-    let normalized_hostname = crate::vm::normalize_dns_hostname(hostname)?;
-    if let Some(addresses) = dns.overrides.get(&normalized_hostname) {
-        emit_dns_resolution_event(
-            bridge,
-            vm_id,
-            hostname,
-            DnsResolutionSource::Override,
-            addresses,
-            dns,
-        );
-        return Ok(addresses.clone());
-    }
-
-    let addresses = match resolve_dns_with_sidecar_resolver(dns, &normalized_hostname) {
-        Ok(addresses) => addresses,
+    let resolution = match kernel.resolve_dns(hostname, policy) {
+        Ok(resolution) => resolution,
         Err(error) => {
-            emit_dns_resolution_failure_event(bridge, vm_id, hostname, dns, &error);
-            return Err(error);
+            let sidecar_error = kernel_error(error.clone());
+            if error.code() != "EACCES" {
+                emit_dns_resolution_failure_event(bridge, vm_id, hostname, dns, &sidecar_error);
+            }
+            return Err(sidecar_error);
         }
     };
     emit_dns_resolution_event(
         bridge,
         vm_id,
         hostname,
-        DnsResolutionSource::Resolver,
-        &addresses,
+        resolution.source(),
+        resolution.addresses(),
         dns,
     );
-    Ok(addresses)
+    Ok(resolution.addresses().to_vec())
 }
 
 fn filter_dns_ip_addrs(
@@ -7086,6 +7004,7 @@ fn resolve_udp_bind_addr(
 
 fn resolve_udp_addr<B>(
     bridge: &SharedBridge<B>,
+    kernel: &SidecarKernel,
     vm_id: &str,
     dns: &VmDnsConfig,
     host: &str,
@@ -7097,7 +7016,14 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    resolve_dns_ip_addrs(bridge, vm_id, dns, host)?
+    resolve_dns_ip_addrs(
+        bridge,
+        kernel,
+        vm_id,
+        dns,
+        host,
+        DnsLookupPolicy::SkipPermissions,
+    )?
         .into_iter()
         .map(|ip| {
             let family_key = JavascriptSocketFamily::from_ip(ip);
@@ -8794,7 +8720,7 @@ where
         | "crypto.diffieHellmanSessionCall"
         | "crypto.subtle" => service_javascript_crypto_sync_rpc(process, request),
         "dns.lookup" | "dns.resolve" | "dns.resolve4" | "dns.resolve6" => {
-            service_javascript_dns_sync_rpc(bridge, vm_id, dns, request)
+            service_javascript_dns_sync_rpc(bridge, kernel, vm_id, dns, request)
         }
         "net.http_request" | "net.http_listen" | "net.http_close" | "net.http_wait"
         | "net.http_respond" => service_javascript_net_sync_rpc(
@@ -8831,6 +8757,7 @@ where
         | "net.http2_stream_resume"
         | "net.http2_stream_respond_with_file" => service_javascript_http2_sync_rpc(
             bridge,
+            kernel,
             vm_id,
             dns,
             socket_paths,
@@ -8879,6 +8806,7 @@ where
         | "dgram.setBufferSize"
         | "dgram.getBufferSize" => service_javascript_dgram_sync_rpc(
             bridge,
+            kernel,
             vm_id,
             dns,
             socket_paths,
@@ -11161,6 +11089,7 @@ where
 
 fn service_javascript_dns_sync_rpc<B>(
     bridge: &SharedBridge<B>,
+    kernel: &SidecarKernel,
     vm_id: &str,
     dns: &VmDnsConfig,
     request: &JavascriptSyncRpcRequest,
@@ -11185,13 +11114,15 @@ where
                         SidecarError::InvalidState(format!("invalid dns.lookup payload: {error}"))
                     })
                 })?;
-            bridge.require_network_access(
-                vm_id,
-                NetworkOperation::Dns,
-                format_dns_resource(&payload.hostname),
-            )?;
             let addresses = filter_dns_ip_addrs(
-                resolve_dns_ip_addrs(bridge, vm_id, dns, &payload.hostname)?,
+                resolve_dns_ip_addrs(
+                    bridge,
+                    kernel,
+                    vm_id,
+                    dns,
+                    &payload.hostname,
+                    DnsLookupPolicy::CheckPermissions,
+                )?,
                 payload.family,
             )?;
             let addresses = filter_dns_safe_ip_addrs(addresses, &payload.hostname)?;
@@ -11241,13 +11172,15 @@ where
                     }
                 },
             };
-            bridge.require_network_access(
-                vm_id,
-                NetworkOperation::Dns,
-                format_dns_resource(&payload.hostname),
-            )?;
             let addresses = filter_dns_ip_addrs(
-                resolve_dns_ip_addrs(bridge, vm_id, dns, &payload.hostname)?,
+                resolve_dns_ip_addrs(
+                    bridge,
+                    kernel,
+                    vm_id,
+                    dns,
+                    &payload.hostname,
+                    DnsLookupPolicy::CheckPermissions,
+                )?,
                 family,
             )?;
             let addresses = filter_dns_safe_ip_addrs(addresses, &payload.hostname)?;
@@ -11266,6 +11199,7 @@ where
 
 fn service_javascript_dgram_sync_rpc<B>(
     bridge: &SharedBridge<B>,
+    kernel: &SidecarKernel,
     vm_id: &str,
     dns: &VmDnsConfig,
     socket_paths: &JavascriptSocketPathContext,
@@ -11362,6 +11296,7 @@ where
             })?;
             let (written, local_addr) = socket.send_to(
                 bridge,
+                kernel,
                 vm_id,
                 dns,
                 payload.address.as_deref().unwrap_or("localhost"),
@@ -13224,6 +13159,7 @@ fn http2_stream_for_id(
 
 fn service_javascript_http2_sync_rpc<B>(
     bridge: &SharedBridge<B>,
+    kernel: &SidecarKernel,
     vm_id: &str,
     dns: &VmDnsConfig,
     socket_paths: &JavascriptSocketPathContext,
@@ -13428,7 +13364,15 @@ where
             };
             let resolved = match resolved {
                 Some(resolved) => resolved,
-                None => resolve_tcp_connect_addr(bridge, vm_id, dns, host, port, socket_paths)?,
+                None => resolve_tcp_connect_addr(
+                    bridge,
+                    kernel,
+                    vm_id,
+                    dns,
+                    host,
+                    port,
+                    socket_paths,
+                )?,
             };
             let (command_tx, command_rx) = unbounded_channel();
             let snapshot = Arc::new(Mutex::new(Http2SessionSnapshot {
@@ -13989,8 +13933,15 @@ where
                     NetworkOperation::Http,
                     format_tcp_resource(host, port),
                 )?;
-                let socket =
-                    ActiveTcpSocket::connect(bridge, vm_id, dns, host, port, socket_paths)?;
+                let socket = ActiveTcpSocket::connect(
+                    bridge,
+                    kernel,
+                    vm_id,
+                    dns,
+                    host,
+                    port,
+                    socket_paths,
+                )?;
                 let socket_id = process.allocate_tcp_socket_id();
                 let local_addr = socket.guest_local_addr;
                 let remote_addr = socket.guest_remote_addr;

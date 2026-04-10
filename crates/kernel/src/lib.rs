@@ -4,6 +4,7 @@
 
 pub use agent_os_bridge as bridge;
 pub mod command_registry;
+pub mod dns;
 pub mod device_layer;
 pub mod fd_table;
 pub mod kernel;

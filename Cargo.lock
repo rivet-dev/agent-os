@@ -45,8 +45,10 @@ dependencies = [
  "agent-os-bridge",
  "base64 0.22.1",
  "getrandom 0.2.17",
+ "hickory-resolver",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

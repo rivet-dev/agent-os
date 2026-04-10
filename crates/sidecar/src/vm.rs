@@ -131,6 +131,10 @@ where
         config.cwd = String::from("/");
         config.env = guest_env.clone();
         config.permissions = permissions;
+        config.dns = agent_os_kernel::dns::DnsConfig {
+            name_servers: dns.name_servers.clone(),
+            overrides: dns.overrides.clone(),
+        };
         config.resources = resource_limits;
         let root_filesystem =
             build_root_filesystem(&payload.root_filesystem, loaded_snapshot.as_ref())?;

@@ -9,5 +9,7 @@ description = "Shared kernel plane for Agent OS native and browser sidecars"
 agent-os-bridge = { path = "../bridge" }
 base64 = "0.22"
 getrandom = "0.2"
+hickory-resolver = "0.26.0-beta.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
