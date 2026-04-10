@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import { constants as osConstants } from "node:os";
@@ -29,6 +28,7 @@ import type {
 	CreatedVm,
 	GuestFilesystemStat,
 	NativeSidecarProcessClient,
+	SidecarProcessSnapshotEntry,
 	SidecarSignalHandlerRegistration,
 	SidecarSocketStateEntry,
 } from "./native-process-client.js";
@@ -158,12 +158,6 @@ interface TrackedProcessEntry {
 	pendingKillSignal: number | null;
 }
 
-interface HostProcessRow {
-	pid: number;
-	ppid: number;
-	command: string;
-}
-
 interface NativeSidecarKernelProxyOptions {
 	client: NativeSidecarProcessClient;
 	session: AuthenticatedSession;
@@ -197,6 +191,9 @@ export class NativeSidecarKernelProxy {
 	private readonly boundUdpLookups = new Map<string, SocketLookupCacheEntry>();
 	private readonly signalStates = new Map<number, KernelSignalState>();
 	private readonly signalRefreshes = new Map<number, Promise<void>>();
+	private sidecarProcessSnapshot: SidecarProcessSnapshotEntry[] = [];
+	private processSnapshotRefresh: Promise<void> | null = null;
+	private readonly observedProcessStartTimes = new Map<string, number>();
 	private readonly rootView: VirtualFileSystem;
 	private zombieTimerCountValue = 0;
 	private zombieTimerCountRefresh: Promise<void> | null = null;
@@ -723,6 +720,26 @@ export class NativeSidecarKernelProxy {
 		}
 	}
 
+	private async refreshProcessSnapshot(): Promise<void> {
+		if (this.processSnapshotRefresh) {
+			await this.processSnapshotRefresh;
+			return;
+		}
+
+		this.processSnapshotRefresh = (async () => {
+			try {
+				this.sidecarProcessSnapshot = await this.client.getProcessSnapshot(
+					this.session,
+					this.vm,
+				);
+			} finally {
+				this.processSnapshotRefresh = null;
+			}
+		})();
+
+		await this.processSnapshotRefresh;
+	}
+
 	private async refreshZombieTimerCount(): Promise<void> {
 		try {
 			const snapshot = await this.client.getZombieTimerCount(
@@ -748,6 +765,7 @@ export class NativeSidecarKernelProxy {
 		entry.hostPid = started.pid;
 		entry.started = true;
 		this.updateTrackedProcessSnapshot(entry);
+		void this.refreshProcessSnapshot().catch(() => {});
 		await this.refreshSignalState(entry);
 
 		void this.flushPendingStdin(entry);
@@ -772,6 +790,7 @@ export class NativeSidecarKernelProxy {
 					if (!entry) {
 						continue;
 					}
+					void this.refreshProcessSnapshot().catch(() => {});
 					if (!this.signalRefreshes.has(entry.pid)) {
 						this.signalRefreshes.set(entry.pid, this.refreshSignalState(entry));
 						await this.signalRefreshes.get(entry.pid);
@@ -792,6 +811,7 @@ export class NativeSidecarKernelProxy {
 					if (!entry) {
 						continue;
 					}
+					void this.refreshProcessSnapshot().catch(() => {});
 					this.signalRefreshes.delete(entry.pid);
 					this.finishProcess(entry, event.payload.exit_code);
 				}
@@ -1115,10 +1135,55 @@ export class NativeSidecarKernelProxy {
 	}
 
 	private buildProcessSnapshot(): ProcessInfo[] {
+		void this.refreshProcessSnapshot().catch(() => {});
 		const processMap = new Map<number, ProcessInfo>();
-		const hostRoots = new Map<number, TrackedProcessEntry>();
+		const displayPidByKernelPid = new Map<number, number>();
+
+		for (const entry of this.sidecarProcessSnapshot) {
+			const tracked = this.trackedProcessesById.get(entry.processId);
+			if (tracked) {
+				displayPidByKernelPid.set(entry.pid, tracked.pid);
+			}
+		}
+
+		for (const entry of this.sidecarProcessSnapshot) {
+			const tracked = this.trackedProcessesById.get(entry.processId);
+			const displayPid = displayPidByKernelPid.get(entry.pid) ?? entry.pid;
+			const displayPpid = displayPidByKernelPid.get(entry.ppid) ?? entry.ppid;
+			const displayPgid = displayPidByKernelPid.get(entry.pgid) ?? entry.pgid;
+			const displaySid = displayPidByKernelPid.get(entry.sid) ?? entry.sid;
+			const processKey = `${entry.processId}:${entry.pid}`;
+			const startTime =
+				tracked?.startTime ??
+				this.observedProcessStartTimes.get(processKey) ??
+				Date.now();
+			this.observedProcessStartTimes.set(processKey, startTime);
+
+			processMap.set(displayPid, {
+				pid: displayPid,
+				ppid: displayPpid,
+				pgid: displayPgid,
+				sid: displaySid,
+				driver: tracked?.driver ?? entry.driver,
+				command: tracked?.command ?? entry.command,
+				args: tracked?.args ?? entry.args,
+				cwd: tracked?.cwd ?? entry.cwd,
+				status:
+					tracked?.exitCode !== null
+						? "exited"
+						: tracked
+							? "running"
+							: entry.status,
+				exitCode: tracked?.exitCode ?? entry.exitCode,
+				startTime,
+				exitTime: tracked?.exitTime ?? null,
+			});
+		}
 
 		for (const entry of this.trackedProcesses.values()) {
+			if (processMap.has(entry.pid)) {
+				continue;
+			}
 			processMap.set(entry.pid, {
 				pid: entry.pid,
 				ppid: 0,
@@ -1133,60 +1198,14 @@ export class NativeSidecarKernelProxy {
 				startTime: entry.startTime,
 				exitTime: entry.exitTime,
 			});
-			if (entry.hostPid !== null && entry.exitCode === null) {
-				hostRoots.set(entry.hostPid, entry);
-			}
 		}
 
-		if (hostRoots.size === 0) {
-			return [...processMap.values()];
+		this.processes.clear();
+		for (const process of processMap.values()) {
+			this.processes.set(process.pid, process);
 		}
 
-		const rows = readHostProcesses();
-		const childrenByParent = new Map<number, HostProcessRow[]>();
-		for (const row of rows) {
-			const children = childrenByParent.get(row.ppid);
-			if (children) {
-				children.push(row);
-				continue;
-			}
-			childrenByParent.set(row.ppid, [row]);
-		}
-
-		const displayPidByHostPid = new Map<number, number>();
-		for (const [hostPid, entry] of hostRoots) {
-			displayPidByHostPid.set(hostPid, entry.pid);
-		}
-
-		const queue = [...hostRoots.keys()];
-		while (queue.length > 0) {
-			const hostPid = queue.shift();
-			if (hostPid === undefined) {
-				break;
-			}
-			for (const child of childrenByParent.get(hostPid) ?? []) {
-				const displayPid = child.pid;
-				const displayPpid = displayPidByHostPid.get(child.ppid) ?? child.ppid;
-				processMap.set(displayPid, {
-					pid: displayPid,
-					ppid: displayPpid,
-					pgid: displayPid,
-					sid: displayPid,
-					driver: "node",
-					command: child.command,
-					args: [],
-					cwd: "/",
-					status: "running",
-					exitCode: null,
-					startTime: Date.now(),
-					exitTime: null,
-				});
-				displayPidByHostPid.set(child.pid, displayPid);
-				queue.push(child.pid);
-			}
-		}
-
-		return [...processMap.values()];
+		return [...processMap.values()].sort((left, right) => left.pid - right.pid);
 	}
 
 	private dispatchRead<T>(
@@ -1389,29 +1408,6 @@ function socketLookupKey(
 		port: request.port ?? null,
 		path: request.path ?? null,
 	});
-}
-
-function readHostProcesses(): HostProcessRow[] {
-	try {
-		const output = execFileSync("ps", ["-eo", "pid=,ppid=,comm="], {
-			encoding: "utf8",
-		});
-		return output
-			.split("\n")
-			.map((line) => line.trim())
-			.filter(Boolean)
-			.map((line) => {
-				const [pid, ppid, ...commandParts] = line.split(/\s+/);
-				return {
-					pid: Number(pid),
-					ppid: Number(ppid),
-					command: commandParts.join(" "),
-				};
-			})
-			.filter((row) => Number.isFinite(row.pid) && Number.isFinite(row.ppid));
-	} catch {
-		return [];
-	}
 }
 
 export type {

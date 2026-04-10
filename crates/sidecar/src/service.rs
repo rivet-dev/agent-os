@@ -1002,6 +1002,9 @@ where
             RequestPayload::WriteStdin(payload) => self.write_stdin(&request, payload).await,
             RequestPayload::CloseStdin(payload) => self.close_stdin(&request, payload).await,
             RequestPayload::KillProcess(payload) => self.kill_process(&request, payload).await,
+            RequestPayload::GetProcessSnapshot(payload) => {
+                self.get_process_snapshot(&request, payload).await
+            }
             RequestPayload::FindListener(payload) => self.find_listener(&request, payload).await,
             RequestPayload::FindBoundUdp(payload) => self.find_bound_udp(&request, payload).await,
             RequestPayload::GetSignalState(payload) => {

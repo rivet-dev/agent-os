@@ -112,6 +112,20 @@ export interface SidecarSignalState {
 	handlers: Map<number, SidecarSignalHandlerRegistration>;
 }
 
+export interface SidecarProcessSnapshotEntry {
+	processId: string;
+	pid: number;
+	ppid: number;
+	pgid: number;
+	sid: number;
+	driver: string;
+	command: string;
+	args: string[];
+	cwd: string;
+	status: "running" | "exited";
+	exitCode: number | null;
+}
+
 export interface SidecarZombieTimerCount {
 	count: number;
 }
@@ -289,6 +303,9 @@ type RequestPayload =
 			type: "kill_process";
 			process_id: string;
 			signal: string;
+	  }
+	| {
+			type: "get_process_snapshot";
 	  }
 	| {
 			type: "find_listener";
@@ -521,6 +538,22 @@ interface ResponseFrame {
 		| {
 				type: "process_killed";
 				process_id: string;
+		  }
+		| {
+				type: "process_snapshot";
+				processes: Array<{
+					process_id: string;
+					pid: number;
+					ppid: number;
+					pgid: number;
+					sid: number;
+					driver: string;
+					command: string;
+					args?: string[];
+					cwd: string;
+					status: "running" | "exited";
+					exit_code?: number;
+				}>;
 		  }
 		| {
 				type: "listener_snapshot";
@@ -903,7 +936,9 @@ export class NativeSidecarProcessClient {
 		}
 		return {
 			sessionId: response.payload.session_id,
-			...(response.payload.pid !== undefined ? { pid: response.payload.pid } : {}),
+			...(response.payload.pid !== undefined
+				? { pid: response.payload.pid }
+				: {}),
 			modes: response.payload.modes,
 			configOptions: response.payload.config_options ?? [],
 			agentCapabilities: response.payload.agent_capabilities,
@@ -968,7 +1003,9 @@ export class NativeSidecarProcessClient {
 			sessionId: response.payload.session_id,
 			agentType: response.payload.agent_type,
 			processId: response.payload.process_id,
-			...(response.payload.pid !== undefined ? { pid: response.payload.pid } : {}),
+			...(response.payload.pid !== undefined
+				? { pid: response.payload.pid }
+				: {}),
 			closed: response.payload.closed,
 			modes: response.payload.modes,
 			configOptions: response.payload.config_options ?? [],
@@ -1693,6 +1730,29 @@ export class NativeSidecarProcessClient {
 			: null;
 	}
 
+	async getProcessSnapshot(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+	): Promise<SidecarProcessSnapshotEntry[]> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload: {
+				type: "get_process_snapshot",
+			},
+		});
+		if (response.payload.type !== "process_snapshot") {
+			throw new Error(
+				`unexpected get_process_snapshot response: ${response.payload.type}`,
+			);
+		}
+		return response.payload.processes.map(toSidecarProcessSnapshotEntry);
+	}
+
 	async findBoundUdp(
 		session: AuthenticatedSession,
 		vm: CreatedVm,
@@ -2165,6 +2225,34 @@ function toSidecarSocketStateEntry(entry: {
 		...(entry.host !== undefined ? { host: entry.host } : {}),
 		...(entry.port !== undefined ? { port: entry.port } : {}),
 		...(entry.path !== undefined ? { path: entry.path } : {}),
+	};
+}
+
+function toSidecarProcessSnapshotEntry(entry: {
+	process_id: string;
+	pid: number;
+	ppid: number;
+	pgid: number;
+	sid: number;
+	driver: string;
+	command: string;
+	args?: string[];
+	cwd: string;
+	status: "running" | "exited";
+	exit_code?: number;
+}): SidecarProcessSnapshotEntry {
+	return {
+		processId: entry.process_id,
+		pid: entry.pid,
+		ppid: entry.ppid,
+		pgid: entry.pgid,
+		sid: entry.sid,
+		driver: entry.driver,
+		command: entry.command,
+		args: [...(entry.args ?? [])],
+		cwd: entry.cwd,
+		status: entry.status,
+		exitCode: entry.exit_code ?? null,
 	};
 }
 

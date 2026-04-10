@@ -113,7 +113,7 @@ See `.agent/specs/test-structure.md` for the full restructuring plan. Target lay
 
 - `globalThis.fetch` is hardened (non-writable) in the VM -- can't be mocked in-process
 - Kernel child_process.spawn can't resolve bare commands from PATH (e.g., `pi`). Use `PI_ACP_PI_COMMAND` env var to point to the `.js` entry directly.
-- `allProcesses()` / `processTree()` on the native sidecar path only surface the top-level tracked runtime processes. Guest-local `child_process.spawn()` children still report guest PIDs to user code, but they do not appear as separate kernel process-tree nodes yet.
+- `allProcesses()` / `processTree()` on the native sidecar path should be derived from the VM's active-process snapshot rather than host `ps` output. Preserve the public `spawn()` PID for root processes by remapping the sidecar's kernel PID back through the root `process_id`, so nested guest `child_process.spawn()` children remain visible under the user-facing parent PID.
 - `kernel.readFile()` does NOT see the ModuleAccessFileSystem overlay -- read host files directly with `readFileSync` for package.json resolution
 - Native ELF binaries cannot execute in the VM -- the kernel's command resolver only handles `.js`/`.mjs`/`.cjs` scripts and WASM commands.
 - Projected native assets under `/root/node_modules` are readable through module access, but guest `child_process.spawn*()` still routes them through the VM command resolver; spawning a projected ELF currently fails during WASM warmup instead of executing host-native code.

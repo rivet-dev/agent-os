@@ -211,6 +211,7 @@ pub enum RequestPayload {
     WriteStdin(WriteStdinRequest),
     CloseStdin(CloseStdinRequest),
     KillProcess(KillProcessRequest),
+    GetProcessSnapshot(GetProcessSnapshotRequest),
     FindListener(FindListenerRequest),
     FindBoundUdp(FindBoundUdpRequest),
     GetSignalState(GetSignalStateRequest),
@@ -246,6 +247,7 @@ pub enum ResponsePayload {
     StdinWritten(StdinWrittenResponse),
     StdinClosed(StdinClosedResponse),
     ProcessKilled(ProcessKilledResponse),
+    ProcessSnapshot(ProcessSnapshotResponse),
     ListenerSnapshot(ListenerSnapshotResponse),
     BoundUdpSnapshot(BoundUdpSnapshotResponse),
     SignalState(SignalStateResponse),
@@ -727,6 +729,9 @@ pub struct KillProcessRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GetProcessSnapshotRequest {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FindListenerRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
@@ -1004,6 +1009,35 @@ pub struct StdinClosedResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessKilledResponse {
     pub process_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessSnapshotStatus {
+    Running,
+    Exited,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessSnapshotEntry {
+    pub process_id: String,
+    pub pid: u32,
+    pub ppid: u32,
+    pub pgid: u32,
+    pub sid: u32,
+    pub driver: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    pub cwd: String,
+    pub status: ProcessSnapshotStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessSnapshotResponse {
+    pub processes: Vec<ProcessSnapshotEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1668,6 +1702,7 @@ enum ExpectedResponseKind {
     StdinWritten,
     StdinClosed,
     ProcessKilled,
+    ProcessSnapshot,
     ListenerSnapshot,
     BoundUdpSnapshot,
     SignalState,
@@ -1710,6 +1745,7 @@ impl ExpectedResponseKind {
             Self::StdinWritten => "stdin_written",
             Self::StdinClosed => "stdin_closed",
             Self::ProcessKilled => "process_killed",
+            Self::ProcessSnapshot => "process_snapshot",
             Self::ListenerSnapshot => "listener_snapshot",
             Self::BoundUdpSnapshot => "bound_udp_snapshot",
             Self::SignalState => "signal_state",
@@ -1769,6 +1805,7 @@ impl RequestPayload {
             | Self::WriteStdin(_)
             | Self::CloseStdin(_)
             | Self::KillProcess(_)
+            | Self::GetProcessSnapshot(_)
             | Self::FindListener(_)
             | Self::FindBoundUdp(_)
             | Self::GetSignalState(_)
@@ -1802,6 +1839,7 @@ impl RequestPayload {
             Self::WriteStdin(_) => ExpectedResponseKind::StdinWritten,
             Self::CloseStdin(_) => ExpectedResponseKind::StdinClosed,
             Self::KillProcess(_) => ExpectedResponseKind::ProcessKilled,
+            Self::GetProcessSnapshot(_) => ExpectedResponseKind::ProcessSnapshot,
             Self::FindListener(_) => ExpectedResponseKind::ListenerSnapshot,
             Self::FindBoundUdp(_) => ExpectedResponseKind::BoundUdpSnapshot,
             Self::GetSignalState(_) => ExpectedResponseKind::SignalState,
@@ -1855,6 +1893,7 @@ impl ResponsePayload {
             | Self::StdinWritten(_)
             | Self::StdinClosed(_)
             | Self::ProcessKilled(_)
+            | Self::ProcessSnapshot(_)
             | Self::ListenerSnapshot(_)
             | Self::BoundUdpSnapshot(_)
             | Self::SignalState(_)
@@ -1888,6 +1927,7 @@ impl ResponsePayload {
             Self::StdinWritten(_) => "stdin_written",
             Self::StdinClosed(_) => "stdin_closed",
             Self::ProcessKilled(_) => "process_killed",
+            Self::ProcessSnapshot(_) => "process_snapshot",
             Self::ListenerSnapshot(_) => "listener_snapshot",
             Self::BoundUdpSnapshot(_) => "bound_udp_snapshot",
             Self::SignalState(_) => "signal_state",

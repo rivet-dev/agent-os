@@ -6,11 +6,13 @@ describe("processTree()", () => {
 
 	beforeEach(async () => {
 		vm = await AgentOs.create();
-	});
+	}, 30_000);
 
 	afterEach(async () => {
-		await vm.dispose();
-	});
+		if (vm) {
+			await vm.dispose();
+		}
+	}, 30_000);
 
 	test("returns empty array on fresh VM", () => {
 		expect(vm.processTree()).toEqual([]);
@@ -31,11 +33,9 @@ describe("processTree()", () => {
 		vm.killProcess(pid);
 	}, 30_000);
 
-	test("guest child_process.spawn keeps the tracked parent as a root", async () => {
+	test("guest child_process.spawn children appear under the tracked parent", async () => {
 		let childPid: string | null = null;
 
-		// Guest-visible child PIDs are runtime-local and do not surface as separate
-		// kernel processes in processTree().
 		await vm.writeFile(
 			"/tmp/parent.mjs",
 			`
@@ -63,11 +63,22 @@ setTimeout(() => {}, 30000);
 			await new Promise((r) => setTimeout(r, 100));
 		}
 
-		const tree = vm.processTree();
-		const parentNode = tree.find((n) => n.pid === pid);
+		let parentNode = vm.processTree().find((node) => node.pid === pid);
+		for (let attempt = 0; attempt < 20; attempt++) {
+			parentNode = vm.processTree().find((node) => node.pid === pid);
+			if (
+				parentNode?.children.some((child) => child.pid === Number(childPid))
+			) {
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+
 		expect(parentNode).toBeDefined();
 		expect(childPid).not.toBeNull();
-		expect(parentNode?.children).toEqual([]);
+		expect(parentNode?.children.map((child) => child.pid)).toContain(
+			Number(childPid),
+		);
 
 		vm.killProcess(pid);
 	}, 30_000);

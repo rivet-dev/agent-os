@@ -6,16 +6,17 @@ use crate::filesystem::{
 };
 use crate::protocol::{
     BoundUdpSnapshotResponse, CloseStdinRequest, EventFrame, EventPayload, ExecuteRequest,
-    FindBoundUdpRequest, FindListenerRequest, GetSignalStateRequest, GetZombieTimerCountRequest,
-    GuestRuntimeKind, JavascriptChildProcessSpawnOptions, JavascriptChildProcessSpawnRequest,
-    JavascriptDgramBindRequest, JavascriptDgramCreateSocketRequest, JavascriptDgramSendRequest,
-    JavascriptDnsLookupRequest, JavascriptDnsResolveRequest, JavascriptNetConnectRequest,
-    JavascriptNetListenRequest, KillProcessRequest, ListenerSnapshotResponse, OwnershipScope,
-    ProcessExitedEvent, ProcessKilledResponse, ProcessOutputEvent, ProcessStartedResponse,
-    RequestFrame, ResponsePayload, SidecarRequestPayload, SignalDispositionAction,
-    SignalHandlerRegistration, SignalStateResponse, SocketStateEntry, StdinClosedResponse,
-    StdinWrittenResponse, StreamChannel, WasmPermissionTier, WriteStdinRequest,
-    ZombieTimerCountResponse,
+    FindBoundUdpRequest, FindListenerRequest, GetProcessSnapshotRequest, GetSignalStateRequest,
+    GetZombieTimerCountRequest, GuestRuntimeKind, JavascriptChildProcessSpawnOptions,
+    JavascriptChildProcessSpawnRequest, JavascriptDgramBindRequest,
+    JavascriptDgramCreateSocketRequest, JavascriptDgramSendRequest, JavascriptDnsLookupRequest,
+    JavascriptDnsResolveRequest, JavascriptNetConnectRequest, JavascriptNetListenRequest,
+    KillProcessRequest, ListenerSnapshotResponse, OwnershipScope, ProcessExitedEvent,
+    ProcessKilledResponse, ProcessOutputEvent, ProcessSnapshotEntry, ProcessSnapshotResponse,
+    ProcessSnapshotStatus, ProcessStartedResponse, RequestFrame, ResponsePayload,
+    SidecarRequestPayload, SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse,
+    SocketStateEntry, StdinClosedResponse, StdinWrittenResponse, StreamChannel, WasmPermissionTier,
+    WriteStdinRequest, ZombieTimerCountResponse,
 };
 use crate::service::{
     audit_fields, dirname, emit_security_audit_event, emit_structured_event, javascript_error,
@@ -62,7 +63,7 @@ use agent_os_kernel::dns::{DnsLookupPolicy, DnsResolutionSource as KernelDnsReso
 use agent_os_kernel::kernel::{KernelProcessHandle, SpawnOptions, VirtualProcessOptions};
 use agent_os_kernel::permissions::NetworkOperation;
 use agent_os_kernel::poll::{PollEvents, PollFd, PollTargetEntry, POLLERR, POLLHUP, POLLIN};
-use agent_os_kernel::process_table::{SIGKILL, SIGTERM};
+use agent_os_kernel::process_table::{ProcessStatus, SIGKILL, SIGTERM};
 use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use agent_os_kernel::socket_table::{
@@ -2567,6 +2568,29 @@ where
             response: self.respond(
                 request,
                 ResponsePayload::ListenerSnapshot(ListenerSnapshotResponse { listener }),
+            ),
+            events: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn get_process_snapshot(
+        &mut self,
+        request: &RequestFrame,
+        _payload: GetProcessSnapshotRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
+        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+
+        let processes = self
+            .vms
+            .get(&vm_id)
+            .map(snapshot_vm_processes)
+            .unwrap_or_default();
+
+        Ok(DispatchResult {
+            response: self.respond(
+                request,
+                ResponsePayload::ProcessSnapshot(ProcessSnapshotResponse { processes }),
             ),
             events: Vec::new(),
         })
@@ -6573,6 +6597,48 @@ fn find_socket_state_entry(
     }
 
     Ok(None)
+}
+
+fn snapshot_vm_processes(vm: &VmState) -> Vec<ProcessSnapshotEntry> {
+    let process_table = vm.kernel.list_processes();
+    let mut entries = Vec::new();
+
+    for (process_id, process) in &vm.active_processes {
+        collect_process_snapshot_entries(process_id, process, &process_table, &mut entries);
+    }
+
+    entries
+}
+
+fn collect_process_snapshot_entries(
+    process_id: &str,
+    process: &ActiveProcess,
+    process_table: &BTreeMap<u32, agent_os_kernel::process_table::ProcessInfo>,
+    entries: &mut Vec<ProcessSnapshotEntry>,
+) {
+    if let Some(info) = process_table.get(&process.kernel_pid) {
+        entries.push(ProcessSnapshotEntry {
+            process_id: process_id.to_owned(),
+            pid: info.pid,
+            ppid: info.ppid,
+            pgid: info.pgid,
+            sid: info.sid,
+            driver: info.driver.clone(),
+            command: info.command.clone(),
+            args: Vec::new(),
+            cwd: process.guest_cwd.clone(),
+            status: match info.status {
+                ProcessStatus::Running | ProcessStatus::Stopped => ProcessSnapshotStatus::Running,
+                ProcessStatus::Exited => ProcessSnapshotStatus::Exited,
+            },
+            exit_code: info.exit_code,
+        });
+    }
+
+    for (child_id, child) in &process.child_processes {
+        let child_process_id = format!("{process_id}/{child_id}");
+        collect_process_snapshot_entries(&child_process_id, child, process_table, entries);
+    }
 }
 
 fn find_kernel_socket_state_entry(
