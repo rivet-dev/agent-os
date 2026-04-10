@@ -69,6 +69,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - For `vm.exec()` cwd coverage in `packages/core/tests/execute.test.ts`, set up relative-path fixtures from inside the guest shell when the story is about shell cwd semantics; visibility of files written via VM filesystem APIs is a separate host-shadow sync surface.
 - Pi SDK `createAgentSession({ tools })` only uses the passed tools to seed active built-in tool names; if the adapter must override Pi's default `bash`/`read`/`edit`/`write` implementations, rebuild the returned `AgentSession` with `_baseToolsOverride` or construct `AgentSession` directly.
 - Sidecar layer IDs are VM-local handles, not global identifiers. `VmLayerStore` restarts its `layer-N` sequence for each VM, so tests should prove isolation through VM ownership scope and exported snapshot contents rather than global ID uniqueness.
+- Layer lifecycle coverage is split across two truth suites: `packages/core/tests/layers.test.ts` owns in-memory snapshot reuse and multi-layer composition semantics, while `crates/sidecar/tests/layer_management.rs` owns VM-scoped layer RPC isolation and per-VM ownership boundaries.
 
 ## 2026-04-09 19:58:47 PDT - US-028
 - Fixed the Pi CLI bash-tool regression by patching vendored `brush-core` command resolution for WASI: shell PATH lookup now ignores non-file candidates, and resolved guest executable paths like `/bin/printf` are passed through to process spawn instead of dropping back to a bare command name. Added the matching persistent vendor patch under `registry/native/patches/crates/brush-core/` and recorded the PATH gotcha in `registry/AGENTS.md`.
@@ -340,4 +341,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Multi-layer VM roots should be expressed as immutable `lowers` ordered highest-to-lowest precedence plus `bootstrap_entries` for the single writable upper; tests should assert all three precedence levels explicitly.
   - Replaying upper snapshots over merged lowers must tolerate duplicate directory paths with `mkdir` semantics, or valid upper snapshots will fail early with `EEXIST` before file overrides are applied.
   - The active truth path for this story is `cargo test -p agent-os-kernel --test root_fs -- --test-threads=1`, `cargo test -p agent-os-sidecar --test layer_management -- --test-threads=1`, and root `pnpm check-types`.
+---
+## 2026-04-10 03:30:59 PDT - US-057
+- Expanded the dedicated package-level layer lifecycle suite so `packages/core/tests/layers.test.ts` now covers imported snapshot reuse plus multi-layer composition with a sealed upper snapshot, complementing the existing sidecar VM-isolation coverage.
+- Added a reusable testing note under `packages/core/AGENTS.md` (`packages/core/CLAUDE.md` target) pointing future layer work at the package-level lifecycle suite and the Rust sidecar `layer_management` suite, then re-verified the real sidecar layer RPC smoke path.
+- Files changed: `packages/core/CLAUDE.md`, `packages/core/tests/layers.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Layer lifecycle regressions need both the in-memory package suite and the Rust sidecar suite: the former proves snapshot reuse/composition semantics, and the latter proves VM ownership scoping.
+  - A sealed writable layer is the right reusable upper fixture for multi-layer tests because it exercises both the seal transition and later read-only reopening in one path.
+  - The active truth path for this story is `pnpm --dir packages/core exec vitest run tests/layers.test.ts`, `pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts -t "layer RPCs"`, `cargo test -p agent-os-sidecar --test layer_management -- --test-threads=1`, and root `pnpm check-types`.
 ---
