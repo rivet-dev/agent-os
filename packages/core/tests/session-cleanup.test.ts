@@ -245,6 +245,22 @@ async function waitForSessionResources(
 	).then(() => undefined);
 }
 
+function uniqueSessionRootPids(sessionStates: Array<{ pid?: number }>): number[] {
+	const pidCounts = new Map<number, number>();
+	for (const state of sessionStates) {
+		if (typeof state.pid !== "number") {
+			continue;
+		}
+		pidCounts.set(state.pid, (pidCounts.get(state.pid) ?? 0) + 1);
+	}
+	return sessionStates
+		.map((state) => state.pid)
+		.filter(
+			(pid): pid is number =>
+				typeof pid === "number" && (pidCounts.get(pid) ?? 0) === 1,
+		);
+}
+
 async function createTextMock(): Promise<{
 	url: string;
 	stop: () => Promise<void>;
@@ -390,12 +406,13 @@ describe("session cleanup", () => {
 			);
 
 			const activePids = sessionStates.map((state) => state.pid!);
+			const dedicatedSessionPids = uniqueSessionRootPids(sessionStates);
 			expect(activePids.length).toBe(3);
 
 			await Promise.all(
 				sessions.map(({ sessionId }) => closeSessionAndWait(vm, sessionId)),
 			);
-			await waitForSessionResources(activePids, baselineZombieTimers, vm);
+			await waitForSessionResources(dedicatedSessionPids, baselineZombieTimers, vm);
 		} finally {
 			await vm.dispose();
 			await mock.stop();
