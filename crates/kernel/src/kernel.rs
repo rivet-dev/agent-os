@@ -18,7 +18,8 @@ use crate::permissions::{
 };
 use crate::pipe_manager::{PipeError, PipeManager};
 use crate::poll::{
-    PollEvents, PollFd, PollNotifier, PollResult, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT,
+    PollEvents, PollFd, PollNotifier, PollResult, PollTarget, PollTargetEntry, PollTargetResult,
+    POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT,
 };
 use crate::process_table::{
     DriverProcess, ProcessContext, ProcessExitCallback, ProcessInfo, ProcessStatus, ProcessTable,
@@ -1170,6 +1171,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         self.sockets.bind_inet(socket_id, address)?;
+        self.poll_notifier.notify();
         Ok(())
     }
 
@@ -1194,6 +1196,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
         self.sockets
             .bind_unix(socket_id, normalize_path(&path.into()))?;
+        self.poll_notifier.notify();
         Ok(())
     }
 
@@ -1217,6 +1220,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         self.sockets.listen(socket_id, backlog)?;
+        self.poll_notifier.notify();
         Ok(())
     }
 
@@ -1240,6 +1244,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
         self.sockets
             .enqueue_incoming_tcp_connection(listener_socket_id, peer_address)?;
+        self.poll_notifier.notify();
         Ok(())
     }
 
@@ -1268,7 +1273,9 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             SocketState::Connected,
         )?;
 
-        Ok(self.sockets.accept(listener_socket_id)?.id())
+        let socket_id = self.sockets.accept(listener_socket_id)?.id();
+        self.poll_notifier.notify();
+        Ok(socket_id)
     }
 
     pub fn socket_connect_pair(
@@ -1491,6 +1498,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             state,
         )?;
         self.sockets.update_state(socket_id, state)?;
+        self.poll_notifier.notify();
         Ok(())
     }
 
@@ -1834,9 +1842,38 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         &self,
         requester_driver: &str,
         pid: u32,
-        mut fds: Vec<PollFd>,
+        fds: Vec<PollFd>,
         timeout_ms: i32,
     ) -> KernelResult<PollResult> {
+        let targets = fds
+            .into_iter()
+            .map(|poll_fd| PollTargetEntry::fd(poll_fd.fd, poll_fd.events))
+            .collect::<Vec<_>>();
+        let result = self.poll_targets(requester_driver, pid, targets, timeout_ms)?;
+        Ok(PollResult {
+            ready_count: result.ready_count,
+            fds: result
+                .targets
+                .into_iter()
+                .map(|target| match target.target {
+                    PollTarget::Fd(fd) => PollFd {
+                        fd,
+                        events: target.events,
+                        revents: target.revents,
+                    },
+                    PollTarget::Socket(_) => unreachable!("fd poll should only include fd targets"),
+                })
+                .collect(),
+        })
+    }
+
+    pub fn poll_targets(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        mut targets: Vec<PollTargetEntry>,
+        timeout_ms: i32,
+    ) -> KernelResult<PollTargetResult> {
         self.assert_driver_owns(requester_driver, pid)?;
         if timeout_ms < -1 {
             return Err(KernelError::new(
@@ -1854,21 +1891,30 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
         loop {
             let observed_generation = self.poll_notifier.snapshot();
-            let ready_count = self.populate_poll_revents(pid, &mut fds)?;
+            let ready_count = self.populate_poll_target_revents(pid, &mut targets)?;
             if ready_count > 0 || matches!(timeout, Some(duration) if duration.is_zero()) {
-                return Ok(PollResult { ready_count, fds });
+                return Ok(PollTargetResult {
+                    ready_count,
+                    targets,
+                });
             }
 
             let remaining = deadline.map(|target| target.saturating_duration_since(Instant::now()));
             if matches!(remaining, Some(duration) if duration.is_zero()) {
-                return Ok(PollResult { ready_count, fds });
+                return Ok(PollTargetResult {
+                    ready_count,
+                    targets,
+                });
             }
 
             if !self
                 .poll_notifier
                 .wait_for_change(observed_generation, remaining)
             {
-                return Ok(PollResult { ready_count, fds });
+                return Ok(PollTargetResult {
+                    ready_count,
+                    targets,
+                });
             }
         }
     }
@@ -2342,30 +2388,58 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         ))
     }
 
-    fn populate_poll_revents(&self, pid: u32, fds: &mut [PollFd]) -> KernelResult<usize> {
-        let entries = {
-            let tables = lock_or_recover(&self.fd_tables);
-            let table = tables
-                .get(pid)
-                .ok_or_else(|| KernelError::no_such_process(pid))?;
-            fds.iter()
-                .map(|poll_fd| table.get(poll_fd.fd).cloned())
-                .collect::<Vec<_>>()
-        };
-
+    fn populate_poll_target_revents(
+        &self,
+        pid: u32,
+        targets: &mut [PollTargetEntry],
+    ) -> KernelResult<usize> {
         let mut ready_count = 0;
-        for (poll_fd, entry) in fds.iter_mut().zip(entries.into_iter()) {
-            poll_fd.revents = if let Some(entry) = entry {
-                self.poll_entry(&entry, poll_fd.events)?
-            } else {
-                POLLNVAL
-            };
-            if !poll_fd.revents.is_empty() {
+        for target in targets.iter_mut() {
+            target.revents = self.poll_target_entry(pid, target.target, target.events)?;
+            if !target.revents.is_empty() {
                 ready_count += 1;
             }
         }
 
         Ok(ready_count)
+    }
+
+    fn poll_target_entry(
+        &self,
+        pid: u32,
+        target: PollTarget,
+        requested: PollEvents,
+    ) -> KernelResult<PollEvents> {
+        match target {
+            PollTarget::Fd(fd) => {
+                let entry = {
+                    let tables = lock_or_recover(&self.fd_tables);
+                    tables
+                        .get(pid)
+                        .ok_or_else(|| KernelError::no_such_process(pid))?
+                        .get(fd)
+                        .cloned()
+                };
+                if let Some(entry) = entry {
+                    self.poll_entry(&entry, requested)
+                } else {
+                    Ok(POLLNVAL)
+                }
+            }
+            PollTarget::Socket(socket_id) => {
+                let socket = self.sockets.get(socket_id);
+                if let Some(socket) = socket {
+                    if socket.owner_pid() != pid {
+                        return Err(KernelError::permission_denied(format!(
+                            "process {pid} does not own socket {socket_id}"
+                        )));
+                    }
+                    Ok(self.sockets.poll(socket_id, requested)?)
+                } else {
+                    Ok(POLLNVAL)
+                }
+            }
+        }
     }
 
     fn poll_entry(

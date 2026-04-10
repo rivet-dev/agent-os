@@ -1,3 +1,4 @@
+use crate::poll::{PollEvents, POLLERR, POLLHUP, POLLIN, POLLOUT};
 use crate::vfs::normalize_path;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
@@ -1020,6 +1021,66 @@ impl SocketTable {
             source_address: datagram.source_address,
             payload,
         }))
+    }
+
+    pub fn poll(&self, socket_id: SocketId, requested: PollEvents) -> SocketResult<PollEvents> {
+        let table = lock_or_recover(&self.inner.state);
+        let record = table
+            .sockets
+            .get(&socket_id)
+            .ok_or_else(|| SocketTableError::not_found(socket_id))?;
+
+        let mut events = PollEvents::empty();
+        match record.state {
+            SocketState::Listening => {
+                if requested.intersects(POLLIN) && record.pending_accept_count() > 0 {
+                    events |= POLLIN;
+                }
+            }
+            SocketState::Connected => {
+                let connection = record.connection_state.as_ref().ok_or_else(|| {
+                    SocketTableError::not_connected(format!("socket {socket_id} is not connected"))
+                })?;
+                let peer = connection
+                    .peer_socket_id
+                    .and_then(|peer_socket_id| table.sockets.get(&peer_socket_id));
+
+                if requested.intersects(POLLIN) && !connection.recv_buffer.is_empty() {
+                    events |= POLLIN;
+                }
+                if connection.peer_write_shutdown || peer.is_none() {
+                    events |= POLLHUP;
+                }
+
+                if requested.intersects(POLLOUT) && !connection.write_shutdown {
+                    if peer
+                        .and_then(|peer| peer.connection_state.as_ref())
+                        .map(|peer_connection| peer_connection.read_shutdown)
+                        .unwrap_or(true)
+                    {
+                        events |= POLLERR;
+                    } else {
+                        events |= POLLOUT;
+                    }
+                }
+            }
+            SocketState::Bound if supports_inet_datagram_lifecycle(record.spec) => {
+                let datagram_state = record.datagram_state.as_ref().ok_or_else(|| {
+                    SocketTableError::invalid_argument(format!(
+                        "socket {socket_id} does not support datagrams"
+                    ))
+                })?;
+                if requested.intersects(POLLIN) && !datagram_state.recv_queue.is_empty() {
+                    events |= POLLIN;
+                }
+                if requested.intersects(POLLOUT) {
+                    events |= POLLOUT;
+                }
+            }
+            SocketState::Created | SocketState::Bound => {}
+        }
+
+        Ok(events)
     }
 
     pub fn write(&self, socket_id: SocketId, data: &[u8]) -> SocketResult<usize> {

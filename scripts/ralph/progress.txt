@@ -11,6 +11,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Kernel UDP receive tests should assert datagram-boundary truncation: a short `socket_recv_datagram()` consumes only that queued datagram and must not leak leftover bytes into the next receive.
 - Kernel Unix-socket coverage should use `socket_bind_unix()`, `socket_connect_unix()`, and `socket_accept()` so path normalization, backlog handling, and accepted-socket creation stay on the kernel-owned path.
 - Kernel DNS resolution should live behind `KernelVm::resolve_dns()` / `crates/kernel/src/dns.rs`; explicit guest DNS APIs use `DnsLookupPolicy::CheckPermissions`, while TCP/UDP/HTTP helpers that already gate egress separately should use `SkipPermissions` so the DNS migration does not add an extra permission requirement.
+- Mixed kernel readiness coverage should use `KernelVm::poll_targets()` with `PollTargetEntry::fd(...)` for FD-backed pipes/PTYS and `PollTargetEntry::socket(...)` for socket-table entries so one notifier-driven poll loop is exercised across subsystems.
 - Fire-and-forget session shutdown in `packages/core/src/agent-os.ts` still needs a local `.catch(() => {})` on the dropped `_closeSessionInternal()` promise; deterministic callers should await `_sessionClosePromises` instead of letting shared-runtime close races surface as unhandled rejections.
 - ACP adapters that emit live `session/request_permission` calls during `session/prompt` need the sidecar callback channel (`SidecarRequestPayload`) for replies; queued session events alone arrive too late and will deadlock the prompt.
 - Synthetic ACP `session/update` compatibility belongs in `crates/sidecar/src/acp/session.rs`: when `session/set_mode` or `session/set_config_option` succeeds without a matching agent notification, synthesize the update there so `getSessionState()` and the TypeScript session API stay agent-agnostic.
@@ -246,4 +247,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Unix stream sockets can reuse the same `listener_state`, accepted-socket allocation, and `ConnectionState` machinery as TCP if the socket table tracks bound guest paths separately from INET addresses.
   - Kernel Unix-socket coverage is best expressed through `KernelVm` wrappers (`socket_bind_unix()`, `socket_connect_unix()`, `socket_accept()`) so ownership checks, resource accounting, path normalization, and backlog semantics are exercised together.
   - The active truth path for this story is `cargo test -p agent-os-kernel --test unix_domain_socket -- --test-threads=1`, `cargo test -p agent-os-kernel --test tcp_listener -- --test-threads=1`, and root `pnpm check-types`.
+---
+## 2026-04-10 00:53:35 PDT - US-049
+- Implemented shared kernel poll coverage for socket-table entries by adding `PollTarget` / `PollTargetEntry` alongside the existing FD-only poll API, teaching `KernelVm::poll_targets()` to dispatch one notifier-driven wait loop across FD-backed pipes/PTYS and owned sockets, and wiring socket readiness evaluation plus missing poll notifications into the kernel socket lifecycle.
+- Expanded `crates/kernel/tests/poll.rs` to cover stream-socket readability/hangup, mixed pipe/PTY/UDP readiness in one poll call, and finite timeout behavior across FD and socket targets, and recorded the reusable mixed-poll pattern in `crates/kernel/AGENTS.md`.
+- Files changed: `crates/kernel/AGENTS.md`, `crates/kernel/src/kernel.rs`, `crates/kernel/src/poll.rs`, `crates/kernel/src/socket_table.rs`, `crates/kernel/tests/poll.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `KernelVm::poll_fds()` can stay as the FD compatibility wrapper, but the shared readiness engine should live under `KernelVm::poll_targets()` so later runtime wiring can mix FD-backed resources with socket-table entries without duplicating the timeout/notifier loop.
+  - Socket poll readiness depends on notifier updates from state transitions beyond read/write: listener queueing, accept dequeue, bind/listen transitions, shutdown, and close all need to wake poll waiters or mixed readiness tests will hang on stale snapshots.
+  - The active truth path for this story is `cargo test -p agent-os-kernel poll -- --test-threads=1` plus root `pnpm check-types`.
 ---
