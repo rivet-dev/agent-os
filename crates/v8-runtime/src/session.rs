@@ -905,6 +905,7 @@ pub(crate) const SYNC_BRIDGE_FNS: &[&str] = &[
     "_sqliteStatementSetAllowBareNamedParametersRaw",
     "_sqliteStatementSetAllowUnknownNamedParametersRaw",
     "_sqliteStatementFinalizeRaw",
+    "_kernelPollRaw",
     "_ptySetRawMode",
 ];
 

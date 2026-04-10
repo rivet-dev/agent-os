@@ -3697,6 +3697,11 @@ var __bridge = (() => {
       rationale: "Host bridge for batched module resolution to reduce IPC round-trips."
     },
     {
+      name: "_kernelPollRaw",
+      classification: "hardened",
+      rationale: "Host kernel poll bridge reference for multi-fd readiness waits."
+    },
+    {
       name: "_ptySetRawMode",
       classification: "hardened",
       rationale: "Host PTY bridge reference for stdin.setRawMode()."
@@ -6114,6 +6119,7 @@ var __bridge = (() => {
   var _fdFtruncate = createBridgeSyncFacade("fs.ftruncateSync");
   var _fdFsync = createBridgeSyncFacade("fs.fsyncSync");
   var _fdGetPath = createBridgeSyncFacade("fs._getPathSync");
+  var _kernelPollRaw = createBridgeSyncFacade("_kernelPollRaw");
   function decodeBridgeJson(value) {
     return typeof value === "string" ? JSON.parse(value) : value;
   }

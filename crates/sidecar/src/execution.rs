@@ -61,6 +61,7 @@ use agent_os_execution::{
 use agent_os_kernel::dns::{DnsLookupPolicy, DnsResolutionSource as KernelDnsResolutionSource};
 use agent_os_kernel::kernel::{KernelProcessHandle, SpawnOptions, VirtualProcessOptions};
 use agent_os_kernel::permissions::NetworkOperation;
+use agent_os_kernel::poll::{PollEvents, PollFd};
 use agent_os_kernel::process_table::{SIGKILL, SIGTERM};
 use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::resource_accounting::ResourceLimits;
@@ -5405,6 +5406,109 @@ mod runtime_guest_path_mapping_tests {
     }
 }
 
+#[cfg(test)]
+mod kernel_poll_sync_rpc_tests {
+    use super::{
+        service_javascript_kernel_poll_sync_rpc, ActiveExecution, ActiveProcess,
+        JavascriptSyncRpcRequest, KernelPollFdResponse, SidecarKernel, ToolExecution,
+        EXECUTION_DRIVER_NAME, JAVASCRIPT_COMMAND,
+    };
+    use agent_os_kernel::command_registry::CommandDriver;
+    use agent_os_kernel::kernel::{KernelVmConfig, SpawnOptions};
+    use agent_os_kernel::mount_table::MountTable;
+    use agent_os_kernel::permissions::Permissions;
+    use agent_os_kernel::poll::{POLLHUP, POLLIN};
+    use agent_os_kernel::vfs::MemoryFileSystem;
+    use serde_json::{json, Value};
+    #[test]
+    fn javascript_kernel_poll_sync_rpc_reports_multiple_kernel_fds() {
+        let mut config = KernelVmConfig::new("vm-js-kernel-poll");
+        config.permissions = Permissions::allow_all();
+        let mut kernel = SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config);
+        kernel
+            .register_driver(CommandDriver::new(
+                EXECUTION_DRIVER_NAME,
+                [JAVASCRIPT_COMMAND],
+            ))
+            .expect("register execution driver");
+
+        let kernel_handle = kernel
+            .spawn_process(
+                JAVASCRIPT_COMMAND,
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn javascript kernel process");
+        let pid = kernel_handle.pid();
+
+        let (stdin_read_fd, stdin_write_fd) = kernel
+            .open_pipe(EXECUTION_DRIVER_NAME, pid)
+            .expect("open kernel stdin pipe");
+        kernel
+            .fd_dup2(EXECUTION_DRIVER_NAME, pid, stdin_read_fd, 0)
+            .expect("dup stdin pipe onto fd 0");
+        kernel
+            .fd_close(EXECUTION_DRIVER_NAME, pid, stdin_read_fd)
+            .expect("close original stdin read fd");
+
+        let process = ActiveProcess::new(
+            pid,
+            kernel_handle,
+            super::GuestRuntimeKind::JavaScript,
+            ActiveExecution::Tool(ToolExecution::default()),
+        );
+
+        kernel
+            .fd_write(EXECUTION_DRIVER_NAME, pid, stdin_write_fd, b"poll-ready")
+            .expect("write kernel stdin payload");
+        kernel
+            .fd_close(EXECUTION_DRIVER_NAME, pid, stdin_write_fd)
+            .expect("close kernel stdin writer");
+
+        let response = service_javascript_kernel_poll_sync_rpc(
+            &mut kernel,
+            &process,
+            &JavascriptSyncRpcRequest {
+                id: 1,
+                method: String::from("__kernel_poll"),
+                args: vec![
+                    json!([
+                        { "fd": 0, "events": POLLIN.bits() },
+                        { "fd": 1, "events": POLLIN.bits() }
+                    ]),
+                    json!(250),
+                ],
+            },
+        )
+        .expect("poll kernel fds");
+
+        assert_eq!(response["readyCount"], Value::from(1));
+        let fds: Vec<KernelPollFdResponse> =
+            serde_json::from_value(response["fds"].clone()).expect("kernel poll fd response");
+        assert_eq!(
+            fds,
+            vec![
+                KernelPollFdResponse {
+                    fd: 0,
+                    events: POLLIN.bits(),
+                    revents: (POLLIN | POLLHUP).bits(),
+                },
+                KernelPollFdResponse {
+                    fd: 1,
+                    events: POLLIN.bits(),
+                    revents: 0,
+                },
+            ]
+        );
+
+        process.kernel_handle.finish(0);
+        kernel.waitpid(pid).expect("wait javascript kernel process");
+    }
+}
+
 fn dedupe_strings(values: &[String]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut deduped = Vec::new();
@@ -7024,25 +7128,25 @@ where
         host,
         DnsLookupPolicy::SkipPermissions,
     )?
-        .into_iter()
-        .map(|ip| {
-            let family_key = JavascriptSocketFamily::from_ip(ip);
-            let actual_port = if is_loopback_ip(ip) {
-                context
-                    .translate_udp_loopback_port(family_key, port)
-                    .unwrap_or(port)
-            } else {
-                port
-            };
-            SocketAddr::new(ip, actual_port)
-        })
-        .find(|addr| family.matches_addr(addr))
-        .ok_or_else(|| {
-            SidecarError::Execution(format!(
-                "failed to resolve {} UDP address {host}:{port}",
-                family.socket_type()
-            ))
-        })
+    .into_iter()
+    .map(|ip| {
+        let family_key = JavascriptSocketFamily::from_ip(ip);
+        let actual_port = if is_loopback_ip(ip) {
+            context
+                .translate_udp_loopback_port(family_key, port)
+                .unwrap_or(port)
+        } else {
+            port
+        };
+        SocketAddr::new(ip, actual_port)
+    })
+    .find(|addr| family.matches_addr(addr))
+    .ok_or_else(|| {
+        SidecarError::Execution(format!(
+            "failed to resolve {} UDP address {host}:{port}",
+            family.socket_type()
+        ))
+    })
 }
 
 fn socket_addr_family(addr: &SocketAddr) -> &'static str {
@@ -8665,6 +8769,19 @@ pub(crate) fn javascript_sync_rpc_bytes_value(bytes: &[u8]) -> Value {
     })
 }
 
+#[derive(Debug, Deserialize)]
+struct KernelPollFdRequest {
+    fd: u32,
+    events: u16,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct KernelPollFdResponse {
+    fd: u32,
+    events: u16,
+    revents: u16,
+}
+
 fn javascript_sync_rpc_base64_arg(
     args: &[Value],
     index: usize,
@@ -8695,6 +8812,7 @@ where
 {
     match request.method.as_str() {
         "__kernel_stdin_read" => service_javascript_kernel_stdin_sync_rpc(kernel, process, request),
+        "__kernel_poll" => service_javascript_kernel_poll_sync_rpc(kernel, process, request),
         "__pty_set_raw_mode" => {
             service_javascript_pty_set_raw_mode_sync_rpc(kernel, process, request)
         }
@@ -10767,6 +10885,61 @@ fn service_javascript_pty_set_raw_mode_sync_rpc(
         )
         .map_err(kernel_error)?;
     Ok(Value::Null)
+}
+
+fn service_javascript_kernel_poll_sync_rpc(
+    kernel: &mut SidecarKernel,
+    process: &ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let fd_requests: Vec<KernelPollFdRequest> = serde_json::from_value(
+        request
+            .args
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+    )
+    .map_err(|error| {
+        SidecarError::InvalidState(format!(
+            "__kernel_poll fd list must be a JSON array of {{ fd, events }} objects: {error}"
+        ))
+    })?;
+    let timeout_ms =
+        javascript_sync_rpc_arg_u64_optional(&request.args, 1, "__kernel_poll timeout ms")?
+            .unwrap_or_default();
+    let timeout_ms = i32::try_from(timeout_ms).map_err(|_| {
+        SidecarError::InvalidState(String::from("__kernel_poll timeout ms must fit within i32"))
+    })?;
+
+    let poll_fds = fd_requests
+        .iter()
+        .map(|entry| PollFd {
+            fd: entry.fd,
+            events: PollEvents::from_bits(entry.events),
+            revents: PollEvents::empty(),
+        })
+        .collect::<Vec<_>>();
+    let result = kernel
+        .poll_fds(
+            EXECUTION_DRIVER_NAME,
+            process.kernel_pid,
+            poll_fds,
+            timeout_ms,
+        )
+        .map_err(kernel_error)?;
+
+    Ok(json!({
+        "readyCount": result.ready_count,
+        "fds": result
+            .fds
+            .into_iter()
+            .map(|entry| KernelPollFdResponse {
+                fd: entry.fd,
+                events: entry.events.bits(),
+                revents: entry.revents.bits(),
+            })
+            .collect::<Vec<_>>(),
+    }))
 }
 
 fn install_kernel_stdin_pipe(kernel: &mut SidecarKernel, pid: u32) -> Result<u32, SidecarError> {
@@ -13364,15 +13537,9 @@ where
             };
             let resolved = match resolved {
                 Some(resolved) => resolved,
-                None => resolve_tcp_connect_addr(
-                    bridge,
-                    kernel,
-                    vm_id,
-                    dns,
-                    host,
-                    port,
-                    socket_paths,
-                )?,
+                None => {
+                    resolve_tcp_connect_addr(bridge, kernel, vm_id, dns, host, port, socket_paths)?
+                }
             };
             let (command_tx, command_rx) = unbounded_channel();
             let snapshot = Arc::new(Mutex::new(Http2SessionSnapshot {
@@ -13933,15 +14100,8 @@ where
                     NetworkOperation::Http,
                     format_tcp_resource(host, port),
                 )?;
-                let socket = ActiveTcpSocket::connect(
-                    bridge,
-                    kernel,
-                    vm_id,
-                    dns,
-                    host,
-                    port,
-                    socket_paths,
-                )?;
+                let socket =
+                    ActiveTcpSocket::connect(bridge, kernel, vm_id, dns, host, port, socket_paths)?;
                 let socket_id = process.allocate_tcp_socket_id();
                 let local_addr = socket.guest_local_addr;
                 let remote_addr = socket.guest_remote_addr;

@@ -5,6 +5,7 @@ use agent_os_execution::{
     CreateWasmContextRequest, StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionEvent,
     WasmPermissionTier,
 };
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -325,6 +326,59 @@ fn wasm_write_file_module() -> Vec<u8> {
     .expect("compile write-file wasm fixture")
 }
 
+fn wasm_poll_oneoff_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+(module
+  (type $poll_oneoff_t (func (param i32 i32 i32 i32) (result i32)))
+  (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "poll_oneoff" (func $poll_oneoff (type $poll_oneoff_t)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (type $fd_write_t)))
+  (memory (export "memory") 1)
+  (data (i32.const 176) "poll-ready\n")
+  (func $_start (export "_start")
+    (i64.store (i32.const 0) (i64.const 1))
+    (i32.store8 (i32.const 8) (i32.const 1))
+    (i32.store (i32.const 16) (i32.const 0))
+
+    (i64.store (i32.const 48) (i64.const 2))
+    (i32.store8 (i32.const 56) (i32.const 1))
+    (i32.store (i32.const 64) (i32.const 1))
+
+    (if
+      (i32.ne
+        (call $poll_oneoff
+          (i32.const 0)
+          (i32.const 96)
+          (i32.const 2)
+          (i32.const 160)
+        )
+        (i32.const 0)
+      )
+      (then unreachable)
+    )
+
+    (if (i32.ne (i32.load (i32.const 160)) (i32.const 1)) (then unreachable))
+    (if (i64.ne (i64.load (i32.const 96)) (i64.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 106)) (i32.const 1)) (then unreachable))
+
+    (i32.store (i32.const 168) (i32.const 176))
+    (i32.store (i32.const 172) (i32.const 11))
+    (drop
+      (call $fd_write
+        (i32.const 1)
+        (i32.const 168)
+        (i32.const 1)
+        (i32.const 164)
+      )
+    )
+  )
+)
+"#,
+    )
+    .expect("compile poll_oneoff wasm fixture")
+}
+
 fn wasm_infinite_loop_module() -> Vec<u8> {
     wat::parse_str(
         r#"
@@ -608,6 +662,71 @@ fn wasm_execution_streams_exit_event() {
     }
 
     assert!(saw_stdout, "expected stdout event before exit");
+}
+
+#[test]
+fn wasm_execution_poll_oneoff_uses_kernel_poll_for_multiple_fds() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(&temp.path().join("guest.wasm"), &wasm_poll_oneoff_module());
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let mut execution = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
+        })
+        .expect("start wasm execution");
+
+    let request = match execution
+        .poll_event_blocking(Duration::from_secs(5))
+        .expect("poll wasm event")
+    {
+        Some(WasmExecutionEvent::SyncRpcRequest(request)) => request,
+        other => panic!("expected sync RPC request, got {other:?}"),
+    };
+
+    assert_eq!(request.method, "__kernel_poll");
+    assert_eq!(
+        request.args,
+        vec![
+            json!([
+                { "fd": 0, "events": 1 },
+                { "fd": 1, "events": 1 }
+            ]),
+            json!(10),
+        ]
+    );
+
+    execution
+        .respond_sync_rpc_success(
+            request.id,
+            json!({
+                "readyCount": 1,
+                "fds": [
+                    { "fd": 0, "events": 1, "revents": 1 },
+                    { "fd": 1, "events": 1, "revents": 0 }
+                ]
+            }),
+        )
+        .expect("respond to __kernel_poll");
+
+    let result = execution.wait().expect("wait for wasm execution");
+    let stdout = String::from_utf8(result.stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+    assert_eq!(stdout, "poll-ready\n");
 }
 
 #[test]

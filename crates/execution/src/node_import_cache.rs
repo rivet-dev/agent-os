@@ -15,7 +15,7 @@ const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
 const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "8";
-const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "22";
+const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "23";
 const NODE_IMPORT_CACHE_DIR_PREFIX: &str = "agent-os-node-import-cache";
 const DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const PYODIDE_DIST_DIR: &str = "pyodide-dist";
@@ -9736,6 +9736,10 @@ const delegateManagedPollOneoff =
   typeof wasiImport.poll_oneoff === 'function'
     ? wasiImport.poll_oneoff.bind(wasiImport)
     : null;
+const KERNEL_POLLIN = 0x0001;
+const KERNEL_POLLOUT = 0x0004;
+const KERNEL_POLLERR = 0x0008;
+const KERNEL_POLLHUP = 0x0010;
 
 wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
   const handle = lookupFdHandle(fd);
@@ -9860,6 +9864,7 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
   const memory = new Uint8Array(instanceMemory.buffer);
   const subscriptions = [];
   let hasSyntheticSubscription = false;
+  let hasPassthroughSubscription = false;
   let timeoutMs = null;
 
   for (let index = 0; index < subscriptionCount; index += 1) {
@@ -9884,6 +9889,8 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
     const handle = lookupFdHandle(fd);
     if (handle && handle.kind !== 'passthrough') {
       hasSyntheticSubscription = true;
+    } else if (handle?.kind === 'passthrough') {
+      hasPassthroughSubscription = true;
     }
     subscriptions.push({
       kind: tag === 1 ? 'fd_read' : 'fd_write',
@@ -9893,7 +9900,7 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
     });
   }
 
-  if (!hasSyntheticSubscription) {
+  if (!hasSyntheticSubscription && !hasPassthroughSubscription) {
     return delegateManagedPollOneoff
       ? delegateManagedPollOneoff(inPtr, outPtr, nsubscriptions, neventsPtr)
       : WASI_ERRNO_BADF;
@@ -9901,6 +9908,69 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
 
   const deadline = timeoutMs == null ? null : Date.now() + Math.max(0, timeoutMs);
   const readyEvents = [];
+
+  function collectKernelReadyEvents(waitMs) {
+    if (!hasPassthroughSubscription) {
+      return [];
+    }
+
+    const pollTargets = subscriptions
+      .filter(
+        (subscription) =>
+          (subscription.kind === 'fd_read' || subscription.kind === 'fd_write') &&
+          subscription.handle?.kind === 'passthrough'
+      )
+      .map((subscription) => ({
+        fd: Number(subscription.handle.targetFd) >>> 0,
+        events: subscription.kind === 'fd_read' ? KERNEL_POLLIN : KERNEL_POLLOUT,
+      }));
+    if (pollTargets.length === 0) {
+      return [];
+    }
+
+    let response;
+    try {
+      response = callSyncRpc('__kernel_poll', [
+        pollTargets,
+        Math.max(0, Number(waitMs) >>> 0),
+      ]);
+    } catch {
+      return [];
+    }
+
+    const responseEntries = Array.isArray(response?.fds) ? response.fds : [];
+    const ready = [];
+    for (const subscription of subscriptions) {
+      if (
+        (subscription.kind !== 'fd_read' && subscription.kind !== 'fd_write') ||
+        subscription.handle?.kind !== 'passthrough'
+      ) {
+        continue;
+      }
+
+      const targetFd = Number(subscription.handle.targetFd) >>> 0;
+      const responseEntry = responseEntries.find(
+        (entry) => (Number(entry?.fd) >>> 0) === targetFd
+      );
+      const revents = Number(responseEntry?.revents) >>> 0;
+      const interested =
+        subscription.kind === 'fd_read'
+          ? KERNEL_POLLIN | KERNEL_POLLERR | KERNEL_POLLHUP
+          : KERNEL_POLLOUT | KERNEL_POLLERR | KERNEL_POLLHUP;
+      if ((revents & interested) === 0) {
+        continue;
+      }
+
+      ready.push({
+        userdata: subscription.userdata,
+        error: WASI_ERRNO_SUCCESS,
+        type: subscription.kind === 'fd_read' ? 1 : 2,
+        nbytes: subscription.kind === 'fd_read' ? 1 : 65536,
+        flags: 0,
+      });
+    }
+    return ready;
+  }
 
   while (readyEvents.length === 0) {
     for (const subscription of subscriptions) {
@@ -9932,6 +10002,15 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
 
     if (readyEvents.length > 0) {
       break;
+    }
+
+    if (hasPassthroughSubscription) {
+      const kernelWaitMs =
+        deadline == null ? 10 : Math.max(0, Math.min(10, deadline - Date.now()));
+      readyEvents.push(...collectKernelReadyEvents(kernelWaitMs));
+      if (readyEvents.length > 0) {
+        break;
+      }
     }
 
     let pumped = false;

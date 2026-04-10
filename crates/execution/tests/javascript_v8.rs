@@ -216,10 +216,7 @@ fn javascript_execution_stream_consumers_text_reads_live_stdin() {
             vm_id: String::from("vm-js"),
             context_id: context.context_id,
             argv: vec![String::from("./entry.mjs")],
-            env: BTreeMap::from([(
-                String::from("AGENT_OS_KEEP_STDIN_OPEN"),
-                String::from("1"),
-            )]),
+            env: BTreeMap::from([(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"))]),
             cwd: temp.path().to_path_buf(),
             inline_code: Some(String::from(
                 r#"
@@ -262,10 +259,7 @@ fn javascript_execution_process_stdin_async_iterator_finishes_with_live_stdin() 
             vm_id: String::from("vm-js"),
             context_id: context.context_id,
             argv: vec![String::from("./entry.mjs")],
-            env: BTreeMap::from([(
-                String::from("AGENT_OS_KEEP_STDIN_OPEN"),
-                String::from("1"),
-            )]),
+            env: BTreeMap::from([(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"))]),
             cwd: temp.path().to_path_buf(),
             inline_code: Some(String::from(
                 r#"
@@ -290,8 +284,7 @@ console.log(JSON.stringify({ body }));
     assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(result.stderr.is_empty(), "unexpected stderr: {stderr}");
 
-    let output: Value =
-        serde_json::from_slice(&result.stdout).expect("parse guest stdout as JSON");
+    let output: Value = serde_json::from_slice(&result.stdout).expect("parse guest stdout as JSON");
     assert_eq!(output, json!({ "body": "{\"request_id\":\"init1\"}\n" }));
 }
 
@@ -310,10 +303,7 @@ fn javascript_execution_live_stdin_replays_end_after_late_listener_registration(
             vm_id: String::from("vm-js"),
             context_id: context.context_id,
             argv: vec![String::from("./entry.mjs")],
-            env: BTreeMap::from([(
-                String::from("AGENT_OS_KEEP_STDIN_OPEN"),
-                String::from("1"),
-            )]),
+            env: BTreeMap::from([(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"))]),
             cwd: temp.path().to_path_buf(),
             inline_code: Some(String::from(
                 r#"
@@ -1861,6 +1851,92 @@ fn javascript_execution_v8_schedule_timer_bridge_resolves() {
 
     let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn javascript_execution_v8_kernel_poll_bridge_requests_multiple_fds() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.js")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+const result = globalThis._kernelPollRaw.applySyncPromise(undefined, [[
+  { fd: 0, events: 1 },
+  { fd: 1, events: 1 },
+], 250]);
+if (result.readyCount !== 1) {
+  throw new Error(`readyCount=${result.readyCount}`);
+}
+if (result.fds[0]?.revents !== 1 || result.fds[1]?.revents !== 0) {
+  throw new Error(`revents=${JSON.stringify(result.fds)}`);
+}
+console.log(JSON.stringify(result));
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    let request = match execution
+        .poll_event_blocking(Duration::from_secs(5))
+        .expect("poll execution event")
+    {
+        Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => request,
+        other => panic!("expected sync RPC request, got {other:?}"),
+    };
+
+    assert_eq!(request.method, "__kernel_poll");
+    assert_eq!(
+        request.args,
+        vec![
+            json!([
+                { "fd": 0, "events": 1 },
+                { "fd": 1, "events": 1 }
+            ]),
+            json!(250),
+        ]
+    );
+
+    execution
+        .respond_sync_rpc_success(
+            request.id,
+            json!({
+                "readyCount": 1,
+                "fds": [
+                    { "fd": 0, "events": 1, "revents": 1 },
+                    { "fd": 1, "events": 1, "revents": 0 }
+                ]
+            }),
+        )
+        .expect("respond to __kernel_poll");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+
+    let stdout: Value = serde_json::from_slice(&result.stdout).expect("parse guest stdout JSON");
+    assert_eq!(
+        stdout,
+        json!({
+            "readyCount": 1,
+            "fds": [
+                { "fd": 0, "events": 1, "revents": 1 },
+                { "fd": 1, "events": 1, "revents": 0 }
+            ]
+        })
+    );
 }
 
 #[test]

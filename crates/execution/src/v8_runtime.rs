@@ -435,6 +435,7 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
 
         // Stdin
         "_kernelStdinRead" => ("__kernel_stdin_read", false),
+        "_kernelPollRaw" => ("__kernel_poll", false),
 
         // Network operations
         "_networkHttpRequestRaw" => ("net.http_request", false),
@@ -540,6 +541,7 @@ mod tests {
             "_networkHttp2StreamRespondRaw",
             "_upgradeSocketWriteRaw",
             "_netSocketSetNoDelayRaw",
+            "_kernelPollRaw",
             "_netSocketUpgradeTlsRaw",
             "_tlsGetCiphersRaw",
             "_dgramSocketAddressRaw",

@@ -193,6 +193,7 @@
         "_sqliteStatementSetAllowBareNamedParametersRaw",
         "_sqliteStatementSetAllowUnknownNamedParametersRaw",
         "_sqliteStatementFinalizeRaw",
+        "_kernelPollRaw",
         "_ptySetRawMode"
       ]
     },

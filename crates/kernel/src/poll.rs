@@ -11,6 +11,10 @@ impl PollEvents {
         Self(0)
     }
 
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
     pub const fn bits(self) -> u16 {
         self.0
     }
