@@ -6742,39 +6742,84 @@ await new Promise(() => {});
             write_fixture(
                 &cwd.join("entry.mjs"),
                 r#"
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
-const db = new DatabaseSync("/workspace/sqlite-builtins.db");
-db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)");
-const insert = db.prepare("INSERT INTO items(id, payload) VALUES (?, ?)");
-const insertResult = insert.run(9007199254740993n, new Uint8Array([7, 8, 9]));
+const dbPath = "/workspace/sqlite-builtins.db";
+const db = new DatabaseSync(dbPath);
+if (db.location() !== dbPath) {
+  throw new Error(`unexpected sqlite location: ${String(db.location())}`);
+}
+
+const journalModeRows = db.query("PRAGMA journal_mode = WAL");
+if (journalModeRows[0]?.journal_mode !== "wal") {
+  throw new Error(`unexpected journal mode rows: ${JSON.stringify(journalModeRows)}`);
+}
+
+db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, payload BLOB NOT NULL, quantity INTEGER NOT NULL)");
+const insert = db.prepare("INSERT INTO items(id, payload, quantity) VALUES (:id, :payload, :quantity)");
+insert.setAllowBareNamedParameters(true);
+const insertResult = insert.run({
+  id: 9007199254740993n,
+  payload: new Uint8Array([7, 8, 9]),
+  quantity: 42,
+});
 if (insertResult.changes !== 1) {
   throw new Error(`unexpected insert result: ${JSON.stringify(insertResult)}`);
 }
+if (typeof insertResult.lastInsertRowid !== "bigint" || insertResult.lastInsertRowid !== 9007199254740993n) {
+  throw new Error(`unexpected lastInsertRowid: ${String(insertResult.lastInsertRowid)}`);
+}
 
-const select = db.prepare("SELECT id, payload FROM items");
+const select = db.prepare("SELECT id, payload, quantity FROM items WHERE id = ?");
 select.setReadBigInts(true);
-const row = select.get();
+const row = select.get(9007199254740993n);
 if (typeof row.id !== "bigint" || row.id !== 9007199254740993n) {
   throw new Error(`unexpected bigint row id: ${String(row.id)}`);
 }
 if (!Buffer.isBuffer(row.payload) || row.payload.length !== 3 || row.payload[1] !== 8) {
   throw new Error(`unexpected blob payload: ${JSON.stringify(row.payload)}`);
 }
+if (row.quantity !== 42n) {
+  throw new Error(`unexpected integer payload: id=${String(row.id)} quantity=${String(row.quantity)}`);
+}
+
+const columns = select.columns();
+if (columns.length !== 3 || columns[0]?.name !== "id" || columns[1]?.name !== "payload") {
+  throw new Error(`unexpected statement columns: ${JSON.stringify(columns)}`);
+}
+
+db.checkpoint();
+if (!existsSync(dbPath)) {
+  throw new Error("sqlite database file is not visible in the guest filesystem");
+}
+const fileStat = statSync(dbPath);
+if (fileStat.size <= 0) {
+  throw new Error(`unexpected sqlite file size: ${fileStat.size}`);
+}
+const fileHeader = readFileSync(dbPath).subarray(0, 16).toString("utf8");
+if (!fileHeader.startsWith("SQLite format 3")) {
+  throw new Error(`unexpected sqlite file header: ${JSON.stringify(fileHeader)}`);
+}
+
 db.close();
 
-const reopened = new DatabaseSync("/workspace/sqlite-builtins.db");
-const verify = reopened.prepare("SELECT COUNT(*) AS count FROM items");
+const reopened = new DatabaseSync(dbPath);
+const verify = reopened.prepare("SELECT COUNT(*) AS count, SUM(quantity) AS totalQuantity FROM items");
+verify.setReadBigInts(true);
 const count = verify.get();
-if (count.count !== 1) {
-  throw new Error(`unexpected persisted count: ${JSON.stringify(count)}`);
+if (count.count !== 1n) {
+  throw new Error(`unexpected persisted count: count=${String(count.count)} totalQuantity=${String(count.totalQuantity)}`);
+}
+if (count.totalQuantity !== 42n) {
+  throw new Error(`unexpected persisted quantity total: count=${String(count.count)} totalQuantity=${String(count.totalQuantity)}`);
 }
 reopened.close();
 console.log("sqlite-ok");
 "#,
             );
 
-            let (_stdout, stderr, exit_code) = run_javascript_entry(
+            let (stdout, stderr, exit_code) = run_javascript_entry(
                 &mut sidecar,
                 &vm_id,
                 &cwd,
@@ -6784,6 +6829,7 @@ console.log("sqlite-ok");
 
             assert_eq!(exit_code, Some(0), "stderr: {stderr}");
             assert!(stderr.trim().is_empty(), "stderr: {stderr}");
+            assert_eq!(stdout.trim(), "sqlite-ok");
             let database_bytes = {
                 let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
                 vm.kernel

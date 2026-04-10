@@ -30,6 +30,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - ACP timeout diagnostics should use the structured `kind: "acp_timeout"` payload on `JsonRpcError.data`; keep the low-level ACP client message format and the public TypeScript `isAcpTimeoutErrorData()` guard aligned instead of parsing timeout strings ad hoc.
 - In Agent OS `child_process` polyfills, treat string-valued `options.shell` the same as `true`; tools that go through `cross-spawn` or pass an explicit shell path like `"/bin/sh"` otherwise fail redirected commands by trying to exec the whole shell string as a binary.
 - For the OpenCode ACP Node bundle in `registry/agent/opencode/scripts/build-opencode-acp.mjs`, run result-returning SQLite PRAGMAs through `db.$client.exec(...)` instead of drizzle `db.run(...)`; the VM `node:sqlite` shim treats `journal_mode`, `busy_timeout`, `foreign_keys`, and `wal_checkpoint` as row-returning queries and will break `createSession("opencode")` otherwise.
+- Guest `node:sqlite` coverage that enables `StatementSync.setReadBigInts(true)` should assert bigint results for every integer column and aggregate in that query, not just primary keys; the sidecar bridge applies bigint decoding uniformly once that mode is on.
 - OpenCode VM tool/file coverage depends on two bundle-level patches in `registry/agent/opencode/scripts/build-opencode-acp.mjs`: restore the current `Instance` around async LLM/tool execution, and translate absolute guest paths through `AGENT_OS_GUEST_PATH_MAPPINGS` before the bundle calls `node:fs`.
 - In the V8 bridge, `node:async_hooks` `AsyncLocalStorage` must survive `Promise.then`, `queueMicrotask`, `process.nextTick`, timers, and `AsyncResource.runInAsyncScope`; OpenCode's Effect instance context is carried through those paths during streamed tool execution.
 - The current Pi SDK truth path is `pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts tests/session-cleanup.test.ts -t "Pi SDK"` plus root `pnpm check-types`; if those pass, the write-tool, bash-tool, prompt lifecycle, and cleanup coverage for `US-029` is green on this branch.
@@ -421,4 +422,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Public method signatures are not enough by themselves; if a root-facing helper or type only exists in `agent-os.ts` or `json-rpc.ts` and is not mirrored through `src/types.ts` / `src/index.ts`, downstream consumers still lose the documented root import surface.
   - `packages/core/dist` matters for cross-workspace consumers, so rebuild `packages/core` before trusting workspace-level typecheck results after changing root exports.
   - The active truth path for this story is `pnpm --dir packages/core exec vitest run tests/public-api-exports.test.ts`, `pnpm --dir packages/core build`, and root `pnpm check-types`.
+---
+## 2026-04-10 06:42:28 PDT - US-065
+- Expanded the existing sidecar guest `node:sqlite` integration test so it now proves the Rust sqlite bridge from real guest V8 code across create/write/read/reopen persistence, named prepared statements, bigint and BLOB round trips, guest filesystem visibility of the database file, `DatabaseSync.location()`, WAL mode, and `checkpoint()` behavior.
+- Verified the focused sqlite guest coverage with `cargo test -p agent-os-sidecar --test service sqlite -- --test-threads=1` and kept the workspace green with root `pnpm check-types`.
+- Files changed: `crates/sidecar/tests/service.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The existing guest `javascript_sqlite_builtin_round_trips_through_sidecar_sync_rpc` test is the right truth path for bridge-backed `node:sqlite` coverage; extend that guest script rather than adding host-side RPC-only assertions when the story is about V8-side behavior.
+  - Once a guest SQLite statement enables `setReadBigInts(true)`, non-primary-key integer columns and aggregate values like `COUNT(*)` / `SUM(...)` also round-trip as bigint and should be asserted that way.
+  - For WAL coverage on this path, `DatabaseSync.checkpoint()` plus a guest `fs` read of the persisted `.db` file is the direct way to prove the sidecar bridge synced the checkpointed database back into the VM filesystem.
 ---
