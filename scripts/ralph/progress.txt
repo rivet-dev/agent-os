@@ -127,3 +127,11 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - ACP `_meta` is a practical compatibility channel for Codex prompt-scoped state that must reach the adapter even when optional ACP config RPCs are unavailable in the VM path.
   - The active truth path for this story is `pnpm --dir packages/core exec vitest run tests/codex-session.test.ts -t "configurable mode/model state"` plus root `pnpm check-types`.
 ---
+## 2026-04-09 22:16:08 PDT - US-037
+- Re-verified the Codex single-turn permissioned shell-tool flow on `finish-ts-rust-migration`: the focused session test passes end-to-end, confirming the prompt completes without `response.error`, the expected final text is returned, and shell permission approval still flows through the Agent OS permission API.
+- No product-code changes were required for this story on the current branch; this iteration only updated Ralph tracking after rerunning the exact scoped verification commands.
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `US-037` is verification-only on the current branch; the acceptance truth is `pnpm --dir packages/core exec vitest run tests/codex-session.test.ts -t "permissioned shell tools"` plus root `pnpm check-types`.
+  - The focused Codex permissioned shell-tool test already covers both the single-turn success path and the Agent OS permission callback path, so use it as the first gate before widening into the broader Codex session suite.
+---
