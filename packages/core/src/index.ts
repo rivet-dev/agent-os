@@ -15,5 +15,6 @@ export {
 	createSnapshotExport,
 } from "./layers.js";
 export { defineSoftware } from "./packages.js";
+export { isAcpTimeoutErrorData } from "./json-rpc.js";
 export { createInMemoryFileSystem, KernelError } from "./runtime-compat.js";
 export type * from "./types.js";

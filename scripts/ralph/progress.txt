@@ -36,6 +36,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Pi CLI concurrent `createSession()` coverage can report the same host PID for multiple sessions because the ACP adapter shares one V8 runtime child; in `packages/core/tests/session-cleanup.test.ts`, only unique host PIDs should be treated as dedicated session roots when asserting post-close cleanup.
 - Pi CLI concurrent close coverage can lose the reply for one `close_agent_session` RPC when the shared V8 runtime exits first; cleanup tests should tolerate those specific broken-pipe/stdout-closed close errors while still asserting resource baseline restoration.
 - The renamed core workspace package is `@rivet-dev/agent-os-core`; use that name for both package dependencies and TypeScript subpath imports like `@rivet-dev/agent-os-core/test/*` and `@rivet-dev/agent-os-core/internal/runtime-compat`.
+- Public SDK root exports in `packages/core` are curated through `src/types.ts` plus `src/index.ts`; when a root-facing type or helper is added in modules like `agent-os.ts`, `json-rpc.ts`, or `host-dir-mount.ts`, mirror it there and extend `tests/public-api-exports.test.ts`.
 - For vendored Rust command fixes under `registry/native/vendor/`, add a matching patch under `registry/native/patches/crates/<crate>/` or `native/scripts/patch-vendor.sh` will drop the fix on the next rebuild.
 - Pi CLI prepends `~/.pi/agent/bin` to `PATH` even when that directory does not exist. For vendored `brush-core` on WASI, PATH lookup must require `is_file()` before treating a candidate as executable, and once a guest binary resolves to a real path like `/bin/printf`, the shell should spawn that resolved path instead of falling back to the bare command name.
 - Linked registry software packages are consumed through their package entrypoints (`dist/index.js`) in `packages/core` tests; when you change a `registry/software/*` descriptor, rebuild that package before trusting package-level Vitest results.
@@ -411,4 +412,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Host-tool metadata limits are a cross-boundary compatibility rule, not just a TypeScript convenience check; if Rust accepts longer descriptions than `validateToolkits()`, the sidecar CLI and prompt docs drift from the public SDK contract.
   - Boundary coverage needs both toolkit-level and per-tool rejection cases, because both descriptions flow into `agentos list-tools` output and prompt reference generation.
   - The active truth path for this story is `cargo test -p agent-os-sidecar --lib tools::tests::`, `pnpm --dir packages/core exec vitest run tests/host-tools.test.ts`, and root `pnpm check-types`.
+---
+## 2026-04-10 06:37:02 PDT - US-064
+- Restored the `@rivet-dev/agent-os-core` root export surface for current public SDK types and helpers by extending `packages/core/src/types.ts` and re-exporting `isAcpTimeoutErrorData` from `packages/core/src/index.ts`.
+- Added `packages/core/tests/public-api-exports.test.ts` to lock the root entrypoint contract for newer public types like ACP timeout diagnostics, prompt result/capability types, host-dir mount config, and exec/shell option aliases.
+- Files changed: `packages/core/CLAUDE.md`, `packages/core/src/index.ts`, `packages/core/src/types.ts`, `packages/core/tests/public-api-exports.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Public method signatures are not enough by themselves; if a root-facing helper or type only exists in `agent-os.ts` or `json-rpc.ts` and is not mirrored through `src/types.ts` / `src/index.ts`, downstream consumers still lose the documented root import surface.
+  - `packages/core/dist` matters for cross-workspace consumers, so rebuild `packages/core` before trusting workspace-level typecheck results after changing root exports.
+  - The active truth path for this story is `pnpm --dir packages/core exec vitest run tests/public-api-exports.test.ts`, `pnpm --dir packages/core build`, and root `pnpm check-types`.
 ---

@@ -19,6 +19,7 @@
 - The host-tool description limit is a cross-boundary contract: keep the 200-character maximum aligned between `src/host-tools.ts` and Rust `register_toolkit` validation in `crates/sidecar/src/tools.rs`, with boundary tests on both sides when changing it.
 - `src/sidecar/rpc-client.ts` is the consolidated home for framed sidecar I/O, compat proxy helpers, and sidecar descriptor serializers. Keep shared/explicit sidecar pool and VM lease bookkeeping in `src/agent-os.ts` rather than reintroducing another sidecar lifecycle layer.
 - Public SDK type exports now funnel through `src/types.ts`; keep legacy kernel/runtime implementation helpers behind `src/runtime-compat.ts` and avoid adding new public root exports directly from runtime internals.
+- When adding a new public SDK option/result/helper type under `src/agent-os.ts`, `src/json-rpc.ts`, `src/host-dir-mount.ts`, or other root-facing modules, mirror it through `src/types.ts` and keep `tests/public-api-exports.test.ts` aligned so the package entrypoint stays truthful.
 
 ## Agent Sessions (ACP)
 

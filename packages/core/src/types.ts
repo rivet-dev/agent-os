@@ -18,6 +18,7 @@ export type {
 	McpServerConfigRemote,
 	MountConfig,
 	MountConfigJsonObject,
+	MountConfigJsonPrimitive,
 	MountConfigJsonValue,
 	NativeMountConfig,
 	NativeMountPluginDescriptor,
@@ -27,6 +28,7 @@ export type {
 	PermissionRequestHandler,
 	PlainMountConfig,
 	ProcessTreeNode,
+	PromptResult,
 	ReaddirRecursiveOptions,
 	RootFilesystemConfig,
 	RootLowerInput,
@@ -55,10 +57,15 @@ export type {
 	ScheduleEntry,
 	ScheduleHandle,
 } from "./cron/index.js";
-export type { HostDirBackendOptions } from "./host-dir-mount.js";
+export type {
+	HostDirBackendOptions,
+	HostDirMountPluginConfig,
+} from "./host-dir-mount.js";
 export type { HostTool, ToolExample, ToolKit } from "./host-tools.js";
 export type {
+	AcpTimeoutErrorData,
 	JsonRpcError,
+	JsonRpcErrorData,
 	JsonRpcNotification,
 	JsonRpcRequest,
 	JsonRpcResponse,
@@ -88,9 +95,13 @@ export type {
 	ChildProcessPermissions,
 	ConnectTerminalOptions,
 	EnvPermissions,
+	ExecOptions,
 	ExecResult,
 	FsPermissionRule,
 	FsPermissions,
+	KernelExecOptions,
+	KernelExecResult,
+	KernelSpawnOptions,
 	NetworkAccessRequest,
 	NetworkPermissions,
 	OpenShellOptions,
@@ -100,7 +111,10 @@ export type {
 	Permissions,
 	ProcessInfo,
 	RulePermissions,
+	StdioChannel,
+	TimingMitigation,
 	VirtualDirEntry,
 	VirtualFileSystem,
 	VirtualStat,
 } from "./runtime.js";
+export type { PromptCapabilities } from "./agent-session-types.js";
