@@ -7,6 +7,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Cross-workspace Vitest suites such as `registry/tests/*` load `@rivet-dev/agent-os-core` from `packages/core/dist`; after changing exported runtime-compat/test-runtime code, rebuild `packages/core` before trusting those results.
 - Compat `createKernel()` loopback exemptions must be carried in both create-VM env metadata and every later `configureVm()` call, because native-sidecar VM reconfiguration overwrites prior loopback exemption state.
 - Kernel-owned network scaffolding should register per-process socket lifecycle state in `crates/kernel/src/socket_table.rs` and rely on `cleanup_process_resources()` for exit cleanup instead of keeping separate socket counters elsewhere.
+- For migrated sidecar networking paths, derive listener and bound-UDP snapshots plus VM-wide socket counts from `vm.kernel` socket records; `ActiveProcess` TCP/UDP maps are handle registries and may contain stale or duplicate guest-address copies for kernel-backed sockets.
 - Kernel socket lifecycle coverage should use `KernelVm` wrappers like `socket_bind_inet`, `socket_listen`, `socket_accept`, and `socket_get` so driver ownership, resource limits, and socket-table state stay under the same test path.
 - Before loopback listener routing lands, kernel TCP data-plane coverage should pair stream sockets with `socket_connect_pair()` and drive I/O through `socket_write`, `socket_read`, `socket_shutdown`, and `socket_close` on `KernelVm` rather than mutating peer links inside `SocketTable` tests.
 - Kernel loopback-routing coverage should use `socket_connect_inet_loopback()` for guest listener routing and `socket_send_to_inet_loopback()` plus `socket_recv_datagram()` for UDP delivery so tests stay on the in-kernel address-routing path.
@@ -118,6 +119,15 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - The OpenCode/bash path inside Agent OS goes through V8 `child_process` plus `cross-spawn`, so an explicit shell path like `"/bin/sh"` must be normalized as truthy shell execution or redirect-heavy commands will fail as `command not found`.
   - Successful bash-tool commands that redirect all output can still send an empty tool-result payload to the model; llmock fixtures for that path should key off tool-result presence rather than stdout content.
   - The active truth path for this story is `pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts -t "bash tool"` plus root `pnpm check-types`.
+---
+## 2026-04-10 00:14 PDT - US-054
+- Removed the remaining sidecar-owned networking lookups that shadowed kernel state for migrated TCP listener and bound-UDP queries, and switched VM-wide network resource counting to start from the kernel resource snapshot plus sidecar-only resources.
+- Added focused sidecar regressions that prove stale duplicate guest-address copies in `ActiveProcess` no longer affect listener/bound-UDP snapshots or VM socket counts when the sockets are kernel-backed.
+- Files changed: `crates/sidecar/src/execution.rs`, `crates/sidecar/tests/service.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Kernel-backed sidecar listener and UDP snapshot queries should read address/state from `vm.kernel.socket_get(...)`; `guest_local_addr` copies in `ActiveProcess` are not canonical once the kernel owns the socket.
+  - VM-wide networking limits should start from `vm.kernel.resource_snapshot()` and add only sidecar-only resources, otherwise duplicate kernel-backed entries in sidecar process maps can double-count sockets.
+  - The active truth path for this story is the focused sidecar coverage in `socket_state_queries` plus scoped `service` tests for kernel-backed listener/UDP snapshot behavior and cleanup, together with root `pnpm check-types`.
 ---
 ## 2026-04-09 21:54:34 PDT - US-034
 - Restored the remaining OpenCode session API coverage by fixing live permission approvals/rejections to flow through the sidecar callback channel during `session/prompt`, which lets Agent OS answer `session/request_permission` before the prompt RPC finishes. This unblocked the real approval/rejection tool paths without adding host-side agent exceptions.

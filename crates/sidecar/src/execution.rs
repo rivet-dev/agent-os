@@ -67,7 +67,7 @@ use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use agent_os_kernel::socket_table::{
     InetSocketAddress, SocketDomain, SocketId, SocketShutdown as KernelSocketShutdown, SocketSpec,
-    SocketType,
+    SocketState, SocketType,
 };
 use base64::Engine;
 use bytes::Bytes;
@@ -414,6 +414,47 @@ impl ActiveProcess {
 
         counts
     }
+
+    fn sidecar_only_network_resource_counts(&self) -> NetworkResourceCounts {
+        let mut counts = NetworkResourceCounts {
+            sockets: self.http_servers.len()
+                + self
+                    .tcp_listeners
+                    .values()
+                    .filter(|listener| listener.kernel_socket_id.is_none())
+                    .count()
+                + self
+                    .tcp_sockets
+                    .values()
+                    .filter(|socket| socket.kernel_socket_id.is_none())
+                    .count()
+                + self.unix_listeners.len()
+                + self.unix_sockets.len()
+                + self
+                    .udp_sockets
+                    .values()
+                    .filter(|socket| socket.kernel_socket_id.is_none())
+                    .count(),
+            connections: self
+                .tcp_sockets
+                .values()
+                .filter(|socket| socket.kernel_socket_id.is_none())
+                .count()
+                + self.unix_sockets.len(),
+        };
+        if let Ok(http2) = self.http2.shared.lock() {
+            counts.sockets += http2.servers.len() + http2.sessions.len();
+            counts.connections += http2.sessions.len();
+        }
+
+        for child in self.child_processes.values() {
+            let child_counts = child.sidecar_only_network_resource_counts();
+            counts.sockets += child_counts.sockets;
+            counts.connections += child_counts.connections;
+        }
+
+        counts
+    }
 }
 
 fn poll_child_execution_after_exit(
@@ -588,7 +629,10 @@ impl ActiveTcpSocket {
                 .poll_targets(
                     EXECUTION_DRIVER_NAME,
                     kernel_pid,
-                    vec![PollTargetEntry::socket(socket_id, POLLIN | POLLHUP | POLLERR)],
+                    vec![PollTargetEntry::socket(
+                        socket_id,
+                        POLLIN | POLLHUP | POLLERR,
+                    )],
                     i32::try_from(wait.as_millis()).unwrap_or(i32::MAX),
                 )
                 .map_err(kernel_error)?;
@@ -601,9 +645,15 @@ impl ActiveTcpSocket {
                 return Ok(None);
             }
             if revents.intersects(POLLIN) {
-                return match kernel.socket_read(EXECUTION_DRIVER_NAME, kernel_pid, socket_id, 64 * 1024)
-                {
-                    Ok(Some(bytes)) if !bytes.is_empty() => Ok(Some(JavascriptTcpSocketEvent::Data(bytes))),
+                return match kernel.socket_read(
+                    EXECUTION_DRIVER_NAME,
+                    kernel_pid,
+                    socket_id,
+                    64 * 1024,
+                ) {
+                    Ok(Some(bytes)) if !bytes.is_empty() => {
+                        Ok(Some(JavascriptTcpSocketEvent::Data(bytes)))
+                    }
                     Ok(Some(_)) => Ok(Some(JavascriptTcpSocketEvent::Data(Vec::new()))),
                     Ok(None) => Ok(Some(JavascriptTcpSocketEvent::End)),
                     Err(error) if error.code() == "EAGAIN" => Ok(None),
@@ -629,7 +679,9 @@ impl ActiveTcpSocket {
         match self
             .events
             .as_ref()
-            .ok_or_else(|| SidecarError::InvalidState(String::from("TCP socket event channel missing")))?
+            .ok_or_else(|| {
+                SidecarError::InvalidState(String::from("TCP socket event channel missing"))
+            })?
             .recv_timeout(wait)
         {
             Ok(event) => Ok(Some(event)),
@@ -764,7 +816,9 @@ impl ActiveTcpSocket {
                     SidecarError::InvalidState(String::from("TCP socket stream missing"))
                 })?
                 .lock()
-                .map_err(|_| SidecarError::InvalidState(String::from("TCP socket lock poisoned")))?;
+                .map_err(|_| {
+                    SidecarError::InvalidState(String::from("TCP socket lock poisoned"))
+                })?;
             let cloned = stream.try_clone().map_err(sidecar_net_error)?;
             drop(stream);
 
@@ -977,7 +1031,11 @@ impl ActiveTcpSocket {
         Ok(contents.len())
     }
 
-    fn shutdown_write(&self, kernel: &mut SidecarKernel, kernel_pid: u32) -> Result<(), SidecarError> {
+    fn shutdown_write(
+        &self,
+        kernel: &mut SidecarKernel,
+        kernel_pid: u32,
+    ) -> Result<(), SidecarError> {
         if let Some(socket_id) = self.kernel_socket_id {
             return kernel
                 .socket_shutdown(
@@ -1382,24 +1440,22 @@ impl ActiveTcpListener {
             if revents.is_empty() {
                 return Ok(None);
             }
-            let accepted_socket_id = match kernel.socket_accept(EXECUTION_DRIVER_NAME, kernel_pid, socket_id)
-            {
-                Ok(accepted_socket_id) => accepted_socket_id,
-                Err(error) if error.code() == "EAGAIN" => return Ok(None),
-                Err(error) => {
-                    return Ok(Some(JavascriptTcpListenerEvent::Error {
-                        code: Some(error.code().to_string()),
-                        message: error.to_string(),
-                    }))
-                }
-            };
-            let accepted = kernel
-                .socket_get(accepted_socket_id)
-                .ok_or_else(|| {
-                    SidecarError::InvalidState(format!(
-                        "accepted kernel TCP socket {accepted_socket_id} is missing"
-                    ))
-                })?;
+            let accepted_socket_id =
+                match kernel.socket_accept(EXECUTION_DRIVER_NAME, kernel_pid, socket_id) {
+                    Ok(accepted_socket_id) => accepted_socket_id,
+                    Err(error) if error.code() == "EAGAIN" => return Ok(None),
+                    Err(error) => {
+                        return Ok(Some(JavascriptTcpListenerEvent::Error {
+                            code: Some(error.code().to_string()),
+                            message: error.to_string(),
+                        }))
+                    }
+                };
+            let accepted = kernel.socket_get(accepted_socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "accepted kernel TCP socket {accepted_socket_id} is missing"
+                ))
+            })?;
             let local_addr = accepted.local_address().ok_or_else(|| {
                 SidecarError::InvalidState(format!(
                     "accepted kernel TCP socket {accepted_socket_id} missing local address"
@@ -1410,13 +1466,18 @@ impl ActiveTcpListener {
                     "accepted kernel TCP socket {accepted_socket_id} missing peer address"
                 ))
             })?;
-            return Ok(Some(JavascriptTcpListenerEvent::Connection(PendingTcpSocket {
-                stream: None,
-                kernel_socket_id: Some(accepted_socket_id),
-                preallocated: true,
-                guest_local_addr: resolve_tcp_bind_addr(local_addr.host(), local_addr.port())?,
-                guest_remote_addr: resolve_tcp_bind_addr(remote_addr.host(), remote_addr.port())?,
-            })));
+            return Ok(Some(JavascriptTcpListenerEvent::Connection(
+                PendingTcpSocket {
+                    stream: None,
+                    kernel_socket_id: Some(accepted_socket_id),
+                    preallocated: true,
+                    guest_local_addr: resolve_tcp_bind_addr(local_addr.host(), local_addr.port())?,
+                    guest_remote_addr: resolve_tcp_bind_addr(
+                        remote_addr.host(),
+                        remote_addr.port(),
+                    )?,
+                },
+            )));
         }
 
         let deadline = Instant::now() + wait;
@@ -1655,11 +1716,17 @@ impl ActiveUdpSocket {
                 Ok(Some(datagram)) => {
                     let (source_address, payload) = datagram.into_parts();
                     let remote_addr = source_address
-                        .map(|source| resolve_udp_bind_addr(source.host(), source.port(), self.family))
+                        .map(|source| {
+                            resolve_udp_bind_addr(source.host(), source.port(), self.family)
+                        })
                         .transpose()?
                         .unwrap_or_else(|| match self.family {
-                            JavascriptUdpFamily::Ipv4 => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-                            JavascriptUdpFamily::Ipv6 => SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
+                            JavascriptUdpFamily::Ipv4 => {
+                                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+                            }
+                            JavascriptUdpFamily::Ipv6 => {
+                                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)
+                            }
                         });
                     Ok(Some(JavascriptUdpSocketEvent::Message {
                         data: payload,
@@ -6375,9 +6442,18 @@ fn find_socket_state_entry(
         }
 
         if request.path.is_none() {
+            if let Some(entry) =
+                find_kernel_socket_state_entry(&vm.kernel, process_id, process, kind, request)?
+            {
+                return Ok(Some(entry));
+            }
+
             match kind {
                 SocketQueryKind::TcpListener => {
                     for listener in process.tcp_listeners.values() {
+                        if listener.kernel_socket_id.is_some() {
+                            continue;
+                        }
                         let local_addr = listener.guest_local_addr();
                         let local_host = local_addr.ip().to_string();
                         if !socket_host_matches(request.host.as_deref(), &local_host) {
@@ -6398,6 +6474,9 @@ fn find_socket_state_entry(
                 }
                 SocketQueryKind::UdpBound => {
                     for socket in process.udp_sockets.values() {
+                        if socket.kernel_socket_id.is_some() {
+                            continue;
+                        }
                         let Some(local_addr) = socket.local_addr() else {
                             continue;
                         };
@@ -6460,6 +6539,78 @@ fn find_socket_state_entry(
     }
 
     Ok(None)
+}
+
+fn find_kernel_socket_state_entry(
+    kernel: &SidecarKernel,
+    process_id: &str,
+    process: &ActiveProcess,
+    kind: SocketQueryKind,
+    request: &FindListenerRequest,
+) -> Result<Option<SocketStateEntry>, SidecarError> {
+    let entry = match kind {
+        SocketQueryKind::TcpListener => process
+            .tcp_listeners
+            .values()
+            .filter_map(|listener| listener.kernel_socket_id)
+            .find_map(|socket_id| {
+                kernel_socket_state_entry(kernel, process_id, socket_id, kind, request)
+            }),
+        SocketQueryKind::UdpBound => process
+            .udp_sockets
+            .values()
+            .filter_map(|socket| socket.kernel_socket_id)
+            .find_map(|socket_id| {
+                kernel_socket_state_entry(kernel, process_id, socket_id, kind, request)
+            }),
+    };
+
+    if entry.is_some() {
+        return Ok(entry);
+    }
+
+    for child in process.child_processes.values() {
+        if let Some(entry) =
+            find_kernel_socket_state_entry(kernel, process_id, child, kind, request)?
+        {
+            return Ok(Some(entry));
+        }
+    }
+
+    Ok(None)
+}
+
+fn kernel_socket_state_entry(
+    kernel: &SidecarKernel,
+    process_id: &str,
+    socket_id: SocketId,
+    kind: SocketQueryKind,
+    request: &FindListenerRequest,
+) -> Option<SocketStateEntry> {
+    let record = kernel.socket_get(socket_id)?;
+    let local_address = record.local_address()?;
+    match kind {
+        SocketQueryKind::TcpListener if record.state() == SocketState::Listening => {}
+        SocketQueryKind::TcpListener => return None,
+        SocketQueryKind::UdpBound => {}
+    }
+
+    if !socket_host_matches(request.host.as_deref(), local_address.host()) {
+        return None;
+    }
+    if request
+        .port
+        .is_some_and(|port| local_address.port() != port)
+    {
+        return None;
+    }
+
+    Some(SocketStateEntry {
+        process_id: process_id.to_owned(),
+        host: Some(local_address.host().to_owned()),
+        port: Some(local_address.port()),
+        path: None,
+    })
 }
 
 fn socket_inodes_for_pid(pid: u32) -> Result<BTreeSet<u64>, SidecarError> {
@@ -6586,9 +6737,13 @@ fn is_loopback_socket_host(host: &str) -> bool {
 }
 
 pub(crate) fn vm_network_resource_counts(vm: &VmState) -> NetworkResourceCounts {
-    let mut counts = NetworkResourceCounts::default();
+    let snapshot = vm.kernel.resource_snapshot();
+    let mut counts = NetworkResourceCounts {
+        sockets: snapshot.sockets,
+        connections: snapshot.socket_connections,
+    };
     for process in vm.active_processes.values() {
-        let process_counts = process.network_resource_counts();
+        let process_counts = process.sidecar_only_network_resource_counts();
         counts.sockets += process_counts.sockets;
         counts.connections += process_counts.connections;
     }
@@ -6596,6 +6751,7 @@ pub(crate) fn vm_network_resource_counts(vm: &VmState) -> NetworkResourceCounts 
 }
 
 fn collect_javascript_socket_port_state(
+    kernel: &SidecarKernel,
     process: &ActiveProcess,
     tcp_guest_to_host: &mut BTreeMap<(JavascriptSocketFamily, u16), u16>,
     udp_guest_to_host: &mut BTreeMap<(JavascriptSocketFamily, u16), u16>,
@@ -6615,7 +6771,13 @@ fn collect_javascript_socket_port_state(
     };
 
     for listener in process.tcp_listeners.values() {
-        record_tcp_listener(listener.guest_local_addr(), listener.local_addr().port());
+        let local_addr = listener
+            .kernel_socket_id
+            .and_then(|socket_id| kernel.socket_get(socket_id))
+            .and_then(|record| record.local_address().cloned())
+            .and_then(|address| resolve_tcp_bind_addr(address.host(), address.port()).ok())
+            .unwrap_or_else(|| listener.guest_local_addr());
+        record_tcp_listener(local_addr, local_addr.port());
     }
 
     for server in process.http_servers.values() {
@@ -6633,7 +6795,15 @@ fn collect_javascript_socket_port_state(
     }
 
     for socket in process.udp_sockets.values() {
-        let Some(guest_addr) = socket.local_addr() else {
+        let guest_addr = socket
+            .kernel_socket_id
+            .and_then(|socket_id| kernel.socket_get(socket_id))
+            .and_then(|record| record.local_address().cloned())
+            .and_then(|address| {
+                resolve_udp_bind_addr(address.host(), address.port(), socket.family).ok()
+            })
+            .or_else(|| socket.local_addr());
+        let Some(guest_addr) = guest_addr else {
             continue;
         };
         let family = JavascriptSocketFamily::from_ip(guest_addr.ip());
@@ -6658,6 +6828,7 @@ fn collect_javascript_socket_port_state(
 
     for child in process.child_processes.values() {
         collect_javascript_socket_port_state(
+            kernel,
             child,
             tcp_guest_to_host,
             udp_guest_to_host,
@@ -6681,6 +6852,7 @@ pub(crate) fn build_javascript_socket_path_context(
     let mut used_udp_guest_ports = BTreeMap::new();
     for process in vm.active_processes.values() {
         collect_javascript_socket_port_state(
+            &vm.kernel,
             process,
             &mut tcp_loopback_guest_to_host_ports,
             &mut udp_loopback_guest_to_host_ports,
@@ -7478,10 +7650,8 @@ where
             SidecarError::Execution(format!("failed to resolve TCP address {host}:{port}"))
         })?;
     let family = JavascriptSocketFamily::from_ip(ip);
-    let use_kernel_loopback = is_loopback_ip(ip)
-        && context
-            .translate_tcp_loopback_port(family, port)
-            .is_some();
+    let use_kernel_loopback =
+        is_loopback_ip(ip) && context.translate_tcp_loopback_port(family, port).is_some();
     let actual_port = if is_loopback_ip(ip) {
         context
             .translate_tcp_loopback_port(family, port)
@@ -11883,12 +12053,10 @@ where
                 })?;
             let family = JavascriptUdpFamily::from_socket_type(&payload.socket_type)?;
             let socket_id = process.allocate_udp_socket_id();
-            process
-                .udp_sockets
-                .insert(
-                    socket_id.clone(),
-                    ActiveUdpSocket::new(kernel, process.kernel_pid, family)?,
-                );
+            process.udp_sockets.insert(
+                socket_id.clone(),
+                ActiveUdpSocket::new(kernel, process.kernel_pid, family)?,
+            );
             Ok(json!({
                 "socketId": socket_id,
                 "type": family.socket_type(),
@@ -14770,7 +14938,11 @@ where
             let socket_id =
                 javascript_sync_rpc_arg_str(&request.args, 0, "net.socket_read socket id")?;
             if let Some(socket) = process.tcp_sockets.get_mut(socket_id) {
-                javascript_net_read_value(socket.poll(kernel, process.kernel_pid, Duration::ZERO)?)
+                javascript_net_read_value(socket.poll(
+                    kernel,
+                    process.kernel_pid,
+                    Duration::ZERO,
+                )?)
             } else {
                 let socket = process.unix_sockets.get_mut(socket_id).ok_or_else(|| {
                     SidecarError::InvalidState(format!("unknown net socket {socket_id}"))

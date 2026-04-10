@@ -1001,6 +1001,271 @@ ykAheWCsAteSEWVc0w==\n\
             )
         }
 
+        #[test]
+        fn kernel_socket_queries_ignore_stale_sidecar_guest_addresses() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-kernel-socket-query-state");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-kernel-query",
+                "[\"dgram\",\"net\"]",
+            );
+
+            let listen = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-kernel-query",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 43111,
+                    })],
+                },
+            )
+            .expect("listen on kernel-backed tcp socket");
+            let listener_id = listen["serverId"]
+                .as_str()
+                .expect("listener id")
+                .to_string();
+
+            let udp_socket = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-kernel-query",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("dgram.createSocket"),
+                    args: vec![json!({ "type": "udp4" })],
+                },
+            )
+            .expect("create kernel-backed udp socket");
+            let udp_socket_id = udp_socket["socketId"]
+                .as_str()
+                .expect("udp socket id")
+                .to_string();
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-kernel-query",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("dgram.bind"),
+                    args: vec![
+                        json!(udp_socket_id.clone()),
+                        json!({
+                            "address": "127.0.0.1",
+                            "port": 43112,
+                        }),
+                    ],
+                },
+            )
+            .expect("bind kernel-backed udp socket");
+
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("vm state");
+                let process = vm
+                    .active_processes
+                    .get_mut("proc-js-kernel-query")
+                    .expect("javascript process");
+                let listener = process
+                    .tcp_listeners
+                    .get_mut(&listener_id)
+                    .expect("tcp listener state");
+                listener.local_addr = Some(SocketAddr::from(([127, 0, 0, 1], 49991)));
+                listener.guest_local_addr = SocketAddr::from(([127, 0, 0, 1], 49991));
+
+                let udp_socket = process
+                    .udp_sockets
+                    .get_mut(&udp_socket_id)
+                    .expect("udp socket state");
+                udp_socket.guest_local_addr = Some(SocketAddr::from(([127, 0, 0, 1], 49992)));
+            }
+
+            let listener_response = sidecar
+                .dispatch_blocking(request(
+                    10,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::FindListener(FindListenerRequest {
+                        host: Some(String::from("127.0.0.1")),
+                        port: Some(43111),
+                        path: None,
+                    }),
+                ))
+                .expect("query kernel-backed listener");
+            match listener_response.response.payload {
+                ResponsePayload::ListenerSnapshot(snapshot) => {
+                    let listener = snapshot.listener.expect("listener snapshot");
+                    assert_eq!(listener.process_id, "proc-js-kernel-query");
+                    assert_eq!(listener.host.as_deref(), Some("127.0.0.1"));
+                    assert_eq!(listener.port, Some(43111));
+                }
+                other => panic!("unexpected listener response payload: {other:?}"),
+            }
+
+            let udp_response = sidecar
+                .dispatch_blocking(request(
+                    11,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::FindBoundUdp(FindBoundUdpRequest {
+                        host: Some(String::from("127.0.0.1")),
+                        port: Some(43112),
+                    }),
+                ))
+                .expect("query kernel-backed udp socket");
+            match udp_response.response.payload {
+                ResponsePayload::BoundUdpSnapshot(snapshot) => {
+                    let socket = snapshot.socket.expect("bound udp snapshot");
+                    assert_eq!(socket.process_id, "proc-js-kernel-query");
+                    assert_eq!(socket.host.as_deref(), Some("127.0.0.1"));
+                    assert_eq!(socket.port, Some(43112));
+                }
+                other => panic!("unexpected bound udp response payload: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn vm_network_resource_counts_ignore_duplicate_sidecar_kernel_entries() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let cwd = temp_dir("agent-os-sidecar-kernel-network-counts");
+            write_fixture(&cwd.join("entry.mjs"), "setInterval(() => {}, 1000);");
+            start_fake_javascript_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-kernel-counts",
+                "[\"dgram\",\"net\"]",
+            );
+
+            let listen = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-kernel-counts",
+                JavascriptSyncRpcRequest {
+                    id: 1,
+                    method: String::from("net.listen"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": 43121,
+                    })],
+                },
+            )
+            .expect("listen on kernel-backed tcp socket");
+            let listener_id = listen["serverId"]
+                .as_str()
+                .expect("listener id")
+                .to_string();
+
+            let udp_socket = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-kernel-counts",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("dgram.createSocket"),
+                    args: vec![json!({ "type": "udp4" })],
+                },
+            )
+            .expect("create kernel-backed udp socket");
+            let udp_socket_id = udp_socket["socketId"]
+                .as_str()
+                .expect("udp socket id")
+                .to_string();
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-kernel-counts",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("dgram.bind"),
+                    args: vec![
+                        json!(udp_socket_id.clone()),
+                        json!({
+                            "address": "127.0.0.1",
+                            "port": 43122,
+                        }),
+                    ],
+                },
+            )
+            .expect("bind kernel-backed udp socket");
+
+            let vm = sidecar.vms.get_mut(&vm_id).expect("vm state");
+            let process = vm
+                .active_processes
+                .get_mut("proc-js-kernel-counts")
+                .expect("javascript process");
+
+            let duplicate_listener = {
+                let listener = process
+                    .tcp_listeners
+                    .get(&listener_id)
+                    .expect("tcp listener state");
+                ActiveTcpListener {
+                    listener: None,
+                    kernel_socket_id: listener.kernel_socket_id,
+                    local_addr: Some(SocketAddr::from(([127, 0, 0, 1], 49993))),
+                    guest_local_addr: SocketAddr::from(([127, 0, 0, 1], 49993)),
+                    backlog: listener.backlog,
+                    active_connection_ids: std::collections::BTreeSet::new(),
+                }
+            };
+            process
+                .tcp_listeners
+                .insert(String::from("listener-dup"), duplicate_listener);
+
+            let duplicate_udp = {
+                let socket = process
+                    .udp_sockets
+                    .get(&udp_socket_id)
+                    .expect("udp socket state");
+                ActiveUdpSocket {
+                    family: socket.family,
+                    socket: None,
+                    kernel_socket_id: socket.kernel_socket_id,
+                    guest_local_addr: Some(SocketAddr::from(([127, 0, 0, 1], 49994))),
+                    recv_buffer_size: socket.recv_buffer_size,
+                    send_buffer_size: socket.send_buffer_size,
+                }
+            };
+            process
+                .udp_sockets
+                .insert(String::from("udp-socket-dup"), duplicate_udp);
+
+            let kernel_snapshot = vm.kernel.resource_snapshot();
+            assert_eq!(kernel_snapshot.sockets, 2);
+            assert_eq!(kernel_snapshot.socket_connections, 0);
+
+            let counts = vm_network_resource_counts(vm);
+            assert_eq!(counts.sockets, 2);
+            assert_eq!(counts.connections, 0);
+        }
+
         fn create_acp_session_for_tests(
             sidecar: &mut NativeSidecar<RecordingBridge>,
             vm_id: &str,
@@ -1693,7 +1958,10 @@ ykAheWCsAteSEWVc0w==\n\
                     "expected loopback net.connect to use kernel socket state"
                 );
                 assert!(socket.no_delay, "expected TCP_NODELAY flag to be tracked");
-                assert!(socket.keep_alive, "expected SO_KEEPALIVE flag to be tracked");
+                assert!(
+                    socket.keep_alive,
+                    "expected SO_KEEPALIVE flag to be tracked"
+                );
                 assert_eq!(socket.keep_alive_initial_delay_secs, Some(1));
             }
 
@@ -2756,9 +3024,9 @@ ykAheWCsAteSEWVc0w==\n\
                 JavascriptSyncRpcRequest {
                     id: 41,
                     method: String::from("net.destroy"),
-                    args: vec![json!(
-                        parsed["socketId"].as_str().expect("accepted socket id")
-                    )],
+                    args: vec![json!(parsed["socketId"]
+                        .as_str()
+                        .expect("accepted socket id"))],
                 },
             )
             .expect("destroy accepted socket");
@@ -6626,10 +6894,7 @@ console.log(JSON.stringify(summary));
                 stdout.contains("\"remoteAddress\":\"127.0.0.1\""),
                 "stdout: {stdout}"
             );
-            assert!(
-                stdout.contains("\"listenerPort\":"),
-                "stdout: {stdout}"
-            );
+            assert!(stdout.contains("\"listenerPort\":"), "stdout: {stdout}");
         }
 
         #[test]
