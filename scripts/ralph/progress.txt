@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- For `RootFilesystemDescriptor`, order `lowers` from highest to lowest precedence and let `bootstrap_entries` act like the single writable upper; bootstrap directory entries must be applied with `mkdir`-style semantics so upper snapshots can repeat lower directories without failing on `EEXIST`.
 - Cross-workspace Vitest suites such as `registry/tests/*` load `@rivet-dev/agent-os-core` from `packages/core/dist`; after changing exported runtime-compat/test-runtime code, rebuild `packages/core` before trusting those results.
 - Compat `createKernel()` loopback exemptions must be carried in both create-VM env metadata and every later `configureVm()` call, because native-sidecar VM reconfiguration overwrites prior loopback exemption state.
 - Kernel-owned network scaffolding should register per-process socket lifecycle state in `crates/kernel/src/socket_table.rs` and rely on `cleanup_process_resources()` for exit cleanup instead of keeping separate socket counters elsewhere.
@@ -329,4 +330,14 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Sidecar layer lifecycle logic is easier to keep correct when `VmLayerStore` owns create/seal/import/export/overlay operations and the RPC handlers only translate request payloads.
   - Layer IDs are only unique within one VM store; if two VMs both import their first snapshot they will both get `layer-1`, and the ownership scope must remain the isolation boundary.
   - The active truth path for this story is `cargo test -p agent-os-sidecar --test layer_management -- --nocapture`, `pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts -t "layer"`, and root `pnpm check-types`.
+---
+## 2026-04-10 03:26:37 PDT - US-056
+- Implemented multi-layer VM root composition in the Rust root filesystem bootstrap path by treating bootstrap directory entries as `mkdir -p` over merged lowers, which lets the writable upper override multi-layer roots without rejecting shared directories like `/workspace`.
+- Added focused coverage in `crates/kernel/tests/root_fs.rs` and `crates/sidecar/tests/layer_management.rs` to verify highest-first lower precedence plus writable-upper overrides during direct root construction and sidecar VM creation.
+- Recorded the reusable layering rule in `crates/kernel/AGENTS.md` (`crates/kernel/CLAUDE.md` target).
+- Files changed: `crates/kernel/src/root_fs.rs`, `crates/kernel/tests/root_fs.rs`, `crates/sidecar/tests/layer_management.rs`, `crates/kernel/AGENTS.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Multi-layer VM roots should be expressed as immutable `lowers` ordered highest-to-lowest precedence plus `bootstrap_entries` for the single writable upper; tests should assert all three precedence levels explicitly.
+  - Replaying upper snapshots over merged lowers must tolerate duplicate directory paths with `mkdir` semantics, or valid upper snapshots will fail early with `EEXIST` before file overrides are applied.
+  - The active truth path for this story is `cargo test -p agent-os-kernel --test root_fs -- --test-threads=1`, `cargo test -p agent-os-sidecar --test layer_management -- --test-threads=1`, and root `pnpm check-types`.
 ---

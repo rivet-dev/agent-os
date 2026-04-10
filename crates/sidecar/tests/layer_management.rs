@@ -1,10 +1,11 @@
 mod support;
 
 use agent_os_sidecar::protocol::{
-    ConfigureVmRequest, CreateLayerRequest, CreateOverlayRequest, ExportSnapshotRequest,
-    GuestFilesystemCallRequest, GuestFilesystemOperation, GuestRuntimeKind, ImportSnapshotRequest,
-    OwnershipScope, RequestPayload, ResponsePayload, RootFilesystemEntry, RootFilesystemEntryKind,
-    RootFilesystemMode, SealLayerRequest,
+    ConfigureVmRequest, CreateLayerRequest, CreateOverlayRequest, CreateVmRequest,
+    ExportSnapshotRequest, GuestFilesystemCallRequest, GuestFilesystemOperation, GuestRuntimeKind,
+    ImportSnapshotRequest, OwnershipScope, RequestPayload, ResponsePayload,
+    RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryKind,
+    RootFilesystemLowerDescriptor, RootFilesystemMode, SealLayerRequest,
 };
 use std::collections::BTreeMap;
 use std::fs::{create_dir_all, write};
@@ -286,6 +287,146 @@ fn vm_layer_ids_are_reused_per_vm_without_cross_vm_leakage() {
     assert!(!second_entries
         .iter()
         .any(|entry| entry.path == "/workspace/first.txt"));
+}
+
+#[test]
+fn create_vm_root_filesystem_composes_multiple_lowers_with_bootstrap_upper() {
+    let mut sidecar = new_sidecar("vm-root-multi-layer");
+    let cwd = temp_dir("vm-root-multi-layer-cwd");
+
+    let connection_id = authenticate(&mut sidecar, "conn-1");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let create = sidecar
+        .dispatch_blocking(request(
+            3,
+            OwnershipScope::session(&connection_id, &session_id),
+            RequestPayload::CreateVm(CreateVmRequest {
+                runtime: GuestRuntimeKind::JavaScript,
+                metadata: BTreeMap::from([(
+                    String::from("cwd"),
+                    cwd.to_string_lossy().into_owned(),
+                )]),
+                root_filesystem: RootFilesystemDescriptor {
+                    disable_default_base_layer: true,
+                    lowers: vec![
+                        RootFilesystemLowerDescriptor::Snapshot {
+                            entries: vec![
+                                RootFilesystemEntry {
+                                    path: String::from("/workspace"),
+                                    kind: RootFilesystemEntryKind::Directory,
+                                    executable: false,
+                                    ..Default::default()
+                                },
+                                RootFilesystemEntry {
+                                    path: String::from("/workspace/shared.txt"),
+                                    kind: RootFilesystemEntryKind::File,
+                                    content: Some(String::from("higher")),
+                                    executable: false,
+                                    ..Default::default()
+                                },
+                                RootFilesystemEntry {
+                                    path: String::from("/workspace/higher-only.txt"),
+                                    kind: RootFilesystemEntryKind::File,
+                                    content: Some(String::from("higher-only")),
+                                    executable: false,
+                                    ..Default::default()
+                                },
+                            ],
+                        },
+                        RootFilesystemLowerDescriptor::Snapshot {
+                            entries: vec![
+                                RootFilesystemEntry {
+                                    path: String::from("/workspace"),
+                                    kind: RootFilesystemEntryKind::Directory,
+                                    executable: false,
+                                    ..Default::default()
+                                },
+                                RootFilesystemEntry {
+                                    path: String::from("/workspace/shared.txt"),
+                                    kind: RootFilesystemEntryKind::File,
+                                    content: Some(String::from("lower")),
+                                    executable: false,
+                                    ..Default::default()
+                                },
+                                RootFilesystemEntry {
+                                    path: String::from("/workspace/lower-only.txt"),
+                                    kind: RootFilesystemEntryKind::File,
+                                    content: Some(String::from("lower-only")),
+                                    executable: false,
+                                    ..Default::default()
+                                },
+                            ],
+                        },
+                    ],
+                    bootstrap_entries: vec![
+                        RootFilesystemEntry {
+                            path: String::from("/workspace"),
+                            kind: RootFilesystemEntryKind::Directory,
+                            executable: false,
+                            ..Default::default()
+                        },
+                        RootFilesystemEntry {
+                            path: String::from("/workspace/shared.txt"),
+                            kind: RootFilesystemEntryKind::File,
+                            content: Some(String::from("upper")),
+                            executable: false,
+                            ..Default::default()
+                        },
+                        RootFilesystemEntry {
+                            path: String::from("/workspace/upper-only.txt"),
+                            kind: RootFilesystemEntryKind::File,
+                            content: Some(String::from("upper-only")),
+                            executable: false,
+                            ..Default::default()
+                        },
+                    ],
+                    ..RootFilesystemDescriptor::default()
+                },
+                permissions: None,
+            }),
+        ))
+        .expect("create vm with multi-layer root");
+
+    let vm_id = match create.response.payload {
+        ResponsePayload::VmCreated(response) => response.vm_id,
+        other => panic!("unexpected create vm response: {other:?}"),
+    };
+
+    for (request_id, path, expected) in [
+        (4, "/workspace/shared.txt", "upper"),
+        (5, "/workspace/higher-only.txt", "higher-only"),
+        (6, "/workspace/lower-only.txt", "lower-only"),
+        (7, "/workspace/upper-only.txt", "upper-only"),
+    ] {
+        let read = sidecar
+            .dispatch_blocking(request(
+                request_id,
+                OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                RequestPayload::GuestFilesystemCall(GuestFilesystemCallRequest {
+                    operation: GuestFilesystemOperation::ReadFile,
+                    path: String::from(path),
+                    destination_path: None,
+                    target: None,
+                    content: None,
+                    encoding: None,
+                    recursive: false,
+                    mode: None,
+                    uid: None,
+                    gid: None,
+                    atime_ms: None,
+                    mtime_ms: None,
+                    len: None,
+                }),
+            ))
+            .expect("read layered file");
+
+        match read.response.payload {
+            ResponsePayload::GuestFilesystemResult(response) => {
+                assert_eq!(response.content.as_deref(), Some(expected));
+            }
+            other => panic!("unexpected guest filesystem response: {other:?}"),
+        }
+    }
 }
 
 #[test]

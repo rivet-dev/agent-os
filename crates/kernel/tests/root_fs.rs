@@ -275,6 +275,57 @@ fn higher_lowers_do_not_shadow_base_parent_directories_with_default_ownership() 
 }
 
 #[test]
+fn root_filesystem_composes_multiple_lowers_before_bootstrap_upper() {
+    let mut root = RootFileSystem::from_descriptor(RootFilesystemDescriptor {
+        mode: RootFilesystemMode::Ephemeral,
+        disable_default_base_layer: true,
+        lowers: vec![
+            RootFilesystemSnapshot {
+                entries: vec![
+                    FilesystemEntry::directory("/workspace"),
+                    FilesystemEntry::file("/workspace/shared.txt", b"higher".to_vec()),
+                    FilesystemEntry::file("/workspace/higher-only.txt", b"higher-only".to_vec()),
+                ],
+            },
+            RootFilesystemSnapshot {
+                entries: vec![
+                    FilesystemEntry::directory("/workspace"),
+                    FilesystemEntry::file("/workspace/shared.txt", b"lower".to_vec()),
+                    FilesystemEntry::file("/workspace/lower-only.txt", b"lower-only".to_vec()),
+                ],
+            },
+        ],
+        bootstrap_entries: vec![
+            FilesystemEntry::directory("/workspace"),
+            FilesystemEntry::file("/workspace/shared.txt", b"upper".to_vec()),
+            FilesystemEntry::file("/workspace/upper-only.txt", b"upper-only".to_vec()),
+        ],
+    })
+    .expect("create multi-layer root");
+
+    assert_eq!(
+        root.read_file("/workspace/shared.txt")
+            .expect("read upper override"),
+        b"upper".to_vec()
+    );
+    assert_eq!(
+        root.read_file("/workspace/higher-only.txt")
+            .expect("read higher-only file"),
+        b"higher-only".to_vec()
+    );
+    assert_eq!(
+        root.read_file("/workspace/lower-only.txt")
+            .expect("read lower-only file"),
+        b"lower-only".to_vec()
+    );
+    assert_eq!(
+        root.read_file("/workspace/upper-only.txt")
+            .expect("read upper-only file"),
+        b"upper-only".to_vec()
+    );
+}
+
+#[test]
 fn snapshot_round_trip_preserves_file_type_bits_in_modes() {
     let mut root = RootFileSystem::from_descriptor(RootFilesystemDescriptor {
         mode: RootFilesystemMode::Ephemeral,

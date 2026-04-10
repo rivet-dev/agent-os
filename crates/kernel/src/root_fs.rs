@@ -525,9 +525,7 @@ fn apply_entry_to_memory_filesystem(
 
     match entry.kind {
         FilesystemEntryKind::Directory => {
-            if entry.path != "/" {
-                filesystem.create_dir(&entry.path)?;
-            }
+            filesystem.mkdir(&entry.path, true)?;
             filesystem.chmod(&entry.path, entry.mode)?;
             filesystem.chown(&entry.path, entry.uid, entry.gid)?;
         }
@@ -564,9 +562,7 @@ fn apply_entry(
 
     match entry.kind {
         FilesystemEntryKind::Directory => {
-            if entry.path != "/" {
-                filesystem.create_dir(&entry.path)?;
-            }
+            filesystem.mkdir(&entry.path, true)?;
             filesystem.chmod(&entry.path, entry.mode)?;
             filesystem.chown(&entry.path, entry.uid, entry.gid)?;
         }
