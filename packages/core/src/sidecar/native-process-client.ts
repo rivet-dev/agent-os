@@ -318,6 +318,12 @@ export type SidecarRequestPayload =
 			timeout_ms: number;
 	  }
 	| {
+			type: "permission_request";
+			session_id: string;
+			permission_id: string;
+			params: unknown;
+	  }
+	| {
 			type: "js_bridge_call";
 			call_id: string;
 			mount_id: string;
@@ -330,6 +336,12 @@ export type SidecarResponsePayload =
 			type: "tool_invocation_result";
 			invocation_id: string;
 			result?: unknown;
+			error?: string;
+	  }
+	| {
+			type: "permission_request_result";
+			permission_id: string;
+			reply?: "once" | "always" | "reject";
 			error?: string;
 	  }
 	| {
@@ -2108,6 +2120,8 @@ function isMatchingSidecarResponsePayload(
 	switch (request.type) {
 		case "tool_invocation":
 			return response.type === "tool_invocation_result";
+		case "permission_request":
+			return response.type === "permission_request_result";
 		case "js_bridge_call":
 			return response.type === "js_bridge_result";
 	}
@@ -2123,6 +2137,12 @@ function errorSidecarResponsePayload(
 			return {
 				type: "tool_invocation_result",
 				invocation_id: request.invocation_id,
+				error: message,
+			};
+		case "permission_request":
+			return {
+				type: "permission_request_result",
+				permission_id: request.permission_id,
 				error: message,
 			};
 		case "js_bridge_call":

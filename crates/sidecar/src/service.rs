@@ -2,6 +2,7 @@ use crate::acp::compat::{
     is_cancel_method_not_found, maybe_normalize_permission_response,
     normalize_inbound_permission_request, summarize_inbound_notification,
     summarize_inbound_request, summarize_inbound_response, to_record, ACP_CANCEL_METHOD,
+    LEGACY_PERMISSION_METHOD,
 };
 use crate::acp::session::{AcpSessionState, AcpTerminalState};
 use crate::acp::{
@@ -42,8 +43,9 @@ use crate::protocol::{
     SessionRpcResponse, SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame,
     SidecarResponsePayload, SidecarResponseTracker, SidecarResponseTrackerError,
     SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse, SocketStateEntry,
-    StdinClosedResponse, StdinWrittenResponse, StreamChannel, StructuredEvent, VmLifecycleEvent,
-    VmLifecycleState, WasmPermissionTier, WriteStdinRequest, ZombieTimerCountResponse,
+    SidecarPermissionRequest, StdinClosedResponse, StdinWrittenResponse, StreamChannel,
+    StructuredEvent, VmLifecycleEvent, VmLifecycleState, WasmPermissionTier, WriteStdinRequest,
+    ZombieTimerCountResponse,
 };
 use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
@@ -2966,6 +2968,69 @@ where
                                     (normalized, duplicate)
                                 };
                                 if let Some(notification) = normalized {
+                                    let notification_params: Map<String, Value> =
+                                        to_record(notification.params.clone());
+                                    let permission_id = match notification_params.get("permissionId")
+                                    {
+                                        Some(Value::String(value)) => Some(value.clone()),
+                                        Some(Value::Number(value)) => Some(value.to_string()),
+                                        _ => None,
+                                    };
+                                    if let Some(permission_id) = permission_id {
+                                        let sidecar_response = self.sidecar_requests.invoke(
+                                            ownership.clone(),
+                                            SidecarRequestPayload::PermissionRequest(
+                                                SidecarPermissionRequest {
+                                                    session_id: session_id.to_string(),
+                                                    permission_id: permission_id.clone(),
+                                                    params: Value::Object(
+                                                        notification_params.clone(),
+                                                    ),
+                                                },
+                                            ),
+                                            Duration::from_millis(120_000),
+                                        )?;
+                                        let reply = match sidecar_response {
+                                            SidecarResponsePayload::PermissionRequestResult(
+                                                result,
+                                            ) => result
+                                                .reply
+                                                .unwrap_or_else(|| String::from("reject")),
+                                            other => {
+                                                return Err(SidecarError::InvalidState(format!(
+                                                    "unexpected sidecar permission response: {other:?}",
+                                                )));
+                                            }
+                                        };
+                                        let normalized_response = {
+                                            let session = self
+                                                .acp_sessions
+                                                .get_mut(session_id)
+                                                .expect("ACP session should exist");
+                                            maybe_normalize_permission_response(
+                                                LEGACY_PERMISSION_METHOD,
+                                                Some(json!({
+                                                    "permissionId": permission_id,
+                                                    "reply": reply,
+                                                })),
+                                                &mut session.pending_permission_requests,
+                                            )
+                                        };
+                                        if let Some((response_id, result)) = normalized_response {
+                                            self.write_json_rpc_message(
+                                                vm_id,
+                                                process_id,
+                                                JsonRpcMessage::Response(JsonRpcResponse {
+                                                    jsonrpc: String::from("2.0"),
+                                                    id: response_id,
+                                                    result: Some(result),
+                                                    error: None,
+                                                }),
+                                            )?;
+                                        }
+                                        continue;
+                                    }
+
                                     let sequence_number = {
                                         let session = self
                                             .acp_sessions

@@ -261,6 +261,7 @@ pub enum ResponsePayload {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SidecarRequestPayload {
     ToolInvocation(ToolInvocationRequest),
+    PermissionRequest(SidecarPermissionRequest),
     JsBridgeCall(JsBridgeCallRequest),
 }
 
@@ -268,6 +269,7 @@ pub enum SidecarRequestPayload {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SidecarResponsePayload {
     ToolInvocationResult(ToolInvocationResultResponse),
+    PermissionRequestResult(SidecarPermissionResultResponse),
     JsBridgeResult(JsBridgeResultResponse),
 }
 
@@ -806,6 +808,13 @@ pub struct ToolInvocationRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SidecarPermissionRequest {
+    pub session_id: String,
+    pub permission_id: String,
+    pub params: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsBridgeCallRequest {
     pub call_id: String,
     pub mount_id: String,
@@ -1077,6 +1086,15 @@ pub struct ToolInvocationResultResponse {
     pub invocation_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SidecarPermissionResultResponse {
+    pub permission_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -1663,6 +1681,7 @@ enum ExpectedResponseKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExpectedSidecarResponseKind {
     ToolInvocationResult,
+    PermissionRequestResult,
     JsBridgeResult,
 }
 
@@ -1714,6 +1733,7 @@ impl ExpectedSidecarResponseKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::ToolInvocationResult => "tool_invocation_result",
+            Self::PermissionRequestResult => "permission_request_result",
             Self::JsBridgeResult => "js_bridge_result",
         }
     }
@@ -1802,6 +1822,7 @@ impl SidecarRequestPayload {
     fn expected_response(&self) -> ExpectedSidecarResponseKind {
         match self {
             Self::ToolInvocation(_) => ExpectedSidecarResponseKind::ToolInvocationResult,
+            Self::PermissionRequest(_) => ExpectedSidecarResponseKind::PermissionRequestResult,
             Self::JsBridgeCall(_) => ExpectedSidecarResponseKind::JsBridgeResult,
         }
     }
@@ -1888,6 +1909,7 @@ impl SidecarResponsePayload {
     fn kind_name(&self) -> &'static str {
         match self {
             Self::ToolInvocationResult(_) => "tool_invocation_result",
+            Self::PermissionRequestResult(_) => "permission_request_result",
             Self::JsBridgeResult(_) => "js_bridge_result",
         }
     }

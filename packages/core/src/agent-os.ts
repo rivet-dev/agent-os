@@ -255,6 +255,14 @@ interface AgentSessionEntry {
 	events: SequencedEvent[];
 	eventHandlers: Set<SessionEventHandler>;
 	permissionHandlers: Set<PermissionRequestHandler>;
+	pendingPermissionReplies: Map<
+		string,
+		{
+			resolve: (reply: PermissionReply) => void;
+			reject: (error: Error) => void;
+			timer: ReturnType<typeof setTimeout>;
+		}
+	>;
 }
 
 export type RootLowerInput =
@@ -519,6 +527,7 @@ function sessionEntryFromInit(
 		events: [],
 		eventHandlers: new Set(),
 		permissionHandlers: new Set(),
+		pendingPermissionReplies: new Map(),
 	};
 }
 
@@ -1435,6 +1444,16 @@ async function handleToolInvocation(
 	}
 }
 
+function buildToolMap(toolKits: ToolKit[]): Map<string, HostTool> {
+	const toolMap = new Map<string, HostTool>();
+	for (const toolKit of toolKits) {
+		for (const [toolName, tool] of Object.entries(toolKit.tools)) {
+			toolMap.set(`${toolKit.name}:${toolName}`, tool);
+		}
+	}
+	return toolMap;
+}
+
 async function registerToolkitsOnSidecar(
 	client: NativeSidecarProcessClient,
 	session: AuthenticatedSession,
@@ -1442,20 +1461,8 @@ async function registerToolkitsOnSidecar(
 	toolKits: ToolKit[],
 ): Promise<string> {
 	if (toolKits.length === 0) {
-		client.setSidecarRequestHandler(null);
 		return "";
 	}
-
-	const toolMap = new Map<string, HostTool>();
-	for (const toolKit of toolKits) {
-		for (const [toolName, tool] of Object.entries(toolKit.tools)) {
-			toolMap.set(`${toolKit.name}:${toolName}`, tool);
-		}
-	}
-
-	client.setSidecarRequestHandler((request) =>
-		handleToolInvocation(request, toolMap),
-	);
 
 	let promptMarkdown = "";
 	for (const toolKit of toolKits) {
@@ -1778,6 +1785,7 @@ export class AgentOs {
 			vm._sidecarLease = sidecarLease;
 			vm._toolKits = vmAdmin.toolKits;
 			vm._toolReference = vmAdmin.toolReference;
+			vm._installSidecarRequestHandler();
 			vm._cronManager = new CronManager(
 				vm,
 				options?.scheduleDriver ?? new TimerScheduleDriver(),
@@ -2649,6 +2657,20 @@ export class AgentOs {
 		}
 	}
 
+	private _rejectPendingPermissionReplies(sessionId: string): void {
+		const session = this._sessions.get(sessionId);
+		if (!session) {
+			return;
+		}
+		for (const [permissionId, pendingReply] of session.pendingPermissionReplies) {
+			clearTimeout(pendingReply.timer);
+			pendingReply.reject(
+				new Error(`Session closed before permission reply: ${permissionId}`),
+			);
+		}
+		session.pendingPermissionReplies.clear();
+	}
+
 	private _tryForceCloseSessionProcess(sessionId: string): void {
 		const session = this._sessions.get(sessionId);
 		if (!session?.pid) {
@@ -2679,6 +2701,7 @@ export class AgentOs {
 		const hasPendingRequests =
 			(this._pendingSessionRequestResolvers.get(sessionId)?.size ?? 0) > 0;
 		this._abortPendingSessionRequests(sessionId);
+		this._rejectPendingPermissionReplies(sessionId);
 		if (hasPendingRequests) {
 			this._tryForceCloseSessionProcess(sessionId);
 		}
@@ -2832,6 +2855,97 @@ export class AgentOs {
 		return `${vmPrefix}/${binEntry}`;
 	}
 
+	private _installSidecarRequestHandler(): void {
+		const toolMap = buildToolMap(this._toolKits);
+		this._sidecarClient.setSidecarRequestHandler((request) => {
+			switch (request.payload.type) {
+				case "tool_invocation":
+					return handleToolInvocation(request, toolMap);
+				case "permission_request":
+					return this._handlePermissionSidecarRequest(request);
+				case "js_bridge_call":
+					return Promise.resolve({
+						type: "js_bridge_result",
+						call_id: request.payload.call_id,
+						error: `unsupported sidecar request type: ${request.payload.type}`,
+					});
+			}
+		});
+	}
+
+	private async _handlePermissionSidecarRequest(
+		request: SidecarRequestFrame,
+	): Promise<SidecarResponsePayload> {
+		const payload = request.payload;
+		if (payload.type !== "permission_request") {
+			return {
+				type: "permission_request_result",
+				permission_id: "unknown",
+				error: `unsupported sidecar request type: ${payload.type}`,
+			};
+		}
+
+		const session = this._sessions.get(payload.session_id);
+		if (!session) {
+			return {
+				type: "permission_request_result",
+				permission_id: payload.permission_id,
+				error: `Session not found: ${payload.session_id}`,
+			};
+		}
+
+		if (session.permissionHandlers.size === 0) {
+			return {
+				type: "permission_request_result",
+				permission_id: payload.permission_id,
+				reply: "reject",
+			};
+		}
+
+		const params = toRecord(payload.params);
+		try {
+			const reply = await new Promise<PermissionReply>((resolve, reject) => {
+				const timer = setTimeout(() => {
+					session.pendingPermissionReplies.delete(payload.permission_id);
+					reject(
+						new Error(
+							`Timed out waiting for permission reply: ${payload.permission_id}`,
+						),
+					);
+				}, 120_000);
+				session.pendingPermissionReplies.set(payload.permission_id, {
+					resolve,
+					reject,
+					timer,
+				});
+
+				const permissionRequest: PermissionRequest = {
+					permissionId: payload.permission_id,
+					description:
+						typeof params.description === "string"
+							? params.description
+							: undefined,
+					params,
+				};
+				for (const handler of session.permissionHandlers) {
+					handler(permissionRequest);
+				}
+			});
+
+			return {
+				type: "permission_request_result",
+				permission_id: payload.permission_id,
+				reply,
+			};
+		} catch (error) {
+			return {
+				type: "permission_request_result",
+				permission_id: payload.permission_id,
+				error: validationMessage(error),
+			};
+		}
+	}
+
 	/**
 	 * Resolve an agent config by ID. Package-provided configs take
 	 * precedence over the hardcoded AGENT_CONFIGS.
@@ -2935,6 +3049,23 @@ export class AgentOs {
 		permissionId: string,
 		reply: PermissionReply,
 	): Promise<JsonRpcResponse> {
+		const session = this._requireSession(sessionId);
+		const pendingReply = session.pendingPermissionReplies.get(permissionId);
+		if (pendingReply) {
+			session.pendingPermissionReplies.delete(permissionId);
+			clearTimeout(pendingReply.timer);
+			pendingReply.resolve(reply);
+			return {
+				jsonrpc: "2.0",
+				id: null,
+				result: {
+					permissionId,
+					reply,
+					via: "sidecar-request",
+				},
+			};
+		}
+
 		return this._sendSessionRequest(sessionId, LEGACY_PERMISSION_METHOD, {
 			permissionId,
 			reply,

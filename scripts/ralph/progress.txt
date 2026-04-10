@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- ACP adapters that emit live `session/request_permission` calls during `session/prompt` need the sidecar callback channel (`SidecarRequestPayload`) for replies; queued session events alone arrive too late and will deadlock the prompt.
 - In Agent OS `child_process` polyfills, treat string-valued `options.shell` the same as `true`; tools that go through `cross-spawn` or pass an explicit shell path like `"/bin/sh"` otherwise fail redirected commands by trying to exec the whole shell string as a binary.
 - For the OpenCode ACP Node bundle in `registry/agent/opencode/scripts/build-opencode-acp.mjs`, run result-returning SQLite PRAGMAs through `db.$client.exec(...)` instead of drizzle `db.run(...)`; the VM `node:sqlite` shim treats `journal_mode`, `busy_timeout`, `foreign_keys`, and `wal_checkpoint` as row-returning queries and will break `createSession("opencode")` otherwise.
 - OpenCode VM tool/file coverage depends on two bundle-level patches in `registry/agent/opencode/scripts/build-opencode-acp.mjs`: restore the current `Instance` around async LLM/tool execution, and translate absolute guest paths through `AGENT_OS_GUEST_PATH_MAPPINGS` before the bundle calls `node:fs`.
@@ -97,4 +98,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - The OpenCode/bash path inside Agent OS goes through V8 `child_process` plus `cross-spawn`, so an explicit shell path like `"/bin/sh"` must be normalized as truthy shell execution or redirect-heavy commands will fail as `command not found`.
   - Successful bash-tool commands that redirect all output can still send an empty tool-result payload to the model; llmock fixtures for that path should key off tool-result presence rather than stdout content.
   - The active truth path for this story is `pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts -t "bash tool"` plus root `pnpm check-types`.
+---
+## 2026-04-09 21:54:34 PDT - US-034
+- Restored the remaining OpenCode session API coverage by fixing live permission approvals/rejections to flow through the sidecar callback channel during `session/prompt`, which lets Agent OS answer `session/request_permission` before the prompt RPC finishes. This unblocked the real approval/rejection tool paths without adding host-side agent exceptions.
+- Tightened the OpenCode lifecycle tests to match current adapter behavior: redirected bash approval now waits on any tool result instead of stdout text, rejection includes a concrete follow-up llmock response, and cancel coverage asserts the notification-fallback contract without assuming a populated prompt `result`.
+- Files changed: `crates/sidecar/src/protocol.rs`, `crates/sidecar/src/service.rs`, `packages/core/AGENTS.md`, `packages/core/src/agent-os.ts`, `packages/core/src/sidecar/native-process-client.ts`, `packages/core/tests/opencode-session.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - OpenCode permission prompts are ACP requests, not passive notifications; if they need a user decision mid-prompt, route them through `SidecarRequestPayload` so the host can respond before the outstanding `session/prompt` call resolves.
+  - The OpenCode approval path for redirected bash commands still yields an empty tool-result body on success, so llmock fixtures should key off tool-result presence rather than stdout content.
+  - The active truth path for this story is `pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts` plus root `pnpm check-types`.
 ---

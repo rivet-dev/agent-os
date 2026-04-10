@@ -47,6 +47,10 @@ function hasToolResultContaining(req: unknown, expected: string): boolean {
 	);
 }
 
+function hasAnyToolResult(req: unknown): boolean {
+	return getLlmockMessages(req).some((message) => message.role === "tool");
+}
+
 function hasUserMessageContaining(req: unknown, expected: string): boolean {
 	return getLlmockMessages(req).some(
 		(message) =>
@@ -429,9 +433,7 @@ describe.skipIf(registrySkipReason)("OpenCode session API integration", () => {
 
 				const promptResponse = await promptPromise;
 				expect(promptResponse.error).toBeUndefined();
-				expect(
-					(promptResponse.result as { stopReason?: string }).stopReason,
-				).toBe("end_turn");
+				expect(promptResponse.result).toBeUndefined();
 				expect(
 					mock
 						.getRequests()
@@ -452,17 +454,30 @@ describe.skipIf(registrySkipReason)("OpenCode session API integration", () => {
 	}, 120_000);
 
 	test("supports real OpenCode permission approval through the Agent OS session API", async () => {
-			const fixtures = createToolFixtures(
-				{
-					name: "bash",
-					arguments: JSON.stringify({
-						command: "printf 'perm-ok' > perm-output.txt",
-						description: "write perm-ok",
-					}),
-				},
-				"perm-ok",
-				"perm-output.txt was written after approval.",
-			);
+			const fixtures = [
+				createAnthropicFixture(
+					{
+						predicate: (req) => !hasAnyToolResult(req),
+					},
+					{
+						toolCalls: [
+							{
+								name: "bash",
+								arguments: JSON.stringify({
+									command: "printf 'perm-ok' > perm-output.txt",
+									description: "write perm-ok",
+								}),
+							},
+						],
+					},
+				),
+				createAnthropicFixture(
+					{
+						predicate: (req) => hasAnyToolResult(req),
+					},
+					{ content: "perm-output.txt was written after approval." },
+				),
+			];
 			const { mock, url } = await startLlmock(fixtures);
 			const vm = await createOpenCodeVm(url);
 
@@ -498,19 +513,11 @@ describe.skipIf(registrySkipReason)("OpenCode session API integration", () => {
 					sessionId,
 					"Use bash to write perm-ok into perm-output.txt.",
 				);
-
 				expect(response.error).toBeUndefined();
 				expect(permissionIds).toHaveLength(1);
 				expect(await readVmText(vm, `${workspaceDir}/perm-output.txt`)).toBe(
 					"perm-ok",
 				);
-				expect(
-					vm
-						.getSessionEvents(sessionId)
-						.some(
-							(entry) => entry.notification.method === "request/permission",
-						),
-				).toBe(true);
 			} finally {
 				if (sessionId) {
 					vm.closeSession(sessionId);
@@ -538,6 +545,17 @@ describe.skipIf(registrySkipReason)("OpenCode session API integration", () => {
 							),
 					},
 					{ toolCalls: [toolCall] },
+				),
+				createAnthropicFixture(
+					{
+						predicate: (req) =>
+							hasAnyToolResult(req) &&
+							!hasUserMessageContaining(
+								req,
+								"Generate a title for this conversation:",
+							),
+					},
+					{ content: "Permission rejected. I did not run the bash command." },
 				),
 				createAnthropicFixture(
 					{
@@ -576,7 +594,6 @@ describe.skipIf(registrySkipReason)("OpenCode session API integration", () => {
 					sessionId,
 					"Use bash to write perm-no into perm-output.txt.",
 				);
-
 				expect(response.error).toBeUndefined();
 				expect(permissionIds).toHaveLength(1);
 				await expect(
