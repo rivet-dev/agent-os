@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- `HostDirFilesystem` mutations should stay on the anchored `openat2(... RESOLVE_BENEATH ...)` path and then operate through the `/proc/self/fd/<fd>` handle; that keeps direct operations like `pwrite` host-backed without reintroducing path-escape races or falling back to whole-file rewrites.
 - For `RootFilesystemDescriptor`, order `lowers` from highest to lowest precedence and let `bootstrap_entries` act like the single writable upper; bootstrap directory entries must be applied with `mkdir`-style semantics so upper snapshots can repeat lower directories without failing on `EEXIST`.
 - Cross-workspace Vitest suites such as `registry/tests/*` load `@rivet-dev/agent-os-core` from `packages/core/dist`; after changing exported runtime-compat/test-runtime code, rebuild `packages/core` before trusting those results.
 - Compat `createKernel()` loopback exemptions must be carried in both create-VM env metadata and every later `configureVm()` call, because native-sidecar VM reconfiguration overwrites prior loopback exemption state.
@@ -391,4 +392,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Kernel `fcntl` needs a split flag model: keep `O_APPEND` on `FileDescription` so dup/fork handles share append semantics, but keep `O_NONBLOCK` and `FD_CLOEXEC` on `FdEntry` because those remain descriptor-local in the current kernel.
   - `F_GETFL` should expose only the visible access/status bits (`O_APPEND`, `O_NONBLOCK`, and access mode), not one-shot open flags like `O_CREAT` or `O_TRUNC`.
   - The active truth path for this story is `cargo test -p agent-os-kernel --test fd_table --test api_surface -- --test-threads=1` plus root `pnpm check-types`.
+---
+## 2026-04-10 04:22:02 PDT - US-062
+- Implemented direct `HostDirFilesystem::pwrite()` support in the sidecar host-dir plugin using anchored host file descriptors plus a `write_at` loop, so positional writes no longer depend on the generic VFS read-modify-write fallback.
+- Added focused host-dir tests covering in-place positional overwrite, sparse-extension zero filling, and symlink-escape rejection for `pwrite`.
+- Files changed: `crates/sidecar/src/plugins/host_dir.rs`, `crates/sidecar/tests/host_dir.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Host-dir positional writes should use `FileExt::write_at` on an already anchored handle instead of the generic `VirtualFileSystem::pwrite` fallback, because the fallback rewrites the whole file and bypasses the host-backed direct-write path this plugin is supposed to exercise.
+  - Escape hardening for host-dir writes is best verified with an actual symlink out of the mounted root; using `openat2` with `RESOLVE_BENEATH` keeps both ordinary writes and `pwrite` on the same fail-closed path.
+  - The active truth path for this story is `cargo test -p agent-os-sidecar --test host_dir` and root `pnpm check-types`.
 ---

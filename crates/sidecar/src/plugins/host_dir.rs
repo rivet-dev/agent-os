@@ -325,6 +325,35 @@ impl HostDirFilesystem {
             gid: stat.st_gid,
         }
     }
+
+    fn write_all_at(
+        &self,
+        file: &File,
+        content: &[u8],
+        mut offset: u64,
+        path: &str,
+    ) -> VfsResult<()> {
+        let mut written = 0usize;
+        while written < content.len() {
+            let bytes_written = file
+                .write_at(&content[written..], offset)
+                .map_err(|error| io_error_to_vfs("write", path, error))?;
+            if bytes_written == 0 {
+                return Err(io_error_to_vfs(
+                    "write",
+                    path,
+                    io::Error::new(io::ErrorKind::WriteZero, "failed to write whole buffer"),
+                ));
+            }
+
+            written += bytes_written;
+            offset = offset.checked_add(bytes_written as u64).ok_or_else(|| {
+                VfsError::new("EINVAL", format!("pwrite offset overflow: {path}"))
+            })?;
+        }
+
+        Ok(())
+    }
 }
 
 impl VirtualFileSystem for HostDirFilesystem {
@@ -602,6 +631,17 @@ impl VirtualFileSystem for HostDirFilesystem {
             .map_err(|error| io_error_to_vfs("open", path, error))?;
         buffer.truncate(bytes_read);
         Ok(buffer)
+    }
+
+    fn pwrite(&mut self, path: &str, content: impl Into<Vec<u8>>, offset: u64) -> VfsResult<()> {
+        let (_, relative) = self.relative_virtual_path(path);
+        let handle = self.open_beneath(&relative, OFlag::O_WRONLY, Mode::empty())?;
+        let file = File::options()
+            .write(true)
+            .open(handle.proc_path())
+            .map_err(|error| io_error_to_vfs("open", path, error))?;
+        let content = content.into();
+        self.write_all_at(&file, &content, offset, path)
     }
 }
 
