@@ -32,6 +32,7 @@
 - Keep `src/agents.ts` aligned with the shipped registry agent packages. Derive the built-in `AgentType` union from `AGENT_CONFIGS` instead of maintaining a separate manual list, and verify launch args/env with the mock-adapter session tests when adding or changing an agent.
 - ACP agents that issue live `session/request_permission` calls during `session/prompt` cannot rely on queued session events alone. Route those permission round-trips through the sidecar callback channel (`SidecarRequestPayload`) so the host can answer them before the prompt request completes.
 - On the native sidecar path, a top-level `session/cancel` request does not preempt an already running top-level `session/prompt` dispatch. If prompt callers must observe cancellation immediately, resolve the pending prompt request locally in `src/agent-os.ts` while still forwarding the real cancel RPC for eventual adapter/process cleanup.
+- Native-sidecar ACP request timeouts should surface as JSON-RPC errors with `error.data.kind === "acp_timeout"` rather than string-only transport errors. Use `isAcpTimeoutErrorData()` from `src/json-rpc.ts` instead of parsing timeout messages.
 
 ### Agent Adapter Approaches
 

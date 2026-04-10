@@ -2,6 +2,7 @@ use crate::acp::compat::{
     derive_config_options, synthetic_config_update, synthetic_mode_update,
     PendingPermissionRequest, RECENT_ACTIVITY_LIMIT,
 };
+use crate::acp::AcpTimeoutDiagnostics;
 use crate::acp::{JsonRpcId, JsonRpcNotification};
 use crate::protocol::{SequencedNotification, SessionCreatedResponse, SessionStateResponse};
 use serde_json::{Map, Value};
@@ -78,6 +79,7 @@ pub(crate) struct AcpSessionState {
     pub(crate) next_terminal_id: u64,
     pub(crate) closed: bool,
     pub(crate) exit_code: Option<i32>,
+    pub(crate) termination_requested: bool,
 }
 
 impl AcpSessionState {
@@ -140,6 +142,7 @@ impl AcpSessionState {
             next_terminal_id: 1,
             closed: false,
             exit_code: None,
+            termination_requested: false,
         }
     }
 
@@ -182,6 +185,28 @@ impl AcpSessionState {
         while self.recent_activity.len() > RECENT_ACTIVITY_LIMIT {
             self.recent_activity.pop_front();
         }
+    }
+
+    pub(crate) fn mark_termination_requested(&mut self) {
+        self.termination_requested = true;
+    }
+
+    pub(crate) fn timeout_diagnostics(
+        &self,
+        method: &str,
+        id: &JsonRpcId,
+        timeout_ms: u64,
+        transport_state: Option<String>,
+    ) -> AcpTimeoutDiagnostics {
+        AcpTimeoutDiagnostics::new(
+            method,
+            id.clone(),
+            timeout_ms,
+            self.exit_code,
+            self.timeout_killed_state(),
+            transport_state,
+            self.recent_activity.iter().cloned().collect(),
+        )
     }
 
     pub(crate) fn record_notification(&mut self, notification: JsonRpcNotification) {
@@ -346,5 +371,12 @@ impl AcpSessionState {
                 Value::Object(map)
             })
             .collect();
+    }
+
+    fn timeout_killed_state(&self) -> Option<bool> {
+        if self.exit_code.is_some() {
+            return Some(self.termination_requested);
+        }
+        self.termination_requested.then_some(true)
     }
 }

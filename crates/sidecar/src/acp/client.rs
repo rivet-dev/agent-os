@@ -2,6 +2,7 @@ use crate::acp::json_rpc::{
     serialize_message, JsonRpcError, JsonRpcId, JsonRpcMessage, JsonRpcNotification,
     JsonRpcRequest, JsonRpcResponse,
 };
+use crate::acp::AcpTimeoutDiagnostics;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
@@ -23,11 +24,19 @@ const ACTIVITY_TEXT_LIMIT: usize = 240;
 pub type InboundRequestFuture =
     Pin<Box<dyn Future<Output = Result<Option<InboundRequestOutcome>, String>> + Send + 'static>>;
 pub type InboundRequestHandler = Arc<dyn Fn(JsonRpcRequest) -> InboundRequestFuture + Send + Sync>;
+pub type AcpClientProcessStateProvider =
+    Arc<dyn Fn() -> AcpClientProcessState + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InboundRequestOutcome {
     pub result: Option<Value>,
     pub error: Option<JsonRpcError>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AcpClientProcessState {
+    pub exit_code: Option<i32>,
+    pub killed: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -39,6 +48,7 @@ pub struct AcpClient {
 pub struct AcpClientOptions {
     pub timeout: Duration,
     pub request_handler: Option<InboundRequestHandler>,
+    pub process_state_provider: Option<AcpClientProcessStateProvider>,
 }
 
 impl Default for AcpClientOptions {
@@ -46,6 +56,7 @@ impl Default for AcpClientOptions {
         Self {
             timeout: DEFAULT_TIMEOUT_MS,
             request_handler: None,
+            process_state_provider: None,
         }
     }
 }
@@ -87,6 +98,7 @@ struct AcpClientInner {
     closed: AtomicBool,
     transport_state: Mutex<String>,
     timeout: Duration,
+    process_state_provider: Option<AcpClientProcessStateProvider>,
 }
 
 impl AcpClient {
@@ -108,6 +120,7 @@ impl AcpClient {
             closed: AtomicBool::new(false),
             transport_state: Mutex::new(String::from("transport_open")),
             timeout: options.timeout,
+            process_state_provider: options.process_state_provider,
         });
 
         tokio::spawn(read_loop(BufReader::new(reader), Arc::clone(&inner)));
@@ -320,19 +333,29 @@ impl AcpClientInner {
             .lock()
             .expect("transport state lock poisoned")
             .clone();
-        let recent = self
+        let recent_activity = self
             .recent_activity
             .lock()
-            .expect("recent activity lock poisoned");
-        let activity = if recent.is_empty() {
-            String::from("no recent ACP activity")
-        } else {
-            recent.iter().cloned().collect::<Vec<_>>().join(" | ")
-        };
-        AcpClientError::Timeout(format!(
-            "ACP request {method} (id={id}) timed out after {}ms. {transport_state}. Recent ACP activity: {activity}",
-            self.timeout.as_millis()
-        ))
+            .expect("recent activity lock poisoned")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let process_state = self
+            .process_state_provider
+            .as_ref()
+            .map(|provider| provider())
+            .unwrap_or_default();
+        let timeout_ms = u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX);
+        let diagnostics = AcpTimeoutDiagnostics::new(
+            method,
+            id.clone(),
+            timeout_ms,
+            process_state.exit_code,
+            process_state.killed,
+            Some(transport_state),
+            recent_activity,
+        );
+        AcpClientError::Timeout(diagnostics.message())
     }
 
     fn reject_all(&self, error: AcpClientError) {

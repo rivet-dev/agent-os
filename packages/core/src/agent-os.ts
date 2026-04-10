@@ -62,11 +62,14 @@ export type {
 	SessionModeState,
 } from "./agent-session-types.js";
 export type {
+	AcpTimeoutErrorData,
 	JsonRpcError,
+	JsonRpcErrorData,
 	JsonRpcNotification,
 	JsonRpcRequest,
 	JsonRpcResponse,
 } from "./json-rpc.js";
+export { isAcpTimeoutErrorData } from "./json-rpc.js";
 export type { ConnectTerminalOptions } from "./runtime-compat.js";
 
 /** Process tree node: extends kernel ProcessInfo with child references. */
@@ -1329,10 +1332,7 @@ function collectToolkitBootstrapCommands(toolKits: ToolKit[]): string[] {
 		return [];
 	}
 
-	return [
-		"agentos",
-		...toolKits.map((toolKit) => `agentos-${toolKit.name}`),
-	];
+	return ["agentos", ...toolKits.map((toolKit) => `agentos-${toolKit.name}`)];
 }
 
 function materializeOsInstructionsDir(additionalInstructions?: string): string {
@@ -1589,7 +1589,9 @@ export class AgentOs {
 
 		const createVmAdmin = async (): Promise<AgentOsVmAdmin> => {
 			const preparedCommandDirs = prepareCommandDirs(processed.commandPackages);
-			const toolBootstrapCommands = collectToolkitBootstrapCommands(toolKits ?? []);
+			const toolBootstrapCommands = collectToolkitBootstrapCommands(
+				toolKits ?? [],
+			);
 			const bootstrapLower = createKernelBootstrapLower(
 				options?.rootFilesystem,
 				[
@@ -2584,7 +2586,9 @@ export class AgentOs {
 		}
 
 		const meta =
-			params?._meta && typeof params._meta === "object" && !Array.isArray(params._meta)
+			params?._meta &&
+			typeof params._meta === "object" &&
+			!Array.isArray(params._meta)
 				? { ...(params._meta as Record<string, unknown>) }
 				: {};
 		meta.agentOsCodexConfig = {
@@ -2812,7 +2816,10 @@ export class AgentOs {
 		if (!session) {
 			return;
 		}
-		for (const [permissionId, pendingReply] of session.pendingPermissionReplies) {
+		for (const [
+			permissionId,
+			pendingReply,
+		] of session.pendingPermissionReplies) {
 			clearTimeout(pendingReply.timer);
 			pendingReply.reject(
 				new Error(`Session closed before permission reply: ${permissionId}`),
@@ -2827,7 +2834,8 @@ export class AgentOs {
 			return;
 		}
 		const sharedPidUsers = [...this._sessions.values()].filter(
-			(candidate) => candidate.sessionId !== sessionId && candidate.pid === session.pid,
+			(candidate) =>
+				candidate.sessionId !== sessionId && candidate.pid === session.pid,
 		);
 		if (sharedPidUsers.length > 0) {
 			return;

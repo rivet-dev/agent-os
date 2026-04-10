@@ -6,8 +6,8 @@ use crate::acp::compat::{
 };
 use crate::acp::session::{AcpSessionState, AcpTerminalState};
 use crate::acp::{
-    deserialize_message, serialize_message, JsonRpcError, JsonRpcId, JsonRpcMessage,
-    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
+    deserialize_message, serialize_message, AcpTimeoutDiagnostics, JsonRpcError, JsonRpcId,
+    JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
 };
 use crate::bridge::{build_mount_plugin_registry, MountPluginContext};
 pub(crate) use crate::execution::{
@@ -40,12 +40,12 @@ use crate::protocol::{
     ProcessExitedEvent, ProcessKilledResponse, ProcessOutputEvent, ProcessStartedResponse,
     ProtocolSchema, RejectedResponse, RequestFrame, RequestId, RequestPayload, ResponseFrame,
     ResponsePayload, SessionOpenedResponse, SessionRequest as AgentSessionRequest,
-    SessionRpcResponse, SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame,
-    SidecarResponsePayload, SidecarResponseTracker, SidecarResponseTrackerError,
-    SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse, SocketStateEntry,
-    SidecarPermissionRequest, StdinClosedResponse, StdinWrittenResponse, StreamChannel,
-    StructuredEvent, VmLifecycleEvent, VmLifecycleState, WasmPermissionTier, WriteStdinRequest,
-    ZombieTimerCountResponse,
+    SessionRpcResponse, SidecarPermissionRequest, SidecarRequestFrame, SidecarRequestPayload,
+    SidecarResponseFrame, SidecarResponsePayload, SidecarResponseTracker,
+    SidecarResponseTrackerError, SignalDispositionAction, SignalHandlerRegistration,
+    SignalStateResponse, SocketStateEntry, StdinClosedResponse, StdinWrittenResponse,
+    StreamChannel, StructuredEvent, VmLifecycleEvent, VmLifecycleState, WasmPermissionTier,
+    WriteStdinRequest, ZombieTimerCountResponse,
 };
 use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
@@ -136,6 +136,21 @@ struct LegacyJavascriptChildProcessSpawnOptions {
     shell: bool,
     #[serde(default, rename = "maxBuffer")]
     max_buffer: Option<usize>,
+}
+
+#[derive(Debug)]
+enum AcpRequestError {
+    Sidecar(SidecarError),
+    Timeout(AcpTimeoutDiagnostics),
+}
+
+impl AcpRequestError {
+    fn into_sidecar_error(self) -> SidecarError {
+        match self {
+            Self::Sidecar(error) => error,
+            Self::Timeout(diagnostics) => SidecarError::InvalidState(diagnostics.message()),
+        }
+    }
 }
 
 pub(crate) fn parse_javascript_child_process_spawn_request(
@@ -758,6 +773,8 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
+    const ACP_REQUEST_TIMEOUT_MS: u64 = 120_000;
+
     pub fn new(bridge: B) -> Result<Self, SidecarError> {
         Self::with_config(bridge, NativeSidecarConfig::default())
     }
@@ -1327,7 +1344,7 @@ where
             }
             Err(error) => {
                 self.kill_acp_process(&vm_id, &process_id);
-                return Err(error);
+                return Err(error.into_sidecar_error());
             }
         };
         if let Some(error) = &initialize_response.error {
@@ -1364,7 +1381,7 @@ where
             }
             Err(error) => {
                 self.kill_acp_process(&vm_id, &process_id);
-                return Err(error);
+                return Err(error.into_sidecar_error());
             }
         };
         if let Some(error) = &session_response.error {
@@ -1486,15 +1503,23 @@ where
             params: Some(Value::Object(merged_params.clone())),
         };
 
-        let (mut response, mut events) = self
+        let (mut response, mut events) = match self
             .send_acp_request_and_collect(
                 &vm_id,
                 &process_id,
                 &agent_type,
                 Some(&payload.session_id),
-                outbound,
+                outbound.clone(),
             )
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(AcpRequestError::Timeout(diagnostics)) => (
+                Self::session_timeout_response(outbound.id, diagnostics),
+                Vec::new(),
+            ),
+            Err(AcpRequestError::Sidecar(error)) => return Err(error),
+        };
         if payload.method == ACP_CANCEL_METHOD && is_cancel_method_not_found(&response) {
             let notification = JsonRpcNotification {
                 jsonrpc: String::from("2.0"),
@@ -1894,7 +1919,11 @@ where
             .get_mut(process_id)
             .expect("process should still exist");
 
-        if response.is_ok() && matches!(request.method.as_str(), "fs.chmodSync" | "fs.promises.chmod")
+        if response.is_ok()
+            && matches!(
+                request.method.as_str(),
+                "fs.chmodSync" | "fs.promises.chmod"
+            )
         {
             let guest_path =
                 javascript_sync_rpc_arg_str(&request.args, 0, "filesystem chmod path")?;
@@ -2620,6 +2649,11 @@ where
         vm_id: &str,
         process_id: &str,
     ) -> Result<(), SidecarError> {
+        for session in self.acp_sessions.values_mut() {
+            if session.vm_id == vm_id && session.process_id == process_id {
+                session.mark_termination_requested();
+            }
+        }
         let shared_runtime_child_pid = self.vms.get(vm_id).and_then(|vm| {
             vm.active_processes
                 .get(process_id)
@@ -2686,25 +2720,28 @@ where
         Ok(())
     }
 
-    fn session_timeout_error(
+    fn session_timeout_diagnostics(
         session: &AcpSessionState,
         method: &str,
         id: &JsonRpcId,
-    ) -> SidecarError {
-        let activity = if session.recent_activity.is_empty() {
-            String::from("no recent ACP activity")
-        } else {
-            session
-                .recent_activity
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(" | ")
-        };
-        SidecarError::InvalidState(format!(
-            "ACP request {method} (id={id}) timed out after 120000ms. process exitCode={:?}. Recent ACP activity: {activity}",
-            session.exit_code
-        ))
+    ) -> AcpTimeoutDiagnostics {
+        session.timeout_diagnostics(method, id, Self::ACP_REQUEST_TIMEOUT_MS, None)
+    }
+
+    fn session_timeout_response(
+        id: JsonRpcId,
+        diagnostics: AcpTimeoutDiagnostics,
+    ) -> JsonRpcResponse {
+        JsonRpcResponse {
+            jsonrpc: String::from("2.0"),
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32000,
+                message: diagnostics.message(),
+                data: Some(diagnostics.to_json()),
+            }),
+        }
     }
 
     async fn send_acp_request_and_collect(
@@ -2714,37 +2751,47 @@ where
         agent_type: &str,
         session_id: Option<&str>,
         request: JsonRpcRequest,
-    ) -> Result<(JsonRpcResponse, Vec<EventFrame>), SidecarError> {
-        self.write_json_rpc_message(vm_id, process_id, JsonRpcMessage::Request(request.clone()))?;
+    ) -> Result<(JsonRpcResponse, Vec<EventFrame>), AcpRequestError> {
+        self.write_json_rpc_message(vm_id, process_id, JsonRpcMessage::Request(request.clone()))
+            .map_err(AcpRequestError::Sidecar)?;
 
-        let ownership = self.vm_ownership(vm_id)?;
-        let deadline = Instant::now() + Duration::from_millis(120_000);
+        let ownership = self.vm_ownership(vm_id).map_err(AcpRequestError::Sidecar)?;
+        let deadline = Instant::now() + Duration::from_millis(Self::ACP_REQUEST_TIMEOUT_MS);
         let mut events = Vec::new();
 
         loop {
-            let _ = self.pump_process_events(&ownership).await?;
+            let _ = self
+                .pump_process_events(&ownership)
+                .await
+                .map_err(AcpRequestError::Sidecar)?;
 
-            while let Some(envelope) =
-                self.take_matching_process_event_envelope(vm_id, process_id)?
+            while let Some(envelope) = self
+                .take_matching_process_event_envelope(vm_id, process_id)
+                .map_err(AcpRequestError::Sidecar)?
             {
                 let exited = match envelope.event {
                     ActiveExecutionEvent::Exited(exit_code) => Some(exit_code),
                     _ => None,
                 };
-                if let Some(response) = self.handle_acp_process_event(
-                    vm_id,
-                    process_id,
-                    session_id,
-                    &ownership,
-                    envelope.event,
-                    &mut events,
-                )? {
+                if let Some(response) = self
+                    .handle_acp_process_event(
+                        vm_id,
+                        process_id,
+                        session_id,
+                        &ownership,
+                        envelope.event,
+                        &mut events,
+                    )
+                    .map_err(AcpRequestError::Sidecar)?
+                {
                     if response.id == request.id {
                         return Ok((response, events));
                     }
                 }
                 if let Some(exit_code) = exited {
-                    self.terminate_acp_process(vm_id, process_id).await?;
+                    self.terminate_acp_process(vm_id, process_id)
+                        .await
+                        .map_err(AcpRequestError::Sidecar)?;
                     return Ok((
                         JsonRpcResponse {
                             jsonrpc: String::from("2.0"),
@@ -2765,18 +2812,27 @@ where
             }
 
             let event = {
-                let vm = self.vms.get_mut(vm_id).ok_or_else(|| {
-                    SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}"))
-                })?;
-                let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
-                    SidecarError::InvalidState(format!(
-                        "VM {vm_id} has no active process {process_id}"
-                    ))
-                })?;
+                let vm = self
+                    .vms
+                    .get_mut(vm_id)
+                    .ok_or_else(|| {
+                        SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}"))
+                    })
+                    .map_err(AcpRequestError::Sidecar)?;
+                let process = vm
+                    .active_processes
+                    .get_mut(process_id)
+                    .ok_or_else(|| {
+                        SidecarError::InvalidState(format!(
+                            "VM {vm_id} has no active process {process_id}"
+                        ))
+                    })
+                    .map_err(AcpRequestError::Sidecar)?;
                 process
                     .execution
                     .poll_event(Duration::from_millis(10))
-                    .await?
+                    .await
+                    .map_err(AcpRequestError::Sidecar)?
             };
 
             if let Some(event) = event {
@@ -2784,20 +2840,25 @@ where
                     ActiveExecutionEvent::Exited(exit_code) => Some(exit_code),
                     _ => None,
                 };
-                if let Some(response) = self.handle_acp_process_event(
-                    vm_id,
-                    process_id,
-                    session_id,
-                    &ownership,
-                    event,
-                    &mut events,
-                )? {
+                if let Some(response) = self
+                    .handle_acp_process_event(
+                        vm_id,
+                        process_id,
+                        session_id,
+                        &ownership,
+                        event,
+                        &mut events,
+                    )
+                    .map_err(AcpRequestError::Sidecar)?
+                {
                     if response.id == request.id {
                         return Ok((response, events));
                     }
                 }
                 if let Some(exit_code) = exited {
-                    self.terminate_acp_process(vm_id, process_id).await?;
+                    self.terminate_acp_process(vm_id, process_id)
+                        .await
+                        .map_err(AcpRequestError::Sidecar)?;
                     return Ok((
                         JsonRpcResponse {
                             jsonrpc: String::from("2.0"),
@@ -2832,11 +2893,11 @@ where
                             &Map::new(),
                         )
                     });
-                return Err(Self::session_timeout_error(
+                return Err(AcpRequestError::Timeout(Self::session_timeout_diagnostics(
                     &session,
                     &request.method,
                     &request.id,
-                ));
+                )));
             }
         }
     }
@@ -2970,12 +3031,12 @@ where
                                 if let Some(notification) = normalized {
                                     let notification_params: Map<String, Value> =
                                         to_record(notification.params.clone());
-                                    let permission_id = match notification_params.get("permissionId")
-                                    {
-                                        Some(Value::String(value)) => Some(value.clone()),
-                                        Some(Value::Number(value)) => Some(value.to_string()),
-                                        _ => None,
-                                    };
+                                    let permission_id =
+                                        match notification_params.get("permissionId") {
+                                            Some(Value::String(value)) => Some(value.clone()),
+                                            Some(Value::Number(value)) => Some(value.to_string()),
+                                            _ => None,
+                                        };
                                     if let Some(permission_id) = permission_id {
                                         let sidecar_response = self.sidecar_requests.invoke(
                                             ownership.clone(),
@@ -3280,7 +3341,6 @@ where
 
         Ok(())
     }
-
 }
 
 fn shadow_host_path_for_process(

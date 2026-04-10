@@ -1,7 +1,7 @@
 use agent_os_sidecar::acp::{
-    deserialize_message, AcpClient, AcpClientError, AcpClientOptions, InboundRequestHandler,
-    InboundRequestOutcome, JsonRpcError, JsonRpcId, JsonRpcMessage, JsonRpcNotification,
-    JsonRpcRequest, JsonRpcResponse,
+    deserialize_message, AcpClient, AcpClientError, AcpClientOptions, AcpClientProcessState,
+    InboundRequestHandler, InboundRequestOutcome, JsonRpcError, JsonRpcId, JsonRpcMessage,
+    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -445,6 +445,10 @@ async fn client_timeout_errors_include_recent_activity() {
     let (client, mut reader, mut writer) = new_client(AcpClientOptions {
         timeout: Duration::from_millis(50),
         request_handler: None,
+        process_state_provider: Some(Arc::new(|| AcpClientProcessState {
+            exit_code: Some(137),
+            killed: Some(true),
+        })),
     });
 
     let request_task = tokio::spawn({
@@ -483,6 +487,8 @@ async fn client_timeout_errors_include_recent_activity() {
     assert!(message.contains("Recent ACP activity"));
     assert!(message.contains("non_json [sandbox.require] start node:url /"));
     assert!(message.contains("received notification session/update"));
+    assert!(message.contains("process exitCode=137"));
+    assert!(message.contains("killed=true"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -490,6 +496,7 @@ async fn client_waits_for_exit_drain_before_rejecting_pending_requests() {
     let (client, mut reader, mut writer) = new_client(AcpClientOptions {
         timeout: Duration::from_secs(1),
         request_handler: None,
+        process_state_provider: None,
     });
 
     let started_at = Instant::now();
@@ -541,6 +548,7 @@ async fn client_handles_inbound_requests_with_registered_handler() {
     let (client, mut reader, mut writer) = new_client(AcpClientOptions {
         timeout: Duration::from_secs(1),
         request_handler: Some(handler),
+        process_state_provider: None,
     });
     let mut notifications = client.subscribe_notifications();
 

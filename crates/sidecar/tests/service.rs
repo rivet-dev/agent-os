@@ -65,7 +65,7 @@ mod service {
             ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, ServerConfig,
             ServerConnection, SignatureScheme,
         };
-        use serde_json::{json, Value};
+        use serde_json::{json, Map, Value};
         use socket2::SockRef;
         use std::collections::BTreeMap;
         use std::fs;
@@ -147,6 +147,52 @@ ykAheWCsAteSEWVc0w==\n\
                 },
             )
             .expect("create sidecar")
+        }
+
+        #[test]
+        fn session_timeout_response_includes_structured_diagnostics() {
+            let mut session = AcpSessionState::new(
+                String::from("acp-session-1"),
+                String::from("vm-1"),
+                String::from("codex"),
+                String::from("acp-agent-1"),
+                Some(42),
+                &Map::new(),
+                &Map::new(),
+            );
+            session.record_activity(String::from("sent request session/prompt id=7"));
+            session.record_activity(String::from("received notification session/update"));
+            session.exit_code = Some(137);
+            session.mark_termination_requested();
+
+            let diagnostics = NativeSidecar::<RecordingBridge>::session_timeout_diagnostics(
+                &session,
+                "session/prompt",
+                &JsonRpcId::Number(7),
+            );
+            let response = NativeSidecar::<RecordingBridge>::session_timeout_response(
+                JsonRpcId::Number(7),
+                diagnostics,
+            );
+
+            let error = response.error.expect("timeout error");
+            assert!(error.message.contains("process exitCode=137"));
+            assert!(error.message.contains("killed=true"));
+
+            let data = error.data.expect("timeout diagnostics data");
+            assert_eq!(data["kind"], json!("acp_timeout"));
+            assert_eq!(data["method"], json!("session/prompt"));
+            assert_eq!(data["id"], json!(7));
+            assert_eq!(data["timeoutMs"], json!(120000));
+            assert_eq!(data["exitCode"], json!(137));
+            assert_eq!(data["killed"], json!(true));
+            assert_eq!(
+                data["recentActivity"],
+                json!([
+                    "sent request session/prompt id=7",
+                    "received notification session/update"
+                ])
+            );
         }
 
         fn create_kernel_process_handle_for_tests() -> agent_os_kernel::kernel::KernelProcessHandle
