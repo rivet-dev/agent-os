@@ -1,3 +1,4 @@
+use crate::user::ProcessIdentity;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
@@ -171,6 +172,7 @@ pub struct ProcessContext {
     pub cwd: String,
     pub umask: u32,
     pub fds: ProcessFileDescriptors,
+    pub identity: ProcessIdentity,
 }
 
 impl Default for ProcessContext {
@@ -182,6 +184,7 @@ impl Default for ProcessContext {
             cwd: String::from("/"),
             umask: DEFAULT_PROCESS_UMASK,
             fds: ProcessFileDescriptors::default(),
+            identity: ProcessIdentity::default(),
         }
     }
 }
@@ -201,6 +204,7 @@ pub struct ProcessEntry {
     pub env: BTreeMap<String, String>,
     pub cwd: String,
     pub umask: u32,
+    pub identity: ProcessIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +217,7 @@ pub struct ProcessInfo {
     pub command: String,
     pub status: ProcessStatus,
     pub exit_code: Option<i32>,
+    pub identity: ProcessIdentity,
 }
 
 #[derive(Clone)]
@@ -347,6 +352,7 @@ impl ProcessTable {
             env: ctx.env,
             cwd: ctx.cwd,
             umask: ctx.umask & 0o777,
+            identity: ctx.identity,
         };
 
         let weak = Arc::downgrade(&self.inner);
@@ -704,6 +710,7 @@ fn to_process_info(entry: &ProcessEntry) -> ProcessInfo {
         command: entry.command.clone(),
         status: entry.status,
         exit_code: entry.exit_code,
+        identity: entry.identity.clone(),
     }
 }
 

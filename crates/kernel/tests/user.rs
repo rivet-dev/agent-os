@@ -49,6 +49,7 @@ fn accepts_custom_configuration() {
         homedir: Some(String::from("/home/admin")),
         shell: Some(String::from("/bin/bash")),
         gecos: Some(String::from("Admin User")),
+        ..UserConfig::default()
     });
 
     assert_eq!(user.uid, 501);
@@ -130,4 +131,19 @@ fn getpwuid_handles_root_uid_for_root_and_non_root_configs() {
         ..UserConfig::default()
     });
     assert_eq!(root.getpwuid(0), "root:x:0:0::/root:/bin/sh");
+}
+
+#[test]
+fn getgroups_and_getgrgid_use_kernel_managed_group_state() {
+    let user = UserManager::from_config(UserConfig {
+        gid: Some(123),
+        username: Some(String::from("deploy")),
+        group_name: Some(String::from("deployers")),
+        supplementary_gids: vec![456, 123, 789],
+        ..UserConfig::default()
+    });
+
+    assert_eq!(user.getgroups(), vec![123, 456, 789]);
+    assert_eq!(user.getgrgid(123), "deployers:x:123:deploy");
+    assert_eq!(user.getgrgid(999), "group999:x:999:");
 }

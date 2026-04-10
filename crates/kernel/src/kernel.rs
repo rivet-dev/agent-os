@@ -36,7 +36,7 @@ use crate::socket_table::{
     InetSocketAddress, ReceivedDatagram, SocketId, SocketRecord, SocketShutdown, SocketSpec,
     SocketState, SocketTable, SocketTableError,
 };
-use crate::user::UserManager;
+use crate::user::{ProcessIdentity, UserConfig, UserManager};
 use crate::vfs::{normalize_path, VfsError, VfsResult, VirtualFileSystem, VirtualStat};
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
@@ -106,6 +106,7 @@ pub struct KernelVmConfig {
     pub vm_id: String,
     pub env: BTreeMap<String, String>,
     pub cwd: String,
+    pub user: UserConfig,
     pub permissions: Permissions,
     pub dns: DnsConfig,
     pub dns_resolver: SharedDnsResolver,
@@ -119,6 +120,7 @@ impl KernelVmConfig {
             vm_id: vm_id.into(),
             env: BTreeMap::new(),
             cwd: String::from("/home/user"),
+            user: UserConfig::default(),
             permissions: Permissions::default(),
             dns: DnsConfig::default(),
             dns_resolver: Arc::new(HickoryDnsResolver),
@@ -366,6 +368,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     pub fn new(filesystem: F, config: KernelVmConfig) -> Self {
         let vm_id = config.vm_id;
         let permissions = config.permissions.clone();
+        let users = UserManager::from_config(config.user);
         let process_table = ProcessTable::with_zombie_ttl(config.zombie_ttl);
         let process_table_for_pty = process_table.clone();
         let fd_tables = Arc::new(Mutex::new(FdTableManager::new()));
@@ -418,7 +421,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             ptys,
             sockets,
             poll_notifier,
-            users: UserManager::new(),
+            users,
             resources: ResourceAccountant::new(config.resources),
             file_locks,
             driver_pids,
@@ -454,6 +457,47 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
     pub fn user_manager(&self) -> &UserManager {
         &self.users
+    }
+
+    pub fn process_identity(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+    ) -> KernelResult<ProcessIdentity> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        Ok(self
+            .processes
+            .get(pid)
+            .ok_or_else(|| KernelError::no_such_process(pid))?
+            .identity)
+    }
+
+    pub fn getuid(&self, requester_driver: &str, pid: u32) -> KernelResult<u32> {
+        Ok(self.process_identity(requester_driver, pid)?.uid)
+    }
+
+    pub fn getgid(&self, requester_driver: &str, pid: u32) -> KernelResult<u32> {
+        Ok(self.process_identity(requester_driver, pid)?.gid)
+    }
+
+    pub fn geteuid(&self, requester_driver: &str, pid: u32) -> KernelResult<u32> {
+        Ok(self.process_identity(requester_driver, pid)?.euid)
+    }
+
+    pub fn getegid(&self, requester_driver: &str, pid: u32) -> KernelResult<u32> {
+        Ok(self.process_identity(requester_driver, pid)?.egid)
+    }
+
+    pub fn getgroups(&self, requester_driver: &str, pid: u32) -> KernelResult<Vec<u32>> {
+        Ok(self.process_identity(requester_driver, pid)?.supplementary_gids)
+    }
+
+    pub fn getpwuid(&self, uid: u32) -> String {
+        self.users.getpwuid(uid)
+    }
+
+    pub fn getgrgid(&self, gid: u32) -> String {
+        self.users.getgrgid(gid)
     }
 
     pub fn resource_snapshot(&self) -> ResourceSnapshot {
@@ -937,6 +981,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 cwd,
                 umask: DEFAULT_PROCESS_UMASK,
                 fds: Default::default(),
+                identity: self.users.identity(),
             },
             options.requester_driver.as_deref(),
         )
@@ -992,6 +1037,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 cwd,
                 umask: DEFAULT_PROCESS_UMASK,
                 fds: Default::default(),
+                identity: self.users.identity(),
             },
             Some(requester_driver),
         )
@@ -3877,6 +3923,7 @@ mod tests {
                 cwd: String::from("/"),
                 umask: DEFAULT_PROCESS_UMASK,
                 fds: Default::default(),
+                identity: ProcessIdentity::default(),
             },
             Arc::new(StubDriverProcess::default()),
         );
@@ -3894,6 +3941,7 @@ mod tests {
                 cwd: String::from("/"),
                 umask: DEFAULT_PROCESS_UMASK,
                 fds: Default::default(),
+                identity: ProcessIdentity::default(),
             },
             Arc::new(StubDriverProcess::default()),
         );
