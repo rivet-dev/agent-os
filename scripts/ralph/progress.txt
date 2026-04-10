@@ -18,6 +18,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Mixed kernel readiness coverage should use `KernelVm::poll_targets()` with `PollTargetEntry::fd(...)` for FD-backed pipes/PTYS and `PollTargetEntry::socket(...)` for socket-table entries so one notifier-driven poll loop is exercised across subsystems.
 - Kernel guest identity should live on `ProcessContext.identity` / `ProcessInfo.identity`, while passwd/group string formatting stays centralized in `crates/kernel/src/user.rs`; do not infer uid/gid/user state back out of env vars or `/etc/*` snapshots.
 - Guest runtime identity defaults must keep `HOME` tied to the kernel user's homedir and `PWD` tied to the execution cwd; JS, WASM, and Python all need to consume the same prepared env so guest-visible identity probes do not fall back to host or runtime defaults.
+- Root filesystem bootstrap entries must suppress kernel-owned pseudo-filesystem paths under `/dev`, `/proc`, and `/sys`; those directories stay reserved for synthetic kernel state and should not be snapshotted from the writable upper.
 - Sidecar/V8 networking integration tests should prefer VM-local loopback peers inside the guest (for example a guest `net` server/client pair or paired `dgram` sockets) instead of host loopback fixtures plus `LOOPBACK_EXEMPT_PORTS_ENV`, so the test actually exercises kernel-owned socket routing.
 - Sidecar JS execution tests that manually register an `ActiveProcess` must set `.with_host_cwd(cwd.to_path_buf())` (or use the shared test helpers that do) before draining execution events; otherwise shadow-root sync defaults to `/` and unrelated host paths can leak into reconciliation.
 - Fire-and-forget session shutdown in `packages/core/src/agent-os.ts` still needs a local `.catch(() => {})` on the dropped `_closeSessionInternal()` promise; deterministic callers should await `_sessionClosePromises` instead of letting shared-runtime close races surface as unhandled rejections.
@@ -371,4 +372,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - `prepare_guest_runtime_env(...)` is the shared truth path for VM identity defaults; if one runtime bypasses it, `HOME`/`PWD` split and kernel-owned `USER`/`SHELL` values drift immediately.
   - When changing bundled runner assets under `crates/execution/`, bump `NODE_IMPORT_CACHE_ASSET_VERSION` or stale `/tmp/agent-os-node-import-cache-*` materializations will mask the fix.
   - The active truth path for this story is `cargo test -p agent-os-sidecar --test guest_identity -- --test-threads=1` and root `pnpm check-types`.
+---
+## 2026-04-10 04:08:57 PDT - US-060
+- Added root filesystem bootstrap suppression for kernel-reserved pseudo-filesystem paths so `bootstrap_entries` can no longer materialize writable-upper content under `/dev`, `/proc`, or `/sys`.
+- Added focused `crates/kernel/tests/root_fs.rs` coverage proving reserved bootstrap paths are ignored while normal workspace entries still apply and snapshot cleanly, and recorded the reusable rule in `crates/kernel/AGENTS.md` (`crates/kernel/CLAUDE.md` target).
+- Files changed: `crates/kernel/CLAUDE.md`, `crates/kernel/src/root_fs.rs`, `crates/kernel/tests/root_fs.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Root filesystem bootstrap filtering belongs in `crates/kernel/src/root_fs.rs` so every VM construction path that replays `bootstrap_entries` inherits the same reserved-path suppression automatically.
+  - Treat `/dev`, `/proc`, and `/sys` as kernel-owned pseudo-filesystem prefixes, not just single directories; writable-upper snapshots must not persist descendants under those trees.
+  - The active truth path for this story is `cargo test -p agent-os-kernel --test root_fs -- --test-threads=1` and root `pnpm check-types`.
 ---

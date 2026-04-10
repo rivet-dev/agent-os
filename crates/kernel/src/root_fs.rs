@@ -1,5 +1,5 @@
 use crate::overlay_fs::{OverlayFileSystem, OverlayMode};
-use crate::vfs::{MemoryFileSystem, VfsError, VfsResult, VirtualFileSystem};
+use crate::vfs::{normalize_path, MemoryFileSystem, VfsError, VfsResult, VirtualFileSystem};
 use base64::Engine;
 use serde::Deserialize;
 
@@ -47,6 +47,7 @@ const DEFAULT_ROOT_DIRECTORIES: &[&str] = &[
     "/var/tmp",
     "/etc/agentos",
 ];
+const KERNEL_RESERVED_BOOTSTRAP_PATH_PREFIXES: &[&str] = &["/dev", "/proc", "/sys"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootFilesystemError {
@@ -204,6 +205,9 @@ impl RootFileSystem {
         }
 
         for entry in sort_entries(entries.to_vec()) {
+            if is_kernel_reserved_bootstrap_path(&entry.path) {
+                continue;
+            }
             apply_entry(&mut self.overlay, &entry)?;
         }
         Ok(())
@@ -707,4 +711,11 @@ fn snapshot_path(
         target: None,
     });
     Ok(())
+}
+
+fn is_kernel_reserved_bootstrap_path(path: &str) -> bool {
+    let normalized = normalize_path(path);
+    KERNEL_RESERVED_BOOTSTRAP_PATH_PREFIXES
+        .iter()
+        .any(|prefix| normalized == *prefix || normalized.starts_with(&format!("{prefix}/")))
 }

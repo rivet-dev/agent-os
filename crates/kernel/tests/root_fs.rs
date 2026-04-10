@@ -326,6 +326,53 @@ fn root_filesystem_composes_multiple_lowers_before_bootstrap_upper() {
 }
 
 #[test]
+fn root_filesystem_bootstrap_suppresses_kernel_reserved_paths() {
+    let mut root = RootFileSystem::from_descriptor(RootFilesystemDescriptor {
+        mode: RootFilesystemMode::Ephemeral,
+        disable_default_base_layer: true,
+        lowers: vec![RootFilesystemSnapshot {
+            entries: vec![FilesystemEntry::directory("/workspace")],
+        }],
+        bootstrap_entries: vec![
+            FilesystemEntry::directory("/dev/custom"),
+            FilesystemEntry::file("/dev/null", b"not-a-device".to_vec()),
+            FilesystemEntry::file("/proc/mounts", b"fake mounts".to_vec()),
+            FilesystemEntry::file("/sys/kernel/info", b"blocked".to_vec()),
+            FilesystemEntry::file("/workspace/allowed.txt", b"allowed".to_vec()),
+        ],
+    })
+    .expect("create root with reserved bootstrap paths");
+
+    assert!(!root.exists("/dev/custom"));
+    assert!(!root.exists("/dev/null"));
+    assert!(!root.exists("/proc/mounts"));
+    assert!(!root.exists("/sys/kernel/info"));
+    assert_eq!(
+        root.read_file("/workspace/allowed.txt")
+            .expect("read allowed bootstrap file"),
+        b"allowed".to_vec()
+    );
+
+    let snapshot = root.snapshot().expect("snapshot root");
+    assert!(snapshot
+        .entries
+        .iter()
+        .all(|entry| !entry.path.starts_with("/dev/")));
+    assert!(snapshot
+        .entries
+        .iter()
+        .all(|entry| !entry.path.starts_with("/proc/")));
+    assert!(snapshot
+        .entries
+        .iter()
+        .all(|entry| !entry.path.starts_with("/sys/")));
+    assert!(snapshot
+        .entries
+        .iter()
+        .any(|entry| entry.path == "/workspace/allowed.txt"));
+}
+
+#[test]
 fn snapshot_round_trip_preserves_file_type_bits_in_modes() {
     let mut root = RootFileSystem::from_descriptor(RootFilesystemDescriptor {
         mode: RootFilesystemMode::Ephemeral,
