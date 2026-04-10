@@ -5,6 +5,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
 - ACP adapters that emit live `session/request_permission` calls during `session/prompt` need the sidecar callback channel (`SidecarRequestPayload`) for replies; queued session events alone arrive too late and will deadlock the prompt.
+- Synthetic ACP `session/update` compatibility belongs in `crates/sidecar/src/acp/session.rs`: when `session/set_mode` or `session/set_config_option` succeeds without a matching agent notification, synthesize the update there so `getSessionState()` and the TypeScript session API stay agent-agnostic.
 - In Agent OS `child_process` polyfills, treat string-valued `options.shell` the same as `true`; tools that go through `cross-spawn` or pass an explicit shell path like `"/bin/sh"` otherwise fail redirected commands by trying to exec the whole shell string as a binary.
 - For the OpenCode ACP Node bundle in `registry/agent/opencode/scripts/build-opencode-acp.mjs`, run result-returning SQLite PRAGMAs through `db.$client.exec(...)` instead of drizzle `db.run(...)`; the VM `node:sqlite` shim treats `journal_mode`, `busy_timeout`, `foreign_keys`, and `wal_checkpoint` as row-returning queries and will break `createSession("opencode")` otherwise.
 - OpenCode VM tool/file coverage depends on two bundle-level patches in `registry/agent/opencode/scripts/build-opencode-acp.mjs`: restore the current `Instance` around async LLM/tool execution, and translate absolute guest paths through `AGENT_OS_GUEST_PATH_MAPPINGS` before the bundle calls `node:fs`.
@@ -144,4 +145,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - On the native sidecar path, top-level ACP requests are not preemptive with respect to each other; a `session/cancel` request does not by itself interrupt an already running `session/prompt` dispatch soon enough for the public prompt promise to observe cancellation.
   - If Agent OS needs immediate cancellation semantics for prompt callers, the host-side pending-request bookkeeping in `packages/core/src/agent-os.ts` must synthesize the prompt result locally while still forwarding the real cancel RPC for adapter cleanup.
   - The active truth path for this story is `pnpm --dir packages/core exec vitest run tests/codex-session.test.ts` plus root `pnpm check-types`.
+---
+## 2026-04-09 22:30:49 PDT - US-039
+- Generalized ACP synthetic session-update handling in the Rust sidecar so successful `session/set_mode` and `session/set_config_option` calls now emit matching synthetic `session/update` notifications whenever the agent omits them, instead of keeping that compatibility behavior limited to one agent/method path.
+- Added focused coverage at both layers: Rust ACP/session tests now cover synthetic mode/config updates plus duplicate-suppression when real agent updates are present, and a `packages/core` integration test uses a mock Codex ACP adapter that never emits `session/update` to verify the public Agent OS session API still surfaces the expected events.
+- Files changed: `crates/CLAUDE.md`, `crates/sidecar/src/acp/compat.rs`, `crates/sidecar/src/acp/session.rs`, `crates/sidecar/tests/acp_session.rs`, `packages/core/tests/synthetic-session-updates.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The sidecar should synthesize missing ACP mode/config updates from `AcpSessionState` after a successful request, not in per-agent TypeScript fallbacks, so `getSessionState()`, `acp.session_event`, and session subscribers stay aligned.
+  - Duplicate suppression for synthetic updates should key off matching `session/update` notifications recorded during the request window; that lets agents that do emit the event avoid double-reporting while still covering silent adapters.
+  - The active truth path for this story is `cargo test -p agent-os-sidecar --test acp_session`, `pnpm --dir packages/core exec vitest run tests/synthetic-session-updates.test.ts`, and root `pnpm check-types`.
 ---

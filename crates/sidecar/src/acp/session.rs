@@ -1,5 +1,5 @@
 use crate::acp::compat::{
-    compatibility_for, derive_config_options, synthetic_mode_update, AgentCompatibilityKind,
+    derive_config_options, synthetic_config_update, synthetic_mode_update,
     PendingPermissionRequest, RECENT_ACTIVITY_LIMIT,
 };
 use crate::acp::{JsonRpcId, JsonRpcNotification};
@@ -78,7 +78,6 @@ pub(crate) struct AcpSessionState {
     pub(crate) next_terminal_id: u64,
     pub(crate) closed: bool,
     pub(crate) exit_code: Option<i32>,
-    pub(crate) compatibility: AgentCompatibilityKind,
 }
 
 impl AcpSessionState {
@@ -91,7 +90,6 @@ impl AcpSessionState {
         init_result: &Map<String, Value>,
         session_result: &Map<String, Value>,
     ) -> Self {
-        let compatibility = compatibility_for(&agent_type);
         let mut config_options = init_result
             .get("configOptions")
             .and_then(Value::as_array)
@@ -142,7 +140,6 @@ impl AcpSessionState {
             next_terminal_id: 1,
             closed: false,
             exit_code: None,
-            compatibility,
         }
     }
 
@@ -211,18 +208,16 @@ impl AcpSessionState {
         if method == "session/set_mode" {
             if let Some(mode_id) = params.get("modeId").and_then(Value::as_str) {
                 self.apply_local_mode_update(mode_id);
-                if matches!(self.compatibility, AgentCompatibilityKind::OpenCode)
-                    && !self.has_session_update_since(event_count_before, |update| {
-                        update
-                            .get("sessionUpdate")
+                if !self.has_session_update_since(event_count_before, |update| {
+                    update
+                        .get("sessionUpdate")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value == "current_mode_update")
+                        && update
+                            .get("currentModeId")
                             .and_then(Value::as_str)
-                            .is_some_and(|value| value == "current_mode_update")
-                            && update
-                                .get("currentModeId")
-                                .and_then(Value::as_str)
-                                .is_some_and(|value| value == mode_id)
-                    })
-                {
+                            .is_some_and(|value| value == mode_id)
+                }) {
                     let notification = synthetic_mode_update(mode_id);
                     self.record_notification(notification.clone());
                     return Some(notification);
@@ -236,6 +231,18 @@ impl AcpSessionState {
                 params.get("value").and_then(Value::as_str),
             ) {
                 self.apply_local_config_update(config_id, value);
+                if !self.has_session_update_since(event_count_before, |update| {
+                    update
+                        .get("sessionUpdate")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| {
+                            value == "config_option_update" || value == "config_options_update"
+                        })
+                }) {
+                    let notification = synthetic_config_update(&self.config_options);
+                    self.record_notification(notification.clone());
+                    return Some(notification);
+                }
             }
         }
 

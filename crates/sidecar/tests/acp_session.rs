@@ -281,8 +281,8 @@ fn notifications_record_sequence_numbers_and_session_updates() {
 }
 
 #[test]
-fn opencode_mode_changes_inject_synthetic_session_update() {
-    let mut session = session("opencode");
+fn mode_changes_inject_synthetic_session_update_when_agent_omits_notification() {
+    let mut session = session("mock-no-update-agent");
     let params = Map::from_iter([(String::from("modeId"), Value::String(String::from("plan")))]);
 
     let synthetic = session
@@ -293,6 +293,90 @@ fn opencode_mode_changes_inject_synthetic_session_update() {
         session.state_response().modes.expect("modes")["currentModeId"],
         Value::String(String::from("plan"))
     );
+}
+
+#[test]
+fn mode_changes_do_not_duplicate_existing_session_updates() {
+    let mut session = session("mock-no-update-agent");
+    session.record_notification(JsonRpcNotification {
+        jsonrpc: String::from("2.0"),
+        method: String::from("session/update"),
+        params: Some(json!({
+            "update": {
+                "sessionUpdate": "current_mode_update",
+                "currentModeId": "plan",
+            },
+        })),
+    });
+
+    let params = Map::from_iter([(String::from("modeId"), Value::String(String::from("plan")))]);
+    let synthetic = session.apply_request_success("session/set_mode", &params, 0);
+
+    assert!(synthetic.is_none());
+    assert_eq!(session.state_response().events.len(), 1);
+}
+
+#[test]
+fn config_changes_inject_synthetic_session_update_when_agent_omits_notification() {
+    let mut session = session("mock-no-update-agent");
+    let params = Map::from_iter([
+        (
+            String::from("configId"),
+            Value::String(String::from("thought-opt")),
+        ),
+        (String::from("value"), Value::String(String::from("high"))),
+    ]);
+
+    let synthetic = session
+        .apply_request_success("session/set_config_option", &params, 0)
+        .expect("synthetic config update");
+    assert_eq!(synthetic.method, "session/update");
+    assert_eq!(
+        synthetic.params.expect("config params")["update"]["sessionUpdate"],
+        Value::String(String::from("config_option_update"))
+    );
+    assert_eq!(session.state_response().config_options[1]["currentValue"], "high");
+}
+
+#[test]
+fn config_changes_do_not_duplicate_existing_session_updates() {
+    let mut session = session("mock-no-update-agent");
+    session.record_notification(JsonRpcNotification {
+        jsonrpc: String::from("2.0"),
+        method: String::from("session/update"),
+        params: Some(json!({
+            "update": {
+                "sessionUpdate": "config_option_update",
+                "configOptions": [
+                    {
+                        "id": "model-opt",
+                        "category": "model",
+                        "label": "Model",
+                        "currentValue": "default",
+                    },
+                    {
+                        "id": "thought-opt",
+                        "category": "thought_level",
+                        "label": "Thought Level",
+                        "currentValue": "high",
+                    },
+                ],
+            },
+        })),
+    });
+
+    let params = Map::from_iter([
+        (
+            String::from("configId"),
+            Value::String(String::from("thought-opt")),
+        ),
+        (String::from("value"), Value::String(String::from("high"))),
+    ]);
+    let synthetic = session.apply_request_success("session/set_config_option", &params, 0);
+
+    assert!(synthetic.is_none());
+    assert_eq!(session.state_response().events.len(), 1);
+    assert_eq!(session.state_response().config_options[1]["currentValue"], "high");
 }
 
 #[test]

@@ -209,6 +209,19 @@ pub(crate) fn synthetic_mode_update(mode_id: &str) -> JsonRpcNotification {
     }
 }
 
+pub(crate) fn synthetic_config_update(config_options: &[Value]) -> JsonRpcNotification {
+    JsonRpcNotification {
+        jsonrpc: String::from("2.0"),
+        method: String::from("session/update"),
+        params: Some(json!({
+            "update": {
+                "sessionUpdate": "config_option_update",
+                "configOptions": config_options,
+            }
+        })),
+    }
+}
+
 pub(crate) fn truncate_activity_text(value: &str) -> String {
     if value.len() <= ACTIVITY_TEXT_LIMIT {
         return String::from(value);
