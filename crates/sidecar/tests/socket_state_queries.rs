@@ -206,7 +206,6 @@ fn v8_signal_delivery_routes_kill_process_and_process_kill() {
 }
 
 #[test]
-#[ignore = "V8 sidecar socket-state output delivery is flaky in this harness; execution-layer tests cover the V8 bridge path"]
 fn sidecar_queries_listener_udp_and_signal_state() {
     assert_node_available();
 

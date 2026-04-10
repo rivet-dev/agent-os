@@ -17,6 +17,7 @@ use agent_os_execution::{
 use agent_os_kernel::kernel::{KernelProcessHandle, KernelVm};
 use agent_os_kernel::mount_table::MountTable;
 use agent_os_kernel::root_fs::{RootFileSystem, RootFilesystemMode, RootFilesystemSnapshot};
+use agent_os_kernel::socket_table::SocketId;
 use rusqlite::Connection;
 use rustls::{ClientConnection, ServerConnection, StreamOwned};
 use serde::{Deserialize, Serialize};
@@ -642,7 +643,9 @@ pub(crate) enum JavascriptTcpListenerEvent {
 
 #[derive(Debug)]
 pub(crate) struct PendingTcpSocket {
-    pub(crate) stream: TcpStream,
+    pub(crate) stream: Option<TcpStream>,
+    pub(crate) kernel_socket_id: Option<SocketId>,
+    pub(crate) preallocated: bool,
     pub(crate) guest_local_addr: SocketAddr,
     pub(crate) guest_remote_addr: SocketAddr,
 }
@@ -662,10 +665,14 @@ pub(crate) enum JavascriptTcpSocketEvent {
 
 #[derive(Debug)]
 pub(crate) struct ActiveTcpSocket {
-    pub(crate) stream: Arc<Mutex<TcpStream>>,
-    pub(crate) pending_read_stream: Arc<Mutex<Option<TcpStream>>>,
-    pub(crate) events: Receiver<JavascriptTcpSocketEvent>,
-    pub(crate) event_sender: Sender<JavascriptTcpSocketEvent>,
+    pub(crate) stream: Option<Arc<Mutex<TcpStream>>>,
+    pub(crate) pending_read_stream: Option<Arc<Mutex<Option<TcpStream>>>>,
+    pub(crate) events: Option<Receiver<JavascriptTcpSocketEvent>>,
+    pub(crate) event_sender: Option<Sender<JavascriptTcpSocketEvent>>,
+    pub(crate) kernel_socket_id: Option<SocketId>,
+    pub(crate) no_delay: bool,
+    pub(crate) keep_alive: bool,
+    pub(crate) keep_alive_initial_delay_secs: Option<u64>,
     pub(crate) guest_local_addr: SocketAddr,
     pub(crate) guest_remote_addr: SocketAddr,
     pub(crate) listener_id: Option<String>,
@@ -746,8 +753,9 @@ pub(crate) struct ResolvedTcpConnectAddr {
 
 #[derive(Debug)]
 pub(crate) struct ActiveTcpListener {
-    pub(crate) listener: TcpListener,
-    pub(crate) local_addr: SocketAddr,
+    pub(crate) listener: Option<TcpListener>,
+    pub(crate) kernel_socket_id: Option<SocketId>,
+    pub(crate) local_addr: Option<SocketAddr>,
     pub(crate) guest_local_addr: SocketAddr,
     pub(crate) backlog: usize,
     pub(crate) active_connection_ids: BTreeSet<String>,
@@ -846,7 +854,10 @@ pub(crate) enum JavascriptUdpSocketEvent {
 pub(crate) struct ActiveUdpSocket {
     pub(crate) family: JavascriptUdpFamily,
     pub(crate) socket: Option<UdpSocket>,
+    pub(crate) kernel_socket_id: Option<SocketId>,
     pub(crate) guest_local_addr: Option<SocketAddr>,
+    pub(crate) recv_buffer_size: usize,
+    pub(crate) send_buffer_size: usize,
 }
 
 // ---------------------------------------------------------------------------

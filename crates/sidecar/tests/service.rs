@@ -1688,11 +1688,13 @@ ykAheWCsAteSEWVc0w==\n\
                     .get("proc-js-net-read")
                     .expect("javascript process");
                 let socket = process.tcp_sockets.get(&socket_id).expect("tcp socket");
-                let stream = socket.stream.lock().expect("lock tcp socket");
-                assert!(stream.nodelay().expect("read TCP_NODELAY"));
-                assert!(SockRef::from(&*stream)
-                    .keepalive()
-                    .expect("read SO_KEEPALIVE"));
+                assert!(
+                    socket.kernel_socket_id.is_some(),
+                    "expected loopback net.connect to use kernel socket state"
+                );
+                assert!(socket.no_delay, "expected TCP_NODELAY flag to be tracked");
+                assert!(socket.keep_alive, "expected SO_KEEPALIVE flag to be tracked");
+                assert_eq!(socket.keep_alive_initial_delay_secs, Some(1));
             }
 
             call_javascript_sync_rpc(
@@ -2666,16 +2668,6 @@ ykAheWCsAteSEWVc0w==\n\
                 .as_u64()
                 .and_then(|value| u16::try_from(value).ok())
                 .expect("guest listener port");
-            let host_port = {
-                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
-                vm.active_processes
-                    .get("proc-js-server-accept")
-                    .and_then(|process| process.tcp_listeners.get(&server_id))
-                    .expect("sidecar tcp listener")
-                    .local_addr()
-                    .port()
-            };
-
             let timeout = call_javascript_sync_rpc(
                 &mut sidecar,
                 &vm_id,
@@ -2689,10 +2681,24 @@ ykAheWCsAteSEWVc0w==\n\
             .expect("accept timeout sentinel");
             assert_eq!(timeout, Value::from("__secure_exec_net_timeout__"));
 
-            let client = thread::spawn(move || {
-                let _stream = TcpStream::connect(("127.0.0.1", host_port))
-                    .expect("connect to sidecar listener");
-            });
+            let connect = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-server-accept",
+                JavascriptSyncRpcRequest {
+                    id: 3,
+                    method: String::from("net.connect"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": guest_port,
+                    })],
+                },
+            )
+            .expect("connect to vm-owned listener");
+            let client_socket_id = connect["socketId"]
+                .as_str()
+                .expect("client socket id")
+                .to_string();
 
             let mut accepted = None;
             for attempt in 0..20 {
@@ -2725,8 +2731,37 @@ ykAheWCsAteSEWVc0w==\n\
             assert_eq!(parsed["info"]["localPort"], Value::from(guest_port));
             assert_eq!(parsed["info"]["localFamily"], Value::from("IPv4"));
             assert_eq!(parsed["info"]["remoteFamily"], Value::from("IPv4"));
+            assert!(
+                parsed["info"]["remotePort"]
+                    .as_u64()
+                    .is_some_and(|port| port > 0),
+                "accepted payload: {parsed}"
+            );
 
-            client.join().expect("join tcp client");
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-server-accept",
+                JavascriptSyncRpcRequest {
+                    id: 40,
+                    method: String::from("net.destroy"),
+                    args: vec![json!(client_socket_id)],
+                },
+            )
+            .expect("destroy client socket");
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-server-accept",
+                JavascriptSyncRpcRequest {
+                    id: 41,
+                    method: String::from("net.destroy"),
+                    args: vec![json!(
+                        parsed["socketId"].as_str().expect("accepted socket id")
+                    )],
+                },
+            )
+            .expect("destroy accepted socket");
         }
 
         #[test]
@@ -6494,71 +6529,88 @@ console.log("sqlite-ok");
         }
 
         #[test]
-        #[ignore = "V8 sidecar TCP integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
-        fn javascript_net_rpc_connects_to_host_tcp_server() {
+        fn javascript_net_rpc_connects_over_vm_loopback() {
             assert_node_available();
-
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind tcp listener");
-            let port = listener.local_addr().expect("listener address").port();
-            let server = thread::spawn(move || {
-                let (mut stream, _) = listener.accept().expect("accept tcp client");
-                let mut received = [0_u8; 4];
-                stream
-                    .read_exact(&mut received)
-                    .expect("read client payload");
-                assert_eq!(
-                    String::from_utf8(received.to_vec()).expect("client utf8"),
-                    "ping"
-                );
-                stream.write_all(b"pong").expect("write server payload");
-            });
 
             let mut sidecar = create_test_sidecar();
             let (connection_id, session_id) =
                 authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
-            let vm_id = create_vm_with_metadata(
+            let vm_id = create_vm(
                 &mut sidecar,
                 &connection_id,
                 &session_id,
                 PermissionsPolicy::allow_all(),
-                BTreeMap::from([(
-                    format!("env.{LOOPBACK_EXEMPT_PORTS_ENV}"),
-                    serde_json::to_string(&vec![port.to_string()]).expect("serialize exempt ports"),
-                )]),
             )
             .expect("create vm");
             let cwd = temp_dir("agent-os-sidecar-js-net-rpc-cwd");
             write_fixture(
                 &cwd.join("entry.mjs"),
-                &format!(
-                    r#"
+                r#"
 import net from "node:net";
 
-const socket = net.createConnection({{ host: "127.0.0.1", port: {port} }});
-let data = "";
-socket.setEncoding("utf8");
-socket.on("connect", () => {{
-  socket.write("ping");
-}});
-socket.on("data", (chunk) => {{
-  data += chunk;
-}});
-socket.on("error", (error) => {{
-  console.error(error.stack ?? error.message);
-  process.exit(1);
-}});
-socket.on("close", (hadError) => {{
-  console.log(JSON.stringify({{
-    data,
-    hadError,
-    remoteAddress: socket.remoteAddress,
-    remotePort: socket.remotePort,
-    localPort: socket.localPort,
-  }}));
-  process.exit(0);
-}});
+const summary = await new Promise((resolve, reject) => {
+  const server = net.createServer((socket) => {
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      received += chunk;
+    });
+    socket.on("end", () => {
+      if (received !== "ping") {
+        reject(new Error(`unexpected server payload: ${received}`));
+        return;
+      }
+      socket.end("pong");
+    });
+    socket.on("error", reject);
+  });
+  server.on("error", reject);
+  server.listen(0, "127.0.0.1", () => {
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      reject(new Error(`unexpected listener address: ${String(address)}`));
+      return;
+    }
+    const socket = net.createConnection({ host: "127.0.0.1", port: address.port });
+    let data = "";
+    socket.setEncoding("utf8");
+    socket.on("connect", () => {
+      socket.end("ping");
+    });
+    socket.on("data", (chunk) => {
+      data += chunk;
+    });
+    socket.on("error", reject);
+    socket.on("close", (hadError) => {
+      server.close(() => {
+        resolve({
+          data,
+          hadError,
+          remoteAddress: socket.remoteAddress,
+          remotePort: socket.remotePort,
+          localPort: socket.localPort,
+          listenerPort: address.port,
+        });
+      });
+    });
+  });
+});
+
+if (summary.data !== "pong") {
+  throw new Error(`unexpected TCP message: ${summary.data}`);
+}
+if (summary.remoteAddress !== "127.0.0.1") {
+  throw new Error(`unexpected TCP remote address: ${JSON.stringify(summary)}`);
+}
+if (summary.remotePort !== summary.listenerPort) {
+  throw new Error(`unexpected TCP remote port: ${JSON.stringify(summary)}`);
+}
+if (typeof summary.localPort !== "number" || summary.localPort <= 0) {
+  throw new Error(`unexpected TCP local port: ${JSON.stringify(summary)}`);
+}
+
+console.log(JSON.stringify(summary));
 "#,
-                ),
             );
 
             let (stdout, stderr, exit_code) = run_javascript_entry(
@@ -6569,36 +6621,20 @@ socket.on("close", (hadError) => {{
                 "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
             );
 
-            server.join().expect("join tcp server");
             assert_eq!(exit_code, Some(0), "stderr: {stderr}");
             assert!(
                 stdout.contains("\"remoteAddress\":\"127.0.0.1\""),
                 "stdout: {stdout}"
             );
             assert!(
-                stdout.contains(&format!("\"remotePort\":{port}")),
+                stdout.contains("\"listenerPort\":"),
                 "stdout: {stdout}"
             );
         }
 
         #[test]
-        fn javascript_dgram_rpc_sends_and_receives_host_udp_packets() {
+        fn javascript_dgram_rpc_sends_and_receives_vm_loopback_packets() {
             assert_node_available();
-
-            let listener = UdpSocket::bind("127.0.0.1:0").expect("bind udp listener");
-            let port = listener.local_addr().expect("listener address").port();
-            let server = thread::spawn(move || {
-                let mut buffer = [0_u8; 64 * 1024];
-                let (bytes_read, remote_addr) =
-                    listener.recv_from(&mut buffer).expect("recv packet");
-                assert_eq!(
-                    String::from_utf8(buffer[..bytes_read].to_vec()).expect("udp payload utf8"),
-                    "ping"
-                );
-                listener
-                    .send_to(b"pong", remote_addr)
-                    .expect("send udp response");
-            });
 
             let mut sidecar = create_test_sidecar();
             let (connection_id, session_id) =
@@ -6613,139 +6649,76 @@ socket.on("close", (hadError) => {{
             let cwd = temp_dir("agent-os-sidecar-js-dgram-rpc-cwd");
             write_fixture(
                 &cwd.join("entry.mjs"),
-                &format!(
-                    r#"
+                r#"
 import dgram from "node:dgram";
 
-const socket = dgram.createSocket("udp4");
-const summary = await new Promise((resolve) => {{
-socket.on("error", (error) => {{
-  console.error(error.stack ?? error.message);
-  process.exit(1);
-}});
-socket.on("message", (message, rinfo) => {{
-  const address = socket.address();
-  socket.close(() => {{
-    resolve({{
-      address,
-      message: message.toString("utf8"),
-      rinfo,
-    }});
-  }});
-}});
-socket.bind(0, "127.0.0.1", () => {{
-  socket.send("ping", {port}, "127.0.0.1");
-}});
-}});
+const receiver = dgram.createSocket("udp4");
+const sender = dgram.createSocket("udp4");
+let receiverAddress;
+const summary = await new Promise((resolve) => {
+  const reject = (error) => {
+    console.error(error.stack ?? error.message);
+    process.exit(1);
+  };
+  receiver.on("error", reject);
+  sender.on("error", reject);
+  receiver.on("message", (message, rinfo) => {
+    receiverAddress = receiver.address();
+    if (message.toString("utf8") !== "ping") {
+      reject(new Error(`unexpected UDP request: ${message.toString("utf8")}`));
+      return;
+    }
+    receiver.send("pong", rinfo.port, rinfo.address, (error) => {
+      if (error) {
+        reject(error);
+      }
+    });
+  });
+  sender.on("message", (message, rinfo) => {
+    const senderAddress = sender.address();
+    sender.close(() => {
+      receiver.close(() => {
+        resolve({
+          senderAddress,
+          receiverAddress,
+          message: message.toString("utf8"),
+          rinfo,
+        });
+      });
+    });
+  });
+  receiver.bind(0, "127.0.0.1", () => {
+    receiverAddress = receiver.address();
+    sender.bind(0, "127.0.0.1", () => {
+      sender.send("ping", receiverAddress.port, "127.0.0.1");
+    });
+  });
+});
 
-if (summary.message !== "pong") {{
-  throw new Error(`unexpected udp message: ${{summary.message}}`);
-}}
-if (summary.address.address !== "127.0.0.1") {{
-  throw new Error(`unexpected udp address: ${{JSON.stringify(summary.address)}}`);
-}}
-if (summary.rinfo.address !== "127.0.0.1" || summary.rinfo.port !== {port}) {{
-  throw new Error(`unexpected udp remote info: ${{JSON.stringify(summary.rinfo)}}`);
-}}
+if (summary.message !== "pong") {
+  throw new Error(`unexpected udp message: ${summary.message}`);
+}
+if (summary.senderAddress.address !== "127.0.0.1") {
+  throw new Error(`unexpected udp sender address: ${JSON.stringify(summary.senderAddress)}`);
+}
+if (summary.receiverAddress.address !== "127.0.0.1") {
+  throw new Error(`unexpected udp receiver address: ${JSON.stringify(summary.receiverAddress)}`);
+}
+if (summary.rinfo.address !== "127.0.0.1" || summary.rinfo.port !== summary.receiverAddress.port) {
+  throw new Error(`unexpected udp remote info: ${JSON.stringify(summary.rinfo)}`);
+}
+
+console.log(JSON.stringify(summary));
 "#,
-                ),
+            );
+            let (_stdout, stderr, exit_code) = run_javascript_entry(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-dgram",
+                "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dgram\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
             );
 
-            let context =
-                sidecar
-                    .javascript_engine
-                    .create_context(CreateJavascriptContextRequest {
-                        vm_id: vm_id.clone(),
-                        bootstrap_module: None,
-                        compile_cache_root: None,
-                    });
-            let execution = sidecar
-            .javascript_engine
-            .start_execution(StartJavascriptExecutionRequest {
-                vm_id: vm_id.clone(),
-                context_id: context.context_id,
-                argv: vec![String::from("./entry.mjs")],
-                env: BTreeMap::from([(
-                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
-                    String::from(
-                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dgram\",\"events\",\"fs\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
-                    ),
-                )]),
-                cwd: cwd.clone(),
-                inline_code: None,
-            })
-            .expect("start fake javascript execution");
-
-            let kernel_handle = {
-                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
-                vm.kernel
-                    .spawn_process(
-                        JAVASCRIPT_COMMAND,
-                        vec![String::from("./entry.mjs")],
-                        SpawnOptions {
-                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
-                            cwd: Some(String::from("/")),
-                            ..SpawnOptions::default()
-                        },
-                    )
-                    .expect("spawn kernel javascript process")
-            };
-
-            {
-                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
-                vm.active_processes.insert(
-                    String::from("proc-js-dgram"),
-                    ActiveProcess::new(
-                        kernel_handle.pid(),
-                        kernel_handle,
-                        GuestRuntimeKind::JavaScript,
-                        ActiveExecution::Javascript(execution),
-                    ),
-                );
-            }
-
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-            let mut exit_code = None;
-            for _ in 0..64 {
-                let next_event = {
-                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
-                    vm.active_processes
-                        .get("proc-js-dgram")
-                        .map(|process| {
-                            process
-                                .execution
-                                .poll_event_blocking(Duration::from_secs(5))
-                                .expect("poll javascript dgram rpc event")
-                        })
-                        .flatten()
-                };
-                let Some(event) = next_event else {
-                    if exit_code.is_some() {
-                        break;
-                    }
-                    panic!("javascript dgram process disappeared before exit");
-                };
-
-                match &event {
-                    ActiveExecutionEvent::Stdout(chunk) => {
-                        stdout.push_str(&String::from_utf8_lossy(chunk));
-                    }
-                    ActiveExecutionEvent::Stderr(chunk) => {
-                        stderr.push_str(&String::from_utf8_lossy(chunk));
-                    }
-                    ActiveExecutionEvent::Exited(code) => {
-                        exit_code = Some(*code);
-                    }
-                    _ => {}
-                }
-
-                sidecar
-                    .handle_execution_event(&vm_id, "proc-js-dgram", event)
-                    .expect("handle javascript dgram rpc event");
-            }
-
-            server.join().expect("join udp server");
             assert_eq!(exit_code, Some(0), "stderr: {stderr}");
         }
 
@@ -7089,21 +7062,8 @@ process.exit(0);
         }
 
         #[test]
-        #[ignore = "V8 sidecar DNS/network integration can exhaust heap in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_dns_rpc_honors_vm_dns_overrides_and_net_connect_uses_sidecar_dns() {
             assert_node_available();
-
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind tcp listener");
-            let port = listener.local_addr().expect("listener address").port();
-            let server = thread::spawn(move || {
-                let (mut stream, _) = listener.accept().expect("accept tcp client");
-                let mut received = Vec::new();
-                stream
-                    .read_to_end(&mut received)
-                    .expect("read client payload");
-                assert_eq!(String::from_utf8(received).expect("client utf8"), "ping");
-                stream.write_all(b"pong").expect("write server payload");
-            });
 
             let mut sidecar = create_test_sidecar();
             let (connection_id, session_id) =
@@ -7114,11 +7074,6 @@ process.exit(0);
                 &session_id,
                 PermissionsPolicy::allow_all(),
                 BTreeMap::from([
-                    (
-                        format!("env.{LOOPBACK_EXEMPT_PORTS_ENV}"),
-                        serde_json::to_string(&vec![port.to_string()])
-                            .expect("serialize exempt ports"),
-                    ),
                     (
                         String::from("network.dns.override.example.test"),
                         String::from("127.0.0.1"),
@@ -7133,134 +7088,70 @@ process.exit(0);
             let cwd = temp_dir("agent-os-sidecar-js-dns-override-rpc-cwd");
             write_fixture(
                 &cwd.join("entry.mjs"),
-                &format!(
-                    r#"
+                r#"
 import dns from "node:dns";
 import net from "node:net";
 
-const lookup = await dns.promises.lookup("example.test", {{ family: 4 }});
-const resolved = await dns.promises.resolve4("example.test");
-const socketSummary = await new Promise((resolve, reject) => {{
-  const socket = net.createConnection({{ host: "example.test", port: {port} }});
-  let data = "";
-  socket.setEncoding("utf8");
-  socket.on("connect", () => {{
-    socket.end("ping");
-  }});
-  socket.on("data", (chunk) => {{
-    data += chunk;
-  }});
-  socket.on("error", reject);
-  socket.on("close", (hadError) => {{
-    resolve({{
-      data,
-      hadError,
-      remoteAddress: socket.remoteAddress,
-      remotePort: socket.remotePort,
-    }});
-  }});
-}});
+const lookup = await dns.promises.lookup("example.test", { family: 4 });
+const resolved = await dns.promises.resolve("example.test", "A");
+const socketSummary = await new Promise((resolve, reject) => {
+  const server = net.createServer((socket) => {
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      received += chunk;
+    });
+    socket.on("end", () => {
+      if (received !== "ping") {
+        reject(new Error(`unexpected DNS server payload: ${received}`));
+        return;
+      }
+      socket.end("pong");
+    });
+    socket.on("error", reject);
+  });
+  server.on("error", reject);
+  server.listen(0, "127.0.0.1", () => {
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      reject(new Error(`unexpected DNS listener address: ${String(address)}`));
+      return;
+    }
+    const socket = net.createConnection({ host: "example.test", port: address.port });
+    let data = "";
+    socket.setEncoding("utf8");
+    socket.on("connect", () => {
+      socket.end("ping");
+    });
+    socket.on("data", (chunk) => {
+      data += chunk;
+    });
+    socket.on("error", reject);
+    socket.on("close", (hadError) => {
+      server.close(() => {
+        resolve({
+          data,
+          hadError,
+          remoteAddress: socket.remoteAddress,
+          remotePort: socket.remotePort,
+          listenerPort: address.port,
+        });
+      });
+    });
+  });
+});
 
-console.log(JSON.stringify({{ lookup, resolved, socketSummary }}));
+console.log(JSON.stringify({ lookup, resolved, socketSummary }));
 "#,
-                ),
+            );
+            let (stdout, stderr, exit_code) = run_javascript_entry(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-dns-override",
+                "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
             );
 
-            let context =
-                sidecar
-                    .javascript_engine
-                    .create_context(CreateJavascriptContextRequest {
-                        vm_id: vm_id.clone(),
-                        bootstrap_module: None,
-                        compile_cache_root: None,
-                    });
-            let execution = sidecar
-            .javascript_engine
-            .start_execution(StartJavascriptExecutionRequest {
-                vm_id: vm_id.clone(),
-                context_id: context.context_id,
-                argv: vec![String::from("./entry.mjs")],
-                env: BTreeMap::from([(
-                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
-                    String::from(
-                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"dns\",\"events\",\"fs\",\"net\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
-                    ),
-                )]),
-                cwd: cwd.clone(),
-                inline_code: None,
-            })
-            .expect("start fake javascript execution");
-
-            let kernel_handle = {
-                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
-                vm.kernel
-                    .spawn_process(
-                        JAVASCRIPT_COMMAND,
-                        vec![String::from("./entry.mjs")],
-                        SpawnOptions {
-                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
-                            cwd: Some(String::from("/")),
-                            ..SpawnOptions::default()
-                        },
-                    )
-                    .expect("spawn kernel javascript process")
-            };
-
-            {
-                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
-                vm.active_processes.insert(
-                    String::from("proc-js-dns-override"),
-                    ActiveProcess::new(
-                        kernel_handle.pid(),
-                        kernel_handle,
-                        GuestRuntimeKind::JavaScript,
-                        ActiveExecution::Javascript(execution),
-                    ),
-                );
-            }
-
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-            let mut exit_code = None;
-            for _ in 0..64 {
-                let next_event = {
-                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
-                    vm.active_processes
-                        .get("proc-js-dns-override")
-                        .map(|process| {
-                            process
-                                .execution
-                                .poll_event_blocking(Duration::from_secs(5))
-                                .expect("poll javascript dns override rpc event")
-                        })
-                        .flatten()
-                };
-                let Some(event) = next_event else {
-                    if exit_code.is_some() {
-                        break;
-                    }
-                    panic!("javascript dns override process disappeared before exit");
-                };
-
-                match &event {
-                    ActiveExecutionEvent::Stdout(chunk) => {
-                        stdout.push_str(&String::from_utf8_lossy(chunk));
-                    }
-                    ActiveExecutionEvent::Stderr(chunk) => {
-                        stderr.push_str(&String::from_utf8_lossy(chunk));
-                    }
-                    ActiveExecutionEvent::Exited(code) => {
-                        exit_code = Some(*code);
-                    }
-                    _ => {}
-                }
-
-                sidecar
-                    .handle_execution_event(&vm_id, "proc-js-dns-override", event)
-                    .expect("handle javascript dns override rpc event");
-            }
-
-            server.join().expect("join tcp server");
             assert_eq!(exit_code, Some(0), "stderr: {stderr}");
             let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse dns JSON");
             assert_eq!(parsed["lookup"]["address"], Value::from("127.0.0.1"));
@@ -7274,7 +7165,7 @@ console.log(JSON.stringify({{ lookup, resolved, socketSummary }}));
             );
             assert_eq!(
                 parsed["socketSummary"]["remotePort"],
-                Value::from(u64::from(port))
+                parsed["socketSummary"]["listenerPort"]
             );
 
             let events = sidecar
@@ -7289,7 +7180,7 @@ console.log(JSON.stringify({{ lookup, resolved, socketSummary }}));
                 .collect::<Vec<_>>();
             assert!(
                 dns_events.len() >= 3,
-                "expected dns events for lookup, resolve4, and net.connect: {dns_events:?}"
+                "expected dns events for lookup, resolve, and net.connect: {dns_events:?}"
             );
             for event in dns_events {
                 assert_eq!(event.fields["source"], "override");
@@ -9758,7 +9649,6 @@ console.log(JSON.stringify(summary));
         }
 
         #[test]
-        #[ignore = "V8 sidecar per-VM listener isolation integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_network_listeners_are_isolated_per_vm_even_with_same_guest_port() {
             assert_node_available();
 
