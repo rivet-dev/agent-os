@@ -1,3 +1,4 @@
+use crate::vfs::normalize_path;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
@@ -106,6 +107,8 @@ pub struct SocketRecord {
     state: SocketState,
     local_address: Option<InetSocketAddress>,
     peer_address: Option<InetSocketAddress>,
+    local_unix_path: Option<String>,
+    peer_unix_path: Option<String>,
     listener_state: Option<ListenerState>,
     connection_state: Option<ConnectionState>,
     datagram_state: Option<DatagramState>,
@@ -134,6 +137,14 @@ impl SocketRecord {
 
     pub fn peer_address(&self) -> Option<&InetSocketAddress> {
         self.peer_address.as_ref()
+    }
+
+    pub fn local_unix_path(&self) -> Option<&str> {
+        self.local_unix_path.as_deref()
+    }
+
+    pub fn peer_unix_path(&self) -> Option<&str> {
+        self.peer_unix_path.as_deref()
     }
 
     pub fn listen_backlog(&self) -> Option<usize> {
@@ -291,13 +302,14 @@ struct SocketTableState {
     by_owner: BTreeMap<u32, BTreeSet<SocketId>>,
     bound_inet_streams: BTreeMap<InetSocketAddress, SocketId>,
     bound_inet_datagrams: BTreeMap<InetSocketAddress, SocketId>,
+    bound_unix_streams: BTreeMap<String, SocketId>,
     next_socket_id: SocketId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ListenerState {
     backlog: usize,
-    pending_accepts: VecDeque<PendingTcpConnection>,
+    pending_accepts: VecDeque<PendingConnection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -310,8 +322,9 @@ struct ConnectionState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingTcpConnection {
+struct PendingConnection {
     peer_address: Option<InetSocketAddress>,
+    peer_unix_path: Option<String>,
     accepted_socket_id: Option<SocketId>,
 }
 
@@ -360,6 +373,8 @@ impl SocketTable {
             state,
             local_address: None,
             peer_address: None,
+            local_unix_path: None,
+            peer_unix_path: None,
             listener_state: None,
             connection_state: default_connection_state(spec, state),
             datagram_state: default_datagram_state(spec),
@@ -454,12 +469,72 @@ impl SocketTable {
 
             record.local_address = Some(address.clone());
             record.peer_address = None;
+            record.local_unix_path = None;
+            record.peer_unix_path = None;
             record.listener_state = None;
             record.connection_state = None;
             record.state = SocketState::Bound;
             record.clone()
         };
         register_bound_inet_socket(&mut table, cloned.spec, address, socket_id);
+        Ok(cloned)
+    }
+
+    pub fn bind_unix(
+        &self,
+        socket_id: SocketId,
+        path: impl Into<String>,
+    ) -> SocketResult<SocketRecord> {
+        let path = normalize_unix_socket_path(path.into())?;
+        let mut table = lock_or_recover(&self.inner.state);
+        let existing = table
+            .sockets
+            .get(&socket_id)
+            .cloned()
+            .ok_or_else(|| SocketTableError::not_found(socket_id))?;
+        if !supports_unix_stream_lifecycle(existing.spec) {
+            return Err(SocketTableError::invalid_argument(format!(
+                "socket {socket_id} is not a Unix stream socket"
+            )));
+        }
+        let existing_id = table.bound_unix_streams.get(&path).copied();
+        let cloned = {
+            let record = table
+                .sockets
+                .get_mut(&socket_id)
+                .ok_or_else(|| SocketTableError::not_found(socket_id))?;
+
+            if let Some(bound_socket_id) = existing_id {
+                if bound_socket_id != socket_id {
+                    return Err(SocketTableError::address_in_use(format!(
+                        "path {path} is already bound"
+                    )));
+                }
+            }
+
+            match record.state {
+                SocketState::Created => {}
+                SocketState::Bound if record.local_unix_path.as_deref() == Some(path.as_str()) => {
+                    return Ok(record.clone());
+                }
+                SocketState::Bound | SocketState::Listening | SocketState::Connected => {
+                    return Err(SocketTableError::invalid_argument(format!(
+                        "socket {socket_id} cannot bind in state {:?}",
+                        record.state
+                    )));
+                }
+            }
+
+            record.local_address = None;
+            record.peer_address = None;
+            record.local_unix_path = Some(path.clone());
+            record.peer_unix_path = None;
+            record.listener_state = None;
+            record.connection_state = None;
+            record.state = SocketState::Bound;
+            record.clone()
+        };
+        table.bound_unix_streams.insert(path, socket_id);
         Ok(cloned)
     }
 
@@ -476,12 +551,12 @@ impl SocketTable {
             .get_mut(&socket_id)
             .ok_or_else(|| SocketTableError::not_found(socket_id))?;
 
-        if !supports_inet_stream_lifecycle(record.spec) {
+        if !supports_listener_lifecycle(record.spec) {
             return Err(SocketTableError::invalid_argument(format!(
-                "socket {socket_id} is not an INET stream socket"
+                "socket {socket_id} is not a stream socket"
             )));
         }
-        if record.state != SocketState::Bound || record.local_address.is_none() {
+        if record.state != SocketState::Bound || !has_bound_endpoint(record) {
             return Err(SocketTableError::invalid_argument(format!(
                 "socket {socket_id} must be bound before listen"
             )));
@@ -524,18 +599,17 @@ impl SocketTable {
             )));
         }
 
-        listener_state
-            .pending_accepts
-            .push_back(PendingTcpConnection {
-                peer_address: Some(peer_address),
-                accepted_socket_id: None,
-            });
+        listener_state.pending_accepts.push_back(PendingConnection {
+            peer_address: Some(peer_address),
+            peer_unix_path: None,
+            accepted_socket_id: None,
+        });
         Ok(())
     }
 
     pub fn accept(&self, listener_socket_id: SocketId) -> SocketResult<SocketRecord> {
         let mut table = lock_or_recover(&self.inner.state);
-        let (owner_pid, spec, local_address, pending) = {
+        let (owner_pid, spec, local_address, local_unix_path, pending) = {
             let record = table
                 .sockets
                 .get_mut(&listener_socket_id)
@@ -562,6 +636,7 @@ impl SocketTable {
                 record.owner_pid,
                 record.spec,
                 record.local_address.clone(),
+                record.local_unix_path.clone(),
                 pending,
             )
         };
@@ -582,6 +657,8 @@ impl SocketTable {
             state: SocketState::Connected,
             local_address,
             peer_address: pending.peer_address,
+            local_unix_path,
+            peer_unix_path: pending.peer_unix_path,
             listener_state: None,
             connection_state: default_connection_state(spec, SocketState::Connected),
             datagram_state: default_datagram_state(spec),
@@ -624,6 +701,7 @@ impl SocketTable {
 
         socket.state = SocketState::Connected;
         socket.peer_address = peer.local_address.clone();
+        socket.peer_unix_path = peer.local_unix_path.clone();
         socket.listener_state = None;
         socket.connection_state = Some(ConnectionState {
             peer_socket_id: Some(peer_socket_id),
@@ -632,6 +710,7 @@ impl SocketTable {
 
         peer.state = SocketState::Connected;
         peer.peer_address = socket.local_address.clone();
+        peer.peer_unix_path = socket.local_unix_path.clone();
         peer.listener_state = None;
         peer.connection_state = Some(ConnectionState {
             peer_socket_id: Some(socket_id),
@@ -712,6 +791,8 @@ impl SocketTable {
                 state: SocketState::Connected,
                 local_address: listener.local_address.clone(),
                 peer_address: client.local_address.clone(),
+                local_unix_path: None,
+                peer_unix_path: None,
                 listener_state: None,
                 connection_state: Some(ConnectionState {
                     peer_socket_id: Some(socket_id),
@@ -720,15 +801,122 @@ impl SocketTable {
                 datagram_state: default_datagram_state(listener.spec),
             };
 
-            listener_state
-                .pending_accepts
-                .push_back(PendingTcpConnection {
-                    peer_address: client.local_address.clone(),
-                    accepted_socket_id: Some(accepted_socket_id),
-                });
+            listener_state.pending_accepts.push_back(PendingConnection {
+                peer_address: client.local_address.clone(),
+                peer_unix_path: None,
+                accepted_socket_id: Some(accepted_socket_id),
+            });
 
             client.state = SocketState::Connected;
             client.peer_address = listener.local_address.clone();
+            client.peer_unix_path = None;
+            client.listener_state = None;
+            client.connection_state = Some(ConnectionState {
+                peer_socket_id: Some(accepted_socket_id),
+                ..ConnectionState::default()
+            });
+
+            Ok(accepted)
+        })();
+
+        match result {
+            Ok(accepted) => {
+                table.sockets.insert(socket_id, client);
+                table.sockets.insert(accepted_socket_id, accepted.clone());
+                table
+                    .by_owner
+                    .entry(accepted.owner_pid)
+                    .or_default()
+                    .insert(accepted_socket_id);
+                Ok(())
+            }
+            Err(error) => {
+                table.sockets.insert(socket_id, client);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn find_bound_unix_socket(&self, path: &str) -> Option<SocketRecord> {
+        let path = normalize_unix_socket_path(path).ok()?;
+        let table = lock_or_recover(&self.inner.state);
+        let socket_id = table.bound_unix_streams.get(&path).copied()?;
+        table.sockets.get(&socket_id).cloned()
+    }
+
+    pub fn connect_to_bound_unix_stream(
+        &self,
+        socket_id: SocketId,
+        target_path: impl Into<String>,
+    ) -> SocketResult<()> {
+        let target_path = normalize_unix_socket_path(target_path.into())?;
+        let mut table = lock_or_recover(&self.inner.state);
+        let listener_socket_id = table
+            .bound_unix_streams
+            .get(&target_path)
+            .copied()
+            .ok_or_else(|| {
+                SocketTableError::not_found_address(format!(
+                    "no listening socket bound at path {target_path}"
+                ))
+            })?;
+
+        if socket_id == listener_socket_id {
+            return Err(SocketTableError::invalid_argument(
+                "socket cannot connect to its own listening endpoint",
+            ));
+        }
+
+        let mut client = table
+            .sockets
+            .remove(&socket_id)
+            .ok_or_else(|| SocketTableError::not_found(socket_id))?;
+        let accepted_socket_id = next_socket_id(&mut table);
+
+        let result = (|| {
+            let listener = table
+                .sockets
+                .get_mut(&listener_socket_id)
+                .ok_or_else(|| SocketTableError::not_found(listener_socket_id))?;
+            validate_connect_to_listener(&client, listener)?;
+
+            let listener_state = listener.listener_state.as_mut().ok_or_else(|| {
+                SocketTableError::invalid_argument(format!(
+                    "socket {listener_socket_id} has no listener state"
+                ))
+            })?;
+            if listener_state.pending_accepts.len() >= listener_state.backlog {
+                return Err(SocketTableError::would_block(format!(
+                    "listener {listener_socket_id} backlog is full"
+                )));
+            }
+
+            let accepted = SocketRecord {
+                id: accepted_socket_id,
+                owner_pid: listener.owner_pid,
+                spec: listener.spec,
+                state: SocketState::Connected,
+                local_address: None,
+                peer_address: None,
+                local_unix_path: listener.local_unix_path.clone(),
+                peer_unix_path: client.local_unix_path.clone(),
+                listener_state: None,
+                connection_state: Some(ConnectionState {
+                    peer_socket_id: Some(socket_id),
+                    ..ConnectionState::default()
+                }),
+                datagram_state: default_datagram_state(listener.spec),
+            };
+
+            listener_state.pending_accepts.push_back(PendingConnection {
+                peer_address: None,
+                peer_unix_path: client.local_unix_path.clone(),
+                accepted_socket_id: Some(accepted_socket_id),
+            });
+
+            client.state = SocketState::Connected;
+            client.peer_address = None;
+            client.peer_unix_path = listener.local_unix_path.clone();
             client.listener_state = None;
             client.connection_state = Some(ConnectionState {
                 peer_socket_id: Some(accepted_socket_id),
@@ -1067,9 +1255,21 @@ fn supports_connection_lifecycle(spec: SocketSpec) -> bool {
     matches!(spec.socket_type, SocketType::Stream)
 }
 
+fn supports_listener_lifecycle(spec: SocketSpec) -> bool {
+    matches!(spec.socket_type, SocketType::Stream)
+        && matches!(
+            spec.domain,
+            SocketDomain::Inet | SocketDomain::Inet6 | SocketDomain::Unix
+        )
+}
+
 fn supports_inet_bind(spec: SocketSpec) -> bool {
     matches!(spec.domain, SocketDomain::Inet | SocketDomain::Inet6)
         && matches!(spec.socket_type, SocketType::Stream | SocketType::Datagram)
+}
+
+fn supports_unix_stream_lifecycle(spec: SocketSpec) -> bool {
+    matches!(spec.socket_type, SocketType::Stream) && matches!(spec.domain, SocketDomain::Unix)
 }
 
 fn supports_inet_stream_lifecycle(spec: SocketSpec) -> bool {
@@ -1119,9 +1319,9 @@ fn validate_connect_to_listener(
             client.id
         )));
     }
-    if !supports_inet_stream_lifecycle(listener.spec) {
+    if !supports_listener_lifecycle(listener.spec) {
         return Err(SocketTableError::invalid_argument(format!(
-            "socket {} is not an INET stream listener",
+            "socket {} is not a stream listener",
             listener.id
         )));
     }
@@ -1138,6 +1338,10 @@ fn validate_connect_to_listener(
         )));
     }
     Ok(())
+}
+
+fn has_bound_endpoint(record: &SocketRecord) -> bool {
+    record.local_address.is_some() || record.local_unix_path.is_some()
 }
 
 fn validate_bound_udp_sender(sender: &SocketRecord) -> SocketResult<()> {
@@ -1174,7 +1378,7 @@ fn validate_bound_udp_receiver(receiver: &SocketRecord) -> SocketResult<()> {
 
 fn remove_socket(table: &mut SocketTableState, socket_id: SocketId) -> Option<SocketRecord> {
     let record = table.sockets.remove(&socket_id)?;
-    unregister_bound_inet_socket(table, &record);
+    unregister_bound_socket(table, &record);
     if let Some(listener_state) = record.listener_state.as_ref() {
         let pending_socket_ids = listener_state
             .pending_accepts
@@ -1206,8 +1410,15 @@ fn remove_socket(table: &mut SocketTableState, socket_id: SocketId) -> Option<So
     Some(record)
 }
 
-fn unregister_bound_inet_socket(table: &mut SocketTableState, record: &SocketRecord) {
+fn unregister_bound_socket(table: &mut SocketTableState, record: &SocketRecord) {
     let Some(address) = record.local_address.as_ref() else {
+        if supports_unix_stream_lifecycle(record.spec) {
+            if let Some(path) = record.local_unix_path.as_ref() {
+                if table.bound_unix_streams.get(path).copied() == Some(record.id) {
+                    table.bound_unix_streams.remove(path);
+                }
+            }
+        }
         return;
     };
     if supports_inet_stream_lifecycle(record.spec)
@@ -1227,6 +1438,16 @@ fn normalize_inet_address(address: InetSocketAddress) -> InetSocketAddress {
         "localhost" => InetSocketAddress::new("127.0.0.1", address.port()),
         _ => address,
     }
+}
+
+fn normalize_unix_socket_path(path: impl AsRef<str>) -> SocketResult<String> {
+    let normalized = normalize_path(path.as_ref());
+    if normalized == "/" {
+        return Err(SocketTableError::invalid_argument(
+            "unix socket path must not be empty or root",
+        ));
+    }
+    Ok(normalized)
 }
 
 fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {

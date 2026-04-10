@@ -1,10 +1,10 @@
 use crate::bridge::LifecycleState;
 use crate::command_registry::{CommandDriver, CommandRegistry};
+use crate::device_layer::{create_device_layer, DeviceLayer};
 use crate::dns::{
     format_dns_resource, resolve_dns, DnsConfig, DnsLookupPolicy, DnsResolution,
     DnsResolverErrorKind, HickoryDnsResolver, SharedDnsResolver,
 };
-use crate::device_layer::{create_device_layer, DeviceLayer};
 use crate::fd_table::{
     FdEntry, FdStat, FdTableError, FdTableManager, FileDescription, FileLockManager,
     FileLockTarget, FlockOperation, ProcessFdTable, FILETYPE_CHARACTER_DEVICE, FILETYPE_DIRECTORY,
@@ -478,7 +478,12 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.assert_not_terminated()?;
         if matches!(policy, DnsLookupPolicy::CheckPermissions) {
             let resource = format_dns_resource(hostname).map_err(map_dns_resolver_error)?;
-            check_network_access(&self.vm_id, &self.permissions, NetworkOperation::Dns, &resource)?;
+            check_network_access(
+                &self.vm_id,
+                &self.permissions,
+                NetworkOperation::Dns,
+                &resource,
+            )?;
         }
 
         resolve_dns(&self.dns, self.dns_resolver.as_ref(), hostname).map_err(map_dns_resolver_error)
@@ -1168,6 +1173,30 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(())
     }
 
+    pub fn socket_bind_unix(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        path: impl Into<String>,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        self.sockets
+            .bind_unix(socket_id, normalize_path(&path.into()))?;
+        Ok(())
+    }
+
     pub fn socket_listen(
         &mut self,
         requester_driver: &str,
@@ -1279,6 +1308,54 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         self.sockets.connect_pair(socket_id, peer_socket_id)?;
+        self.poll_notifier.notify();
+        Ok(())
+    }
+
+    pub fn socket_connect_unix(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        target_path: impl Into<String>,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        let target_path = normalize_path(&target_path.into());
+        self.sockets
+            .find_bound_unix_socket(&target_path)
+            .ok_or_else(|| {
+                KernelError::new(
+                    "ECONNREFUSED",
+                    format!("no listening socket bound at path {target_path}"),
+                )
+            })?;
+
+        let mut snapshot = self.resource_snapshot();
+        self.resources.check_socket_allocation(&snapshot)?;
+        for current_state in [existing.state(), SocketState::Created] {
+            self.resources.check_socket_state_transition(
+                &snapshot,
+                current_state,
+                SocketState::Connected,
+            )?;
+            if !current_state.counts_as_connection() {
+                snapshot.socket_connections = snapshot.socket_connections.saturating_add(1);
+            }
+        }
+
+        self.sockets
+            .connect_to_bound_unix_stream(socket_id, target_path)?;
         self.poll_notifier.notify();
         Ok(())
     }
