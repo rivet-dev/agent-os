@@ -6,6 +6,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
 - Kernel-owned network scaffolding should register per-process socket lifecycle state in `crates/kernel/src/socket_table.rs` and rely on `cleanup_process_resources()` for exit cleanup instead of keeping separate socket counters elsewhere.
 - Kernel socket lifecycle coverage should use `KernelVm` wrappers like `socket_bind_inet`, `socket_listen`, `socket_accept`, and `socket_get` so driver ownership, resource limits, and socket-table state stay under the same test path.
+- Before loopback listener routing lands, kernel TCP data-plane coverage should pair stream sockets with `socket_connect_pair()` and drive I/O through `socket_write`, `socket_read`, `socket_shutdown`, and `socket_close` on `KernelVm` rather than mutating peer links inside `SocketTable` tests.
 - Fire-and-forget session shutdown in `packages/core/src/agent-os.ts` still needs a local `.catch(() => {})` on the dropped `_closeSessionInternal()` promise; deterministic callers should await `_sessionClosePromises` instead of letting shared-runtime close races surface as unhandled rejections.
 - ACP adapters that emit live `session/request_permission` calls during `session/prompt` need the sidecar callback channel (`SidecarRequestPayload`) for replies; queued session events alone arrive too late and will deadlock the prompt.
 - Synthetic ACP `session/update` compatibility belongs in `crates/sidecar/src/acp/session.rs`: when `session/set_mode` or `session/set_config_option` succeeds without a matching agent notification, synthesize the update there so `getSessionState()` and the TypeScript session API stay agent-agnostic.
@@ -195,4 +196,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Listener lifecycle coverage is cleaner through `KernelVm` than direct `SocketTable` mutation, because ownership checks and resource-accounting limits stay in the same path the sidecar will call.
   - `socket_accept()` should spend both a socket slot and a connection slot when it materializes an accepted socket; the queued backlog entries here are still pending metadata, not counted live connections.
   - The active truth path for this story is `cargo test -p agent-os-kernel --test tcp_listener -- --test-threads=1`, `cargo test -p agent-os-kernel --test socket_table -- --test-threads=1`, and root `pnpm check-types`.
+---
+## 2026-04-09 23:51:09 PDT - US-044
+- Implemented kernel-owned TCP data-plane lifecycle support in `crates/kernel/src/socket_table.rs` and `crates/kernel/src/kernel.rs`: connected socket pairing, peer-linked receive buffers, read/write half-close tracking, EOF/broken-pipe propagation on shutdown and close, and `KernelVm` wrappers for connect, read, write, shutdown, and close operations.
+- Added a dedicated kernel TCP data-plane test target in `crates/kernel/tests/tcp_data_plane.rs` covering bidirectional client/server I/O, half-close semantics, peer-close EOF behavior, and post-close resource cleanup, and recorded the reusable data-plane test pattern in `crates/kernel/AGENTS.md`.
+- Files changed: `crates/kernel/AGENTS.md`, `crates/kernel/src/kernel.rs`, `crates/kernel/src/socket_table.rs`, `crates/kernel/tests/tcp_data_plane.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The kernel TCP data plane can advance independently of loopback listener routing by pairing two pre-created stream sockets with `socket_connect_pair()` and letting the socket table own peer links, receive buffers, and half-close flags.
+  - Close cleanup for connected sockets has to update the surviving peer record as well as remove the closed socket, or later reads will miss EOF and later writes will not surface `EPIPE` consistently.
+  - The active truth path for this story is `cargo test -p agent-os-kernel --test tcp_data_plane -- --test-threads=1`, `cargo test -p agent-os-kernel --test tcp_listener -- --test-threads=1`, `cargo test -p agent-os-kernel --test socket_table -- --test-threads=1`, and root `pnpm check-types`.
 ---

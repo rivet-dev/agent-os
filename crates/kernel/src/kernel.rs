@@ -27,8 +27,8 @@ use crate::resource_accounting::{
 };
 use crate::root_fs::{RootFileSystem, RootFilesystemError, RootFilesystemSnapshot};
 use crate::socket_table::{
-    InetSocketAddress, SocketId, SocketRecord, SocketSpec, SocketState, SocketTable,
-    SocketTableError,
+    InetSocketAddress, SocketId, SocketRecord, SocketShutdown, SocketSpec, SocketState,
+    SocketTable, SocketTableError,
 };
 use crate::user::UserManager;
 use crate::vfs::{normalize_path, VfsError, VfsResult, VirtualFileSystem, VirtualStat};
@@ -1215,6 +1215,47 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(self.sockets.accept(listener_socket_id)?.id())
     }
 
+    pub fn socket_connect_pair(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        peer_socket_id: SocketId,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        let peer = self.sockets.get(peer_socket_id).ok_or_else(|| {
+            KernelError::new("ENOENT", format!("no such socket {peer_socket_id}"))
+        })?;
+        self.assert_driver_owns(requester_driver, peer.owner_pid())?;
+
+        let mut snapshot = self.resource_snapshot();
+        for current_state in [existing.state(), peer.state()] {
+            self.resources.check_socket_state_transition(
+                &snapshot,
+                current_state,
+                SocketState::Connected,
+            )?;
+            if !current_state.counts_as_connection() {
+                snapshot.socket_connections = snapshot.socket_connections.saturating_add(1);
+            }
+        }
+
+        self.sockets.connect_pair(socket_id, peer_socket_id)?;
+        self.poll_notifier.notify();
+        Ok(())
+    }
+
     pub fn socket_set_state(
         &mut self,
         requester_driver: &str,
@@ -1243,6 +1284,82 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(())
     }
 
+    pub fn socket_write(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        data: &[u8],
+    ) -> KernelResult<usize> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        let written = self.sockets.write(socket_id, data)?;
+        if written > 0 {
+            self.poll_notifier.notify();
+        }
+        Ok(written)
+    }
+
+    pub fn socket_read(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        max_bytes: usize,
+    ) -> KernelResult<Option<Vec<u8>>> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        let result = self.sockets.read(socket_id, max_bytes)?;
+        if result.is_some() {
+            self.poll_notifier.notify();
+        }
+        Ok(result)
+    }
+
+    pub fn socket_shutdown(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        how: SocketShutdown,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        self.sockets.shutdown(socket_id, how)?;
+        self.poll_notifier.notify();
+        Ok(())
+    }
+
     pub fn socket_close(
         &mut self,
         requester_driver: &str,
@@ -1262,6 +1379,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         self.sockets.remove(socket_id)?;
+        self.poll_notifier.notify();
         Ok(())
     }
 
