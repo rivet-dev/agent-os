@@ -22,8 +22,8 @@ use crate::service::{
 };
 use crate::state::{
     BridgeError, VmConfiguration, VmDnsConfig, VmLayer, VmLayerStore, VmOverlayLayer, VmState,
-    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME,
-    JAVASCRIPT_COMMAND, PYTHON_COMMAND, WASM_COMMAND,
+    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME, JAVASCRIPT_COMMAND,
+    PYTHON_COMMAND, WASM_COMMAND,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -90,6 +90,9 @@ const SHADOW_ROOT_BOOTSTRAP_DIRS: &[(&str, u32)] = &[
     ("/var/tmp", 0o1777),
     ("/etc/agentos", 0o755),
 ];
+
+pub(crate) const DEFAULT_GUEST_PATH_ENV: &str =
+    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 // ---------------------------------------------------------------------------
 // NativeSidecar VM lifecycle methods
@@ -1284,8 +1287,11 @@ fn refresh_guest_command_path_env(
     let mut merged = Vec::new();
     let mut seen = BTreeSet::new();
 
-    if !command_guest_paths.is_empty() && seen.insert(String::from("/bin")) {
-        merged.push(String::from("/bin"));
+    for segment in DEFAULT_GUEST_PATH_ENV.split(':') {
+        let normalized = normalize_path(segment);
+        if seen.insert(normalized.clone()) {
+            merged.push(normalized);
+        }
     }
 
     for guest_path in command_guest_paths.values() {
@@ -1296,6 +1302,9 @@ fn refresh_guest_command_path_env(
             continue;
         };
         let normalized = normalize_path(parent);
+        if normalized == "/" {
+            continue;
+        }
         if seen.insert(normalized.clone()) {
             merged.push(normalized);
         }
@@ -1318,9 +1327,7 @@ fn refresh_guest_command_path_env(
         }
     }
 
-    if !merged.is_empty() {
-        guest_env.insert(String::from("PATH"), merged.join(":"));
-    }
+    guest_env.insert(String::from("PATH"), merged.join(":"));
 }
 
 pub(crate) fn normalize_dns_hostname(hostname: &str) -> Result<String, SidecarError> {

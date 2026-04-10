@@ -5779,12 +5779,18 @@ fn prepare_guest_runtime_env(
             SidecarError::InvalidState(format!("failed to encode allowed builtins: {error}"))
         })?,
     );
-    env.insert(String::from("AGENT_OS_VIRTUAL_OS_USER"), user.username.clone());
+    env.insert(
+        String::from("AGENT_OS_VIRTUAL_OS_USER"),
+        user.username.clone(),
+    );
     env.insert(
         String::from("AGENT_OS_VIRTUAL_OS_HOMEDIR"),
         user.homedir.clone(),
     );
-    env.insert(String::from("AGENT_OS_VIRTUAL_OS_SHELL"), user.shell.clone());
+    env.insert(
+        String::from("AGENT_OS_VIRTUAL_OS_SHELL"),
+        user.shell.clone(),
+    );
     env.insert(
         String::from("AGENT_OS_VIRTUAL_PROCESS_UID"),
         user.uid.to_string(),
@@ -5801,6 +5807,12 @@ fn prepare_guest_runtime_env(
         .or_insert_with(|| user.username.clone());
     env.entry(String::from("SHELL"))
         .or_insert_with(|| user.shell.clone());
+    env.entry(String::from("PATH")).or_insert_with(|| {
+        vm.guest_env
+            .get("PATH")
+            .cloned()
+            .unwrap_or_else(|| crate::vm::DEFAULT_GUEST_PATH_ENV.to_owned())
+    });
     env.entry(String::from("TMPDIR"))
         .or_insert_with(|| String::from("/tmp"));
     env.insert(String::from("PWD"), guest_cwd.to_owned());

@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- Guest-visible runtime env is a shared cross-runtime contract: `prepare_guest_runtime_env(...)` should supply stable kernel-owned identity vars including `PATH`, Python should mirror only that guest-facing subset into `os.environ`, and the WASM `AGENT_OS_GUEST_ENV` payload must strip internal control vars like `AGENT_OS_*` / `NODE_SYNC_RPC_*` before they reach WASI guest code.
 - The host-tool description limit is a shared boundary contract: keep the 200-character maximum aligned between `packages/core/src/host-tools.ts` and Rust sidecar `register_toolkit` validation in `crates/sidecar/src/tools.rs`, and cover boundary acceptance/rejection on both sides.
 - `HostDirFilesystem` mutations should stay on the anchored `openat2(... RESOLVE_BENEATH ...)` path and then operate through the `/proc/self/fd/<fd>` handle; that keeps direct operations like `pwrite` host-backed without reintroducing path-escape races or falling back to whole-file rewrites.
 - For `RootFilesystemDescriptor`, order `lowers` from highest to lowest precedence and let `bootstrap_entries` act like the single writable upper; bootstrap directory entries must be applied with `mkdir`-style semantics so upper snapshots can repeat lower directories without failing on `EEXIST`.
@@ -431,4 +432,14 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - The existing guest `javascript_sqlite_builtin_round_trips_through_sidecar_sync_rpc` test is the right truth path for bridge-backed `node:sqlite` coverage; extend that guest script rather than adding host-side RPC-only assertions when the story is about V8-side behavior.
   - Once a guest SQLite statement enables `setReadBigInts(true)`, non-primary-key integer columns and aggregate values like `COUNT(*)` / `SUM(...)` also round-trip as bigint and should be asserted that way.
   - For WAL coverage on this path, `DatabaseSync.checkpoint()` plus a guest `fs` read of the persisted `.db` file is the direct way to prove the sidecar bridge synced the checkpointed database back into the VM filesystem.
+---
+## 2026-04-10 06:53:31 PDT - US-066
+- Hardened the shared guest runtime env contract so JS, Python, and WASM all expose kernel-owned identity defaults consistently: the sidecar now supplies a canonical guest `PATH`, the Python runner mirrors that `PATH` into `os.environ`, and the WASM runner strips internal control vars from the guest-visible WASI env payload while still keeping host-runner bootstrap env intact.
+- Expanded `crates/sidecar/tests/guest_identity.rs` into a focused three-runtime hardening suite that asserts guest-visible `HOME`, `USER`, and `PATH` values plus the absence of leaked `AGENT_OS_*` / `NODE_SYNC_RPC_*` vars from JS, Python, and WASM guest code.
+- Files changed: `crates/execution/CLAUDE.md`, `crates/execution/assets/runners/python-runner.mjs`, `crates/execution/src/node_import_cache.rs`, `crates/execution/src/wasm.rs`, `crates/sidecar/src/execution.rs`, `crates/sidecar/src/vm.rs`, `crates/sidecar/tests/guest_identity.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Guest-visible env behavior is split from host-runner bootstrap env: internal `AGENT_OS_*` / `NODE_SYNC_RPC_*` keys can still exist on the host runner, but the JS/Python/WASM guest surface must not inherit them.
+  - Runtime identity coverage should assert `PATH` alongside `HOME` and `USER`; missing or malformed `PATH` can drift silently because the host Node process runs under `env_clear()` and only sees values that Agent OS injects explicitly.
+  - When `python-runner.mjs` changes, bump `NODE_IMPORT_CACHE_ASSET_VERSION` in `crates/execution/src/node_import_cache.rs` or stale materialized runner assets under `/tmp/agent-os-node-import-cache-*` can mask the fix.
+  - The active truth path for this story is `cargo test -p agent-os-sidecar --test guest_identity -- --test-threads=1`, `cargo test -p agent-os-sidecar --test security_hardening -- --test-threads=1`, and root `pnpm check-types`.
 ---

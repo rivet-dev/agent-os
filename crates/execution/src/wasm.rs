@@ -764,6 +764,7 @@ fn create_node_child(
     ensure_host_cwd_exists(&request.cwd).map_err(WasmExecutionError::Spawn)?;
     let mut command = Command::new(node_binary());
     let mut exported_fds = ExportedChildFds::default();
+    let guest_visible_env = guest_visible_wasm_env(&request.env);
     configure_wasm_node_sandbox(&mut command, import_cache, resolved_module, request)?;
     command
         .arg("--no-warnings")
@@ -782,7 +783,7 @@ fn create_node_child(
     apply_guest_env(&mut command, &request.env, RESERVED_WASM_ENV_KEYS);
     command
         .env(WASM_GUEST_ARGV_ENV, encode_json_string_array(guest_argv))
-        .env(WASM_GUEST_ENV_ENV, encode_json_string_map(&request.env))
+        .env(WASM_GUEST_ENV_ENV, encode_json_string_map(&guest_visible_env))
         .env(
             WASM_PERMISSION_TIER_ENV,
             request.permission_tier.as_env_value(),
@@ -840,6 +841,7 @@ fn prewarm_wasm_path(
     }
 
     let guest_argv = warmup_guest_argv(resolved_module, request);
+    let guest_visible_env = guest_visible_wasm_env(&request.env);
     ensure_host_cwd_exists(&request.cwd).map_err(WasmExecutionError::WarmupSpawn)?;
     let mut command = Command::new(node_binary());
     configure_wasm_node_sandbox(&mut command, import_cache, resolved_module, request)?;
@@ -858,7 +860,7 @@ fn prewarm_wasm_path(
             resolved_module.resolved_path.as_os_str(),
         )
         .env(WASM_GUEST_ARGV_ENV, encode_json_string_array(&guest_argv))
-        .env(WASM_GUEST_ENV_ENV, encode_json_string_map(&request.env))
+        .env(WASM_GUEST_ENV_ENV, encode_json_string_map(&guest_visible_env))
         .env(
             WASM_PERMISSION_TIER_ENV,
             request.permission_tier.as_env_value(),
@@ -914,7 +916,10 @@ fn configure_wasm_node_sandbox(
                 .map(Path::to_path_buf),
         ),
     ));
-    read_paths.extend(parse_env_path_list(&request.env, NODE_EXTRA_FS_READ_PATHS_ENV));
+    read_paths.extend(parse_env_path_list(
+        &request.env,
+        NODE_EXTRA_FS_READ_PATHS_ENV,
+    ));
     write_paths.extend(parse_env_path_list(
         &request.env,
         NODE_EXTRA_FS_WRITE_PATHS_ENV,
@@ -940,6 +945,17 @@ fn parse_env_path_list(env: &BTreeMap<String, String>, key: &str) -> Vec<PathBuf
         .flatten()
         .map(PathBuf::from)
         .collect()
+}
+
+fn guest_visible_wasm_env(env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    env.iter()
+        .filter(|(key, _)| !is_internal_wasm_guest_env_key(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+fn is_internal_wasm_guest_env_key(key: &str) -> bool {
+    key.starts_with("AGENT_OS_") || key.starts_with("NODE_SYNC_RPC_")
 }
 
 fn configure_node_command(
