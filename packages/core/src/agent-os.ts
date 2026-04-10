@@ -1492,7 +1492,10 @@ export class AgentOs {
 	private _sessionClosePromises = new Map<string, Promise<void>>();
 	private _pendingSessionRequestResolvers = new Map<
 		string,
-		Set<(response: JsonRpcResponse) => void>
+		Set<{
+			method: string;
+			resolve: (response: JsonRpcResponse) => void;
+		}>
 	>();
 	private _processes = new Map<
 		number,
@@ -2668,10 +2671,13 @@ export class AgentOs {
 		const response = await new Promise<JsonRpcResponse>((resolve, reject) => {
 			const resolvers =
 				this._pendingSessionRequestResolvers.get(sessionId) ?? new Set();
-			const abortRequest = (response: JsonRpcResponse) => {
-				resolve(response);
+			const resolver = {
+				method,
+				resolve: (response: JsonRpcResponse) => {
+					resolve(response);
+				},
 			};
-			resolvers.add(abortRequest);
+			resolvers.add(resolver);
 			this._pendingSessionRequestResolvers.set(sessionId, resolvers);
 
 			void this._sidecarClient
@@ -2687,7 +2693,7 @@ export class AgentOs {
 					if (!nextResolvers) {
 						return;
 					}
-					nextResolvers.delete(abortRequest);
+					nextResolvers.delete(resolver);
 					if (nextResolvers.size === 0) {
 						this._pendingSessionRequestResolvers.delete(sessionId);
 					}
@@ -2769,8 +2775,35 @@ export class AgentOs {
 				message: `Session closed: ${sessionId}`,
 			},
 		};
-		for (const resolve of resolvers) {
-			resolve(response);
+		for (const resolver of resolvers) {
+			resolver.resolve(response);
+		}
+	}
+
+	private _cancelPendingPromptRequests(sessionId: string): void {
+		const resolvers = this._pendingSessionRequestResolvers.get(sessionId);
+		if (!resolvers) {
+			return;
+		}
+
+		const response: JsonRpcResponse = {
+			jsonrpc: "2.0",
+			id: null,
+			result: {
+				stopReason: "cancelled",
+			},
+		};
+
+		for (const resolver of [...resolvers]) {
+			if (resolver.method !== "session/prompt") {
+				continue;
+			}
+			resolvers.delete(resolver);
+			resolver.resolve(response);
+		}
+
+		if (resolvers.size === 0) {
+			this._pendingSessionRequestResolvers.delete(sessionId);
 		}
 	}
 
@@ -3131,6 +3164,7 @@ export class AgentOs {
 
 	/** Cancel ongoing agent work for a session. */
 	async cancelSession(sessionId: string): Promise<JsonRpcResponse> {
+		this._cancelPendingPromptRequests(sessionId);
 		return this._sendSessionRequest(sessionId, "session/cancel");
 	}
 

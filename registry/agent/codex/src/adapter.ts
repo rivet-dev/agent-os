@@ -139,6 +139,8 @@ class ActivePrompt {
 	private stdoutBuffer = "";
 	private stderr = "";
 	private resolved = false;
+	private exited = false;
+	private forceKillTimer: NodeJS.Timeout | null = null;
 	private resolvePrompt!: (value: PromptResponse) => void;
 	private rejectPrompt!: (reason?: unknown) => void;
 	private readonly promptPromise: Promise<PromptResponse>;
@@ -166,11 +168,14 @@ class ActivePrompt {
 			this.processStdoutBuffer();
 		});
 		this.child.stderr?.on("data", (chunk) => {
+			if (this.resolved) return;
 			const text = Buffer.from(chunk).toString("utf8");
 			this.stderr += text;
 			trace(`child stderr ${JSON.stringify(text)}`);
 		});
 		this.child.on("exit", (code, signal) => {
+			this.exited = true;
+			this.clearForceKillTimer();
 			if (this.resolved) return;
 			if (this.cancelled) {
 				this.finish({ stopReason: "cancelled" });
@@ -214,9 +219,17 @@ class ActivePrompt {
 	}
 
 	cancel(): void {
-		if (this.resolved) return;
+		if (this.cancelled || this.resolved) return;
 		this.cancelled = true;
+		this.finish({ stopReason: "cancelled" });
+		this.child.stdin?.destroy();
 		this.child.kill("SIGTERM");
+		this.forceKillTimer = setTimeout(() => {
+			if (this.exited) {
+				return;
+			}
+			this.child.kill("SIGKILL");
+		}, 500);
 	}
 
 	private finish(result: PromptResponse): void {
@@ -227,6 +240,10 @@ class ActivePrompt {
 
 	private processStdoutBuffer(): void {
 		while (true) {
+			if (this.resolved) {
+				this.stdoutBuffer = "";
+				return;
+			}
 			const newline = this.stdoutBuffer.indexOf("\n");
 			if (newline === -1) break;
 			const line = this.stdoutBuffer.slice(0, newline).trim();
@@ -246,6 +263,9 @@ class ActivePrompt {
 	}
 
 	private async handleEvent(event: ChildEvent): Promise<void> {
+		if (this.resolved) {
+			return;
+		}
 		switch (event.type) {
 			case "text_delta":
 				await this.conn.sessionUpdate({
@@ -325,6 +345,14 @@ class ActivePrompt {
 				);
 				return;
 		}
+	}
+
+	private clearForceKillTimer(): void {
+		if (this.forceKillTimer === null) {
+			return;
+		}
+		clearTimeout(this.forceKillTimer);
+		this.forceKillTimer = null;
 	}
 }
 
