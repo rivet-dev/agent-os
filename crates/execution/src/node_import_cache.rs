@@ -10490,18 +10490,6 @@ impl NodeImportCache {
         Arc::clone(&self.cleanup)
     }
 
-    pub(crate) fn loader_path(&self) -> &Path {
-        &self.loader_path
-    }
-
-    pub(crate) fn register_path(&self) -> &Path {
-        &self.register_path
-    }
-
-    pub(crate) fn runner_path(&self) -> &Path {
-        &self.runner_path
-    }
-
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn python_runner_path(&self) -> &Path {
         &self.python_runner_path
@@ -10509,10 +10497,6 @@ impl NodeImportCache {
 
     pub(crate) fn timing_bootstrap_path(&self) -> &Path {
         &self.timing_bootstrap_path
-    }
-
-    pub(crate) fn prewarm_path(&self) -> &Path {
-        &self.prewarm_path
     }
 
     pub(crate) fn wasm_runner_path(&self) -> &Path {

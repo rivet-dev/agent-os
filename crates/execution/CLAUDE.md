@@ -12,9 +12,9 @@ If tests fail because they were written for the old `Command::new("node")` path,
 
 **Desired state:** Guest JS/TS runs inside isolated V8 contexts managed by the execution engine. All Node.js builtins (`fs`, `net`, `child_process`, `dns`, `http`, `os`, etc.) are kernel-backed polyfills that route through the kernel VFS, socket table, and process table. Module loading is fully intercepted — guest code never touches real host APIs. The execution engine previously had this working via `@secure-exec/core` + `@secure-exec/nodejs` with full kernel-backed polyfills for all builtins.
 
-**Current state (⚠️ COMPLETELY BROKEN -- see `.agent/todo/node-isolation-gaps.md`):**
+**Current state (⚠️ STILL INCOMPLETE -- see `.agent/todo/node-isolation-gaps.md`):**
 
-Guest Node.js code currently runs as **real host Node.js child processes** spawned via `std::process::Command::new("node")` in `javascript.rs`. The ESM loader hooks intercept `require()`/`import` but most builtins either fall through to the real host module or are thin wrappers that call real host APIs. **This fundamentally violates the isolation model.** The execution engine must be rebuilt to use V8 isolates with kernel-backed polyfills instead of spawning real `node` processes. This is being actively worked on.
+Guest JavaScript entrypoints in `javascript.rs` now run only through the shared V8 runtime. The remaining gaps are polyfill completeness and builtin isolation parity: some builtins still need deeper kernel-backed implementations or broader conformance coverage, but restoring a host-Node guest execution fallback is not allowed.
 
 **Recovery reference:** The complete working polyfill + V8 isolate code from the original `@secure-exec/core` + `@secure-exec/nodejs` + `@secure-exec/v8` packages has been recovered to `.agent/recovery/secure-exec/`. Key files to port:
 - `nodejs/src/bridge/fs.ts` (3,974 lines) -- full kernel-backed `fs`/`fs/promises` polyfill
@@ -71,7 +71,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 1. **`globalThis.fetch` hardening** -- Replaced with `restrictedFetch` (loopback-only on exempt ports). Does NOT cover `http.request()`, `net.connect()`, or `dgram.createSocket()`.
 2. **Node.js `--permission` flag** -- OS-level backstop for filesystem and child_process only. No network restrictions. This is a safety net, not the isolation boundary.
 3. **Guest env stripping** -- `NODE_OPTIONS`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `LD_LIBRARY_PATH` stripped before spawn.
-4. **Permissioned Pyodide host launches still need `--allow-worker`.** `python.rs` bootstraps through Node's internal ESM loader worker, so the host process must keep `--allow-worker` enabled even while guest `worker_threads` stays denied.
+4. **Permissioned Pyodide host launches still need `--allow-worker`.** `python.rs` bootstraps through Node's internal ESM loader worker, so the host process must keep `--allow-worker` enabled even though the guest `node:worker_threads` surface is limited to a compatibility shim and does not permit real worker creation.
 
 ## Guest `fs` and `fs/promises` Polyfill Rules
 
@@ -108,7 +108,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 - If guest `fetch()` is powered by bundled undici, the aliased `node:stream` helpers in `crates/execution/assets/undici-shims/stream.js` must understand the bundled web-streams ponyfill too; undici's fetch path calls `finished()`, `isReadable()`, `isErrored()`, and `isDisturbed()` on `ReadableStream` response bodies, not just Node event-emitter streams.
 - When testing import-cache temp-root cleanup, use a dedicated `NodeImportCache::new_in(...)` base dir so the one-time sweep stays isolated to that root.
 - Active JavaScript/Python/WASM executions must hold a `NodeImportCache` cleanup guard until the child exits; otherwise dropping the engine can delete `timing-bootstrap.mjs` and related assets while the host runtime is still importing them.
-- Host-Node compatibility coverage should stay behind the `legacy-js-tests` feature. Default validation for JavaScript execution must target the V8 isolate path and its `javascript_v8.rs` tests.
+- JavaScript guest validation should live in `crates/execution/tests/javascript_v8.rs`. Do not reintroduce a feature-gated host-Node guest path or a parallel host-Node compatibility suite for guest JavaScript behavior.
 - Shared-V8 JavaScript tests should assert `uses_shared_v8_runtime()` and the absence of host guest-node launches, not `child_pid() == 0`; shared isolates still report the host runtime PID so the sidecar can manage lifecycle signals.
 
 ## Guest Path Scrubbing

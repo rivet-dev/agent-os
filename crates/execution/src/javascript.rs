@@ -1,16 +1,11 @@
-use crate::common::{encode_json_string, frozen_time_ms, stable_hash64};
+use crate::common::stable_hash64;
 use crate::node_import_cache::{
     NodeImportCache, NodeImportCacheCleanup, NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
 };
 use crate::node_process::{
-    apply_guest_env, configure_node_control_channel, create_node_control_channel,
-    encode_json_string_array, ensure_host_cwd_exists, env_builtin_enabled, harden_node_command,
-    node_binary, node_resolution_read_paths, resolve_path_like_specifier,
-    spawn_node_control_reader, spawn_stream_reader, spawn_waiter, ExportedChildFds,
     LinePrefixFilter, NodeControlMessage, NodeSignalHandlerRegistration,
 };
 use crate::runtime_support::{
-    configure_compile_cache, env_flag_enabled, import_cache_root, sandbox_root, warmup_marker_path,
     NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
     NODE_SANDBOX_ROOT_ENV,
 };
@@ -18,10 +13,8 @@ use crate::v8_host::{V8RuntimeHost, V8SessionHandle};
 use crate::v8_ipc::BinaryFrame;
 use crate::v8_runtime;
 use getrandom::getrandom;
-use nix::fcntl::OFlag;
-use nix::unistd::pipe2;
 use serde::Deserialize;
-use serde_json::{from_str, json, Value};
+use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -29,7 +22,6 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{
     mpsc::{self, Receiver, SyncSender, TrySendError},
     Arc, Mutex, OnceLock,
@@ -45,8 +37,6 @@ const NODE_ENTRYPOINT_ENV: &str = "AGENT_OS_ENTRYPOINT";
 const NODE_BOOTSTRAP_ENV: &str = "AGENT_OS_BOOTSTRAP_MODULE";
 const NODE_GUEST_ARGV_ENV: &str = "AGENT_OS_GUEST_ARGV";
 const NODE_PREWARM_IMPORTS_ENV: &str = "AGENT_OS_NODE_PREWARM_IMPORTS";
-const NODE_WARMUP_DEBUG_ENV: &str = "AGENT_OS_NODE_WARMUP_DEBUG";
-const NODE_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_NODE_WARMUP_METRICS__:";
 const NODE_IMPORT_COMPILE_CACHE_NAMESPACE_VERSION: &str = "3";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
@@ -812,14 +802,10 @@ pub enum JavascriptExecutionError {
     EmptyArgv,
     MissingContext(String),
     VmMismatch { expected: String, found: String },
-    MissingChildStream(&'static str),
     PrepareImportCache(std::io::Error),
-    WarmupSpawn(std::io::Error),
-    WarmupFailed { exit_code: i32, stderr: String },
     Spawn(std::io::Error),
     PendingSyncRpcRequest(u64),
     ExpiredSyncRpcRequest(u64),
-    RpcChannel(String),
     RpcResponse(String),
     Terminate(std::io::Error),
     StdinClosed,
@@ -840,26 +826,11 @@ impl fmt::Display for JavascriptExecutionError {
                     "guest JavaScript context belongs to vm {expected}, not {found}"
                 )
             }
-            Self::MissingChildStream(name) => write!(f, "node child missing {name} pipe"),
             Self::PrepareImportCache(err) => {
                 write!(
                     f,
                     "failed to prepare sidecar-scoped Node import cache: {err}"
                 )
-            }
-            Self::WarmupSpawn(err) => {
-                write!(f, "failed to start Node import warmup process: {err}")
-            }
-            Self::WarmupFailed { exit_code, stderr } => {
-                if stderr.trim().is_empty() {
-                    write!(f, "Node import warmup exited with status {exit_code}")
-                } else {
-                    write!(
-                        f,
-                        "Node import warmup exited with status {exit_code}: {}",
-                        stderr.trim()
-                    )
-                }
             }
             Self::Spawn(err) => write!(f, "failed to start guest JavaScript runtime: {err}"),
             Self::PendingSyncRpcRequest(id) => {
@@ -870,12 +841,6 @@ impl fmt::Display for JavascriptExecutionError {
             }
             Self::ExpiredSyncRpcRequest(id) => {
                 write!(f, "sync RPC request {id} is no longer pending")
-            }
-            Self::RpcChannel(message) => {
-                write!(
-                    f,
-                    "failed to configure guest JavaScript sync RPC channel: {message}"
-                )
             }
             Self::RpcResponse(message) => {
                 write!(
@@ -901,13 +866,10 @@ impl std::error::Error for JavascriptExecutionError {}
 pub struct JavascriptExecution {
     execution_id: String,
     child_pid: u32,
-    stdin: Option<ChildStdin>,
     events: RefCell<UnboundedReceiver<JavascriptExecutionEvent>>,
     pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
-    sync_rpc_responses: Option<JavascriptSyncRpcResponseWriter>,
     _import_cache_guard: Arc<NodeImportCacheCleanup>,
-    /// V8 session handle for sending bridge responses (None for legacy node mode).
-    v8_session: Option<V8SessionHandle>,
+    v8_session: V8SessionHandle,
 }
 
 impl JavascriptExecution {
@@ -920,56 +882,28 @@ impl JavascriptExecution {
     }
 
     pub fn uses_shared_v8_runtime(&self) -> bool {
-        self.v8_session.is_some()
+        true
     }
 
     pub fn write_stdin(&mut self, chunk: &[u8]) -> Result<(), JavascriptExecutionError> {
-        // V8 stdin via stream event
-        if let Some(session) = &self.v8_session {
-            // CBOR-encode the stdin data
-            let payload = v8_runtime::json_to_cbor_payload(&Value::String(
-                String::from_utf8_lossy(chunk).into_owned(),
-            ))
-            .map_err(|e| JavascriptExecutionError::Stdin(e))?;
-            session
-                .send_stream_event("stdin", payload)
-                .map_err(|e| JavascriptExecutionError::Stdin(e))?;
-            return Ok(());
-        }
-
-        // Legacy node stdin pipe
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or(JavascriptExecutionError::StdinClosed)?;
-        stdin
-            .write_all(chunk)
-            .and_then(|()| stdin.flush())
+        let payload =
+            v8_runtime::json_to_cbor_payload(&Value::String(String::from_utf8_lossy(chunk).into()))
+            .map_err(JavascriptExecutionError::Stdin)
+            ?;
+        self.v8_session
+            .send_stream_event("stdin", payload)
             .map_err(JavascriptExecutionError::Stdin)
     }
 
     pub fn close_stdin(&mut self) -> Result<(), JavascriptExecutionError> {
-        // V8 stdin end via stream event
-        if let Some(session) = &self.v8_session {
-            let _ = session.send_stream_event("stdin_end", vec![]);
-            return Ok(());
-        }
-
-        // Legacy node stdin pipe
-        if let Some(stdin) = self.stdin.take() {
-            drop(stdin);
-        }
+        let _ = self.v8_session.send_stream_event("stdin_end", vec![]);
         Ok(())
     }
 
     pub fn terminate(&self) -> Result<(), JavascriptExecutionError> {
-        if let Some(session) = &self.v8_session {
-            return session
-                .terminate()
-                .map_err(JavascriptExecutionError::Terminate);
-        }
-
-        Ok(())
+        self.v8_session
+            .terminate()
+            .map_err(JavascriptExecutionError::Terminate)
     }
 
     pub fn send_stream_event(
@@ -977,14 +911,9 @@ impl JavascriptExecution {
         event_type: &str,
         payload: Value,
     ) -> Result<(), JavascriptExecutionError> {
-        let session = self.v8_session.as_ref().ok_or_else(|| {
-            JavascriptExecutionError::RpcResponse(String::from(
-                "stream events require a V8-backed JavaScript execution",
-            ))
-        })?;
         let payload = v8_runtime::json_to_cbor_payload(&payload)
             .map_err(|error| JavascriptExecutionError::RpcResponse(error.to_string()))?;
-        session
+        self.v8_session
             .send_stream_event(event_type, payload)
             .map_err(|error| JavascriptExecutionError::RpcResponse(error.to_string()))
     }
@@ -1002,31 +931,12 @@ impl JavascriptExecution {
             PendingSyncRpcResolution::Missing => {}
         }
 
-        // V8 bridge response path
-        if let Some(session) = &self.v8_session {
-            let payload = translate_legacy_bridge_value_to_v8(&result);
-            let payload = v8_runtime::json_to_cbor_payload(&payload)
-                .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()))?;
-            session
-                .send_bridge_response(id, 0, payload)
-                .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()))?;
-            return Ok(());
-        }
-
-        // Legacy node pipe-based response path
-        let Some(writer) = &self.sync_rpc_responses else {
-            return Err(JavascriptExecutionError::RpcResponse(String::from(
-                "no sync RPC channel is active for this JavaScript execution",
-            )));
-        };
-        write_javascript_sync_rpc_response(
-            writer,
-            json!({
-                "id": id,
-                "ok": true,
-                "result": result,
-            }),
-        )
+        let payload = translate_legacy_bridge_value_to_v8(&result);
+        let payload = v8_runtime::json_to_cbor_payload(&payload)
+            .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()))?;
+        self.v8_session
+            .send_bridge_response(id, 0, payload)
+            .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()))
     }
 
     pub fn respond_sync_rpc_error(
@@ -1043,33 +953,10 @@ impl JavascriptExecution {
             PendingSyncRpcResolution::Missing => {}
         }
 
-        // V8 bridge response path
-        if let Some(session) = &self.v8_session {
-            let error_msg = message.into();
-            let payload = error_msg.into_bytes();
-            session
-                .send_bridge_response(id, 1, payload)
-                .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()))?;
-            return Ok(());
-        }
-
-        // Legacy node pipe-based response path
-        let Some(writer) = &self.sync_rpc_responses else {
-            return Err(JavascriptExecutionError::RpcResponse(String::from(
-                "no sync RPC channel is active for this JavaScript execution",
-            )));
-        };
-        write_javascript_sync_rpc_response(
-            writer,
-            json!({
-                "id": id,
-                "ok": false,
-                "error": {
-                    "code": code.into(),
-                    "message": message.into(),
-                },
-            }),
-        )
+        let error_msg = format!("{}: {}", code.into(), message.into());
+        self.v8_session
+            .send_bridge_response(id, 1, error_msg.into_bytes())
+            .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()))
     }
 
     pub async fn poll_event(
@@ -1350,12 +1237,10 @@ impl JavascriptExecutionEngine {
         Ok(JavascriptExecution {
             execution_id,
             child_pid: v8_host.child_pid(),
-            stdin: None,
             events: RefCell::new(events),
             pending_sync_rpc,
-            sync_rpc_responses: None,
             _import_cache_guard: import_cache_guard,
-            v8_session: Some(v8_session),
+            v8_session,
         })
     }
 
@@ -1384,77 +1269,6 @@ impl JavascriptExecutionEngine {
     }
 }
 
-fn spawn_javascript_event_bridge(
-    receiver: Receiver<JavascriptProcessEvent>,
-    stderr_filter: Arc<Mutex<LinePrefixFilter>>,
-    pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
-    sync_rpc_responses: Option<JavascriptSyncRpcResponseWriter>,
-    sync_rpc_timeout: Duration,
-) -> UnboundedReceiver<JavascriptExecutionEvent> {
-    let (sender, forwarded) = unbounded_channel();
-    thread::spawn(move || {
-        while let Ok(event) = receiver.recv() {
-            let forwarded_event = match event {
-                JavascriptProcessEvent::Stdout(chunk) => {
-                    Some(JavascriptExecutionEvent::Stdout(chunk))
-                }
-                JavascriptProcessEvent::RawStderr(chunk) => {
-                    let mut filter = match stderr_filter.lock() {
-                        Ok(filter) => filter,
-                        Err(_) => break,
-                    };
-                    let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
-                    if filtered.is_empty() {
-                        None
-                    } else {
-                        Some(JavascriptExecutionEvent::Stderr(filtered))
-                    }
-                }
-                JavascriptProcessEvent::SyncRpcRequest(request) => {
-                    if set_pending_sync_rpc_state(&pending_sync_rpc, request.id).is_err() {
-                        break;
-                    }
-                    spawn_javascript_sync_rpc_timeout(
-                        request.id,
-                        sync_rpc_timeout,
-                        pending_sync_rpc.clone(),
-                        sync_rpc_responses.clone(),
-                    );
-                    Some(JavascriptExecutionEvent::SyncRpcRequest(request))
-                }
-                JavascriptProcessEvent::Control(NodeControlMessage::NodeImportCacheMetrics {
-                    metrics,
-                }) => Some(JavascriptExecutionEvent::Stderr(
-                    format!(
-                        "{}{}\n",
-                        crate::node_import_cache::NODE_IMPORT_CACHE_METRICS_PREFIX,
-                        serde_json::to_string(&metrics).unwrap_or_else(|_| String::from("{}"))
-                    )
-                    .into_bytes(),
-                )),
-                JavascriptProcessEvent::Control(NodeControlMessage::SignalState {
-                    signal,
-                    registration,
-                }) => Some(JavascriptExecutionEvent::SignalState {
-                    signal,
-                    registration,
-                }),
-                JavascriptProcessEvent::Control(_) => None,
-                JavascriptProcessEvent::Exited(code) => {
-                    Some(JavascriptExecutionEvent::Exited(code))
-                }
-            };
-
-            if let Some(event) = forwarded_event {
-                if sender.send(event).is_err() {
-                    break;
-                }
-            }
-        }
-    });
-    forwarded
-}
-
 fn set_pending_sync_rpc_state(
     pending_sync_rpc: &Arc<Mutex<Option<PendingSyncRpcState>>>,
     id: u64,
@@ -1466,352 +1280,6 @@ fn set_pending_sync_rpc_state(
     })?;
     *pending = Some(PendingSyncRpcState::Pending(id));
     Ok(())
-}
-
-#[cfg(feature = "legacy-js-tests")]
-fn prewarm_node_import_path(
-    import_cache: &NodeImportCache,
-    context: &JavascriptContext,
-    request: &StartJavascriptExecutionRequest,
-    frozen_time_ms: u128,
-) -> Result<Option<Vec<u8>>, JavascriptExecutionError> {
-    let debug_enabled = env_flag_enabled(&request.env, NODE_WARMUP_DEBUG_ENV);
-
-    let Some(_compile_cache_dir) = &context.compile_cache_dir else {
-        return Ok(warmup_metrics_line(
-            debug_enabled,
-            false,
-            "compile-cache-disabled",
-            import_cache,
-        ));
-    };
-
-    let marker_path = warmup_marker_path(
-        import_cache.prewarm_marker_dir(),
-        "node-import-prewarm",
-        NODE_WARMUP_MARKER_VERSION,
-        &warmup_marker_contents(),
-    );
-    if marker_path.exists() {
-        return Ok(warmup_metrics_line(
-            debug_enabled,
-            false,
-            "cached",
-            import_cache,
-        ));
-    }
-
-    let warmup_imports = NODE_WARMUP_SPECIFIERS
-        .iter()
-        .map(|specifier| (*specifier).to_string())
-        .collect::<Vec<_>>();
-
-    ensure_host_cwd_exists(&request.cwd).map_err(JavascriptExecutionError::WarmupSpawn)?;
-    let mut command = Command::new(node_binary());
-    configure_node_sandbox(&mut command, import_cache, context, request)?;
-    command
-        .arg("--import")
-        .arg(import_cache.register_path())
-        .arg("--import")
-        .arg(import_cache.timing_bootstrap_path())
-        .arg(import_cache.prewarm_path())
-        .current_dir(&request.cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env(
-            NODE_PREWARM_IMPORTS_ENV,
-            encode_json_string_array(&warmup_imports),
-        );
-    configure_node_command(&mut command, import_cache, context, frozen_time_ms)?;
-
-    let output = command
-        .output()
-        .map_err(JavascriptExecutionError::WarmupSpawn)?;
-    if !output.status.success() {
-        return Err(JavascriptExecutionError::WarmupFailed {
-            exit_code: output.status.code().unwrap_or(1),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
-    }
-
-    fs::write(&marker_path, warmup_marker_contents())
-        .map_err(JavascriptExecutionError::PrepareImportCache)?;
-
-    Ok(warmup_metrics_line(
-        debug_enabled,
-        true,
-        "executed",
-        import_cache,
-    ))
-}
-
-#[cfg(feature = "legacy-js-tests")]
-fn create_node_child(
-    import_cache: &NodeImportCache,
-    context: &JavascriptContext,
-    request: &StartJavascriptExecutionRequest,
-    frozen_time_ms: u128,
-    control_fd: &std::os::fd::OwnedFd,
-    sync_rpc_channels: Option<JavascriptSyncRpcChannels>,
-) -> Result<
-    (
-        std::process::Child,
-        Option<File>,
-        Option<JavascriptSyncRpcResponseWriter>,
-    ),
-    JavascriptExecutionError,
-> {
-    ensure_host_cwd_exists(&request.cwd).map_err(JavascriptExecutionError::Spawn)?;
-    let guest_argv = encode_json_string_array(&request.argv[1..]);
-    let mut command = Command::new(node_binary());
-    configure_node_sandbox(&mut command, import_cache, context, request)?;
-    command
-        .arg("--import")
-        .arg(import_cache.register_path())
-        .arg("--import")
-        .arg(import_cache.timing_bootstrap_path())
-        .arg(import_cache.runner_path())
-        .current_dir(&request.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env(NODE_ENTRYPOINT_ENV, &request.argv[0]);
-
-    apply_guest_env(&mut command, &request.env, RESERVED_NODE_ENV_KEYS);
-    command.env(NODE_GUEST_ARGV_ENV, guest_argv);
-    for key in [
-        NODE_ALLOWED_BUILTINS_ENV,
-        NODE_EXTRA_FS_READ_PATHS_ENV,
-        NODE_EXTRA_FS_WRITE_PATHS_ENV,
-        NODE_GUEST_ENTRYPOINT_ENV,
-        NODE_GUEST_PATH_MAPPINGS_ENV,
-        NODE_KEEP_STDIN_OPEN_ENV,
-        NODE_LOOPBACK_EXEMPT_PORTS_ENV,
-        NODE_VIRTUAL_PROCESS_EXEC_PATH_ENV,
-        NODE_VIRTUAL_PROCESS_PID_ENV,
-        NODE_VIRTUAL_PROCESS_PPID_ENV,
-        NODE_VIRTUAL_PROCESS_UID_ENV,
-        NODE_VIRTUAL_PROCESS_GID_ENV,
-    ] {
-        if let Some(value) = request.env.get(key) {
-            command.env(key, value);
-        }
-    }
-    command.env(
-        NODE_PARENT_ALLOW_CHILD_PROCESS_ENV,
-        if inherited_node_permission_enabled(&request.env, NODE_PARENT_ALLOW_CHILD_PROCESS_ENV)
-            .unwrap_or_else(|| env_builtin_enabled(&request.env, "child_process"))
-        {
-            "1"
-        } else {
-            "0"
-        },
-    );
-    command.env(
-        NODE_PARENT_ALLOW_WORKER_ENV,
-        if inherited_node_permission_enabled(&request.env, NODE_PARENT_ALLOW_WORKER_ENV)
-            .unwrap_or_else(|| env_builtin_enabled(&request.env, "worker_threads"))
-        {
-            "1"
-        } else {
-            "0"
-        },
-    );
-
-    if let Some(bootstrap_module) = &context.bootstrap_module {
-        command.env(NODE_BOOTSTRAP_ENV, bootstrap_module);
-    }
-
-    let channels = sync_rpc_channels.expect("JavaScript sync RPC channels should be configured");
-    let mut exported_fds = ExportedChildFds::default();
-    command
-        .env(NODE_SYNC_RPC_ENABLE_ENV, "1")
-        .env(
-            NODE_SYNC_RPC_DATA_BYTES_ENV,
-            NODE_SYNC_RPC_DEFAULT_DATA_BYTES.to_string(),
-        )
-        .env(
-            NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV,
-            javascript_sync_rpc_timeout(request).as_millis().to_string(),
-        );
-    exported_fds
-        .export(
-            &mut command,
-            NODE_SYNC_RPC_REQUEST_FD_ENV,
-            &channels.child_request_writer,
-        )
-        .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
-    exported_fds
-        .export(
-            &mut command,
-            NODE_SYNC_RPC_RESPONSE_FD_ENV,
-            &channels.child_response_reader,
-        )
-        .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
-    let (sync_rpc_request_reader, sync_rpc_response_writer) = (
-        Some(channels.parent_request_reader),
-        Some(JavascriptSyncRpcResponseWriter::new(
-            channels.parent_response_writer,
-            javascript_sync_rpc_timeout(request),
-        )),
-    );
-
-    configure_node_control_channel(&mut command, control_fd, &mut exported_fds)
-        .map_err(JavascriptExecutionError::Spawn)?;
-    configure_node_command(&mut command, import_cache, context, frozen_time_ms)?;
-
-    let child = command.spawn().map_err(JavascriptExecutionError::Spawn)?;
-    Ok((child, sync_rpc_request_reader, sync_rpc_response_writer))
-}
-
-#[cfg(feature = "legacy-js-tests")]
-fn configure_node_sandbox(
-    command: &mut Command,
-    import_cache: &NodeImportCache,
-    context: &JavascriptContext,
-    request: &StartJavascriptExecutionRequest,
-) -> Result<(), JavascriptExecutionError> {
-    let sandbox_root = sandbox_root(&request.env, &request.cwd);
-    let cache_root = import_cache_root(import_cache, import_cache.asset_root());
-    let mut read_paths = vec![cache_root.clone()];
-    let mut write_paths = vec![cache_root, sandbox_root.clone()];
-
-    if let Some(entrypoint_path) = resolve_path_like_specifier(&request.cwd, &request.argv[0]) {
-        read_paths.push(entrypoint_path.clone());
-        if let Some(parent) = entrypoint_path.parent() {
-            read_paths.push(parent.to_path_buf());
-        }
-    }
-
-    if let Some(bootstrap_module) = &context.bootstrap_module {
-        if let Some(bootstrap_path) = resolve_path_like_specifier(&request.cwd, bootstrap_module) {
-            read_paths.push(bootstrap_path);
-        }
-    }
-
-    read_paths.extend(node_resolution_read_paths(
-        std::iter::once(request.cwd.clone())
-            .chain(
-                resolve_path_like_specifier(&request.cwd, &request.argv[0])
-                    .and_then(|path| path.parent().map(PathBuf::from)),
-            )
-            .chain(
-                context
-                    .bootstrap_module
-                    .as_ref()
-                    .and_then(|module| resolve_path_like_specifier(&request.cwd, module))
-                    .and_then(|path| path.parent().map(PathBuf::from)),
-            ),
-    ));
-
-    if let Some(compile_cache_dir) = &context.compile_cache_dir {
-        read_paths.push(compile_cache_dir.clone());
-        write_paths.push(compile_cache_dir.clone());
-    }
-
-    read_paths.extend(parse_env_path_list(
-        &request.env,
-        NODE_EXTRA_FS_READ_PATHS_ENV,
-    ));
-    write_paths.extend(parse_env_path_list(
-        &request.env,
-        NODE_EXTRA_FS_WRITE_PATHS_ENV,
-    ));
-
-    harden_node_command(
-        command,
-        &sandbox_root,
-        &read_paths,
-        &write_paths,
-        true,
-        false,
-        inherited_node_permission_enabled(&request.env, NODE_PARENT_ALLOW_WORKER_ENV)
-            .unwrap_or(true),
-        inherited_node_permission_enabled(&request.env, NODE_PARENT_ALLOW_CHILD_PROCESS_ENV)
-            .unwrap_or_else(|| env_builtin_enabled(&request.env, "child_process")),
-    );
-    Ok(())
-}
-
-#[cfg(feature = "legacy-js-tests")]
-fn inherited_node_permission_enabled(env: &BTreeMap<String, String>, key: &str) -> Option<bool> {
-    env.get(key).and_then(|value| match value.as_str() {
-        "1" | "true" => Some(true),
-        "0" | "false" => Some(false),
-        _ => None,
-    })
-}
-
-#[cfg(feature = "legacy-js-tests")]
-fn parse_env_path_list(env: &BTreeMap<String, String>, key: &str) -> Vec<PathBuf> {
-    env.get(key)
-        .and_then(|value| from_str::<Vec<String>>(value).ok())
-        .into_iter()
-        .flatten()
-        .map(PathBuf::from)
-        .collect()
-}
-
-#[cfg(feature = "legacy-js-tests")]
-fn configure_node_command(
-    command: &mut Command,
-    import_cache: &NodeImportCache,
-    context: &JavascriptContext,
-    frozen_time_ms: u128,
-) -> Result<(), JavascriptExecutionError> {
-    command
-        .env(
-            NODE_IMPORT_CACHE_LOADER_PATH_ENV,
-            import_cache.loader_path(),
-        )
-        .env(NODE_IMPORT_CACHE_PATH_ENV, import_cache.cache_path())
-        .env(NODE_IMPORT_CACHE_ASSET_ROOT_ENV, import_cache.asset_root())
-        .env(NODE_FROZEN_TIME_ENV, frozen_time_ms.to_string());
-
-    if let Some(compile_cache_dir) = &context.compile_cache_dir {
-        configure_compile_cache(command, compile_cache_dir)
-            .map_err(JavascriptExecutionError::PrepareImportCache)?;
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "legacy-js-tests")]
-fn warmup_marker_contents() -> String {
-    [
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION"),
-        NODE_WARMUP_MARKER_VERSION,
-        NODE_IMPORT_COMPILE_CACHE_NAMESPACE_VERSION,
-    ]
-    .into_iter()
-    .chain(NODE_WARMUP_SPECIFIERS.iter().copied())
-    .collect::<Vec<_>>()
-    .join("\n")
-}
-
-#[cfg(feature = "legacy-js-tests")]
-fn warmup_metrics_line(
-    debug_enabled: bool,
-    executed: bool,
-    reason: &str,
-    import_cache: &NodeImportCache,
-) -> Option<Vec<u8>> {
-    if !debug_enabled {
-        return None;
-    }
-
-    Some(
-        format!(
-            "{NODE_WARMUP_METRICS_PREFIX}{{\"executed\":{},\"reason\":{},\"importCount\":{},\"assetRoot\":{}}}\n",
-            if executed { "true" } else { "false" },
-            encode_json_string(reason),
-            NODE_WARMUP_SPECIFIERS.len(),
-            encode_json_string(&import_cache.asset_root().display().to_string()),
-        )
-        .into_bytes(),
-    )
 }
 
 fn resolve_node_import_compile_cache_dir(root_dir: PathBuf) -> PathBuf {
@@ -1838,26 +1306,6 @@ fn stable_compile_cache_namespace_hash() -> u64 {
         .join("\n")
         .as_bytes(),
     )
-}
-
-fn create_javascript_sync_rpc_channels(
-) -> Result<JavascriptSyncRpcChannels, JavascriptExecutionError> {
-    let fd_reservations = (0..64)
-        .map(|_| File::open("/dev/null"))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(JavascriptExecutionError::PrepareImportCache)?;
-    let (parent_request_reader, child_request_writer) = pipe2(OFlag::O_CLOEXEC)
-        .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
-    let (child_response_reader, parent_response_writer) = pipe2(OFlag::O_CLOEXEC)
-        .map_err(|error| JavascriptExecutionError::RpcChannel(error.to_string()))?;
-    drop(fd_reservations);
-
-    Ok(JavascriptSyncRpcChannels {
-        parent_request_reader: File::from(parent_request_reader),
-        parent_response_writer: File::from(parent_response_writer),
-        child_request_writer,
-        child_response_reader,
-    })
 }
 
 fn javascript_sync_rpc_timeout(request: &StartJavascriptExecutionRequest) -> Duration {

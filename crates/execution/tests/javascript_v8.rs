@@ -127,7 +127,7 @@ fn javascript_execution_uses_v8_runtime_without_spawning_guest_node_binary() {
         compile_cache_root: None,
     });
 
-    let mut execution = engine
+    let execution = engine
         .start_execution(StartJavascriptExecutionRequest {
             vm_id: String::from("vm-js"),
             context_id: context.context_id,
@@ -166,7 +166,7 @@ fn javascript_execution_virtualizes_process_metadata_for_inline_v8_code() {
         compile_cache_root: None,
     });
 
-    let mut execution = engine
+    let execution = engine
         .start_execution(StartJavascriptExecutionRequest {
             vm_id: String::from("vm-js"),
             context_id: context.context_id,
@@ -545,7 +545,7 @@ if (typeof performance?.now !== "function") {
 }
 
 #[test]
-fn javascript_execution_denies_dangerous_builtins_with_err_access_denied() {
+fn javascript_execution_exposes_compatibility_shims_and_denies_escape_builtins() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
     let context = engine.create_context(CreateJavascriptContextRequest {
@@ -566,7 +566,32 @@ fn javascript_execution_denies_dangerous_builtins_with_err_access_denied() {
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-for (const builtin of ["vm", "worker_threads", "inspector", "v8", "cluster"]) {
+const vm = require("node:vm");
+if (typeof vm.runInThisContext !== "function") {
+  throw new Error("node:vm compatibility shim missing runInThisContext");
+}
+
+const v8 = require("node:v8");
+if (typeof v8.cachedDataVersionTag !== "function") {
+  throw new Error("node:v8 compatibility shim missing cachedDataVersionTag");
+}
+
+const workerThreads = require("node:worker_threads");
+if (workerThreads.isMainThread !== true) {
+  throw new Error("node:worker_threads compatibility shim missing isMainThread");
+}
+
+let workerDenied = false;
+try {
+  new workerThreads.Worker(new URL("data:text/javascript,0"));
+} catch (error) {
+  workerDenied = error?.code === "ERR_NOT_IMPLEMENTED";
+}
+if (!workerDenied) {
+  throw new Error("node:worker_threads Worker should stay unavailable");
+}
+
+for (const builtin of ["inspector", "cluster"]) {
   let denied = false;
   try {
     require(`node:${builtin}`);

@@ -422,6 +422,7 @@ fn resolve_executable_path(binary: &str) -> Option<String> {
     None
 }
 
+#[allow(dead_code)]
 pub fn spawn_waiter<E, FE, FW>(
     mut child: Child,
     stdout_reader: JoinHandle<()>,

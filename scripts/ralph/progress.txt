@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- V8 builtin coverage should treat `node:vm`, `node:v8`, and `node:worker_threads` as compatibility shims, not denied imports; keep true escape builtins like `node:inspector` and `node:cluster` on `ERR_ACCESS_DENIED`, and assert `worker_threads.Worker` fails with `ERR_NOT_IMPLEMENTED` instead of requiring the module import to fail.
 - Guest-visible runtime env is a shared cross-runtime contract: `prepare_guest_runtime_env(...)` should supply stable kernel-owned identity vars including `PATH`, Python should mirror only that guest-facing subset into `os.environ`, and the WASM `AGENT_OS_GUEST_ENV` payload must strip internal control vars like `AGENT_OS_*` / `NODE_SYNC_RPC_*` before they reach WASI guest code.
 - The host-tool description limit is a shared boundary contract: keep the 200-character maximum aligned between `packages/core/src/host-tools.ts` and Rust sidecar `register_toolkit` validation in `crates/sidecar/src/tools.rs`, and cover boundary acceptance/rejection on both sides.
 - `HostDirFilesystem` mutations should stay on the anchored `openat2(... RESOLVE_BENEATH ...)` path and then operate through the `/proc/self/fd/<fd>` handle; that keeps direct operations like `pwrite` host-backed without reintroducing path-escape races or falling back to whole-file rewrites.
@@ -258,6 +259,15 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Kernel DNS lookups should stay behind `KernelVm::resolve_dns()` so overrides, nameservers, and permission checks do not drift between sidecar entry points.
   - Mock `DnsResolver` injection on `KernelVmConfig` is the cleanest way to test nameserver propagation and permission hooks without depending on live DNS infrastructure.
   - The active truth path for this story is `cargo test -p agent-os-kernel --test dns_resolution -- --test-threads=1` and root `pnpm check-types`; the closest sidecar DNS integration tests are currently ignored in this harness, and the Python bridge probe in this environment failed because the guest `python` command was unavailable.
+---
+## 2026-04-10 07:20:19 PDT - US-068
+- Removed the last feature-gated host-Node JavaScript execution path from `crates/execution`: deleted the `legacy-js-tests` cargo feature, dropped the dead host-child/prewarm helpers from `javascript.rs`, simplified `JavascriptExecution` to the shared-V8-only model, and removed import-cache accessors that only existed for the deleted JS runner path.
+- Updated focused V8 execution coverage to match the intended builtin contract by asserting `node:vm`, `node:v8`, and `node:worker_threads` stay importable as compatibility shims while `node:inspector` and `node:cluster` remain denied, and recorded the new no-legacy-JS rule in `crates/execution/CLAUDE.md`.
+- Files changed: `crates/execution/CLAUDE.md`, `crates/execution/Cargo.toml`, `crates/execution/src/javascript.rs`, `crates/execution/src/node_import_cache.rs`, `crates/execution/src/node_process.rs`, `crates/execution/tests/javascript_v8.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - JavaScript guest execution now has one truth path in this crate: the shared V8 runtime. Do not add a feature-gated host-Node fallback back into `javascript.rs` or its tests.
+  - `node:vm`, `node:v8`, and `node:worker_threads` are compatibility shims in V8 coverage; only real escape builtins such as `node:inspector` and `node:cluster` should raise `ERR_ACCESS_DENIED`.
+  - The active truth path for this story is `cargo test -p agent-os-execution --test javascript_v8` plus root `pnpm check-types`.
 ---
 ## 2026-04-10 07:09:54 PDT - US-067
 - Replaced the native-sidecar `allProcesses()` / `processTree()` child-process discovery path with a VM-backed process snapshot. The sidecar now exposes active root and nested guest child processes from VM state, and the core RPC client remaps root kernel PIDs back to the public synthetic `spawn()` PID so nested `child_process.spawn()` children attach to the expected parent in public introspection APIs.
