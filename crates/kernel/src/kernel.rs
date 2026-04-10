@@ -26,7 +26,10 @@ use crate::resource_accounting::{
     ResourceSnapshot,
 };
 use crate::root_fs::{RootFileSystem, RootFilesystemError, RootFilesystemSnapshot};
-use crate::socket_table::{SocketId, SocketSpec, SocketState, SocketTable, SocketTableError};
+use crate::socket_table::{
+    InetSocketAddress, SocketId, SocketRecord, SocketSpec, SocketState, SocketTable,
+    SocketTableError,
+};
 use crate::user::UserManager;
 use crate::vfs::{normalize_path, VfsError, VfsResult, VirtualFileSystem, VirtualStat};
 use std::any::Any;
@@ -1109,6 +1112,107 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.resources
             .check_socket_allocation(&self.resource_snapshot())?;
         Ok(self.sockets.allocate(pid, spec).id())
+    }
+
+    pub fn socket_get(&self, socket_id: SocketId) -> Option<SocketRecord> {
+        self.sockets.get(socket_id)
+    }
+
+    pub fn socket_bind_inet(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        address: InetSocketAddress,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        self.sockets.bind_inet(socket_id, address)?;
+        Ok(())
+    }
+
+    pub fn socket_listen(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        backlog: usize,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        self.sockets.listen(socket_id, backlog)?;
+        Ok(())
+    }
+
+    pub fn socket_queue_incoming_tcp_connection(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        listener_socket_id: SocketId,
+        peer_address: InetSocketAddress,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self.sockets.get(listener_socket_id).ok_or_else(|| {
+            KernelError::new("ENOENT", format!("no such socket {listener_socket_id}"))
+        })?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {listener_socket_id}"
+            )));
+        }
+
+        self.sockets
+            .enqueue_incoming_tcp_connection(listener_socket_id, peer_address)?;
+        Ok(())
+    }
+
+    pub fn socket_accept(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        listener_socket_id: SocketId,
+    ) -> KernelResult<SocketId> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self.sockets.get(listener_socket_id).ok_or_else(|| {
+            KernelError::new("ENOENT", format!("no such socket {listener_socket_id}"))
+        })?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {listener_socket_id}"
+            )));
+        }
+
+        let snapshot = self.resource_snapshot();
+        self.resources.check_socket_allocation(&snapshot)?;
+        self.resources.check_socket_state_transition(
+            &snapshot,
+            SocketState::Created,
+            SocketState::Connected,
+        )?;
+
+        Ok(self.sockets.accept(listener_socket_id)?.id())
     }
 
     pub fn socket_set_state(
