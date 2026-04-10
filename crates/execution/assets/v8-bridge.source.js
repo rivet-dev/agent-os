@@ -7818,6 +7818,20 @@ var __bridge = (() => {
   function getRuntimeTmpDir() {
     return globalThis.process?.env?.TMPDIR || config.tmpdir;
   }
+  function getRuntimeUserName() {
+    return globalThis.process?.env?.USER || globalThis.process?.env?.LOGNAME || "root";
+  }
+  function getRuntimeShell() {
+    return globalThis.process?.env?.SHELL || "/bin/bash";
+  }
+  function getRuntimeUid() {
+    const value = globalThis.process?.uid;
+    return Number.isFinite(value) ? value : 0;
+  }
+  function getRuntimeGid() {
+    const value = globalThis.process?.gid;
+    return Number.isFinite(value) ? value : 0;
+  }
   var signals = {
     SIGHUP: 1,
     SIGINT: 2,
@@ -7973,10 +7987,10 @@ var __bridge = (() => {
     // User information
     userInfo(_options) {
       return {
-        username: "root",
-        uid: 0,
-        gid: 0,
-        shell: "/bin/bash",
+        username: getRuntimeUserName(),
+        uid: getRuntimeUid(),
+        gid: getRuntimeGid(),
+        shell: getRuntimeShell(),
         homedir: getRuntimeHomeDir()
       };
     },
@@ -20531,19 +20545,21 @@ ${headerLines}\r
     },
     hrtime,
     getuid() {
-      return config2.uid;
+      return getRuntimeUid();
     },
     getgid() {
-      return config2.gid;
+      return getRuntimeGid();
     },
     geteuid() {
-      return config2.uid;
+      const value = globalThis.process?.euid;
+      return Number.isFinite(value) ? value : getRuntimeUid();
     },
     getegid() {
-      return config2.gid;
+      const value = globalThis.process?.egid;
+      return Number.isFinite(value) ? value : getRuntimeGid();
     },
     getgroups() {
-      return [config2.gid];
+      return Array.isArray(globalThis.process?.groups) && globalThis.process.groups.length > 0 ? [...globalThis.process.groups] : [getRuntimeGid()];
     },
     setuid() {
     },

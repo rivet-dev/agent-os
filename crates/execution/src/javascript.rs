@@ -400,9 +400,16 @@ impl GuestPathTranslator {
     fn from_request(request: &StartJavascriptExecutionRequest) -> Self {
         let implicit_guest_cwd = request
             .env
-            .get("HOME")
+            .get("PWD")
             .filter(|value| value.starts_with('/'))
             .cloned()
+            .or_else(|| {
+                request
+                    .env
+                    .get("HOME")
+                    .filter(|value| value.starts_with('/'))
+                    .cloned()
+            })
             .unwrap_or_else(|| String::from("/root"));
         let mut mappings = parse_guest_path_mappings(request)
             .into_iter()
@@ -1247,7 +1254,9 @@ impl JavascriptExecutionEngine {
 
         // Lazily spawn the V8 runtime host, or replace a dead shared host.
         let should_spawn_v8_host = match self.v8_host.as_mut() {
-            Some(v8_host) => !v8_host.is_alive().map_err(JavascriptExecutionError::Spawn)?,
+            Some(v8_host) => !v8_host
+                .is_alive()
+                .map_err(JavascriptExecutionError::Spawn)?,
             None => true,
         };
         if should_spawn_v8_host {
@@ -2084,6 +2093,17 @@ fn prepend_v8_runtime_shim(
     const nextPpid = Number(nextEnv.AGENT_OS_VIRTUAL_PROCESS_PPID);
     if (Number.isFinite(nextPpid) && nextPpid >= 0) {{
       process.ppid = nextPpid;
+    }}
+    const nextUid = Number(nextEnv.AGENT_OS_VIRTUAL_PROCESS_UID);
+    if (Number.isFinite(nextUid) && nextUid >= 0) {{
+      process.uid = nextUid;
+      process.euid = nextUid;
+    }}
+    const nextGid = Number(nextEnv.AGENT_OS_VIRTUAL_PROCESS_GID);
+    if (Number.isFinite(nextGid) && nextGid >= 0) {{
+      process.gid = nextGid;
+      process.egid = nextGid;
+      process.groups = [nextGid];
     }}
     if (typeof nextEnv.AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH === "string" && nextEnv.AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH.length > 0) {{
       process.execPath = nextEnv.AGENT_OS_VIRTUAL_PROCESS_EXEC_PATH;

@@ -18,6 +18,7 @@ const PYTHON_WARMUP_METRICS_PREFIX = '__AGENT_OS_PYTHON_WARMUP_METRICS__:';
 const PYTHON_PRELOAD_PACKAGES_ENV = 'AGENT_OS_PYTHON_PRELOAD_PACKAGES';
 const PYTHON_VFS_RPC_REQUEST_FD_ENV = 'AGENT_OS_PYTHON_VFS_RPC_REQUEST_FD';
 const PYTHON_VFS_RPC_RESPONSE_FD_ENV = 'AGENT_OS_PYTHON_VFS_RPC_RESPONSE_FD';
+const PYTHON_RUNTIME_ENV_NAMES = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'PWD', 'TMPDIR'];
 const ALLOW_PROCESS_BINDINGS = process.env.AGENT_OS_ALLOW_PROCESS_BINDINGS === '1';
 const STDIN_FD = 0;
 const SUPPORTED_PRELOAD_PACKAGES = ['numpy', 'pandas'];
@@ -852,6 +853,32 @@ function installPythonGuestImportBlocklist(pyodide) {
   pyodide.runPython(PYTHON_GUEST_IMPORT_BLOCKLIST_SOURCE);
 }
 
+function buildPythonRuntimeEnv() {
+  const runtimeEnv = {};
+  for (const name of PYTHON_RUNTIME_ENV_NAMES) {
+    if (typeof process.env[name] === 'string') {
+      runtimeEnv[name] = process.env[name];
+    }
+  }
+  return runtimeEnv;
+}
+
+function installPythonRuntimeEnv(pyodide) {
+  if (typeof pyodide?.runPython !== 'function') {
+    return;
+  }
+
+  const runtimeEnv = buildPythonRuntimeEnv();
+
+  pyodide.runPython(`
+import json as _agent_os_json
+import os as _agent_os_os
+
+for _agent_os_key, _agent_os_value in _agent_os_json.loads(${JSON.stringify(JSON.stringify(runtimeEnv))}).items():
+    _agent_os_os.environ[_agent_os_key] = _agent_os_value
+`);
+}
+
 function installPythonKernelRpcShims(pyodide) {
   if (typeof pyodide?.runPython !== 'function' || !globalThis.__agentOsPythonVfsRpc) {
     return;
@@ -1379,6 +1406,7 @@ try {
     indexURL: indexPath,
     lockFileContents,
     packageBaseUrl: indexPath,
+    env: buildPythonRuntimeEnv(),
     stdout: writePyodideStdout,
     stderr: (message) => writeStream(process.stderr, message),
   });
@@ -1418,6 +1446,7 @@ try {
   installPythonKernelRpcShims(pyodide);
   installPythonGuestProcessHardening();
   installPythonGuestImportBlocklist(pyodide);
+  installPythonRuntimeEnv(pyodide);
   const source = process.env[PYTHON_FILE_ENV] != null ? 'file' : 'inline';
   emitPythonStartupMetrics({
     prewarmOnly: false,

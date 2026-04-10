@@ -22,8 +22,8 @@ use crate::service::{
 };
 use crate::state::{
     BridgeError, VmConfiguration, VmDnsConfig, VmLayer, VmLayerStore, VmOverlayLayer, VmState,
-    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME, JAVASCRIPT_COMMAND,
-    WASM_COMMAND,
+    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME,
+    JAVASCRIPT_COMMAND, PYTHON_COMMAND, WASM_COMMAND,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -144,8 +144,11 @@ where
         );
         let command_guest_paths = discover_command_guest_paths(&mut kernel);
         refresh_guest_command_path_env(&mut guest_env, &command_guest_paths);
-        let mut execution_commands =
-            vec![String::from(JAVASCRIPT_COMMAND), String::from(WASM_COMMAND)];
+        let mut execution_commands = vec![
+            String::from(JAVASCRIPT_COMMAND),
+            String::from(PYTHON_COMMAND),
+            String::from(WASM_COMMAND),
+        ];
         execution_commands.extend(command_guest_paths.keys().cloned());
         kernel
             .register_driver(CommandDriver::new(
@@ -811,7 +814,9 @@ impl VmLayerStore {
             .remove(layer_id)
             .ok_or_else(|| SidecarError::InvalidState(format!("unknown layer: {layer_id}")))?;
         let snapshot = match layer {
-            VmLayer::Writable(mut filesystem) => filesystem.snapshot().map_err(root_filesystem_error)?,
+            VmLayer::Writable(mut filesystem) => {
+                filesystem.snapshot().map_err(root_filesystem_error)?
+            }
             VmLayer::Snapshot(_) | VmLayer::Overlay(_) => {
                 return Err(SidecarError::InvalidState(format!(
                     "layer {layer_id} is not writable"
@@ -826,7 +831,8 @@ impl VmLayerStore {
 
     fn import_snapshot(&mut self, snapshot: RootFilesystemSnapshot) -> String {
         let layer_id = self.allocate_layer_id();
-        self.layers.insert(layer_id.clone(), VmLayer::Snapshot(snapshot));
+        self.layers
+            .insert(layer_id.clone(), VmLayer::Snapshot(snapshot));
         layer_id
     }
 

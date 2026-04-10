@@ -5089,13 +5089,11 @@ fn resolve_execute_request(
         .then(|| resolve_host_entrypoint_within_vm_host_cwd(vm, &entrypoint))
         .flatten();
 
-    if runtime != GuestRuntimeKind::Python {
-        let guest_entrypoint = host_entrypoint_override
-            .as_ref()
-            .map(|(guest_entrypoint, _)| guest_entrypoint.clone())
-            .or_else(|| guest_entrypoint_for_specifier(&guest_cwd, &entrypoint));
-        prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
-    }
+    let guest_entrypoint = host_entrypoint_override
+        .as_ref()
+        .map(|(guest_entrypoint, _)| guest_entrypoint.clone())
+        .or_else(|| guest_entrypoint_for_specifier(&guest_cwd, &entrypoint));
+    prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
 
     Ok(ResolvedChildProcessExecution {
         command: match runtime {
@@ -5728,6 +5726,7 @@ fn prepare_guest_runtime_env(
     host_cwd: &Path,
     guest_entrypoint: Option<String>,
 ) -> Result<(), SidecarError> {
+    let user = vm.kernel.user_profile();
     let path_mappings = runtime_guest_path_mappings(vm);
     let read_paths = expand_host_access_paths(
         std::iter::once(vm.cwd.clone())
@@ -5780,8 +5779,31 @@ fn prepare_guest_runtime_env(
             SidecarError::InvalidState(format!("failed to encode allowed builtins: {error}"))
         })?,
     );
+    env.insert(String::from("AGENT_OS_VIRTUAL_OS_USER"), user.username.clone());
+    env.insert(
+        String::from("AGENT_OS_VIRTUAL_OS_HOMEDIR"),
+        user.homedir.clone(),
+    );
+    env.insert(String::from("AGENT_OS_VIRTUAL_OS_SHELL"), user.shell.clone());
+    env.insert(
+        String::from("AGENT_OS_VIRTUAL_PROCESS_UID"),
+        user.uid.to_string(),
+    );
+    env.insert(
+        String::from("AGENT_OS_VIRTUAL_PROCESS_GID"),
+        user.gid.to_string(),
+    );
     env.entry(String::from("HOME"))
-        .or_insert_with(|| guest_cwd.to_owned());
+        .or_insert_with(|| user.homedir.clone());
+    env.entry(String::from("USER"))
+        .or_insert_with(|| user.username.clone());
+    env.entry(String::from("LOGNAME"))
+        .or_insert_with(|| user.username.clone());
+    env.entry(String::from("SHELL"))
+        .or_insert_with(|| user.shell.clone());
+    env.entry(String::from("TMPDIR"))
+        .or_insert_with(|| String::from("/tmp"));
+    env.insert(String::from("PWD"), guest_cwd.to_owned());
     if !loopback_exempt_ports.is_empty() {
         env.insert(
             String::from(LOOPBACK_EXEMPT_PORTS_ENV),

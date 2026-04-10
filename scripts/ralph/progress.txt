@@ -17,6 +17,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Kernel DNS resolution should live behind `KernelVm::resolve_dns()` / `crates/kernel/src/dns.rs`; explicit guest DNS APIs use `DnsLookupPolicy::CheckPermissions`, while TCP/UDP/HTTP helpers that already gate egress separately should use `SkipPermissions` so the DNS migration does not add an extra permission requirement.
 - Mixed kernel readiness coverage should use `KernelVm::poll_targets()` with `PollTargetEntry::fd(...)` for FD-backed pipes/PTYS and `PollTargetEntry::socket(...)` for socket-table entries so one notifier-driven poll loop is exercised across subsystems.
 - Kernel guest identity should live on `ProcessContext.identity` / `ProcessInfo.identity`, while passwd/group string formatting stays centralized in `crates/kernel/src/user.rs`; do not infer uid/gid/user state back out of env vars or `/etc/*` snapshots.
+- Guest runtime identity defaults must keep `HOME` tied to the kernel user's homedir and `PWD` tied to the execution cwd; JS, WASM, and Python all need to consume the same prepared env so guest-visible identity probes do not fall back to host or runtime defaults.
 - Sidecar/V8 networking integration tests should prefer VM-local loopback peers inside the guest (for example a guest `net` server/client pair or paired `dgram` sockets) instead of host loopback fixtures plus `LOOPBACK_EXEMPT_PORTS_ENV`, so the test actually exercises kernel-owned socket routing.
 - Sidecar JS execution tests that manually register an `ActiveProcess` must set `.with_host_cwd(cwd.to_path_buf())` (or use the shared test helpers that do) before draining execution events; otherwise shadow-root sync defaults to `/` and unrelated host paths can leak into reconciliation.
 - Fire-and-forget session shutdown in `packages/core/src/agent-os.ts` still needs a local `.catch(() => {})` on the dropped `_closeSessionInternal()` promise; deterministic callers should await `_sessionClosePromises` instead of letting shared-runtime close races surface as unhandled rejections.
@@ -360,4 +361,14 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Kernel identity should be modeled once and copied into per-process metadata at registration time, so guest-facing uid/gid syscalls can read process-owned state without reverse-engineering env vars.
   - Group membership needs primary-gid normalization and deduplication up front; otherwise `getgroups()` and rendered `/etc/group`-style entries drift on duplicate primary gids.
   - The active truth path for this story is `cargo test -p agent-os-kernel --test user -- --test-threads=1`, `cargo test -p agent-os-kernel --test identity -- --test-threads=1`, and root `pnpm check-types`.
+---
+## 2026-04-10 04:04 PDT - US-059
+- Added guest-visible identity coverage for JavaScript, Python, and WASM, then wired the runtime env assembly so all three paths expose kernel-owned user, group, home, shell, and cwd defaults instead of runtime fallbacks.
+- Fixed the host-node compatibility layers that those tests exercise: JS/V8 now keys implicit cwd off `PWD`, the embedded WASM runner now materializes virtual uid/gid and passwd data from env, and the Pyodide runner now receives the VM identity env during bootstrap.
+- Files changed: `crates/kernel/src/kernel.rs`, `crates/sidecar/src/execution.rs`, `crates/sidecar/src/vm.rs`, `crates/sidecar/tests/guest_identity.rs`, `crates/execution/AGENTS.md`, `crates/execution/assets/runners/python-runner.mjs`, `crates/execution/assets/v8-bridge.js`, `crates/execution/assets/v8-bridge.source.js`, `crates/execution/src/javascript.rs`, `crates/execution/src/node_import_cache.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Guest-visible identity tests should exercise all three runtime front doors, because JS, WASM, and Python each have their own bootstrap layer that can leak a default like Pyodide's `web_user` or a stale host-node asset.
+  - `prepare_guest_runtime_env(...)` is the shared truth path for VM identity defaults; if one runtime bypasses it, `HOME`/`PWD` split and kernel-owned `USER`/`SHELL` values drift immediately.
+  - When changing bundled runner assets under `crates/execution/`, bump `NODE_IMPORT_CACHE_ASSET_VERSION` or stale `/tmp/agent-os-node-import-cache-*` materializations will mask the fix.
+  - The active truth path for this story is `cargo test -p agent-os-sidecar --test guest_identity -- --test-threads=1` and root `pnpm check-types`.
 ---

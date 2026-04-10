@@ -472,6 +472,10 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             .identity)
     }
 
+    pub fn user_profile(&self) -> UserManager {
+        self.users.clone()
+    }
+
     pub fn getuid(&self, requester_driver: &str, pid: u32) -> KernelResult<u32> {
         Ok(self.process_identity(requester_driver, pid)?.uid)
     }

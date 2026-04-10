@@ -15,7 +15,7 @@ const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
 const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "8";
-const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "23";
+const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "26";
 const NODE_IMPORT_CACHE_DIR_PREFIX: &str = "agent-os-node-import-cache";
 const DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const PYODIDE_DIST_DIR: &str = "pyodide-dist";
@@ -93,9 +93,12 @@ const CACHE_ROOT = CACHE_PATH ? path.dirname(CACHE_PATH) : null;
 const GUEST_INTERNAL_CACHE_ROOT = '/.agent-os/node-import-cache';
 const HOST_CWD = process.cwd();
 const DEFAULT_GUEST_CWD =
-  typeof process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR === 'string' &&
-  process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR.startsWith('/')
-    ? path.posix.normalize(process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR)
+  typeof process.env.PWD === 'string' &&
+  process.env.PWD.startsWith('/')
+    ? path.posix.normalize(process.env.PWD)
+    : typeof process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR === 'string' &&
+        process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR.startsWith('/')
+      ? path.posix.normalize(process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR)
     : '/root';
 const UNMAPPED_GUEST_PATH = '/unknown';
 const PROJECTED_SOURCE_CACHE_ROOT = CACHE_PATH
@@ -7897,6 +7900,28 @@ const WASI_OFLAGS_DIRECTORY = 2;
 const WASI_OFLAGS_EXCL = 4;
 const WASI_OFLAGS_TRUNC = 8;
 const WASM_PAGE_BYTES = 65536;
+const DEFAULT_VIRTUAL_UID = 0;
+const DEFAULT_VIRTUAL_GID = 0;
+const DEFAULT_VIRTUAL_OS_USER = 'root';
+const DEFAULT_VIRTUAL_OS_HOMEDIR = '/root';
+const DEFAULT_VIRTUAL_OS_SHELL = '/bin/sh';
+
+function parseVirtualProcessNumber(value, fallback) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function parseVirtualProcessString(value, fallback) {
+  return typeof value === 'string' && value.length > 0 ? value : fallback;
+}
+
+function resolveVirtualPath(value, fallback) {
+  const resolved = parseVirtualProcessString(value, fallback);
+  return resolved.startsWith('/') ? path.posix.normalize(resolved) : fallback;
+}
 
 function isPathLike(specifier) {
   return specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('file:');
@@ -7953,6 +7978,26 @@ const maxMemoryPages = Number.isFinite(maxMemoryBytesValue)
 const frozenTimeValue = Number(process.env.AGENT_OS_FROZEN_TIME_MS);
 const frozenTimeMs = Number.isFinite(frozenTimeValue) ? Math.trunc(frozenTimeValue) : Date.now();
 const frozenTimeNs = BigInt(frozenTimeMs) * 1000000n;
+const VIRTUAL_UID = parseVirtualProcessNumber(
+  process.env.AGENT_OS_VIRTUAL_PROCESS_UID,
+  DEFAULT_VIRTUAL_UID,
+);
+const VIRTUAL_GID = parseVirtualProcessNumber(
+  process.env.AGENT_OS_VIRTUAL_PROCESS_GID,
+  DEFAULT_VIRTUAL_GID,
+);
+const VIRTUAL_OS_USER = parseVirtualProcessString(
+  process.env.AGENT_OS_VIRTUAL_OS_USER,
+  DEFAULT_VIRTUAL_OS_USER,
+);
+const VIRTUAL_OS_HOMEDIR = resolveVirtualPath(
+  process.env.AGENT_OS_VIRTUAL_OS_HOMEDIR,
+  DEFAULT_VIRTUAL_OS_HOMEDIR,
+);
+const VIRTUAL_OS_SHELL = resolveVirtualPath(
+  process.env.AGENT_OS_VIRTUAL_OS_SHELL,
+  DEFAULT_VIRTUAL_OS_SHELL,
+);
 const CONTROL_PIPE_FD = parseControlPipeFd(process.env.AGENT_OS_CONTROL_PIPE_FD);
 const NODE_SYNC_RPC_ENABLE = process.env.AGENT_OS_NODE_SYNC_RPC_ENABLE === '1';
 const NODE_SYNC_RPC_REQUEST_FD = parseControlPipeFd(process.env.AGENT_OS_NODE_SYNC_RPC_REQUEST_FD);
