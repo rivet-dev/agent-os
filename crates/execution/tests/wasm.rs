@@ -16,6 +16,41 @@ use tempfile::tempdir;
 
 const WASM_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_WASM_WARMUP_METRICS__:";
 
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &Path) -> Self {
+        let previous = std::env::var(key).ok();
+        // SAFETY: These tests mutate process env only within this scoped guard.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => {
+                // SAFETY: Restores the env key owned by this scoped guard.
+                unsafe {
+                    std::env::set_var(self.key, value);
+                }
+            }
+            None => {
+                // SAFETY: Restores the env key owned by this scoped guard.
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WasmWarmupMetrics {
     executed: bool,
@@ -35,6 +70,20 @@ fn assert_node_available() {
 
 fn write_fixture(path: &Path, contents: &[u8]) {
     fs::write(path, contents).expect("write fixture");
+}
+
+fn write_fake_node_binary(path: &Path, log_path: &Path) {
+    let script = format!(
+        "#!/bin/sh\nset -eu\nprintf 'host-node-invoked\\n' >> \"{}\"\nexit 1\n",
+        log_path.display(),
+    );
+    fs::write(path, script).expect("write fake node binary");
+    let mut permissions = fs::metadata(path)
+        .expect("fake node metadata")
+        .permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("chmod fake node binary");
 }
 
 fn parse_warmup_metrics(stderr: &str) -> WasmWarmupMetrics {
@@ -485,6 +534,45 @@ fn wasm_contexts_preserve_vm_and_module_configuration() {
 }
 
 #[test]
+fn wasm_execution_stays_inside_v8_runtime_without_host_node_launches() {
+    let temp = tempdir().expect("create temp dir");
+    let fake_node_path = temp.path().join("fake-node.sh");
+    let log_path = temp.path().join("node-invocations.log");
+    write_fake_node_binary(&fake_node_path, &log_path);
+    let _node_binary = EnvVarGuard::set("AGENT_OS_NODE_BINARY", &fake_node_path);
+
+    write_fixture(&temp.path().join("guest.wasm"), &wasm_stdout_module());
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let (stdout, stderr, exit_code) = run_wasm_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        Vec::new(),
+        BTreeMap::from([
+            (String::from(WASM_MAX_FUEL_ENV), String::from("250")),
+            (
+                String::from(WASM_MAX_MEMORY_BYTES_ENV),
+                String::from((2 * 65_536).to_string()),
+            ),
+        ]),
+        WasmPermissionTier::Full,
+    );
+
+    assert_eq!(exit_code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("stdout:wasm-smoke"), "stdout={stdout}");
+    assert!(
+        !log_path.exists(),
+        "WASM prewarm/execution should stay inside the shared V8 runtime, not launch AGENT_OS_NODE_BINARY",
+    );
+}
+
+#[test]
 fn wasm_execution_runs_guest_module_through_v8() {
     assert_node_available();
 
@@ -624,7 +712,7 @@ fn wasm_execution_streams_exit_event() {
         module_path: Some(String::from("./guest.wasm")),
     });
 
-    let execution = engine
+    let mut execution = engine
         .start_execution(StartWasmExecutionRequest {
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
@@ -742,7 +830,7 @@ fn wasm_execution_emits_signal_state_from_control_channel() {
         module_path: Some(String::from("./guest.wasm")),
     });
 
-    let execution = engine
+    let mut execution = engine
         .start_execution(StartWasmExecutionRequest {
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,

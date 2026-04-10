@@ -29,7 +29,7 @@
         "Typecheck passes"
       ],
       "priority": 44,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -2720,6 +2720,647 @@
       "priority": 226,
       "passes": false,
       "notes": "Found during 2026-04-10 code review pass 11. Session-slot leak on spawn failure accumulates over time."
+    },
+    {
+      "id": "US-250",
+      "title": "Replace dev-shell hybrid-VFS host fallthrough with a real kernel path",
+      "description": "As a maintainer, I want `packages/dev-shell/src/kernel.ts` to stop falling through to real `node:fs` for any path inside host roots (`workDir`, `workspaceRoot`, `hostProjectRoot`, `/tmp`). Today `writeFile`, `mkdir`, `rename`, `symlink`, `link`, `chmod`, `chown` call `fsPromises.*` directly on the host for those paths, and `createKernel({ hostNetworkAdapter: createNodeHostNetworkAdapter(), mounts: [...] })` at line 1205 constructs the legacy JS kernel wired directly to real Node fs/net. Directly violates `crates/CLAUDE.md` invariant #4: no path-translating wrapper over real `node:fs`.",
+      "acceptanceCriteria": [
+        "`packages/dev-shell/src/kernel.ts:57-290` no longer calls `fsPromises.writeFile/mkdir/rename/symlink/link/chmod/chown` directly for guest paths",
+        "`createDevShellKernel` routes through the Rust sidecar (or a V8 isolate running against it) the same way `@rivet-dev/agent-os-core` does",
+        "The hybrid VFS fallthrough path at lines 1174-1179 is removed — guest paths are exclusively handled by the sidecar",
+        "A test exercises `writeFile` from the dev-shell and asserts the write does NOT touch the host filesystem (the bytes land in the VM shadow root)",
+        "`pnpm --dir packages/dev-shell test` passes",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 227,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 12. Dev-shell is an island of pre-migration JS kernel that bypasses the Rust sidecar entirely."
+    },
+    {
+      "id": "US-251",
+      "title": "Browser sidecar kernel must be allow_all and actually routed through VmState",
+      "description": "As a maintainer, I want `crates/sidecar-browser/src/service.rs:126-148` to set `config.permissions = Permissions::allow_all()` per `crates/CLAUDE.md` browser-scaffold guidance, and I want `VmState.kernel` (currently `#[allow(dead_code)]` at line 51) to actually be used by the public methods. Today `create_javascript_context`, `start_execution`, `write_stdin`, `kill_execution`, `poll_execution_event` all forward directly to `self.bridge` without ever touching the kernel, so permission checks, VFS routing, process-table accounting, and socket-table state are unenforced in the browser sidecar.",
+      "acceptanceCriteria": [
+        "`KernelVm::new(...)` at `crates/sidecar-browser/src/service.rs:126-148` is called with `config.permissions = Permissions::allow_all()`",
+        "`VmState.kernel` has its `#[allow(dead_code)]` removed and is actively used by the public methods",
+        "`create_javascript_context`, `start_execution`, `write_stdin`, `kill_execution`, `poll_execution_event` route guest operations through the kernel before calling the bridge",
+        "A test exercises a browser-sidecar VM, performs a kernel FS operation, and asserts the kernel VFS state reflects it",
+        "`cargo test -p agent-os-sidecar-browser` passes"
+      ],
+      "priority": 228,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 12. Browser sidecar is currently a facade: the kernel is allocated but never consulted."
+    },
+    {
+      "id": "US-252",
+      "title": "Playground static server must re-check containment after realpath",
+      "description": "As a maintainer, I want `packages/playground/backend/server.ts:36-46, 87` to re-verify the resolved path is still inside `playgroundDir` AFTER `realpath()` resolves symlinks. Today containment is checked on the lexical `absolutePath` but the post-realpath `finalPath` is served without a re-check. An attacker-placed symlink inside `vendor/` pointing at `/etc/passwd` or the host home directory would pass the pre-realpath check and serve the host file.",
+      "acceptanceCriteria": [
+        "`packages/playground/backend/server.ts` calls `realpath()` then verifies `resolvedPath.startsWith(playgroundDir)` before serving",
+        "Requests that resolve outside the playground directory return HTTP 403 with a clear error",
+        "A test creates a symlink inside the playground pointing at `/etc/passwd` and asserts the request is rejected",
+        "A test covers a legitimate symlink inside `vendor/` pointing at a `node_modules` file under the playground and asserts it still works",
+        "`pnpm --dir packages/playground test` passes"
+      ],
+      "priority": 229,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 12. Classic TOCTOU-adjacent path traversal via post-realpath containment check missing."
+    },
+    {
+      "id": "US-253",
+      "title": "Delete empty @rivet-dev/agent-os-posix stub package or land a real POSIX driver",
+      "description": "As a maintainer, I want `packages/posix/` either deleted or implemented. Today `packages/posix/src/index.ts` is `export {};`, but `package.json` advertises `@rivet-dev/agent-os-posix` v0.1.1 with description `\"POSIX runtime driver — WASI-based Unix userland for Agent OS\"` and depends on `@secure-exec/core`. This is a zero-implementation published package that misrepresents itself.",
+      "acceptanceCriteria": [
+        "`packages/posix/` is either deleted (package name removed from `website/src/data/registry.ts` if listed) OR the package contains a real POSIX driver implementation",
+        "If deleted: `pnpm install` still succeeds and no workspace references remain",
+        "If implemented: the description matches the actual exported surface and at least one behavior test exercises the driver",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 230,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 12. Empty package shipping under a real-sounding name is a trust leak."
+    },
+    {
+      "id": "US-254",
+      "title": "Codex adapter must strip AGENT_OS_* and secret env vars before spawning codex-exec",
+      "description": "As a maintainer, I want `registry/agent/codex/src/adapter.ts:159-164` to strip all `AGENT_OS_*` control vars (and ideally only forward a documented allowlist) before spawning `codex-exec`, matching the env-filtering rule in `crates/execution/CLAUDE.md` under 'Guest child_process Isolation'. Today `spawn(execCommand, ['--session-turn'], { env: process.env, ... })` forwards the entire host env including API keys, NODE_OPTIONS, DYLD/LD_PRELOAD, and internal `AGENT_OS_*` state.",
+      "acceptanceCriteria": [
+        "`registry/agent/codex/src/adapter.ts` constructs a filtered env object that excludes every key matching `AGENT_OS_*` and `NODE_SYNC_RPC_*`",
+        "Codex-specific required env (e.g. `PATH`, `HOME`, `OPENAI_API_KEY` if applicable) is explicitly re-injected",
+        "A test spawns Codex through the adapter and asserts no `AGENT_OS_*` key survives in the child env",
+        "A test asserts `DYLD_INSERT_LIBRARIES`/`LD_PRELOAD` are stripped from the child env",
+        "`pnpm --dir registry/agent/codex test` (or equivalent) passes"
+      ],
+      "priority": 231,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 12. Passes host env wholesale to the Codex child, violating the adapter env-isolation rule."
+    },
+    {
+      "id": "US-255",
+      "title": "Close browser package parity gap with Rust sidecar or document the placeholder state",
+      "description": "As a maintainer, I want `packages/browser/` either closed against the Rust browser sidecar (actually routing network/commands/FS through the scaffold) or explicitly documented as a placeholder. Today `packages/browser/src/runtime.ts:278-298` ships stubs that throw ENOSYS for fetch/httpRequest/dnsLookup/spawn, while `packages/browser/src/driver.ts:1-15` imports them as the default. There is no kernel, no process table, no permission engine — the package is a thin driver that either throws or forwards to the host environment, not parity with the Rust sidecar.",
+      "acceptanceCriteria": [
+        "Either: `packages/browser/` routes guest ops through `crates/sidecar-browser` (now functional after US-251) and the ENOSYS stubs are replaced with real bridge calls",
+        "OR: `packages/browser/README.md` clearly states the current placeholder state and the intended path to parity",
+        "The package description in `package.json` matches the actual behavior",
+        "`pnpm --dir packages/browser test` (or equivalent) passes"
+      ],
+      "priority": 232,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 12. Parity gap vs the Rust sidecar needs to be closed or clearly documented."
+    },
+    {
+      "id": "US-256",
+      "title": "dev-shell must not mutate host process.env at startup",
+      "description": "As a maintainer, I want `packages/dev-shell/src/kernel.ts:1149-1151` to stop setting `process.env.AGENT_OS_NODE_BINARY = process.execPath` on the host process. This mutation persists for the lifetime of the dev-shell process, leaks into any child processes that inherit env, and is observable from guest code via the polyfilled `process.env`. Prefer assigning to a local env map that only the constructed kernel/VM sees.",
+      "acceptanceCriteria": [
+        "`packages/dev-shell/src/kernel.ts:1149-1151` no longer writes to `process.env`",
+        "The `AGENT_OS_NODE_BINARY` value is passed through a local env map or function argument instead",
+        "A test asserts `process.env.AGENT_OS_NODE_BINARY` is undefined after `createDevShellKernel()` returns (unless explicitly set by the user)",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 233,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 12. Host-process env mutation is an observable host-state leak into guests."
+    },
+    {
+      "id": "US-257",
+      "title": "dev-shell must use a per-session temp dir, not host /tmp",
+      "description": "As a maintainer, I want `packages/dev-shell/src/kernel.ts:1174-1179, 1190-1193` to stop treating host `/tmp` as the VM's `/tmp`. Today `createHybridVfs([..., '/tmp'])` + `NodeFileSystem({ root: '/tmp' })` forces every `/tmp` op inside the VM to write to the real host `/tmp`, which is shared with every other process on the developer's machine — dev-shell sessions collide with each other and with unrelated host tools. Use a per-session temp dir under `os.tmpdir()/agent-os-dev-shell-<pid>-<uuid>/tmp`.",
+      "acceptanceCriteria": [
+        "`createDevShellKernel` creates a per-session temp directory at startup and wires `/tmp` inside the VM to that directory (not host `/tmp`)",
+        "The per-session temp dir is cleaned up on dispose",
+        "A test creates two dev-shell sessions concurrently and asserts they do not see each other's `/tmp` files",
+        "`pnpm --dir packages/dev-shell test` passes"
+      ],
+      "priority": 234,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 12. Host `/tmp` sharing is a correctness issue and a cross-session leak."
+    },
+    {
+      "id": "US-258",
+      "title": "Update docs-internal/kernel-runtime-subsystem-map browser-sidecar entry to reflect placeholder state",
+      "description": "As a maintainer, I want `docs-internal/kernel-runtime-subsystem-map.md:529-531` to accurately describe the browser sidecar as a placeholder/scaffold, not 'A minimal sidecar service that manages VMs, contexts, and browser worker-backed executions'. Per US-251, the browser sidecar does not currently use its kernel, does not enforce permissions, and all methods bypass routing. Update the doc until US-251 lands.",
+      "acceptanceCriteria": [
+        "`docs-internal/kernel-runtime-subsystem-map.md` describes the browser sidecar as a placeholder/scaffold with the current limitations explicitly listed",
+        "The entry cites US-251 as the tracker for bringing the scaffold up to parity",
+        "Once US-251 lands, this story is reviewed and the doc is updated accordingly"
+      ],
+      "priority": 235,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 12. Doc overstates the current capability of the browser sidecar."
+    },
+    {
+      "id": "US-259",
+      "title": "host_dir metadata ops (chmod/chown/utimes) must go through RESOLVE_BENEATH",
+      "description": "As a maintainer, I want `chmod`, `chown`, and `utimes` in `crates/sidecar/src/plugins/host_dir.rs:577-610` to use the `openat2`/`RESOLVE_BENEATH` containment path that `truncate`/`pread`/`write_file` already use, instead of calling `fchmodat`/`fchownat`/`utimensat` directly with FollowSymlink flags against `host_root_dir.as_raw_fd()`. A writable host_dir mount containing a guest-created symlink `/mount/evil -> /etc/shadow` currently permits `vm.chmod('/mount/evil', 0o777)` to chmod host files outside the mount.",
+      "acceptanceCriteria": [
+        "`crates/sidecar/src/plugins/host_dir.rs` `chmod`, `chown`, and `utimes` use `open_beneath`/`RESOLVE_BENEATH` before the metadata syscall",
+        "Symlinks inside the mount are not followed by metadata operations (or are explicitly resolved in-kernel and containment is re-verified)",
+        "A test creates a symlink inside a host_dir mount pointing at `/etc/passwd` and asserts `vm.chmod('/mount/link', 0o777)` fails with EACCES/EPERM rather than mutating the host file",
+        "A similar test covers `chown` and `utimes`",
+        "`cargo test -p agent-os-sidecar --test filesystem` passes"
+      ],
+      "priority": 236,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 13. Inconsistent with truncate/pread/write_file which already use openat2/RESOLVE_BENEATH."
+    },
+    {
+      "id": "US-260",
+      "title": "ACP JSON-RPC parser must emit spec errors instead of silently dropping malformed frames",
+      "description": "As a maintainer, I want `deserialize_message` in `crates/sidecar/src/acp/json_rpc.rs:96-120` to return JSON-RPC 2.0 spec errors (`-32700 Parse error`, `-32600 Invalid Request`) on malformed input instead of using `.ok()?` and silently returning `None`. Today a request with a missing `id`, typo'd `method`, or invalid params causes the upstream read loop to treat it as 'no message' — the agent stalls instead of failing loud. Additionally, `JsonRpcResponse` currently allows both `result` and `error` to be set simultaneously, violating the spec requirement that 'both members MUST NOT be included'.",
+      "acceptanceCriteria": [
+        "Malformed frames in `deserialize_message` return a structured `JsonRpcParseError` that the read loop forwards to the client as `-32700` / `-32600` per the spec",
+        "`JsonRpcResponse` construction enforces that exactly one of `result`/`error` is set; simultaneous presence is rejected at compile time or via a smart constructor",
+        "A test feeds a malformed ACP frame (missing `id`) and asserts the sidecar responds with `-32600 Invalid Request` instead of stalling",
+        "A test asserts `JsonRpcResponse { result: Some, error: Some }` cannot be constructed",
+        "`cargo test -p agent-os-sidecar --test acp_session` passes"
+      ],
+      "priority": 237,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 13. Silent drop is a JSON-RPC 2.0 spec violation and a debuggability nightmare."
+    },
+    {
+      "id": "US-261",
+      "title": "Guest node:vm must provide real context isolation and honor Script/options semantics",
+      "description": "As a maintainer, I want `vm.runInNewContext`, `vm.runInContext`, `vm.runInThisContext`, `vm.createContext`, and the `vm.Script` class in `crates/execution/assets/v8-bridge.source.js:19970-20001` to provide real V8 context isolation instead of being implemented via `Function(...params, 'return (...)')(...values)` which runs inside the current global scope with access to `require`, `Buffer`, `globalThis`, and every outer closure. I also want `Script` options (`timeout`, `filename`, `lineOffset`, `columnOffset`, `cachedData`, `produceCachedData`) honored, including real timeout enforcement for guest-supplied script loops.",
+      "acceptanceCriteria": [
+        "`vm.createContext` creates a genuine V8 isolate context where only the sandbox object is visible (no access to `require`, `Buffer`, `globalThis` from the parent)",
+        "`vm.runInNewContext` and `vm.runInContext` execute in that isolated context",
+        "`vm.Script` stores and honors `filename`, `lineOffset`, `columnOffset`",
+        "`timeout` option actually terminates long-running guest scripts at the deadline",
+        "`vm.runInContext`, `vm.compileFunction`, and `vm.measureMemory` are implemented (or throw `ERR_NOT_IMPLEMENTED` with a specific name)",
+        "A conformance test exercises `vm.runInNewContext('globalThis.require')` and asserts the sandbox does NOT see the parent `require`",
+        "A conformance test runs an infinite-loop script with `timeout: 100` and asserts it terminates within 200ms",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 238,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 13. Current impl is a pretend sandbox. jsdom, template engines, vm2-style libraries all see host leakage."
+    },
+    {
+      "id": "US-262",
+      "title": "Implement per-process signal masks and pending-signal queues in kernel process_table",
+      "description": "As a maintainer, I want `crates/kernel/src/process_table.rs` to carry per-process `blocked_signals` and `pending_signals` state, and expose `sigprocmask` / `sigpending` equivalents so that guest programs bracketing critical sections with `sigprocmask(SIG_BLOCK, &chld)` can defer signal delivery. Today SIGCHLD/SIGTERM/etc. are delivered synchronously via `parent_driver.kill(SIGCHLD)` on child exit (lines 768, 904); there is no mask, no queue, and `sigpending()` returns empty. Python's `signal.pthread_sigmask`, Rust's `nix::sys::signal::sigprocmask`, and POSIX shells silently misbehave.",
+      "acceptanceCriteria": [
+        "`ProcessContext` carries `blocked_signals: SignalSet` and `pending_signals: SignalSet`",
+        "Signal delivery checks the mask — blocked signals are queued into pending rather than delivered",
+        "`sigprocmask` / `sigpending` syscalls are exposed through the kernel syscall surface",
+        "When a process unblocks a previously-pending signal, it is delivered immediately",
+        "A conformance test runs a Python `signal.pthread_sigmask` pattern and asserts deferred delivery matches real Linux",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 239,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 13. CLAUDE.md requires 'correct signal semantics'. No mask/pending support is a significant POSIX gap."
+    },
+    {
+      "id": "US-263",
+      "title": "Native sidecar client must observe child exit/error and surface disconnect (or reconnect)",
+      "description": "As a maintainer, I want `packages/core/src/sidecar/native-process-client.ts:763-793, 1934-1976` to register `child.on('exit')` and `child.on('error')` handlers in addition to the existing `stdout.on('end'/'error')`, so that a sidecar process crash surfaces as a deterministic disconnect instead of hanging in-flight requests for 60s waiting on the frame timeout. Optionally expose a reconnect hook so a long-running `AgentOs` host does not have to be torn down and recreated on every sidecar crash.",
+      "acceptanceCriteria": [
+        "`NativeProcessClient` constructor registers `child.on('exit')` and `child.on('error')` and rejects all pending requests with a typed `SidecarProcessExited` / `SidecarProcessError`",
+        "`child.on('exit')` also marks the client as permanently dead so subsequent `sendRequest` calls fail fast instead of waiting for frame timeout",
+        "A test kills the sidecar child during an in-flight request and asserts the pending request rejects within 100ms with the typed error",
+        "Optionally, a reconnect hook API is documented for callers who want to handle restart themselves",
+        "`pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts` passes"
+      ],
+      "priority": 240,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 13. Dead sidecar = every method hangs 60s then permanently throws stdoutClosedError."
+    },
+    {
+      "id": "US-264",
+      "title": "Cap and backpressure bufferedEvents in native sidecar client",
+      "description": "As a maintainer, I want `bufferedEvents: EventFrame[]` in `packages/core/src/sidecar/native-process-client.ts:740, 1852-1854, 2126` to have a bounded capacity and a backpressure mechanism. Today it is an unbounded array that receives every unmatched event from `dispatchEvent` and is drained via `findIndex(matcher) + splice` — O(n²) access, no cap. `process_output` chunks stream at guest write rate, and if `runEventPump` is paused or slow the buffer grows without bound.",
+      "acceptanceCriteria": [
+        "`bufferedEvents` has a configurable max capacity (default sized for typical workloads)",
+        "When the buffer is full, new events trigger a backpressure signal to the sidecar (or a typed overflow error)",
+        "Lookup is O(1) or O(log n) — replace `findIndex + splice` with a per-matcher indexed map",
+        "A stress test writes 10k events before the consumer starts draining and asserts memory stays bounded",
+        "`pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts` passes",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 241,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 13. Related to the US-163/164/165/183 unbounded-collection theme but specific to the TS sidecar client event buffer."
+    },
+    {
+      "id": "US-265",
+      "title": "Replace 24h event-pump polling timer with cancellable indefinite wait",
+      "description": "As a maintainer, I want the event pump in `packages/core/src/sidecar/rpc-client.ts:37, 786` to use an indefinite cancellable wait instead of `EVENT_PUMP_TIMEOUT_MS = 86_400_000`. Every `waitForEvent` call allocates a fresh `setTimeout` with a 24-hour timer. A legitimately idle VM emits a spurious timeout error after 24h, and there is no visible catch in the outer `while (!this.disposed)` loop.",
+      "acceptanceCriteria": [
+        "`waitForEvent` supports a no-timeout mode that waits indefinitely until a cancellation token fires",
+        "`runEventPump` uses the indefinite mode so idle VMs do not spuriously error after 24h",
+        "The `EVENT_PUMP_TIMEOUT_MS = 86_400_000` constant is deleted",
+        "A test runs a VM idle for a simulated 25h (via fake timers) and asserts no error fires",
+        "`pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts` passes"
+      ],
+      "priority": 242,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 13. Arbitrary 24h ceiling on idle pumps."
+    },
+    {
+      "id": "US-266",
+      "title": "vm.isContext must discriminate createContext-tagged sandboxes from arbitrary objects",
+      "description": "As a maintainer, I want `vm.isContext` in `crates/execution/assets/v8-bridge.source.js:19976-19978` to return true only for objects that were previously passed through `vm.createContext` (matching Node.js semantics), instead of returning true for any non-null object. Libraries like jsdom use `isContext(x)` to decide whether to re-contextify — the current shim makes every plain object look contextified and the subsequent `runInContext` call (missing entirely per US-261) throws.",
+      "acceptanceCriteria": [
+        "`vm.isContext(x)` returns true only for sandboxes tagged by `vm.createContext`",
+        "Plain `{}` returns `false`",
+        "Arrays, functions, and primitives all return `false`",
+        "A conformance test compares behavior against real Node for a matrix of input types",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 243,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 13. Related to US-261 (real vm context isolation) but specific to the isContext discriminator."
+    },
+    {
+      "id": "US-267",
+      "title": "overlay_fs directory_has_raw_children must filter whiteouts before rmdir ENOTEMPTY",
+      "description": "As a maintainer, I want `directory_has_raw_children` in `crates/kernel/src/overlay_fs.rs:444-479` to filter raw entries through `is_whited_out(join_path(path, entry))` when deciding whether `rmdir` should return `ENOTEMPTY`. Today the rmdir path scans raw upper+lower layer entries without whiteout filtering, so a scenario where the lower has `/a/c`, the user writes a whiteout for `/a/c`, then calls `rmdir('/a')` returns `ENOTEMPTY` even though the merged view is empty. Violates the `crates/kernel/CLAUDE.md` directive that emptiness checks must inspect raw layer entries directly but still honor whiteouts.",
+      "acceptanceCriteria": [
+        "`directory_has_raw_children` in `crates/kernel/src/overlay_fs.rs` filters out entries that have an active whiteout marker in the upper layer before returning true",
+        "A test writes `/a/c` in a lower snapshot, whites it out in the upper, and asserts `rmdir('/a')` succeeds",
+        "A test asserts `rmdir` on a genuinely non-empty overlay directory still returns `ENOTEMPTY`",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 244,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 14. The raw-layer scan was added for unreachable-via-opaque children but never got whiteout-aware filtering."
+    },
+    {
+      "id": "US-268",
+      "title": "Align overlay_fs rename and rmdir emptiness-check policies (raw vs merged)",
+      "description": "As a maintainer, I want the rename destination emptiness check in `crates/kernel/src/overlay_fs.rs:1034-1040` and the rmdir check (US-267) to use the same policy (raw-with-whiteout-filter), so the two operations agree on whether a directory is empty. Today rename uses merged `read_dir` while rmdir uses a raw-layer scan — if dest only contains lower-layer entries that have been whited out, rename succeeds but rmdir would not (pre-US-267) or both would (post-US-267). Either way the two should be identical and covered by a conformance test.",
+      "acceptanceCriteria": [
+        "Rename and rmdir use a shared helper for the 'is this directory effectively empty?' question",
+        "A conformance test asserts rename-over-whited-out-dest and rmdir-of-whited-out-dest behave identically",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 245,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 14. Policy inconsistency even after US-267 lands."
+    },
+    {
+      "id": "US-269",
+      "title": "stdin.setRawMode must not mutate isRaw when bridge call fails or is missing",
+      "description": "As a maintainer, I want `stdin.setRawMode()` in `crates/execution/assets/v8-bridge.source.js:20338-20346` to (a) only set `this.isRaw = mode` after a successful bridge call, and (b) construct the TTY-guard error with `code = 'ERR_TTY_INIT_FAILED'` to match Node. Today `isRaw` is updated even when `_ptySetRawMode` is undefined, so guest code that checks `process.stdin.isRaw` after calling `setRawMode(true)` is told raw mode is enabled while the kernel PTY discipline is unchanged.",
+      "acceptanceCriteria": [
+        "`setRawMode` only mutates `this.isRaw` after the bridge call returns success",
+        "The TTY-guard error has `err.code === 'ERR_TTY_INIT_FAILED'`",
+        "A test exercises `setRawMode(true)` when the bridge is unavailable and asserts `isRaw === false` afterwards",
+        "A test compares the error shape against real Node",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 246,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 14."
+    },
+    {
+      "id": "US-270",
+      "title": "Fix or delete ralph.sh reference to non-existent prompt.md on amp path",
+      "description": "As a maintainer, I want `scripts/ralph/ralph.sh:107` to stop referencing `$SCRIPT_DIR/prompt.md` (which does not exist — the directory contains only `CLAUDE.md` and `CODEX.md`). The `|| true` at the end of the line swallows the failure and amp runs with empty stdin on every iteration. Either create `prompt.md`, read `CLAUDE.md` like the claude branch does, or delete the amp code path entirely.",
+      "acceptanceCriteria": [
+        "`scripts/ralph/ralph.sh` amp branch either reads an existing prompt file or is removed",
+        "Running `ralph.sh --tool amp 1` does not silently pass empty stdin to amp",
+        "If amp is no longer supported, the tool selector errors clearly when `--tool amp` is passed"
+      ],
+      "priority": 247,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 14. Silent no-op amp iterations."
+    },
+    {
+      "id": "US-271",
+      "title": "escape_query_literal must escape backslashes before quotes for Google Drive queries",
+      "description": "As a maintainer, I want `escape_query_literal` in `crates/sidecar/src/plugins/google_drive.rs:968-970` to escape `\\` to `\\\\` before escaping `'` to `\\'`, matching Google Drive's query language. Today only single quotes are escaped, so a `key_prefix` containing a backslash produces a malformed query. `key_prefix` is directly user-controlled from mount config and can contain arbitrary characters.",
+      "acceptanceCriteria": [
+        "`escape_query_literal` escapes `\\` to `\\\\` first, then `'` to `\\'`",
+        "A unit test covers escaping for inputs containing both characters, only backslash, only quote, and neither",
+        "`cargo test -p agent-os-sidecar` passes"
+      ],
+      "priority": 248,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 14. Google Drive query injection surface from mount config key_prefix."
+    },
+    {
+      "id": "US-272",
+      "title": "sandbox_agent pread must use HTTP Range instead of fetching entire remote file",
+      "description": "As a maintainer, I want `pread` in `crates/sidecar/src/plugins/sandbox_agent.rs:606-628` to use an HTTP `Range` request (or equivalent partial-read API) to fetch only the requested `offset..offset+length` bytes of the remote file. Today a 1KB positional read of a 1GB remote file downloads the entire gigabyte. Not a correctness bug but a catastrophic performance cliff that defeats the purpose of pread.",
+      "acceptanceCriteria": [
+        "`pread` issues an HTTP Range request for `offset..offset+length` when the remote supports it",
+        "If the remote does not support Range (returns 200 instead of 206), fall back to the existing full-fetch path and log a warning",
+        "A test asserts a 1KB `pread` on a 100KB remote file only fetches ~1KB over the wire (not the full 100KB)",
+        "`cargo test -p agent-os-sidecar` passes"
+      ],
+      "priority": 249,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 14. Remote process-API fallback documented in `crates/CLAUDE.md` is not used."
+    },
+    {
+      "id": "US-273",
+      "title": "release.ts bumpVersion must validate split result, reject NaN",
+      "description": "As a maintainer, I want `bumpVersion` in `scripts/release.ts:46` to assert that major/minor/patch are all finite integers before bumping. Today `'invalid'.split('.').map(Number)` yields `[NaN]`, and bumping `'0.1'` to patch produces `'0.1.NaN'`. The regex validation at the top of the script only runs on the `--version <val>` path, not the `--patch`/`--minor`/`--major` path.",
+      "acceptanceCriteria": [
+        "`bumpVersion` throws a clear error if the current version does not match `/^\\d+\\.\\d+\\.\\d+(-[\\w.]+)?$/`",
+        "A test asserts bumping `0.1` or `invalid` fails loudly",
+        "A test asserts bumping `0.1.2` succeeds and produces `0.1.3` (patch), `0.2.0` (minor), `1.0.0` (major)",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 250,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 14. Malformed package.json version silently produces NaN version strings."
+    },
+    {
+      "id": "US-274",
+      "title": "MountTable::unmount must return EBUSY when child mounts exist",
+      "description": "As a maintainer, I want `unmount` in `crates/kernel/src/mount_table.rs:550-570` to iterate `self.mounts` for any entry whose path starts with `{normalized}/` and return `EBUSY` if found, instead of silently removing only the exact-path registration. Today unmounting `/a` while `/a/b` is still mounted leaves `/a/b` as a dangling registration whose parent no longer exists in any visible filesystem — Linux `umount(2)` returns `EBUSY` in this case.",
+      "acceptanceCriteria": [
+        "`MountTable::unmount` scans for child mounts and returns a typed `EBUSY` error when any sub-path mount exists",
+        "A test mounts `/a`, then `/a/b`, then unmounts `/a` and asserts the second call fails with `EBUSY`",
+        "A test unmounts `/a/b` first, then `/a`, and asserts both succeed",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 251,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 15. Linux umount(2) semantics."
+    },
+    {
+      "id": "US-275",
+      "title": "ACP initialize must negotiate protocolVersion instead of hardcoding 1",
+      "description": "As a maintainer, I want `initialize` dispatch in `crates/sidecar/src/service.rs:1318-1329` to (a) read the agent's `protocolVersion` from the `initialize` response, (b) reject a mismatch loudly or downgrade to the highest version both sides support, and (c) stop unconditionally sending `clientCapabilities` regardless of AgentOs caller intent. Today the sidecar sends `protocolVersion: 1` and parses back only `agentCapabilities`/`agentInfo`/`modes`/`configOptions` — if an agent replies with version 2 or rejects 1, the sidecar proceeds as if 1 is in effect.",
+      "acceptanceCriteria": [
+        "`initialize` response parsing extracts `protocolVersion` from the agent and verifies it matches the sent value (or negotiates a downgrade)",
+        "If the agent reports an unsupported version, the sidecar returns a typed `ProtocolVersionMismatch` error",
+        "`clientCapabilities` forwarded to the agent reflect the actual AgentOs caller intent (not hardcoded)",
+        "A test exercises an agent that responds with version 2 and asserts the sidecar either negotiates down or errors loudly",
+        "`cargo test -p agent-os-sidecar --test acp_session` passes"
+      ],
+      "priority": 252,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 15. Related to but distinct from US-226 (bridge contract version handshake) — this is ACP protocol version, US-226 is the internal bridge contract version."
+    },
+    {
+      "id": "US-276",
+      "title": "perf_hooks PerformanceObserver and createHistogram must not silently no-op",
+      "description": "As a maintainer, I want `builtinPerfHooksModule` in `crates/execution/assets/v8-bridge.source.js:21201-21222` to either implement `PerformanceObserver.observe()` / `takeRecords()` and `createHistogram()` fully, or throw `ERR_NOT_IMPLEMENTED` with specific method names — never silent no-ops. Today `observe` is empty, `takeRecords` returns `[]`, `createHistogram().record()` is empty, and `percentile()` returns `0`. Guest code instrumenting itself with `PerformanceObserver` silently collects nothing.",
+      "acceptanceCriteria": [
+        "`PerformanceObserver.observe` either wires through to real V8 `performance` observation or throws `ERR_NOT_IMPLEMENTED`",
+        "`takeRecords` matches the chosen path (real records or throw)",
+        "`createHistogram().record()` and `.percentile()` either return real values or throw `ERR_NOT_IMPLEMENTED`",
+        "A conformance test compares guest output against real Node's PerformanceObserver for a simple mark/measure pattern",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 253,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 15. Violates 'never return undefined or silently skip' rule."
+    },
+    {
+      "id": "US-277",
+      "title": "readline.createInterface().question() must actually read input, not return empty string",
+      "description": "As a maintainer, I want `readline.createInterface().question()` in `crates/execution/assets/v8-bridge.source.js:22892-22899` to either wire through to the stdin stream and wait for a line, or throw `ERR_NOT_IMPLEMENTED`. Today it writes the prompt and unconditionally calls `callback('')` — guest interactive CLIs receive an empty answer with no wait.",
+      "acceptanceCriteria": [
+        "`rl.question(prompt, cb)` reads a line from the underlying input stream and invokes `cb` with the actual answer",
+        "The async promise variant `rl.question(prompt)` resolves with the real answer",
+        "A conformance test feeds `hello\\n` on stdin and asserts the callback receives `'hello'`",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 254,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 15. Silent fake callback."
+    },
+    {
+      "id": "US-278",
+      "title": "createSession must not silently drop additionalInstructions when skipOsInstructions: true",
+      "description": "As a maintainer, I want `createSession` in `packages/core/src/agent-os.ts:2908-2914` to forward the caller's `additionalInstructions` even when `skipOsInstructions: true`, or throw a typed error on the conflicting combination. Today `prepareInstructions(...)` is passed `undefined` for `additionalInstructions` whenever `skipOsInstructions === true`, so users expecting 'no OS prompt BUT still my extras' silently lose their extras.",
+      "acceptanceCriteria": [
+        "`createSession({ skipOsInstructions: true, additionalInstructions: '...' })` forwards the extras to `prepareInstructions` instead of passing `undefined`",
+        "OR: the combination throws a typed `IncompatibleSessionOptions` error",
+        "A test asserts the caller's `additionalInstructions` are honored",
+        "`pnpm --dir packages/core exec vitest run tests/createSession.test.ts` (or equivalent) passes",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 255,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 15."
+    },
+    {
+      "id": "US-279",
+      "title": "builtinPerformance must not mutate bootstrap globalThis.performance",
+      "description": "As a maintainer, I want `builtinPerformance` in `crates/execution/assets/v8-bridge.source.js:20882-20945` to construct a fresh object rather than patching fields onto whatever `globalThis.performance` the V8 bootstrap stub defined. Today the shim does `perf = performance; perf.mark = ...; perf.measure = ...;` which mutates the shared global, so later code relying on the raw bootstrap `performance` shape observes the patched object. Per project rules, bootstrap stubs should be ignored or replaced by stdlib polyfills, not patched in place.",
+      "acceptanceCriteria": [
+        "`builtinPerformance` constructs a fresh object and does not mutate `globalThis.performance` or any bootstrap-provided fields",
+        "Guest code that reads `globalThis.performance.now` before and after the polyfill loads sees consistent behavior",
+        "A test asserts no bootstrap-stub mutation side effects leak into later observers",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 256,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 15. Violates the bootstrap-stub replacement policy."
+    },
+    {
+      "id": "US-280",
+      "title": "V8 event loop must gate on pending guest timers, not exit between setInterval ticks",
+      "description": "As a maintainer, I want the V8 event loop exit condition in `crates/v8-runtime/src/session.rs:1065-1073` to consider pending guest `setTimeout`/`setInterval` entries before returning `Completed`. Guest timers created via `kernelTimerCreate` (`crates/execution/assets/v8-bridge.source.js:21436-21473`) do NOT register a pending Promise; they rely on external `StreamEvent` delivery. Between ticks of a long `setInterval(cb, 10_000)`, the event loop has no pending work and silently terminates the session before the next tick fires. The guest-side bridge already exposes `_getPendingTimerCount()`/`_waitForTimerDrain()` at lines 21483-21489 but nothing on the Rust side calls them.",
+      "acceptanceCriteria": [
+        "`run_event_loop` polls `_getPendingTimerCount()` (or equivalent kernel-side timer count) before returning `Completed`",
+        "Guest `setInterval(cb, 10_000)` running alone keeps the session alive between ticks",
+        "A test creates a session with only a `setInterval(..., 500)` callback, waits 2 seconds, and asserts the callback fired 4 times before the session exited",
+        "Guest `setTimeout(cb, 1_000_000)` does not cause the session to hang forever if the caller explicitly cancels it",
+        "`cargo test -p agent-os-v8-runtime -- --test-threads=1` passes"
+      ],
+      "priority": 257,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 16. Real concurrency bug — long-running intervals silently die between ticks. Related to US-239 (Timer ref/unref) but specific to the event-loop exit condition. Distinct from US-175 (TerminateExecution silent drop)."
+    },
+    {
+      "id": "US-281",
+      "title": "TimerScheduleDriver must validate schedule at schedule time and reject past one-shots",
+      "description": "As a maintainer, I want `TimerScheduleDriver` in `packages/core/src/cron/timer-driver.ts:67-90` to validate the schedule expression at `schedule()` time and reject malformed input. Today `'tomorrow'` yields `Invalid Date` → `getTime() = NaN` → `setTimeout(..., NaN)` fires on the next tick. Past ISO timestamps (e.g. `'2020-01-01T00:00:00Z'`) compute delay 0 and fire immediately — contradicting `CronManager.list()` which reports `nextRun: undefined` for the same entry via `computeNextTime()` at `cron-manager.ts:33-44`.",
+      "acceptanceCriteria": [
+        "`TimerScheduleDriver.schedule()` throws a typed error on malformed schedule strings (non-parseable dates, non-cron strings without a T/Z or space format)",
+        "Past one-shot schedules are rejected with a clear `PastScheduleError`",
+        "`CronManager.list()` and the driver agree: if `nextRun` is undefined, the driver does not fire",
+        "A test exercises `'tomorrow'`, `'2020-01-01T00:00:00Z'`, and a valid future ISO and asserts the expected behavior",
+        "`pnpm --dir packages/core exec vitest run tests/cron` passes",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 258,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 16. `isCronExpression` heuristic is lossy and the driver-vs-manager disagree."
+    },
+    {
+      "id": "US-282",
+      "title": "Cron queue overlap policy must be a counter or explicitly named coalesce",
+      "description": "As a maintainer, I want the queue overlap policy in `packages/core/src/cron/cron-manager.ts:134-178` to either (a) use an actual counter so N overlapping runs during a long action are replayed one after another, or (b) rename the `queue` option to `coalesce` / `queue-one` so users understand only one buffered run is remembered. Today `state.queued` is a boolean — the name implies buffering but semantics are identical to 'skip + 1'.",
+      "acceptanceCriteria": [
+        "`state.queued` becomes a counter OR the API option is renamed to reflect coalesce semantics",
+        "A test schedules a 100ms action with a 50ms cron and asserts exactly N-1 queued runs replay after the first (if counter) OR only 1 replays (if coalesce)",
+        "Documentation in the cron types describes the chosen policy unambiguously",
+        "`pnpm --dir packages/core exec vitest run tests/cron` passes",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 259,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 16. Name/behavior mismatch."
+    },
+    {
+      "id": "US-283",
+      "title": "host_dir plugin must honor guest-provided file/directory mode instead of hardcoded defaults",
+      "description": "As a maintainer, I want `write_file`, `create_dir`, `mkdir`, and `ensure_directory_tree` in `crates/sidecar/src/plugins/host_dir.rs:407-442, 218` to honor the guest-provided mode from the VFS write/mkdir call, instead of hardcoding `0o644`/`0o755`. Today `fs.writeFile(path, data, { mode: 0o600 })` or `fs.mkdir(path, { mode: 0o700 })` silently collapses to the default — diverges from POSIX and from the in-kernel VFS which honors supplied modes. Also, `write_file` unnecessarily re-opens via `/proc/self/fd/N` after `open_beneath` and drops `O_CLOEXEC`.",
+      "acceptanceCriteria": [
+        "`host_dir` `write_file` and `mkdir`/`create_dir` accept and apply the guest-provided mode bits",
+        "The unnecessary re-open via `/proc/self/fd/N` is removed or keeps `O_CLOEXEC` set",
+        "A test exercises `fs.writeFile(..., { mode: 0o600 })` through a host_dir mount and asserts the resulting file on disk has mode 0o600 (masked by the current umask)",
+        "A test asserts `fs.mkdir(..., { mode: 0o700 })` produces a 0o700 directory",
+        "`cargo test -p agent-os-sidecar --test filesystem` passes"
+      ],
+      "priority": 260,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 16. POSIX mode divergence + redundant re-open dropping O_CLOEXEC."
+    },
+    {
+      "id": "US-284",
+      "title": "host_dir stat must preserve nsec timestamp precision",
+      "description": "As a maintainer, I want `host_dir` `stat` in `crates/sidecar/src/plugins/host_dir.rs:275-326` to preserve nanosecond timestamp precision instead of truncating to milliseconds. Today `atime_ms = atime_sec*1000 + (atime_nsec / 1_000_000)` drops sub-millisecond resolution. Build tools like `make`, `ninja`, and `rsync` depend on sub-millisecond mtime for up-to-date checks. Once `VirtualStat` exposes nsec fields, this plugin will still report ms-only data unless updated.",
+      "acceptanceCriteria": [
+        "`host_dir` stat returns `atime_nsec`, `mtime_nsec`, `ctime_nsec` fields (matching the kernel `VirtualStat` schema once it supports them)",
+        "A conformance test compares guest `fs.statSync(...)` mtime precision against real Linux for a file whose mtime has non-zero nanoseconds",
+        "`make`/`ninja` incremental-build behavior through a host_dir mount matches real Linux semantics",
+        "`cargo test -p agent-os-sidecar --test filesystem` passes"
+      ],
+      "priority": 261,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 16. Related to US-236 (utimes nsec precision) but specific to stat read path in host_dir."
+    },
+    {
+      "id": "US-285",
+      "title": "assert_node_available must skip tests on Node-less hosts instead of panicking",
+      "description": "As a maintainer, I want `assert_node_available` in `crates/sidecar/tests/support/mod.rs:21-30` to gracefully skip (`return`) or opt into a typed skip instead of `.expect('spawn node --version')` panicking when Node is not on PATH. ~20 sidecar integration tests call this helper; on a Node-less CI host they all fail with a panic instead of a clear skip. Additionally, the helper's continued existence should be documented (since the project invariant forbids host-Node for guest execution — this is a comparator probe, not guest exec).",
+      "acceptanceCriteria": [
+        "`assert_node_available` either skips via the `test_case`-style skip mechanism or returns early with a logged reason when Node is not installed",
+        "On a Node-less host, `cargo test -p agent-os-sidecar` does not panic",
+        "A top-of-file comment in `support/mod.rs` documents that the helper is ONLY used for host-Node comparator probes, not guest execution, and cites the US-075..US-077 convergence plan",
+        "`cargo test -p agent-os-sidecar` runs cleanly when Node is present and clean-skips when it is not"
+      ],
+      "priority": 262,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 16. Related to but distinct from US-149 (flaky ignore template) — this is the helper that ~20 tests depend on for comparator runs."
+    },
+    {
+      "id": "US-286",
+      "title": "computeNextTime schedule classifier must try Date.parse before Cron",
+      "description": "As a maintainer, I want `computeNextTime` in `packages/core/src/cron/cron-manager.ts:33-44` to replace its `schedule.includes(' ') && !schedule.includes('T') && !schedule.includes('Z')` heuristic with `Date.parse(schedule)` tried first, falling back to `Cron` only if that returns NaN. Today `'2026-04-10 14:00:00'` (a valid local-time ISO variant parseable by `new Date`) is misclassified as a cron expression and throws.",
+      "acceptanceCriteria": [
+        "`computeNextTime` tries `Date.parse(schedule)` first — if it returns a finite number, treat as a one-shot date",
+        "If parse fails, fall back to `Cron` expression parsing",
+        "A test exercises `'2026-04-10 14:00:00'`, `'2026-04-10T14:00:00Z'`, `'* * * * *'`, `'* * * * * *'`, and asserts each is classified correctly",
+        "`pnpm --dir packages/core exec vitest run tests/cron` passes"
+      ],
+      "priority": 263,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 16. Space-containing ISO format is a valid `Date()` input but trips the cron heuristic."
+    },
+    {
+      "id": "US-287",
+      "title": "EventEmitter maxListeners tracked but never enforced",
+      "description": "As a maintainer, I want the custom `EventEmitter` in `crates/execution/assets/v8-bridge.source.js:19189-19281` to actually enforce `_maxListeners` by emitting `MaxListenersExceededWarning` via `ProcessEmitWarning` when `on`/`once`/`prependListener`/`prependOnceListener` push past the threshold, matching real Node.js. Today `_maxListeners` is stored and exposed via `setMaxListeners/getMaxListeners` but never consulted — user-facing EventEmitters silently accumulate listeners without the warning that real servers rely on to detect leaks.",
+      "acceptanceCriteria": [
+        "`on`, `once`, `prependListener`, `prependOnceListener` all compare the post-add listener count against `_maxListeners` and emit a real `MaxListenersExceededWarning` once per emitter",
+        "The warning is emitted via `ProcessEmitWarning` (or equivalent) so process-level listeners see it",
+        "`setMaxListeners(0)` disables the warning, matching Node",
+        "A conformance test adds 11 listeners and asserts the warning fires exactly once with the correct event name and count",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 264,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 17. User-facing EventEmitter class is missing the leak-detection warning entirely."
+    },
+    {
+      "id": "US-288",
+      "title": "EventEmitter listeners() and rawListeners() must differ — unwrap once wrappers",
+      "description": "As a maintainer, I want `emitter.listeners(event)` in `crates/execution/assets/v8-bridge.source.js:19262-19267` to return the original user listener functions (unwrapping once-wrappers), while `emitter.rawListeners(event)` returns the bound wrappers. Today both methods return the same result, so consumers using `rawListeners` to restore listeners across emitter transfer silently re-add once-listeners as permanent listeners.",
+      "acceptanceCriteria": [
+        "`listeners(event)` returns user-provided functions with once-wrappers unwrapped to their underlying target",
+        "`rawListeners(event)` returns the wrapper functions (where applicable)",
+        "A conformance test adds a `.once('x', fn)` listener and asserts `rawListeners('x')[0] !== fn` and `listeners('x')[0] === fn`",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 265,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 17. Documented emitter-transfer pattern silently corrupts."
+    },
+    {
+      "id": "US-289",
+      "title": "EventEmitter must emit newListener and removeListener meta-events",
+      "description": "As a maintainer, I want the custom `EventEmitter` in `crates/execution/assets/v8-bridge.source.js:19189-19281` to emit the `newListener` event before adding a listener and the `removeListener` event after removing one. Real Node.js documents these hooks; packages like `stream` internals and monitoring libraries rely on them.",
+      "acceptanceCriteria": [
+        "`on`, `once`, `prependListener`, `prependOnceListener` all emit `newListener` with `(eventName, listener)` before the listener is added",
+        "`removeListener` and `removeAllListeners` emit `removeListener` with `(eventName, listener)` for each listener removed",
+        "A conformance test attaches handlers for `newListener`/`removeListener` and asserts they fire with the correct arguments",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 266,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 17. Documented Node.js meta-events are silent no-ops."
+    },
+    {
+      "id": "US-290",
+      "title": "Inline WASI _pathOpen must enforce preopen containment to prevent ../ escape",
+      "description": "As a maintainer, I want the inline WASI `_pathOpen` in `crates/execution/src/wasm.rs:1253-1270` to verify the resolved `hostPath` starts with `entry.hostPath + path.sep` (or use `fs.realpathSync` + containment check) before calling `__agentOsFs().openSync(hostPath, mode)`. Today `path.resolve(entry.hostPath, target)` happily eats `..` segments — a guest passing `target = '../../../../etc/passwd'` escapes the preopen boundary and reads any host file the sidecar process can read.",
+      "acceptanceCriteria": [
+        "`_pathOpen` rejects target paths whose resolution escapes `entry.hostPath`",
+        "A test exercises a WASM runner opening `../../../../etc/passwd` through a preopen and asserts the open fails with `EACCES` or `ENOENT`",
+        "A test asserts legitimate nested paths inside the preopen still succeed",
+        "`cargo test -p agent-os-execution` passes"
+      ],
+      "priority": 267,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 17. Compare to `HostDirFilesystem::open_beneath` which correctly uses `openat2` with `RESOLVE_BENEATH`."
+    },
+    {
+      "id": "US-291",
+      "title": "Inline WASI _pathOpen must honor rightsBase for read-only preopens",
+      "description": "As a maintainer, I want the inline WASI `_pathOpen` in `crates/execution/src/wasm.rs:1253-1270` to check `rightsBase` / `rightsInheriting` before opening for write. Today `oflags` decoding only inspects `0x1` (CREAT) and `0x8` (TRUNC), and if either is set it opens `'w+'` unconditionally — ignoring the permission tier. `buildPreopens()` at `node_import_cache.rs:8125-8151` hands out identical preopen maps for `read-only`, `read-write`, and `full`, so read-only guests can still create and truncate files in every preopened directory. Directly contradicts CLAUDE.md: 'ReadOnly / ReadWrite / Full differentiate the read/write scope through the guest WASI layer'.",
+      "acceptanceCriteria": [
+        "`_pathOpen` checks `rightsBase` and returns `EACCES` on write operations under a read-only preopen",
+        "`buildPreopens()` in `node_import_cache.rs` emits distinct rights maps for the three permission tiers",
+        "A test exercises a read-only preopen and asserts `fs.writeFileSync` fails with `EACCES`",
+        "A test asserts a read-write preopen still succeeds on the same write",
+        "`cargo test -p agent-os-execution` passes"
+      ],
+      "priority": 268,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 17. Permission-tier bypass in the host WASI runner."
+    },
+    {
+      "id": "US-292",
+      "title": "Buffer.allocUnsafe pool + defaultMaxListeners getter divergence",
+      "description": "As a maintainer, I want `crates/execution/assets/v8-bridge.source.js` to (a) either implement a real `allocUnsafe` pool backing `Buffer.poolSize` or delete the unused `poolSize` field, and (b) fix the `Object.assign` composition in the `events` module shim at lines 22577-22593 so the `defaultMaxListeners` getter is preserved on the module export instead of being shadowed by a plain-property copy. Today `require('events').defaultMaxListeners = 50` sets a dead property that never affects instances, while `require('events').EventEmitter.defaultMaxListeners = 50` works via the getter — observable divergence from Node.",
+      "acceptanceCriteria": [
+        "`Buffer.poolSize` either drives a real allocation pool or is removed as a dead field",
+        "`require('events').defaultMaxListeners = 50` updates the live value seen by every emitter that hasn't overridden it (matching Node)",
+        "A conformance test sets `require('events').defaultMaxListeners` and asserts a new emitter observes the updated cap",
+        "A conformance test sets `require('events').EventEmitter.defaultMaxListeners` and asserts the same",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 269,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 17. Two separate Node-parity bugs bundled because both trace to the same composition layer."
+    },
+    {
+      "id": "US-293",
+      "title": "pipe_manager close-on-read must drain waiting_reads symmetrically with close-on-write",
+      "description": "As a maintainer, I want `pipe_manager.rs` `close()` with `PipeSide::Read` to drain `pipe.waiting_reads` the same way close-on-write at lines 448-450 does. Today the reader-close path only sets `pipe.closed_read = true` and calls `notify_waiters_and_pollers()`, leaving stale waiter IDs lingering in the queue until a future writer pops them and `continue`s. Asymmetric cleanup semantics — safe but wasteful and a footgun for the next refactor.",
+      "acceptanceCriteria": [
+        "`close()` with `PipeSide::Read` drains `pipe.waiting_reads` and marks any residual waiter entries in `state.waiters` as aborted",
+        "A test closes the reader end while a writer is parked on wait, then asserts no stale waiter ID remains in `state.waiters` after a follow-up operation",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 270,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 17. Asymmetric cleanup — not a correctness bug today but wastes work and is a future-refactor footgun."
     }
   ]
 }

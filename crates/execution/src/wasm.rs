@@ -1,40 +1,25 @@
 use crate::common::{encode_json_string, frozen_time_ms};
-use crate::javascript::JavascriptSyncRpcRequest;
-use crate::node_import_cache::{NodeImportCache, NodeImportCacheCleanup};
+use crate::javascript::{
+    CreateJavascriptContextRequest, JavascriptExecution, JavascriptExecutionEngine,
+    JavascriptExecutionError, JavascriptExecutionEvent, JavascriptSyncRpcRequest,
+    StartJavascriptExecutionRequest,
+};
+use crate::node_import_cache::NodeImportCache;
 use crate::node_process::{
-    apply_guest_env, configure_node_control_channel, create_node_control_channel,
-    encode_json_string_array, encode_json_string_map, ensure_host_cwd_exists, env_builtin_enabled,
-    harden_node_command, node_binary, node_resolution_read_paths, resolve_path_like_specifier,
-    spawn_node_control_reader, spawn_stream_reader, ExportedChildFds, LinePrefixFilter,
-    NodeControlMessage, NodeSignalDispositionAction, NodeSignalHandlerRegistration,
+    encode_json_string_array, encode_json_string_map, resolve_path_like_specifier,
+    NodeSignalDispositionAction, NodeSignalHandlerRegistration,
 };
-use crate::runtime_support::{
-    configure_compile_cache, env_flag_enabled, file_fingerprint, import_cache_root, sandbox_root,
-    warmup_marker_path, NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV,
-    NODE_FROZEN_TIME_ENV, NODE_SANDBOX_ROOT_ENV,
-};
-use nix::fcntl::OFlag;
-use nix::unistd::pipe2;
-use serde::Deserialize;
+use crate::runtime_support::{env_flag_enabled, file_fingerprint, warmup_marker_path};
+use crate::v8_runtime;
+use base64::Engine as _;
 use serde_json::{json, Value};
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
-use std::os::fd::OwnedFd;
+use std::fs;
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{
-    mpsc::{self, Receiver},
-    Arc, Mutex,
-};
-use std::thread::JoinHandle;
-use std::time::Duration;
-use tokio::sync::mpsc::{
-    error::TryRecvError as TokioTryRecvError, unbounded_channel, UnboundedReceiver,
-};
-use tokio::time;
+use std::time::{Duration, Instant};
 
 const WASM_MODULE_PATH_ENV: &str = "AGENT_OS_WASM_MODULE_PATH";
 const WASM_GUEST_ARGV_ENV: &str = "AGENT_OS_GUEST_ARGV";
@@ -42,37 +27,13 @@ const WASM_GUEST_ENV_ENV: &str = "AGENT_OS_GUEST_ENV";
 const WASM_PERMISSION_TIER_ENV: &str = "AGENT_OS_WASM_PERMISSION_TIER";
 const WASM_PREWARM_ONLY_ENV: &str = "AGENT_OS_WASM_PREWARM_ONLY";
 const WASM_WARMUP_DEBUG_ENV: &str = "AGENT_OS_WASM_WARMUP_DEBUG";
-const NODE_SYNC_RPC_ENABLE_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_ENABLE";
-const NODE_SYNC_RPC_REQUEST_FD_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_REQUEST_FD";
-const NODE_SYNC_RPC_RESPONSE_FD_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_RESPONSE_FD";
-const NODE_EXTRA_FS_READ_PATHS_ENV: &str = "AGENT_OS_EXTRA_FS_READ_PATHS";
-const NODE_EXTRA_FS_WRITE_PATHS_ENV: &str = "AGENT_OS_EXTRA_FS_WRITE_PATHS";
 pub const WASM_PREWARM_TIMEOUT_MS_ENV: &str = "AGENT_OS_WASM_PREWARM_TIMEOUT_MS";
 pub const WASM_MAX_FUEL_ENV: &str = "AGENT_OS_WASM_MAX_FUEL";
 pub const WASM_MAX_MEMORY_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_MEMORY_BYTES";
 pub const WASM_MAX_STACK_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_STACK_BYTES";
 const WASM_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_WASM_WARMUP_METRICS__:";
+const WASM_SIGNAL_STATE_PREFIX: &str = "__AGENT_OS_WASM_SIGNAL_STATE__:";
 const WASM_WARMUP_MARKER_VERSION: &str = "1";
-const SIGNAL_STATE_CONTROL_PREFIX: &str = "__AGENT_OS_SIGNAL_STATE__:";
-const CONTROLLED_STDERR_PREFIXES: &[&str] = &[SIGNAL_STATE_CONTROL_PREFIX];
-const RESERVED_WASM_ENV_KEYS: &[&str] = &[
-    NODE_COMPILE_CACHE_ENV,
-    NODE_DISABLE_COMPILE_CACHE_ENV,
-    NODE_FROZEN_TIME_ENV,
-    NODE_SANDBOX_ROOT_ENV,
-    WASM_PERMISSION_TIER_ENV,
-    WASM_GUEST_ARGV_ENV,
-    WASM_GUEST_ENV_ENV,
-    WASM_MODULE_PATH_ENV,
-    WASM_MAX_FUEL_ENV,
-    WASM_MAX_MEMORY_BYTES_ENV,
-    WASM_MAX_STACK_BYTES_ENV,
-    WASM_PREWARM_TIMEOUT_MS_ENV,
-    WASM_PREWARM_ONLY_ENV,
-    NODE_SYNC_RPC_ENABLE_ENV,
-    NODE_SYNC_RPC_REQUEST_FD_ENV,
-    NODE_SYNC_RPC_RESPONSE_FD_ENV,
-];
 const WASM_PAGE_BYTES: u64 = 65_536;
 const WASM_TIMEOUT_EXIT_CODE: i32 = 124;
 const MAX_WASM_MODULE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -160,55 +121,6 @@ pub enum WasmExecutionEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum WasmProcessEvent {
-    Stdout(Vec<u8>),
-    RawStderr(Vec<u8>),
-    SyncRpcRequest(JavascriptSyncRpcRequest),
-    Control(NodeControlMessage),
-    Exited(i32),
-}
-
-#[derive(Debug, Deserialize)]
-struct WasmSyncRpcRequestWire {
-    id: u64,
-    method: String,
-    #[serde(default)]
-    args: Vec<Value>,
-}
-
-struct WasmSyncRpcChannels {
-    parent_request_reader: File,
-    parent_response_writer: File,
-    child_request_writer: OwnedFd,
-    child_response_reader: OwnedFd,
-}
-
-#[derive(Debug, Clone)]
-struct WasmSyncRpcResponseWriter {
-    writer: Arc<Mutex<BufWriter<File>>>,
-}
-
-impl WasmSyncRpcResponseWriter {
-    fn new(writer: File) -> Self {
-        Self {
-            writer: Arc::new(Mutex::new(BufWriter::new(writer))),
-        }
-    }
-
-    fn send(&self, payload: Vec<u8>) -> Result<(), WasmExecutionError> {
-        let mut writer = self.writer.lock().map_err(|_| {
-            WasmExecutionError::RpcResponse(String::from(
-                "WASM sync RPC response writer lock poisoned",
-            ))
-        })?;
-        writer
-            .write_all(&payload)
-            .and_then(|()| writer.flush())
-            .map_err(|error| WasmExecutionError::RpcResponse(error.to_string()))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmExecutionResult {
     pub execution_id: String,
     pub exit_code: i32,
@@ -229,13 +141,11 @@ pub enum WasmExecutionError {
     MissingModulePath,
     InvalidLimit(String),
     InvalidModule(String),
-    MissingChildStream(&'static str),
     PrepareWarmPath(std::io::Error),
     WarmupSpawn(std::io::Error),
     WarmupTimeout(Duration),
     WarmupFailed { exit_code: i32, stderr: String },
     Spawn(std::io::Error),
-    RpcChannel(String),
     RpcResponse(String),
     StdinClosed,
     Stdin(std::io::Error),
@@ -259,12 +169,11 @@ impl fmt::Display for WasmExecutionError {
             }
             Self::InvalidLimit(message) => write!(f, "invalid WebAssembly limit: {message}"),
             Self::InvalidModule(message) => write!(f, "invalid WebAssembly module: {message}"),
-            Self::MissingChildStream(name) => write!(f, "node child missing {name} pipe"),
             Self::PrepareWarmPath(err) => {
                 write!(f, "failed to prepare shared WebAssembly warm path: {err}")
             }
             Self::WarmupSpawn(err) => {
-                write!(f, "failed to start WebAssembly warmup process: {err}")
+                write!(f, "failed to start WebAssembly warmup runtime: {err}")
             }
             Self::WarmupTimeout(timeout) => {
                 write!(
@@ -285,12 +194,6 @@ impl fmt::Display for WasmExecutionError {
                 }
             }
             Self::Spawn(err) => write!(f, "failed to start guest WebAssembly runtime: {err}"),
-            Self::RpcChannel(message) => {
-                write!(
-                    f,
-                    "failed to configure guest WebAssembly sync RPC: {message}"
-                )
-            }
             Self::RpcResponse(message) => {
                 write!(
                     f,
@@ -312,10 +215,19 @@ impl std::error::Error for WasmExecutionError {}
 pub struct WasmExecution {
     execution_id: String,
     child_pid: u32,
-    stdin: Option<ChildStdin>,
-    events: RefCell<UnboundedReceiver<WasmExecutionEvent>>,
-    sync_rpc_responses: Option<WasmSyncRpcResponseWriter>,
-    _import_cache_guard: Arc<NodeImportCacheCleanup>,
+    inner: JavascriptExecution,
+    execution_timeout: Option<Duration>,
+    internal_sync_rpc: WasmInternalSyncRpc,
+}
+
+#[derive(Debug)]
+struct WasmInternalSyncRpc {
+    module_guest_paths: Vec<String>,
+    module_host_path: PathBuf,
+    guest_cwd: String,
+    host_cwd: PathBuf,
+    next_fd: u32,
+    open_files: BTreeMap<u32, fs::File>,
 }
 
 impl WasmExecution {
@@ -328,18 +240,11 @@ impl WasmExecution {
     }
 
     pub fn write_stdin(&mut self, chunk: &[u8]) -> Result<(), WasmExecutionError> {
-        let stdin = self.stdin.as_mut().ok_or(WasmExecutionError::StdinClosed)?;
-        stdin
-            .write_all(chunk)
-            .and_then(|()| stdin.flush())
-            .map_err(WasmExecutionError::Stdin)
+        self.inner.write_stdin(chunk).map_err(map_javascript_error)
     }
 
     pub fn close_stdin(&mut self) -> Result<(), WasmExecutionError> {
-        if let Some(stdin) = self.stdin.take() {
-            drop(stdin);
-        }
-        Ok(())
+        self.inner.close_stdin().map_err(map_javascript_error)
     }
 
     pub fn respond_sync_rpc_success(
@@ -347,19 +252,9 @@ impl WasmExecution {
         id: u64,
         result: Value,
     ) -> Result<(), WasmExecutionError> {
-        let writer = self.sync_rpc_responses.as_ref().ok_or_else(|| {
-            WasmExecutionError::RpcResponse(String::from(
-                "guest WebAssembly execution does not have a sync RPC response channel",
-            ))
-        })?;
-        write_wasm_sync_rpc_response(
-            writer,
-            json!({
-                "id": id,
-                "ok": true,
-                "result": result,
-            }),
-        )
+        self.inner
+            .respond_sync_rpc_success(id, result)
+            .map_err(map_javascript_error)
     }
 
     pub fn respond_sync_rpc_error(
@@ -368,74 +263,94 @@ impl WasmExecution {
         code: impl Into<String>,
         message: impl Into<String>,
     ) -> Result<(), WasmExecutionError> {
-        let writer = self.sync_rpc_responses.as_ref().ok_or_else(|| {
-            WasmExecutionError::RpcResponse(String::from(
-                "guest WebAssembly execution does not have a sync RPC response channel",
-            ))
-        })?;
-        write_wasm_sync_rpc_response(
-            writer,
-            json!({
-                "id": id,
-                "ok": false,
-                "error": {
-                    "code": code.into(),
-                    "message": message.into(),
-                },
-            }),
-        )
+        self.inner
+            .respond_sync_rpc_error(id, code, message)
+            .map_err(map_javascript_error)
     }
 
     pub async fn poll_event(
-        &self,
+        &mut self,
         timeout: Duration,
     ) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
-        if timeout.is_zero() {
-            return match self.events.borrow_mut().try_recv() {
-                Ok(event) => Ok(Some(event)),
-                Err(TokioTryRecvError::Empty) => Ok(None),
-                Err(TokioTryRecvError::Disconnected) => Err(WasmExecutionError::EventChannelClosed),
-            };
-        }
-
-        let mut events = self.events.borrow_mut();
-        match time::timeout(timeout, events.recv()).await {
-            Ok(Some(event)) => Ok(Some(event)),
-            Ok(None) => Err(WasmExecutionError::EventChannelClosed),
-            Err(_) => Ok(None),
+        loop {
+            match self
+                .inner
+                .poll_event(timeout)
+                .await
+                .map_err(map_javascript_error)?
+            {
+                Some(event) => {
+                    if let Some(signal_state) = translate_wasm_signal_state_stream_event(&event)? {
+                        return Ok(Some(signal_state));
+                    }
+                    if let JavascriptExecutionEvent::SyncRpcRequest(request) = &event {
+                        if self.handle_internal_sync_rpc(request)? {
+                            continue;
+                        }
+                        if let Some(signal_state) = self.handle_signal_state_sync_rpc(request)? {
+                            return Ok(Some(signal_state));
+                        }
+                    }
+                    if let Some(event) = translate_javascript_event(event) {
+                        return Ok(Some(event));
+                    }
+                }
+                None => return Ok(None),
+            }
         }
     }
 
     pub fn poll_event_blocking(
-        &self,
+        &mut self,
         timeout: Duration,
     ) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
-        let deadline = std::time::Instant::now() + timeout;
         loop {
-            match self.events.borrow_mut().try_recv() {
-                Ok(event) => return Ok(Some(event)),
-                Err(TokioTryRecvError::Disconnected) => {
-                    return Err(WasmExecutionError::EventChannelClosed)
-                }
-                Err(TokioTryRecvError::Empty) => {
-                    if std::time::Instant::now() >= deadline {
-                        return Ok(None);
+            match self
+                .inner
+                .poll_event_blocking(timeout)
+                .map_err(map_javascript_error)?
+            {
+                Some(event) => {
+                    if let Some(signal_state) = translate_wasm_signal_state_stream_event(&event)? {
+                        return Ok(Some(signal_state));
                     }
-                    std::thread::sleep(Duration::from_millis(1));
+                    if let JavascriptExecutionEvent::SyncRpcRequest(request) = &event {
+                        if self.handle_internal_sync_rpc(request)? {
+                            continue;
+                        }
+                        if let Some(signal_state) = self.handle_signal_state_sync_rpc(request)? {
+                            return Ok(Some(signal_state));
+                        }
+                    }
+                    if let Some(event) = translate_javascript_event(event) {
+                        return Ok(Some(event));
+                    }
                 }
+                None => return Ok(None),
             }
         }
     }
 
     pub fn wait(mut self) -> Result<WasmExecutionResult, WasmExecutionError> {
         self.close_stdin()?;
-        let mut events = self.events.into_inner();
-
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        let started = Instant::now();
 
         loop {
-            match events.blocking_recv() {
+            let poll_timeout = self
+                .execution_timeout
+                .map(|limit| {
+                    let elapsed = started.elapsed();
+                    if elapsed >= limit {
+                        Duration::ZERO
+                    } else {
+                        limit.saturating_sub(elapsed).min(Duration::from_millis(50))
+                    }
+                })
+                .unwrap_or_else(|| Duration::from_millis(50));
+
+            match self.poll_event_blocking(poll_timeout)? {
                 Some(WasmExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
                 Some(WasmExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
                 Some(WasmExecutionEvent::SyncRpcRequest(_)) => {}
@@ -448,9 +363,40 @@ impl WasmExecution {
                         stderr,
                     });
                 }
-                None => return Err(WasmExecutionError::EventChannelClosed),
+                None => {}
+            }
+
+            if let Some(limit) = self.execution_timeout {
+                if started.elapsed() >= limit {
+                    let _ = self.inner.terminate();
+                    stderr.extend_from_slice(b"WebAssembly fuel budget exhausted\n");
+                    return Ok(WasmExecutionResult {
+                        execution_id: self.execution_id,
+                        exit_code: WASM_TIMEOUT_EXIT_CODE,
+                        stdout,
+                        stderr,
+                    });
+                }
             }
         }
+    }
+
+    fn handle_internal_sync_rpc(
+        &mut self,
+        request: &JavascriptSyncRpcRequest,
+    ) -> Result<bool, WasmExecutionError> {
+        handle_internal_wasm_sync_rpc_request(
+            &mut self.inner,
+            &mut self.internal_sync_rpc,
+            request,
+        )
+    }
+
+    fn handle_signal_state_sync_rpc(
+        &mut self,
+        request: &JavascriptSyncRpcRequest,
+    ) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
+        translate_wasm_signal_state_sync_rpc_request(&mut self.inner, request)
     }
 }
 
@@ -460,18 +406,31 @@ pub struct WasmExecutionEngine {
     next_execution_id: usize,
     contexts: BTreeMap<String, WasmContext>,
     import_caches: BTreeMap<String, NodeImportCache>,
+    javascript_context_ids: BTreeMap<String, String>,
+    javascript_engine: JavascriptExecutionEngine,
 }
 
 impl WasmExecutionEngine {
     pub fn create_context(&mut self, request: CreateWasmContextRequest) -> WasmContext {
         self.next_context_id += 1;
         self.import_caches.entry(request.vm_id.clone()).or_default();
+        let javascript_context =
+            self.javascript_engine
+                .create_context(CreateJavascriptContextRequest {
+                    vm_id: request.vm_id.clone(),
+                    bootstrap_module: None,
+                    compile_cache_root: None,
+                });
 
         let context = WasmContext {
             context_id: format!("wasm-ctx-{}", self.next_context_id),
             vm_id: request.vm_id,
             module_path: request.module_path,
         };
+        self.javascript_context_ids.insert(
+            context.context_id.clone(),
+            javascript_context.context_id,
+        );
         self.contexts
             .insert(context.context_id.clone(), context.clone());
         context
@@ -496,6 +455,11 @@ impl WasmExecutionEngine {
 
         let resolved_module = resolve_wasm_module(&context, &request)?;
         let prewarm_timeout = resolve_wasm_prewarm_timeout(&request)?;
+        let javascript_context_id = self
+            .javascript_context_ids
+            .get(&context.context_id)
+            .cloned()
+            .ok_or_else(|| WasmExecutionError::MissingContext(context.context_id.clone()))?;
         {
             let import_cache = self.import_caches.entry(context.vm_id.clone()).or_default();
             import_cache
@@ -509,9 +473,10 @@ impl WasmExecutionEngine {
             .import_caches
             .get(&context.vm_id)
             .expect("vm import cache should exist after materialization");
-        let import_cache_guard = import_cache.cleanup_guard();
         let warmup_metrics = prewarm_wasm_path(
             import_cache,
+            &mut self.javascript_engine,
+            &javascript_context_id,
             &resolved_module,
             &request,
             frozen_time_ms,
@@ -520,302 +485,970 @@ impl WasmExecutionEngine {
 
         self.next_execution_id += 1;
         let execution_id = format!("exec-{}", self.next_execution_id);
-        let guest_argv = guest_argv(&context, &request)?;
-        let sync_rpc_channels = create_wasm_sync_rpc_channels()?;
-        let control_channel = create_node_control_channel().map_err(WasmExecutionError::Spawn)?;
-        let mut child = create_node_child(
+        let javascript_execution = start_wasm_javascript_execution(
+            &mut self.javascript_engine,
             import_cache,
+            &javascript_context_id,
             &resolved_module,
             &request,
-            &guest_argv,
             frozen_time_ms,
-            Some(&sync_rpc_channels),
-            &control_channel.child_writer,
+            false,
+            warmup_metrics.as_deref(),
         )?;
-        let child_pid = child.id();
-
-        let stdin = child.stdin.take();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(WasmExecutionError::MissingChildStream("stdout"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or(WasmExecutionError::MissingChildStream("stderr"))?;
-
-        let (sender, receiver) = mpsc::channel();
-        if let Some(metrics) = warmup_metrics {
-            let _ = sender.send(WasmProcessEvent::RawStderr(metrics));
-        }
-
-        let stdout_reader = spawn_stream_reader(stdout, sender.clone(), WasmProcessEvent::Stdout);
-        let stderr_reader =
-            spawn_stream_reader(stderr, sender.clone(), WasmProcessEvent::RawStderr);
-        let _sync_rpc_reader =
-            spawn_wasm_sync_rpc_reader(sync_rpc_channels.parent_request_reader, sender.clone());
-        let _control_reader = spawn_node_control_reader(
-            control_channel.parent_reader,
-            sender.clone(),
-            WasmProcessEvent::Control,
-            |message| WasmProcessEvent::RawStderr(message.into_bytes()),
-        );
-        spawn_wasm_waiter(
-            child,
-            stdout_reader,
-            stderr_reader,
-            execution_timeout,
-            sender,
-        );
-
-        let events =
-            spawn_wasm_event_bridge(receiver, Arc::new(Mutex::new(LinePrefixFilter::default())));
+        let child_pid = javascript_execution.child_pid();
 
         Ok(WasmExecution {
             execution_id,
             child_pid,
-            stdin,
-            events: RefCell::new(events),
-            sync_rpc_responses: Some(WasmSyncRpcResponseWriter::new(
-                sync_rpc_channels.parent_response_writer,
-            )),
-            _import_cache_guard: import_cache_guard,
+            inner: javascript_execution,
+            execution_timeout,
+            internal_sync_rpc: WasmInternalSyncRpc {
+                module_guest_paths: wasm_guest_module_paths(&resolved_module.specifier, &request.env),
+                module_host_path: resolved_module.resolved_path.clone(),
+                guest_cwd: wasm_guest_cwd(&request.env),
+                host_cwd: request.cwd.clone(),
+                next_fd: 64,
+                open_files: BTreeMap::new(),
+            },
         })
     }
 
     pub fn dispose_vm(&mut self, vm_id: &str) {
         self.contexts.retain(|_, context| context.vm_id != vm_id);
+        self.javascript_context_ids
+            .retain(|wasm_context_id, _| self.contexts.contains_key(wasm_context_id));
         self.import_caches.remove(vm_id);
+        self.javascript_engine.dispose_vm(vm_id);
     }
 }
 
-fn spawn_wasm_event_bridge(
-    receiver: Receiver<WasmProcessEvent>,
-    stderr_filter: Arc<Mutex<LinePrefixFilter>>,
-) -> UnboundedReceiver<WasmExecutionEvent> {
-    let (sender, forwarded) = unbounded_channel();
-    std::thread::spawn(move || {
-        while let Ok(event) = receiver.recv() {
-            let forwarded_event = match event {
-                WasmProcessEvent::Stdout(chunk) => Some(WasmExecutionEvent::Stdout(chunk)),
-                WasmProcessEvent::RawStderr(chunk) => {
-                    let mut filter = match stderr_filter.lock() {
-                        Ok(filter) => filter,
-                        Err(_) => break,
-                    };
-                    let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
-                    if filtered.is_empty() {
-                        None
-                    } else {
-                        Some(WasmExecutionEvent::Stderr(filtered))
-                    }
-                }
-                WasmProcessEvent::SyncRpcRequest(request) => {
-                    Some(WasmExecutionEvent::SyncRpcRequest(request))
-                }
-                WasmProcessEvent::Control(NodeControlMessage::SignalState {
-                    signal,
-                    registration,
-                }) => Some(WasmExecutionEvent::SignalState {
-                    signal,
-                    registration: registration.into(),
+fn map_javascript_error(error: JavascriptExecutionError) -> WasmExecutionError {
+    match error {
+        JavascriptExecutionError::EmptyArgv => WasmExecutionError::Spawn(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "guest WebAssembly bootstrap requires a JavaScript entrypoint",
+        )),
+        JavascriptExecutionError::MissingContext(context_id) => {
+            WasmExecutionError::MissingContext(context_id)
+        }
+        JavascriptExecutionError::VmMismatch { expected, found } => {
+            WasmExecutionError::VmMismatch { expected, found }
+        }
+        JavascriptExecutionError::PrepareImportCache(error) => {
+            WasmExecutionError::PrepareWarmPath(error)
+        }
+        JavascriptExecutionError::Spawn(error) => WasmExecutionError::Spawn(error),
+        JavascriptExecutionError::PendingSyncRpcRequest(id) => {
+            WasmExecutionError::RpcResponse(format!(
+                "guest WebAssembly sync RPC request {id} is still pending"
+            ))
+        }
+        JavascriptExecutionError::ExpiredSyncRpcRequest(id) => WasmExecutionError::RpcResponse(
+            format!("guest WebAssembly sync RPC request {id} is no longer pending"),
+        ),
+        JavascriptExecutionError::RpcResponse(message) => WasmExecutionError::RpcResponse(message),
+        JavascriptExecutionError::Terminate(error) => WasmExecutionError::Spawn(error),
+        JavascriptExecutionError::StdinClosed => WasmExecutionError::StdinClosed,
+        JavascriptExecutionError::Stdin(error) => WasmExecutionError::Stdin(error),
+        JavascriptExecutionError::EventChannelClosed => WasmExecutionError::EventChannelClosed,
+    }
+}
+
+fn translate_javascript_event(event: JavascriptExecutionEvent) -> Option<WasmExecutionEvent> {
+    match event {
+        JavascriptExecutionEvent::Stdout(chunk) => Some(WasmExecutionEvent::Stdout(chunk)),
+        JavascriptExecutionEvent::Stderr(chunk) => Some(WasmExecutionEvent::Stderr(chunk)),
+        JavascriptExecutionEvent::SyncRpcRequest(request) => {
+            Some(WasmExecutionEvent::SyncRpcRequest(request))
+        }
+        JavascriptExecutionEvent::SignalState {
+            signal,
+            registration,
+        } => Some(WasmExecutionEvent::SignalState {
+            signal,
+            registration: registration.into(),
+        }),
+        JavascriptExecutionEvent::Exited(code) => Some(WasmExecutionEvent::Exited(code)),
+    }
+}
+
+fn handle_internal_wasm_sync_rpc_request(
+    execution: &mut JavascriptExecution,
+    internal_sync_rpc: &mut WasmInternalSyncRpc,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<bool, WasmExecutionError> {
+    if matches!(
+        request.method.as_str(),
+        "fs.promises.readFile" | "fs.readFileSync"
+    ) && request
+        .args
+        .first()
+        .and_then(Value::as_str)
+        .is_some_and(|path| internal_sync_rpc.module_guest_paths.iter().any(|candidate| candidate == path))
+    {
+        let module_bytes = fs::read(&internal_sync_rpc.module_host_path).map_err(WasmExecutionError::Spawn)?;
+        execution.respond_sync_rpc_success(
+            request.id,
+            json!({
+                "__agentOsType": "bytes",
+                "base64": v8_runtime::base64_encode_pub(&module_bytes),
+            }),
+        ).map_err(map_javascript_error)?;
+        return Ok(true);
+    }
+
+    if request.method == "fs.openSync" {
+        let Some(path) = request.args.first().and_then(Value::as_str) else {
+            return Err(WasmExecutionError::RpcResponse(String::from("missing fs.openSync path")));
+        };
+        let Some(host_path) = translate_wasm_guest_path(path, internal_sync_rpc) else {
+            return Err(WasmExecutionError::RpcResponse(format!(
+                "unmapped guest path for fs.openSync: {path}"
+            )));
+        };
+        let flags = request.args.get(1).unwrap_or(&Value::Null);
+        let file = open_wasm_guest_file(&host_path, flags)?;
+        let fd = internal_sync_rpc.next_fd;
+        internal_sync_rpc.next_fd += 1;
+        internal_sync_rpc.open_files.insert(fd, file);
+        execution
+            .respond_sync_rpc_success(request.id, json!(fd))
+            .map_err(map_javascript_error)?;
+        return Ok(true);
+    }
+
+    if request.method == "fs.closeSync" {
+        let Some(fd) = request.args.first().and_then(Value::as_u64) else {
+            return Err(WasmExecutionError::RpcResponse(String::from("missing fs.closeSync fd")));
+        };
+        internal_sync_rpc.open_files.remove(&(fd as u32));
+        execution
+            .respond_sync_rpc_success(request.id, Value::Null)
+            .map_err(map_javascript_error)?;
+        return Ok(true);
+    }
+
+    if request.method == "fs.writeSync" {
+        let Some(fd) = request.args.first().and_then(Value::as_u64) else {
+            return Err(WasmExecutionError::RpcResponse(String::from("missing fs.writeSync fd")));
+        };
+        let bytes = decode_wasm_bytes_arg(request.args.get(1))
+            .ok_or_else(|| WasmExecutionError::RpcResponse(String::from("missing fs.writeSync bytes")))?;
+        let position = request.args.get(2).and_then(Value::as_u64);
+        let Some(file) = internal_sync_rpc.open_files.get_mut(&(fd as u32)) else {
+            return Err(WasmExecutionError::RpcResponse(format!("unknown fs.writeSync fd: {fd}")));
+        };
+        if let Some(position) = position {
+            file.seek(SeekFrom::Start(position))
+                .map_err(WasmExecutionError::Spawn)?;
+        }
+        let written = file.write(&bytes).map_err(WasmExecutionError::Spawn)?;
+        execution
+            .respond_sync_rpc_success(request.id, json!(written))
+            .map_err(map_javascript_error)?;
+        return Ok(true);
+    }
+
+    if request.method == "fs.readSync" {
+        let Some(fd) = request.args.first().and_then(Value::as_u64) else {
+            return Err(WasmExecutionError::RpcResponse(String::from("missing fs.readSync fd")));
+        };
+        let length = request.args.get(1).and_then(Value::as_u64).unwrap_or(0) as usize;
+        let position = request.args.get(2).and_then(Value::as_u64);
+        let Some(file) = internal_sync_rpc.open_files.get_mut(&(fd as u32)) else {
+            return Err(WasmExecutionError::RpcResponse(format!("unknown fs.readSync fd: {fd}")));
+        };
+        if let Some(position) = position {
+            file.seek(SeekFrom::Start(position))
+                .map_err(WasmExecutionError::Spawn)?;
+        }
+        let mut buffer = vec![0u8; length];
+        let bytes_read = file.read(&mut buffer).map_err(WasmExecutionError::Spawn)?;
+        buffer.truncate(bytes_read);
+        execution
+            .respond_sync_rpc_success(
+                request.id,
+                json!({
+                    "__agentOsType": "bytes",
+                    "base64": v8_runtime::base64_encode_pub(&buffer),
                 }),
-                WasmProcessEvent::Control(_) => None,
-                WasmProcessEvent::Exited(code) => Some(WasmExecutionEvent::Exited(code)),
-            };
+            )
+            .map_err(map_javascript_error)?;
+        return Ok(true);
+    }
 
-            if let Some(event) = forwarded_event {
-                if sender.send(event).is_err() {
-                    break;
-                }
+    Ok(false)
+}
+
+fn translate_wasm_guest_path(path: &str, internal_sync_rpc: &WasmInternalSyncRpc) -> Option<PathBuf> {
+    if path == internal_sync_rpc.module_host_path.to_string_lossy() {
+        return Some(internal_sync_rpc.module_host_path.clone());
+    }
+    if internal_sync_rpc
+        .module_guest_paths
+        .iter()
+        .any(|candidate| candidate == path)
+    {
+        return Some(internal_sync_rpc.module_host_path.clone());
+    }
+    strip_guest_prefix(path, &internal_sync_rpc.guest_cwd)
+        .map(|suffix| join_host_path(&internal_sync_rpc.host_cwd, &suffix))
+}
+
+fn strip_guest_prefix(path: &str, prefix: &str) -> Option<String> {
+    let normalized_path = normalize_guest_path(path);
+    let normalized_prefix = normalize_guest_path(prefix);
+    if normalized_path == normalized_prefix {
+        return Some(String::new());
+    }
+    normalized_path
+        .strip_prefix(&(normalized_prefix + "/"))
+        .map(str::to_owned)
+}
+
+fn join_host_path(base: &Path, suffix: &str) -> PathBuf {
+    if suffix.is_empty() {
+        return base.to_path_buf();
+    }
+    suffix
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .fold(base.to_path_buf(), |path, segment| path.join(segment))
+}
+
+fn decode_wasm_bytes_arg(value: Option<&Value>) -> Option<Vec<u8>> {
+    let value = value?;
+    let base64 = value
+        .as_object()?
+        .get("base64")?
+        .as_str()?;
+    base64::engine::general_purpose::STANDARD.decode(base64).ok()
+}
+
+fn open_wasm_guest_file(path: &Path, flags: &Value) -> Result<fs::File, WasmExecutionError> {
+    let mut options = OpenOptions::new();
+    let flags_label = flags.to_string();
+
+    match flags.as_str() {
+        Some("r") | None if flags.as_u64().unwrap_or(0) == 0 => {
+            options.read(true);
+        }
+        Some("r+") => {
+            options.read(true).write(true);
+        }
+        Some("w") => {
+            options.write(true).create(true).truncate(true);
+        }
+        Some("w+") => {
+            options.read(true).write(true).create(true).truncate(true);
+        }
+        Some("a") => {
+            options.append(true).create(true);
+        }
+        Some("a+") => {
+            options.read(true).append(true).create(true);
+        }
+        _ => {
+            let numeric = flags.as_u64().ok_or_else(|| {
+                WasmExecutionError::RpcResponse(format!(
+                    "unsupported fs.openSync flags: {flags_label}"
+                ))
+            })?;
+            let write_only = (numeric & 0o1) != 0;
+            let read_write = (numeric & 0o2) != 0;
+            let create = (numeric & 0o100) != 0;
+            let truncate = (numeric & 0o1000) != 0;
+            let append = (numeric & 0o2000) != 0;
+
+            if read_write {
+                options.read(true).write(true);
+            } else if write_only {
+                options.write(true);
+            } else {
+                options.read(true);
+            }
+            if create {
+                options.create(true);
+            }
+            if truncate {
+                options.truncate(true);
+            }
+            if append {
+                options.append(true);
             }
         }
-    });
-    forwarded
-}
+    }
 
-fn create_wasm_sync_rpc_channels() -> Result<WasmSyncRpcChannels, WasmExecutionError> {
-    let fd_reservations = (0..64)
-        .map(|_| File::open("/dev/null"))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(WasmExecutionError::PrepareWarmPath)?;
-    let (parent_request_reader, child_request_writer) = pipe2(OFlag::O_CLOEXEC)
-        .map_err(|error| WasmExecutionError::RpcChannel(error.to_string()))?;
-    let (child_response_reader, parent_response_writer) = pipe2(OFlag::O_CLOEXEC)
-        .map_err(|error| WasmExecutionError::RpcChannel(error.to_string()))?;
-    drop(fd_reservations);
-
-    Ok(WasmSyncRpcChannels {
-        parent_request_reader: File::from(parent_request_reader),
-        parent_response_writer: File::from(parent_response_writer),
-        child_request_writer,
-        child_response_reader,
+    options.open(path).map_err(|error| {
+        WasmExecutionError::Spawn(std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to open guest file {} with flags {}: {error}",
+                path.display(),
+                flags_label
+            ),
+        ))
     })
 }
 
-fn spawn_wasm_sync_rpc_reader(
-    reader: File,
-    sender: mpsc::Sender<WasmProcessEvent>,
-) -> JoinHandle<()> {
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
+fn translate_wasm_signal_state_sync_rpc_request(
+    execution: &mut JavascriptExecution,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
+    if request.method != "process.signal_state" {
+        return Ok(None);
+    }
 
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => return,
-                Ok(_) => {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
+    let signal = request
+        .args
+        .first()
+        .and_then(Value::as_u64)
+        .ok_or_else(|| WasmExecutionError::RpcResponse(String::from("missing signal number")))?;
+    let action = match request.args.get(1).and_then(Value::as_str).unwrap_or("default") {
+        "ignore" => WasmSignalDispositionAction::Ignore,
+        "user" => WasmSignalDispositionAction::User,
+        _ => WasmSignalDispositionAction::Default,
+    };
+    let mask = request
+        .args
+        .get(2)
+        .and_then(Value::as_str)
+        .map(|value| serde_json::from_str::<Vec<u32>>(value))
+        .transpose()
+        .map_err(|error| WasmExecutionError::RpcResponse(error.to_string()))?
+        .unwrap_or_default();
+    let flags = request
+        .args
+        .get(3)
+        .and_then(Value::as_u64)
+        .unwrap_or_default() as u32;
 
-                    match parse_wasm_sync_rpc_request(trimmed) {
-                        Ok(request) => {
-                            if sender
-                                .send(WasmProcessEvent::SyncRpcRequest(request))
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                        Err(message) => {
-                            if sender
-                                .send(WasmProcessEvent::RawStderr(
-                                    format!("{message}\n").into_bytes(),
-                                ))
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                    }
-                }
-                Err(error) => {
-                    let _ = sender.send(WasmProcessEvent::RawStderr(
-                        format!("failed to read WebAssembly sync RPC request: {error}\n")
-                            .into_bytes(),
-                    ));
-                    return;
-                }
-            }
-        }
-    })
+    execution
+        .respond_sync_rpc_success(request.id, Value::Null)
+        .map_err(map_javascript_error)?;
+
+    Ok(Some(WasmExecutionEvent::SignalState {
+        signal: signal as u32,
+        registration: WasmSignalHandlerRegistration {
+            action,
+            mask,
+            flags,
+        },
+    }))
 }
 
-fn parse_wasm_sync_rpc_request(line: &str) -> Result<JavascriptSyncRpcRequest, String> {
-    let wire: WasmSyncRpcRequestWire =
-        serde_json::from_str(line).map_err(|error| error.to_string())?;
-    Ok(JavascriptSyncRpcRequest {
-        id: wire.id,
-        method: wire.method,
-        args: wire.args,
-    })
-}
-
-fn write_wasm_sync_rpc_response(
-    writer: &WasmSyncRpcResponseWriter,
-    response: Value,
-) -> Result<(), WasmExecutionError> {
-    let mut payload = serde_json::to_vec(&response)
+fn translate_wasm_signal_state_stream_event(
+    event: &JavascriptExecutionEvent,
+) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
+    let chunk = match event {
+        JavascriptExecutionEvent::Stdout(chunk) | JavascriptExecutionEvent::Stderr(chunk) => chunk,
+        _ => return Ok(None),
+    };
+    let text = std::str::from_utf8(chunk)
         .map_err(|error| WasmExecutionError::RpcResponse(error.to_string()))?;
-    payload.push(b'\n');
-    writer.send(payload)
+    let payload = match text.trim().strip_prefix(WASM_SIGNAL_STATE_PREFIX) {
+        Some(payload) => payload,
+        None => return Ok(None),
+    };
+    let message: Value = serde_json::from_str(payload)
+        .map_err(|error| WasmExecutionError::RpcResponse(error.to_string()))?;
+    let signal = message
+        .get("signal")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| WasmExecutionError::RpcResponse(String::from("missing signal number")))?;
+    let registration = message
+        .get("registration")
+        .and_then(Value::as_object)
+        .ok_or_else(|| WasmExecutionError::RpcResponse(String::from("missing signal registration")))?;
+    let action = match registration
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("default")
+    {
+        "ignore" => WasmSignalDispositionAction::Ignore,
+        "user" => WasmSignalDispositionAction::User,
+        _ => WasmSignalDispositionAction::Default,
+    };
+    let mask = registration
+        .get("mask")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(Value::as_u64)
+                .map(|value| value as u32)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let flags = registration
+        .get("flags")
+        .and_then(Value::as_u64)
+        .unwrap_or_default() as u32;
+
+    Ok(Some(WasmExecutionEvent::SignalState {
+        signal: signal as u32,
+        registration: WasmSignalHandlerRegistration {
+            action,
+            mask,
+            flags,
+        },
+    }))
 }
 
-fn guest_argv(
-    context: &WasmContext,
-    request: &StartWasmExecutionRequest,
-) -> Result<Vec<String>, WasmExecutionError> {
-    if !request.argv.is_empty() {
-        return Ok(request.argv.clone());
-    }
-
-    match &context.module_path {
-        Some(module_path) => Ok(vec![module_path.clone()]),
-        None => Err(WasmExecutionError::MissingModulePath),
-    }
-}
-
-fn module_path(
-    context: &WasmContext,
-    request: &StartWasmExecutionRequest,
-) -> Result<String, WasmExecutionError> {
-    match context.module_path.as_deref() {
-        Some(module_path) => Ok(module_path.to_owned()),
-        None => request
-            .argv
-            .first()
-            .cloned()
-            .ok_or(WasmExecutionError::MissingModulePath),
-    }
-}
-
-fn create_node_child(
+fn start_wasm_javascript_execution(
+    javascript_engine: &mut JavascriptExecutionEngine,
     import_cache: &NodeImportCache,
+    javascript_context_id: &str,
     resolved_module: &ResolvedWasmModule,
     request: &StartWasmExecutionRequest,
-    guest_argv: &[String],
     frozen_time_ms: u128,
-    sync_rpc_channels: Option<&WasmSyncRpcChannels>,
-    control_fd: &std::os::fd::OwnedFd,
-) -> Result<std::process::Child, WasmExecutionError> {
-    ensure_host_cwd_exists(&request.cwd).map_err(WasmExecutionError::Spawn)?;
-    let mut command = Command::new(node_binary());
-    let mut exported_fds = ExportedChildFds::default();
-    let guest_visible_env = guest_visible_wasm_env(&request.env);
-    configure_wasm_node_sandbox(&mut command, import_cache, resolved_module, request)?;
-    command
-        .arg("--no-warnings")
-        .arg("--import")
-        .arg(import_cache.timing_bootstrap_path())
-        .arg(import_cache.wasm_runner_path())
-        .current_dir(&request.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env(
-            WASM_MODULE_PATH_ENV,
-            resolved_module.resolved_path.as_os_str(),
-        );
+    prewarm_only: bool,
+    warmup_metrics: Option<&[u8]>,
+) -> Result<JavascriptExecution, WasmExecutionError> {
+    let internal_env = build_wasm_internal_env(
+        resolved_module,
+        request,
+        frozen_time_ms,
+        prewarm_only,
+    );
+    let inline_code = build_wasm_runner_module_source(import_cache, &internal_env, warmup_metrics)?;
+    let mut env = request.env.clone();
+    env.extend(internal_env);
 
-    apply_guest_env(&mut command, &request.env, RESERVED_WASM_ENV_KEYS);
-    command
-        .env(WASM_GUEST_ARGV_ENV, encode_json_string_array(guest_argv))
-        .env(WASM_GUEST_ENV_ENV, encode_json_string_map(&guest_visible_env))
-        .env(
-            WASM_PERMISSION_TIER_ENV,
-            request.permission_tier.as_env_value(),
-        );
+    javascript_engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: request.vm_id.clone(),
+            context_id: javascript_context_id.to_owned(),
+            argv: vec![import_cache.wasm_runner_path().display().to_string()],
+            env,
+            cwd: request.cwd.clone(),
+            inline_code: Some(inline_code),
+        })
+        .map_err(map_javascript_error)
+}
 
-    if let Some(channels) = sync_rpc_channels {
-        command.env(NODE_SYNC_RPC_ENABLE_ENV, "1");
-        exported_fds
-            .export(
-                &mut command,
-                NODE_SYNC_RPC_REQUEST_FD_ENV,
-                &channels.child_request_writer,
-            )
-            .map_err(|error| WasmExecutionError::RpcChannel(error.to_string()))?;
-        exported_fds
-            .export(
-                &mut command,
-                NODE_SYNC_RPC_RESPONSE_FD_ENV,
-                &channels.child_response_reader,
-            )
-            .map_err(|error| WasmExecutionError::RpcChannel(error.to_string()))?;
+fn build_wasm_internal_env(
+    resolved_module: &ResolvedWasmModule,
+    request: &StartWasmExecutionRequest,
+    frozen_time_ms: u128,
+    prewarm_only: bool,
+) -> BTreeMap<String, String> {
+    let mut internal_env = request
+        .env
+        .iter()
+        .filter(|(key, _)| key.starts_with("AGENT_OS_"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    internal_env.insert(WASM_MODULE_PATH_ENV.to_string(), resolved_module.specifier.clone());
+    internal_env.insert(
+        WASM_GUEST_ARGV_ENV.to_string(),
+        encode_json_string_array(&warmup_guest_argv(resolved_module, request)),
+    );
+    internal_env.insert(
+        WASM_GUEST_ENV_ENV.to_string(),
+        encode_json_string_map(&guest_visible_wasm_env(&request.env)),
+    );
+    internal_env.insert(
+        WASM_PERMISSION_TIER_ENV.to_string(),
+        request.permission_tier.as_env_value().to_string(),
+    );
+    internal_env.insert(
+        String::from("AGENT_OS_FROZEN_TIME_MS"),
+        frozen_time_ms.to_string(),
+    );
+
+    if prewarm_only {
+        internal_env.insert(WASM_PREWARM_ONLY_ENV.to_string(), String::from("1"));
+        internal_env.remove("AGENT_OS_KEEP_STDIN_OPEN");
+    } else {
+        internal_env.insert(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"));
+        internal_env.remove(WASM_PREWARM_ONLY_ENV);
     }
 
-    configure_node_control_channel(&mut command, control_fd, &mut exported_fds)
-        .map_err(WasmExecutionError::Spawn)?;
-    configure_node_command(&mut command, import_cache, frozen_time_ms, request)?;
+    internal_env
+}
 
-    command.spawn().map_err(WasmExecutionError::Spawn)
+fn build_wasm_runner_module_source(
+    import_cache: &NodeImportCache,
+    internal_env: &BTreeMap<String, String>,
+    warmup_metrics: Option<&[u8]>,
+) -> Result<String, WasmExecutionError> {
+    let runner_source = fs::read_to_string(import_cache.wasm_runner_path())
+        .map_err(WasmExecutionError::PrepareWarmPath)?;
+    let runner_source = runner_source.replace(
+        "import { WASI } from 'node:wasi';\n",
+        "const { WASI } = globalThis.__agentOsWasiModule;\n",
+    );
+    let bootstrap = build_wasm_runner_bootstrap(internal_env, warmup_metrics);
+    Ok(insert_wasm_runner_bootstrap(&runner_source, &bootstrap))
+}
+
+fn build_wasm_runner_bootstrap(
+    internal_env: &BTreeMap<String, String>,
+    warmup_metrics: Option<&[u8]>,
+) -> String {
+    let internal_env_json =
+        serde_json::to_string(internal_env).unwrap_or_else(|_| String::from("{}"));
+    let warmup_metrics_json = warmup_metrics.map(|bytes| {
+        serde_json::to_string(&String::from_utf8_lossy(bytes).to_string())
+            .unwrap_or_else(|_| String::from("\"\""))
+    });
+    let warmup_emit = warmup_metrics_json
+        .map(|metrics| {
+            format!(
+                "if (typeof process?.stderr?.write === \"function\") {{\n  process.stderr.write({metrics});\n}}\n"
+            )
+        })
+        .unwrap_or_default();
+
+    format!(
+        r#"const __agentOsWasmInternalEnv = {internal_env_json};
+const __agentOsRequireBuiltin = (specifier) => {{
+  if (typeof globalThis.require === "function") {{
+    return globalThis.require(specifier);
+  }}
+  if (typeof process?.getBuiltinModule === "function") {{
+    return process.getBuiltinModule(specifier);
+  }}
+  throw new Error(`Agent OS WASM bootstrap cannot load ${{specifier}}`);
+}};
+if (typeof globalThis !== "undefined" && typeof globalThis.__agentOsWasiModule === "undefined") {{
+  const __agentOsFs = () => __agentOsRequireBuiltin("node:fs");
+  const __agentOsPath = () => __agentOsRequireBuiltin("node:path");
+  const __agentOsWasiErrnoSuccess = 0;
+  const __agentOsWasiErrnoBadf = 8;
+  const __agentOsWasiErrnoFault = 21;
+  const __agentOsWasiErrnoNosys = 52;
+
+  class WASI {{
+    constructor(options = {{}}) {{
+      this.args = Array.isArray(options.args) ? options.args.map((value) => String(value)) : [];
+      this.env =
+        options.env && typeof options.env === "object"
+          ? Object.fromEntries(
+              Object.entries(options.env).map(([key, value]) => [String(key), String(value)]),
+            )
+          : {{}};
+      this.preopens = options.preopens && typeof options.preopens === "object" ? options.preopens : {{}};
+      this.returnOnExit = options.returnOnExit === true;
+      this.instance = null;
+      this.nextFd = 3;
+      this.fdTable = new Map([
+        [0, {{ kind: "stdin" }}],
+        [1, {{ kind: "stdout" }}],
+        [2, {{ kind: "stderr" }}],
+      ]);
+      for (const [guestPath, hostPath] of Object.entries(this.preopens)) {{
+        this.fdTable.set(this.nextFd++, {{
+          kind: "preopen",
+          guestPath: String(guestPath),
+          hostPath: String(hostPath),
+        }});
+      }}
+      this.wasiImport = {{
+        clock_time_get: (...args) => this._clockTimeGet(...args),
+        clock_res_get: (...args) => this._clockResGet(...args),
+        fd_close: (...args) => this._fdClose(...args),
+        fd_pwrite: (...args) => this._fdPwrite(...args),
+        fd_read: (...args) => this._fdRead(...args),
+        fd_write: (...args) => this._fdWrite(...args),
+        path_open: (...args) => this._pathOpen(...args),
+        poll_oneoff: (...args) => this._pollOneoff(...args),
+        proc_exit: (...args) => this._procExit(...args),
+      }};
+    }}
+
+    start(instance) {{
+      this.instance = instance;
+      try {{
+        if (typeof instance?.exports?._start === "function") {{
+          instance.exports._start();
+        }}
+        return 0;
+      }} catch (error) {{
+        if (error && error.__agentOsWasiExit === true) {{
+          return Number(error.code) >>> 0;
+        }}
+        throw error;
+      }}
+    }}
+
+    _memoryView() {{
+      const memory = this.instance?.exports?.memory;
+      if (!(memory instanceof WebAssembly.Memory)) {{
+        throw new Error("WASI memory export is unavailable");
+      }}
+      return new DataView(memory.buffer);
+    }}
+
+    _memoryBytes() {{
+      const memory = this.instance?.exports?.memory;
+      if (!(memory instanceof WebAssembly.Memory)) {{
+        throw new Error("WASI memory export is unavailable");
+      }}
+      return new Uint8Array(memory.buffer);
+    }}
+
+    _writeUint32(ptr, value) {{
+      try {{
+        this._memoryView().setUint32(Number(ptr) >>> 0, Number(value) >>> 0, true);
+        return __agentOsWasiErrnoSuccess;
+      }} catch {{
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _writeUint64(ptr, value) {{
+      try {{
+        this._memoryView().setBigUint64(Number(ptr) >>> 0, BigInt(value), true);
+        return __agentOsWasiErrnoSuccess;
+      }} catch {{
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _readBytes(ptr, len) {{
+      const start = Number(ptr) >>> 0;
+      const end = start + (Number(len) >>> 0);
+      return Buffer.from(this._memoryBytes().slice(start, end));
+    }}
+
+    _readString(ptr, len) {{
+      return this._readBytes(ptr, len).toString("utf8");
+    }}
+
+    _collectIovs(iovs, iovsLen) {{
+      const view = this._memoryView();
+      const chunks = [];
+      for (let index = 0; index < (Number(iovsLen) >>> 0); index += 1) {{
+        const entryOffset = (Number(iovs) >>> 0) + index * 8;
+        const ptr = view.getUint32(entryOffset, true);
+        const len = view.getUint32(entryOffset + 4, true);
+        chunks.push(this._readBytes(ptr, len));
+      }}
+      return Buffer.concat(chunks);
+    }}
+
+    _writeToIovs(iovs, iovsLen, bytes) {{
+      const view = this._memoryView();
+      const memory = this._memoryBytes();
+      let sourceOffset = 0;
+      for (let index = 0; index < (Number(iovsLen) >>> 0) && sourceOffset < bytes.length; index += 1) {{
+        const entryOffset = (Number(iovs) >>> 0) + index * 8;
+        const ptr = view.getUint32(entryOffset, true);
+        const len = view.getUint32(entryOffset + 4, true);
+        const chunk = bytes.subarray(sourceOffset, sourceOffset + len);
+        memory.set(chunk, Number(ptr) >>> 0);
+        sourceOffset += chunk.length;
+      }}
+      return sourceOffset;
+    }}
+
+    _clockTimeGet(_clockId, _precision, resultPtr) {{
+      return this._writeUint64(resultPtr, BigInt(Date.now()) * 1000000n);
+    }}
+
+    _clockResGet(_clockId, resultPtr) {{
+      return this._writeUint64(resultPtr, 1000000n);
+    }}
+
+    _fdWrite(fd, iovs, iovsLen, nwrittenPtr) {{
+      try {{
+        const bytes = this._collectIovs(iovs, iovsLen);
+        const descriptor = Number(fd) >>> 0;
+        const entry = this.fdTable.get(descriptor);
+        if (!entry) {{
+          return __agentOsWasiErrnoBadf;
+        }}
+        if (entry.kind === "stdout") {{
+          process.stdout.write(bytes);
+          return this._writeUint32(nwrittenPtr, bytes.length);
+        }}
+        if (entry.kind === "stderr") {{
+          process.stderr.write(bytes);
+          return this._writeUint32(nwrittenPtr, bytes.length);
+        }}
+        if (entry.kind === "file") {{
+          const written = __agentOsFs().writeSync(entry.realFd, bytes, 0, bytes.length);
+          return this._writeUint32(nwrittenPtr, written);
+        }}
+        return __agentOsWasiErrnoBadf;
+      }} catch {{
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _fdPwrite(fd, iovs, iovsLen, offset, nwrittenPtr) {{
+      try {{
+        const bytes = this._collectIovs(iovs, iovsLen);
+        const descriptor = Number(fd) >>> 0;
+        const entry = this.fdTable.get(descriptor);
+        if (!entry || entry.kind !== "file") {{
+          return __agentOsWasiErrnoBadf;
+        }}
+        const written = __agentOsFs().writeSync(
+          entry.realFd,
+          bytes,
+          0,
+          bytes.length,
+          Number(offset) >>> 0,
+        );
+        return this._writeUint32(nwrittenPtr, written);
+      }} catch {{
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _fdRead(fd, iovs, iovsLen, nreadPtr) {{
+      try {{
+        const descriptor = Number(fd) >>> 0;
+        const entry = this.fdTable.get(descriptor);
+        if (!entry) {{
+          return __agentOsWasiErrnoBadf;
+        }}
+        if (entry.kind === "stdin") {{
+          return this._writeUint32(nreadPtr, 0);
+        }}
+        if (entry.kind !== "file") {{
+          return __agentOsWasiErrnoBadf;
+        }}
+        const totalLength = (() => {{
+          const view = this._memoryView();
+          let length = 0;
+          for (let index = 0; index < (Number(iovsLen) >>> 0); index += 1) {{
+            const entryOffset = (Number(iovs) >>> 0) + index * 8;
+            length += view.getUint32(entryOffset + 4, true);
+          }}
+          return length >>> 0;
+        }})();
+        const buffer = Buffer.alloc(totalLength);
+        const bytesRead = __agentOsFs().readSync(entry.realFd, buffer, 0, totalLength, null);
+        const written = this._writeToIovs(iovs, iovsLen, buffer.subarray(0, bytesRead));
+        return this._writeUint32(nreadPtr, written);
+      }} catch {{
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _fdClose(fd) {{
+      try {{
+        const descriptor = Number(fd) >>> 0;
+        const entry = this.fdTable.get(descriptor);
+        if (!entry) {{
+          return __agentOsWasiErrnoBadf;
+        }}
+        if (entry.kind === "file") {{
+          __agentOsFs().closeSync(entry.realFd);
+        }}
+        if (descriptor > 2) {{
+          this.fdTable.delete(descriptor);
+        }}
+        return __agentOsWasiErrnoSuccess;
+      }} catch {{
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _pathOpen(fd, _dirflags, pathPtr, pathLen, oflags, _rightsBase, _rightsInheriting, _fdflags, openedFdPtr) {{
+      try {{
+        const descriptor = Number(fd) >>> 0;
+        const entry = this.fdTable.get(descriptor);
+        if (!entry || entry.kind !== "preopen") {{
+          return __agentOsWasiErrnoBadf;
+        }}
+        const target = this._readString(pathPtr, pathLen);
+        const hostPath = __agentOsPath().resolve(entry.hostPath, target);
+        const mode = (Number(oflags) & 0x1) !== 0 || (Number(oflags) & 0x8) !== 0 ? "w+" : "r";
+        const realFd = __agentOsFs().openSync(hostPath, mode);
+        const openedFd = this.nextFd++;
+        this.fdTable.set(openedFd, {{ kind: "file", realFd }});
+        return this._writeUint32(openedFdPtr, openedFd);
+      }} catch {{
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _pollOneoff(_inPtr, _outPtr, _nsubscriptions, neventsPtr) {{
+      return this._writeUint32(neventsPtr, 0);
+    }}
+
+    _procExit(code) {{
+      if (this.returnOnExit) {{
+        const error = new Error(`wasi exit(${{Number(code) >>> 0}})`);
+        error.__agentOsWasiExit = true;
+        error.code = Number(code) >>> 0;
+        throw error;
+      }}
+      process.exit(Number(code) >>> 0);
+    }}
+  }}
+
+  Object.defineProperty(globalThis, "__agentOsWasiModule", {{
+    configurable: true,
+    enumerable: false,
+    value: {{ WASI }},
+    writable: true,
+  }});
+}}
+if (typeof process !== "undefined") {{
+  process.env = {{ ...(process.env || {{}}), ...__agentOsWasmInternalEnv }};
+}}
+if (typeof globalThis !== "undefined" && typeof globalThis.__agentOsSyncRpc === "undefined") {{
+  const __agentOsNormalizeBytes = (value) => {{
+    if (value == null) {{
+      return value;
+    }}
+    if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) {{
+      return value;
+    }}
+    if (value instanceof Uint8Array) {{
+      return Buffer.from(value);
+    }}
+    if (ArrayBuffer.isView(value)) {{
+      return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    }}
+    if (value instanceof ArrayBuffer) {{
+      return Buffer.from(value);
+    }}
+    if (
+      value &&
+      typeof value === "object" &&
+      value.__agentOsType === "bytes" &&
+      typeof value.base64 === "string"
+    ) {{
+      return Buffer.from(value.base64, "base64");
+    }}
+    return value;
+  }};
+  const __agentOsWasmSyncRpc = {{
+    callSync(method, args = []) {{
+      switch (method) {{
+        case "fs.fstatSync":
+          return __agentOsRequireBuiltin("node:fs").fstatSync(...args);
+        case "fs.lstatSync":
+          return __agentOsRequireBuiltin("node:fs").lstatSync(...args);
+        case "fs.statSync":
+          return __agentOsRequireBuiltin("node:fs").statSync(...args);
+        case "fs.chmodSync":
+          return __agentOsRequireBuiltin("node:fs").chmodSync(...args);
+        case "__kernel_poll":
+          if (typeof _kernelPollRaw === "undefined") {{
+            throw new Error("Agent OS WASM kernel poll bridge is unavailable");
+          }}
+          return _kernelPollRaw.applySync(void 0, args);
+        case "child_process.spawn": {{
+          if (typeof _childProcessSpawnStart === "undefined") {{
+            throw new Error("Agent OS WASM child_process bridge is unavailable");
+          }}
+          const [request] = args;
+          return _childProcessSpawnStart.applySync(void 0, [
+            request?.command ?? "",
+            JSON.stringify(request?.args ?? []),
+            JSON.stringify(request?.options ?? {{}}),
+          ]);
+        }}
+        case "child_process.poll":
+          if (typeof _childProcessPoll === "undefined") {{
+            throw new Error("Agent OS WASM child_process poll bridge is unavailable");
+          }}
+          return _childProcessPoll.applySync(void 0, args);
+        case "child_process.kill":
+          if (typeof _childProcessKill === "undefined") {{
+            throw new Error("Agent OS WASM child_process kill bridge is unavailable");
+          }}
+          return _childProcessKill.applySync(void 0, args);
+        case "child_process.write_stdin": {{
+          if (typeof _childProcessStdinWrite === "undefined") {{
+            throw new Error("Agent OS WASM child_process stdin bridge is unavailable");
+          }}
+          const [childId, chunk] = args;
+          return _childProcessStdinWrite.applySync(void 0, [
+            childId,
+            __agentOsNormalizeBytes(chunk),
+          ]);
+        }}
+        case "child_process.close_stdin":
+          if (typeof _childProcessStdinClose === "undefined") {{
+            throw new Error("Agent OS WASM child_process stdin-close bridge is unavailable");
+          }}
+          return _childProcessStdinClose.applySync(void 0, args);
+        case "net.connect":
+          if (typeof _netSocketConnectRaw === "undefined") {{
+            throw new Error("Agent OS WASM net.connect bridge is unavailable");
+          }}
+          return _netSocketConnectRaw.applySync(void 0, args);
+        case "net.write":
+          if (typeof _netSocketWriteRaw === "undefined") {{
+            throw new Error("Agent OS WASM net.write bridge is unavailable");
+          }}
+          return _netSocketWriteRaw.applySync(void 0, args);
+        case "net.destroy":
+          if (typeof _netSocketDestroyRaw === "undefined") {{
+            throw new Error("Agent OS WASM net.destroy bridge is unavailable");
+          }}
+          return _netSocketDestroyRaw.applySync(void 0, args);
+        case "net.socket_upgrade_tls":
+          if (typeof _netSocketUpgradeTlsRaw === "undefined") {{
+            throw new Error("Agent OS WASM TLS-upgrade bridge is unavailable");
+          }}
+          return _netSocketUpgradeTlsRaw.applySync(void 0, args);
+        case "process.signal_state": {{
+          if (typeof _processSignalState === "undefined") {{
+            throw new Error("Agent OS WASM signal-state bridge is unavailable");
+          }}
+          const [signal, action = "default", maskJson = "[]", flags = 0] = args;
+          return _processSignalState.applySyncPromise(void 0, [
+            signal,
+            action,
+            maskJson,
+            flags,
+          ]);
+        }}
+        default:
+          throw new Error(`Agent OS WASM sync RPC method not implemented in V8 runtime: ${{method}}`);
+      }}
+    }},
+    async call(method, args = []) {{
+      return this.callSync(method, args);
+    }},
+  }};
+  Object.defineProperty(globalThis, "__agentOsSyncRpc", {{
+    configurable: true,
+    enumerable: false,
+    value: __agentOsWasmSyncRpc,
+    writable: true,
+  }});
+}}
+{warmup_emit}"#
+    )
+}
+
+fn insert_wasm_runner_bootstrap(source: &str, bootstrap: &str) -> String {
+    let mut insert_at = 0usize;
+    let mut saw_import = false;
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("import ") || (saw_import && trimmed.is_empty()) {
+            insert_at += line.len();
+            saw_import = saw_import || trimmed.starts_with("import ");
+            continue;
+        }
+        break;
+    }
+
+    format!(
+        "{}{}{}",
+        &source[..insert_at],
+        bootstrap,
+        &source[insert_at..]
+    )
 }
 
 fn prewarm_wasm_path(
     import_cache: &NodeImportCache,
+    javascript_engine: &mut JavascriptExecutionEngine,
+    javascript_context_id: &str,
     resolved_module: &ResolvedWasmModule,
     request: &StartWasmExecutionRequest,
     frozen_time_ms: u128,
@@ -840,44 +1473,78 @@ fn prewarm_wasm_path(
         ));
     }
 
-    let guest_argv = warmup_guest_argv(resolved_module, request);
-    let guest_visible_env = guest_visible_wasm_env(&request.env);
-    ensure_host_cwd_exists(&request.cwd).map_err(WasmExecutionError::WarmupSpawn)?;
-    let mut command = Command::new(node_binary());
-    configure_wasm_node_sandbox(&mut command, import_cache, resolved_module, request)?;
-    command
-        .arg("--no-warnings")
-        .arg("--import")
-        .arg(import_cache.timing_bootstrap_path())
-        .arg(import_cache.wasm_runner_path())
-        .current_dir(&request.cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .env(WASM_PREWARM_ONLY_ENV, "1")
-        .env(
-            WASM_MODULE_PATH_ENV,
-            resolved_module.resolved_path.as_os_str(),
-        )
-        .env(WASM_GUEST_ARGV_ENV, encode_json_string_array(&guest_argv))
-        .env(WASM_GUEST_ENV_ENV, encode_json_string_map(&guest_visible_env))
-        .env(
-            WASM_PERMISSION_TIER_ENV,
-            request.permission_tier.as_env_value(),
-        );
+    let mut prewarm_execution = start_wasm_javascript_execution(
+        javascript_engine,
+        import_cache,
+        javascript_context_id,
+        resolved_module,
+        request,
+        frozen_time_ms,
+        true,
+        None,
+    )
+    .map_err(|error| match error {
+        WasmExecutionError::Spawn(err) => WasmExecutionError::WarmupSpawn(err),
+        other => other,
+    })?;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let started = Instant::now();
 
-    configure_node_command(&mut command, import_cache, frozen_time_ms, request)?;
-
-    let output = run_warmup_command(command, Some(prewarm_timeout))?;
-    if !output.status.success() {
-        return Err(WasmExecutionError::WarmupFailed {
-            exit_code: output.status.code().unwrap_or(1),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
+    loop {
+        match prewarm_execution
+            .poll_event_blocking(prewarm_timeout)
+            .map_err(map_javascript_error)?
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::Exited(exit_code)) => {
+                if exit_code != 0 {
+                    return Err(WasmExecutionError::WarmupFailed {
+                        exit_code,
+                        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                    });
+                }
+                break;
+            }
+            Some(JavascriptExecutionEvent::SyncRpcRequest(sync_request)) => {
+        let mut internal_sync_rpc = WasmInternalSyncRpc {
+            module_guest_paths: wasm_guest_module_paths(
+                &resolved_module.specifier,
+                &request.env,
+            ),
+            module_host_path: resolved_module.resolved_path.clone(),
+            guest_cwd: wasm_guest_cwd(&request.env),
+            host_cwd: request.cwd.clone(),
+            next_fd: 64,
+            open_files: BTreeMap::new(),
+        };
+        let handled = handle_internal_wasm_sync_rpc_request(
+            &mut prewarm_execution,
+            &mut internal_sync_rpc,
+                    &sync_request,
+                )?;
+                if !handled {
+                    return Err(WasmExecutionError::WarmupFailed {
+                        exit_code: 1,
+                        stderr: format!(
+                            "unexpected WebAssembly prewarm sync RPC request {} {} {:?}",
+                            sync_request.id, sync_request.method, sync_request.args
+                        ),
+                    });
+                }
+            }
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
+            None => {
+                let _ = prewarm_execution.terminate();
+                return Err(WasmExecutionError::WarmupTimeout(prewarm_timeout));
+            }
+        }
     }
 
+    let _ = stdout;
+    let _duration_ms = started.elapsed().as_secs_f64() * 1000.0;
     fs::write(&marker_path, marker_contents).map_err(WasmExecutionError::PrepareWarmPath)?;
-
     Ok(warmup_metrics_line(
         debug_enabled,
         true,
@@ -887,64 +1554,99 @@ fn prewarm_wasm_path(
     ))
 }
 
-fn configure_wasm_node_sandbox(
-    command: &mut Command,
-    import_cache: &NodeImportCache,
-    resolved_module: &ResolvedWasmModule,
+fn guest_argv(
+    context: &WasmContext,
     request: &StartWasmExecutionRequest,
-) -> Result<(), WasmExecutionError> {
-    let sandbox_root = sandbox_root(&request.env, &request.cwd);
-    let cache_root = import_cache_root(import_cache, import_cache.prewarm_marker_dir());
-    let compile_cache_dir = import_cache.shared_compile_cache_dir();
-    let mut read_paths = vec![cache_root.clone(), compile_cache_dir.clone()];
-    let mut write_paths = vec![cache_root, compile_cache_dir];
-
-    if request.permission_tier.workspace_write_enabled() {
-        write_paths.push(sandbox_root.clone());
+) -> Result<Vec<String>, WasmExecutionError> {
+    if !request.argv.is_empty() {
+        return Ok(request.argv.clone());
     }
 
-    read_paths.push(resolved_module.resolved_path.clone());
-    if let Some(parent) = resolved_module.resolved_path.parent() {
-        read_paths.push(parent.to_path_buf());
+    match &context.module_path {
+        Some(module_path) => Ok(vec![module_path.clone()]),
+        None => Err(WasmExecutionError::MissingModulePath),
     }
-
-    read_paths.extend(node_resolution_read_paths(
-        std::iter::once(request.cwd.clone()).chain(
-            resolved_module
-                .resolved_path
-                .parent()
-                .map(Path::to_path_buf),
-        ),
-    ));
-    read_paths.extend(parse_env_path_list(
-        &request.env,
-        NODE_EXTRA_FS_READ_PATHS_ENV,
-    ));
-    write_paths.extend(parse_env_path_list(
-        &request.env,
-        NODE_EXTRA_FS_WRITE_PATHS_ENV,
-    ));
-
-    harden_node_command(
-        command,
-        &sandbox_root,
-        &read_paths,
-        &write_paths,
-        true,
-        request.permission_tier.wasi_enabled(),
-        env_builtin_enabled(&request.env, "worker_threads"),
-        false,
-    );
-    Ok(())
 }
 
-fn parse_env_path_list(env: &BTreeMap<String, String>, key: &str) -> Vec<PathBuf> {
-    env.get(key)
-        .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
-        .into_iter()
-        .flatten()
-        .map(PathBuf::from)
-        .collect()
+fn wasm_guest_module_paths(
+    specifier: &str,
+    env: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    candidates.push(specifier.to_owned());
+
+    if specifier.starts_with('/') {
+        candidates.push(normalize_guest_path(specifier));
+    } else if !specifier.starts_with("file:") {
+        let guest_cwd = wasm_guest_cwd(env);
+        candidates.push(join_guest_path(&guest_cwd, specifier));
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn wasm_guest_cwd(env: &BTreeMap<String, String>) -> String {
+    env.get("PWD")
+        .filter(|value| value.starts_with('/'))
+        .cloned()
+        .or_else(|| {
+            env.get("HOME")
+                .filter(|value| value.starts_with('/'))
+                .cloned()
+        })
+        .unwrap_or_else(|| String::from("/root"))
+}
+
+fn normalize_guest_path(path: &str) -> String {
+    join_guest_path("/", path)
+}
+
+fn join_guest_path(base: &str, suffix: &str) -> String {
+    let mut segments = Vec::new();
+    let mut absolute = false;
+    for part in [base, suffix] {
+        if part.starts_with('/') {
+            absolute = true;
+        }
+        for segment in part.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    let _ = segments.pop();
+                }
+                value => segments.push(value),
+            }
+        }
+    }
+
+    let joined = segments.join("/");
+    if absolute {
+        if joined.is_empty() {
+            String::from("/")
+        } else {
+            format!("/{joined}")
+        }
+    } else if joined.is_empty() {
+        String::from(".")
+    } else {
+        joined
+    }
+}
+
+fn module_path(
+    context: &WasmContext,
+    request: &StartWasmExecutionRequest,
+) -> Result<String, WasmExecutionError> {
+    match context.module_path.as_deref() {
+        Some(module_path) => Ok(module_path.to_owned()),
+        None => request
+            .argv
+            .first()
+            .cloned()
+            .ok_or(WasmExecutionError::MissingModulePath),
+    }
 }
 
 fn guest_visible_wasm_env(env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
@@ -956,36 +1658,6 @@ fn guest_visible_wasm_env(env: &BTreeMap<String, String>) -> BTreeMap<String, St
 
 fn is_internal_wasm_guest_env_key(key: &str) -> bool {
     key.starts_with("AGENT_OS_") || key.starts_with("NODE_SYNC_RPC_")
-}
-
-fn configure_node_command(
-    command: &mut Command,
-    import_cache: &NodeImportCache,
-    frozen_time_ms: u128,
-    request: &StartWasmExecutionRequest,
-) -> Result<(), WasmExecutionError> {
-    let compile_cache_dir = import_cache.shared_compile_cache_dir();
-    configure_compile_cache(command, &compile_cache_dir)
-        .map_err(WasmExecutionError::PrepareWarmPath)?;
-
-    if let Some(stack_bytes) = wasm_stack_limit_bytes(request)? {
-        let stack_kib = (stack_bytes.saturating_add(1023) / 1024).max(64);
-        command.arg(format!("--stack-size={stack_kib}"));
-    }
-
-    if let Some(memory_limit_bytes) = wasm_memory_limit_bytes(request)? {
-        let memory_limit_pages = wasm_memory_limit_pages(memory_limit_bytes)?;
-        command
-            .arg(format!("{WASM_MAX_MEM_PAGES_FLAG}{memory_limit_pages}"))
-            .env(WASM_MAX_MEMORY_BYTES_ENV, memory_limit_bytes.to_string());
-    }
-
-    if let Some(fuel_limit) = wasm_limit_u64(&request.env, WASM_MAX_FUEL_ENV)? {
-        command.env(WASM_MAX_FUEL_ENV, fuel_limit.to_string());
-    }
-
-    command.env(NODE_FROZEN_TIME_ENV, frozen_time_ms.to_string());
-    Ok(())
 }
 
 fn warmup_marker_contents(resolved_module: &ResolvedWasmModule) -> String {
@@ -1023,126 +1695,6 @@ fn warmup_metrics_line(
         )
         .into_bytes(),
     )
-}
-
-#[derive(Debug)]
-struct WarmupOutput {
-    status: std::process::ExitStatus,
-    stderr: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChildWaitError {
-    TimedOut,
-    WaitFailed,
-}
-
-fn run_warmup_command(
-    mut command: Command,
-    timeout: Option<Duration>,
-) -> Result<WarmupOutput, WasmExecutionError> {
-    let program = command.get_program().to_string_lossy().into_owned();
-    let args = command
-        .get_args()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    let cwd = command
-        .get_current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| String::from("<none>"));
-    let mut child = command.spawn().map_err(|error| {
-        WasmExecutionError::WarmupSpawn(std::io::Error::new(
-            error.kind(),
-            format!("{error} (program: {program}, cwd: {cwd}, args: {:?})", args),
-        ))
-    })?;
-    let Some(mut stderr) = child.stderr.take() else {
-        return Err(WasmExecutionError::MissingChildStream("stderr"));
-    };
-
-    let status =
-        wait_for_child_with_optional_timeout(&mut child, timeout).map_err(|timed_out| {
-            if timed_out == ChildWaitError::TimedOut {
-                WasmExecutionError::WarmupTimeout(timeout.expect("timeout should be present"))
-            } else {
-                WasmExecutionError::WarmupSpawn(std::io::Error::other(
-                    "failed to wait for WebAssembly warmup child",
-                ))
-            }
-        })?;
-
-    let mut stderr_bytes = Vec::new();
-    let _ = stderr.read_to_end(&mut stderr_bytes);
-    Ok(WarmupOutput {
-        status,
-        stderr: stderr_bytes,
-    })
-}
-
-fn spawn_wasm_waiter(
-    mut child: Child,
-    stdout_reader: JoinHandle<()>,
-    stderr_reader: JoinHandle<()>,
-    timeout: Option<Duration>,
-    sender: mpsc::Sender<WasmProcessEvent>,
-) {
-    std::thread::spawn(move || {
-        let wait_result = wait_for_child_with_optional_timeout(&mut child, timeout);
-        match wait_result {
-            Ok(status) => {
-                let exit_code = status.code().unwrap_or(1);
-                let _ = sender.send(WasmProcessEvent::Exited(exit_code));
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return;
-            }
-            Err(ChildWaitError::TimedOut) => {
-                let _ = sender.send(WasmProcessEvent::RawStderr(
-                    b"WebAssembly fuel budget exhausted\n".to_vec(),
-                ));
-                let _ = sender.send(WasmProcessEvent::Exited(WASM_TIMEOUT_EXIT_CODE));
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return;
-            }
-            Err(ChildWaitError::WaitFailed) => {
-                let _ = sender.send(WasmProcessEvent::RawStderr(
-                    b"agent-os execution wait error: failed to wait for WebAssembly child\n"
-                        .to_vec(),
-                ));
-                let _ = sender.send(WasmProcessEvent::Exited(1));
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return;
-            }
-        }
-    });
-}
-
-fn wait_for_child_with_optional_timeout(
-    child: &mut Child,
-    timeout: Option<Duration>,
-) -> Result<std::process::ExitStatus, ChildWaitError> {
-    if timeout.is_none() {
-        return child.wait().map_err(|_| ChildWaitError::WaitFailed);
-    }
-
-    let timeout = timeout.expect("timeout should be present");
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(ChildWaitError::TimedOut);
-                }
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            Err(_) => return Err(ChildWaitError::WaitFailed),
-        }
-    }
 }
 
 fn resolve_wasm_execution_timeout(

@@ -381,6 +381,22 @@ function parseControlPipeFd(value) {
 
 function emitControlMessage(message) {
   if (CONTROL_PIPE_FD == null) {
+    if (
+      message?.type === 'signal_state' &&
+      globalThis.__agentOsSyncRpc &&
+      typeof globalThis.__agentOsSyncRpc.callSync === 'function'
+    ) {
+      try {
+        globalThis.__agentOsSyncRpc.callSync('process.signal_state', [
+          Number(message.signal) >>> 0,
+          message.registration?.action ?? 'default',
+          JSON.stringify(message.registration?.mask ?? []),
+          Number(message.registration?.flags) >>> 0,
+        ]);
+      } catch {
+        // Ignore control-channel fallback failures during teardown.
+      }
+    }
     return;
   }
 
@@ -6822,6 +6838,16 @@ function isProcessSignalEventName(eventName) {
 
 function emitControlMessage(message) {
   if (CONTROL_PIPE_FD == null) {
+    if (
+      message?.type === 'signal_state' &&
+      typeof process?.stdout?.write === 'function'
+    ) {
+      try {
+        process.stdout.write(`__AGENT_OS_WASM_SIGNAL_STATE__:${JSON.stringify(message)}\n`);
+      } catch {
+        // Ignore signal-state bridge failures during teardown.
+      }
+    }
     return;
   }
 
@@ -8315,14 +8341,28 @@ function parseControlPipeFd(value) {
 }
 
 function emitControlMessage(message) {
+  const emitSignalStateFallback = () => {
+    if (
+      message?.type === 'signal_state' &&
+      typeof process?.stdout?.write === 'function'
+    ) {
+      try {
+        process.stdout.write(`__AGENT_OS_WASM_SIGNAL_STATE__:${JSON.stringify(message)}\n`);
+      } catch {
+        // Ignore signal-state bridge failures during teardown.
+      }
+    }
+  };
+
   if (CONTROL_PIPE_FD == null) {
+    emitSignalStateFallback();
     return;
   }
 
   try {
     writeSync(CONTROL_PIPE_FD, `${JSON.stringify(message)}\n`);
   } catch {
-    // Ignore control-channel write failures during teardown.
+    emitSignalStateFallback();
   }
 }
 
@@ -9018,6 +9058,13 @@ function readSyncRpcLine() {
 }
 
 function callSyncRpc(method, args = []) {
+  if (
+    globalThis.__agentOsSyncRpc &&
+    typeof globalThis.__agentOsSyncRpc.callSync === 'function'
+  ) {
+    return globalThis.__agentOsSyncRpc.callSync(method, args);
+  }
+
   if (!NODE_SYNC_RPC_ENABLE || NODE_SYNC_RPC_REQUEST_FD == null || NODE_SYNC_RPC_RESPONSE_FD == null) {
     const error = new Error(`Agent OS WASM sync RPC is unavailable for ${method}`);
     error.code = 'ERR_AGENT_OS_WASM_SYNC_RPC_UNAVAILABLE';
@@ -9333,7 +9380,7 @@ const hostNetImport = {
 };
 
 const hostProcessImport =
-  permissionTier !== 'isolated'
+  permissionTier === 'full'
     ? {
         proc_spawn(
           argvPtr,

@@ -12,11 +12,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use tempfile::tempdir;
 
-const ARG_PREFIX: &str = "ARG=";
-const ENV_PREFIX: &str = "ENV=";
-const INVOCATION_BREAK: &str = "--END--";
-const NODE_ALLOW_WASI_FLAG: &str = "--allow-wasi";
-const NODE_WASM_MAX_MEM_PAGES_FLAG_PREFIX: &str = "--wasm-max-mem-pages=";
 const PYTHON_MAX_OLD_SPACE_MB_ENV: &str = "AGENT_OS_PYTHON_MAX_OLD_SPACE_MB";
 const WASM_MAX_FUEL_ENV: &str = "AGENT_OS_WASM_MAX_FUEL";
 const WASM_MAX_MEMORY_BYTES_ENV: &str = "AGENT_OS_WASM_MAX_MEMORY_BYTES";
@@ -61,11 +56,8 @@ impl Drop for EnvVarGuard {
 
 fn write_fake_node_binary(path: &Path, log_path: &Path) {
     let script = format!(
-        "#!/bin/sh\nset -eu\nlog=\"{}\"\nfor arg in \"$@\"; do\n  printf 'ARG=%s\\n' \"$arg\" >> \"$log\"\ndone\nfor key in {} {}; do\n  value=$(printenv \"$key\" || true)\n  if [ -n \"$value\" ]; then\n    printf 'ENV=%s=%s\\n' \"$key\" \"$value\" >> \"$log\"\n  fi\ndone\nprintf '%s\\n' '{}' >> \"$log\"\nexit 0\n",
+        "#!/bin/sh\nset -eu\nprintf 'host-node-invoked\\n' >> \"{}\"\nexit 1\n",
         log_path.display(),
-        WASM_MAX_FUEL_ENV,
-        WASM_MAX_MEMORY_BYTES_ENV,
-        INVOCATION_BREAK,
     );
     fs::write(path, script).expect("write fake node binary");
     let mut permissions = fs::metadata(path)
@@ -75,37 +67,16 @@ fn write_fake_node_binary(path: &Path, log_path: &Path) {
     fs::set_permissions(path, permissions).expect("chmod fake node binary");
 }
 
-fn parse_invocations(log_path: &Path) -> Vec<Vec<String>> {
-    let contents = fs::read_to_string(log_path).expect("read invocation log");
-    let separator = format!("{INVOCATION_BREAK}\n");
-    contents
-        .split(&separator)
-        .filter(|block| !block.trim().is_empty())
-        .map(|block| {
-            block
-                .lines()
-                .filter_map(|line| line.strip_prefix(ARG_PREFIX))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
-fn parse_invocation_env(log_path: &Path) -> Vec<BTreeMap<String, String>> {
-    let contents = fs::read_to_string(log_path).expect("read invocation log");
-    let separator = format!("{INVOCATION_BREAK}\n");
-    contents
-        .split(&separator)
-        .filter(|block| !block.trim().is_empty())
-        .map(|block| {
-            block
-                .lines()
-                .filter_map(|line| line.strip_prefix(ENV_PREFIX))
-                .filter_map(|entry| entry.split_once('='))
-                .map(|(key, value)| (key.to_owned(), value.to_owned()))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .collect()
+fn wasm_noop_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+(module
+  (memory (export "memory") 1)
+  (func (export "_start"))
+)
+"#,
+    )
+    .expect("compile noop wasm fixture")
 }
 
 #[test]
@@ -297,7 +268,7 @@ export async function loadPyodide() {
 }
 
 #[test]
-fn wasm_execution_passes_runtime_memory_and_fuel_limits_to_node_process() {
+fn wasm_execution_applies_runtime_memory_and_fuel_limits_inside_v8_runtime() {
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
     let log_path = temp.path().join("node-args.log");
@@ -306,7 +277,7 @@ fn wasm_execution_passes_runtime_memory_and_fuel_limits_to_node_process() {
 
     let wasm_cwd = temp.path().join("wasm-project");
     fs::create_dir_all(&wasm_cwd).expect("create wasm cwd");
-    fs::write(wasm_cwd.join("guest.wasm"), b"\0asm\x01\0\0\0").expect("write wasm module");
+    fs::write(wasm_cwd.join("guest.wasm"), wasm_noop_module()).expect("write wasm module");
 
     let mut engine = WasmExecutionEngine::default();
     let context = engine.create_context(CreateWasmContextRequest {
@@ -320,7 +291,7 @@ fn wasm_execution_passes_runtime_memory_and_fuel_limits_to_node_process() {
             context_id: context.context_id,
             argv: vec![String::from("./guest.wasm")],
             env: BTreeMap::from([
-                (String::from(WASM_MAX_FUEL_ENV), String::from("25")),
+                (String::from(WASM_MAX_FUEL_ENV), String::from("250000")),
                 (
                     String::from(WASM_MAX_MEMORY_BYTES_ENV),
                     String::from("131072"),
@@ -333,41 +304,14 @@ fn wasm_execution_passes_runtime_memory_and_fuel_limits_to_node_process() {
         .wait()
         .expect("wait for wasm execution");
     assert_eq!(result.exit_code, 0);
-
-    let invocations = parse_invocations(&log_path);
-    let envs = parse_invocation_env(&log_path);
-    assert_eq!(
-        invocations.len(),
-        2,
-        "expected prewarm and execution invocations"
+    assert!(
+        !log_path.exists(),
+        "wasm execution should apply runtime limits inside the shared V8 runtime, not launch the host node binary"
     );
-    assert_eq!(
-        envs.len(),
-        2,
-        "expected one env capture per prewarm and execution invocation"
-    );
-
-    for (args, env) in invocations.iter().zip(envs.iter()) {
-        assert!(
-            args.iter()
-                .any(|arg| arg == &format!("{NODE_WASM_MAX_MEM_PAGES_FLAG_PREFIX}2")),
-            "wasm invocations should enforce the configured runtime page limit: {args:?}"
-        );
-        assert_eq!(
-            env.get(WASM_MAX_MEMORY_BYTES_ENV).map(String::as_str),
-            Some("131072"),
-            "wasm invocations should receive the configured memory limit env: {env:?}"
-        );
-        assert_eq!(
-            env.get(WASM_MAX_FUEL_ENV).map(String::as_str),
-            Some("25"),
-            "wasm invocations should receive the configured fuel limit env: {env:?}"
-        );
-    }
 }
 
 #[test]
-fn wasm_permission_tiers_only_enable_wasi_outside_isolated_mode() {
+fn wasm_permission_tiers_do_not_fall_back_to_host_node_binary() {
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
     let log_path = temp.path().join("node-args.log");
@@ -391,7 +335,7 @@ fn wasm_permission_tiers_only_enable_wasi_outside_isolated_mode() {
         };
         let wasm_cwd = temp.path().join(format!("wasm-{tier_name}"));
         fs::create_dir_all(&wasm_cwd).expect("create tier-specific wasm cwd");
-        fs::write(wasm_cwd.join("guest.wasm"), b"\0asm\x01\0\0\0").expect("write wasm module");
+        fs::write(wasm_cwd.join("guest.wasm"), wasm_noop_module()).expect("write wasm module");
 
         let context = engine.create_context(CreateWasmContextRequest {
             vm_id: String::from("vm-wasm"),
@@ -412,22 +356,8 @@ fn wasm_permission_tiers_only_enable_wasi_outside_isolated_mode() {
             .expect("wait for wasm execution");
         assert_eq!(result.exit_code, 0);
     }
-
-    let invocations = parse_invocations(&log_path);
-    assert_eq!(
-        invocations.len(),
-        tiers.len() * 2,
-        "expected prewarm and execution invocations for each tier"
+    assert!(
+        !log_path.exists(),
+        "wasm permission tiers should stay inside the V8 runtime rather than falling back to the host node binary"
     );
-
-    for (index, tier) in tiers.iter().enumerate() {
-        for args in &invocations[index * 2..index * 2 + 2] {
-            let has_wasi_flag = args.iter().any(|arg| arg == NODE_ALLOW_WASI_FLAG);
-            assert_eq!(
-                has_wasi_flag,
-                !matches!(tier, WasmPermissionTier::Isolated),
-                "unexpected --allow-wasi flag for tier {tier:?}: {args:?}"
-            );
-        }
-    }
 }

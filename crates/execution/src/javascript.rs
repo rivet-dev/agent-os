@@ -2859,6 +2859,8 @@ const pathModule = {
 };
 const posix = pathModule;
 const win32 = pathModule;
+pathModule.posix = posix;
+pathModule.win32 = win32;
 
 export { basename, delimiter, dirname, extname, format, isAbsolute, join, normalize, parse, posix, relative, resolve, sep, win32 };
 export default pathModule;

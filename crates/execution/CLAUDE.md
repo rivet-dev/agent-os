@@ -80,6 +80,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 - Async methods should dispatch under `fs.promises.*`.
 - `fs.promises` methods that need real concurrency must use dedicated async bridge globals in `crates/execution/assets/v8-bridge.source.js`; wrapping `fs.*Sync` inside `async` functions still serializes `Promise.all(...)` behind the first sidecar response.
 - When adding WASI guest imports in `registry/native/crates/wasi-ext`, mirror the required module/object in `crates/execution/src/node_import_cache.rs`'s inline `NODE_WASM_RUNNER_SOURCE`; missing modules fail at `WebAssembly.instantiate()` before guest `main()` runs.
+- The shared-V8 WASM runner now resolves its own module loads plus internal guest `fs.openSync` / `fs.readSync` / `fs.writeSync` / `fs.closeSync` traffic inside `crates/execution/src/wasm.rs`; if the embedded runner gains more internal file syscalls, extend that internal sync-RPC handling there instead of surfacing those requests to callers or reintroducing a host-Node runtime path.
 - fd-based APIs (`open`, `read`, `write`, `close`, `fstat`) plus `createReadStream`/`createWriteStream` should ride the same bridge.
 - Guest `fs.watch` / `fs.watchFile` currently stay guest-owned polling wrappers over `fs.statSync`; keep them in `v8-bridge.source.js` unless the kernel grows a real notification API.
 - Runner-internal pipe/control writes must keep snapped host `node:fs` bindings because `syncBuiltinModuleExports(...)` mutates the builtin module for guests.
