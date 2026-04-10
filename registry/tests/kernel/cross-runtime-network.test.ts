@@ -1,178 +1,206 @@
 /**
  * Cross-runtime network integration tests.
  *
- * Verifies that WasmVM and Node.js can communicate via kernel sockets
- * through loopback routing. Neither connection touches the host network.
- *
- * Test 1: WasmVM tcp_server -> Node.js net.connect client
- * Test 2: Node.js http.createServer -> WasmVM http_get client
- *
- * Skipped when WASM binaries are not built.
+ * These suites stay on the runtime matrix that currently routes through the
+ * shared kernel transport path in this repo: guest Node.js and guest WASM
+ * commands. They intentionally use shipped first-party command artifacts so the
+ * suite stays runnable without optional `native/c` fixture builds.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { createServer as createHttpServer } from 'node:http';
+import { resolve } from 'node:path';
+import { createServer as createNetServer } from 'node:net';
 import {
-  AF_INET,
-  createInMemoryFileSystem,
   COMMANDS_DIR,
-  C_BUILD_DIR,
-  createKernel,
-  createWasmVmRuntime,
-  createNodeRuntime,
-  SOCK_STREAM,
+  createIntegrationKernel,
+  skipUnlessWasmBuilt,
 } from './helpers.ts';
-import type { Kernel } from './helpers.ts';
+import type { IntegrationKernelResult, Kernel } from './helpers.ts';
+
+const WASM_CURL = resolve(COMMANDS_DIR, 'curl');
 
 function skipReasonNetwork(): string | false {
-  if (!existsSync(COMMANDS_DIR)) return 'WASM binaries not built (run make wasm in native/)';
-  if (!existsSync(join(C_BUILD_DIR, 'tcp_server'))) return 'tcp_server not built (run make -C native/c sysroot && make -C native/c programs)';
-  if (!existsSync(join(C_BUILD_DIR, 'http_get'))) return 'http_get not built (run make -C native/c programs)';
+  const wasmSkipReason = skipUnlessWasmBuilt();
+  if (wasmSkipReason) return wasmSkipReason;
+  if (!existsSync(WASM_CURL)) {
+    return `curl WASM binary not found at ${WASM_CURL} — rebuild registry command artifacts`;
+  }
   return false;
 }
 
-// Poll for a kernel socket listener on the given port
-async function waitForListener(
+interface RunningGuestProgram {
+  process: ReturnType<Kernel['spawn']>;
+  stdoutChunks: Uint8Array[];
+  stderrChunks: Uint8Array[];
+  getExitCode: () => number | null;
+}
+
+function decodeChunks(chunks: Uint8Array[]): string {
+  return chunks.map((chunk) => new TextDecoder().decode(chunk)).join('');
+}
+
+function spawnGuestNodeProgram(
   kernel: Kernel,
-  port: number,
-  timeoutMs = 10_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const listener = kernel.socketTable.findListener({ host: '0.0.0.0', port });
-    if (listener) return;
-    await new Promise((r) => setTimeout(r, 20));
-  }
-  throw new Error(`Timed out waiting for listener on port ${port}`);
+  code: string,
+): RunningGuestProgram {
+  const stdoutChunks: Uint8Array[] = [];
+  const stderrChunks: Uint8Array[] = [];
+  let exitCode: number | null = null;
+  const process = kernel.spawn('node', ['-e', code], {
+    onStdout: (chunk) => stdoutChunks.push(chunk),
+    onStderr: (chunk) => stderrChunks.push(chunk),
+  });
+  void process.wait().then((code) => {
+    exitCode = code;
+  });
+  return {
+    process,
+    stdoutChunks,
+    stderrChunks,
+    getExitCode: () => exitCode,
+  };
+}
+
+async function runGuestNodeProgram(
+  kernel: Kernel,
+  code: string,
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const program = spawnGuestNodeProgram(kernel, code);
+  const exitCode = await program.process.wait();
+  return {
+    exitCode,
+    stdout: decodeChunks(program.stdoutChunks),
+    stderr: decodeChunks(program.stderrChunks),
+  };
 }
 
 describe.skipIf(skipReasonNetwork())('cross-runtime network integration', { timeout: 30_000 }, () => {
-  let kernel: Kernel;
+  let ctx: IntegrationKernelResult;
+  let hostNetServer: ReturnType<typeof createNetServer> | undefined;
+  let hostHttpServer: ReturnType<typeof createHttpServer> | undefined;
 
   afterEach(async () => {
-    await kernel?.dispose();
+    if (hostNetServer) {
+      await new Promise<void>((resolveClose) => hostNetServer!.close(() => resolveClose()));
+      hostNetServer = undefined;
+    }
+    if (hostHttpServer) {
+      await new Promise<void>((resolveClose) => hostHttpServer!.close(() => resolveClose()));
+      hostHttpServer = undefined;
+    }
+    await ctx?.dispose();
   });
 
-  it('WasmVM tcp_server <-> Node.js net.connect: data exchange via kernel loopback', async () => {
-    const vfs = createInMemoryFileSystem();
-    kernel = createKernel({ filesystem: vfs });
-    // Mount WasmVM first (provides shell + C programs), then Node
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }));
-    await kernel.mount(createNodeRuntime());
-
-    const PORT = 9090;
-
-    // Start WasmVM TCP server (blocks on accept)
-    const serverPromise = kernel.exec(`tcp_server ${PORT}`);
-
-    // Wait for the server to bind+listen in the kernel socket table
-    await waitForListener(kernel, PORT);
-
-    // Run Node.js client that connects via net.connect (routes through kernel sockets)
-    const clientResult = await kernel.exec(`node -e '
-const net = require("net");
-const client = net.connect(${PORT}, "127.0.0.1", () => {
-  client.write("ping");
-});
-client.on("data", (data) => {
-  console.log("reply:" + data.toString());
-  client.end();
-});
-client.on("end", () => {
-  process.exit(0);
-});
-client.on("error", (err) => {
-  console.error("client error:", err.message);
-  process.exit(1);
-});
-'`);
-
-    expect(clientResult.exitCode).toBe(0);
-    expect(clientResult.stdout).toContain('reply:pong');
-
-    // Server should also have completed
-    const serverResult = await serverPromise;
-    expect(serverResult.exitCode).toBe(0);
-    expect(serverResult.stdout).toContain(`listening on port ${PORT}`);
-    expect(serverResult.stdout).toContain('received: ping');
-  });
-
-  it('Node.js http.createServer <-> WasmVM http_get: HTTP via kernel loopback', async () => {
-    const vfs = createInMemoryFileSystem();
-    kernel = createKernel({ filesystem: vfs });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }));
-    await kernel.mount(createNodeRuntime());
-
-    const PORT = 8080;
-
-    // Start Node.js HTTP server that responds with "hello from node"
-    const serverProc = kernel.spawn('node', ['-e', `
-const http = require("http");
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("hello from node");
-});
-server.listen(${PORT}, "0.0.0.0", () => {
-  console.log("server listening");
-});
-`], {
-      onStdout: () => {},
-      onStderr: () => {},
+  it('Node.js net.connect resolves localhost and exchanges TCP data over guest loopback', async () => {
+    hostNetServer = createNetServer((socket) => {
+      socket.on('data', (chunk) => {
+        socket.end(`pong:${chunk.toString()}`);
+      });
+    });
+    await new Promise<void>((resolveListen) => {
+      hostNetServer!.listen(0, '127.0.0.1', () => resolveListen());
+    });
+    const port = (hostNetServer.address() as import('node:net').AddressInfo).port;
+    ctx = await createIntegrationKernel({
+      runtimes: ['node'],
+      loopbackExemptPorts: [port],
     });
 
-    // Wait for the Node.js server's listener in the kernel socket table
-    await waitForListener(kernel, PORT);
-
-    // Run WasmVM http_get client that connects to the Node.js server
-    const clientResult = await kernel.exec(`http_get ${PORT}`);
+    const clientResult = await runGuestNodeProgram(
+      ctx.kernel,
+      [
+      "const dns = require('dns');",
+      "const net = require('net');",
+      'async function main() {',
+      "  const lookup = await dns.promises.lookup('localhost', { family: 4 });",
+      '  const reply = await new Promise((resolve, reject) => {',
+      `    const client = net.connect({ host: 'localhost', port: ${port}, family: 4 }, () => {`,
+      "      client.write('ping');",
+      '    });',
+      "    client.on('data', (chunk) => {",
+      '      resolve(chunk.toString());',
+      '      client.end();',
+      '    });',
+      "    client.on('error', reject);",
+      '  });',
+      '  console.log(JSON.stringify({ lookup, reply }));',
+      '}',
+      'main().catch((error) => {',
+      '  console.error(error);',
+      '  process.exit(1);',
+      '});',
+      ].join('\n'),
+    );
 
     expect(clientResult.exitCode).toBe(0);
-    expect(clientResult.stdout).toContain('body: hello from node');
-
-    // Kill the server process so the test can clean up
-    serverProc.kill(15);
-    await serverProc.wait();
+    expect(clientResult.stderr).toBe('');
+    const parsed = JSON.parse(clientResult.stdout.trim()) as {
+      lookup: { address: string };
+      reply: string;
+    };
+    expect(parsed.lookup.address).toBe('127.0.0.1');
+    expect(parsed.reply).toBe('pong:ping');
   });
 
-  it('loopback: neither test touches the host network stack', async () => {
-    const vfs = createInMemoryFileSystem();
-    kernel = createKernel({ filesystem: vfs });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }));
-    await kernel.mount(createNodeRuntime());
+  it('Wasm curl reaches a guest Node.js HTTP server over 127.0.0.1 loopback', async () => {
+    hostHttpServer = createHttpServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          host: req.headers.host ?? null,
+          url: req.url,
+          runtime: 'host',
+        }),
+      );
+    });
+    await new Promise<void>((resolveListen) => {
+      hostHttpServer!.listen(0, '127.0.0.1', () => resolveListen());
+    });
+    const port = (hostHttpServer.address() as import('node:net').AddressInfo).port;
+    ctx = await createIntegrationKernel({
+      runtimes: ['wasmvm', 'node'],
+      loopbackExemptPorts: [port],
+    });
 
-    const PORT = 9091;
+    const result = await ctx.kernel.exec(`curl -s http://127.0.0.1:${port}/loopback`);
 
-    // Start WasmVM TCP server
-    const serverPromise = kernel.exec(`tcp_server ${PORT}`);
-    await waitForListener(kernel, PORT);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).not.toContain('socket error');
+    expect(result.stderr).not.toContain('ERROR');
+    expect(result.stdout).toContain('"runtime":"host"');
+    expect(result.stdout).toContain('"url":"/loopback"');
+    expect(result.stdout).toContain(`"host":"127.0.0.1:${port}"`);
+  });
 
-    // Connect via kernel socket table directly (test-side client)
-    const CLIENT_PID = 999;
-    const st = kernel.socketTable;
-    const clientId = st.create(AF_INET, SOCK_STREAM, 0, CLIENT_PID);
-    await st.connect(clientId, { host: '127.0.0.1', port: PORT });
+  it('Wasm curl resolves localhost and reaches the loopback fixture through the same kernel path', async () => {
+    hostHttpServer = createHttpServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          host: req.headers.host ?? null,
+          url: req.url,
+          runtime: 'host',
+        }),
+      );
+    });
+    await new Promise<void>((resolveListen) => {
+      hostHttpServer!.listen(0, '127.0.0.1', () => resolveListen());
+    });
+    const port = (hostHttpServer.address() as import('node:net').AddressInfo).port;
+    ctx = await createIntegrationKernel({
+      runtimes: ['wasmvm', 'node'],
+      loopbackExemptPorts: [port],
+    });
 
-    // Send data and verify response. All through kernel, no host TCP.
-    st.send(clientId, new TextEncoder().encode('ping'));
+    const result = await ctx.kernel.exec(`curl -s http://localhost:${port}/dns`);
 
-    let reply = '';
-    const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline) {
-      const chunk = st.recv(clientId, 256);
-      if (chunk && chunk.length > 0) {
-        reply += new TextDecoder().decode(chunk);
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 20));
-    }
-
-    expect(reply).toBe('pong');
-
-    st.close(clientId, CLIENT_PID);
-
-    const serverResult = await serverPromise;
-    expect(serverResult.exitCode).toBe(0);
-    expect(serverResult.stdout).toContain('received: ping');
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).not.toContain('socket error');
+    expect(result.stderr).not.toContain('ERROR');
+    expect(result.stdout).toContain('"runtime":"host"');
+    expect(result.stdout).toContain('"url":"/dns"');
+    expect(result.stdout).toContain(`"host":"localhost:${port}"`);
   });
 });

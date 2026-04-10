@@ -51,6 +51,7 @@ export interface IntegrationKernelResult {
 
 export interface IntegrationKernelOptions {
   runtimes?: ("wasmvm" | "node")[];
+  loopbackExemptPorts?: number[];
 }
 
 /**
@@ -65,7 +66,10 @@ export async function createIntegrationKernel(
 ): Promise<IntegrationKernelResult> {
   const runtimes = options?.runtimes ?? ["wasmvm"];
   const vfs = createInMemoryFileSystem();
-  const kernel = createKernel({ filesystem: vfs });
+  const kernel = createKernel({
+    filesystem: vfs,
+    loopbackExemptPorts: options?.loopbackExemptPorts,
+  });
 
   if (runtimes.includes("wasmvm")) {
     await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));

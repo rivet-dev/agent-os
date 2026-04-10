@@ -1,14 +1,15 @@
 /**
  * CI guard for cross-runtime network Wasm artifacts.
  *
- * The cross-runtime network suite skips locally when these binaries are absent,
- * but CI must fail before that suite can silently disappear behind skip guards.
+ * The cross-runtime network suite now uses first-party command artifacts only.
+ * It may skip locally when those binaries are absent, but CI must fail before
+ * that suite can silently disappear behind skip guards.
  */
 
 import { describe, it, expect } from 'vitest';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { COMMANDS_DIR, C_BUILD_DIR } from './helpers.ts';
+import { COMMANDS_DIR } from './helpers.ts';
 
 const REQUIRED_ARTIFACTS = [
   {
@@ -17,14 +18,9 @@ const REQUIRED_ARTIFACTS = [
     buildStep: 'run `make wasm` in `native/`',
   },
   {
-    label: 'tcp_server C WASM binary',
-    path: join(C_BUILD_DIR, 'tcp_server'),
-    buildStep: 'run `make -C native/c sysroot && make -C native/c programs`',
-  },
-  {
-    label: 'http_get C WASM binary',
-    path: join(C_BUILD_DIR, 'http_get'),
-    buildStep: 'run `make -C native/c sysroot && make -C native/c programs`',
+    label: 'curl WASM binary',
+    path: join(COMMANDS_DIR, 'curl'),
+    buildStep: 'run `make wasm` in `native/`',
   },
 ] as const;
 

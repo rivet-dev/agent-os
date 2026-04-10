@@ -141,6 +141,7 @@ make clean         # Remove dist/ and wasm/ from all packages
 ## Testing
 
 - External-network registry tests should stay behind `AGENTOS_E2E_NETWORK=1`, probe host connectivity up front so CI can skip cleanly when the internet is unavailable, and retry the in-VM command itself for transient outbound failures instead of hard-failing on the first flaky request.
+- Cross-runtime kernel networking tests should prefer shipped first-party command artifacts from `native/target/wasm32-wasip1/release/commands` plus explicit `loopbackExemptPorts` host fixtures over optional `native/c` programs, unless the story is specifically about the patched-sysroot C command surface.
 
 ## Native Source
 
