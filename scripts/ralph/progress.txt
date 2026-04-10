@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- The current Pi SDK truth path is `pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts tests/session-cleanup.test.ts -t "Pi SDK"` plus root `pnpm check-types`; if those pass, the write-tool, bash-tool, prompt lifecycle, and cleanup coverage for `US-029` is green on this branch.
 - The renamed core workspace package is `@rivet-dev/agent-os-core`; use that name for both package dependencies and TypeScript subpath imports like `@rivet-dev/agent-os-core/test/*` and `@rivet-dev/agent-os-core/internal/runtime-compat`.
 - For vendored Rust command fixes under `registry/native/vendor/`, add a matching patch under `registry/native/patches/crates/<crate>/` or `native/scripts/patch-vendor.sh` will drop the fix on the next rebuild.
 - Pi CLI prepends `~/.pi/agent/bin` to `PATH` even when that directory does not exist. For vendored `brush-core` on WASI, PATH lookup must require `is_file()` before treating a candidate as executable, and once a guest binary resolves to a real path like `/bin/printf`, the shell should spawn that resolved path instead of falling back to the bare command name.
@@ -48,4 +49,12 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Pi's local bash tool uses `getShellEnv()` to prepend `~/.pi/agent/bin` to `PATH` even when that directory is absent, so missing-path regressions can show up only in Pi CLI shell flows and not in direct `vm.exec()` coverage.
   - For vendored `brush-core` on WASI, shell command discovery and actual spawn must agree on the executable path; resolving `/bin/printf` and then spawning bare `printf` is not equivalent when the guest PATH starts with nonexistent directories.
   - The exact acceptance path for this story is sufficient after the shell rebuild: `pnpm --dir packages/core exec vitest run tests/pi-cli-headless.test.ts` proves the real Pi CLI ACP bash-tool round trip, and root `pnpm check-types` keeps the workspace green.
+---
+## 2026-04-09 20:02:25 PDT - US-029
+- Re-verified the Pi SDK end-to-end flow after the prior Pi CLI shell fix: the real Pi SDK write-tool, bash-tool, prompt/update lifecycle, and cleanup coverage now pass on `finish-ts-rust-migration` without additional product-code changes.
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `US-029` is a verification-only story on the current branch; the acceptance truth comes directly from `packages/core/tests/pi-headless.test.ts` and `packages/core/tests/session-cleanup.test.ts` filtered with `-t "Pi SDK"`.
+  - The Pi SDK cleanup coverage already exercises sequential create/close cycles plus mid-prompt cancellation, so if this story regresses again the likely culprit is shared session/resource cleanup rather than missing test breadth.
+  - The prior Pi CLI PATH fix is sufficient for Pi SDK parity too; once that landed, the SDK suite went green unchanged under the active PRD commands.
 ---
