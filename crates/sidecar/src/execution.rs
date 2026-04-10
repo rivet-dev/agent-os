@@ -454,9 +454,7 @@ impl ActiveTcpSocket {
         BridgeError<B>: fmt::Debug + Send + Sync + 'static,
     {
         let resolved = resolve_tcp_connect_addr(bridge, kernel, vm_id, dns, host, port, context)?;
-        if is_loopback_ip(resolved.guest_remote_addr.ip())
-            && resolved.actual_addr.port() == resolved.guest_remote_addr.port()
-        {
+        if resolved.use_kernel_loopback {
             let family = JavascriptSocketFamily::from_ip(resolved.guest_remote_addr.ip());
             let local_port = allocate_guest_listen_port(
                 0,
@@ -7480,6 +7478,10 @@ where
             SidecarError::Execution(format!("failed to resolve TCP address {host}:{port}"))
         })?;
     let family = JavascriptSocketFamily::from_ip(ip);
+    let use_kernel_loopback = is_loopback_ip(ip)
+        && context
+            .translate_tcp_loopback_port(family, port)
+            .is_some();
     let actual_port = if is_loopback_ip(ip) {
         context
             .translate_tcp_loopback_port(family, port)
@@ -7490,6 +7492,7 @@ where
     Ok(ResolvedTcpConnectAddr {
         actual_addr: SocketAddr::new(ip, actual_port),
         guest_remote_addr: SocketAddr::new(ip, port),
+        use_kernel_loopback,
     })
 }
 
@@ -14015,6 +14018,7 @@ where
                     .map(|server| ResolvedTcpConnectAddr {
                         actual_addr: server.actual_local_addr,
                         guest_remote_addr: server.guest_local_addr,
+                        use_kernel_loopback: false,
                     })
             };
             let resolved = match resolved {

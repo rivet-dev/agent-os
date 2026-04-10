@@ -17,7 +17,6 @@ import {
   COMMANDS_DIR,
   createInMemoryFileSystem,
   createKernel,
-  createNodeHostNetworkAdapter,
   hasWasmBinaries,
 } from '../helpers.js';
 import type { Kernel } from '../helpers.js';
@@ -38,7 +37,7 @@ async function createGitKernel() {
   return { kernel, vfs, dispose: () => kernel.dispose() };
 }
 
-async function createGitKernelWithNet() {
+async function createGitKernelWithNet(loopbackExemptPorts: number[]) {
   const vfs = createInMemoryFileSystem();
   await (vfs as any).chmod('/', 0o1777);
   await vfs.mkdir('/tmp', { recursive: true });
@@ -46,7 +45,7 @@ async function createGitKernelWithNet() {
   const kernel = createKernel({
     filesystem: vfs,
     permissions: allowAll,
-    hostNetworkAdapter: createNodeHostNetworkAdapter(),
+    loopbackExemptPorts,
   });
   await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
   return { kernel, vfs, dispose: () => kernel.dispose() };
@@ -487,19 +486,19 @@ describe.skipIf(!hasGit)('git command', () => {
     });
 
     it('clone fetches refs and worktree contents from a smart HTTP remote', async () => {
-      ({ kernel, vfs, dispose } = await createGitKernelWithNet());
+      ({ kernel, vfs, dispose } = await createGitKernelWithNet([httpPort]));
 
       await run(kernel, `git clone http://127.0.0.1:${httpPort}/origin.git /tmp/clone`);
 
-      const head = new TextDecoder().decode(await vfs.readFile('/tmp/clone/.git/HEAD'));
+      const head = new TextDecoder().decode(await kernel.readFile('/tmp/clone/.git/HEAD'));
       expect(head.trim()).toBe('ref: refs/heads/main');
 
-      const readme = new TextDecoder().decode(await vfs.readFile('/tmp/clone/README.md'));
+      const readme = new TextDecoder().decode(await kernel.readFile('/tmp/clone/README.md'));
       expect(readme).toBe('remote smart clone\n');
-      expect(await vfs.exists('/tmp/clone/.git/refs/remotes/origin/feature/deep')).toBe(true);
+      expect(await kernel.exists('/tmp/clone/.git/refs/remotes/origin/feature/deep')).toBe(true);
 
       await run(kernel, 'git -C /tmp/clone checkout feature/deep');
-      const feature = new TextDecoder().decode(await vfs.readFile('/tmp/clone/feature.txt'));
+      const feature = new TextDecoder().decode(await kernel.readFile('/tmp/clone/feature.txt'));
       expect(feature).toBe('remote branch payload\n');
     });
   });

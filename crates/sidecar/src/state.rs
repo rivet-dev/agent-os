@@ -749,6 +749,7 @@ pub(crate) struct ActiveTlsState {
 pub(crate) struct ResolvedTcpConnectAddr {
     pub(crate) actual_addr: SocketAddr,
     pub(crate) guest_remote_addr: SocketAddr,
+    pub(crate) use_kernel_loopback: bool,
 }
 
 #[derive(Debug)]

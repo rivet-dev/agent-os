@@ -179,6 +179,14 @@ describe.skipIf(!hasWasmBinaries)('wasi-http client (http-test binary)', () => {
   let server: Server;
   let port: number;
 
+  function createHttpKernel(loopbackPort: number): Kernel {
+    const vfs = new SimpleVFS();
+    return createKernel({
+      filesystem: vfs as any,
+      loopbackExemptPorts: [loopbackPort],
+    });
+  }
+
   beforeAll(async () => {
     server = createHttpServer(requestHandler(0));
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -197,8 +205,7 @@ describe.skipIf(!hasWasmBinaries)('wasi-http client (http-test binary)', () => {
   });
 
   it('GET returns status and body', async () => {
-    const vfs = new SimpleVFS();
-    kernel = createKernel({ filesystem: vfs as any });
+    kernel = createHttpKernel(port);
     await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
     const result = await kernel.exec(`http-test get http://127.0.0.1:${port}/`);
@@ -207,8 +214,7 @@ describe.skipIf(!hasWasmBinaries)('wasi-http client (http-test binary)', () => {
   });
 
   it('GET returns JSON response', async () => {
-    const vfs = new SimpleVFS();
-    kernel = createKernel({ filesystem: vfs as any });
+    kernel = createHttpKernel(port);
     await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
     const result = await kernel.exec(`http-test get http://127.0.0.1:${port}/json`);
@@ -217,8 +223,7 @@ describe.skipIf(!hasWasmBinaries)('wasi-http client (http-test binary)', () => {
   });
 
   it('POST sends JSON body correctly', async () => {
-    const vfs = new SimpleVFS();
-    kernel = createKernel({ filesystem: vfs as any });
+    kernel = createHttpKernel(port);
     await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
     const jsonBody = '{"key":"value","num":42}';
@@ -230,8 +235,7 @@ describe.skipIf(!hasWasmBinaries)('wasi-http client (http-test binary)', () => {
   });
 
   it('GET with custom headers sends headers correctly', async () => {
-    const vfs = new SimpleVFS();
-    kernel = createKernel({ filesystem: vfs as any });
+    kernel = createHttpKernel(port);
     await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
     const result = await kernel.exec(
@@ -243,8 +247,7 @@ describe.skipIf(!hasWasmBinaries)('wasi-http client (http-test binary)', () => {
   });
 
   it('SSE streaming receives events', async () => {
-    const vfs = new SimpleVFS();
-    kernel = createKernel({ filesystem: vfs as any });
+    kernel = createHttpKernel(port);
     await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
     const result = await kernel.exec(`http-test sse http://127.0.0.1:${port}/sse`);
@@ -257,8 +260,7 @@ describe.skipIf(!hasWasmBinaries)('wasi-http client (http-test binary)', () => {
   });
 
   it('GET to non-existent path returns 404', async () => {
-    const vfs = new SimpleVFS();
-    kernel = createKernel({ filesystem: vfs as any });
+    kernel = createHttpKernel(port);
     await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
     const result = await kernel.exec(`http-test get http://127.0.0.1:${port}/nonexistent`);
@@ -272,6 +274,14 @@ describe.skipIf(!hasWasmBinaries || !hasOpenssl)('wasi-http HTTPS (http-test bin
   let httpsPort: number;
   let certKey: string;
   let certPem: string;
+
+  function createHttpsKernel(loopbackPort: number): Kernel {
+    const vfs = new SimpleVFS();
+    return createKernel({
+      filesystem: vfs as any,
+      loopbackExemptPorts: [loopbackPort],
+    });
+  }
 
   beforeAll(async () => {
     // Generate self-signed cert for testing
@@ -307,8 +317,7 @@ describe.skipIf(!hasWasmBinaries || !hasOpenssl)('wasi-http HTTPS (http-test bin
   });
 
   it('HTTPS GET via TLS upgrade returns response', async () => {
-    const vfs = new SimpleVFS();
-    kernel = createKernel({ filesystem: vfs as any });
+    kernel = createHttpsKernel(httpsPort);
     await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
     // Disable TLS verification for self-signed cert in tests

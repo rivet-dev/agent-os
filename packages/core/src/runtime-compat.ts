@@ -1959,6 +1959,7 @@ class NativeKernel implements Kernel {
 	private readyPromise: Promise<void> | null = null;
 	private readonly pendingLocalMounts: LocalCompatMount[] = [];
 	private mountedCommandDirs: string[] = [];
+	private readonly loopbackExemptPorts: number[];
 
 	constructor(
 		private readonly options: {
@@ -1967,6 +1968,7 @@ class NativeKernel implements Kernel {
 			env?: Record<string, string>;
 			cwd?: string;
 			hostNetworkAdapter?: unknown;
+			loopbackExemptPorts?: number[];
 			mounts?: Array<{
 				path: string;
 				fs: VirtualFileSystem;
@@ -1992,6 +1994,7 @@ class NativeKernel implements Kernel {
 					handlers: new Map<number, unknown>(),
 				},
 		};
+		this.loopbackExemptPorts = [...(options.loopbackExemptPorts ?? [])];
 		for (const mount of options.mounts ?? []) {
 			this.pendingLocalMounts.push({
 				path: normalizePath(mount.path),
@@ -2049,6 +2052,7 @@ class NativeKernel implements Kernel {
 		);
 		await this.client.configureVm(this.session, this.vm, {
 			mounts: sidecarMounts,
+			loopbackExemptPorts: this.loopbackExemptPorts,
 		});
 		this.proxy.registerCommandGuestPaths(newGuestPaths);
 		this.mountedCommandDirs.push(...commandDirs);
@@ -2181,6 +2185,12 @@ class NativeKernel implements Kernel {
 	}
 
 	private async initialize(): Promise<void> {
+		const createVmEnv = { ...this.env };
+		if (this.loopbackExemptPorts.length > 0) {
+			createVmEnv.AGENT_OS_LOOPBACK_EXEMPT_PORTS = JSON.stringify(
+				this.loopbackExemptPorts,
+			);
+		}
 		const rootFilesystem = {
 			disableDefaultBaseLayer: true,
 			lowers: [
@@ -2202,7 +2212,7 @@ class NativeKernel implements Kernel {
 			runtime: "java_script",
 			metadata: {
 				...Object.fromEntries(
-					Object.entries(this.env).map(([key, value]) => [`env.${key}`, value]),
+					Object.entries(createVmEnv).map(([key, value]) => [`env.${key}`, value]),
 				),
 			},
 			rootFilesystem,
@@ -2213,7 +2223,10 @@ class NativeKernel implements Kernel {
 				event.payload.state === "ready",
 			10_000,
 		);
-		if (this.pendingLocalMounts.length > 0) {
+		if (
+			this.pendingLocalMounts.length > 0 ||
+			this.loopbackExemptPorts.length > 0
+		) {
 			await client.configureVm(session, vm, {
 				mounts: this.pendingLocalMounts.map((mount) =>
 					mount.fs instanceof NodeFileSystem
@@ -2234,6 +2247,7 @@ class NativeKernel implements Kernel {
 								readOnly: mount.readOnly,
 							}),
 				),
+				loopbackExemptPorts: this.loopbackExemptPorts,
 			});
 		}
 
@@ -2262,6 +2276,7 @@ export function createKernel(options: {
 	cwd?: string;
 	maxProcesses?: number;
 	hostNetworkAdapter?: unknown;
+	loopbackExemptPorts?: number[];
 	logger?: unknown;
 	mounts?: Array<{ path: string; fs: VirtualFileSystem; readOnly?: boolean }>;
 }): Kernel {
