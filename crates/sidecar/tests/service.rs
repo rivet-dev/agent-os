@@ -8520,7 +8520,6 @@ console.log(JSON.stringify(summary));
         }
 
         #[test]
-        #[ignore = "V8 sidecar HTTP integration is flaky in this harness; focused HTTP bridge tests cover the sidecar path"]
         fn javascript_http_rpc_requests_gets_and_serves_over_guest_net() {
             assert_node_available();
 
@@ -8608,99 +8607,13 @@ console.log(JSON.stringify(summary));
 "#,
             );
 
-            let context =
-                sidecar
-                    .javascript_engine
-                    .create_context(CreateJavascriptContextRequest {
-                        vm_id: vm_id.clone(),
-                        bootstrap_module: None,
-                        compile_cache_root: None,
-                    });
-            let execution = sidecar
-            .javascript_engine
-            .start_execution(StartJavascriptExecutionRequest {
-                vm_id: vm_id.clone(),
-                context_id: context.context_id,
-                argv: vec![String::from("./entry.mjs")],
-                env: BTreeMap::from([(
-                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
-                    String::from(
-                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"http\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
-                    ),
-                )]),
-                cwd: cwd.clone(),
-                inline_code: None,
-            })
-            .expect("start fake javascript execution");
-
-            let kernel_handle = {
-                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
-                vm.kernel
-                    .spawn_process(
-                        JAVASCRIPT_COMMAND,
-                        vec![String::from("./entry.mjs")],
-                        SpawnOptions {
-                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
-                            cwd: Some(String::from("/")),
-                            ..SpawnOptions::default()
-                        },
-                    )
-                    .expect("spawn kernel javascript process")
-            };
-
-            {
-                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
-                vm.active_processes.insert(
-                    String::from("proc-js-http"),
-                    ActiveProcess::new(
-                        kernel_handle.pid(),
-                        kernel_handle,
-                        GuestRuntimeKind::JavaScript,
-                        ActiveExecution::Javascript(execution),
-                    ),
-                );
-            }
-
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-            let mut exit_code = None;
-            for _ in 0..192 {
-                let next_event = {
-                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
-                    vm.active_processes
-                        .get("proc-js-http")
-                        .map(|process| {
-                            process
-                                .execution
-                                .poll_event_blocking(Duration::from_secs(5))
-                                .expect("poll javascript http rpc event")
-                        })
-                        .flatten()
-                };
-                let Some(event) = next_event else {
-                    if exit_code.is_some() {
-                        break;
-                    }
-                    continue;
-                };
-
-                match &event {
-                    ActiveExecutionEvent::Stdout(chunk) => {
-                        stdout.push_str(&String::from_utf8_lossy(chunk));
-                    }
-                    ActiveExecutionEvent::Stderr(chunk) => {
-                        stderr.push_str(&String::from_utf8_lossy(chunk));
-                    }
-                    ActiveExecutionEvent::Exited(code) => {
-                        exit_code = Some(*code);
-                    }
-                    _ => {}
-                }
-
-                sidecar
-                    .handle_execution_event(&vm_id, "proc-js-http", event)
-                    .expect("handle javascript http rpc event");
-            }
+            let (stdout, stderr, exit_code) = run_javascript_entry(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-http",
+                "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"http\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+            );
 
             assert_eq!(exit_code, Some(0), "stderr: {stderr}");
             let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse http JSON");
@@ -8727,7 +8640,6 @@ console.log(JSON.stringify(summary));
         }
 
         #[test]
-        #[ignore = "V8 sidecar HTTPS integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_https_rpc_requests_and_serves_over_guest_tls() {
             assert_node_available();
 
@@ -8799,99 +8711,13 @@ console.log(JSON.stringify(summary));
             );
             write_fixture(&cwd.join("entry.mjs"), &entry);
 
-            let context =
-                sidecar
-                    .javascript_engine
-                    .create_context(CreateJavascriptContextRequest {
-                        vm_id: vm_id.clone(),
-                        bootstrap_module: None,
-                        compile_cache_root: None,
-                    });
-            let execution = sidecar
-            .javascript_engine
-            .start_execution(StartJavascriptExecutionRequest {
-                vm_id: vm_id.clone(),
-                context_id: context.context_id,
-                argv: vec![String::from("./entry.mjs")],
-                env: BTreeMap::from([(
-                    String::from("AGENT_OS_ALLOWED_NODE_BUILTINS"),
-                    String::from(
-                        "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"https\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
-                    ),
-                )]),
-                cwd: cwd.clone(),
-                inline_code: None,
-            })
-            .expect("start fake javascript execution");
-
-            let kernel_handle = {
-                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
-                vm.kernel
-                    .spawn_process(
-                        JAVASCRIPT_COMMAND,
-                        vec![String::from("./entry.mjs")],
-                        SpawnOptions {
-                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
-                            cwd: Some(String::from("/")),
-                            ..SpawnOptions::default()
-                        },
-                    )
-                    .expect("spawn kernel javascript process")
-            };
-
-            {
-                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
-                vm.active_processes.insert(
-                    String::from("proc-js-https"),
-                    ActiveProcess::new(
-                        kernel_handle.pid(),
-                        kernel_handle,
-                        GuestRuntimeKind::JavaScript,
-                        ActiveExecution::Javascript(execution),
-                    ),
-                );
-            }
-
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-            let mut exit_code = None;
-            for _ in 0..192 {
-                let next_event = {
-                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
-                    vm.active_processes
-                        .get("proc-js-https")
-                        .map(|process| {
-                            process
-                                .execution
-                                .poll_event_blocking(Duration::from_secs(5))
-                                .expect("poll javascript https rpc event")
-                        })
-                        .flatten()
-                };
-                let Some(event) = next_event else {
-                    if exit_code.is_some() {
-                        break;
-                    }
-                    continue;
-                };
-
-                match &event {
-                    ActiveExecutionEvent::Stdout(chunk) => {
-                        stdout.push_str(&String::from_utf8_lossy(chunk));
-                    }
-                    ActiveExecutionEvent::Stderr(chunk) => {
-                        stderr.push_str(&String::from_utf8_lossy(chunk));
-                    }
-                    ActiveExecutionEvent::Exited(code) => {
-                        exit_code = Some(*code);
-                    }
-                    _ => {}
-                }
-
-                sidecar
-                    .handle_execution_event(&vm_id, "proc-js-https", event)
-                    .expect("handle javascript https rpc event");
-            }
+            let (stdout, stderr, exit_code) = run_javascript_entry(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-js-https",
+                "[\"assert\",\"buffer\",\"console\",\"crypto\",\"events\",\"fs\",\"https\",\"path\",\"querystring\",\"stream\",\"string_decoder\",\"timers\",\"url\",\"util\",\"zlib\"]",
+            );
 
             assert_eq!(exit_code, Some(0), "stderr: {stderr}");
             let parsed: Value = serde_json::from_str(stdout.trim()).expect("parse https JSON");
