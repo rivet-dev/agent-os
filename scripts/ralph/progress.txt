@@ -108,3 +108,12 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - The OpenCode approval path for redirected bash commands still yields an empty tool-result body on success, so llmock fixtures should key off tool-result presence rather than stdout content.
   - The active truth path for this story is `pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts` plus root `pnpm check-types`.
 ---
+## 2026-04-09 21:56:59 PDT - US-035
+- Re-verified the Codex WASM runner startup path on `finish-ts-rust-migration`: the permissioned shell-tool session test now gets past runner initialization and completes successfully, which confirms the current runtime is already providing the `host_net` import surface required by the shipped Codex execution path.
+- No additional product-code changes were required for this story; the workspace already satisfied the acceptance criteria, so this iteration only updated Ralph tracking after rerunning the exact PRD verification commands.
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `US-035` is verification-only on the current branch; the acceptance truth is `pnpm --dir packages/core exec vitest run tests/codex-session.test.ts -t "permissioned shell tools"` plus root `pnpm check-types`.
+  - When a Codex startup regression mentions missing WASM imports, the fastest gate is the focused permissioned shell-tool test in `packages/core/tests/codex-session.test.ts`; it exercises runner startup before broader multi-turn/session-state coverage.
+  - If the scoped Codex test is green and the only overlapping runtime diffs are formatting-only, update the backlog rather than widening the code-change surface unnecessarily.
+---
