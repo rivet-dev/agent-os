@@ -8728,7 +8728,11 @@ var __bridge = (() => {
         spawnResult = _childProcessSpawnStart.applySync(void 0, [
           command,
           JSON.stringify(argsArray),
-          JSON.stringify({ cwd: effectiveCwd, env: opts.env, shell: opts.shell === true })
+          JSON.stringify({
+            cwd: effectiveCwd,
+            env: opts.env,
+            shell: opts.shell === true || typeof opts.shell === "string"
+          })
         ]);
       } catch (error) {
         const spawnError = error instanceof Error ? error : new Error(String(error));
@@ -8805,7 +8809,12 @@ var __bridge = (() => {
       const jsonResult = _childProcessSpawnSync.applySyncPromise(void 0, [
         command,
         JSON.stringify(argsArray),
-        JSON.stringify({ cwd: effectiveCwd, env: opts.env, maxBuffer, shell: opts.shell === true })
+        JSON.stringify({
+          cwd: effectiveCwd,
+          env: opts.env,
+          maxBuffer,
+          shell: opts.shell === true || typeof opts.shell === "string"
+        })
       ]);
       const result = typeof jsonResult === "string" ? JSON.parse(jsonResult) : jsonResult;
       const stdoutBuf = typeof Buffer !== "undefined" ? Buffer.from(result.stdout) : result.stdout;

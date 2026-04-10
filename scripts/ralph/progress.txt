@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- In Agent OS `child_process` polyfills, treat string-valued `options.shell` the same as `true`; tools that go through `cross-spawn` or pass an explicit shell path like `"/bin/sh"` otherwise fail redirected commands by trying to exec the whole shell string as a binary.
 - For the OpenCode ACP Node bundle in `registry/agent/opencode/scripts/build-opencode-acp.mjs`, run result-returning SQLite PRAGMAs through `db.$client.exec(...)` instead of drizzle `db.run(...)`; the VM `node:sqlite` shim treats `journal_mode`, `busy_timeout`, `foreign_keys`, and `wal_checkpoint` as row-returning queries and will break `createSession("opencode")` otherwise.
 - OpenCode VM tool/file coverage depends on two bundle-level patches in `registry/agent/opencode/scripts/build-opencode-acp.mjs`: restore the current `Instance` around async LLM/tool execution, and translate absolute guest paths through `AGENT_OS_GUEST_PATH_MAPPINGS` before the bundle calls `node:fs`.
 - In the V8 bridge, `node:async_hooks` `AsyncLocalStorage` must survive `Promise.then`, `queueMicrotask`, `process.nextTick`, timers, and `AsyncResource.runInAsyncScope`; OpenCode's Effect instance context is carried through those paths during streamed tool execution.
@@ -87,4 +88,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - OpenCode's VM prompt/tool path depends on `TextDecoderStream` / `TextEncoderStream`; if prompt streaming regresses before tool execution starts, inspect the V8 bridge web-stream globals before patching the adapter.
   - `No context found for instance` in OpenCode usually means Effect `Instance` state was lost across async boundaries inside the generated bundle, not that the ACP entrypoint failed to seed context initially.
   - The active truth path for this story is `pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts -t "write tool"` plus root `pnpm check-types`.
+---
+## 2026-04-09 21:33 PDT - US-033
+- Restored the OpenCode bash-tool happy path in the V8 guest runtime by teaching both child-process polyfill surfaces to treat string-valued `options.shell` as shell-enabled, then rebuilding the V8 bridge asset and sidecar/runtime binaries so `cross-spawn` can execute redirected commands like `printf 'bash-ok' > bash-output.txt` through `/bin/sh` inside the VM.
+- Updated the OpenCode bash-tool llmock fixture to trigger the second model turn when any tool result is present, because successful redirected bash commands produce empty stdout even though the file write completed correctly. Recorded the reusable shell-option gotcha in `crates/execution/CLAUDE.md`.
+- Files changed: `crates/execution/CLAUDE.md`, `crates/execution/assets/v8-bridge.js`, `crates/execution/assets/v8-bridge.source.js`, `crates/execution/src/node_import_cache.rs`, `packages/core/tests/opencode-session.test.ts`, `registry/agent/opencode/scripts/build-opencode-acp.mjs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The OpenCode/bash path inside Agent OS goes through V8 `child_process` plus `cross-spawn`, so an explicit shell path like `"/bin/sh"` must be normalized as truthy shell execution or redirect-heavy commands will fail as `command not found`.
+  - Successful bash-tool commands that redirect all output can still send an empty tool-result payload to the model; llmock fixtures for that path should key off tool-result presence rather than stdout content.
+  - The active truth path for this story is `pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts -t "bash tool"` plus root `pnpm check-types`.
 ---

@@ -225,17 +225,36 @@ describe.skipIf(registrySkipReason)("OpenCode session API integration", () => {
 	}, 120_000);
 
 	test("runs the real OpenCode ACP flow end-to-end for bash tool calls", async () => {
-			const fixtures = createToolFixtures(
-				{
-					name: "bash",
-					arguments: JSON.stringify({
-						command: "printf 'bash-ok' > bash-output.txt",
-						description: "write bash-ok to bash-output.txt",
-					}),
-				},
-				"bash-ok",
-				"bash-output.txt was written successfully.",
-			);
+			const fixtures = [
+				createAnthropicFixture(
+					{
+						predicate: (req) =>
+							!getLlmockMessages(req).some(
+								(message) => message.role === "tool",
+							),
+					},
+					{
+						toolCalls: [
+							{
+								name: "bash",
+								arguments: JSON.stringify({
+									command: "printf 'bash-ok' > bash-output.txt",
+									description: "write bash-ok to bash-output.txt",
+								}),
+							},
+						],
+					},
+				),
+				createAnthropicFixture(
+					{
+						predicate: (req) =>
+							getLlmockMessages(req).some(
+								(message) => message.role === "tool",
+							),
+					},
+					{ content: "bash-output.txt was written successfully." },
+				),
+			];
 			const { mock, url } = await startLlmock(fixtures);
 			const vm = await createOpenCodeVm(url);
 

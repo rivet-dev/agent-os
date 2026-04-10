@@ -3131,6 +3131,69 @@ export function win32InstallCtrlCGuard() {
 	);
 }
 
+function patchBuiltBundle(bundlePath) {
+	const original = readFileSync(bundlePath, "utf-8");
+	if (
+		original.includes(
+			"bash tool command scan failed, falling back to raw permission request",
+		)
+	) {
+		return;
+	}
+
+	const updated = original.replace(
+		`      async execute(params, ctx) {
+        const cwd = params.workdir ? await resolvePath(params.workdir, Instance.directory, shell2) : Instance.directory;
+        if (params.timeout !== undefined && params.timeout < 0) {
+          throw new Error(\`Invalid timeout value: \${params.timeout}. Timeout must be a positive number.\`);
+        }
+        const timeout4 = params.timeout ?? DEFAULT_TIMEOUT;
+        const ps2 = PS.has(name21);
+        const root = await parse10(params.command, ps2);
+        const scan5 = await collect6(root, cwd, ps2, shell2);
+        if (!Instance.containsPath(cwd))
+          scan5.dirs.add(cwd);
+        await ask(ctx, scan5);
+        return run7({
+`,
+		`      async execute(params, ctx) {
+        const cwd = params.workdir ? await resolvePath(params.workdir, Instance.directory, shell2) : Instance.directory;
+        if (params.timeout !== undefined && params.timeout < 0) {
+          throw new Error(\`Invalid timeout value: \${params.timeout}. Timeout must be a positive number.\`);
+        }
+        const timeout4 = params.timeout ?? DEFAULT_TIMEOUT;
+        const ps2 = PS.has(name21);
+        let scan5;
+        try {
+          const root = await parse10(params.command, ps2);
+          scan5 = await collect6(root, cwd, ps2, shell2);
+        } catch (error48) {
+          log7.warn("bash tool command scan failed, falling back to raw permission request", {
+            command: params.command,
+            error: error48 instanceof Error ? error48.message : String(error48)
+          });
+          scan5 = {
+            dirs: new Set,
+            patterns: new Set([params.command]),
+            always: new Set([params.command])
+          };
+        }
+        if (!Instance.containsPath(cwd))
+          scan5.dirs.add(cwd);
+        await ask(ctx, scan5);
+        return run7({
+`,
+	);
+
+	if (updated === original) {
+		throw new Error(
+			"Failed to patch built OpenCode ACP bundle for bash scan fallback",
+		);
+	}
+
+	writeFileSync(bundlePath, updated);
+}
+
 async function assertPreparedSource(sourceRoot) {
 	const instanceSource = await readFile(
 		resolve(sourceRoot, "packages/opencode/src/server/instance.ts"),
@@ -3301,6 +3364,7 @@ for (const output of result.outputs) {
 	}
 
 	await assertBundleClean(join(bundleDir, "acp.js"));
+	patchBuiltBundle(join(bundleDir, "acp.js"));
 
 	writeFileSync(
 		manifestPath,
