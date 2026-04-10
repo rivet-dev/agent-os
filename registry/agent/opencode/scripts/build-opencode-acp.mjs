@@ -479,6 +479,8 @@ async function runServiceWithCurrentInstance<T>(
     import("../../project/instance"),
   ])
   console.error("[opencode-acp] serviceRuntime:ctx", ctx.directory)
+  ;(globalThis as typeof globalThis & { __agentosOpencodeInstanceFallback?: unknown }).__agentosOpencodeInstanceFallback =
+    ctx
   const runtime = ManagedRuntime.make(serviceModule.defaultLayer, { memoMap })
   try {
     const result = await Instance.restore(
@@ -606,7 +608,12 @@ async function withDirectory<T>(
   return Instance.provide({
     directory: directory ?? process.cwd(),
     init: InstanceBootstrap,
-    fn: () => fn(Instance.current),
+    fn: () => {
+      const ctx = Instance.current
+      ;(globalThis as typeof globalThis & { __agentosOpencodeInstanceFallback?: unknown }).__agentosOpencodeInstanceFallback =
+        ctx
+      return fn(ctx)
+    },
   })
 }
 
@@ -1129,6 +1136,207 @@ export const AcpCommand = cmd({
 			),
 	);
 
+	await rewriteSourceFile(
+		sourceRoot,
+		"packages/opencode/src/util/filesystem.ts",
+		(contents) => {
+			if (contents.includes("cachedAgentOsGuestPathMappings")) {
+				return contents;
+			}
+
+			return contents
+				.replace(
+					'import { dirname, join, relative, resolve as pathResolve, win32 } from "path"\n',
+					`import { dirname, join, relative, resolve as pathResolve, win32 } from "path"
+
+type AgentOsGuestPathMapping = {
+  guestPath?: string
+  hostPath?: string
+}
+
+let cachedAgentOsGuestPathMappings:
+  | Array<{ guestPath: string; hostPath: string }>
+  | undefined
+
+function runtimeWindowsPath(p: string): string {
+  if (process.platform !== "win32") return p
+  return p
+    .replace(/^\\/([a-zA-Z]):(?:[\\\\/]|$)/, (_, drive) => \`\${drive.toUpperCase()}:/\`)
+    .replace(/^\\/([a-zA-Z])(?:\\/|$)/, (_, drive) => \`\${drive.toUpperCase()}:/\`)
+    .replace(/^\\/cygdrive\\/([a-zA-Z])(?:\\/|$)/, (_, drive) => \`\${drive.toUpperCase()}:/\`)
+    .replace(/^\\/mnt\\/([a-zA-Z])(?:\\/|$)/, (_, drive) => \`\${drive.toUpperCase()}:/\`)
+}
+
+function agentOsGuestPathMappings() {
+  if (cachedAgentOsGuestPathMappings) return cachedAgentOsGuestPathMappings
+  const raw = process.env.AGENT_OS_GUEST_PATH_MAPPINGS
+  if (!raw) {
+    cachedAgentOsGuestPathMappings = []
+    return cachedAgentOsGuestPathMappings
+  }
+
+  try {
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      cachedAgentOsGuestPathMappings = []
+      return cachedAgentOsGuestPathMappings
+    }
+
+    cachedAgentOsGuestPathMappings = parsed
+      .filter(
+        (item): item is AgentOsGuestPathMapping =>
+          typeof item === "object" &&
+          item !== null &&
+          typeof item.guestPath === "string" &&
+          typeof item.hostPath === "string",
+      )
+      .map((item) => ({
+        guestPath: item.guestPath === "/" ? "/" : pathResolve(runtimeWindowsPath(item.guestPath)),
+        hostPath: pathResolve(runtimeWindowsPath(item.hostPath)),
+      }))
+      .sort((left, right) => right.guestPath.length - left.guestPath.length)
+    return cachedAgentOsGuestPathMappings
+  } catch {
+    cachedAgentOsGuestPathMappings = []
+    return cachedAgentOsGuestPathMappings
+  }
+}
+
+function runtimePath(p: string): string {
+  if (!p.startsWith("/")) return p
+
+  const normalized = pathResolve(runtimeWindowsPath(p))
+  for (const mapping of agentOsGuestPathMappings()) {
+    if (
+      mapping.guestPath !== "/" &&
+      normalized !== mapping.guestPath &&
+      !normalized.startsWith(\`\${mapping.guestPath}/\`)
+    ) {
+      continue
+    }
+
+    const suffix =
+      mapping.guestPath === "/"
+        ? normalized.slice(1)
+        : normalized.slice(mapping.guestPath.length).replace(/^[/\\\\]+/, "")
+    return suffix ? join(mapping.hostPath, suffix) : mapping.hostPath
+  }
+
+  return p
+}
+`,
+				)
+				.replace(
+					`    return existsSync(p)
+`,
+					`    return existsSync(runtimePath(p))
+`,
+				)
+				.replace(
+					`      return statSync(p).isDirectory()
+`,
+					`      return statSync(runtimePath(p)).isDirectory()
+`,
+				)
+				.replace(
+					`    return statSync(p, { throwIfNoEntry: false }) ?? undefined
+`,
+					`    return statSync(runtimePath(p), { throwIfNoEntry: false }) ?? undefined
+`,
+				)
+				.replace(
+					`    return statFile(p).catch((e) => {
+`,
+					`    return statFile(runtimePath(p)).catch((e) => {
+`,
+				)
+				.replace(
+					`    return readFile(p, "utf-8")
+`,
+					`    return readFile(runtimePath(p), "utf-8")
+`,
+				)
+				.replace(
+					`    return JSON.parse(await readFile(p, "utf-8"))
+`,
+					`    return JSON.parse(await readFile(runtimePath(p), "utf-8"))
+`,
+				)
+				.replace(
+					`    return readFile(p)
+`,
+					`    return readFile(runtimePath(p))
+`,
+				)
+				.replace(
+					`    const buf = await readFile(p)
+`,
+					`    const buf = await readFile(runtimePath(p))
+`,
+				)
+				.replace(
+					`    try {
+      if (mode) {
+        await writeFile(p, content, { mode })
+      } else {
+        await writeFile(p, content)
+      }
+    } catch (e) {
+      if (isEnoent(e)) {
+        await mkdir(dirname(p), { recursive: true })
+        if (mode) {
+          await writeFile(p, content, { mode })
+        } else {
+          await writeFile(p, content)
+        }
+        return
+      }
+      throw e
+    }
+`,
+					`    const target = runtimePath(p)
+    try {
+      if (mode) {
+        await writeFile(target, content, { mode })
+      } else {
+        await writeFile(target, content)
+      }
+    } catch (e) {
+      if (isEnoent(e)) {
+        await mkdir(dirname(target), { recursive: true })
+        if (mode) {
+          await writeFile(target, content, { mode })
+        } else {
+          await writeFile(target, content)
+        }
+        return
+      }
+      throw e
+    }
+`,
+				)
+				.replace(
+					`    const dir = dirname(p)
+`,
+					`    const target = runtimePath(p)
+    const dir = dirname(target)
+`,
+				)
+				.replace(
+					`    const writeStream = createWriteStream(p)
+`,
+					`    const writeStream = createWriteStream(target)
+`,
+				)
+				.replace(
+					`      await chmod(p, mode)
+`,
+					`      await chmod(target, mode)
+`,
+				);
+		},
+	);
+
 	for (const relativePath of [
 		"packages/opencode/src/cli/cmd/mcp.ts",
 		"packages/opencode/src/config/config.ts",
@@ -1432,16 +1640,23 @@ export const AcpCommand = cmd({
 	await rewriteSourceFile(
 		sourceRoot,
 		"packages/opencode/src/session/llm.ts",
-		(contents) =>
-				contents
-					.replace(
-						'import { Installation } from "@/installation"\n',
-						'import { Installation } from "@/installation"\nimport { InstanceState } from "@/effect/instance-state"\n',
-					)
-					.replace(
-						`        stream(input) {
-	          return Stream.scoped(
-	            Stream.unwrap(
+		(contents) => {
+			let updated = contents;
+			if (
+				!updated.includes(
+					'import { InstanceState } from "@/effect/instance-state"\n',
+				)
+			) {
+				updated = updated.replace(
+					'import { Installation } from "@/installation"\n',
+					'import { Installation } from "@/installation"\nimport { InstanceState } from "@/effect/instance-state"\n',
+				);
+			}
+			updated = updated
+				.replace(
+					`        stream(input) {
+          return Stream.scoped(
+            Stream.unwrap(
               Effect.gen(function* () {
                 const ctrl = yield* Effect.acquireRelease(
                   Effect.sync(() => new AbortController()),
@@ -1456,31 +1671,31 @@ export const AcpCommand = cmd({
               }),
             ),
           )
-	        },
+        },
 `,
-						`        stream(input) {
-	          return Stream.scoped(
-	            Stream.unwrap(
-	              Effect.gen(function* () {
-	                const instanceCtx = yield* InstanceState.context
-	                const ctrl = yield* Effect.acquireRelease(
-	                  Effect.sync(() => new AbortController()),
-	                  (ctrl) => Effect.sync(() => ctrl.abort()),
-	                )
+					`        stream(input) {
+          return Stream.scoped(
+            Stream.unwrap(
+              Effect.gen(function* () {
+                const instanceCtx = yield* InstanceState.context
+                const ctrl = yield* Effect.acquireRelease(
+                  Effect.sync(() => new AbortController()),
+                  (ctrl) => Effect.sync(() => ctrl.abort()),
+                )
 
-	                const result = yield* Effect.promise(() =>
-	                  Instance.restore(instanceCtx, () => LLM.stream({ ...input, abort: ctrl.signal })),
-	                )
+                const result = yield* Effect.promise(() =>
+                  Instance.restore(instanceCtx, () => LLM.stream({ ...input, abort: ctrl.signal })),
+                )
 
-	                return Stream.fromAsyncIterable(result.fullStream, (e) =>
-	                  e instanceof Error ? e : new Error(String(e)),
-	                )
+                return Stream.fromAsyncIterable(result.fullStream, (e) =>
+                  e instanceof Error ? e : new Error(String(e)),
+                )
               }),
             ),
-	          )
-	        },
+          )
+        },
 `,
-					)
+				)
 				.replace(
 					`    const [language, cfg, provider, auth] = await Promise.all([
       Provider.getLanguage(input.model),
@@ -1641,8 +1856,82 @@ export const AcpCommand = cmd({
 					`    }))
   }
 `,
-				),
-		);
+				);
+			return updated;
+		},
+	);
+
+	await rewriteSourceFile(
+		sourceRoot,
+		"packages/opencode/src/session/prompt.ts",
+		(contents) =>
+			contents.replace(
+				`            execute(args, options) {
+              return Effect.runPromise(
+                Effect.gen(function* () {
+                  const ctx = context(args, options)
+                  yield* plugin.trigger(
+                    "tool.execute.before",
+                    { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
+                    { args },
+                  )
+                  const result = yield* Effect.promise(() => item.execute(args, ctx))
+                  const output = {
+                    ...result,
+                    attachments: result.attachments?.map((attachment) => ({
+                      ...attachment,
+                      id: PartID.ascending(),
+                      sessionID: ctx.sessionID,
+                      messageID: input.processor.message.id,
+                    })),
+                  }
+                  yield* plugin.trigger(
+                    "tool.execute.after",
+                    { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
+                    output,
+                  )
+                  return output
+                }),
+              )
+            },
+`,
+				`            execute(args, options) {
+              const instanceCtx =
+                ((globalThis as typeof globalThis & { __agentosOpencodeInstanceFallback?: unknown })
+                  .__agentosOpencodeInstanceFallback ??
+                  Instance.current) as any
+              return Instance.restore(instanceCtx, () =>
+                Effect.runPromise(
+                  Effect.gen(function* () {
+                    const ctx = context(args, options)
+                    yield* plugin.trigger(
+                      "tool.execute.before",
+                      { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
+                      { args },
+                    )
+                    const result = yield* Effect.promise(() => item.execute(args, ctx))
+                    const output = {
+                      ...result,
+                      attachments: result.attachments?.map((attachment) => ({
+                        ...attachment,
+                        id: PartID.ascending(),
+                        sessionID: ctx.sessionID,
+                        messageID: input.processor.message.id,
+                      })),
+                    }
+                    yield* plugin.trigger(
+                      "tool.execute.after",
+                      { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
+                      output,
+                    )
+                    return output
+                  }),
+                ),
+              )
+            },
+`,
+			),
+	);
 
 	await rewriteSourceFile(
 		sourceRoot,
@@ -1779,6 +2068,20 @@ export const AcpCommand = cmd({
 		"packages/opencode/src/effect/instance-state.ts",
 		(contents) =>
 			contents.replace(
+				`    const fiber = Fiber.getCurrent()
+    const ctx = fiber ? ServiceMap.getReferenceUnsafe(fiber.services, InstanceRef) : undefined
+    if (!ctx) return fn
+    return ((...args: any[]) => Instance.restore(ctx, () => fn(...args))) as F
+`,
+				`    const fiber = Fiber.getCurrent()
+    const ctx = fiber ? ServiceMap.getReferenceUnsafe(fiber.services, InstanceRef) : undefined
+    const fallback = (globalThis as typeof globalThis & { __agentosOpencodeInstanceFallback?: unknown })
+      .__agentosOpencodeInstanceFallback as typeof ctx
+    const boundCtx = ctx ?? fallback
+    if (!boundCtx) return fn
+    return ((...args: any[]) => Instance.restore(boundCtx, () => fn(...args))) as F
+`,
+			).replace(
 				`  export const context = Effect.fnUntraced(function* () {
     return (yield* InstanceRef) ?? Instance.current
   })()
@@ -1786,6 +2089,9 @@ export const AcpCommand = cmd({
 				`  export const context = Effect.fnUntraced(function* () {
     const ref = yield* InstanceRef
     if (ref) return ref
+    const fallback = (globalThis as typeof globalThis & { __agentosOpencodeInstanceFallback?: unknown })
+      .__agentosOpencodeInstanceFallback
+    if (fallback) return fallback as typeof ref
     try {
       return Instance.current
     } catch (error) {

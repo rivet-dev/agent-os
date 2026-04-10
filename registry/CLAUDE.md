@@ -57,6 +57,7 @@ To unblock the remaining C packages: run `cd native && ./scripts/patch-wasi-libc
 
 The published `@rivet-dev/agent-os-curl` package is currently backed by the Rust `native/crates/commands/curl/` binary built on `crates/libs/wasi-http`. Keep curl CLI compatibility fixes there until the patched-sysroot C curl path is restored.
 When patching the OpenCode ACP Node bundle in `registry/agent/opencode/scripts/build-opencode-acp.mjs`, run result-returning SQLite PRAGMAs through `db.$client.exec(...)` instead of drizzle `db.run(...)`. The VM `node:sqlite` shim treats `journal_mode`, `busy_timeout`, `foreign_keys`, and `wal_checkpoint` as queries with rows, so `db.run(...)` breaks `createSession("opencode")` during database bootstrap.
+OpenCode ACP bundle patches that touch `packages/opencode/src/util/filesystem.ts` should resolve absolute guest paths through `AGENT_OS_GUEST_PATH_MAPPINGS` before calling `node:fs`, or tool writes can report success while landing outside the mounted project on the host. When patching streamed LLM or tool execution paths, keep the current `Instance` restored around the async work itself, not just the ACP entrypoint, or VM runs will fail with `No context found for instance`.
 
 ### Meta-packages
 

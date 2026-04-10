@@ -12,6 +12,8 @@ import {
   WebReadableStream,
   WebWritableStream,
   WebTransformStream,
+  WebTextEncoderStream,
+  WebTextDecoderStream,
 } from "./undici-shims/web-streams-global.js";
 import undiciAgentModule from "undici/lib/dispatcher/agent.js";
 import undiciFetchModule from "undici/lib/web/fetch/index.js";
@@ -2781,6 +2783,12 @@ var __bridge = (() => {
   defineGlobal("WritableStream", typeof WebWritableStream === "function" ? WebWritableStream : FallbackWritableStream);
   if (typeof WebTransformStream === "function") {
     defineGlobal("TransformStream", WebTransformStream);
+  }
+  if (typeof WebTextEncoderStream === "function") {
+    defineGlobal("TextEncoderStream", WebTextEncoderStream);
+  }
+  if (typeof WebTextDecoderStream === "function") {
+    defineGlobal("TextDecoderStream", WebTextDecoderStream);
   }
   const undiciWebidl = undiciWebidlModule?.webidl ?? undiciWebidlModule;
   if (undiciWebidl?.is) {
@@ -20499,7 +20507,11 @@ ${headerLines}\r
       return process2.exit(1);
     },
     nextTick(callback, ...args) {
-      _nextTickQueue.push({ callback, args });
+      const asyncLocalStorageSnapshot = snapshotAsyncLocalStorageStores();
+      _nextTickQueue.push({
+        callback: wrapAsyncLocalStorageCallback(callback, asyncLocalStorageSnapshot),
+        args
+      });
       scheduleNextTickFlush();
     },
     hrtime,
@@ -21192,36 +21204,113 @@ ${headerLines}\r
     unsubscribe() {
     }
   };
+  var asyncLocalStorageInstances = /* @__PURE__ */ new Set();
+  function snapshotAsyncLocalStorageStores() {
+    return Array.from(asyncLocalStorageInstances, (storage) => ({
+      storage,
+      hasStore: storage._hasStore === true,
+      store: storage._store
+    }));
+  }
+  function applyAsyncLocalStorageSnapshot(snapshot) {
+    for (const entry of snapshot) {
+      entry.storage._hasStore = entry.hasStore;
+      entry.storage._store = entry.store;
+    }
+  }
+  function runWithAsyncLocalStorageSnapshot(snapshot, callback, thisArg, args) {
+    if (typeof callback !== "function") {
+      return callback;
+    }
+    const previous = snapshotAsyncLocalStorageStores();
+    applyAsyncLocalStorageSnapshot(snapshot);
+    try {
+      return callback.apply(thisArg, args);
+    } finally {
+      applyAsyncLocalStorageSnapshot(previous);
+    }
+  }
+  function wrapAsyncLocalStorageCallback(callback, snapshot) {
+    if (typeof callback !== "function") {
+      return callback;
+    }
+    return function(...args) {
+      return runWithAsyncLocalStorageSnapshot(snapshot, callback, this, args);
+    };
+  }
   var builtinAsyncHooksModule = {
     AsyncLocalStorage: class {
       constructor() {
+        this._hasStore = false;
         this._store = void 0;
+        asyncLocalStorageInstances.add(this);
       }
       disable() {
+        this._hasStore = false;
         this._store = void 0;
       }
       enterWith(store) {
+        this._hasStore = true;
         this._store = store;
       }
       exit(callback, ...args) {
-        return callback(...args);
+        const previous = {
+          hasStore: this._hasStore,
+          store: this._store
+        };
+        this._hasStore = false;
+        this._store = void 0;
+        let restoreOnFinally = true;
+        try {
+          const result = callback(...args);
+          if (result && typeof result.then === "function") {
+            restoreOnFinally = false;
+            return Promise.resolve(result).finally(() => {
+              this._hasStore = previous.hasStore;
+              this._store = previous.store;
+            });
+          }
+          return result;
+        } finally {
+          if (restoreOnFinally) {
+            this._hasStore = previous.hasStore;
+            this._store = previous.store;
+          }
+        }
       }
       getStore() {
-        return this._store;
+        return this._hasStore ? this._store : void 0;
       }
       run(store, callback, ...args) {
-        const previous = this._store;
+        const previous = {
+          hasStore: this._hasStore,
+          store: this._store
+        };
+        this._hasStore = true;
         this._store = store;
+        let restoreOnFinally = true;
         try {
-          return callback(...args);
+          const result = callback(...args);
+          if (result && typeof result.then === "function") {
+            restoreOnFinally = false;
+            return Promise.resolve(result).finally(() => {
+              this._hasStore = previous.hasStore;
+              this._store = previous.store;
+            });
+          }
+          return result;
         } finally {
-          this._store = previous;
+          if (restoreOnFinally) {
+            this._hasStore = previous.hasStore;
+            this._store = previous.store;
+          }
         }
       }
     },
     AsyncResource: class {
       constructor(type = "AgentOsAsyncResource") {
         this.type = type;
+        this._asyncLocalStorageSnapshot = snapshotAsyncLocalStorageStores();
       }
       emitBefore() {
       }
@@ -21236,7 +21325,12 @@ ${headerLines}\r
         return 0;
       }
       runInAsyncScope(callback, thisArg, ...args) {
-        return callback.apply(thisArg, args);
+        return runWithAsyncLocalStorageSnapshot(
+          this._asyncLocalStorageSnapshot,
+          callback,
+          thisArg,
+          args
+        );
       }
     },
     createHook() {
@@ -21256,6 +21350,21 @@ ${headerLines}\r
       return 0;
     }
   };
+  if (!Promise.prototype.__agentOsAsyncLocalStoragePatched) {
+    const nativePromiseThen = Promise.prototype.then;
+    Promise.prototype.then = function(onFulfilled, onRejected) {
+      const snapshot = snapshotAsyncLocalStorageStores();
+      return nativePromiseThen.call(
+        this,
+        wrapAsyncLocalStorageCallback(onFulfilled, snapshot),
+        wrapAsyncLocalStorageCallback(onRejected, snapshot)
+      );
+    };
+    Object.defineProperty(Promise.prototype, "__agentOsAsyncLocalStoragePatched", {
+      value: true,
+      configurable: true
+    });
+  }
   var TIMER_DISPATCH = {
     create: "kernelTimerCreate",
     arm: "kernelTimerArm",
@@ -21362,7 +21471,15 @@ ${headerLines}\r
       return;
     }
     _nextTickScheduled = true;
-    _queueMicrotask(flushNextTickQueue);
+    const asyncLocalStorageSnapshot = snapshotAsyncLocalStorageStores();
+    _queueMicrotask(() =>
+      runWithAsyncLocalStorageSnapshot(
+        asyncLocalStorageSnapshot,
+        flushNextTickQueue,
+        globalThis,
+        []
+      )
+    );
   }
   function timerDispatch(_eventType, payload) {
     const timerId = typeof payload === "number" ? payload : Number(payload?.timerId);
@@ -21391,9 +21508,10 @@ ${headerLines}\r
     const actualDelay = normalizeTimerDelay(delay);
     const id = createKernelTimer(actualDelay, false);
     const handle = new TimerHandle(id);
+    const asyncLocalStorageSnapshot = snapshotAsyncLocalStorageStores();
     _timerEntries.set(id, {
       handle,
-      callback,
+      callback: wrapAsyncLocalStorageCallback(callback, asyncLocalStorageSnapshot),
       args,
       repeat: false
     });
@@ -21415,9 +21533,10 @@ ${headerLines}\r
     const actualDelay = Math.max(1, normalizeTimerDelay(delay));
     const id = createKernelTimer(actualDelay, true);
     const handle = new TimerHandle(id);
+    const asyncLocalStorageSnapshot = snapshotAsyncLocalStorageStores();
     _timerEntries.set(id, {
       handle,
-      callback,
+      callback: wrapAsyncLocalStorageCallback(callback, asyncLocalStorageSnapshot),
       args,
       repeat: true
     });
@@ -21951,9 +22070,18 @@ ${headerLines}\r
     g.clearInterval = clearInterval;
     g.setImmediate = setImmediate;
     g.clearImmediate = clearImmediate;
-    if (typeof g.queueMicrotask === "undefined") {
-      g.queueMicrotask = _queueMicrotask;
-    }
+    const nativeQueueMicrotask = typeof g.queueMicrotask === "function" ? g.queueMicrotask.bind(g) : _queueMicrotask;
+    g.queueMicrotask = (callback) => {
+      const asyncLocalStorageSnapshot = snapshotAsyncLocalStorageStores();
+      return nativeQueueMicrotask(() =>
+        runWithAsyncLocalStorageSnapshot(
+          asyncLocalStorageSnapshot,
+          callback,
+          g,
+          []
+        )
+      );
+    };
     installWhatwgUrlGlobals(g);
     g.TextEncoder = TextEncoder2;
     g.TextDecoder = TextDecoder;

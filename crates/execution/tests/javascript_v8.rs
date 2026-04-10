@@ -1584,6 +1584,94 @@ if (first.value !== "alpha" || first.done !== false || second.done !== true) {
 }
 
 #[test]
+fn javascript_execution_v8_text_codec_streams_support_pipe_through() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+const {
+  TextEncoderStream: ModuleTextEncoderStream,
+  TextDecoderStream: ModuleTextDecoderStream,
+} = await import("node:stream/web");
+
+if (ModuleTextEncoderStream !== TextEncoderStream) {
+  throw new Error("node:stream/web TextEncoderStream export diverged from global");
+}
+if (ModuleTextDecoderStream !== TextDecoderStream) {
+  throw new Error("node:stream/web TextDecoderStream export diverged from global");
+}
+
+if (new TextEncoderStream().encoding !== "utf-8") {
+  throw new Error("unexpected TextEncoderStream encoding");
+}
+
+const decoder = new ReadableStream({
+  start(controller) {
+    controller.enqueue(new Uint8Array([0xe2, 0x82]));
+    controller.enqueue(new Uint8Array([0xac, 0x21]));
+    controller.close();
+  },
+}).pipeThrough(new TextDecoderStream());
+
+const decoderReader = decoder.getReader();
+const decoded = [];
+for (;;) {
+  const { done, value } = await decoderReader.read();
+  if (done) break;
+  decoded.push(value);
+}
+decoderReader.releaseLock();
+
+if (decoded.join("") !== "€!") {
+  throw new Error(`unexpected decoded output: ${JSON.stringify(decoded)}`);
+}
+
+const encoded = new ReadableStream({
+  start(controller) {
+    controller.enqueue("hello");
+    controller.enqueue(" world");
+    controller.close();
+  },
+}).pipeThrough(new TextEncoderStream());
+
+const encodedReader = encoded.getReader();
+const bytes = [];
+for (;;) {
+  const { done, value } = await encodedReader.read();
+  if (done) break;
+  bytes.push(...value);
+}
+encodedReader.releaseLock();
+
+const roundTrip = new TextDecoder().decode(new Uint8Array(bytes));
+if (roundTrip !== "hello world") {
+  throw new Error(`unexpected encoded output: ${roundTrip}`);
+}
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    assert_eq!(result.exit_code, 0);
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
 fn javascript_execution_v8_abort_controller_dispatches_abort() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
