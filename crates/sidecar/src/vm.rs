@@ -338,10 +338,7 @@ where
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
         let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let layer_id = allocate_vm_layer_id(&mut vm.layers);
-        vm.layers
-            .layers
-            .insert(layer_id.clone(), VmLayer::Writable(new_writable_layer()?));
+        let layer_id = vm.layers.create_writable_layer()?;
 
         Ok(DispatchResult {
             response: self.respond(
@@ -361,24 +358,7 @@ where
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
         let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let layer = vm.layers.layers.remove(&payload.layer_id).ok_or_else(|| {
-            SidecarError::InvalidState(format!("unknown layer: {}", payload.layer_id))
-        })?;
-        let snapshot = match layer {
-            VmLayer::Writable(mut filesystem) => {
-                filesystem.snapshot().map_err(root_filesystem_error)?
-            }
-            VmLayer::Snapshot(_) | VmLayer::Overlay(_) => {
-                return Err(SidecarError::InvalidState(format!(
-                    "layer {} is not writable",
-                    payload.layer_id
-                )));
-            }
-        };
-        let layer_id = allocate_vm_layer_id(&mut vm.layers);
-        vm.layers
-            .layers
-            .insert(layer_id.clone(), VmLayer::Snapshot(snapshot));
+        let layer_id = vm.layers.seal_layer(&payload.layer_id)?;
 
         Ok(DispatchResult {
             response: self.respond(
@@ -398,11 +378,9 @@ where
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
         let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let layer_id = allocate_vm_layer_id(&mut vm.layers);
-        vm.layers.layers.insert(
-            layer_id.clone(),
-            VmLayer::Snapshot(root_snapshot_from_entries(&payload.entries)?),
-        );
+        let layer_id = vm
+            .layers
+            .import_snapshot(root_snapshot_from_entries(&payload.entries)?);
 
         Ok(DispatchResult {
             response: self.respond(
@@ -422,7 +400,7 @@ where
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
         let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let snapshot = materialize_vm_layer_snapshot(&mut vm.layers, &payload.layer_id)?;
+        let snapshot = vm.layers.export_snapshot(&payload.layer_id)?;
 
         Ok(DispatchResult {
             response: self.respond(
@@ -445,33 +423,14 @@ where
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
         let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        for layer_id in &payload.lower_layer_ids {
-            if !vm.layers.layers.contains_key(layer_id) {
-                return Err(SidecarError::InvalidState(format!(
-                    "unknown lower layer: {layer_id}"
-                )));
-            }
-        }
-        if let Some(upper_layer_id) = payload.upper_layer_id.as_ref() {
-            if !vm.layers.layers.contains_key(upper_layer_id) {
-                return Err(SidecarError::InvalidState(format!(
-                    "unknown upper layer: {upper_layer_id}"
-                )));
-            }
-        }
-
-        let layer_id = allocate_vm_layer_id(&mut vm.layers);
-        vm.layers.layers.insert(
-            layer_id.clone(),
-            VmLayer::Overlay(VmOverlayLayer {
-                mode: match payload.mode {
-                    RootFilesystemMode::Ephemeral => KernelRootFilesystemMode::Ephemeral,
-                    RootFilesystemMode::ReadOnly => KernelRootFilesystemMode::ReadOnly,
-                },
-                upper_layer_id: payload.upper_layer_id,
-                lower_layer_ids: payload.lower_layer_ids,
-            }),
-        );
+        let layer_id = vm.layers.create_overlay_layer(
+            match payload.mode {
+                RootFilesystemMode::Ephemeral => KernelRootFilesystemMode::Ephemeral,
+                RootFilesystemMode::ReadOnly => KernelRootFilesystemMode::ReadOnly,
+            },
+            payload.upper_layer_id,
+            payload.lower_layer_ids,
+        )?;
 
         Ok(DispatchResult {
             response: self.respond(
@@ -832,10 +791,81 @@ fn append_module_access_symlink_mount(
     Ok(())
 }
 
-fn allocate_vm_layer_id(layers: &mut VmLayerStore) -> String {
-    let layer_id = format!("layer-{}", layers.next_layer_id);
-    layers.next_layer_id += 1;
-    layer_id
+impl VmLayerStore {
+    fn allocate_layer_id(&mut self) -> String {
+        let layer_id = format!("layer-{}", self.next_layer_id);
+        self.next_layer_id += 1;
+        layer_id
+    }
+
+    fn create_writable_layer(&mut self) -> Result<String, SidecarError> {
+        let layer_id = self.allocate_layer_id();
+        self.layers
+            .insert(layer_id.clone(), VmLayer::Writable(new_writable_layer()?));
+        Ok(layer_id)
+    }
+
+    fn seal_layer(&mut self, layer_id: &str) -> Result<String, SidecarError> {
+        let layer = self
+            .layers
+            .remove(layer_id)
+            .ok_or_else(|| SidecarError::InvalidState(format!("unknown layer: {layer_id}")))?;
+        let snapshot = match layer {
+            VmLayer::Writable(mut filesystem) => filesystem.snapshot().map_err(root_filesystem_error)?,
+            VmLayer::Snapshot(_) | VmLayer::Overlay(_) => {
+                return Err(SidecarError::InvalidState(format!(
+                    "layer {layer_id} is not writable"
+                )));
+            }
+        };
+        let sealed_layer_id = self.allocate_layer_id();
+        self.layers
+            .insert(sealed_layer_id.clone(), VmLayer::Snapshot(snapshot));
+        Ok(sealed_layer_id)
+    }
+
+    fn import_snapshot(&mut self, snapshot: RootFilesystemSnapshot) -> String {
+        let layer_id = self.allocate_layer_id();
+        self.layers.insert(layer_id.clone(), VmLayer::Snapshot(snapshot));
+        layer_id
+    }
+
+    fn export_snapshot(&mut self, layer_id: &str) -> Result<RootFilesystemSnapshot, SidecarError> {
+        materialize_vm_layer_snapshot(self, layer_id)
+    }
+
+    fn create_overlay_layer(
+        &mut self,
+        mode: KernelRootFilesystemMode,
+        upper_layer_id: Option<String>,
+        lower_layer_ids: Vec<String>,
+    ) -> Result<String, SidecarError> {
+        for layer_id in &lower_layer_ids {
+            if !self.layers.contains_key(layer_id) {
+                return Err(SidecarError::InvalidState(format!(
+                    "unknown lower layer: {layer_id}"
+                )));
+            }
+        }
+        if let Some(layer_id) = upper_layer_id.as_ref() {
+            if !self.layers.contains_key(layer_id) {
+                return Err(SidecarError::InvalidState(format!(
+                    "unknown upper layer: {layer_id}"
+                )));
+            }
+        }
+
+        let layer_id = self.allocate_layer_id();
+        self.layers.insert(
+            layer_id.clone(),
+            VmLayer::Overlay(VmOverlayLayer {
+                mode,
+                upper_layer_id,
+                lower_layer_ids,
+            }),
+        );
+        Ok(layer_id)
+    }
 }
 
 fn new_writable_layer() -> Result<RootFileSystem, SidecarError> {

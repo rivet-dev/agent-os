@@ -67,6 +67,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - For individually rebuilt registry/native command crates, the fresh Wasm binary is `registry/native/target/wasm32-wasip1/release/<cmd>.wasm`; package-level Vitest coverage that uses package `commandDir` still needs that artifact copied into `registry/software/*/wasm/<cmd>`.
 - For `vm.exec()` cwd coverage in `packages/core/tests/execute.test.ts`, set up relative-path fixtures from inside the guest shell when the story is about shell cwd semantics; visibility of files written via VM filesystem APIs is a separate host-shadow sync surface.
 - Pi SDK `createAgentSession({ tools })` only uses the passed tools to seed active built-in tool names; if the adapter must override Pi's default `bash`/`read`/`edit`/`write` implementations, rebuild the returned `AgentSession` with `_baseToolsOverride` or construct `AgentSession` directly.
+- Sidecar layer IDs are VM-local handles, not global identifiers. `VmLayerStore` restarts its `layer-N` sequence for each VM, so tests should prove isolation through VM ownership scope and exported snapshot contents rather than global ID uniqueness.
 
 ## 2026-04-09 19:58:47 PDT - US-028
 - Fixed the Pi CLI bash-tool regression by patching vendored `brush-core` command resolution for WASI: shell PATH lookup now ignores non-file candidates, and resolved guest executable paths like `/bin/printf` are passed through to process spawn instead of dropping back to a bare command name. Added the matching persistent vendor patch under `registry/native/patches/crates/brush-core/` and recorded the PATH gotcha in `registry/AGENTS.md`.
@@ -319,4 +320,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - At the package-layer `NativeKernel` test surface, guest Node loopback listeners are not a reliable readiness probe yet; for cross-runtime conformance coverage in `registry/tests/kernel/*`, use host loopback fixtures plus explicit `loopbackExemptPorts` when the story is about client-path parity rather than guest-listener internals.
   - The shipped Rust `curl` command supports `-s` but not GNU curl's combined `-sS`; successful guest `curl` runs can still emit a benign `could not retrieve pid for child process` warning on stderr, so conformance assertions should fail on transport errors rather than requiring empty stderr.
   - The active truth path for this story is `pnpm --dir registry exec vitest run tests/kernel/cross-runtime-network.test.ts` plus root `pnpm check-types`; the companion CI artifact guard intentionally stays skipped outside CI.
+---
+## 2026-04-10 03:17:57 PDT - US-055
+- Implemented explicit `VmLayerStore` lifecycle methods in `crates/sidecar/src/vm.rs` for writable-layer creation, sealing, snapshot import/export, and overlay registration so the sidecar no longer mutates the per-VM layer map ad hoc in each RPC handler.
+- Added focused sidecar coverage in `crates/sidecar/tests/layer_management.rs` for snapshot round-tripping, sealing invalidation, and VM-local layer ID reuse without leakage, and kept the real client surface green with the native sidecar layer RPC smoke test.
+- Files changed: `crates/sidecar/src/vm.rs`, `crates/sidecar/tests/layer_management.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Sidecar layer lifecycle logic is easier to keep correct when `VmLayerStore` owns create/seal/import/export/overlay operations and the RPC handlers only translate request payloads.
+  - Layer IDs are only unique within one VM store; if two VMs both import their first snapshot they will both get `layer-1`, and the ownership scope must remain the isolation boundary.
+  - The active truth path for this story is `cargo test -p agent-os-sidecar --test layer_management -- --nocapture`, `pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts -t "layer"`, and root `pnpm check-types`.
 ---

@@ -11,6 +11,284 @@ use std::fs::{create_dir_all, write};
 use support::{authenticate, create_vm, new_sidecar, open_session, request, temp_dir};
 
 #[test]
+fn vm_layer_lifecycle_round_trips_snapshots_and_invalidates_sealed_ids() {
+    let mut sidecar = new_sidecar("layer-lifecycle");
+    let cwd = temp_dir("layer-lifecycle-cwd");
+
+    let connection_id = authenticate(&mut sidecar, "conn-1");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let (vm_id, _) = create_vm(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::JavaScript,
+        &cwd,
+    );
+
+    let imported_layer_id = match sidecar
+        .dispatch_blocking(request(
+            4,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::ImportSnapshot(ImportSnapshotRequest {
+                entries: vec![
+                    RootFilesystemEntry {
+                        path: String::from("/workspace"),
+                        kind: RootFilesystemEntryKind::Directory,
+                        executable: false,
+                        ..Default::default()
+                    },
+                    RootFilesystemEntry {
+                        path: String::from("/workspace/note.txt"),
+                        kind: RootFilesystemEntryKind::File,
+                        content: Some(String::from("imported")),
+                        executable: false,
+                        ..Default::default()
+                    },
+                ],
+            }),
+        ))
+        .expect("import snapshot")
+        .response
+        .payload
+    {
+        ResponsePayload::SnapshotImported(response) => response.layer_id,
+        other => panic!("unexpected import snapshot response: {other:?}"),
+    };
+
+    let imported_entries = match sidecar
+        .dispatch_blocking(request(
+            5,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::ExportSnapshot(ExportSnapshotRequest {
+                layer_id: imported_layer_id.clone(),
+            }),
+        ))
+        .expect("export imported snapshot")
+        .response
+        .payload
+    {
+        ResponsePayload::SnapshotExported(response) => response.entries,
+        other => panic!("unexpected export snapshot response: {other:?}"),
+    };
+    assert!(imported_entries.iter().any(|entry| {
+        entry.path == "/workspace/note.txt" && entry.content.as_deref() == Some("imported")
+    }));
+
+    let writable_layer_id = match sidecar
+        .dispatch_blocking(request(
+            6,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::CreateLayer(CreateLayerRequest::default()),
+        ))
+        .expect("create writable layer")
+        .response
+        .payload
+    {
+        ResponsePayload::LayerCreated(response) => response.layer_id,
+        other => panic!("unexpected create layer response: {other:?}"),
+    };
+    let sealed_layer_id = match sidecar
+        .dispatch_blocking(request(
+            7,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::SealLayer(SealLayerRequest {
+                layer_id: writable_layer_id.clone(),
+            }),
+        ))
+        .expect("seal writable layer")
+        .response
+        .payload
+    {
+        ResponsePayload::LayerSealed(response) => response.layer_id,
+        other => panic!("unexpected seal layer response: {other:?}"),
+    };
+    assert_ne!(sealed_layer_id, writable_layer_id);
+
+    let sealed_entries = match sidecar
+        .dispatch_blocking(request(
+            8,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::ExportSnapshot(ExportSnapshotRequest {
+                layer_id: sealed_layer_id,
+            }),
+        ))
+        .expect("export sealed layer")
+        .response
+        .payload
+    {
+        ResponsePayload::SnapshotExported(response) => response.entries,
+        other => panic!("unexpected export sealed snapshot response: {other:?}"),
+    };
+    assert!(sealed_entries.iter().any(|entry| entry.path == "/"));
+
+    let rejected = sidecar
+        .dispatch_blocking(request(
+            9,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::ExportSnapshot(ExportSnapshotRequest {
+                layer_id: writable_layer_id.clone(),
+            }),
+        ))
+        .expect("export sealed source layer should reject");
+    match rejected.response.payload {
+        ResponsePayload::Rejected(response) => {
+            assert_eq!(response.code, "invalid_state");
+            assert!(response.message.contains("unknown layer"));
+        }
+        other => panic!("unexpected rejection response: {other:?}"),
+    }
+
+    let rejected = sidecar
+        .dispatch_blocking(request(
+            10,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::SealLayer(SealLayerRequest {
+                layer_id: writable_layer_id,
+            }),
+        ))
+        .expect("double seal should reject");
+    match rejected.response.payload {
+        ResponsePayload::Rejected(response) => {
+            assert_eq!(response.code, "invalid_state");
+            assert!(response.message.contains("unknown layer"));
+        }
+        other => panic!("unexpected rejection response: {other:?}"),
+    }
+}
+
+#[test]
+fn vm_layer_ids_are_reused_per_vm_without_cross_vm_leakage() {
+    let mut sidecar = new_sidecar("layer-store-isolation");
+    let cwd = temp_dir("layer-store-isolation-cwd");
+
+    let connection_id = authenticate(&mut sidecar, "conn-1");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let (first_vm_id, _) = create_vm(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::JavaScript,
+        &cwd,
+    );
+    let (second_vm_id, _) = create_vm(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::JavaScript,
+        &cwd,
+    );
+
+    let first_layer_id = match sidecar
+        .dispatch_blocking(request(
+            5,
+            OwnershipScope::vm(&connection_id, &session_id, &first_vm_id),
+            RequestPayload::ImportSnapshot(ImportSnapshotRequest {
+                entries: vec![
+                    RootFilesystemEntry {
+                        path: String::from("/workspace"),
+                        kind: RootFilesystemEntryKind::Directory,
+                        executable: false,
+                        ..Default::default()
+                    },
+                    RootFilesystemEntry {
+                        path: String::from("/workspace/first.txt"),
+                        kind: RootFilesystemEntryKind::File,
+                        content: Some(String::from("first-vm")),
+                        executable: false,
+                        ..Default::default()
+                    },
+                ],
+            }),
+        ))
+        .expect("import snapshot into first vm")
+        .response
+        .payload
+    {
+        ResponsePayload::SnapshotImported(response) => response.layer_id,
+        other => panic!("unexpected first import response: {other:?}"),
+    };
+    let second_layer_id = match sidecar
+        .dispatch_blocking(request(
+            6,
+            OwnershipScope::vm(&connection_id, &session_id, &second_vm_id),
+            RequestPayload::ImportSnapshot(ImportSnapshotRequest {
+                entries: vec![
+                    RootFilesystemEntry {
+                        path: String::from("/workspace"),
+                        kind: RootFilesystemEntryKind::Directory,
+                        executable: false,
+                        ..Default::default()
+                    },
+                    RootFilesystemEntry {
+                        path: String::from("/workspace/second.txt"),
+                        kind: RootFilesystemEntryKind::File,
+                        content: Some(String::from("second-vm")),
+                        executable: false,
+                        ..Default::default()
+                    },
+                ],
+            }),
+        ))
+        .expect("import snapshot into second vm")
+        .response
+        .payload
+    {
+        ResponsePayload::SnapshotImported(response) => response.layer_id,
+        other => panic!("unexpected second import response: {other:?}"),
+    };
+
+    assert_eq!(first_layer_id, "layer-1");
+    assert_eq!(second_layer_id, "layer-1");
+
+    let first_entries = match sidecar
+        .dispatch_blocking(request(
+            7,
+            OwnershipScope::vm(&connection_id, &session_id, &first_vm_id),
+            RequestPayload::ExportSnapshot(ExportSnapshotRequest {
+                layer_id: first_layer_id,
+            }),
+        ))
+        .expect("export first vm snapshot")
+        .response
+        .payload
+    {
+        ResponsePayload::SnapshotExported(response) => response.entries,
+        other => panic!("unexpected first export response: {other:?}"),
+    };
+    let second_entries = match sidecar
+        .dispatch_blocking(request(
+            8,
+            OwnershipScope::vm(&connection_id, &session_id, &second_vm_id),
+            RequestPayload::ExportSnapshot(ExportSnapshotRequest {
+                layer_id: second_layer_id,
+            }),
+        ))
+        .expect("export second vm snapshot")
+        .response
+        .payload
+    {
+        ResponsePayload::SnapshotExported(response) => response.entries,
+        other => panic!("unexpected second export response: {other:?}"),
+    };
+
+    assert!(first_entries.iter().any(|entry| {
+        entry.path == "/workspace/first.txt" && entry.content.as_deref() == Some("first-vm")
+    }));
+    assert!(!first_entries
+        .iter()
+        .any(|entry| entry.path == "/workspace/second.txt"));
+    assert!(second_entries.iter().any(|entry| {
+        entry.path == "/workspace/second.txt" && entry.content.as_deref() == Some("second-vm")
+    }));
+    assert!(!second_entries
+        .iter()
+        .any(|entry| entry.path == "/workspace/first.txt"));
+}
+
+#[test]
 fn vm_layer_rpcs_and_module_access_mounts_are_scoped_per_vm() {
     let mut sidecar = new_sidecar("layer-management");
     let cwd = temp_dir("layer-management-cwd");
