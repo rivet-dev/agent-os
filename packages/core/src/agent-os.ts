@@ -3184,7 +3184,11 @@ export class AgentOs {
 		) {
 			throw new Error(`Session not found: ${sessionId}`);
 		}
-		void this._closeSessionInternal(sessionId);
+		const closePromise = this._closeSessionInternal(sessionId);
+		// `closeSession()` is intentionally fire-and-forget; suppress unhandled
+		// rejections here and let tracked close promises surface errors to any
+		// internal/test callers awaiting `_sessionClosePromises`.
+		void closePromise.catch(() => {});
 	}
 
 	getSessionEvents(

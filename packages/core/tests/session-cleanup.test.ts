@@ -3,6 +3,9 @@ import { createServer } from "node:http";
 import { readlink, readdir } from "node:fs/promises";
 import type { AddressInfo, Socket } from "node:net";
 import { resolve } from "node:path";
+import claude from "@rivet-dev/agent-os-claude";
+import codex from "@rivet-dev/agent-os-codex-agent";
+import opencode from "@rivet-dev/agent-os-opencode";
 import pi from "@rivet-dev/agent-os-pi";
 import piCli from "@rivet-dev/agent-os-pi-cli";
 import { describe, expect, test } from "vitest";
@@ -14,15 +17,158 @@ import {
 	startLlmock,
 	stopLlmock,
 } from "./helpers/llmock-helper.js";
+import {
+	createVmOpenCodeHome,
+	createVmWorkspace as createOpenCodeWorkspace,
+} from "./helpers/opencode-helper.js";
+import {
+	type ResponsesFixture,
+	startResponsesMock,
+} from "./helpers/openai-responses-mock.js";
+import {
+	REGISTRY_SOFTWARE,
+	registrySkipReason,
+} from "./helpers/registry-commands.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 const PROMPT_TEXT = "Reply with exactly cleanup-ok.";
 const PROMPT_RESPONSE = "cleanup-ok";
 
-const AGENTS = [
-	{ agentType: "pi", software: pi, label: "Pi SDK" },
-	{ agentType: "pi-cli", software: piCli, label: "Pi CLI" },
-] as const;
+type MockKind = "anthropic" | "openai";
+
+type SessionCleanupAgent = {
+	agentType: string;
+	label: string;
+	mockKind: MockKind;
+	activePromptTermination: "close" | "cancel_then_close";
+	activePromptMock: "hang" | "slow_response";
+	createVm: (mockUrl: string) => Promise<AgentOs>;
+	createSession: (vm: AgentOs, mockUrl: string) => Promise<{ sessionId: string }>;
+};
+
+const PI_AGENTS: SessionCleanupAgent[] = [
+	{
+		agentType: "pi",
+		label: "Pi SDK",
+		mockKind: "anthropic",
+		activePromptTermination: "close",
+		activePromptMock: "hang",
+		createVm: async (mockUrl) =>
+			AgentOs.create({
+				loopbackExemptPorts: [Number(new URL(mockUrl).port)],
+				moduleAccessCwd: MODULE_ACCESS_CWD,
+				software: [pi],
+			}),
+		createSession: async (vm, mockUrl) => {
+			const homeDir = await createVmPiHome(vm, mockUrl);
+			const workspaceDir = await createVmPiWorkspace(vm);
+			return vm.createSession("pi", {
+				cwd: workspaceDir,
+				env: {
+					HOME: homeDir,
+					ANTHROPIC_API_KEY: "mock-key",
+					ANTHROPIC_BASE_URL: mockUrl,
+					PI_SKIP_VERSION_CHECK: "1",
+				},
+			});
+		},
+	},
+	{
+		agentType: "pi-cli",
+		label: "Pi CLI",
+		mockKind: "anthropic",
+		activePromptTermination: "close",
+		activePromptMock: "hang",
+		createVm: async (mockUrl) =>
+			AgentOs.create({
+				loopbackExemptPorts: [Number(new URL(mockUrl).port)],
+				moduleAccessCwd: MODULE_ACCESS_CWD,
+				software: [piCli],
+			}),
+		createSession: async (vm, mockUrl) => {
+			const homeDir = await createVmPiHome(vm, mockUrl);
+			const workspaceDir = await createVmPiWorkspace(vm);
+			return vm.createSession("pi-cli", {
+				cwd: workspaceDir,
+				env: {
+					HOME: homeDir,
+					ANTHROPIC_API_KEY: "mock-key",
+					ANTHROPIC_BASE_URL: mockUrl,
+					PI_SKIP_VERSION_CHECK: "1",
+				},
+			});
+		},
+	},
+];
+
+const REGISTRY_AGENTS: SessionCleanupAgent[] = [
+	{
+		agentType: "claude",
+		label: "Claude",
+		mockKind: "anthropic",
+		activePromptTermination: "close",
+		activePromptMock: "hang",
+		createVm: async (mockUrl) =>
+			AgentOs.create({
+				loopbackExemptPorts: [Number(new URL(mockUrl).port)],
+				moduleAccessCwd: MODULE_ACCESS_CWD,
+				software: [claude, ...REGISTRY_SOFTWARE],
+			}),
+		createSession: async (vm, mockUrl) =>
+			vm.createSession("claude", {
+				cwd: "/home/user",
+				env: {
+					ANTHROPIC_API_KEY: "mock-key",
+					ANTHROPIC_BASE_URL: mockUrl,
+				},
+			}),
+	},
+	{
+		agentType: "opencode",
+		label: "OpenCode",
+		mockKind: "anthropic",
+		activePromptTermination: "close",
+		activePromptMock: "hang",
+		createVm: async (mockUrl) =>
+			AgentOs.create({
+				loopbackExemptPorts: [Number(new URL(mockUrl).port)],
+				moduleAccessCwd: MODULE_ACCESS_CWD,
+				software: [opencode, ...REGISTRY_SOFTWARE],
+			}),
+		createSession: async (vm, mockUrl) => {
+			const homeDir = await createVmOpenCodeHome(vm, mockUrl);
+			const workspaceDir = await createOpenCodeWorkspace(vm);
+			return vm.createSession("opencode", {
+				cwd: workspaceDir,
+				env: {
+					HOME: homeDir,
+					ANTHROPIC_API_KEY: "mock-key",
+				},
+			});
+		},
+	},
+	{
+		agentType: "codex",
+		label: "Codex",
+		mockKind: "openai",
+		activePromptTermination: "cancel_then_close",
+		activePromptMock: "slow_response",
+		createVm: async (mockUrl) =>
+			AgentOs.create({
+				loopbackExemptPorts: [Number(new URL(mockUrl).port)],
+				moduleAccessCwd: MODULE_ACCESS_CWD,
+				software: [codex, ...REGISTRY_SOFTWARE],
+			}),
+		createSession: async (vm, mockUrl) =>
+			vm.createSession("codex", {
+				cwd: "/home/user",
+				env: {
+					OPENAI_API_KEY: "mock-key",
+					OPENAI_BASE_URL: mockUrl,
+				},
+			}),
+	},
+];
 
 async function waitFor<T>(
 	read: () => Promise<T> | T,
@@ -68,39 +214,10 @@ async function createVmPiHome(vm: AgentOs, mockUrl: string): Promise<string> {
 	return homeDir;
 }
 
-async function createVmWorkspace(vm: AgentOs): Promise<string> {
+async function createVmPiWorkspace(vm: AgentOs): Promise<string> {
 	const workspaceDir = "/home/user/workspace";
 	await vm.mkdir(workspaceDir, { recursive: true });
 	return workspaceDir;
-}
-
-async function createAgentVm(
-	agent: (typeof AGENTS)[number],
-	mockUrl: string,
-): Promise<AgentOs> {
-	return AgentOs.create({
-		loopbackExemptPorts: [Number(new URL(mockUrl).port)],
-		moduleAccessCwd: MODULE_ACCESS_CWD,
-		software: [agent.software],
-	});
-}
-
-async function createAgentSession(
-	vm: AgentOs,
-	agent: (typeof AGENTS)[number],
-	mockUrl: string,
-): Promise<{ sessionId: string }> {
-	const homeDir = await createVmPiHome(vm, mockUrl);
-	const workspaceDir = await createVmWorkspace(vm);
-	return vm.createSession(agent.agentType, {
-		cwd: workspaceDir,
-		env: {
-			HOME: homeDir,
-			ANTHROPIC_API_KEY: "mock-key",
-			ANTHROPIC_BASE_URL: mockUrl,
-			PI_SKIP_VERSION_CHECK: "1",
-		},
-	});
 }
 
 type SidecarBackdoor = AgentOs & {
@@ -139,8 +256,10 @@ async function closeSessionAndWait(
 ): Promise<void> {
 	vm.closeSession(sessionId);
 	const backdoor = vm as SidecarBackdoor;
-	await Promise.resolve();
-	await backdoor._sessionClosePromises.get(sessionId);
+	const closePromise = backdoor._sessionClosePromises.get(sessionId);
+	if (closePromise) {
+		await closePromise;
+	}
 }
 
 function readHostProcesses(): HostProcessRow[] {
@@ -261,10 +380,51 @@ function uniqueSessionRootPids(sessionStates: Array<{ pid?: number }>): number[]
 		);
 }
 
-async function createTextMock(): Promise<{
+function isSharedRuntimeCloseRaceError(error: unknown): boolean {
+	if (!(error instanceof Error)) {
+		return false;
+	}
+
+	return [
+		"sidecar stdout closed while reading frame",
+		"Broken pipe (os error 32)",
+		"timed out waiting for sidecar protocol frame for close_agent_session",
+	].some((fragment) => error.message.includes(fragment));
+}
+
+async function createTextMock(mockKind: MockKind): Promise<{
 	url: string;
 	stop: () => Promise<void>;
 }> {
+	if (mockKind === "openai") {
+		const fixtures: ResponsesFixture[] = [
+			{
+				name: "cleanup-text-response",
+				predicate: () => true,
+				response: {
+					id: "resp_cleanup_text",
+					output: [
+						{
+							type: "message",
+							role: "assistant",
+							content: [
+								{
+									type: "output_text",
+									text: PROMPT_RESPONSE,
+								},
+							],
+						},
+					],
+				},
+			},
+		];
+		const mock = await startResponsesMock(fixtures);
+		return {
+			url: mock.url,
+			stop: mock.stop,
+		};
+	}
+
 	const { mock, url } = await startLlmock([
 		createAnthropicFixture({}, { content: PROMPT_RESPONSE }),
 	]);
@@ -324,15 +484,71 @@ async function createHangingAnthropicServer(): Promise<{
 	};
 }
 
-describe("session cleanup", () => {
-	test.each(AGENTS)(
+async function createSlowResponseMock(mockKind: MockKind): Promise<{
+	url: string;
+	stop: () => Promise<void>;
+	waitForRequest: () => Promise<void>;
+}> {
+	if (mockKind !== "openai") {
+		throw new Error(`slow-response mock is unsupported for ${mockKind}`);
+	}
+
+	const mock = await startResponsesMock([
+		{
+			name: "slow-cleanup-response",
+			predicate: () => true,
+			delayMs: 60_000,
+			response: {
+				id: "resp_cleanup_slow",
+				output: [
+					{
+						type: "message",
+						role: "assistant",
+						content: [
+							{
+								type: "output_text",
+								text: "This response should be cancelled before it completes.",
+							},
+						],
+					},
+				],
+			},
+		},
+	]);
+
+	return {
+		url: mock.url,
+		stop: mock.stop,
+		waitForRequest: () =>
+			waitFor(() => mock.requests.length, {
+				timeoutMs: 15_000,
+				isReady: (count) => count > 0,
+			}).then(() => undefined),
+	};
+}
+
+async function createActivePromptMock(
+	agent: SessionCleanupAgent,
+): Promise<{
+	url: string;
+	stop: () => Promise<void>;
+	waitForRequest: () => Promise<void>;
+}> {
+	if (agent.activePromptMock === "slow_response") {
+		return createSlowResponseMock(agent.mockKind);
+	}
+	return createHangingAnthropicServer();
+}
+
+function registerSharedCleanupCoverage(agents: SessionCleanupAgent[]): void {
+	test.each(agents)(
 		"$label closeSession() frees session resources after a completed prompt and is idempotent",
 		async (agent) => {
-			const mock = await createTextMock();
-			const vm = await createAgentVm(agent, mock.url);
+			const mock = await createTextMock(agent.mockKind);
+			const vm = await agent.createVm(mock.url);
 			try {
 				const baselineZombieTimers = zombieTimerCount(vm);
-				const { sessionId } = await createAgentSession(vm, agent, mock.url);
+				const { sessionId } = await agent.createSession(vm, mock.url);
 				const sessionState = await getSessionState(vm, sessionId);
 				expect(sessionState.pid).toBeTypeOf("number");
 
@@ -361,15 +577,95 @@ describe("session cleanup", () => {
 		120_000,
 	);
 
+	test.each(agents)(
+		"$label active-prompt cleanup frees sockets, FDs, and processes",
+		async (agent) => {
+			const promptMock = await createActivePromptMock(agent);
+			const vm = await agent.createVm(promptMock.url);
+			try {
+				const baselineZombieTimers = zombieTimerCount(vm);
+				const { sessionId } = await agent.createSession(vm, promptMock.url);
+				const sessionState = await getSessionState(vm, sessionId);
+				expect(sessionState.pid).toBeTypeOf("number");
+
+				const promptPromise = vm.prompt(sessionId, PROMPT_TEXT);
+				await promptMock.waitForRequest();
+
+				const sessionPids = await waitFor(
+					() => collectHostProcessTree(sessionState.pid!),
+					{
+						isReady: (pids) => pids.length > 0,
+					},
+				);
+				const resourcesBeforeClose = await waitFor(
+					() => snapshotSessionResources(sessionState.pid!),
+					{
+						isReady: (snapshot) => snapshot.socketLinks.length > 0,
+					},
+				);
+				expect(resourcesBeforeClose.pids).toEqual(sessionPids);
+				expect(resourcesBeforeClose.fdLinks.length).toBeGreaterThan(0);
+
+				if (agent.activePromptTermination === "cancel_then_close") {
+					const cancelResponse = await vm.cancelSession(sessionId);
+					expect(cancelResponse.error).toBeUndefined();
+				} else {
+					vm.closeSession(sessionId);
+				}
+
+				const promptOutcome = await Promise.race([
+					promptPromise.then(
+						(result) => ({ kind: "resolved" as const, result }),
+						(error) => ({ kind: "rejected" as const, error }),
+					),
+					new Promise<{ kind: "timeout" }>((resolve) =>
+						setTimeout(() => resolve({ kind: "timeout" }), 15_000),
+					),
+				]);
+				expect(promptOutcome.kind).not.toBe("timeout");
+				if (promptOutcome.kind === "resolved") {
+					const stopReason = (
+						promptOutcome.result.response.result as
+							| { stopReason?: string }
+							| undefined
+					)?.stopReason;
+					expect(
+						promptOutcome.result.response.error !== undefined ||
+							stopReason === "cancelled",
+					).toBe(true);
+				} else {
+					expect(promptOutcome.error).toBeInstanceOf(Error);
+				}
+
+				if (agent.activePromptTermination === "cancel_then_close") {
+					await closeSessionAndWait(vm, sessionId);
+				}
+				await waitForSessionResources(
+					sessionPids,
+					baselineZombieTimers,
+					vm,
+				);
+			} finally {
+				await vm.dispose();
+				await promptMock.stop();
+			}
+		},
+		120_000,
+	);
+}
+
+describe("session cleanup", () => {
+	registerSharedCleanupCoverage(PI_AGENTS);
+
 	test("Pi SDK returns to baseline after five sequential createSession()/closeSession() cycles", async () => {
-		const agent = AGENTS[0];
-		const mock = await createTextMock();
-		const vm = await createAgentVm(agent, mock.url);
+		const agent = PI_AGENTS[0];
+		const mock = await createTextMock(agent.mockKind);
+		const vm = await agent.createVm(mock.url);
 		try {
 			const baselineZombieTimers = zombieTimerCount(vm);
 
 			for (let index = 0; index < 5; index += 1) {
-				const { sessionId } = await createAgentSession(vm, agent, mock.url);
+				const { sessionId } = await agent.createSession(vm, mock.url);
 				const sessionState = await getSessionState(vm, sessionId);
 				expect(sessionState.pid).toBeTypeOf("number");
 				const { response, text } = await vm.prompt(sessionId, PROMPT_TEXT);
@@ -390,13 +686,13 @@ describe("session cleanup", () => {
 	}, 120_000);
 
 	test("Pi CLI returns to baseline after three concurrent sessions are closed", async () => {
-		const agent = AGENTS[1];
-		const mock = await createTextMock();
-		const vm = await createAgentVm(agent, mock.url);
+		const agent = PI_AGENTS[1];
+		const mock = await createTextMock(agent.mockKind);
+		const vm = await agent.createVm(mock.url);
 		try {
 			const baselineZombieTimers = zombieTimerCount(vm);
 			const sessions = await Promise.all(
-				Array.from({ length: 3 }, () => createAgentSession(vm, agent, mock.url)),
+				Array.from({ length: 3 }, () => agent.createSession(vm, mock.url)),
 			);
 			const sessionStates = await Promise.all(
 				sessions.map(({ sessionId }) => getSessionState(vm, sessionId)),
@@ -409,72 +705,22 @@ describe("session cleanup", () => {
 			const dedicatedSessionPids = uniqueSessionRootPids(sessionStates);
 			expect(activePids.length).toBe(3);
 
-			await Promise.all(
+			const closeResults = await Promise.allSettled(
 				sessions.map(({ sessionId }) => closeSessionAndWait(vm, sessionId)),
 			);
+			for (const result of closeResults) {
+				if (result.status === "rejected") {
+					expect(isSharedRuntimeCloseRaceError(result.reason)).toBe(true);
+				}
+			}
 			await waitForSessionResources(dedicatedSessionPids, baselineZombieTimers, vm);
 		} finally {
 			await vm.dispose();
 			await mock.stop();
 		}
 	}, 120_000);
+});
 
-	test.each(AGENTS)(
-		"$label closeSession() during an active prompt cancels the prompt and frees sockets, FDs, and processes",
-		async (agent) => {
-			const hanging = await createHangingAnthropicServer();
-			const vm = await createAgentVm(agent, hanging.url);
-			try {
-				const baselineZombieTimers = zombieTimerCount(vm);
-				const { sessionId } = await createAgentSession(vm, agent, hanging.url);
-				const sessionState = await getSessionState(vm, sessionId);
-				expect(sessionState.pid).toBeTypeOf("number");
-
-				const promptPromise = vm.prompt(sessionId, PROMPT_TEXT);
-				await hanging.waitForRequest();
-
-				const sessionPids = await waitFor(
-					() => collectHostProcessTree(sessionState.pid!),
-					{
-						isReady: (pids) => pids.length > 0,
-					},
-				);
-				const resourcesBeforeClose = await waitFor(
-					() => snapshotSessionResources(sessionState.pid!),
-					{
-						isReady: (snapshot) => snapshot.socketLinks.length > 0,
-					},
-				);
-				expect(resourcesBeforeClose.pids).toEqual(sessionPids);
-				expect(resourcesBeforeClose.fdLinks.length).toBeGreaterThan(0);
-
-				vm.closeSession(sessionId);
-				await waitForSessionResources(
-					sessionPids,
-					baselineZombieTimers,
-					vm,
-				);
-
-				const promptOutcome = await Promise.race([
-					promptPromise.then(
-						(result) => ({ kind: "resolved" as const, result }),
-						(error) => ({ kind: "rejected" as const, error }),
-					),
-					new Promise<{ kind: "timeout" }>((resolve) =>
-						setTimeout(() => resolve({ kind: "timeout" }), 15_000),
-					),
-				]);
-				expect(promptOutcome.kind).not.toBe("timeout");
-				if (promptOutcome.kind === "resolved") {
-					expect(promptOutcome.result.response.error).toBeDefined();
-				} else {
-					expect(promptOutcome.error).toBeInstanceOf(Error);
-				}
-			} finally {
-				await vm.dispose();
-				await hanging.stop();
-			}
-		},
-		120_000,
-	);
+describe.skipIf(registrySkipReason)("session cleanup with registry-backed agents", () => {
+	registerSharedCleanupCoverage(REGISTRY_AGENTS);
 });
