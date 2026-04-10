@@ -1,15 +1,17 @@
-import { closeSync, createReadStream, readSync, writeSync } from 'node:fs';
+import { closeSync, createReadStream, mkdirSync, readFileSync, readSync, writeSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { register } from 'node:module';
+import * as moduleBuiltin from 'node:module';
 import { performance as realPerformance } from 'node:perf_hooks';
 import path from 'node:path';
 import readline from 'node:readline';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { URL } from 'node:url';
 
 const ACCESS_DENIED_CODE = 'ERR_ACCESS_DENIED';
 const ASSET_ROOT_ENV = 'AGENT_OS_NODE_IMPORT_CACHE_ASSET_ROOT';
 const PYODIDE_INDEX_URL_ENV = 'AGENT_OS_PYODIDE_INDEX_URL';
 const PYODIDE_PACKAGE_BASE_URL_ENV = 'AGENT_OS_PYODIDE_PACKAGE_BASE_URL';
+const PYODIDE_PACKAGE_CACHE_DIR_ENV = 'AGENT_OS_PYODIDE_PACKAGE_CACHE_DIR';
+const PYODIDE_PACKAGE_CACHE_GUEST_ROOT = '/__agent_os_pyodide_cache';
 const PYTHON_CODE_ENV = 'AGENT_OS_PYTHON_CODE';
 const PYTHON_FILE_ENV = 'AGENT_OS_PYTHON_FILE';
 const PYTHON_PREWARM_ONLY_ENV = 'AGENT_OS_PYTHON_PREWARM_ONLY';
@@ -49,11 +51,42 @@ const originalRequire =
   typeof globalThis.require === 'function'
     ? globalThis.require.bind(globalThis)
     : null;
+function canCallBridgeSync(bridge) {
+  return (
+    typeof bridge?.applySyncPromise === 'function' ||
+    typeof bridge?.applySync === 'function' ||
+    typeof bridge === 'function'
+  );
+}
+
+function callBridgeSync(bridge, args) {
+  if (typeof bridge?.applySyncPromise === 'function') {
+    return bridge.applySyncPromise(void 0, args);
+  }
+  if (typeof bridge?.applySync === 'function') {
+    return bridge.applySync(void 0, args);
+  }
+  if (typeof bridge === 'function') {
+    return bridge(...args);
+  }
+  return undefined;
+}
+
+const bridgePythonRpc =
+  canCallBridgeSync(globalThis._pythonRpc)
+    ? globalThis._pythonRpc
+    : null;
+const bridgeKernelStdinRead = globalThis._kernelStdinRead ?? null;
+const bridgeLoadFileSync =
+  canCallBridgeSync(globalThis._loadFileSync)
+    ? globalThis._loadFileSync
+    : null;
 const originalGetBuiltinModule =
   typeof process.getBuiltinModule === 'function'
     ? process.getBuiltinModule.bind(process)
     : null;
 const CONTROL_PIPE_FD = parseControlPipeFd(process.env.AGENT_OS_CONTROL_PIPE_FD);
+const register = typeof moduleBuiltin?.register === 'function' ? moduleBuiltin.register.bind(moduleBuiltin) : null;
 
 function requiredEnv(name) {
   const value = process.env[name];
@@ -88,6 +121,19 @@ function normalizeDirectoryPath(value) {
   return value.endsWith(path.sep) ? value : `${value}${path.sep}`;
 }
 
+function pathToFileUrlString(value) {
+  const normalizedPath = path.resolve(value);
+  return `file://${normalizedPath.startsWith(path.sep) ? normalizedPath : `${path.sep}${normalizedPath}`}`;
+}
+
+function fileUrlToPathString(value) {
+  const url = value instanceof URL ? value : new URL(String(value));
+  if (url.protocol !== 'file:') {
+    throw new Error(`Expected file URL, received ${url.protocol}`);
+  }
+  return decodeURIComponent(url.pathname);
+}
+
 function resolveIndexLocation(value) {
   if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) {
     const normalizedUrl = value.endsWith('/') ? value : `${value}/`;
@@ -98,17 +144,17 @@ function resolveIndexLocation(value) {
       };
     }
 
-    const indexPath = normalizeDirectoryPath(fileURLToPath(normalizedUrl));
+    const indexPath = normalizeDirectoryPath(fileUrlToPathString(normalizedUrl));
     return {
       indexPath,
-      indexUrl: pathToFileURL(indexPath).href,
+      indexUrl: pathToFileUrlString(indexPath),
     };
   }
 
   const indexPath = normalizeDirectoryPath(path.resolve(value));
   return {
     indexPath,
-    indexUrl: pathToFileURL(indexPath).href,
+    indexUrl: pathToFileUrlString(indexPath),
   };
 }
 
@@ -122,6 +168,113 @@ function normalizeBaseUrl(value) {
   }
 
   return normalizeDirectoryPath(path.resolve(value));
+}
+
+function normalizePyodideShellPath(value) {
+  if (typeof value !== 'string') {
+    throw new Error(`expected shell path to be a string, received ${typeof value}`);
+  }
+
+  if (value.startsWith('file://')) {
+    return fileUrlToPathString(value);
+  }
+
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) {
+    throw new Error(`unsupported Pyodide shell URL ${value}`);
+  }
+
+  return value;
+}
+
+function installPyodideShellCompat() {
+  const originalRead = globalThis.read;
+  const originalReadbuffer = globalThis.readbuffer;
+  const originalLoad = globalThis.load;
+  const originalArguments = globalThis.arguments;
+  const originalScriptArgs = globalThis.scriptArgs;
+  const originalPrint = globalThis.print;
+  const originalPrintErr = globalThis.printErr;
+
+  const shellRead = (target, mode) => {
+    const normalized = normalizePyodideShellPath(String(target));
+    if (mode === 'binary') {
+      return new Uint8Array(readFileSync(normalized));
+    }
+    return readFileSync(normalized, 'utf8');
+  };
+
+  globalThis.read = shellRead;
+  globalThis.readbuffer = (target) => new Uint8Array(readFileSync(normalizePyodideShellPath(String(target))));
+  globalThis.load = async (target) => {
+    const normalized = normalizePyodideShellPath(String(target));
+    await import(normalized.startsWith('/') ? normalized : pathToFileUrlString(normalized));
+  };
+  globalThis.arguments = [];
+  globalThis.scriptArgs = [];
+  const writeShellStream = (stream, args) => {
+    const value = args.join(' ');
+    if (value.trim().length === 0) {
+      return;
+    }
+    writeStream(stream, value);
+  };
+
+  globalThis.print = (...args) => writeShellStream(process.stdout, args);
+  globalThis.printErr = (...args) => writeShellStream(process.stderr, args);
+
+  return () => {
+    if (originalRead === undefined) {
+      delete globalThis.read;
+    } else {
+      globalThis.read = originalRead;
+    }
+    if (originalReadbuffer === undefined) {
+      delete globalThis.readbuffer;
+    } else {
+      globalThis.readbuffer = originalReadbuffer;
+    }
+    if (originalLoad === undefined) {
+      delete globalThis.load;
+    } else {
+      globalThis.load = originalLoad;
+    }
+    if (originalArguments === undefined) {
+      delete globalThis.arguments;
+    } else {
+      globalThis.arguments = originalArguments;
+    }
+    if (originalScriptArgs === undefined) {
+      delete globalThis.scriptArgs;
+    } else {
+      globalThis.scriptArgs = originalScriptArgs;
+    }
+    if (originalPrint === undefined) {
+      delete globalThis.print;
+    } else {
+      globalThis.print = originalPrint;
+    }
+    if (originalPrintErr === undefined) {
+      delete globalThis.printErr;
+    } else {
+      globalThis.printErr = originalPrintErr;
+    }
+  };
+}
+
+function resolvePyodideResource(indexPath, indexUrl, resourceName) {
+  if (typeof indexPath === 'string' && path.isAbsolute(indexPath)) {
+    const resourcePath = path.join(indexPath, resourceName);
+    return {
+      path: resourcePath,
+      url: resourcePath,
+    };
+  }
+
+  const resourceUrl = new URL(resourceName, indexUrl).href;
+  return {
+    path: resourceUrl,
+    url: resourceUrl,
+  };
 }
 
 function writeStream(stream, message) {
@@ -140,14 +293,53 @@ function writePyodideStdout(message) {
 
   const value = typeof message === 'string' ? message : String(message);
   const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return;
+  }
   if (
     trimmed.startsWith('Loading ') ||
-    trimmed.startsWith('Loaded ')
+    trimmed.startsWith('Loaded ') ||
+    trimmed.startsWith("Didn't find package ") ||
+    (trimmed.startsWith('Package ') && trimmed.includes(' loaded from '))
   ) {
     return;
   }
 
   writeStream(process.stdout, value);
+}
+
+function resolvePyodidePackageCacheDir() {
+  if (bridgePythonRpc) {
+    return PYODIDE_PACKAGE_CACHE_GUEST_ROOT;
+  }
+
+  const configured = process.env[PYODIDE_PACKAGE_CACHE_DIR_ENV];
+  if (typeof configured === 'string' && configured.trim() !== '') {
+    return path.resolve(configured);
+  }
+
+  const assetRoot = process.env[ASSET_ROOT_ENV];
+  if (typeof assetRoot === 'string' && assetRoot.trim() !== '') {
+    return path.resolve(assetRoot, '..', 'pyodide-package-cache');
+  }
+
+  return path.resolve(process.cwd(), '.agent-os-pyodide-cache');
+}
+
+function emitWarmupStage(stage) {
+  if (process.env[PYTHON_WARMUP_DEBUG_ENV] !== '1') {
+    return;
+  }
+
+  writeStream(process.stderr, `__AGENT_OS_PYTHON_WARMUP_STAGE__:${stage}`);
+}
+
+function emitPythonDebug(channel, message) {
+  if (process.env[PYTHON_WARMUP_DEBUG_ENV] !== '1') {
+    return;
+  }
+
+  writeStream(process.stderr, `__AGENT_OS_PYTHON_${channel}__:${message}`);
 }
 
 function formatError(error) {
@@ -156,6 +348,15 @@ function formatError(error) {
   }
 
   return String(error);
+}
+
+function wrapPythonStartupError(step, context, error) {
+  const details = Object.entries(context)
+    .filter(([, value]) => value != null && value !== '')
+    .map(([key, value]) => `${key}=${value}`)
+    .join(', ');
+  const suffix = details.length > 0 ? ` (${details})` : '';
+  return new Error(`Python runtime ${step} failed${suffix}: ${formatError(error)}`);
 }
 
 function normalizeFetchHeaders(headers) {
@@ -284,6 +485,19 @@ function parseOptionalFd(name) {
   return fd;
 }
 
+function normalizeWriteContent(content) {
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (ArrayBuffer.isView(content)) {
+    return Buffer.from(content.buffer, content.byteOffset, content.byteLength).toString('base64');
+  }
+  if (content instanceof ArrayBuffer) {
+    return Buffer.from(content).toString('base64');
+  }
+  throw new Error('fsWrite requires a base64 string or Uint8Array');
+}
+
 function rejectPendingRpcRequests(pending, error) {
   for (const { reject } of pending.values()) {
     reject(error);
@@ -291,7 +505,126 @@ function rejectPendingRpcRequests(pending, error) {
   pending.clear();
 }
 
-function createPythonVfsRpcBridge() {
+function normalizePythonBridgeError(error) {
+  const normalized = error instanceof Error ? error : new Error(String(error));
+  const message = normalized.message || String(error);
+  const separatorIndex = message.indexOf(': ');
+  if (separatorIndex > 0) {
+    const code = message.slice(0, separatorIndex);
+    if (/^(?:ERR_[A-Z0-9_]+|E[A-Z0-9_]+)$/.test(code)) {
+      normalized.code = code;
+      normalized.message = message.slice(separatorIndex + 2);
+    }
+  }
+  if (typeof normalized.code !== 'string') {
+    normalized.code = 'ERR_AGENT_OS_PYTHON_VFS_RPC';
+  }
+  return normalized;
+}
+
+function createPythonBridgeRpcBridge() {
+  if (!bridgePythonRpc) {
+    return null;
+  }
+
+  function requestSync(method, payload = {}) {
+    try {
+      return callBridgeSync(bridgePythonRpc, [{
+        method,
+        ...payload,
+      }]) ?? {};
+    } catch (error) {
+      throw normalizePythonBridgeError(error);
+    }
+  }
+
+  return {
+    fsReadSync(path) {
+      const result = requestSync('fsRead', { path });
+      return result.contentBase64 ?? '';
+    },
+    async fsRead(path) {
+      return this.fsReadSync(path);
+    },
+    fsWriteSync(path, content) {
+      requestSync('fsWrite', {
+        path,
+        contentBase64: normalizeWriteContent(content),
+      });
+    },
+    async fsWrite(path, content) {
+      this.fsWriteSync(path, content);
+    },
+    fsStatSync(path) {
+      const result = requestSync('fsStat', { path });
+      return result.stat ?? null;
+    },
+    async fsStat(path) {
+      return this.fsStatSync(path);
+    },
+    fsReaddirSync(path) {
+      const result = requestSync('fsReaddir', { path });
+      return result.entries ?? [];
+    },
+    async fsReaddir(path) {
+      return this.fsReaddirSync(path);
+    },
+    fsMkdirSync(path, options = {}) {
+      requestSync('fsMkdir', {
+        path,
+        recursive: options?.recursive === true,
+      });
+    },
+    async fsMkdir(path, options = {}) {
+      this.fsMkdirSync(path, options);
+    },
+    httpRequestSync(url, method = 'GET', headersJson = '{}', bodyBase64 = null) {
+      let headers;
+      try {
+        headers = JSON.parse(headersJson);
+      } catch (error) {
+        throw new Error(`invalid Python httpRequest headers JSON: ${formatError(error)}`);
+      }
+      return JSON.stringify(requestSync('httpRequest', {
+        url,
+        httpMethod: method,
+        headers,
+        bodyBase64,
+      }));
+    },
+    dnsLookupSync(hostname, family = null) {
+      return JSON.stringify(requestSync('dnsLookup', { hostname, family }));
+    },
+    subprocessRunSync(
+      command,
+      argsJson = '[]',
+      cwd = null,
+      envJson = '{}',
+      shell = false,
+      maxBuffer = null,
+    ) {
+      let args;
+      let env;
+      try {
+        args = JSON.parse(argsJson);
+        env = JSON.parse(envJson);
+      } catch (error) {
+        throw new Error(`invalid Python subprocessRun payload JSON: ${formatError(error)}`);
+      }
+      return JSON.stringify(requestSync('subprocessRun', {
+        command,
+        args,
+        cwd,
+        env,
+        shell,
+        maxBuffer,
+      }));
+    },
+    dispose() {},
+  };
+}
+
+function createPythonFdRpcBridge() {
   const requestFd = parseOptionalFd(PYTHON_VFS_RPC_REQUEST_FD_ENV);
   const responseFd = parseOptionalFd(PYTHON_VFS_RPC_RESPONSE_FD_ENV);
 
@@ -379,19 +712,6 @@ function createPythonVfsRpcBridge() {
 
   function request(method, payload = {}) {
     return Promise.resolve().then(() => requestSync(method, payload));
-  }
-
-  function normalizeWriteContent(content) {
-    if (typeof content === 'string') {
-      return content;
-    }
-    if (ArrayBuffer.isView(content)) {
-      return Buffer.from(content.buffer, content.byteOffset, content.byteLength).toString('base64');
-    }
-    if (content instanceof ArrayBuffer) {
-      return Buffer.from(content).toString('base64');
-    }
-    throw new Error('fsWrite requires a base64 string or Uint8Array');
   }
 
   return {
@@ -629,6 +949,24 @@ class _AgentOsHttpResponse:
         self.close()
         return False
 
+class _AgentOsPyfetchResponse:
+    def __init__(self, payload):
+        self.status = int(payload.get("status", 0))
+        self.status_text = str(payload.get("reason", ""))
+        self.url = str(payload.get("url", ""))
+        self.headers = {str(name): ", ".join(values) for name, values in (payload.get("headers") or {}).items()}
+        self._body = _agent_os_base64.b64decode(payload.get("bodyBase64", "") or "")
+
+    async def bytes(self):
+        return self._body
+
+    async def string(self):
+        return self._body.decode("utf-8", errors="replace")
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise RuntimeError(f"{self.status} {self.status_text}")
+
 def _agent_os_extract_request_parts(url_or_request, data=None):
     if isinstance(url_or_request, _agent_os_urllib_request.Request):
         request = url_or_request
@@ -667,11 +1005,38 @@ def _agent_os_http_request(url_or_request, data=None):
         )
     return response
 
+async def _agent_os_pyfetch(url, **kwargs):
+    headers = dict(kwargs.get("headers") or {})
+    method = str(kwargs.get("method", "GET")).upper()
+    body = kwargs.get("body")
+    if body is not None and isinstance(body, str):
+        body = body.encode("utf-8")
+    body_base64 = None if body is None else _agent_os_base64.b64encode(body).decode("ascii")
+    try:
+        payload = _agent_os_json.loads(
+            _agent_os_rpc.httpRequestSync(
+                str(url),
+                method,
+                _agent_os_json.dumps(headers),
+                body_base64,
+            )
+        )
+    except Exception as error:
+        _agent_os_raise_from_error({"message": str(error)})
+    return _AgentOsPyfetchResponse(payload)
+
 def _agent_os_urlopen(url, data=None, timeout=None, *args, **kwargs):
     del timeout, args, kwargs
     return _agent_os_http_request(url, data=data)
 
 _agent_os_urllib_request.urlopen = _agent_os_urlopen
+
+try:
+    import pyodide.http as _agent_os_pyodide_http
+except ModuleNotFoundError:
+    _agent_os_pyodide_http = None
+else:
+    _agent_os_pyodide_http.pyfetch = _agent_os_pyfetch
 
 _agent_os_original_getaddrinfo = _agent_os_socket.getaddrinfo
 
@@ -785,6 +1150,7 @@ def _agent_os_subprocess_run(args, *, capture_output=False, check=False, cwd=Non
         command = str(values[0])
         argv = [str(value) for value in values[1:]]
     merged_env = dict(env or {})
+    resolved_cwd = cwd if cwd is not None else _agent_os_os.environ.get("PWD")
     if input is not None:
         raise NotImplementedError("subprocess.run input is not supported in the Agent OS Python runtime")
     try:
@@ -792,7 +1158,7 @@ def _agent_os_subprocess_run(args, *, capture_output=False, check=False, cwd=Non
             _agent_os_rpc.subprocessRunSync(
                 command,
                 _agent_os_json.dumps(argv),
-                cwd,
+                resolved_cwd,
                 _agent_os_json.dumps(merged_env),
                 bool(shell),
             )
@@ -833,6 +1199,14 @@ function hardenProperty(target, key, value) {
       configurable: false,
     });
   } catch (error) {
+    try {
+      target[key] = value;
+      if (target[key] === value) {
+        return;
+      }
+    } catch {
+      // Fall through to the original hardening error.
+    }
     throw new Error(`Failed to harden property ${String(key)}`, { cause: error });
   }
 }
@@ -968,6 +1342,7 @@ function installPythonGuestPreloadHardening(bridge = null) {
       }
 
       if (url.protocol === 'data:' || url.protocol === 'file:') {
+        emitPythonDebug('HTTP_DEBUG', `fetch:passthrough:${url.href}`);
         return originalFetch(resource, init);
       }
 
@@ -975,8 +1350,13 @@ function installPythonGuestPreloadHardening(bridge = null) {
         const method = (init.method ?? request?.method ?? 'GET').toUpperCase();
         const headers = normalizeFetchHeaders(init.headers ?? request?.headers);
         const bodyBase64 = await normalizeFetchBody(init.body ?? null);
+        emitPythonDebug('HTTP_DEBUG', `fetch:start:${method}:${url.href}`);
         const payload = JSON.parse(
           bridge.httpRequestSync(url.href, method, JSON.stringify(headers), bodyBase64),
+        );
+        emitPythonDebug(
+          'HTTP_DEBUG',
+          `fetch:ok:${payload.status ?? 0}:${url.href}`,
         );
         const responseBody = Buffer.from(payload.bodyBase64 ?? '', 'base64');
         return new Response(responseBody, {
@@ -992,7 +1372,11 @@ function installPythonGuestPreloadHardening(bridge = null) {
       return originalFetch(resource, init);
     };
 
-    hardenProperty(globalThis, 'fetch', restrictedFetch);
+    try {
+      hardenProperty(globalThis, 'fetch', restrictedFetch);
+    } catch {
+      // The shared JS runtime may have already sealed fetch with its own restrictions.
+    }
   }
 }
 
@@ -1022,7 +1406,7 @@ function installPythonGuestProcessHardening() {
 
 function installPythonGuestLoaderHooks() {
   const assetRoot = process.env[ASSET_ROOT_ENV];
-  if (!assetRoot) {
+  if (!assetRoot || !register) {
     return;
   }
 
@@ -1030,7 +1414,7 @@ function installPythonGuestLoaderHooks() {
 }
 
 function installPythonVfsRpcBridge() {
-  const bridge = createPythonVfsRpcBridge();
+  const bridge = createPythonBridgeRpcBridge() ?? createPythonFdRpcBridge();
   if (!bridge) {
     return null;
   }
@@ -1069,19 +1453,20 @@ function installPythonWorkspaceFs(pyodide, bridge) {
       return error;
     }
 
-    const message = String(error?.message || error);
+    const diagnostic = `${error?.code || ''} ${error?.message || ''} ${error?.stack || ''}`;
+    const message = diagnostic.toLowerCase();
     let errno = ERRNO_CODES.EIO;
-    if (/permission denied|access denied|denied/i.test(message)) {
+    if (/permission denied|access denied|denied/.test(message)) {
       errno = ERRNO_CODES.EACCES;
-    } else if (/read-only|erofs/i.test(message)) {
+    } else if (/read-only|erofs/.test(message)) {
       errno = ERRNO_CODES.EROFS;
-    } else if (/not a directory|enotdir/i.test(message)) {
+    } else if (/not a directory|enotdir/.test(message)) {
       errno = ERRNO_CODES.ENOTDIR;
-    } else if (/is a directory|eisdir/i.test(message)) {
+    } else if (/is a directory|eisdir/.test(message)) {
       errno = ERRNO_CODES.EISDIR;
-    } else if (/exists|already exists|eexist/i.test(message)) {
+    } else if (/exists|already exists|eexist/.test(message)) {
       errno = ERRNO_CODES.EEXIST;
-    } else if (/not found|no such file|enoent/i.test(message)) {
+    } else if (/not found|no such file|enoent/.test(message)) {
       errno = ERRNO_CODES.ENOENT;
     }
 
@@ -1352,9 +1737,25 @@ function installPythonWorkspaceFs(pyodide, bridge) {
   );
 }
 
-async function readLockFileContents(indexURL) {
-  const lockFileUrl = new URL('pyodide-lock.json', indexURL);
-  return readFile(lockFileUrl, 'utf8');
+async function readLockFileContents(indexPath, indexURL) {
+  const { path: lockFilePath, url: lockFileUrl } = resolvePyodideResource(
+    indexPath,
+    indexURL,
+    'pyodide-lock.json',
+  );
+  try {
+    if (typeof lockFilePath === 'string' && lockFilePath.startsWith('/') && bridgeLoadFileSync) {
+      return callBridgeSync(bridgeLoadFileSync, [lockFilePath]);
+    }
+    return await readFile(lockFilePath, 'utf8');
+  } catch (error) {
+    throw wrapPythonStartupError('lock file readFile', {
+      indexPath,
+      indexURL,
+      lockFileUrl,
+      lockFilePath,
+    }, error);
+  }
 }
 
 function installPythonStdin(pyodide) {
@@ -1362,9 +1763,31 @@ function installPythonStdin(pyodide) {
     return;
   }
 
+  function readFromKernelStdin(buffer) {
+    while (true) {
+      const response = callBridgeSync(bridgeKernelStdinRead, [buffer.length, 100]);
+      if (response?.done) {
+        return 0;
+      }
+
+      const dataBase64 = typeof response?.dataBase64 === 'string' ? response.dataBase64 : '';
+      if (dataBase64.length === 0) {
+        continue;
+      }
+
+      const chunk = Buffer.from(dataBase64, 'base64');
+      const target = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      chunk.copy(target, 0, 0, Math.min(chunk.length, target.length));
+      return Math.min(chunk.length, buffer.length);
+    }
+  }
+
   pyodide.setStdin({
     isatty: false,
     read(buffer) {
+      if (bridgeKernelStdinRead) {
+        return readFromKernelStdin(buffer);
+      }
       return readSync(STDIN_FD, buffer, 0, buffer.length, null);
     },
   });
@@ -1387,60 +1810,107 @@ let pythonVfsRpcBridge = null;
 
 try {
   const startupStarted = realPerformance.now();
+  emitWarmupStage('startup');
+  emitWarmupStage(`python-rpc-bridge:${bridgePythonRpc ? 'on' : 'off'}`);
   const { indexPath, indexUrl } = resolveIndexLocation(requiredEnv(PYODIDE_INDEX_URL_ENV));
-  const packageBaseUrl = normalizeBaseUrl(process.env[PYODIDE_PACKAGE_BASE_URL_ENV] ?? indexPath);
+  const bundledPackageBaseUrl = normalizeBaseUrl(indexPath);
+  const packageBaseUrl = normalizeBaseUrl(
+    process.env[PYODIDE_PACKAGE_BASE_URL_ENV] ?? bundledPackageBaseUrl,
+  );
+  const packageCacheDir = resolvePyodidePackageCacheDir();
+  emitWarmupStage(`package-cache-dir:${packageCacheDir}`);
   const prewarmOnly = process.env[PYTHON_PREWARM_ONLY_ENV] === '1';
   const preloadPackages = parsePreloadPackages(process.env[PYTHON_PRELOAD_PACKAGES_ENV]);
-  const lockFileContents = await readLockFileContents(indexUrl);
-  const pyodideModuleUrl = new URL('pyodide.mjs', indexUrl).href;
-  const { loadPyodide } = await import(pyodideModuleUrl);
+  const lockFileContents = await readLockFileContents(indexPath, indexUrl).catch((error) => {
+    throw wrapPythonStartupError('lock file read', { indexPath, indexUrl }, error);
+  });
+  emitWarmupStage('lock-file-ready');
+  const { url: pyodideModuleUrl } = resolvePyodideResource(indexPath, indexUrl, 'pyodide.mjs');
+  const restorePyodideShellCompat = installPyodideShellCompat();
+  const { loadPyodide } = await import(pyodideModuleUrl).catch((error) => {
+    throw wrapPythonStartupError('module import', { indexPath, indexUrl, pyodideModuleUrl }, error);
+  });
+  emitWarmupStage('module-imported');
 
   if (typeof loadPyodide !== 'function') {
     throw new Error(`pyodide.mjs at ${indexUrl} does not export loadPyodide()`);
   }
 
-  pythonVfsRpcBridge = installPythonVfsRpcBridge();
-  installPythonGuestPreloadHardening(pythonVfsRpcBridge);
-  const loadPyodideStarted = realPerformance.now();
-  const pyodide = await loadPyodide({
-    indexURL: indexPath,
-    lockFileContents,
-    packageBaseUrl: indexPath,
-    env: buildPythonRuntimeEnv(),
-    stdout: writePyodideStdout,
-    stderr: (message) => writeStream(process.stderr, message),
-  });
-  const loadPyodideMs = realPerformance.now() - loadPyodideStarted;
-  let packageLoadMs = 0;
-
   if (prewarmOnly) {
+    const stdlibResource = resolvePyodideResource(indexPath, indexUrl, 'python_stdlib.zip');
+    const wasmResource = resolvePyodideResource(indexPath, indexUrl, 'pyodide.asm.wasm');
+    await readFile(stdlibResource.path);
+    await readFile(wasmResource.path);
+    restorePyodideShellCompat();
+    emitWarmupStage('prewarm-assets-ready');
     emitPythonStartupMetrics({
       prewarmOnly: true,
       startupMs: realPerformance.now() - startupStarted,
-      loadPyodideMs,
-      packageLoadMs,
+      loadPyodideMs: 0,
+      packageLoadMs: 0,
       packageCount: 0,
       source: 'prewarm',
     });
     process.exitCode = 0;
   } else {
+  pythonVfsRpcBridge = installPythonVfsRpcBridge();
+  installPythonGuestPreloadHardening(pythonVfsRpcBridge);
+  mkdirSync(packageCacheDir, { recursive: true });
+  emitWarmupStage('before-load-pyodide');
+  const loadPyodideStarted = realPerformance.now();
+  const pyodide = await loadPyodide({
+    indexURL: indexPath,
+    lockFileContents,
+    packageBaseUrl: bundledPackageBaseUrl,
+    packageCacheDir,
+    env: buildPythonRuntimeEnv(),
+    stdout: writePyodideStdout,
+    stderr: (message) => writeStream(process.stderr, message),
+  }).catch((error) => {
+    throw wrapPythonStartupError(
+      'Pyodide bootstrap',
+      {
+        indexPath,
+        indexUrl,
+        packageBaseUrl,
+        bundledPackageBaseUrl,
+        packageCacheDir,
+        pyodideModuleUrl,
+      },
+      error,
+    );
+  });
+  restorePyodideShellCompat();
+  emitWarmupStage('after-load-pyodide');
+  const loadPyodideMs = realPerformance.now() - loadPyodideStarted;
+  let packageLoadMs = 0;
+
   installPythonStdin(pyodide);
   installPythonWorkspaceFs(pyodide, pythonVfsRpcBridge);
   installPythonGuestLoaderHooks();
+  if (pyodide?._api?.config) {
+    pyodide._api.config.packageBaseUrl = bundledPackageBaseUrl;
+    emitWarmupStage(`pyodide-package-base:${pyodide._api.config.packageBaseUrl}`);
+  }
   const canLoadPackages = typeof pyodide?.loadPackage === 'function';
   if (!canLoadPackages && preloadPackages.length > 0) {
     throw new Error('Pyodide loadPackage() is required to preload Python packages');
   }
   if (canLoadPackages) {
+    emitWarmupStage('before-load-micropip');
     await pyodide.loadPackage(['micropip']);
+    emitWarmupStage('after-load-micropip');
     if (preloadPackages.length > 0) {
+      emitWarmupStage('before-load-preload-packages');
       const packageLoadStarted = realPerformance.now();
       await pyodide.loadPackage(preloadPackages);
       packageLoadMs = realPerformance.now() - packageLoadStarted;
+      emitWarmupStage('after-load-preload-packages');
     }
   }
   if (pyodide?._api?.config) {
     pyodide._api.config.packageBaseUrl = packageBaseUrl;
+    emitWarmupStage(`micropip-package-base:${pyodide._api.config.packageBaseUrl}`);
   }
   installPythonMicropipCompat(pyodide);
   installPythonKernelRpcShims(pyodide);

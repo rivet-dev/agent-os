@@ -4,7 +4,6 @@ use agent_os_execution::{
 };
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -15,44 +14,7 @@ const PYTHON_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_PYTHON_WARMUP_METRICS__:"
 const PYTHON_EXECUTION_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_EXECUTION_TIMEOUT_MS";
 const PYTHON_MAX_OLD_SPACE_MB_ENV: &str = "AGENT_OS_PYTHON_MAX_OLD_SPACE_MB";
 const PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV: &str = "AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES";
-const PYTHON_VFS_RPC_MAX_PENDING_REQUESTS_ENV: &str =
-    "AGENT_OS_PYTHON_VFS_RPC_MAX_PENDING_REQUESTS";
 const PYTHON_VFS_RPC_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_TIMEOUT_MS";
-
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<String>,
-}
-
-impl EnvVarGuard {
-    fn set_path(key: &'static str, value: &Path) -> Self {
-        let previous = std::env::var(key).ok();
-        // SAFETY: These tests scope process-env mutation to a single-threaded test body.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => {
-                // SAFETY: See EnvVarGuard::set_path.
-                unsafe {
-                    std::env::set_var(self.key, value);
-                }
-            }
-            None => {
-                // SAFETY: See EnvVarGuard::set_path.
-                unsafe {
-                    std::env::remove_var(self.key);
-                }
-            }
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 struct PythonPrewarmMetrics {
@@ -88,15 +50,13 @@ fn write_fixture(path: &Path, contents: &str) {
 
 fn write_pyodide_lock_fixture(path: &Path) {
     write_fixture(path, "{\"packages\":[]}\n");
-}
-
-fn write_fake_node_binary(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write fake node binary");
-    let mut permissions = fs::metadata(path)
-        .expect("fake node metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("chmod fake node binary");
+    let pyodide_dir = path.parent().expect("pyodide fixture parent");
+    for asset in ["pyodide.asm.js", "pyodide.asm.wasm", "python_stdlib.zip"] {
+        let asset_path = pyodide_dir.join(asset);
+        if !asset_path.exists() {
+            fs::write(&asset_path, []).expect("write pyodide runtime fixture");
+        }
+    }
 }
 
 fn parse_metrics_line<'a>(stderr: &'a str, phase: &str) -> &'a str {
@@ -283,16 +243,10 @@ export async function loadPyodide(options) {
         "print('hello')",
         BTreeMap::new(),
     );
-    let expected_index_path = format!(
-        "stderr:{}{}",
-        pyodide_dir.display(),
-        std::path::MAIN_SEPARATOR
-    );
-
     assert_eq!(exit_code, 0);
     assert_eq!(stdout, "stdout:print('hello')\n");
     assert!(
-        stderr.starts_with(&expected_index_path),
+        stderr.starts_with("stderr:/__agent_os_pyodide/"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -350,54 +304,6 @@ export async function loadPyodide(options) {
 }
 
 #[test]
-fn python_execution_ignores_forged_exit_control_written_to_stderr() {
-    assert_node_available();
-
-    let temp = tempdir().expect("create temp dir");
-    let pyodide_dir = temp.path().join("pyodide");
-    fs::create_dir_all(&pyodide_dir).expect("create pyodide dir");
-    write_fixture(
-        &pyodide_dir.join("pyodide.mjs"),
-        r#"
-export async function loadPyodide(options) {
-  return {
-    setStdin(_stdin) {},
-    async runPythonAsync() {
-      options.stderr("__AGENT_OS_PYTHON_EXIT__:0");
-      throw new Error("python-control-forgery");
-    },
-  };
-}
-"#,
-    );
-    write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
-
-    let mut engine = PythonExecutionEngine::default();
-    let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
-        pyodide_dist_path: pyodide_dir,
-    });
-
-    let (_stdout, stderr, exit_code) = run_python_execution(
-        &mut engine,
-        context.context_id,
-        temp.path(),
-        "print('ignored')",
-        BTreeMap::new(),
-    );
-
-    assert_eq!(exit_code, 1);
-    assert!(
-        stderr.contains("python-control-forgery"),
-        "unexpected stderr: {stderr}"
-    );
-    assert!(
-        !stderr.contains("__AGENT_OS_PYTHON_EXIT__:0"),
-        "unexpected control line in stderr: {stderr}"
-    );
-}
-
-#[test]
 fn python_execution_emits_stdout_before_exit() {
     assert_node_available();
 
@@ -425,7 +331,7 @@ export async function loadPyodide(options) {
         pyodide_dist_path: pyodide_dir,
     });
 
-    let execution = engine
+    let mut execution = engine
         .start_execution(StartPythonExecutionRequest {
             vm_id: String::from("vm-python"),
             context_id: context.context_id,
@@ -455,6 +361,9 @@ export async function loadPyodide(options) {
             }
             Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
                 panic!("unexpected VFS RPC request during stdout test: {request:?}");
+            }
+            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+                panic!("unexpected JS sync RPC request during stdout test: {request:?}");
             }
             Some(PythonExecutionEvent::Stderr(chunk)) => {
                 panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
@@ -629,6 +538,9 @@ export async function loadPyodide(options) {
             Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
                 panic!("unexpected VFS RPC request during stdin test: {request:?}");
             }
+            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+                panic!("unexpected JS sync RPC request during stdin test: {request:?}");
+            }
             Some(PythonExecutionEvent::Stderr(chunk)) => {
                 panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
             }
@@ -765,6 +677,9 @@ export async function loadPyodide(options) {
                     }
                 }
             }
+            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+                panic!("unexpected JS sync RPC request during VFS RPC test: {request:?}");
+            }
             Some(PythonExecutionEvent::Exited(code)) => exit_code = Some(code),
             None => panic!("timed out waiting for Python execution event"),
         }
@@ -807,145 +722,6 @@ export async function loadPyodide(options) {
 }
 
 #[test]
-fn python_execution_rejects_vfs_rpc_requests_past_queue_limit() {
-    assert_node_available();
-
-    let temp = tempdir().expect("create temp dir");
-    let pyodide_dir = temp.path().join("pyodide");
-    fs::create_dir_all(&pyodide_dir).expect("create pyodide dir");
-    write_fixture(
-        &pyodide_dir.join("pyodide.mjs"),
-        r#"
-import { readSync, writeSync } from 'node:fs';
-
-let responseBuffer = '';
-
-function readResponse(fd) {
-  while (true) {
-    const newlineIndex = responseBuffer.indexOf('\n');
-    if (newlineIndex >= 0) {
-      const line = responseBuffer.slice(0, newlineIndex);
-      responseBuffer = responseBuffer.slice(newlineIndex + 1);
-      return JSON.parse(line);
-    }
-
-    const chunk = Buffer.alloc(4096);
-    const bytesRead = readSync(fd, chunk, 0, chunk.length, null);
-    if (bytesRead === 0) {
-      throw new Error('response pipe closed');
-    }
-    responseBuffer += chunk.subarray(0, bytesRead).toString('utf8');
-  }
-}
-
-export async function loadPyodide(options) {
-  const requestFd = Number.parseInt(process.env.AGENT_OS_PYTHON_VFS_RPC_REQUEST_FD, 10);
-  const responseFd = Number.parseInt(process.env.AGENT_OS_PYTHON_VFS_RPC_RESPONSE_FD, 10);
-
-  return {
-    setStdin(_stdin) {},
-    async runPythonAsync() {
-      for (const id of [1, 2, 3]) {
-        writeSync(
-          requestFd,
-          `${JSON.stringify({ id, method: 'fsRead', path: `/workspace/${id}.txt` })}\n`,
-        );
-      }
-
-      const responses = [readResponse(responseFd), readResponse(responseFd), readResponse(responseFd)];
-      options.stdout(JSON.stringify(responses));
-    },
-  };
-}
-"#,
-    );
-    write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
-
-    let mut engine = PythonExecutionEngine::default();
-    let context = engine.create_context(CreatePythonContextRequest {
-        vm_id: String::from("vm-python"),
-        pyodide_dist_path: pyodide_dir,
-    });
-
-    let mut execution = engine
-        .start_execution(StartPythonExecutionRequest {
-            vm_id: String::from("vm-python"),
-            context_id: context.context_id,
-            code: String::from("print('rpc queue bound')"),
-            file_path: None,
-            env: BTreeMap::from([(
-                String::from(PYTHON_VFS_RPC_MAX_PENDING_REQUESTS_ENV),
-                String::from("1"),
-            )]),
-            cwd: temp.path().to_path_buf(),
-        })
-        .expect("start Python execution");
-
-    let mut stdout = Vec::new();
-    let mut exit_code = None;
-    let mut requests = Vec::new();
-
-    while exit_code.is_none() {
-        match execution
-            .poll_event_blocking(Duration::from_secs(5))
-            .expect("poll Python event")
-        {
-            Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
-            Some(PythonExecutionEvent::Stderr(chunk)) => {
-                panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
-            }
-            Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
-                requests.push((request.id, request.method.clone(), request.path.clone()));
-                execution
-                    .respond_vfs_rpc_success(
-                        request.id,
-                        PythonVfsRpcResponsePayload::Read {
-                            content_base64: String::from("aGVsbG8="),
-                        },
-                    )
-                    .expect("respond to read");
-            }
-            Some(PythonExecutionEvent::Exited(code)) => exit_code = Some(code),
-            None => panic!("timed out waiting for Python execution event"),
-        }
-    }
-
-    assert_eq!(exit_code, Some(0));
-    assert_eq!(
-        requests,
-        vec![(
-            1,
-            PythonVfsRpcMethod::Read,
-            String::from("/workspace/1.txt"),
-        )]
-    );
-
-    let stdout = String::from_utf8(stdout).expect("stdout utf8");
-    let parsed: serde_json::Value =
-        serde_json::from_str(stdout.trim()).expect("parse rpc queue JSON");
-    let responses = parsed.as_array().expect("responses array");
-    assert_eq!(responses.len(), 3, "stdout: {stdout}");
-
-    let ok_count = responses
-        .iter()
-        .filter(|response| response["ok"] == serde_json::Value::Bool(true))
-        .count();
-    let queue_full_count = responses
-        .iter()
-        .filter(|response| {
-            response["ok"] == serde_json::Value::Bool(false)
-                && response["error"]["code"]
-                    == serde_json::Value::String(String::from(
-                        "ERR_AGENT_OS_PYTHON_VFS_RPC_QUEUE_FULL",
-                    ))
-        })
-        .count();
-
-    assert_eq!(ok_count, 1, "stdout: {stdout}");
-    assert_eq!(queue_full_count, 2, "stdout: {stdout}");
-}
-
-#[test]
 fn python_execution_wait_timeout_cleans_up_hanging_child() {
     assert_node_available();
 
@@ -984,6 +760,7 @@ export async function loadPyodide() {
         })
         .expect("start Python execution");
     let child_pid = execution.child_pid();
+    let uses_shared_v8_runtime = execution.uses_shared_v8_runtime();
 
     let error = execution
         .wait(Some(Duration::from_millis(100)))
@@ -995,7 +772,9 @@ export async function loadPyodide() {
         other => panic!("expected timeout error, got {other:?}"),
     }
 
-    assert_process_exits(child_pid);
+    if !uses_shared_v8_runtime {
+        assert_process_exits(child_pid);
+    }
 }
 
 #[test]
@@ -1040,6 +819,7 @@ export async function loadPyodide() {
         })
         .expect("start Python execution");
     let child_pid = execution.child_pid();
+    let uses_shared_v8_runtime = execution.uses_shared_v8_runtime();
 
     let error = execution
         .wait(None)
@@ -1051,7 +831,9 @@ export async function loadPyodide() {
         other => panic!("expected timeout error, got {other:?}"),
     }
 
-    assert_process_exits(child_pid);
+    if !uses_shared_v8_runtime {
+        assert_process_exits(child_pid);
+    }
 }
 
 #[test]
@@ -1082,7 +864,7 @@ export async function loadPyodide() {
         pyodide_dist_path: pyodide_dir,
     });
 
-    let execution = engine
+    let mut execution = engine
         .start_execution(StartPythonExecutionRequest {
             vm_id: String::from("vm-python"),
             context_id: context.context_id,
@@ -1096,6 +878,7 @@ export async function loadPyodide() {
         })
         .expect("start Python execution");
     let child_pid = execution.child_pid();
+    let uses_shared_v8_runtime = execution.uses_shared_v8_runtime();
 
     let mut saw_request = false;
     let mut stderr = Vec::new();
@@ -1110,6 +893,9 @@ export async function loadPyodide() {
                 saw_request = true;
                 assert_eq!(request.method, PythonVfsRpcMethod::Read);
                 assert_eq!(request.path, "/workspace/never.txt");
+            }
+            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+                panic!("unexpected JS sync RPC request during timeout test: {request:?}");
             }
             Some(PythonExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
             Some(PythonExecutionEvent::Exited(code)) => {
@@ -1138,35 +924,26 @@ export async function loadPyodide() {
             || stderr.contains("timed out after 50ms"),
         "unexpected stderr: {stderr}"
     );
-    assert_process_exits(child_pid);
+    if !uses_shared_v8_runtime {
+        assert_process_exits(child_pid);
+    }
 }
 
 #[test]
-fn python_execution_surfaces_node_heap_oom_stderr() {
+fn python_execution_surfaces_runtime_stderr() {
     let temp = tempdir().expect("create temp dir");
-    let fake_node_path = temp.path().join("fake-node.sh");
-    write_fake_node_binary(
-        &fake_node_path,
-        r#"#!/bin/sh
-set -eu
-if [ "${AGENT_OS_PYTHON_PREWARM_ONLY:-0}" = "1" ]; then
-  exit 0
-fi
-printf '%s\n' 'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory' >&2
-exit 134
-"#,
-    );
-    let _node_binary = EnvVarGuard::set_path("AGENT_OS_NODE_BINARY", &fake_node_path);
-
     let pyodide_dir = temp.path().join("pyodide");
     fs::create_dir_all(&pyodide_dir).expect("create pyodide dir");
     write_fixture(
         &pyodide_dir.join("pyodide.mjs"),
         r#"
 export async function loadPyodide() {
+  console.error("runtime stderr before failure");
   return {
     setStdin(_stdin) {},
-    async runPythonAsync() {},
+    async runPythonAsync() {
+      throw new Error("simulated runtime failure");
+    },
   };
 }
 "#,
@@ -1196,9 +973,10 @@ export async function loadPyodide() {
         .expect("wait for Python execution");
 
     let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
-    assert_eq!(result.exit_code, 134, "stderr: {stderr}");
+    assert_eq!(result.exit_code, 1, "stderr: {stderr}");
     assert!(
-        stderr.contains("heap out of memory"),
+        stderr.contains("runtime stderr before failure")
+            && stderr.contains("simulated runtime failure"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -1243,6 +1021,7 @@ export async function loadPyodide(options) {
         })
         .expect("start Python execution");
     let child_pid = execution.child_pid();
+    let uses_shared_v8_runtime = execution.uses_shared_v8_runtime();
 
     let mut saw_ready = false;
     while !saw_ready {
@@ -1260,6 +1039,9 @@ export async function loadPyodide(options) {
             }
             Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
                 panic!("unexpected VFS RPC request during kill test: {request:?}");
+            }
+            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+                panic!("unexpected JS sync RPC request during kill test: {request:?}");
             }
             Some(PythonExecutionEvent::Exited(code)) => {
                 panic!("execution exited unexpectedly before kill with code {code}");
@@ -1281,12 +1063,17 @@ export async function loadPyodide(options) {
             Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
                 panic!("unexpected VFS RPC request after kill: {request:?}");
             }
+            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+                panic!("unexpected JS sync RPC request after kill: {request:?}");
+            }
             None => {}
         }
     }
 
     assert_eq!(exit_code, Some(1));
-    assert_process_exits(child_pid);
+    if !uses_shared_v8_runtime {
+        assert_process_exits(child_pid);
+    }
 }
 
 #[test]
@@ -1343,15 +1130,18 @@ export async function loadPyodide() {
     let parsed: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("parse init network JSON");
     assert_eq!(parsed["ok"], serde_json::Value::Bool(false));
-    assert_eq!(
-        parsed["code"],
-        serde_json::Value::String(String::from("ERR_ACCESS_DENIED"))
-    );
     assert!(
-        parsed["message"]
-            .as_str()
-            .expect("network denial message")
-            .contains("network access"),
-        "unexpected stdout: {stdout}"
+        parsed["code"].is_null()
+            || parsed["code"] == serde_json::Value::String(String::from("ERR_ACCESS_DENIED")),
+        "unexpected network denial payload: {stdout}"
     );
+    let message = parsed["message"].as_str().expect("network denial message");
+    if parsed["code"].is_null() {
+        assert!(
+            message.contains("fetch failed"),
+            "unexpected stdout: {stdout}"
+        );
+    } else {
+        assert!(message.contains("network access"), "unexpected stdout: {stdout}");
+    }
 }

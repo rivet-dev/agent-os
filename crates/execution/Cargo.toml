@@ -7,6 +7,7 @@ description = "Native execution plane scaffold for Agent OS"
 
 [dependencies]
 agent-os-bridge = { path = "../bridge" }
+base64 = "0.22"
 ciborium = "0.2"
 getrandom = "0.2"
 nix = { version = "0.29", features = ["fs"] }
@@ -15,6 +16,5 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
-base64 = "0.22"
 tempfile = "3"
 wat = "1"

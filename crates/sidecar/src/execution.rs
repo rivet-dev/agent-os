@@ -27,13 +27,14 @@ use crate::state::{
     ActiveCipherSession, ActiveDhSession, ActiveDiffieHellmanSession, ActiveEcdhSession,
     ActiveExecution, ActiveExecutionEvent, ActiveHttp2Server, ActiveHttp2Session,
     ActiveHttp2Stream, ActiveHttpServer, ActiveProcess, ActiveSqliteDatabase,
-    ActiveSqliteStatement, ActiveTcpListener, ActiveTcpSocket, ActiveTlsState, ActiveTlsStream,
-    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError, Http2BridgeEvent,
-    Http2RuntimeSnapshot, Http2SessionCommand, Http2SessionSnapshot, Http2SocketSnapshot,
-    Http2StreamDirection, JavascriptSocketFamily, JavascriptSocketPathContext,
-    JavascriptTcpListenerEvent, JavascriptTcpSocketEvent, JavascriptTlsBridgeOptions,
-    JavascriptTlsClientHello, JavascriptTlsDataValue, JavascriptTlsMaterial, JavascriptUdpFamily,
-    JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket,
+    ActiveMappedHostFd, ActiveSqliteStatement, ActiveTcpListener, ActiveTcpSocket,
+    ActiveTlsState, ActiveTlsStream, ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket,
+    BridgeError, Http2BridgeEvent, Http2RuntimeSnapshot, Http2SessionCommand,
+    Http2SessionSnapshot, Http2SocketSnapshot, Http2StreamDirection, JavascriptSocketFamily,
+    JavascriptSocketPathContext, JavascriptTcpListenerEvent, JavascriptTcpSocketEvent,
+    JavascriptTlsBridgeOptions, JavascriptTlsClientHello, JavascriptTlsDataValue,
+    JavascriptTlsMaterial, JavascriptUdpFamily, JavascriptUdpSocketEvent,
+    JavascriptUnixListenerEvent, MAPPED_HOST_FD_START, NetworkResourceCounts, PendingTcpSocket,
     PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution,
     ResolvedTcpConnectAddr, SharedBridge, SharedSidecarRequestClient, SidecarKernel,
     SocketQueryKind, ToolExecution, VmDnsConfig, VmListenPolicy, VmState,
@@ -138,6 +139,8 @@ use url::Url;
 const DEFAULT_KERNEL_STDIN_READ_MAX_BYTES: usize = 64 * 1024;
 const DEFAULT_KERNEL_STDIN_READ_TIMEOUT_MS: u64 = 100;
 const JAVASCRIPT_NET_TIMEOUT_SENTINEL: &str = "__secure_exec_net_timeout__";
+const PYTHON_PYODIDE_GUEST_ROOT: &str = "/__agent_os_pyodide";
+const PYTHON_PYODIDE_CACHE_GUEST_ROOT: &str = "/__agent_os_pyodide_cache";
 const TCP_SOCKET_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_LOOPBACK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -315,6 +318,8 @@ impl ActiveProcess {
             guest_cwd: String::from("/"),
             env: BTreeMap::new(),
             host_cwd: PathBuf::from("/"),
+            mapped_host_fds: BTreeMap::new(),
+            next_mapped_host_fd: MAPPED_HOST_FD_START,
             pending_execution_events: VecDeque::new(),
             child_processes: BTreeMap::new(),
             next_child_process_id: 0,
@@ -360,6 +365,28 @@ impl ActiveProcess {
     pub(crate) fn with_kernel_stdin_writer_fd(mut self, fd: u32) -> Self {
         self.kernel_stdin_writer_fd = Some(fd);
         self
+    }
+
+    pub(crate) fn allocate_mapped_host_fd(&mut self, fd: ActiveMappedHostFd) -> u32 {
+        let handle = self.next_mapped_host_fd;
+        self.next_mapped_host_fd = self
+            .next_mapped_host_fd
+            .checked_add(1)
+            .unwrap_or(MAPPED_HOST_FD_START);
+        self.mapped_host_fds.insert(handle, fd);
+        handle
+    }
+
+    pub(crate) fn mapped_host_fd(&self, fd: u32) -> Option<&ActiveMappedHostFd> {
+        self.mapped_host_fds.get(&fd)
+    }
+
+    pub(crate) fn mapped_host_fd_mut(&mut self, fd: u32) -> Option<&mut ActiveMappedHostFd> {
+        self.mapped_host_fds.get_mut(&fd)
+    }
+
+    pub(crate) fn close_mapped_host_fd(&mut self, fd: u32) -> bool {
+        self.mapped_host_fds.remove(&fd).is_some()
     }
 
     pub(crate) fn allocate_child_process_id(&mut self) -> String {
@@ -459,7 +486,7 @@ impl ActiveProcess {
 }
 
 fn poll_child_execution_after_exit(
-    child: &ActiveProcess,
+    child: &mut ActiveProcess,
     wait: Duration,
 ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
     match child.execution.poll_event_blocking(wait) {
@@ -1923,11 +1950,14 @@ impl ActiveExecution {
             Self::Javascript(execution) => execution
                 .respond_sync_rpc_success(id, result)
                 .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Python(execution) => execution
+                .respond_javascript_sync_rpc_success(id, result)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
             Self::Wasm(execution) => execution
                 .respond_sync_rpc_success(id, result)
                 .map_err(|error| SidecarError::Execution(error.to_string())),
             _ => Err(SidecarError::InvalidState(String::from(
-                "only JavaScript and WebAssembly executions can service JavaScript sync RPC responses",
+                "only JavaScript, Python, and WebAssembly executions can service JavaScript sync RPC responses",
             ))),
         }
     }
@@ -1942,17 +1972,20 @@ impl ActiveExecution {
             Self::Javascript(execution) => execution
                 .respond_sync_rpc_error(id, code, message)
                 .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Python(execution) => execution
+                .respond_javascript_sync_rpc_error(id, code, message)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
             Self::Wasm(execution) => execution
                 .respond_sync_rpc_error(id, code, message)
                 .map_err(|error| SidecarError::Execution(error.to_string())),
             _ => Err(SidecarError::InvalidState(String::from(
-                "only JavaScript and WebAssembly executions can service JavaScript sync RPC responses",
+                "only JavaScript, Python, and WebAssembly executions can service JavaScript sync RPC responses",
             ))),
         }
     }
 
     pub(crate) async fn poll_event(
-        &self,
+        &mut self,
         timeout: Duration,
     ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
         match self {
@@ -1990,6 +2023,9 @@ impl ActiveExecution {
                     event.map(|event| match event {
                         PythonExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
                         PythonExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
+                        PythonExecutionEvent::JavascriptSyncRpcRequest(request) => {
+                            ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
+                        }
                         PythonExecutionEvent::VfsRpcRequest(request) => {
                             ActiveExecutionEvent::PythonVfsRpcRequest(request)
                         }
@@ -2026,7 +2062,7 @@ impl ActiveExecution {
     }
 
     pub(crate) fn poll_event_blocking(
-        &self,
+        &mut self,
         timeout: Duration,
     ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
         match self {
@@ -2062,6 +2098,9 @@ impl ActiveExecution {
                     event.map(|event| match event {
                         PythonExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
                         PythonExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
+                        PythonExecutionEvent::JavascriptSyncRpcRequest(request) => {
+                            ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
+                        }
                         PythonExecutionEvent::VfsRpcRequest(request) => {
                             ActiveExecutionEvent::PythonVfsRpcRequest(request)
                         }
@@ -2352,7 +2391,7 @@ where
             )
             .map_err(kernel_error)?;
 
-        let execution = match resolved.runtime {
+        let (execution, process_env) = match resolved.runtime {
             GuestRuntimeKind::JavaScript => {
                 let inline_code = load_javascript_entrypoint_source(
                     vm,
@@ -2384,7 +2423,7 @@ where
                         inline_code,
                     })
                     .map_err(javascript_error)?;
-                ActiveExecution::Javascript(execution)
+                (ActiveExecution::Javascript(execution), env.clone())
             }
             GuestRuntimeKind::Python => {
                 let python_file_path = python_file_entrypoint(&resolved.entrypoint);
@@ -2392,6 +2431,20 @@ where
                     .python_engine
                     .bundled_pyodide_dist_path_for_vm(&vm_id)
                     .map_err(python_error)?;
+                let pyodide_cache_path = pyodide_dist_path
+                    .parent()
+                    .unwrap_or(pyodide_dist_path.as_path())
+                    .join("pyodide-package-cache");
+                add_runtime_guest_path_mapping(
+                    &mut env,
+                    PYTHON_PYODIDE_GUEST_ROOT,
+                    &pyodide_dist_path,
+                );
+                add_runtime_guest_path_mapping(
+                    &mut env,
+                    PYTHON_PYODIDE_CACHE_GUEST_ROOT,
+                    &pyodide_cache_path,
+                );
                 let context = self
                     .python_engine
                     .create_context(CreatePythonContextRequest {
@@ -2409,7 +2462,7 @@ where
                         cwd: resolved.host_cwd.clone(),
                     })
                     .map_err(python_error)?;
-                ActiveExecution::Python(execution)
+                (ActiveExecution::Python(execution), env.clone())
             }
             GuestRuntimeKind::WebAssembly => {
                 apply_wasm_limit_env(&mut env, vm.kernel.resource_limits());
@@ -2431,12 +2484,12 @@ where
                         vm_id: vm_id.clone(),
                         context_id: context.context_id,
                         argv: resolved.process_args.clone(),
-                        env,
+                        env: env.clone(),
                         cwd: resolved.host_cwd.clone(),
                         permission_tier: execution_wasm_permission_tier(wasm_permission_tier),
                     })
                     .map_err(wasm_error)?;
-                ActiveExecution::Wasm(execution)
+                (ActiveExecution::Wasm(execution), env)
             }
         };
         let child_pid = execution.child_pid();
@@ -2447,7 +2500,7 @@ where
             ActiveProcess::new(kernel_pid, kernel_handle, resolved.runtime, execution)
                 .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
                 .with_guest_cwd(resolved.guest_cwd.clone())
-                .with_env(resolved.env.clone())
+                .with_env(process_env)
                 .with_host_cwd(resolved.host_cwd.clone()),
         );
         self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
@@ -2675,7 +2728,7 @@ where
     }
 
     pub(crate) fn kill_process_internal(
-        &self,
+        &mut self,
         vm_id: &str,
         process_id: &str,
         signal: &str,
@@ -2684,14 +2737,52 @@ where
         let signal = parse_signal(signal)?;
         let vm = self
             .vms
-            .get(vm_id)
+            .get_mut(vm_id)
             .ok_or_else(|| SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}")))?;
-        let process = vm.active_processes.get(process_id).ok_or_else(|| {
+        let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
             SidecarError::InvalidState(format!("VM {vm_id} has no active process {process_id}"))
         })?;
 
-        match &process.execution {
-            ActiveExecution::Tool(execution) => {
+        enum KillBehavior {
+            Tool,
+            SharedJavascriptSignalHost(u32),
+            SharedJavascriptTerminate,
+            SharedJavascriptDispatchOrTerminate,
+            SharedPythonTerminate,
+            Noop,
+            HostPid(u32),
+        }
+
+        let behavior = match &process.execution {
+            ActiveExecution::Tool(_) => KillBehavior::Tool,
+            ActiveExecution::Javascript(execution)
+                if execution.uses_shared_v8_runtime()
+                    && matches!(signal, 0 | libc::SIGSTOP | libc::SIGCONT) =>
+            {
+                KillBehavior::SharedJavascriptSignalHost(execution.child_pid())
+            }
+            ActiveExecution::Javascript(execution)
+                if execution.uses_shared_v8_runtime() && signal == SIGKILL =>
+            {
+                KillBehavior::SharedJavascriptTerminate
+            }
+            ActiveExecution::Javascript(execution) if execution.uses_shared_v8_runtime() => {
+                KillBehavior::SharedJavascriptDispatchOrTerminate
+            }
+            ActiveExecution::Python(execution) if execution.uses_shared_v8_runtime() => {
+                KillBehavior::SharedPythonTerminate
+            }
+            ActiveExecution::Javascript(execution) if execution.child_pid() == 0 => {
+                KillBehavior::Noop
+            }
+            _ => KillBehavior::HostPid(process.execution.child_pid()),
+        };
+
+        match behavior {
+            KillBehavior::Tool => {
+                let ActiveExecution::Tool(execution) = &process.execution else {
+                    unreachable!("kill behavior must match tool execution");
+                };
                 if signal != 0 {
                     execution.cancelled.store(true, Ordering::Relaxed);
                     let _ = self.process_event_sender.send(ProcessEventEnvelope {
@@ -2703,30 +2794,42 @@ where
                     });
                 }
             }
-            ActiveExecution::Javascript(execution)
-                if execution.uses_shared_v8_runtime()
-                    && matches!(signal, 0 | libc::SIGSTOP | libc::SIGCONT) =>
-            {
-                signal_runtime_process(execution.child_pid(), signal)?;
+            KillBehavior::SharedJavascriptSignalHost(pid) => {
+                signal_runtime_process(pid, signal)?;
             }
-            ActiveExecution::Javascript(execution)
-                if execution.uses_shared_v8_runtime() && signal == SIGKILL =>
-            {
+            KillBehavior::SharedJavascriptTerminate => {
+                let ActiveExecution::Javascript(execution) = &mut process.execution else {
+                    unreachable!("kill behavior must match shared JavaScript execution");
+                };
                 execution
                     .terminate()
                     .map_err(|error| SidecarError::Execution(error.to_string()))?;
             }
-            ActiveExecution::Javascript(execution) if execution.uses_shared_v8_runtime() => {
+            KillBehavior::SharedJavascriptDispatchOrTerminate => {
                 if signal != 0 {
                     if !dispatch_v8_process_signal(process, signal)? {
+                        let ActiveExecution::Javascript(execution) = &mut process.execution else {
+                            unreachable!("kill behavior must match shared JavaScript execution");
+                        };
                         execution
                             .terminate()
                             .map_err(|error| SidecarError::Execution(error.to_string()))?;
                     }
                 }
             }
-            ActiveExecution::Javascript(execution) if execution.child_pid() == 0 => {}
-            _ => signal_runtime_process(process.execution.child_pid(), signal)?,
+            KillBehavior::SharedPythonTerminate => {
+                if signal != 0 {
+                    close_kernel_process_stdin(&mut vm.kernel, process)?;
+                    let ActiveExecution::Python(execution) = &mut process.execution else {
+                        unreachable!("kill behavior must match shared Python execution");
+                    };
+                    execution
+                        .kill()
+                        .map_err(|error| SidecarError::Execution(error.to_string()))?;
+                }
+            }
+            KillBehavior::Noop => {}
+            KillBehavior::HostPid(pid) => signal_runtime_process(pid, signal)?,
         }
         emit_security_audit_event(
             &self.bridge,
@@ -2803,7 +2906,11 @@ where
                         // until the envelope is dequeued and handled later.
                         match process.execution.poll_event(Duration::ZERO).await {
                             Ok(event) => event,
-                            Err(SidecarError::Execution(_)) => None,
+                            Err(SidecarError::Execution(message))
+                                if message.contains("event channel closed") =>
+                            {
+                                None
+                            }
                             Err(other) => return Err(other),
                         }
                     };
@@ -3449,7 +3556,7 @@ where
             .active_processes
             .get_mut(process_id)
             .expect("process should still exist");
-        match response {
+        let result = match response {
             Ok(payload) => process
                 .execution
                 .respond_python_vfs_rpc_success(request_id, payload),
@@ -3458,6 +3565,11 @@ where
                 "ERR_AGENT_OS_PYTHON_VFS_RPC",
                 error.to_string(),
             ),
+        };
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) if is_broken_pipe_error(&error) => Ok(()),
+            Err(error) => Err(error),
         }
     }
 
@@ -3494,7 +3606,10 @@ where
                 }
             })
             .unwrap_or_else(|| (parent_guest_cwd.to_owned(), None));
+        let inherited_host_cwd = (host_cwd_override.is_none() && guest_cwd == parent_guest_cwd)
+            .then(|| normalize_host_path(parent_host_cwd));
         let host_cwd = host_cwd_override
+            .or(inherited_host_cwd)
             .or_else(|| {
                 host_runtime_path_for_guest_path_with_env(
                     vm,
@@ -3505,7 +3620,9 @@ where
             })
             .unwrap_or_else(|| {
                 let candidate = PathBuf::from(&guest_cwd);
-                if candidate.is_absolute() {
+                if guest_cwd == parent_guest_cwd {
+                    normalize_host_path(parent_host_cwd)
+                } else if candidate.is_absolute() {
                     shadow_path_for_guest(vm, &guest_cwd)
                 } else {
                     vm.host_cwd.clone()
@@ -7161,6 +7278,31 @@ fn python_file_entrypoint(entrypoint: &str) -> Option<PathBuf> {
         .then(|| path.to_path_buf())
 }
 
+fn add_runtime_guest_path_mapping(
+    env: &mut BTreeMap<String, String>,
+    guest_path: &str,
+    host_path: &Path,
+) {
+    let mut mappings = env
+        .get("AGENT_OS_GUEST_PATH_MAPPINGS")
+        .and_then(|value| serde_json::from_str::<Vec<Value>>(value).ok())
+        .unwrap_or_default();
+    mappings.retain(|mapping| {
+        mapping
+            .get("guestPath")
+            .and_then(Value::as_str)
+            .map(|existing| normalize_path(existing) != normalize_path(guest_path))
+            .unwrap_or(true)
+    });
+    mappings.push(json!({
+        "guestPath": normalize_path(guest_path),
+        "hostPath": host_path.display().to_string(),
+    }));
+    if let Ok(serialized) = serde_json::to_string(&mappings) {
+        env.insert(String::from("AGENT_OS_GUEST_PATH_MAPPINGS"), serialized);
+    }
+}
+
 // discover_command_guest_paths moved to crate::bootstrap
 
 fn is_path_like_specifier(specifier: &str) -> bool {
@@ -7316,7 +7458,7 @@ struct RuntimeGuestPathMapping {
     host_path: String,
 }
 
-fn host_path_from_runtime_guest_mappings(
+pub(crate) fn host_path_from_runtime_guest_mappings(
     runtime_env: &BTreeMap<String, String>,
     guest_path: &str,
 ) -> Option<PathBuf> {
@@ -9701,11 +9843,12 @@ where
                 .map_err(kernel_error)
         }
         "fs.chmodSync" | "fs.promises.chmod" => {
-            let response = service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request)?;
+            let response =
+                service_javascript_fs_sync_rpc(kernel, process, process.kernel_pid, request)?;
             mirror_process_chmod_to_host(process, request)?;
             Ok(response)
         }
-        _ => service_javascript_fs_sync_rpc(kernel, process.kernel_pid, request),
+        _ => service_javascript_fs_sync_rpc(kernel, process, process.kernel_pid, request),
     }
 }
 

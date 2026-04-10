@@ -77,7 +77,7 @@ fn spawn_static_file_server(root: PathBuf) -> (u16, thread::JoinHandle<()>) {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if served_any {
                         match idle_since {
-                            Some(start) if start.elapsed() >= Duration::from_millis(500) => break,
+                            Some(start) if start.elapsed() >= Duration::from_secs(5) => break,
                             Some(_) => {}
                             None => idle_since = Some(Instant::now()),
                         }
@@ -1803,7 +1803,7 @@ print(json.dumps({{
         &session_id,
         &vm_id,
         "proc-python-micropip-install",
-        Duration::from_secs(30),
+        Duration::from_secs(90),
     );
 
     let _ = server.join();

@@ -18813,7 +18813,17 @@ ${headerLines}\r
       enumerable: false
     }
   });
-  var NativeURL = typeof globalThis.URL === "function" && globalThis.URL.__agentOsBootstrapStub !== true ? globalThis.URL : class URL {
+  function canUseNativeUrlImplementation(candidate) {
+    if (typeof candidate !== "function" || candidate.__agentOsBootstrapStub === true) {
+      return false;
+    }
+    try {
+      return String(new candidate("./child.mjs", "file:///root/base/entry.mjs").href) === "file:///root/base/child.mjs";
+    } catch {
+      return false;
+    }
+  }
+  var NativeURL = canUseNativeUrlImplementation(globalThis.URL) ? globalThis.URL : class URL {
     constructor(url, base) {
       const raw = String(url ?? "");
       const hasScheme = /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(raw);
@@ -19698,6 +19708,9 @@ ${headerLines}\r
   function formatConsoleArgs(args) {
     return args.map((value) => formatConsoleValue(value)).join(" ");
   }
+  function formatConsoleLine(args) {
+    return `${formatConsoleArgs(args)}\n`;
+  }
   class Console {
     constructor(stdout = _stdout, stderr = _stderr) {
       this._stdout = stdout;
@@ -19706,22 +19719,22 @@ ${headerLines}\r
       this._times = new Map();
     }
     log(...args) {
-      this._stdout.write(formatConsoleArgs(args));
+      this._stdout.write(formatConsoleLine(args));
     }
     info(...args) {
-      this._stdout.write(formatConsoleArgs(args));
+      this._stdout.write(formatConsoleLine(args));
     }
     debug(...args) {
-      this._stdout.write(formatConsoleArgs(args));
+      this._stdout.write(formatConsoleLine(args));
     }
     warn(...args) {
-      this._stderr.write(formatConsoleArgs(args));
+      this._stderr.write(formatConsoleLine(args));
     }
     error(...args) {
-      this._stderr.write(formatConsoleArgs(args));
+      this._stderr.write(formatConsoleLine(args));
     }
     dir(value) {
-      this._stdout.write(formatConsoleArgs([value]));
+      this._stdout.write(formatConsoleLine([value]));
     }
     dirxml(...args) {
       this.log(...args);
@@ -19729,12 +19742,12 @@ ${headerLines}\r
     trace(...args) {
       const message = formatConsoleArgs(args);
       const error = new Error(message);
-      this._stderr.write(error.stack || message);
+      this._stderr.write(`${error.stack || message}\n`);
     }
     assert(condition, ...args) {
       if (!condition) {
         const message = args.length > 0 ? formatConsoleArgs(args) : "Assertion failed";
-        this._stderr.write(message);
+        this._stderr.write(`${message}\n`);
       }
     }
     clear() {
@@ -22065,6 +22078,47 @@ ${headerLines}\r
     };
   }
   var builtinCryptoModule = {
+    randomFillSync(buffer, offset = 0, size = void 0) {
+      const target = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer;
+      if (!ArrayBuffer.isView(target)) {
+        throw new TypeError(
+          'The "buffer" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView'
+        );
+      }
+      const start = Number(offset) || 0;
+      if (!Number.isInteger(start) || start < 0 || start > target.byteLength) {
+        throw new RangeError('The value of "offset" is out of range');
+      }
+      const length = size === void 0 ? target.byteLength - start : Number(size);
+      if (!Number.isInteger(length) || length < 0 || start + length > target.byteLength) {
+        throw new RangeError('The value of "size" is out of range');
+      }
+      const view = new Uint8Array(target.buffer, target.byteOffset + start, length);
+      cryptoPolyfill.getRandomValues(view);
+      return buffer;
+    },
+    randomFill(buffer, offset, size, callback) {
+      let start = offset;
+      let length = size;
+      let done = callback;
+      if (typeof start === "function") {
+        done = start;
+        start = 0;
+        length = void 0;
+      } else if (typeof length === "function") {
+        done = length;
+        length = void 0;
+      }
+      if (typeof done !== "function") {
+        throw new TypeError('The "callback" argument must be of type function');
+      }
+      try {
+        const result = builtinCryptoModule.randomFillSync(buffer, start, length);
+        queueMicrotask(() => done(null, result));
+      } catch (error) {
+        queueMicrotask(() => done(error));
+      }
+    },
     createHash(algorithm) {
       return createBuiltinHash(algorithm);
     },

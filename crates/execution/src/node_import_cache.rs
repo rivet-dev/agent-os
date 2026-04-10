@@ -15,7 +15,7 @@ const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
 const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "8";
-const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "27";
+const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "33";
 const NODE_IMPORT_CACHE_DIR_PREFIX: &str = "agent-os-node-import-cache";
 const DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const PYODIDE_DIST_DIR: &str = "pyodide-dist";
@@ -2682,6 +2682,70 @@ function requireFsSyncRpcBridge() {
   return requireAgentOsSyncRpcBridge();
 }
 
+function isPythonWarmupDebugEnabled() {
+  return process.env.AGENT_OS_PYTHON_WARMUP_DEBUG === '1';
+}
+
+function emitPythonWarmupFsDebug(message) {
+  if (!isPythonWarmupDebugEnabled()) {
+    return;
+  }
+
+  try {
+    process.stderr.write(`__AGENT_OS_PYTHON_FS_DEBUG__:${message}\n`);
+  } catch {
+    // Ignore debug logging failures.
+  }
+}
+
+function formatPythonWarmupFsDebugError(error) {
+  if (!error || typeof error !== 'object') {
+    return String(error);
+  }
+
+  if (typeof error.code === 'string' && error.code.length > 0) {
+    return error.code;
+  }
+
+  if (typeof error.message === 'string' && error.message.length > 0) {
+    return error.message;
+  }
+
+  return 'unknown';
+}
+
+function callFsRpc(method, args = []) {
+  emitPythonWarmupFsDebug(`${method}:start`);
+  return requireFsSyncRpcBridge()
+    .call(method, args)
+    .then(
+      (result) => {
+        emitPythonWarmupFsDebug(`${method}:ok`);
+        return result;
+      },
+      (error) => {
+        emitPythonWarmupFsDebug(
+          `${method}:error:${formatPythonWarmupFsDebugError(error)}`,
+        );
+        throw error;
+      },
+    );
+}
+
+function callFsRpcSync(method, args = []) {
+  emitPythonWarmupFsDebug(`${method}:start`);
+  try {
+    const result = requireFsSyncRpcBridge().callSync(method, args);
+    emitPythonWarmupFsDebug(`${method}:ok`);
+    return result;
+  } catch (error) {
+    emitPythonWarmupFsDebug(
+      `${method}:error:${formatPythonWarmupFsDebugError(error)}`,
+    );
+    throw error;
+  }
+}
+
 function guestProcessUmask(mask) {
   const bridge = requireAgentOsSyncRpcBridge();
   if (mask == null) {
@@ -2691,7 +2755,7 @@ function guestProcessUmask(mask) {
 }
 
 function createRpcBackedFsPromises(fromGuestDir = '/') {
-  const call = (method, args = []) => requireFsSyncRpcBridge().call(method, args);
+  const call = (method, args = []) => callFsRpc(method, args);
 
   return {
     access: async (target, mode) => {
@@ -3139,7 +3203,7 @@ function createRpcBackedFsCallbacks(fromGuestDir = '/') {
 }
 
 function createRpcBackedFsSync(fromGuestDir = '/') {
-  const callSync = (method, args = []) => requireFsSyncRpcBridge().callSync(method, args);
+  const callSync = (method, args = []) => callFsRpcSync(method, args);
 
   return {
     accessSync: (target, mode) =>
@@ -10619,9 +10683,9 @@ impl NodeImportCacheMaterialization {
                 .join(format!("{PATH_POLYFILL_ASSET_NAME}.mjs")),
             &render_path_polyfill_source(),
         )?;
-        write_bytes_if_changed(
+        write_file_if_changed(
             &self.pyodide_dist_path.join("pyodide.mjs"),
-            BUNDLED_PYODIDE_MJS,
+            &render_patched_pyodide_mjs(),
         )?;
         write_bytes_if_changed(
             &self.pyodide_dist_path.join("pyodide.asm.js"),
@@ -10680,6 +10744,27 @@ fn render_loader_source() -> String {
         .replace(
             "__AGENT_OS_POLYFILL_SPECIFIER_PREFIX__",
             AGENT_OS_POLYFILL_SPECIFIER_PREFIX,
+        )
+}
+
+fn render_patched_pyodide_mjs() -> String {
+    let source = String::from_utf8_lossy(BUNDLED_PYODIDE_MJS);
+    source
+        .replace(
+            r#"H=(await import("node:vm")).default,"#,
+            "",
+        )
+        .replace(
+            r#"async function fe(e){e.startsWith("file://")&&(e=e.slice(7)),e.includes("://")?H.runInThisContext(await(await fetch(e)).text()):await import(e.startsWith("/" )?e:$.pathToFileURL(e).href)}o(fe,"nodeLoadScript");"#,
+            r#"async function fe(e){if(e.startsWith("file://")&&(e=e.slice(7)),e.includes("://")){let t=await(await fetch(e)).text();await import(`data:text/javascript;base64,${$e(t)}`);return}await import(e.startsWith("/")?e:$.pathToFileURL(e).href)}o(fe,"nodeLoadScript");"#,
+        )
+        .replace(
+            r#"function ce(e,t){return e.startsWith("file://")&&(e=e.slice(7)),e.includes("://")?{response:fetch(e)}:{binary:L.readFile(e).then(n=>new Uint8Array(n.buffer,n.byteOffset,n.byteLength))}}o(ce,"node_getBinaryResponse");"#,
+            r#"function ce(e,t){return e.startsWith("file://")&&(e=e.slice(7)),e.includes("://")?{response:fetch(e)}:{binary:L.readFile(e).then(n=>new Uint8Array(n.buffer,n.byteOffset,n.byteLength))}}o(ce,"node_getBinaryResponse");"#,
+        )
+        .replace(
+            r#"async function ct(e={}){let t=await Se(e),n=Ie(t);await we(t);let i=await _e(t,n),s=await Re(n);ke(s,t);let r=Ae(s,i,t);return await Fe(r,t)}o(ct,"loadPyodide");"#,
+            r#"async function ct(e={}){let t=await Se(e),n=Ie(t);await we(t);let i=await _e(t,n),s=await Re(n);ke(s,t);let r=Ae(s,i,t);return await Fe(r,t)}o(ct,"loadPyodide");"#,
         )
 }
 

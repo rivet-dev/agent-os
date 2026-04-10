@@ -25,6 +25,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
+use std::fs::File;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -65,6 +66,7 @@ pub(crate) const DEFAULT_JAVASCRIPT_NET_BACKLOG: u32 = 511;
 pub(crate) const LOOPBACK_EXEMPT_PORTS_ENV: &str = "AGENT_OS_LOOPBACK_EXEMPT_PORTS";
 pub(crate) const TOOL_DRIVER_NAME: &str = "agent-os-sidecar-tools";
 pub(crate) const TOOL_MASTER_COMMAND: &str = "agentos";
+pub(crate) const MAPPED_HOST_FD_START: u32 = 1_000_000_000;
 
 // ---------------------------------------------------------------------------
 // Public API types
@@ -392,6 +394,8 @@ pub(crate) struct ActiveProcess {
     pub(crate) guest_cwd: String,
     pub(crate) env: BTreeMap<String, String>,
     pub(crate) host_cwd: PathBuf,
+    pub(crate) mapped_host_fds: BTreeMap<u32, ActiveMappedHostFd>,
+    pub(crate) next_mapped_host_fd: u32,
     pub(crate) pending_execution_events: VecDeque<ActiveExecutionEvent>,
     pub(crate) child_processes: BTreeMap<String, ActiveProcess>,
     pub(crate) next_child_process_id: usize,
@@ -416,6 +420,11 @@ pub(crate) struct ActiveProcess {
     pub(crate) next_sqlite_database_id: u64,
     pub(crate) sqlite_statements: BTreeMap<u64, ActiveSqliteStatement>,
     pub(crate) next_sqlite_statement_id: u64,
+}
+
+pub(crate) struct ActiveMappedHostFd {
+    pub(crate) file: File,
+    pub(crate) path: PathBuf,
 }
 
 pub(crate) struct ActiveCipherSession {

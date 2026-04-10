@@ -1,45 +1,35 @@
 use crate::common::{encode_json_string, frozen_time_ms};
-use crate::node_import_cache::{
-    NodeImportCache, NodeImportCacheCleanup, NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
+use crate::javascript::{
+    CreateJavascriptContextRequest, JavascriptExecution, JavascriptExecutionEngine,
+    JavascriptExecutionError, JavascriptExecutionEvent, JavascriptSyncRpcRequest,
+    StartJavascriptExecutionRequest,
 };
-use crate::node_process::{
-    apply_guest_env, configure_node_control_channel, create_node_control_channel,
-    ensure_host_cwd_exists, harden_node_command, node_binary, spawn_node_control_reader,
-    spawn_stream_reader, ExportedChildFds, LinePrefixFilter, NodeControlMessage,
-};
+use crate::node_import_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV};
 use crate::runtime_support::{
-    compile_cache_ready, configure_compile_cache, env_flag_enabled, file_fingerprint,
-    import_cache_root, resolve_execution_path, sandbox_root, warmup_marker_path,
-    NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
-    NODE_SANDBOX_ROOT_ENV,
+    env_flag_enabled, file_fingerprint, resolve_execution_path, warmup_marker_path,
+    NODE_FROZEN_TIME_ENV,
 };
-use nix::fcntl::OFlag;
-use nix::unistd::pipe2;
-use serde::Deserialize;
-use serde_json::json;
-use std::cell::RefCell;
+use crate::v8_runtime;
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::os::fd::OwnedFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{
-    error::TryRecvError as TokioTryRecvError, unbounded_channel, UnboundedReceiver,
-};
-use tokio::time;
-const NODE_ALLOWED_BUILTINS_ENV: &str = "AGENT_OS_ALLOWED_NODE_BUILTINS";
 const NODE_ALLOW_PROCESS_BINDINGS_ENV: &str = "AGENT_OS_ALLOW_PROCESS_BINDINGS";
-const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
+const NODE_GUEST_PATH_MAPPINGS_ENV: &str = "AGENT_OS_GUEST_PATH_MAPPINGS";
+const NODE_SYNC_RPC_DATA_BYTES_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_DATA_BYTES";
+const NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_WAIT_TIMEOUT_MS";
+const V8_HEAP_LIMIT_MB_ENV: &str = "AGENT_OS_V8_HEAP_LIMIT_MB";
 const PYODIDE_INDEX_URL_ENV: &str = "AGENT_OS_PYODIDE_INDEX_URL";
 const PYODIDE_PACKAGE_BASE_URL_ENV: &str = "AGENT_OS_PYODIDE_PACKAGE_BASE_URL";
+const PYODIDE_GUEST_ROOT: &str = "/__agent_os_pyodide";
+const PYODIDE_CACHE_GUEST_ROOT: &str = "/__agent_os_pyodide_cache";
 const PYTHON_CODE_ENV: &str = "AGENT_OS_PYTHON_CODE";
 const PYTHON_FILE_ENV: &str = "AGENT_OS_PYTHON_FILE";
 const PYTHON_PREWARM_ONLY_ENV: &str = "AGENT_OS_PYTHON_PREWARM_ONLY";
@@ -48,41 +38,15 @@ const PYTHON_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_PYTHON_WARMUP_METRICS__:"
 const PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV: &str = "AGENT_OS_PYTHON_OUTPUT_BUFFER_MAX_BYTES";
 const PYTHON_EXECUTION_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_EXECUTION_TIMEOUT_MS";
 const PYTHON_MAX_OLD_SPACE_MB_ENV: &str = "AGENT_OS_PYTHON_MAX_OLD_SPACE_MB";
-const PYTHON_VFS_RPC_REQUEST_FD_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_REQUEST_FD";
-const PYTHON_VFS_RPC_RESPONSE_FD_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_RESPONSE_FD";
 const PYTHON_VFS_RPC_TIMEOUT_MS_ENV: &str = "AGENT_OS_PYTHON_VFS_RPC_TIMEOUT_MS";
-const PYTHON_VFS_RPC_MAX_PENDING_REQUESTS_ENV: &str =
-    "AGENT_OS_PYTHON_VFS_RPC_MAX_PENDING_REQUESTS";
-const PYTHON_EXIT_CONTROL_PREFIX: &str = "__AGENT_OS_PYTHON_EXIT__:";
-const PYTHON_WARMUP_MARKER_VERSION: &str = "1";
+const PYTHON_WARMUP_MARKER_VERSION: &str = "2";
 const DEFAULT_PYTHON_OUTPUT_BUFFER_MAX_BYTES: usize = 1024 * 1024;
 const DEFAULT_PYTHON_EXECUTION_TIMEOUT_MS: u64 = 5 * 60 * 1000;
-const DEFAULT_PYTHON_MAX_OLD_SPACE_MB: usize = 1024;
+const DEFAULT_PYTHON_MAX_OLD_SPACE_MB: usize = 0;
 const DEFAULT_PYTHON_VFS_RPC_TIMEOUT_MS: u64 = 30_000;
-const DEFAULT_PYTHON_VFS_RPC_MAX_PENDING_REQUESTS: usize = 1000;
-const CONTROLLED_STDERR_PREFIXES: &[&str] = &[PYTHON_EXIT_CONTROL_PREFIX];
-const RESERVED_PYTHON_ENV_KEYS: &[&str] = &[
-    NODE_COMPILE_CACHE_ENV,
-    NODE_DISABLE_COMPILE_CACHE_ENV,
-    NODE_ALLOWED_BUILTINS_ENV,
-    NODE_ALLOW_PROCESS_BINDINGS_ENV,
-    NODE_SANDBOX_ROOT_ENV,
-    NODE_FROZEN_TIME_ENV,
-    NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
-    NODE_IMPORT_CACHE_PATH_ENV,
-    PYODIDE_INDEX_URL_ENV,
-    PYODIDE_PACKAGE_BASE_URL_ENV,
-    PYTHON_CODE_ENV,
-    PYTHON_EXECUTION_TIMEOUT_MS_ENV,
-    PYTHON_FILE_ENV,
-    PYTHON_MAX_OLD_SPACE_MB_ENV,
-    PYTHON_OUTPUT_BUFFER_MAX_BYTES_ENV,
-    PYTHON_PREWARM_ONLY_ENV,
-    PYTHON_VFS_RPC_REQUEST_FD_ENV,
-    PYTHON_VFS_RPC_RESPONSE_FD_ENV,
-    PYTHON_VFS_RPC_MAX_PENDING_REQUESTS_ENV,
-    PYTHON_VFS_RPC_TIMEOUT_MS_ENV,
-];
+const PYTHON_SYNC_RPC_DATA_BYTES: usize = 20 * 1024 * 1024;
+const PYTHON_SYNC_RPC_WAIT_TIMEOUT_MS: u64 = 120_000;
+const PYTHON_PREWARM_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PythonVfsRpcMethod {
@@ -173,8 +137,7 @@ pub enum PythonVfsRpcResponsePayload {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PythonVfsRpcRequestWire {
-    id: u64,
+struct PythonVfsBridgeRequestWire {
     method: String,
     #[serde(default)]
     path: String,
@@ -208,11 +171,11 @@ struct PythonVfsRpcRequestWire {
     max_buffer: Option<usize>,
 }
 
-struct PythonVfsRpcChannels {
-    parent_request_reader: File,
-    parent_response_writer: Arc<Mutex<BufWriter<File>>>,
-    child_request_writer: OwnedFd,
-    child_response_reader: OwnedFd,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PythonGuestPathMappingWire {
+    guest_path: String,
+    host_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,16 +205,8 @@ pub struct StartPythonExecutionRequest {
 pub enum PythonExecutionEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
+    JavascriptSyncRpcRequest(JavascriptSyncRpcRequest),
     VfsRpcRequest(PythonVfsRpcRequest),
-    Exited(i32),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PythonProcessEvent {
-    Stdout(Vec<u8>),
-    RawStderr(Vec<u8>),
-    VfsRpcRequest(PythonVfsRpcRequest),
-    Control(NodeControlMessage),
     Exited(i32),
 }
 
@@ -267,19 +222,15 @@ pub struct PythonExecutionResult {
 pub enum PythonExecutionError {
     MissingContext(String),
     VmMismatch { expected: String, found: String },
-    MissingChildStream(&'static str),
     PrepareRuntime(std::io::Error),
     PrepareWarmPath(std::io::Error),
-    WarmupSpawn(std::io::Error),
     WarmupFailed { exit_code: i32, stderr: String },
     Spawn(std::io::Error),
     StdinClosed,
     Stdin(std::io::Error),
     Kill(std::io::Error),
-    Wait(std::io::Error),
     TimedOut(Duration),
     PendingVfsRpcRequest(u64),
-    RpcChannel(String),
     RpcResponse(String),
     EventChannelClosed,
 }
@@ -296,15 +247,11 @@ impl fmt::Display for PythonExecutionError {
                     "guest Python context belongs to vm {expected}, not {found}"
                 )
             }
-            Self::MissingChildStream(name) => write!(f, "node child missing {name} pipe"),
             Self::PrepareRuntime(err) => {
                 write!(f, "failed to prepare guest Python runtime assets: {err}")
             }
             Self::PrepareWarmPath(err) => {
                 write!(f, "failed to prepare guest Python warm path: {err}")
-            }
-            Self::WarmupSpawn(err) => {
-                write!(f, "failed to start guest Python warmup process: {err}")
             }
             Self::WarmupFailed { exit_code, stderr } => {
                 if stderr.trim().is_empty() {
@@ -321,7 +268,6 @@ impl fmt::Display for PythonExecutionError {
             Self::StdinClosed => f.write_str("guest Python stdin is already closed"),
             Self::Stdin(err) => write!(f, "failed to write guest stdin: {err}"),
             Self::Kill(err) => write!(f, "failed to kill guest Python runtime: {err}"),
-            Self::Wait(err) => write!(f, "failed to wait for guest Python runtime: {err}"),
             Self::TimedOut(timeout) => write!(
                 f,
                 "guest Python runtime timed out after {}ms",
@@ -331,12 +277,6 @@ impl fmt::Display for PythonExecutionError {
                 write!(
                     f,
                     "guest Python execution requires servicing pending VFS RPC request {id}"
-                )
-            }
-            Self::RpcChannel(message) => {
-                write!(
-                    f,
-                    "failed to configure guest Python VFS RPC channel: {message}"
                 )
             }
             Self::RpcResponse(message) => {
@@ -358,16 +298,13 @@ impl std::error::Error for PythonExecutionError {}
 pub struct PythonExecution {
     execution_id: String,
     child_pid: u32,
-    child: Arc<Mutex<Option<Child>>>,
-    stdin: Option<ChildStdin>,
-    events: RefCell<UnboundedReceiver<PythonExecutionEvent>>,
-    pending_exit_code: Arc<Mutex<Option<i32>>>,
+    inner: JavascriptExecution,
+    pyodide_dist_path: PathBuf,
     pending_vfs_rpc: Arc<Mutex<Option<PendingVfsRpcState>>>,
-    pending_vfs_rpc_count: Arc<AtomicUsize>,
-    vfs_rpc_responses: Arc<Mutex<BufWriter<File>>>,
+    v8_session: crate::v8_host::V8SessionHandle,
     output_buffer_max_bytes: usize,
     execution_timeout: Option<Duration>,
-    _import_cache_guard: Arc<NodeImportCacheCleanup>,
+    vfs_rpc_timeout: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,22 +329,16 @@ impl PythonExecution {
         self.child_pid
     }
 
+    pub fn uses_shared_v8_runtime(&self) -> bool {
+        self.inner.uses_shared_v8_runtime()
+    }
+
     pub fn write_stdin(&mut self, chunk: &[u8]) -> Result<(), PythonExecutionError> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or(PythonExecutionError::StdinClosed)?;
-        stdin
-            .write_all(chunk)
-            .and_then(|()| stdin.flush())
-            .map_err(PythonExecutionError::Stdin)
+        self.inner.write_stdin(chunk).map_err(map_javascript_error)
     }
 
     pub fn close_stdin(&mut self) -> Result<(), PythonExecutionError> {
-        if let Some(stdin) = self.stdin.take() {
-            drop(stdin);
-        }
-        Ok(())
+        self.inner.close_stdin().map_err(map_javascript_error)
     }
 
     pub fn cancel(&mut self) -> Result<(), PythonExecutionError> {
@@ -416,10 +347,7 @@ impl PythonExecution {
 
     pub fn kill(&mut self) -> Result<(), PythonExecutionError> {
         self.close_stdin()?;
-        if let Some(exit_code) = self.terminate_child()? {
-            self.store_pending_exit_code(exit_code)?;
-        }
-        Ok(())
+        self.inner.terminate().map_err(map_javascript_error)
     }
 
     pub fn respond_vfs_rpc_success(
@@ -428,9 +356,7 @@ impl PythonExecution {
         payload: PythonVfsRpcResponsePayload,
     ) -> Result<(), PythonExecutionError> {
         match self.clear_pending_vfs_rpc(id)? {
-            PendingVfsRpcResolution::Pending => {
-                release_python_vfs_rpc_slot(self.pending_vfs_rpc_count.as_ref());
-            }
+            PendingVfsRpcResolution::Pending => {}
             PendingVfsRpcResolution::TimedOut => {
                 return Err(PythonExecutionError::RpcResponse(format!(
                     "VFS RPC request {id} is no longer pending"
@@ -484,14 +410,9 @@ impl PythonExecution {
             }),
         };
 
-        write_python_vfs_rpc_response(
-            &self.vfs_rpc_responses,
-            json!({
-                "id": id,
-                "ok": true,
-                "result": result,
-            }),
-        )
+        self.inner
+            .respond_sync_rpc_success(id, result)
+            .map_err(map_javascript_error)
     }
 
     pub fn respond_vfs_rpc_error(
@@ -501,9 +422,7 @@ impl PythonExecution {
         message: impl Into<String>,
     ) -> Result<(), PythonExecutionError> {
         match self.clear_pending_vfs_rpc(id)? {
-            PendingVfsRpcResolution::Pending => {
-                release_python_vfs_rpc_slot(self.pending_vfs_rpc_count.as_ref());
-            }
+            PendingVfsRpcResolution::Pending => {}
             PendingVfsRpcResolution::TimedOut => {
                 return Err(PythonExecutionError::RpcResponse(format!(
                     "VFS RPC request {id} is no longer pending"
@@ -512,85 +431,80 @@ impl PythonExecution {
             PendingVfsRpcResolution::Missing => {}
         }
 
-        write_python_vfs_rpc_response(
-            &self.vfs_rpc_responses,
-            json!({
-                "id": id,
-                "ok": false,
-                "error": {
-                    "code": code.into(),
-                    "message": message.into(),
-                },
-            }),
-        )
+        self.inner
+            .respond_sync_rpc_error(id, code, message)
+            .map_err(map_javascript_error)
+    }
+
+    pub fn respond_javascript_sync_rpc_success(
+        &mut self,
+        id: u64,
+        result: Value,
+    ) -> Result<(), PythonExecutionError> {
+        self.inner
+            .respond_sync_rpc_success(id, result)
+            .map_err(map_javascript_error)
+    }
+
+    pub fn respond_javascript_sync_rpc_error(
+        &mut self,
+        id: u64,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<(), PythonExecutionError> {
+        self.inner
+            .respond_sync_rpc_error(id, code, message)
+            .map_err(map_javascript_error)
     }
 
     pub async fn poll_event(
-        &self,
+        &mut self,
         timeout: Duration,
     ) -> Result<Option<PythonExecutionEvent>, PythonExecutionError> {
-        if timeout.is_zero() {
-            return match self.events.borrow_mut().try_recv() {
-                Ok(event) => Ok(Some(event)),
-                Err(TokioTryRecvError::Empty) => {
-                    if let Some(exit_code) = self.take_pending_exit_code()? {
-                        Ok(Some(PythonExecutionEvent::Exited(exit_code)))
-                    } else {
-                        Ok(None)
-                    }
-                }
-                Err(TokioTryRecvError::Disconnected) => {
-                    if let Some(exit_code) = self.take_pending_exit_code()? {
-                        Ok(Some(PythonExecutionEvent::Exited(exit_code)))
-                    } else {
-                        Err(PythonExecutionError::EventChannelClosed)
-                    }
-                }
+        let started = Instant::now();
+        loop {
+            let remaining = if timeout.is_zero() {
+                Duration::ZERO
+            } else {
+                timeout.saturating_sub(started.elapsed())
             };
-        }
-
-        let mut events = self.events.borrow_mut();
-        match time::timeout(timeout, events.recv()).await {
-            Ok(Some(event)) => Ok(Some(event)),
-            Ok(None) => {
-                if let Some(exit_code) = self.take_pending_exit_code()? {
-                    Ok(Some(PythonExecutionEvent::Exited(exit_code)))
-                } else {
-                    Err(PythonExecutionError::EventChannelClosed)
+            match self
+                .inner
+                .poll_event(remaining)
+                .await
+                .map_err(map_javascript_error)?
+            {
+                Some(event) => {
+                    if let Some(event) = self.translate_javascript_event(event)? {
+                        return Ok(Some(event));
+                    }
                 }
-            }
-            Err(_) => {
-                if let Some(exit_code) = self.take_pending_exit_code()? {
-                    Ok(Some(PythonExecutionEvent::Exited(exit_code)))
-                } else {
-                    Ok(None)
-                }
+                None => return Ok(None),
             }
         }
     }
 
     pub fn poll_event_blocking(
-        &self,
+        &mut self,
         timeout: Duration,
     ) -> Result<Option<PythonExecutionEvent>, PythonExecutionError> {
         let deadline = Instant::now() + timeout;
         loop {
-            match self.events.borrow_mut().try_recv() {
-                Ok(event) => return Ok(Some(event)),
-                Err(TokioTryRecvError::Disconnected) => {
-                    if let Some(exit_code) = self.take_pending_exit_code()? {
-                        return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self
+                .inner
+                .poll_event_blocking(remaining)
+                .map_err(map_javascript_error)?
+            {
+                Some(event) => {
+                    if let Some(event) = self.translate_javascript_event(event)? {
+                        return Ok(Some(event));
                     }
-                    return Err(PythonExecutionError::EventChannelClosed);
                 }
-                Err(TokioTryRecvError::Empty) => {
-                    if let Some(exit_code) = self.take_pending_exit_code()? {
-                        return Ok(Some(PythonExecutionEvent::Exited(exit_code)));
-                    }
+                None => {
                     if Instant::now() >= deadline {
                         return Ok(None);
                     }
-                    thread::sleep(Duration::from_millis(1));
                 }
             }
         }
@@ -633,6 +547,18 @@ impl PythonExecution {
             match event {
                 Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(&chunk),
                 Some(PythonExecutionEvent::Stderr(chunk)) => stderr.extend(&chunk),
+                Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+                    if let Some((code, message)) = python_javascript_sync_rpc_error(&request) {
+                        self.inner
+                            .respond_sync_rpc_error(request.id, code, message)
+                            .map_err(map_javascript_error)?;
+                        continue;
+                    }
+                    return Err(PythonExecutionError::RpcResponse(format!(
+                        "guest Python execution requires servicing pending JavaScript sync RPC request {} {} {:?}",
+                        request.id, request.method, request.args
+                    )));
+                }
                 Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
                     return Err(PythonExecutionError::PendingVfsRpcRequest(request.id));
                 }
@@ -656,48 +582,6 @@ impl PythonExecution {
         }
     }
 
-    fn terminate_child(&self) -> Result<Option<i32>, PythonExecutionError> {
-        let mut child_slot = self
-            .child
-            .lock()
-            .map_err(|_| PythonExecutionError::EventChannelClosed)?;
-        let Some(child) = child_slot.as_mut() else {
-            return Ok(None);
-        };
-
-        let exit_code = match child.try_wait().map_err(PythonExecutionError::Wait)? {
-            Some(status) => status.code().unwrap_or(1),
-            None => {
-                child.kill().map_err(PythonExecutionError::Kill)?;
-                child
-                    .wait()
-                    .map_err(PythonExecutionError::Wait)?
-                    .code()
-                    .unwrap_or(1)
-            }
-        };
-
-        *child_slot = None;
-        Ok(Some(exit_code))
-    }
-
-    fn store_pending_exit_code(&self, exit_code: i32) -> Result<(), PythonExecutionError> {
-        let mut pending = self
-            .pending_exit_code
-            .lock()
-            .map_err(|_| PythonExecutionError::EventChannelClosed)?;
-        *pending = Some(exit_code);
-        Ok(())
-    }
-
-    fn take_pending_exit_code(&self) -> Result<Option<i32>, PythonExecutionError> {
-        let mut pending = self
-            .pending_exit_code
-            .lock()
-            .map_err(|_| PythonExecutionError::EventChannelClosed)?;
-        Ok(pending.take())
-    }
-
     fn clear_pending_vfs_rpc(
         &self,
         id: u64,
@@ -717,12 +601,56 @@ impl PythonExecution {
             _ => Ok(PendingVfsRpcResolution::Missing),
         }
     }
+
+    fn translate_javascript_event(
+        &mut self,
+        event: JavascriptExecutionEvent,
+    ) -> Result<Option<PythonExecutionEvent>, PythonExecutionError> {
+        match event {
+            JavascriptExecutionEvent::Stdout(chunk) => {
+                Ok(Some(PythonExecutionEvent::Stdout(chunk)))
+            }
+            JavascriptExecutionEvent::Stderr(chunk) => {
+                Ok(Some(PythonExecutionEvent::Stderr(chunk)))
+            }
+            JavascriptExecutionEvent::Exited(code) => Ok(Some(PythonExecutionEvent::Exited(code))),
+            JavascriptExecutionEvent::SignalState { .. } => Ok(None),
+            JavascriptExecutionEvent::SyncRpcRequest(request) => {
+                if request.method == "_pythonRpc" {
+                    let request = parse_python_bridge_sync_rpc_request(&request)?;
+                    set_pending_vfs_rpc_state(&self.pending_vfs_rpc, request.id)?;
+                    spawn_python_vfs_rpc_timeout(
+                        request.id,
+                        self.vfs_rpc_timeout,
+                        self.pending_vfs_rpc.clone(),
+                        self.v8_session.clone(),
+                    );
+                    Ok(Some(PythonExecutionEvent::VfsRpcRequest(request)))
+                } else {
+                    if let Some(action) =
+                        python_javascript_sync_rpc_action(&self.pyodide_dist_path, &request)?
+                    {
+                        respond_python_javascript_sync_rpc_action(
+                            &mut self.inner,
+                            request.id,
+                            action,
+                        )?;
+                        Ok(None)
+                    } else {
+                        Ok(Some(PythonExecutionEvent::JavascriptSyncRpcRequest(
+                            request,
+                        )))
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Drop for PythonExecution {
     fn drop(&mut self) {
         let _ = self.close_stdin();
-        let _ = self.terminate_child();
+        let _ = self.inner.terminate();
     }
 }
 
@@ -732,6 +660,8 @@ pub struct PythonExecutionEngine {
     next_execution_id: usize,
     contexts: BTreeMap<String, PythonContext>,
     import_caches: BTreeMap<String, NodeImportCache>,
+    javascript_context_ids: BTreeMap<String, String>,
+    javascript_engine: JavascriptExecutionEngine,
 }
 
 impl PythonExecutionEngine {
@@ -749,12 +679,21 @@ impl PythonExecutionEngine {
     pub fn create_context(&mut self, request: CreatePythonContextRequest) -> PythonContext {
         self.next_context_id += 1;
         self.import_caches.entry(request.vm_id.clone()).or_default();
+        let javascript_context =
+            self.javascript_engine
+                .create_context(CreateJavascriptContextRequest {
+                    vm_id: request.vm_id.clone(),
+                    bootstrap_module: None,
+                    compile_cache_root: None,
+                });
 
         let context = PythonContext {
             context_id: format!("python-ctx-{}", self.next_context_id),
             vm_id: request.vm_id,
             pyodide_dist_path: request.pyodide_dist_path,
         };
+        self.javascript_context_ids
+            .insert(context.context_id.clone(), javascript_context.context_id);
         self.contexts
             .insert(context.context_id.clone(), context.clone());
         context
@@ -778,161 +717,67 @@ impl PythonExecutionEngine {
         }
 
         let frozen_time_ms = frozen_time_ms();
+        let javascript_context_id = self
+            .javascript_context_ids
+            .get(&context.context_id)
+            .cloned()
+            .ok_or_else(|| PythonExecutionError::MissingContext(context.context_id.clone()))?;
         let warmup_metrics = {
             let import_cache = self.import_caches.entry(context.vm_id.clone()).or_default();
             import_cache
                 .ensure_materialized()
                 .map_err(PythonExecutionError::PrepareRuntime)?;
-            prewarm_python_path(import_cache, &context, &request, frozen_time_ms)?
+            prewarm_python_path(
+                import_cache,
+                &mut self.javascript_engine,
+                &javascript_context_id,
+                &context,
+                &request,
+                frozen_time_ms,
+            )?
         };
 
         self.next_execution_id += 1;
         let execution_id = format!("exec-{}", self.next_execution_id);
-        let rpc_channels = create_python_vfs_rpc_channels()?;
-        let control_channel = create_node_control_channel().map_err(PythonExecutionError::Spawn)?;
         let import_cache = self
             .import_caches
             .get(&context.vm_id)
             .expect("vm import cache should exist after materialization");
-        let import_cache_guard = import_cache.cleanup_guard();
-        let pending_vfs_rpc_count = Arc::new(AtomicUsize::new(0));
-        let (mut child, rpc_request_reader, rpc_response_writer) = create_node_child(
+        let pyodide_dist_path =
+            resolved_pyodide_dist_path(&context.pyodide_dist_path, &request.cwd);
+        let javascript_execution = start_python_javascript_execution(
+            &mut self.javascript_engine,
             import_cache,
+            &javascript_context_id,
             &context,
             &request,
-            rpc_channels,
-            &control_channel.child_writer,
             frozen_time_ms,
+            false,
+            warmup_metrics.as_deref(),
         )?;
-        let child_pid = child.id();
-
-        let stdin = child.stdin.take();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(PythonExecutionError::MissingChildStream("stdout"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or(PythonExecutionError::MissingChildStream("stderr"))?;
-
-        let (sender, receiver) = mpsc::channel();
-        if let Some(metrics) = warmup_metrics {
-            let _ = sender.send(PythonProcessEvent::RawStderr(metrics));
-        }
-        let stdout_reader = spawn_stream_reader(stdout, sender.clone(), PythonProcessEvent::Stdout);
-        let stderr_reader =
-            spawn_stream_reader(stderr, sender.clone(), PythonProcessEvent::RawStderr);
-        let _rpc_reader = spawn_python_vfs_rpc_reader(
-            rpc_request_reader,
-            sender.clone(),
-            rpc_response_writer.clone(),
-            pending_vfs_rpc_count.clone(),
-            python_vfs_rpc_max_pending_requests(&request),
-        );
-        let _control_reader = spawn_node_control_reader(
-            control_channel.parent_reader,
-            sender.clone(),
-            PythonProcessEvent::Control,
-            |message| PythonProcessEvent::RawStderr(message.into_bytes()),
-        );
-        let child = Arc::new(Mutex::new(Some(child)));
-        spawn_python_waiter(
-            child.clone(),
-            stdout_reader,
-            stderr_reader,
-            sender,
-            PythonProcessEvent::Exited,
-            |message| PythonProcessEvent::RawStderr(message.into_bytes()),
-        );
-
-        let pending_exit_code = Arc::new(Mutex::new(None));
         let pending_vfs_rpc = Arc::new(Mutex::new(None));
-        let stderr_filter = Arc::new(Mutex::new(LinePrefixFilter::default()));
         let vfs_rpc_timeout = python_vfs_rpc_timeout(&request);
-        let events = spawn_python_event_bridge(
-            receiver,
-            pending_vfs_rpc.clone(),
-            pending_vfs_rpc_count.clone(),
-            rpc_response_writer.clone(),
-            stderr_filter,
-            vfs_rpc_timeout,
-        );
 
         Ok(PythonExecution {
             execution_id,
-            child_pid,
-            child,
-            stdin,
-            events: RefCell::new(events),
-            pending_exit_code,
+            child_pid: javascript_execution.child_pid(),
+            v8_session: javascript_execution.v8_session_handle(),
+            inner: javascript_execution,
+            pyodide_dist_path,
             pending_vfs_rpc,
-            pending_vfs_rpc_count,
-            vfs_rpc_responses: rpc_response_writer,
             output_buffer_max_bytes: python_output_buffer_max_bytes(&request),
             execution_timeout: python_execution_timeout(&request),
-            _import_cache_guard: import_cache_guard,
+            vfs_rpc_timeout,
         })
     }
 
     pub fn dispose_vm(&mut self, vm_id: &str) {
         self.contexts.retain(|_, context| context.vm_id != vm_id);
+        self.javascript_context_ids
+            .retain(|python_context_id, _| self.contexts.contains_key(python_context_id));
         self.import_caches.remove(vm_id);
+        self.javascript_engine.dispose_vm(vm_id);
     }
-}
-
-fn spawn_python_event_bridge(
-    receiver: Receiver<PythonProcessEvent>,
-    pending_vfs_rpc: Arc<Mutex<Option<PendingVfsRpcState>>>,
-    pending_vfs_rpc_count: Arc<AtomicUsize>,
-    vfs_rpc_responses: Arc<Mutex<BufWriter<File>>>,
-    stderr_filter: Arc<Mutex<LinePrefixFilter>>,
-    vfs_rpc_timeout: Duration,
-) -> UnboundedReceiver<PythonExecutionEvent> {
-    let (sender, forwarded) = unbounded_channel();
-    thread::spawn(move || {
-        while let Ok(event) = receiver.recv() {
-            let forwarded_event = match event {
-                PythonProcessEvent::Stdout(chunk) => Some(PythonExecutionEvent::Stdout(chunk)),
-                PythonProcessEvent::RawStderr(chunk) => {
-                    let mut filter = match stderr_filter.lock() {
-                        Ok(filter) => filter,
-                        Err(_) => break,
-                    };
-                    let filtered = filter.filter_chunk(&chunk, CONTROLLED_STDERR_PREFIXES);
-                    if filtered.is_empty() {
-                        None
-                    } else {
-                        Some(PythonExecutionEvent::Stderr(filtered))
-                    }
-                }
-                PythonProcessEvent::VfsRpcRequest(request) => {
-                    if set_pending_vfs_rpc_state(&pending_vfs_rpc, request.id).is_err() {
-                        break;
-                    }
-                    spawn_python_vfs_rpc_timeout(
-                        request.id,
-                        vfs_rpc_timeout,
-                        pending_vfs_rpc.clone(),
-                        pending_vfs_rpc_count.clone(),
-                        vfs_rpc_responses.clone(),
-                    );
-                    Some(PythonExecutionEvent::VfsRpcRequest(request))
-                }
-                PythonProcessEvent::Exited(exit_code) => {
-                    Some(PythonExecutionEvent::Exited(exit_code))
-                }
-                PythonProcessEvent::Control(_) => None,
-            };
-
-            if let Some(event) = forwarded_event {
-                if sender.send(event).is_err() {
-                    break;
-                }
-            }
-        }
-    });
-    forwarded
 }
 
 fn set_pending_vfs_rpc_state(
@@ -944,6 +789,275 @@ fn set_pending_vfs_rpc_state(
         .map_err(|_| PythonExecutionError::EventChannelClosed)?;
     *pending = Some(PendingVfsRpcState::Pending(id));
     Ok(())
+}
+
+fn map_javascript_error(error: JavascriptExecutionError) -> PythonExecutionError {
+    match error {
+        JavascriptExecutionError::EmptyArgv => PythonExecutionError::Spawn(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "guest Python bootstrap requires a JavaScript entrypoint",
+        )),
+        JavascriptExecutionError::MissingContext(context_id) => {
+            PythonExecutionError::MissingContext(context_id)
+        }
+        JavascriptExecutionError::VmMismatch { expected, found } => {
+            PythonExecutionError::VmMismatch { expected, found }
+        }
+        JavascriptExecutionError::PrepareImportCache(error) => {
+            PythonExecutionError::PrepareRuntime(error)
+        }
+        JavascriptExecutionError::Spawn(error) => PythonExecutionError::Spawn(error),
+        JavascriptExecutionError::PendingSyncRpcRequest(id) => {
+            PythonExecutionError::PendingVfsRpcRequest(id)
+        }
+        JavascriptExecutionError::ExpiredSyncRpcRequest(id) => {
+            PythonExecutionError::RpcResponse(format!("VFS RPC request {id} is no longer pending"))
+        }
+        JavascriptExecutionError::RpcResponse(message) => {
+            PythonExecutionError::RpcResponse(message)
+        }
+        JavascriptExecutionError::Terminate(error) => PythonExecutionError::Kill(error),
+        JavascriptExecutionError::StdinClosed => PythonExecutionError::StdinClosed,
+        JavascriptExecutionError::Stdin(error) => PythonExecutionError::Stdin(error),
+        JavascriptExecutionError::EventChannelClosed => PythonExecutionError::EventChannelClosed,
+    }
+}
+
+fn start_python_javascript_execution(
+    javascript_engine: &mut JavascriptExecutionEngine,
+    import_cache: &NodeImportCache,
+    javascript_context_id: &str,
+    context: &PythonContext,
+    request: &StartPythonExecutionRequest,
+    frozen_time_ms: u128,
+    prewarm_only: bool,
+    warmup_metrics: Option<&[u8]>,
+) -> Result<JavascriptExecution, PythonExecutionError> {
+    let internal_env =
+        build_python_internal_env(import_cache, context, request, frozen_time_ms, prewarm_only);
+    let inline_code =
+        build_python_runner_module_source(import_cache, &internal_env, warmup_metrics)?;
+    let mut env = request.env.clone();
+    env.extend(internal_env);
+
+    javascript_engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: request.vm_id.clone(),
+            context_id: javascript_context_id.to_owned(),
+            argv: vec![import_cache.python_runner_path().display().to_string()],
+            env,
+            cwd: request.cwd.clone(),
+            inline_code: Some(inline_code),
+        })
+        .map_err(map_javascript_error)
+}
+
+fn build_python_internal_env(
+    import_cache: &NodeImportCache,
+    context: &PythonContext,
+    request: &StartPythonExecutionRequest,
+    frozen_time_ms: u128,
+    prewarm_only: bool,
+) -> BTreeMap<String, String> {
+    let mut internal_env = request
+        .env
+        .iter()
+        .filter(|(key, _)| key.starts_with("AGENT_OS_"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let pyodide_dist_path = resolved_pyodide_dist_path(&context.pyodide_dist_path, &request.cwd);
+
+    add_python_guest_path_mapping(&mut internal_env, &pyodide_dist_path);
+
+    internal_env.insert(
+        PYODIDE_INDEX_URL_ENV.to_string(),
+        String::from(PYODIDE_GUEST_ROOT),
+    );
+    internal_env.insert(
+        PYODIDE_PACKAGE_BASE_URL_ENV.to_string(),
+        request
+            .env
+            .get(PYODIDE_PACKAGE_BASE_URL_ENV)
+            .cloned()
+            .unwrap_or_else(|| String::from(PYODIDE_GUEST_ROOT)),
+    );
+    internal_env.insert(
+        NODE_IMPORT_CACHE_ASSET_ROOT_ENV.to_string(),
+        import_cache.asset_root().display().to_string(),
+    );
+    internal_env.insert(
+        NODE_ALLOW_PROCESS_BINDINGS_ENV.to_string(),
+        String::from("1"),
+    );
+    internal_env.insert(
+        NODE_SYNC_RPC_DATA_BYTES_ENV.to_string(),
+        PYTHON_SYNC_RPC_DATA_BYTES.to_string(),
+    );
+    internal_env.insert(
+        NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV.to_string(),
+        PYTHON_SYNC_RPC_WAIT_TIMEOUT_MS.to_string(),
+    );
+    internal_env.insert(
+        V8_HEAP_LIMIT_MB_ENV.to_string(),
+        python_max_old_space_mb(request).to_string(),
+    );
+    internal_env.insert(PYTHON_CODE_ENV.to_string(), request.code.clone());
+    internal_env.insert(NODE_FROZEN_TIME_ENV.to_string(), frozen_time_ms.to_string());
+    if prewarm_only {
+        internal_env.insert(PYTHON_PREWARM_ONLY_ENV.to_string(), String::from("1"));
+    } else {
+        internal_env.insert(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"));
+        internal_env.remove(PYTHON_PREWARM_ONLY_ENV);
+    }
+    if let Some(file_path) = &request.file_path {
+        internal_env.insert(PYTHON_FILE_ENV.to_string(), file_path.display().to_string());
+    } else {
+        internal_env.remove(PYTHON_FILE_ENV);
+    }
+
+    internal_env
+}
+
+fn add_python_guest_path_mapping(
+    internal_env: &mut BTreeMap<String, String>,
+    pyodide_dist_path: &Path,
+) {
+    let pyodide_cache_path = pyodide_cache_path(pyodide_dist_path);
+    let mut mappings = internal_env
+        .get(NODE_GUEST_PATH_MAPPINGS_ENV)
+        .and_then(|value| serde_json::from_str::<Vec<PythonGuestPathMappingWire>>(value).ok())
+        .unwrap_or_default();
+
+    mappings.retain(|mapping| {
+        mapping.guest_path != PYODIDE_GUEST_ROOT && mapping.guest_path != PYODIDE_CACHE_GUEST_ROOT
+    });
+    mappings.push(PythonGuestPathMappingWire {
+        guest_path: String::from(PYODIDE_GUEST_ROOT),
+        host_path: pyodide_dist_path.display().to_string(),
+    });
+    mappings.push(PythonGuestPathMappingWire {
+        guest_path: String::from(PYODIDE_CACHE_GUEST_ROOT),
+        host_path: pyodide_cache_path.display().to_string(),
+    });
+
+    let serialized = serde_json::to_string(&mappings).unwrap_or_else(|_| String::from("[]"));
+    internal_env.insert(String::from(NODE_GUEST_PATH_MAPPINGS_ENV), serialized);
+}
+
+fn pyodide_cache_path(pyodide_dist_path: &Path) -> PathBuf {
+    pyodide_dist_path
+        .parent()
+        .unwrap_or(pyodide_dist_path)
+        .join("pyodide-package-cache")
+}
+
+fn build_python_runner_module_source(
+    import_cache: &NodeImportCache,
+    internal_env: &BTreeMap<String, String>,
+    warmup_metrics: Option<&[u8]>,
+) -> Result<String, PythonExecutionError> {
+    let runner_source = fs::read_to_string(import_cache.python_runner_path())
+        .map_err(PythonExecutionError::PrepareRuntime)?;
+    let runner_source =
+        format!("import * as __agentOsConstantsBinding from 'node:constants';\n{runner_source}");
+    let bootstrap = build_python_runner_bootstrap(internal_env, warmup_metrics);
+    Ok(insert_python_runner_bootstrap(&runner_source, &bootstrap))
+}
+
+fn build_python_runner_bootstrap(
+    internal_env: &BTreeMap<String, String>,
+    warmup_metrics: Option<&[u8]>,
+) -> String {
+    let internal_env_json =
+        serde_json::to_string(internal_env).unwrap_or_else(|_| String::from("{}"));
+    let warmup_metrics_json = warmup_metrics.map(|bytes| {
+        serde_json::to_string(&String::from_utf8_lossy(bytes).to_string())
+            .unwrap_or_else(|_| String::from("\"\""))
+    });
+
+    match warmup_metrics_json {
+        Some(warmup_metrics_json) => format!(
+            "const __agentOsPythonInternalEnv = {internal_env_json};\n\
+if (typeof process !== 'undefined') {{\n  process.env = {{ ...(process.env || {{}}), ...__agentOsPythonInternalEnv }};\n}}\n\
+if (typeof process?.stderr?.write === 'function') {{\n  process.stderr.write({warmup_metrics_json});\n}}\n"
+        ),
+        None => format!(
+            "const __agentOsPythonInternalEnv = {internal_env_json};\n\
+if (typeof process !== 'undefined') {{\n  process.env = {{ ...(process.env || {{}}), ...__agentOsPythonInternalEnv }};\n}}\n"
+        ),
+    }
+}
+
+fn insert_python_runner_bootstrap(source: &str, bootstrap: &str) -> String {
+    let mut insert_at = 0usize;
+    let mut saw_import = false;
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("import ") || (saw_import && trimmed.is_empty()) {
+            insert_at += line.len();
+            saw_import = saw_import || trimmed.starts_with("import ");
+            continue;
+        }
+        break;
+    }
+
+    format!(
+        "{}{}{}",
+        &source[..insert_at],
+        bootstrap,
+        &source[insert_at..]
+    )
+}
+
+fn parse_python_bridge_sync_rpc_request(
+    request: &JavascriptSyncRpcRequest,
+) -> Result<PythonVfsRpcRequest, PythonExecutionError> {
+    if request.method != "_pythonRpc" {
+        return Err(PythonExecutionError::RpcResponse(format!(
+            "unexpected JavaScript sync RPC method for guest Python runtime: {}",
+            request.method
+        )));
+    }
+
+    let payload = request.args.first().ok_or_else(|| {
+        PythonExecutionError::RpcResponse(String::from(
+            "guest Python bridge call did not include a request payload",
+        ))
+    })?;
+
+    let wire: PythonVfsBridgeRequestWire =
+        serde_json::from_value(payload.clone()).map_err(|error| {
+            PythonExecutionError::RpcResponse(format!(
+                "invalid guest Python bridge request payload: {error}"
+            ))
+        })?;
+
+    let method = PythonVfsRpcMethod::from_wire(&wire.method).ok_or_else(|| {
+        PythonExecutionError::RpcResponse(format!(
+            "unsupported agent-os python rpc method {} for {}",
+            wire.method, request.id
+        ))
+    })?;
+
+    Ok(PythonVfsRpcRequest {
+        id: request.id,
+        method,
+        path: wire.path,
+        content_base64: wire.content_base64,
+        recursive: wire.recursive,
+        url: wire.url,
+        http_method: wire.http_method,
+        headers: wire.headers,
+        body_base64: wire.body_base64,
+        hostname: wire.hostname,
+        family: wire.family,
+        command: wire.command,
+        args: wire.args,
+        cwd: wire.cwd,
+        env: wire.env,
+        shell: wire.shell,
+        max_buffer: wire.max_buffer,
+    })
 }
 
 #[derive(Debug)]
@@ -1023,21 +1137,11 @@ fn python_vfs_rpc_timeout(request: &StartPythonExecutionRequest) -> Duration {
     )
 }
 
-fn python_vfs_rpc_max_pending_requests(request: &StartPythonExecutionRequest) -> usize {
-    request
-        .env
-        .get(PYTHON_VFS_RPC_MAX_PENDING_REQUESTS_ENV)
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_PYTHON_VFS_RPC_MAX_PENDING_REQUESTS)
-}
-
 fn spawn_python_vfs_rpc_timeout(
     id: u64,
     timeout: Duration,
     pending: Arc<Mutex<Option<PendingVfsRpcState>>>,
-    pending_count: Arc<AtomicUsize>,
-    responses: Arc<Mutex<BufWriter<File>>>,
+    v8_session: crate::v8_host::V8SessionHandle,
 ) {
     thread::spawn(move || {
         thread::sleep(timeout);
@@ -1054,205 +1158,16 @@ fn spawn_python_vfs_rpc_timeout(
             return;
         }
 
-        release_python_vfs_rpc_slot(pending_count.as_ref());
-        let _ = write_python_vfs_rpc_response(
-            &responses,
-            json!({
-                "id": id,
-                "ok": false,
-                "error": {
-                    "code": "ERR_AGENT_OS_PYTHON_VFS_RPC_TIMEOUT",
-                    "message": format!(
-                        "guest Python VFS RPC request {id} timed out after {}ms",
-                        timeout.as_millis()
-                    ),
-                },
-            }),
+        let _ = v8_session.send_bridge_response(
+            id,
+            1,
+            format!(
+                "ERR_AGENT_OS_PYTHON_VFS_RPC_TIMEOUT: guest Python VFS RPC request {id} timed out after {}ms",
+                timeout.as_millis()
+            )
+            .into_bytes(),
         );
     });
-}
-
-fn spawn_python_waiter<E, FE, FW>(
-    child: Arc<Mutex<Option<Child>>>,
-    stdout_reader: JoinHandle<()>,
-    stderr_reader: JoinHandle<()>,
-    sender: Sender<E>,
-    exit_event: FE,
-    wait_error_event: FW,
-) where
-    E: Send + 'static,
-    FE: Fn(i32) -> E + Send + 'static,
-    FW: Fn(String) -> E + Send + 'static,
-{
-    thread::spawn(move || loop {
-        let outcome = {
-            let mut child_slot = match child.lock() {
-                Ok(child_slot) => child_slot,
-                Err(_) => {
-                    let _ = sender.send(wait_error_event(String::from(
-                        "agent-os execution wait error: child lock poisoned\n",
-                    )));
-                    return;
-                }
-            };
-            let Some(child) = child_slot.as_mut() else {
-                return;
-            };
-
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    let exit_code = status.code().unwrap_or(1);
-                    *child_slot = None;
-                    Some(Ok(exit_code))
-                }
-                Ok(None) => None,
-                Err(err) => {
-                    *child_slot = None;
-                    Some(Err(err))
-                }
-            }
-        };
-
-        match outcome {
-            Some(Ok(exit_code)) => {
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                let _ = sender.send(exit_event(exit_code));
-                return;
-            }
-            Some(Err(err)) => {
-                let _ = sender.send(wait_error_event(format!(
-                    "agent-os execution wait error: {err}\n"
-                )));
-                return;
-            }
-            None => thread::sleep(Duration::from_millis(10)),
-        }
-    });
-}
-
-fn create_node_child(
-    import_cache: &NodeImportCache,
-    context: &PythonContext,
-    request: &StartPythonExecutionRequest,
-    rpc_channels: PythonVfsRpcChannels,
-    control_fd: &OwnedFd,
-    frozen_time_ms: u128,
-) -> Result<(std::process::Child, File, Arc<Mutex<BufWriter<File>>>), PythonExecutionError> {
-    ensure_host_cwd_exists(&request.cwd).map_err(PythonExecutionError::Spawn)?;
-    let mut command = Command::new(node_binary());
-    let mut exported_fds = ExportedChildFds::default();
-    configure_python_node_sandbox(&mut command, import_cache, context, request);
-    command
-        .arg(format!(
-            "--max-old-space-size={}",
-            python_max_old_space_mb(request)
-        ))
-        .arg("--no-warnings")
-        .arg("--import")
-        .arg(import_cache.timing_bootstrap_path())
-        .arg(import_cache.python_runner_path())
-        .current_dir(&request.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env(
-            PYODIDE_INDEX_URL_ENV,
-            resolved_pyodide_dist_path(&context.pyodide_dist_path, &request.cwd),
-        )
-        .env(
-            PYODIDE_PACKAGE_BASE_URL_ENV,
-            request
-                .env
-                .get(PYODIDE_PACKAGE_BASE_URL_ENV)
-                .cloned()
-                .unwrap_or_else(|| {
-                    resolved_pyodide_dist_path(&context.pyodide_dist_path, &request.cwd)
-                        .to_string_lossy()
-                        .into_owned()
-                }),
-        )
-        .env(NODE_IMPORT_CACHE_ASSET_ROOT_ENV, import_cache.asset_root())
-        .env(NODE_IMPORT_CACHE_PATH_ENV, import_cache.cache_path())
-        .env(NODE_ALLOW_PROCESS_BINDINGS_ENV, "1")
-        .env(PYTHON_CODE_ENV, &request.code)
-        .env(
-            PYTHON_VFS_RPC_TIMEOUT_MS_ENV,
-            request
-                .env
-                .get(PYTHON_VFS_RPC_TIMEOUT_MS_ENV)
-                .cloned()
-                .unwrap_or_else(|| DEFAULT_PYTHON_VFS_RPC_TIMEOUT_MS.to_string()),
-        )
-        .env(NODE_FROZEN_TIME_ENV, frozen_time_ms.to_string());
-
-    if let Some(file_path) = &request.file_path {
-        command.env(PYTHON_FILE_ENV, file_path);
-    }
-
-    exported_fds
-        .export(
-            &mut command,
-            PYTHON_VFS_RPC_REQUEST_FD_ENV,
-            &rpc_channels.child_request_writer,
-        )
-        .map_err(|error| PythonExecutionError::RpcChannel(error.to_string()))?;
-    exported_fds
-        .export(
-            &mut command,
-            PYTHON_VFS_RPC_RESPONSE_FD_ENV,
-            &rpc_channels.child_response_reader,
-        )
-        .map_err(|error| PythonExecutionError::RpcChannel(error.to_string()))?;
-    apply_guest_env(&mut command, &request.env, RESERVED_PYTHON_ENV_KEYS);
-    configure_node_control_channel(&mut command, control_fd, &mut exported_fds)
-        .map_err(PythonExecutionError::Spawn)?;
-    configure_node_command(&mut command, import_cache)?;
-    let child = command.spawn().map_err(PythonExecutionError::Spawn)?;
-    Ok((
-        child,
-        rpc_channels.parent_request_reader,
-        rpc_channels.parent_response_writer,
-    ))
-}
-
-fn configure_python_node_sandbox(
-    command: &mut Command,
-    import_cache: &NodeImportCache,
-    context: &PythonContext,
-    request: &StartPythonExecutionRequest,
-) {
-    let sandbox_root = sandbox_root(&request.env, &request.cwd);
-    let cache_root = import_cache_root(import_cache, import_cache.asset_root());
-    let compile_cache_dir = import_cache.shared_compile_cache_dir();
-    let pyodide_dist_path = resolved_pyodide_dist_path(&context.pyodide_dist_path, &request.cwd);
-    let read_paths = vec![
-        cache_root.clone(),
-        compile_cache_dir.clone(),
-        pyodide_dist_path,
-    ];
-    let write_paths = vec![cache_root, compile_cache_dir, sandbox_root.clone()];
-
-    harden_node_command(
-        command,
-        &sandbox_root,
-        &read_paths,
-        &write_paths,
-        false,
-        false,
-        true,
-        false,
-    );
-}
-
-fn configure_node_command(
-    command: &mut Command,
-    import_cache: &NodeImportCache,
-) -> Result<(), PythonExecutionError> {
-    let compile_cache_dir = import_cache.shared_compile_cache_dir();
-    configure_compile_cache(command, &compile_cache_dir)
-        .map_err(PythonExecutionError::PrepareWarmPath)?;
-    Ok(())
 }
 
 fn resolved_pyodide_dist_path(path: &Path, cwd: &Path) -> PathBuf {
@@ -1261,6 +1176,8 @@ fn resolved_pyodide_dist_path(path: &Path, cwd: &Path) -> PathBuf {
 
 fn prewarm_python_path(
     import_cache: &NodeImportCache,
+    javascript_engine: &mut JavascriptExecutionEngine,
+    javascript_context_id: &str,
     context: &PythonContext,
     request: &StartPythonExecutionRequest,
     frozen_time_ms: u128,
@@ -1273,7 +1190,7 @@ fn prewarm_python_path(
         PYTHON_WARMUP_MARKER_VERSION,
         &marker_contents,
     );
-    if marker_path.exists() && compile_cache_ready(&import_cache.shared_compile_cache_dir()) {
+    if marker_path.exists() {
         return Ok(warmup_metrics_line(
             debug_enabled,
             false,
@@ -1285,42 +1202,99 @@ fn prewarm_python_path(
         ));
     }
 
-    let warmup_started = Instant::now();
-    ensure_host_cwd_exists(&request.cwd).map_err(PythonExecutionError::WarmupSpawn)?;
-    let mut command = Command::new(node_binary());
-    configure_python_node_sandbox(&mut command, import_cache, context, request);
-    command
-        .arg(format!(
-            "--max-old-space-size={}",
-            python_max_old_space_mb(request)
-        ))
-        .arg("--no-warnings")
-        .arg("--import")
-        .arg(import_cache.timing_bootstrap_path())
-        .arg(import_cache.python_runner_path())
-        .current_dir(&request.cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .env(
-            PYODIDE_INDEX_URL_ENV,
-            resolved_pyodide_dist_path(&context.pyodide_dist_path, &request.cwd),
-        )
-        .env(NODE_IMPORT_CACHE_ASSET_ROOT_ENV, import_cache.asset_root())
-        .env(NODE_IMPORT_CACHE_PATH_ENV, import_cache.cache_path())
-        .env(NODE_ALLOW_PROCESS_BINDINGS_ENV, "1")
-        .env(PYTHON_PREWARM_ONLY_ENV, "1")
-        .env(NODE_FROZEN_TIME_ENV, frozen_time_ms.to_string());
-    configure_node_command(&mut command, import_cache)?;
+    let started = Instant::now();
+    let mut prewarm_execution = start_python_javascript_execution(
+        javascript_engine,
+        import_cache,
+        javascript_context_id,
+        context,
+        request,
+        frozen_time_ms,
+        true,
+        None,
+    )?;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut sync_rpc_log = Vec::new();
+    let result = loop {
+        match prewarm_execution
+            .poll_event_blocking(PYTHON_PREWARM_TIMEOUT)
+            .map_err(map_javascript_error)?
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::Exited(exit_code)) => {
+                break PythonExecutionResult {
+                    execution_id: String::from("python-prewarm"),
+                    exit_code,
+                    stdout,
+                    stderr,
+                };
+            }
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
+            Some(JavascriptExecutionEvent::SyncRpcRequest(sync_request)) => {
+                sync_rpc_log.push(format!(
+                    "{} {} {:?}",
+                    sync_request.id, sync_request.method, sync_request.args
+                ));
+                let pyodide_dist_path =
+                    resolved_pyodide_dist_path(&context.pyodide_dist_path, &request.cwd);
+                if let Some(action) =
+                    python_javascript_sync_rpc_action(&pyodide_dist_path, &sync_request)?
+                {
+                    respond_python_javascript_sync_rpc_action(
+                        &mut prewarm_execution,
+                        sync_request.id,
+                        action,
+                    )?;
+                    sync_rpc_log.push(format!("responded {}", sync_request.id));
+                    continue;
+                }
+                if let Some((code, message)) = python_javascript_sync_rpc_error(&sync_request) {
+                    prewarm_execution
+                        .respond_sync_rpc_error(sync_request.id, code, message)
+                        .map_err(map_javascript_error)?;
+                    sync_rpc_log.push(format!("errored {}", sync_request.id));
+                    continue;
+                }
+                if sync_request.method == "_pythonRpc" {
+                    let request = parse_python_bridge_sync_rpc_request(&sync_request)?;
+                    return Err(PythonExecutionError::WarmupFailed {
+                        exit_code: 1,
+                        stderr: format!(
+                            "unexpected Python prewarm VFS RPC request {} {} {:?}",
+                            request.id, request.path, request.method
+                        ),
+                    });
+                }
+                return Err(PythonExecutionError::WarmupFailed {
+                    exit_code: 1,
+                    stderr: format!(
+                        "unexpected Python prewarm JavaScript sync RPC request {} {} {:?}",
+                        sync_request.id, sync_request.method, sync_request.args
+                    ),
+                });
+            }
+            None => {
+                return Err(PythonExecutionError::WarmupFailed {
+                    exit_code: 1,
+                    stderr: format!(
+                        "python prewarm timed out after {}s\nstdout:\n{}\nstderr:\n{}\nsync rpc:\n{}",
+                        PYTHON_PREWARM_TIMEOUT.as_secs(),
+                        String::from_utf8_lossy(&stdout),
+                        String::from_utf8_lossy(&stderr),
+                        sync_rpc_log.join("\n"),
+                    ),
+                });
+            }
+        }
+    };
+    let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-    let output = command
-        .output()
-        .map_err(PythonExecutionError::WarmupSpawn)?;
-    let duration_ms = warmup_started.elapsed().as_secs_f64() * 1000.0;
-    if !output.status.success() {
+    if result.exit_code != 0 {
         return Err(PythonExecutionError::WarmupFailed {
-            exit_code: output.status.code().unwrap_or(1),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_code: result.exit_code,
+            stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
         });
     }
 
@@ -1336,6 +1310,290 @@ fn prewarm_python_path(
     ))
 }
 
+enum PythonJavascriptSyncRpcAction {
+    Success(Value),
+    Error { code: &'static str, message: String },
+}
+
+fn python_javascript_sync_rpc_action(
+    pyodide_dist_path: &Path,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Option<PythonJavascriptSyncRpcAction>, PythonExecutionError> {
+    let Some(path) = request.args.first().and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(host_path) = python_guest_path_to_host(pyodide_dist_path, path) else {
+        return Ok(None);
+    };
+
+    Ok(Some(match request.method.as_str() {
+        "fs.promises.readFile" | "fs.readFileSync" => {
+            let bytes = match fs::read(&host_path) {
+                Ok(bytes) => bytes,
+                Err(error) => return python_sync_rpc_fs_action_error(path, "open", error).map(Some),
+            };
+            let encoding = python_prewarm_sync_rpc_encoding(&request.args);
+            match encoding.as_deref() {
+                Some("utf8") | Some("utf-8") => {
+                    PythonJavascriptSyncRpcAction::Success(Value::String(
+                        String::from_utf8_lossy(&bytes).into_owned(),
+                    ))
+                }
+                _ => PythonJavascriptSyncRpcAction::Success(json!({
+                    "__agentOsType": "bytes",
+                    "base64": v8_runtime::base64_encode_pub(&bytes),
+                })),
+            }
+        }
+        "fs.statSync" | "fs.promises.stat" => match fs::metadata(&host_path) {
+            Ok(metadata) => PythonJavascriptSyncRpcAction::Success(python_host_stat_value(&metadata)),
+            Err(error) => return python_sync_rpc_fs_action_error(path, "stat", error).map(Some),
+        },
+        "fs.lstatSync" | "fs.promises.lstat" => match fs::symlink_metadata(&host_path) {
+            Ok(metadata) => PythonJavascriptSyncRpcAction::Success(python_host_stat_value(&metadata)),
+            Err(error) => return python_sync_rpc_fs_action_error(path, "lstat", error).map(Some),
+        },
+        "fs.existsSync" => PythonJavascriptSyncRpcAction::Success(Value::Bool(host_path.exists())),
+        "fs.accessSync" | "fs.promises.access" => {
+            match fs::metadata(&host_path) {
+                Ok(_) => PythonJavascriptSyncRpcAction::Success(Value::Null),
+                Err(error) => return python_sync_rpc_fs_action_error(path, "access", error).map(Some),
+            }
+        }
+        "fs.readdirSync" | "fs.promises.readdir" => match fs::read_dir(&host_path) {
+            Ok(entries) => PythonJavascriptSyncRpcAction::Success(python_readdir_value(
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .collect(),
+            )),
+            Err(error) => return python_sync_rpc_fs_action_error(path, "scandir", error).map(Some),
+        },
+        "fs.mkdirSync" | "fs.promises.mkdir" => {
+            let recursive = python_sync_rpc_recursive_flag(&request.args);
+            if recursive {
+                fs::create_dir_all(&host_path).map_err(PythonExecutionError::PrepareRuntime)?;
+            } else {
+                match fs::create_dir(&host_path) {
+                    Ok(()) => {}
+                    Err(error) => return python_sync_rpc_fs_action_error(path, "mkdir", error).map(Some),
+                }
+            }
+            PythonJavascriptSyncRpcAction::Success(Value::Null)
+        }
+        "fs.writeFileSync" | "fs.promises.writeFile" => {
+            let contents = python_sync_rpc_bytes_arg(&request.args, 1)?;
+            if let Some(parent) = host_path.parent() {
+                fs::create_dir_all(parent).map_err(PythonExecutionError::PrepareRuntime)?;
+            }
+            fs::write(&host_path, contents).map_err(PythonExecutionError::PrepareRuntime)?;
+            PythonJavascriptSyncRpcAction::Success(Value::Null)
+        }
+        "fs.realpathSync" | "fs.realpathSync.native" => match fs::canonicalize(&host_path) {
+            Ok(canonical) => PythonJavascriptSyncRpcAction::Success(Value::String(
+                python_host_path_to_guest(pyodide_dist_path, &canonical)
+                    .unwrap_or_else(|| path.to_owned()),
+            )),
+            Err(error) => return python_sync_rpc_fs_action_error(path, "realpath", error).map(Some),
+        },
+        _ => return Ok(None),
+    }))
+}
+
+fn python_sync_rpc_fs_action_error(
+    path: &str,
+    syscall: &str,
+    error: std::io::Error,
+) -> Result<PythonJavascriptSyncRpcAction, PythonExecutionError> {
+    let action = match error.kind() {
+        std::io::ErrorKind::NotFound => PythonJavascriptSyncRpcAction::Error {
+            code: "ENOENT",
+            message: format!("ENOENT: no such file or directory, {syscall} '{path}'"),
+        },
+        std::io::ErrorKind::AlreadyExists => PythonJavascriptSyncRpcAction::Error {
+            code: "EEXIST",
+            message: format!("EEXIST: file already exists, {syscall} '{path}'"),
+        },
+        std::io::ErrorKind::PermissionDenied => PythonJavascriptSyncRpcAction::Error {
+            code: "EACCES",
+            message: format!("EACCES: permission denied, {syscall} '{path}'"),
+        },
+        _ => {
+            return Err(PythonExecutionError::PrepareRuntime(std::io::Error::new(
+                error.kind(),
+                error.to_string(),
+            )));
+        }
+    };
+    Ok(action)
+}
+
+fn respond_python_javascript_sync_rpc_action(
+    execution: &mut JavascriptExecution,
+    id: u64,
+    action: PythonJavascriptSyncRpcAction,
+) -> Result<(), PythonExecutionError> {
+    match action {
+        PythonJavascriptSyncRpcAction::Success(value) => execution
+            .respond_sync_rpc_success(id, value)
+            .map_err(map_javascript_error),
+        PythonJavascriptSyncRpcAction::Error { code, message } => execution
+            .respond_sync_rpc_error(id, code, message)
+            .map_err(map_javascript_error),
+    }
+}
+
+fn python_guest_path_to_host(pyodide_dist_path: &Path, guest_path: &str) -> Option<PathBuf> {
+    if let Some(normalized) = guest_path.strip_prefix(PYODIDE_GUEST_ROOT) {
+        let relative = normalized.trim_start_matches('/');
+        return Some(if relative.is_empty() {
+            pyodide_dist_path.to_path_buf()
+        } else {
+            pyodide_dist_path.join(relative)
+        });
+    }
+
+    let cache_path = pyodide_cache_path(pyodide_dist_path);
+    let normalized = guest_path.strip_prefix(PYODIDE_CACHE_GUEST_ROOT)?;
+    let relative = normalized.trim_start_matches('/');
+    Some(if relative.is_empty() {
+        cache_path
+    } else {
+        cache_path.join(relative)
+    })
+}
+
+fn python_host_path_to_guest(pyodide_dist_path: &Path, host_path: &Path) -> Option<String> {
+    if let Ok(relative) = host_path.strip_prefix(pyodide_dist_path) {
+        let suffix = relative.to_string_lossy().replace('\\', "/");
+        return Some(if suffix.is_empty() {
+            String::from(PYODIDE_GUEST_ROOT)
+        } else {
+            format!("{PYODIDE_GUEST_ROOT}/{suffix}")
+        });
+    }
+
+    let cache_path = pyodide_cache_path(pyodide_dist_path);
+    let relative = host_path.strip_prefix(cache_path).ok()?;
+    let suffix = relative.to_string_lossy().replace('\\', "/");
+    Some(if suffix.is_empty() {
+        String::from(PYODIDE_CACHE_GUEST_ROOT)
+    } else {
+        format!("{PYODIDE_CACHE_GUEST_ROOT}/{suffix}")
+    })
+}
+
+fn python_host_stat_value(metadata: &fs::Metadata) -> Value {
+    json!({
+        "mode": metadata.mode(),
+        "size": metadata.size(),
+        "blocks": metadata.blocks(),
+        "dev": metadata.dev(),
+        "rdev": metadata.rdev(),
+        "isDirectory": metadata.is_dir(),
+        "isSymbolicLink": metadata.file_type().is_symlink(),
+        "atimeMs": metadata.atime() * 1000 + (metadata.atime_nsec() / 1_000_000),
+        "mtimeMs": metadata.mtime() * 1000 + (metadata.mtime_nsec() / 1_000_000),
+        "ctimeMs": metadata.ctime() * 1000 + (metadata.ctime_nsec() / 1_000_000),
+        "birthtimeMs": metadata.ctime() * 1000 + (metadata.ctime_nsec() / 1_000_000),
+        "ino": metadata.ino(),
+        "nlink": metadata.nlink(),
+        "uid": metadata.uid(),
+        "gid": metadata.gid(),
+    })
+}
+
+fn python_readdir_value(entries: Vec<String>) -> Value {
+    json!(entries
+        .into_iter()
+        .filter(|entry| entry != "." && entry != "..")
+        .collect::<Vec<_>>())
+}
+
+fn python_sync_rpc_recursive_flag(args: &[Value]) -> bool {
+    args.get(1)
+        .and_then(|value| {
+            value
+                .as_bool()
+                .or_else(|| value.get("recursive").and_then(Value::as_bool))
+        })
+        .unwrap_or(false)
+}
+
+fn python_sync_rpc_bytes_arg(
+    args: &[Value],
+    index: usize,
+) -> Result<Vec<u8>, PythonExecutionError> {
+    let Some(value) = args.get(index) else {
+        return Err(PythonExecutionError::RpcResponse(format!(
+            "sync RPC argument {index} is required"
+        )));
+    };
+
+    if let Some(text) = value.as_str() {
+        return Ok(text.as_bytes().to_vec());
+    }
+
+    let Some(base64_value) = value
+        .get("__agentOsType")
+        .and_then(Value::as_str)
+        .filter(|kind| *kind == "bytes")
+        .and_then(|_| value.get("base64"))
+        .and_then(Value::as_str)
+    else {
+        return Err(PythonExecutionError::RpcResponse(format!(
+            "sync RPC argument {index} must be a string or encoded bytes payload"
+        )));
+    };
+
+    base64::engine::general_purpose::STANDARD
+        .decode(base64_value)
+        .map_err(|error| {
+            PythonExecutionError::RpcResponse(format!(
+                "sync RPC argument {index} contains invalid base64: {error}"
+            ))
+        })
+}
+
+fn python_prewarm_sync_rpc_encoding(args: &[Value]) -> Option<String> {
+    args.get(1).and_then(|value| {
+        value.as_str().map(str::to_owned).or_else(|| {
+            value
+                .get("encoding")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+    })
+}
+
+fn python_javascript_sync_rpc_error(
+    request: &JavascriptSyncRpcRequest,
+) -> Option<(&'static str, String)> {
+    if matches!(
+        request.method.as_str(),
+        "net.connect"
+            | "net.createConnection"
+            | "dns.lookup"
+            | "dns.resolve"
+            | "dns.resolve4"
+            | "dns.resolve6"
+            | "dns.reverse"
+            | "dgram.send"
+            | "http.request"
+            | "https.request"
+            | "tls.connect"
+    ) {
+        return Some((
+            "ERR_ACCESS_DENIED",
+            String::from(
+                "network access is not available during standalone guest Python execution",
+            ),
+        ));
+    }
+
+    None
+}
+
 fn warmup_marker_contents(
     import_cache: &NodeImportCache,
     context: &PythonContext,
@@ -1348,7 +1606,8 @@ fn warmup_marker_contents(
         env!("CARGO_PKG_NAME").to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
         PYTHON_WARMUP_MARKER_VERSION.to_string(),
-        node_binary(),
+        String::from("agent-os-v8"),
+        python_max_old_space_mb(request).to_string(),
         compile_cache_dir.display().to_string(),
         pyodide_dist_path.display().to_string(),
         file_fingerprint(&pyodide_dist_path.join("pyodide.mjs")),
@@ -1382,185 +1641,13 @@ fn warmup_metrics_line(
 
     Some(
         format!(
-            "{PYTHON_WARMUP_METRICS_PREFIX}{{\"phase\":\"prewarm\",\"executed\":{},\"reason\":{},\"durationMs\":{duration_ms:.3},\"compileCacheDir\":{},\"pyodideDistPath\":{}}}\n",
+            "{PYTHON_WARMUP_METRICS_PREFIX}{{\"phase\":\"prewarm\",\"executed\":{},\"reason\":{},\"durationMs\":{duration_ms:.3},\"heapLimitMb\":{},\"compileCacheDir\":{},\"pyodideDistPath\":{}}}\n",
             if executed { "true" } else { "false" },
             encode_json_string(reason),
+            python_max_old_space_mb(request),
             encode_json_string(&compile_cache_dir.display().to_string()),
             encode_json_string(&pyodide_dist_path.display().to_string()),
         )
         .into_bytes(),
     )
-}
-
-fn create_python_vfs_rpc_channels() -> Result<PythonVfsRpcChannels, PythonExecutionError> {
-    let (parent_request_reader, child_request_writer) = pipe2(OFlag::O_CLOEXEC)
-        .map_err(|error| PythonExecutionError::RpcChannel(error.to_string()))?;
-    let (child_response_reader, parent_response_writer) = pipe2(OFlag::O_CLOEXEC)
-        .map_err(|error| PythonExecutionError::RpcChannel(error.to_string()))?;
-
-    Ok(PythonVfsRpcChannels {
-        parent_request_reader: File::from(parent_request_reader),
-        parent_response_writer: Arc::new(Mutex::new(BufWriter::new(File::from(
-            parent_response_writer,
-        )))),
-        child_request_writer,
-        child_response_reader,
-    })
-}
-
-fn try_reserve_python_vfs_rpc_slot(
-    pending_count: &AtomicUsize,
-    max_pending_requests: usize,
-) -> bool {
-    let mut current = pending_count.load(Ordering::Acquire);
-
-    loop {
-        if current >= max_pending_requests {
-            return false;
-        }
-
-        match pending_count.compare_exchange(
-            current,
-            current + 1,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => return true,
-            Err(observed) => current = observed,
-        }
-    }
-}
-
-fn release_python_vfs_rpc_slot(pending_count: &AtomicUsize) {
-    let _ = pending_count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-        current.checked_sub(1)
-    });
-}
-
-fn spawn_python_vfs_rpc_reader(
-    reader: File,
-    sender: Sender<PythonProcessEvent>,
-    responses: Arc<Mutex<BufWriter<File>>>,
-    pending_count: Arc<AtomicUsize>,
-    max_pending_requests: usize,
-) -> JoinHandle<()> {
-    thread::spawn(move || {
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => return,
-                Ok(_) => {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-
-                    match parse_python_vfs_rpc_request(trimmed) {
-                        Ok(request) => {
-                            if !try_reserve_python_vfs_rpc_slot(
-                                pending_count.as_ref(),
-                                max_pending_requests,
-                            ) {
-                                let _ = write_python_vfs_rpc_response(
-                                    &responses,
-                                    json!({
-                                        "id": request.id,
-                                        "ok": false,
-                                        "error": {
-                                            "code": "ERR_AGENT_OS_PYTHON_VFS_RPC_QUEUE_FULL",
-                                            "message": format!(
-                                                "guest Python VFS RPC queue exceeded configured limit of {max_pending_requests} pending requests"
-                                            ),
-                                        },
-                                    }),
-                                );
-                                continue;
-                            }
-                            if sender
-                                .send(PythonProcessEvent::VfsRpcRequest(request))
-                                .is_err()
-                            {
-                                release_python_vfs_rpc_slot(pending_count.as_ref());
-                                return;
-                            }
-                        }
-                        Err(message) => {
-                            if sender
-                                .send(PythonProcessEvent::RawStderr(message.into_bytes()))
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                    }
-                }
-                Err(error) => {
-                    let _ = sender.send(PythonProcessEvent::RawStderr(
-                        format!("agent-os python vfs rpc read error: {error}\n").into_bytes(),
-                    ));
-                    return;
-                }
-            }
-        }
-    })
-}
-
-fn parse_python_vfs_rpc_request(line: &str) -> Result<PythonVfsRpcRequest, String> {
-    let wire: PythonVfsRpcRequestWire = serde_json::from_str(line)
-        .map_err(|error| format!("invalid agent-os python vfs rpc request: {error}\n"))?;
-    let method = PythonVfsRpcMethod::from_wire(&wire.method).ok_or_else(|| {
-        let subject = if !wire.path.is_empty() {
-            wire.path.clone()
-        } else if let Some(url) = wire.url.clone() {
-            url
-        } else if let Some(hostname) = wire.hostname.clone() {
-            hostname
-        } else if let Some(command) = wire.command.clone() {
-            command
-        } else {
-            String::from("<unknown>")
-        };
-        format!(
-            "unsupported agent-os python rpc method {} for {}\n",
-            wire.method, subject
-        )
-    })?;
-
-    Ok(PythonVfsRpcRequest {
-        id: wire.id,
-        method,
-        path: wire.path,
-        content_base64: wire.content_base64,
-        recursive: wire.recursive,
-        url: wire.url,
-        http_method: wire.http_method,
-        headers: wire.headers,
-        body_base64: wire.body_base64,
-        hostname: wire.hostname,
-        family: wire.family,
-        command: wire.command,
-        args: wire.args,
-        cwd: wire.cwd,
-        env: wire.env,
-        shell: wire.shell,
-        max_buffer: wire.max_buffer,
-    })
-}
-
-fn write_python_vfs_rpc_response(
-    writer: &Arc<Mutex<BufWriter<File>>>,
-    response: serde_json::Value,
-) -> Result<(), PythonExecutionError> {
-    let mut writer = writer.lock().map_err(|_| {
-        PythonExecutionError::RpcResponse(String::from("VFS RPC writer lock poisoned"))
-    })?;
-    serde_json::to_writer(&mut *writer, &response)
-        .map_err(|error| PythonExecutionError::RpcResponse(error.to_string()))?;
-    writer
-        .write_all(b"\n")
-        .and_then(|()| writer.flush())
-        .map_err(|error| PythonExecutionError::RpcResponse(error.to_string()))
 }

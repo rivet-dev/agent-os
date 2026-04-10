@@ -5,598 +5,6 @@
   "testPolicy": "Treat the old April 7-8, 2026 Ralph progress claims as stale. Use only the exact scoped commands listed in each story. US-001 and US-002 restore reproducible workspace install and normal pnpm/Vitest execution; no TypeScript-package story should be marked complete before those land. The final story requires root `pnpm test`, targeted crate suites (`agent-os-kernel`, `agent-os-bridge`, `agent-os-execution`, `agent-os-v8-runtime`, `agent-os-sidecar`), and the package/registry suites to pass with no first-party ignored Rust tests and no product-debt skips remaining.",
   "userStories": [
     {
-      "id": "US-028",
-      "title": "Fix Pi CLI bash-tool output persistence in end-to-end sessions",
-      "description": "As a user, I want Pi CLI bash-tool turns to create the expected workspace files so the unmodified Pi CLI adapter is usable for shell actions inside the VM.",
-      "acceptanceCriteria": [
-        "The Pi CLI bash-tool E2E no longer fails trying to read a missing `bash-output.txt`",
-        "The bash tool writes its output into the expected guest workspace path through the CLI adapter flow",
-        "`pnpm --dir packages/core exec vitest run tests/pi-cli-headless.test.ts` passes",
-        "Typecheck passes"
-      ],
-      "priority": 1,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-029",
-      "title": "Re-verify full Pi SDK end-to-end flow including write, bash, and response lifecycle",
-      "description": "As a developer, I want the full Pi SDK adapter flow to be green again so the previously completed Pi E2E story is actually true on the current branch.",
-      "acceptanceCriteria": [
-        "The full Pi SDK session suite passes for write-tool, bash-tool, prompt lifecycle, and cleanup paths",
-        "Any stale assumptions in the current Pi tests are updated only if they contradict the intended guest behavior",
-        "`pnpm --dir packages/core exec vitest run tests/pi-headless.test.ts tests/session-cleanup.test.ts -t \"Pi SDK\"` passes",
-        "Typecheck passes"
-      ],
-      "priority": 2,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-030",
-      "title": "Re-verify full Pi CLI end-to-end flow including write, bash, and cleanup lifecycle",
-      "description": "As a developer, I want the unmodified Pi CLI adapter to be fully green again so the older Pi CLI completion claim matches the current branch state.",
-      "acceptanceCriteria": [
-        "The full Pi CLI session suite passes for write-tool, bash-tool, prompt lifecycle, and cleanup paths",
-        "Concurrent-session cleanup for Pi CLI no longer times out waiting for baseline resource recovery",
-        "`pnpm --dir packages/core exec vitest run tests/pi-cli-headless.test.ts tests/session-cleanup.test.ts -t \"Pi CLI\"` passes",
-        "Typecheck passes"
-      ],
-      "priority": 3,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-031",
-      "title": "Fix OpenCode ACP session-new handshake failures",
-      "description": "As a developer, I want `createSession(\"opencode\")` to complete successfully so the OpenCode adapter can be exercised at all through the Agent OS session API.",
-      "acceptanceCriteria": [
-        "OpenCode no longer fails `ACP session/new` with `Internal error` during session creation",
-        "A focused OpenCode session-creation test covers the happy path without requiring tool calls",
-        "`pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts -t \"full createSession('opencode') inside the VM\"` gets past session creation",
-        "Typecheck passes"
-      ],
-      "priority": 4,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-032",
-      "title": "Restore OpenCode write-tool end-to-end coverage",
-      "description": "As a user, I want OpenCode write-tool turns to work through the real ACP flow so the adapter can create files inside the VM through its intended tool surface.",
-      "acceptanceCriteria": [
-        "The OpenCode write-tool flow creates the expected guest file and returns a successful final response",
-        "The real OpenCode ACP flow remains inside the VM and does not rely on a host wrapper workaround",
-        "`pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts -t \"write tool\"` passes",
-        "Typecheck passes"
-      ],
-      "priority": 5,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-033",
-      "title": "Restore OpenCode bash-tool end-to-end coverage",
-      "description": "As a user, I want OpenCode bash-tool turns to work through the real ACP flow so OpenCode can perform guest shell actions inside the VM.",
-      "acceptanceCriteria": [
-        "The OpenCode bash-tool flow creates the expected guest file and returns a successful final response",
-        "The bash flow uses the guest shell/runtime path rather than a host-only fallback",
-        "`pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts -t \"bash tool\"` passes",
-        "Typecheck passes"
-      ],
-      "priority": 6,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-034",
-      "title": "Restore OpenCode lifecycle, mode, permission, and rawSend coverage",
-      "description": "As a developer, I want the rest of the OpenCode session API surface to be reliable so mode switching, permissions, lifecycle, and raw ACP calls behave like the generic session contract expects.",
-      "acceptanceCriteria": [
-        "OpenCode session metadata, plan/build mode handling, permission approval/rejection, cancel behavior, and `rawSend()` all have passing focused coverage",
-        "Any intentionally unsupported config surface is explicit in code and tests rather than failing at runtime",
-        "`pnpm --dir packages/core exec vitest run tests/opencode-session.test.ts` passes",
-        "Typecheck passes"
-      ],
-      "priority": 7,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-035",
-      "title": "Fix Codex WASM host_net imports and runner startup",
-      "description": "As a developer, I want the Codex WASM runner to instantiate with all required imports so Codex prompts stop dying before the adapter can complete a turn.",
-      "acceptanceCriteria": [
-        "The WASM runner provides the imports needed by the current Codex execution path, including the missing `host_net` surface",
-        "Codex prompts no longer fail with `Import #5 \"host_net\": module is not an object or function`",
-        "`pnpm --dir packages/core exec vitest run tests/codex-session.test.ts -t \"permissioned shell tools\"` gets past runner startup",
-        "Typecheck passes"
-      ],
-      "priority": 8,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-036",
-      "title": "Restore Codex session config state for model and thought level",
-      "description": "As a developer, I want Codex session config updates to round-trip through the adapter so `getSessionConfigOptions()` reflects the configured model and thought level instead of stale defaults.",
-      "acceptanceCriteria": [
-        "Codex session config changes update the adapter state used by `getSessionConfigOptions()` and subsequent turns",
-        "The Codex config-state assertion no longer reports `gpt-5-codex` after setting the model to `gpt-5.4`",
-        "`pnpm --dir packages/core exec vitest run tests/codex-session.test.ts -t \"configurable mode/model state\"` passes",
-        "Typecheck passes"
-      ],
-      "priority": 9,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-037",
-      "title": "Restore Codex single-turn shell tool end-to-end coverage",
-      "description": "As a user, I want a single Codex shell-tool turn to succeed so the adapter can complete the simplest permissioned tool workflow through Agent OS.",
-      "acceptanceCriteria": [
-        "The Codex single-turn shell-tool prompt completes with `response.error === undefined` and the expected final text",
-        "Permission approval for the shell tool still goes through the Agent OS permission API",
-        "`pnpm --dir packages/core exec vitest run tests/codex-session.test.ts -t \"permissioned shell tools\"` passes",
-        "Typecheck passes"
-      ],
-      "priority": 10,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-038",
-      "title": "Restore Codex multi-turn history, cancel, and destroy coverage",
-      "description": "As a user, I want Codex multi-turn sessions to preserve history and handle cancellation/cleanup correctly so the adapter can support normal agent-session lifecycles.",
-      "acceptanceCriteria": [
-        "Codex multi-call, history-preservation, cancel-session, and destroy-session tests all pass",
-        "Prompt cancellation and rejection paths return the expected stop reasons instead of internal errors",
-        "`pnpm --dir packages/core exec vitest run tests/codex-session.test.ts` passes",
-        "Typecheck passes"
-      ],
-      "priority": 11,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-039",
-      "title": "Implement synthetic session-update coverage for agents that do not emit notifications",
-      "description": "As a developer, I want the sidecar session layer to synthesize `session/update` notifications when an agent omits them so the public session API stays agent-agnostic.",
-      "acceptanceCriteria": [
-        "Agents that omit `session/update` notifications still surface the expected update events through the Agent OS session API",
-        "Synthetic updates cover both mode changes and relevant config/state changes rather than only a subset of events",
-        "Focused ACP/session tests for synthetic update behavior pass",
-        "Typecheck passes"
-      ],
-      "priority": 12,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-040",
-      "title": "Add ACP timeout diagnostics with process exit code and killed state",
-      "description": "As a developer, I want ACP timeout errors to include process exit context so session failures can be diagnosed without guessing whether the underlying adapter exited, crashed, or hung.",
-      "acceptanceCriteria": [
-        "ACP timeout diagnostics include process exit code and killed/terminated state when available",
-        "Focused ACP client/session tests assert the richer timeout payload",
-        "Any public TypeScript types for timeout errors are updated to reflect the extra diagnostics",
-        "Typecheck passes"
-      ],
-      "priority": 13,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-041",
-      "title": "Restore session cleanup and leak-prevention coverage across all agent types",
-      "description": "As a developer, I want close/cancel cleanup behavior to be verified for every shipped agent so leaked processes, sockets, and file descriptors stop hiding behind partial test coverage.",
-      "acceptanceCriteria": [
-        "Pi SDK, Pi CLI, Claude, OpenCode, and Codex all have focused close/cancel cleanup coverage where the adapter exists",
-        "Cleanup tests assert baseline restoration for processes, sockets, and other tracked sidecar resources",
-        "`pnpm --dir packages/core exec vitest run tests/session-cleanup.test.ts` passes",
-        "Typecheck passes"
-      ],
-      "priority": 14,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-042",
-      "title": "Add kernel socket-table scaffolding and resource accounting",
-      "description": "As a developer, I want the Rust kernel to own socket state explicitly so networking can migrate out of ad hoc sidecar state and into kernel-managed resources like the old Secure Exec model.",
-      "acceptanceCriteria": [
-        "`crates/kernel/src/socket_table.rs` (or equivalent) exists and is wired into the kernel crate",
-        "Socket resources are tracked by kernel-level resource accounting instead of only sidecar-local state",
-        "A focused kernel test file for socket-table scaffolding/resource limits passes",
-        "Typecheck passes"
-      ],
-      "priority": 15,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-043",
-      "title": "Implement kernel TCP listener lifecycle",
-      "description": "As a developer, I want the kernel to own bind/listen/accept state for TCP listeners so loopback and cross-runtime networking can stop depending on sidecar-managed host listeners.",
-      "acceptanceCriteria": [
-        "The kernel socket table supports TCP listener creation, bind, listen, and accept lifecycle state",
-        "Focused kernel tests cover listener creation, backlog handling, and accept semantics",
-        "A dedicated kernel TCP-listener test file passes",
-        "Typecheck passes"
-      ],
-      "priority": 16,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-044",
-      "title": "Implement kernel TCP connect, read, write, shutdown, and close lifecycle",
-      "description": "As a developer, I want the kernel to own connected TCP socket state so guest networking can move onto kernel-managed data-plane semantics.",
-      "acceptanceCriteria": [
-        "The kernel socket table supports connect, read, write, shutdown, and close for TCP sockets",
-        "Focused kernel tests cover client/server data flow and close semantics",
-        "A dedicated kernel TCP data-plane test file passes",
-        "Typecheck passes"
-      ],
-      "priority": 17,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-045",
-      "title": "Implement kernel loopback routing for guest-owned TCP listeners",
-      "description": "As a developer, I want loopback connections to stay inside the kernel so guest listeners can be reached without bouncing through unrelated host loopback state.",
-      "acceptanceCriteria": [
-        "Kernel-owned loopback connections to guest listeners stay within the kernel/socket-table path",
-        "Loopback routing covers both TCP listeners and UDP datagram delivery for the covered kernel-owned paths",
-        "Focused kernel or sidecar tests cover guest loopback connection to a kernel-owned listener and UDP loopback delivery",
-        "Loopback routing no longer depends on sidecar-only listener translation for the covered path",
-        "Typecheck passes"
-      ],
-      "priority": 18,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-046",
-      "title": "Implement kernel DNS resolver and policy hooks",
-      "description": "As a developer, I want DNS resolution to be a kernel-owned subsystem so guest DNS behavior can be permissioned, virtualized, and tested like the rest of guest networking.",
-      "acceptanceCriteria": [
-        "DNS resolution flows through a kernel-owned resolver surface instead of directly through sidecar host resolver calls for the covered path",
-        "Resolver state honors VM DNS overrides and permission policy hooks",
-        "Focused tests for kernel-backed DNS resolution pass",
-        "Typecheck passes"
-      ],
-      "priority": 19,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-047",
-      "title": "Implement kernel UDP datagram sockets",
-      "description": "As a developer, I want the kernel to own UDP datagram state so datagram networking stops depending on sidecar-managed host sockets.",
-      "acceptanceCriteria": [
-        "The kernel socket table supports UDP bind/send/receive state with datagram boundaries",
-        "Focused kernel tests cover UDP send and receive semantics",
-        "A dedicated kernel UDP test file passes",
-        "Typecheck passes"
-      ],
-      "priority": 20,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-048",
-      "title": "Implement kernel Unix domain sockets",
-      "description": "As a developer, I want the kernel to own Unix socket listener and stream state so guest Unix-socket networking stops depending on sidecar-managed host socket files.",
-      "acceptanceCriteria": [
-        "The kernel socket table supports Unix listener creation, connect, and stream lifecycle state",
-        "Focused kernel tests cover Unix socket bind/connect/data flow semantics",
-        "A dedicated kernel Unix-socket test file passes",
-        "Typecheck passes"
-      ],
-      "priority": 21,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-049",
-      "title": "Implement kernel poll across pipes, PTYs, and sockets",
-      "description": "As a developer, I want one kernel-level poll implementation that covers pipes, PTYs, and sockets so guest runtimes can wait on readiness through a single kernel surface.",
-      "acceptanceCriteria": [
-        "Kernel poll dispatches across pipes, PTYs, and the new socket-table entries",
-        "Focused kernel tests cover mixed readiness sets and timeout behavior across multiple subsystem types",
-        "`cargo test -p agent-os-kernel poll -- --test-threads=1` passes with the expanded poll coverage",
-        "Typecheck passes"
-      ],
-      "priority": 22,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-049a",
-      "title": "Wire kernel poll to V8 bridge and WASM runtime surfaces",
-      "description": "As a developer, I want guest JS and WASM runtimes to use the kernel poll implementation so readiness waiting is actually exposed to guest code rather than stopping at a kernel-only primitive.",
-      "acceptanceCriteria": [
-        "The V8 bridge exposes kernel-backed poll readiness to the covered guest JS path",
-        "The WASM runtime routes its covered poll or poll-like readiness path through kernel poll instead of a host-side fallback",
-        "Focused JS and WASM tests cover waiting on multiple file descriptors through the rewired poll surface",
-        "Typecheck passes"
-      ],
-      "priority": 23,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-050",
-      "title": "Wire V8 net, dns, and dgram bridge calls through kernel socket state",
-      "description": "As a developer, I want V8 guest `net`/`dns`/`dgram` calls to route through kernel-owned networking so the JS runtime stops opening host sockets directly.",
-      "acceptanceCriteria": [
-        "Covered V8 `net`, `dns`, and `dgram` bridge calls resolve against kernel socket/DNS state instead of sidecar-managed host socket calls",
-        "Focused sidecar/V8 tests cover the rewired JS transport path",
-        "Existing JS network tests for the covered surface pass without host-socket shortcuts",
-        "Typecheck passes"
-      ],
-      "priority": 24,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-051",
-      "title": "Wire V8 http, https, and http2 flows through kernel sockets",
-      "description": "As a developer, I want higher-level V8 HTTP/TLS flows to sit on kernel-managed sockets so guest HTTP no longer depends on host-side transport shortcuts.",
-      "acceptanceCriteria": [
-        "Covered V8 `http`, `https`, and `http2` flows sit on the kernel-backed transport path",
-        "Focused sidecar/V8 tests cover guest HTTP, HTTPS, and HTTP/2 client/server behavior on the rewired path",
-        "Guest outbound HTTP no longer uses host-only `ureq`/host-socket shortcuts for the covered path",
-        "Typecheck passes"
-      ],
-      "priority": 25,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-052",
-      "title": "Wire WASM networking imports through kernel socket state",
-      "description": "As a developer, I want guest WASM networking to use the same kernel socket table as JS so cross-runtime networking becomes a real shared subsystem instead of a JS-only feature.",
-      "acceptanceCriteria": [
-        "Covered WASM networking imports/syscalls route through kernel-owned socket state",
-        "Focused WASM networking tests cover guest TCP/UDP behavior on the rewired path",
-        "Focused WASM networking coverage includes concrete guest command paths such as HTTP fetches used by `curl` and repository/network flows used by `git` for the covered path",
-        "WASM guest networking no longer depends on direct host-node bridges for the covered surface",
-        "Typecheck passes"
-      ],
-      "priority": 26,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-053",
-      "title": "Add cross-runtime networking conformance suites and make them runnable",
-      "description": "As a developer, I want shared JS/WASM/Python networking suites to verify the kernel transport path so networking parity is enforced across runtimes instead of inferred from one-off tests.",
-      "acceptanceCriteria": [
-        "There is focused cross-runtime coverage for TCP, DNS, and loopback behavior across the runtimes that now use kernel networking",
-        "The cross-runtime networking suites are runnable in this repo without being fully skipped by default",
-        "`registry/tests/kernel/cross-runtime-network.test.ts` (or its replacement) passes for the covered runtime matrix",
-        "Typecheck passes"
-      ],
-      "priority": 27,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-054",
-      "title": "Remove sidecar-managed socket state that duplicates kernel networking",
-      "description": "As a developer, I want to delete the redundant sidecar-owned socket bookkeeping once kernel networking owns the covered paths so there is one canonical transport implementation.",
-      "acceptanceCriteria": [
-        "The covered networking paths no longer depend on duplicated sidecar-managed socket tables/listeners that shadow kernel state",
-        "Socket snapshots and listener queries reflect kernel-owned networking state for the migrated surface",
-        "Focused sidecar tests for networking state and cleanup still pass after the cleanup",
-        "Typecheck passes"
-      ],
-      "priority": 28,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-055",
-      "title": "Implement LayerStore create, seal, import, and export primitives",
-      "description": "As a developer, I want explicit layer lifecycle primitives in Rust so VM filesystems can stop relying on one-off overlay state and match the old layered TypeScript model.",
-      "acceptanceCriteria": [
-        "Rust exposes layer create, seal, import, and export primitives for VM filesystem state",
-        "Layer lifecycle state is independent per VM and no longer implicit in a single overlay handle",
-        "Focused layer lifecycle tests pass",
-        "Typecheck passes"
-      ],
-      "priority": 29,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-056",
-      "title": "Implement multi-layer overlay composition for VM roots",
-      "description": "As a developer, I want VM roots to compose one writable upper over multiple immutable lowers so the filesystem model matches the intended Docker-like layer semantics.",
-      "acceptanceCriteria": [
-        "VM root construction supports multiple lower layers plus one writable upper",
-        "Overlay composition semantics match the expected snapshot/layer ordering for the covered cases",
-        "Focused overlay composition tests pass",
-        "Typecheck passes"
-      ],
-      "priority": 30,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-057",
-      "title": "Add multi-layer snapshot lifecycle and per-VM isolation tests",
-      "description": "As a developer, I want layer lifecycle tests to verify snapshot reuse and VM isolation so layer primitives cannot regress silently.",
-      "acceptanceCriteria": [
-        "Snapshot import/export, sealing, and multi-layer composition have focused lifecycle tests",
-        "Per-VM layer isolation is explicitly tested",
-        "A dedicated layer lifecycle test suite passes",
-        "Typecheck passes"
-      ],
-      "priority": 31,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-058",
-      "title": "Implement kernel user and group identity syscalls and process metadata",
-      "description": "As a developer, I want the kernel to own uid/gid/user metadata so guest identity APIs can stop relying on thin placeholder behavior.",
-      "acceptanceCriteria": [
-        "Kernel process/user state includes the identity fields needed by guest APIs",
-        "Covered uid/gid/user info calls return kernel-managed values rather than host leakage or placeholders",
-        "Focused kernel identity tests pass",
-        "Typecheck passes"
-      ],
-      "priority": 32,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-059",
-      "title": "Add guest-visible JS, WASM, and Python identity tests",
-      "description": "As a developer, I want identity behavior to be tested from guest code so kernel user/group work is verified where agents actually observe it.",
-      "acceptanceCriteria": [
-        "There are guest-visible identity tests for the covered JS, WASM, and Python surfaces",
-        "The guest tests assert kernel-owned values rather than host user leakage",
-        "Focused guest identity test suites pass",
-        "Typecheck passes"
-      ],
-      "priority": 33,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-060",
-      "title": "Add bootstrap suppression for kernel-reserved directories and files",
-      "description": "As a developer, I want bootstrap logic to suppress reserved kernel paths so VM roots cannot be polluted by files that should always be kernel-owned.",
-      "acceptanceCriteria": [
-        "Bootstrap logic suppresses the reserved directories and files that must stay kernel-owned",
-        "Focused tests cover bootstrap suppression for those reserved paths",
-        "The reserved-path suppression behavior is documented in the relevant crate instructions",
-        "Typecheck passes"
-      ],
-      "priority": 34,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-061",
-      "title": "Add fcntl support to the kernel FD table",
-      "description": "As a developer, I want `fcntl` support in the kernel FD table so guest runtimes can manage descriptor flags like a normal POSIX environment.",
-      "acceptanceCriteria": [
-        "The kernel FD table supports the `fcntl` operations required by the covered guest/runtime paths",
-        "Focused kernel FD-table tests cover the added `fcntl` behavior",
-        "Any guest-facing bridge/RPC code needed for the covered flags is wired through and tested",
-        "Typecheck passes"
-      ],
-      "priority": 35,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-062",
-      "title": "Add pwrite support to HostDirFilesystem",
-      "description": "As a developer, I want HostDirFilesystem to support `pwrite` directly so mounted host-dir backends stop depending on default trait fallbacks for positional writes.",
-      "acceptanceCriteria": [
-        "HostDirFilesystem implements `pwrite` semantics directly for the covered path",
-        "Focused host-dir tests cover positional writes against mounted host directories",
-        "The implementation preserves existing read-only and path-escape protections",
-        "Typecheck passes"
-      ],
-      "priority": 36,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-063",
-      "title": "Enforce maximum tool-description length in Rust tool registration",
-      "description": "As a developer, I want the Rust tool-registration path to enforce the same description-length limits as the old TypeScript layer so oversized tool metadata is rejected consistently.",
-      "acceptanceCriteria": [
-        "Rust tool registration enforces the first-party maximum description length for tool definitions",
-        "Focused tool-registration tests cover acceptance and rejection at the boundary",
-        "The TypeScript and Rust tool surfaces agree on the enforced limit after the change",
-        "Typecheck passes"
-      ],
-      "priority": 37,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-064",
-      "title": "Restore missing public type exports in packages/core index surface",
-      "description": "As a developer, I want the packages/core public type surface to include the intended exported types so downstream packages stop depending on hidden internals or missing exports.",
-      "acceptanceCriteria": [
-        "`packages/core/src/index.ts` re-exports the intended current public types from `types.ts` and related public modules",
-        "Focused public-API tests cover the restored export surface",
-        "Downstream first-party packages compile against the restored exports without reaching into runtime internals",
-        "Typecheck passes"
-      ],
-      "priority": 38,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-065",
-      "title": "Verify guest V8 SQLite works through the sidecar sqlite bridge",
-      "description": "As a developer, I want guest V8 SQLite behavior to be proven through the sidecar bridge so the Rust sqlite path is validated from actual guest code rather than only lower-level RPC tests.",
-      "acceptanceCriteria": [
-        "A guest-V8 SQLite test covers create, write, read, and persistence behavior through the sidecar sqlite bridge",
-        "Focused guest SQLite coverage includes prepared statements, database-file visibility from the guest filesystem, BLOB and integer round-trip behavior, and WAL checkpoint behavior for the covered path",
-        "The guest test does not bypass the intended sqlite bridge path",
-        "Focused sqlite guest tests pass",
-        "Typecheck passes"
-      ],
-      "priority": 39,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-066",
-      "title": "Filter AGENT_OS env vars and virtualize host identity across all runtimes",
-      "description": "As a developer, I want guest-visible env and identity surfaces to be sanitized consistently across JS, Python, and WASM so no runtime leaks host control vars or host identity unexpectedly.",
-      "acceptanceCriteria": [
-        "Guest-visible env filtering removes internal `AGENT_OS_*` control vars and other covered internal control vars such as `NODE_SYNC_RPC_*` for the runtime paths under test",
-        "Guest-visible identity values are virtualized consistently across JS, Python, and WASM for the covered paths",
-        "Focused runtime hardening tests assert kernel-owned `HOME`, `USER`, and `PATH` values instead of host leakage for the covered runtimes",
-        "Focused runtime hardening tests cover all three runtimes",
-        "Typecheck passes"
-      ],
-      "priority": 40,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-067",
-      "title": "Restore nested child-process visibility in allProcesses and processTree",
-      "description": "As a user, I want guest child processes to appear in process introspection APIs so the public process-model docs match what the VM actually does.",
-      "acceptanceCriteria": [
-        "Guest child processes are visible through the supported `allProcesses()` and `processTree()` surfaces for the covered path",
-        "Tests stop codifying the current missing-child regression as intended behavior",
-        "`pnpm --dir packages/core exec vitest run tests/all-processes.test.ts tests/process-tree.test.ts` passes with the restored behavior",
-        "Typecheck passes"
-      ],
-      "priority": 41,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-068",
-      "title": "Remove legacy feature-gated JS host-Node execution paths",
-      "description": "As a developer, I want the legacy host-Node JS execution path deleted so the JS runtime has exactly one guest-execution model: V8 inside the VM.",
-      "acceptanceCriteria": [
-        "Feature-gated legacy JS host-child execution paths are removed from the execution crate",
-        "The execution crate no longer needs a `legacy-js-tests` execution path for guest JS runtime behavior",
-        "Focused JS execution/V8 tests still pass after the cleanup",
-        "Typecheck passes"
-      ],
-      "priority": 42,
-      "passes": true,
-      "notes": ""
-    },
-    {
       "id": "US-069",
       "title": "Migrate Python execution and prewarm off host node_binary launches",
       "description": "As a developer, I want Python guest execution and prewarm to stop spawning host Node so the Python runtime stays inside the VM isolation boundary.",
@@ -607,8 +15,8 @@
         "Typecheck passes"
       ],
       "priority": 43,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "REVIEW (uncommitted): (1) crates/execution/tests/python.rs:242 — python_contexts_preserve_vm_and_pyodide_configuration has #[test] stripped (silently disabled). Restore or delete the function. (2) PYTHON_MAX_OLD_SPACE_MB feature silently removed: python_max_old_space_mb (python.rs:1189) and create_node_child (python.rs:1312) are dead; permission_flags.rs heap-limit test deleted with no V8-path replacement. Either re-enforce the env var on the V8 Pyodide path or delete the env var with a user-visible note. (3) ~25 unused items left as dead code in crates/execution/src/python.rs (configure_python_node_sandbox, spawn_python_waiter, PYTHON_VFS_RPC_*, PYTHON_EXIT_CONTROL_PREFIX stderr filter, etc.). PYTHON_VFS_RPC_MAX_PENDING_REQUESTS cap and stderr control-line filter no longer enforced — delete the dead plumbing rather than leaving it rotting."
     },
     {
       "id": "US-070",
@@ -1327,7 +735,7 @@
       ],
       "priority": 93,
       "passes": false,
-      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/v8-isolate-runtime-daemon.md (14 checklist items). Focus on implementing the coverage itself, not just running existing suites."
+      "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/v8-isolate-runtime-daemon.md (14 checklist items). Focus on implementing the coverage itself, not just running existing suites. | REVIEW (uncommitted): crates/v8-runtime/src/session.rs adds pump_v8_tasks driving v8::Platform::pump_message_loop in run_event_loop (real fix for async WebAssembly.compile/instantiate stalls). Eight new repro tests in crates/v8-runtime/src/execution.rs test mod and three in crates/execution/tests/javascript_v8.rs are ALL #[ignore]d — the async WASM fix has zero enabled test coverage. Acceptance: at least one non-ignored regression test in javascript_v8.rs that exercises WebAssembly.compile under Promise.then patching / TLA / snapshot-restored bridge to validate pump_v8_tasks."
     },
     {
       "id": "US-117",
@@ -1734,6 +1142,1584 @@
       "priority": 122,
       "passes": false,
       "notes": "Derived from .agent/specs/kernel-runtime-test-checklists/first-party-mount-plugins.md (17 checklist items). This follow-up story is for executing the new coverage, fixing regressions, and leaving the subsystem green."
+    },
+    {
+      "id": "US-146",
+      "title": "Remove minimal_root_snapshot fallback and require committed base filesystem",
+      "description": "As a kernel maintainer, I want `RootFileSystem::from_descriptor` to always load the bundled Alpine-derived `base-filesystem.json` so the default root is a single source of truth instead of silently degrading to a hand-maintained directory skeleton when callers disable the base layer. The committed `packages/core/fixtures/base-filesystem.json` is the canonical default rootfs and must always be present and working; the `minimal_root_snapshot()` fallback and the `DEFAULT_ROOT_DIRECTORIES` constant in `crates/kernel/src/root_fs.rs` are dead code that lets a misconfigured descriptor produce a half-broken VM, and they should be deleted.",
+      "acceptanceCriteria": [
+        "`DEFAULT_ROOT_DIRECTORIES` and `minimal_root_snapshot()` are deleted from `crates/kernel/src/root_fs.rs`.",
+        "`RootFileSystem::from_descriptor` always loads `BUNDLED_BASE_FILESYSTEM_JSON` as the bottom lower layer; `disable_default_base_layer` is removed from `RootFilesystemDescriptor` (and all callers/tests/serializers updated) OR is preserved only as an explicit error path that requires the caller to supply at least one non-empty lower snapshot.",
+        "`packages/core/fixtures/base-filesystem.json` remains committed to the repo and continues to be loaded via `include_str!` so the kernel binary can never start without it.",
+        "All kernel and sidecar tests that previously relied on the minimal fallback are updated to use the bundled base snapshot or an explicit caller-supplied snapshot.",
+        "`cargo test -p agent-os-kernel` passes.",
+        "`cargo test -p agent-os-sidecar --lib` passes.",
+        "Typecheck passes for any TypeScript callers that construct `RootFilesystemDescriptor` payloads."
+      ],
+      "priority": 123,
+      "passes": false,
+      "notes": "Context: `crates/kernel/src/root_fs.rs:9` defines a hand-maintained `DEFAULT_ROOT_DIRECTORIES` list that is only used by `minimal_root_snapshot()` (line 460), which in turn is only reached when `descriptor.disable_default_base_layer == true` AND no lowers are supplied. This produces a Linux-looking but content-free root that drifts from the real Alpine-derived `base-filesystem.json` and hides bugs. The fallback should be removed entirely so the bundled base FS is the only default."
+    },
+    {
+      "id": "US-147",
+      "title": "Resolve uncommitted deletion of public docs/ tree",
+      "description": "As a maintainer, I want a clear decision about the working-tree deletion of docs/features/typescript.mdx, docs/filesystem.mdx, docs/system-drivers/browser.mdx, and docs/wasmvm/supported-commands.md so the public docs are either restored or intentionally retired in a single commit with replacements.",
+      "acceptanceCriteria": [
+        "Decide whether the four deleted user-facing docs (typescript.mdx, filesystem.mdx, browser.mdx, wasmvm/supported-commands.md) should be restored, rewritten, or replaced by content under docs-internal/",
+        "If restoring: re-add the files from HEAD (commit 5a43882) and update them for the current Rust kernel architecture",
+        "If retiring: commit the deletion explicitly with a commit message that records the rationale and any link redirects, and add replacement user-facing docs for the affected topics",
+        "Working tree no longer contains long-lived uncommitted deletions of docs/",
+        "git status -s | grep \"^ D docs/\" returns empty"
+      ],
+      "priority": 124,
+      "passes": false,
+      "notes": "Detected during ralph review on 2026-04-10. The four files exist in HEAD (last touched in commit 5a43882 \"feat: rust kernel sidecar (#1430)\") but have been sitting deleted in the working tree across at least 47 codex iterations (visible since step-1.log). docs-internal/ exists as untracked content but is internal-only and is not a public-docs replacement. Whoever deleted these did not also commit the change, so the deletion will be lost or accidentally committed by an unrelated story."
+    },
+    {
+      "id": "US-148",
+      "title": "Audit and clean up @rivet-dev/agent-os-shell package so it builds and runs cleanly",
+      "description": "As a maintainer, I want the existing `packages/shell/` workspace package (`@rivet-dev/agent-os-shell`) to be in a clean, working state so that `agent-os-shell` launches an interactive VM shell session without errors and the package ships with sane scripts, types, and a verified entrypoint.",
+      "acceptanceCriteria": [
+        "`packages/shell/package.json` keeps the name `@rivet-dev/agent-os-shell` (do NOT rename to `@rivet-dev/agent-os-repl`)",
+        "`pnpm --dir packages/shell run build` succeeds and produces `dist/main.js` wired to the `agent-os-shell` bin",
+        "`pnpm --dir packages/shell run check-types` passes with no errors",
+        "Manually launching `node packages/shell/dist/main.js` (or `pnpm --dir packages/shell exec agent-os-shell`) starts the shell against an Agent OS VM, accepts at least one command (e.g. `echo hello` or `ls /`), and exits cleanly on `exit`",
+        "Any unused dependencies or dead imports inside `packages/shell/src/` are removed",
+        "`packages/shell/src/main.ts` has a short top-of-file comment describing the intended user workflow, and the README-style block in the package (if any) matches the current behavior",
+        "Root `pnpm check-types` stays green after the cleanup"
+      ],
+      "priority": 125,
+      "passes": false,
+      "notes": "Added 2026-04-10 per /loop user request. Original ask mentioned creating or renaming an 'hslel' package to `@rivet-dev/agent-os-repl`, which was then corrected: keep the name as `shell`. The existing `packages/shell/` package already uses `@rivet-dev/agent-os-shell` — the remaining work is verifying it actually runs cleanly end-to-end and cleaning up any rot."
+    },
+    {
+      "id": "US-149",
+      "title": "Replace copy-pasted 'flaky in this harness' ignores in sidecar V8 tests with root-cause comments or issue links",
+      "description": "As a maintainer, I want every `#[ignore]` attribute in `crates/sidecar/tests/` that currently uses the boilerplate `V8 sidecar ... is flaky in this harness; execution-layer tests cover the V8 bridge path` comment to either link to a concrete issue/story, state the real root cause in one sentence, or be deleted in favor of the execution-layer test it claims to defer to.",
+      "acceptanceCriteria": [
+        "Every `#[ignore = \"...\"]` in `crates/sidecar/tests/service.rs`, `vm_lifecycle.rs`, `stdio_binary.rs`, `socket_state_queries.rs`, and `security_hardening.rs` cites a concrete root cause OR a `US-###` story that is actively tracking the fix",
+        "No occurrence of the exact phrase 'flaky in this harness' remains in `crates/sidecar/tests/`",
+        "For each ignored test whose coverage is claimed to be 'covered by execution-layer tests', a comment pointer (`// coverage: crates/execution/tests/<file.rs>::<test_name>`) is added, or the sidecar test is deleted if the coverage is truly redundant",
+        "`cargo test -p agent-os-sidecar --no-run` still builds",
+        "`grep -rn 'flaky in this harness' crates/sidecar/tests/` returns empty"
+      ],
+      "priority": 126,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review. ~17 ignored tests share the identical boilerplate 'V8 sidecar ... is flaky in this harness; execution-layer tests cover the V8 bridge path' with no root cause, no issue link, and in several cases no actual execution-layer equivalent (e.g. vm_lifecycle bridge callback composition). This is dishonest — it buries real regressions behind a comment that implies the test is safe to skip."
+    },
+    {
+      "id": "US-150",
+      "title": "Tighten packages/core file-system negative-path tests so wrong errors fail",
+      "description": "As a maintainer, I want the negative-path tests in `packages/core/src/test/file-system.ts` to assert the specific error they expect instead of degrading to `expect(true).toBe(true)` whenever any error (or no error) is raised, so that broken filesystem backends fail tests loudly.",
+      "acceptanceCriteria": [
+        "`packages/core/src/test/file-system.ts` no longer contains `expect(true).toBe(true)` inside negative-path `try/catch` blocks",
+        "Tests for missing-path `removeFile`, `readDir`, `rename`, and similar operations assert that an error is thrown AND that the error code matches the expected POSIX code (e.g. `ENOENT`, `ENOTDIR`)",
+        "For backends whose capabilities legitimately differ from POSIX (e.g. S3-like object stores), gate the permissive behavior on an explicit capability flag on the filesystem descriptor, NOT on generic try/catch",
+        "All existing first-party filesystem suites still pass under the tightened assertions",
+        "`pnpm --dir packages/core exec vitest run src/test/file-system` passes"
+      ],
+      "priority": 127,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review. Five call sites in `packages/core/src/test/file-system.ts` (lines 193, 216, 253, 346, 463) use `expect(true).toBe(true)` as a fallback, meaning any non-ENOENT outcome — including the operation silently succeeding — passes the test. This hides real regressions in filesystem backends."
+    },
+    {
+      "id": "US-151",
+      "title": "Delete or relocate accidental .agent/notes/us076-debug.test.ts debug scratch file",
+      "description": "As a maintainer, I want the checked-in `.agent/notes/us076-debug.test.ts` scratch file to be deleted (or moved out of any directory matched by test globs) so it cannot accidentally be picked up by vitest and does not clutter the notes directory with test-suffixed files.",
+      "acceptanceCriteria": [
+        "`.agent/notes/us076-debug.test.ts` is either deleted or renamed to a non-`.test.ts` filename and moved under `.agent/tmp/` if it still has debugging value",
+        "No vitest config in the repo matches `.agent/notes/**/*.test.ts`",
+        "`git status` does not show a stray `.test.ts` file under `.agent/notes/`",
+        "`rg --files -g '*.test.ts' .agent/` returns empty"
+      ],
+      "priority": 128,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review. `.agent/notes/us076-debug.test.ts` imports from `../../packages/core/src/agent-os.ts` and appears to be a debugging driver that got committed by accident during US-076 work."
+    },
+    {
+      "id": "US-152",
+      "title": "Delete or relocate quickstart debug scratch scripts out of examples/quickstart/src",
+      "description": "As a maintainer, I want the uncommitted scratch TypeScript files under `examples/quickstart/src/` (claude-fs-test.ts, fs-test.ts, fs-comprehensive-test.ts, vm-fetch-check.ts, vm-http-check.ts, vm-net-diagnose.ts, vm-net-temp.ts) either deleted or moved to `.agent/tmp/` so the public quickstart example does not ship with debug drivers that have no assertions, emoji console output, and live external network calls.",
+      "acceptanceCriteria": [
+        "`examples/quickstart/src/` no longer contains `claude-fs-test.ts`, `fs-test.ts`, `fs-comprehensive-test.ts`, `vm-fetch-check.ts`, `vm-http-check.ts`, `vm-net-diagnose.ts`, or `vm-net-temp.ts`",
+        "Any file still useful for local debugging is relocated under `.agent/tmp/` or `.agent/notes/` with a non-`.test.ts` extension",
+        "`pnpm --dir examples/quickstart run check-types` (or the project's quickstart build command) passes",
+        "The remaining `examples/quickstart` files all have real assertions or intentional example-style output, not emoji console drivers",
+        "Root `pnpm check-types` stays green"
+      ],
+      "priority": 129,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review. These seven scratch scripts use `console.log` + emoji, try/catch-without-assert, and `claude-fs-test.ts` requires real `ANTHROPIC_API_KEY`; `vm-net-diagnose.ts` makes live external calls to `example.com:80`, which violates the sandbox rule unless loopback-exempted. They are clearly in-flight debugging drivers, not examples."
+    },
+    {
+      "id": "US-153",
+      "title": "Document or delete silent it.skip in packages/dev-shell CLI integration test",
+      "description": "As a maintainer, I want the `it.skip(\"runs scripted shell commands through the just wrapper\")` in `packages/dev-shell/test/dev-shell-cli.integration.test.ts` to either be un-skipped and made to pass, deleted outright, or annotated with a specific reason and tracking story so future maintainers know why it is dormant.",
+      "acceptanceCriteria": [
+        "`packages/dev-shell/test/dev-shell-cli.integration.test.ts` contains no `it.skip`, `test.skip`, `describe.skip`, or `.todo(` without an inline comment citing the reason",
+        "If the scripted-shell test is fixable on the current branch, it is re-enabled and passes under the package's integration test command",
+        "If it is not fixable, the skip is replaced with an explicit `// SKIP: <reason> — tracked in US-###` comment and a new PRD story covers the actual fix",
+        "`pnpm --dir packages/dev-shell test` (or the project-specific command) runs cleanly"
+      ],
+      "priority": 130,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review. Line ~125 of `dev-shell-cli.integration.test.ts` skips with no explanation, no TODO, and no tracking story."
+    },
+    {
+      "id": "US-154",
+      "title": "Reconcile stale US-069 PRD notes with actual python.rs state and verify Python host-Node migration",
+      "description": "As a maintainer, I want the verification commands and PRD notes for US-069 to match reality. The code review on 2026-04-10 found that `crates/execution/src/python.rs` no longer contains most of the 'dead' symbols the PRD notes claim need removal (e.g. `configure_python_node_sandbox`, `spawn_python_waiter`, `create_node_child`), and the claim that `python_max_old_space_mb` is dead is false (it is used at ~3 sites). Either US-069 is already effectively done (and should be marked `passes: true` after running the acceptance command) or its notes need to be rewritten to reflect what is actually left.",
+      "acceptanceCriteria": [
+        "`crates/execution/src/python.rs` has been audited against the US-069 acceptance criteria and PRD notes",
+        "The US-069 `notes` field in `scripts/ralph/prd.json` is updated to match the real state of `python.rs` on this branch (no false claims about dead code)",
+        "`cargo test -p agent-os-sidecar --test python -- --test-threads=1` runs and either passes (close US-069 as `passes: true`) or the failing cases are documented as new scoped stories",
+        "Root `pnpm check-types` passes",
+        "No `Command::new(node_binary())` or equivalent host-Node launch survives inside `python.rs` or `crates/execution/src/python_*.rs`"
+      ],
+      "priority": 131,
+      "passes": false,
+      "notes": "Added 2026-04-10 after code review showed stale PRD notes. The verification should NOT blindly trust existing US-069 notes; confirm against the current tree."
+    },
+    {
+      "id": "US-155",
+      "title": "Fix shared agent-os-v8-runtime test binary SIGSEGV on teardown so snapshot tests run in the main suite",
+      "description": "As a maintainer, I want `cargo test -p agent-os-v8-runtime` to be able to run the whole test binary in one invocation without the shared-test-binary teardown SIGSEGV that currently forces us to split the suite into `--test-threads=1` for the main run and `--exact --ignored snapshot_consolidated_tests` for the snapshot path. The workaround is documented in the root `CLAUDE.md`, but it masks a real lifecycle bug in the shared v8 test process.",
+      "acceptanceCriteria": [
+        "`cargo test -p agent-os-v8-runtime` runs the full suite in a single invocation without SIGSEGV, regardless of test ordering",
+        "`snapshot::tests::snapshot_consolidated_tests` is no longer `#[ignore]`'d and runs as part of the normal suite",
+        "The `CLAUDE.md` guidance about running the snapshot test in isolation is removed or replaced with a note that the SIGSEGV has been fixed",
+        "Root `pnpm check-types` and `cargo test -p agent-os-v8-runtime` both pass"
+      ],
+      "priority": 132,
+      "passes": false,
+      "notes": "Known issue documented in repo root `CLAUDE.md`. Found during 2026-04-10 code review while auditing `#[ignore]` attributes. The SIGSEGV on teardown is a real lifecycle bug in the shared v8 test process, not an unavoidable platform quirk."
+    },
+    {
+      "id": "US-156",
+      "title": "Implement full node:dns record-type polyfill via kernel DNS resolver",
+      "description": "As a maintainer, I want `node:dns` methods `resolve`, `resolve4`, `resolve6`, `resolveMx`, `resolveTxt`, `resolveNs`, `resolveSoa`, `resolveSrv`, `resolveCname`, `resolvePtr`, `resolveCaa`, and `resolveNaptr` to return real record-typed results from the kernel DNS resolver instead of silently collapsing to a single A/AAAA answer, so that guest packages like nodemailer (MX), undici (SRV/SOA retry logic), and service-discovery libraries see correct record shapes.",
+      "acceptanceCriteria": [
+        "`dns.resolve(host, rrtype, cb)` dispatches to the correct record-type codepath and returns the full record set, not a single fake entry synthesized from `dns.lookup`",
+        "Each typed method (`resolveMx`, `resolveTxt`, `resolveNs`, `resolveSoa`, `resolveSrv`, `resolveCname`, `resolvePtr`, `resolveCaa`, `resolveNaptr`) returns objects whose shape matches real Node (e.g. MX: `{ exchange, priority }`, SRV: `{ priority, weight, port, name }`, SOA: `{ nsname, hostmaster, serial, refresh, retry, expire, minttl }`)",
+        "`dns.resolve4`/`resolve6` return ALL matching records, not just the first",
+        "Unsupported record types throw `ERR_NOT_IMPLEMENTED` with the offending rrtype in the error message — never silently return an A record",
+        "A conformance test in `crates/execution/tests/` or `crates/sidecar/tests/` compares each record-type method against real Node for a fixed kernel-resolver stub",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 133,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 2. Current impl in `crates/execution/assets/v8-bridge.source.js:9297-9328` delegates every `dns.resolve(host, rrtype)` call to `dns.lookup()` regardless of rrtype, so MX/TXT/NS/SOA/SRV/CNAME/PTR/CAA/NAPTR all silently return a single `[<IP>]`. Violates the 'Every Node builtin must be COMPLETE... NEVER return undefined or silently skip' rule in `CLAUDE.md`."
+    },
+    {
+      "id": "US-157",
+      "title": "Add dns.Resolver and dns.promises.Resolver guest shims to node:dns polyfill",
+      "description": "As a maintainer, I want `dns.Resolver` and `dns.promises.Resolver` exposed as guest classes in the `node:dns` polyfill so that guest `import { Resolver } from 'node:dns'; new Resolver()` works instead of throwing `TypeError: Resolver is not a constructor`.",
+      "acceptanceCriteria": [
+        "`dns.Resolver` is exported as a class from the `node:dns` polyfill",
+        "`dns.promises.Resolver` is exported as a class from the `node:dns/promises` polyfill",
+        "Instance methods `resolve*`, `setServers`, `getServers`, `cancel` are implemented (either forwarding to the kernel resolver with per-instance state, or throwing `ERR_NOT_IMPLEMENTED` with a specific message)",
+        "`new Resolver().resolve4('example.com', cb)` returns results through the guest callback, not the top-level resolver",
+        "A conformance probe covers `Resolver` construction, `setServers` / `getServers` round-trip, and at least one query",
+        "`crates/execution/CLAUDE.md` guidance about host-owned-helper replacement is satisfied for `dns.Resolver`"
+      ],
+      "priority": 134,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 2. `dns` is in `DEFAULT_ALLOWED_NODE_BUILTINS` but `Resolver` is missing, which directly violates the guidance in `crates/execution/CLAUDE.md` that `dns.Resolver` must have a guest-owned shim or explicit unsupported stub before `dns` is allowed."
+    },
+    {
+      "id": "US-158",
+      "title": "Restore full upstream provider support in OpenCode ACP VM build",
+      "description": "As a maintainer, I want the OpenCode ACP VM bundle to support the full upstream provider matrix (Google/Gemini, Groq, Mistral, Vertex, etc.) instead of the hardcoded Anthropic+OpenAI allow-list, so that users who configure OpenCode with a non-Anthropic/OpenAI provider do not hit `InitError: Unsupported provider in ACP VM build` at first prompt.",
+      "acceptanceCriteria": [
+        "`registry/agent/opencode/scripts/build-opencode-acp.mjs` `getSdk()` switch covers every provider the upstream OpenCode SDK supports (at minimum `anthropic`, `openai`, `google`, `google-vertex`, `groq`, `mistral`)",
+        "The bundle loads real SDK modules for each provider instead of throwing `InitError('Unsupported provider in ACP VM build: ...')`",
+        "`registry/agent/opencode/` build succeeds with no missing-dep warnings for the added providers",
+        "An end-to-end test (can be llmock-backed) exercises at least two non-Anthropic providers through the OpenCode adapter",
+        "The adapter still uses the real SDK path — no direct HTTP calls to `/v1/messages` or `/v1/chat/completions`"
+      ],
+      "priority": 135,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 2. `registry/agent/opencode/scripts/build-opencode-acp.mjs:2801-2814` hardcodes `anthropic`/`openai` even though line 2288 already imports `@ai-sdk/google-vertex/anthropic`. Violates `registry/CLAUDE.md` rule: 'Agent SDKs must run unmodified... Do not replace with minimal adapter.'"
+    },
+    {
+      "id": "US-159",
+      "title": "Fix FakeSocket and ServerResponse.socket stub writes to avoid silent data loss",
+      "description": "As a maintainer, I want `FakeSocket.write()` (used on `http.ClientRequest.socket` when no `createConnection` is supplied) and `ServerResponse.socket.write()` to either throw `ERR_NOT_IMPLEMENTED` or route the data into the real HTTP request/response pipeline, so that guest code that writes directly to `req.socket` or `res.socket` does not silently lose bytes.",
+      "acceptanceCriteria": [
+        "`class FakeSocket` in `crates/execution/assets/v8-bridge.source.js` no longer silently accepts writes — it either throws or forwards",
+        "`ServerResponse.socket.write()` behaves the same way (no silent accept)",
+        "A conformance test writes to `req.socket`/`res.socket` and asserts that either the write propagates (preferred) or throws with `ERR_NOT_IMPLEMENTED` (acceptable)",
+        "Existing HTTP tests in `crates/sidecar/tests/` and `crates/execution/tests/` continue to pass",
+        "No regression in the http-proxy-style pattern used by real npm packages"
+      ],
+      "priority": 136,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 2. `FakeSocket.write` at `v8-bridge.source.js:10323-10325` returns `true` without doing anything; `ServerResponse.socket.write` at `v8-bridge.source.js:11870-11875` has the same bug. Proxies/tunneling libraries (http-proxy, tunnel-agent) that poke at `req.socket`/`res.socket` directly lose bytes with no error."
+    },
+    {
+      "id": "US-160",
+      "title": "Surface tls.getCiphers bridge failures instead of empty fallback",
+      "description": "As a maintainer, I want `tls.getCiphers()` in the guest V8 polyfill to propagate bridge parse errors (or at minimum log them loudly) rather than swallowing them and returning `[]`, so that guest feature-detection like `tls.getCiphers().includes('AES256-GCM-SHA384')` does not silently report false negatives and downgrade TLS negotiation.",
+      "acceptanceCriteria": [
+        "`tls.getCiphers()` in `crates/execution/assets/v8-bridge.source.js` does not fall back to `[]` on bridge parse failure; it throws or returns a documented sentinel",
+        "A conformance test in `crates/sidecar/tests/builtin_conformance.rs` asserts that guest `tls.getCiphers()` returns the same (non-empty) list as host Node for a well-known subset",
+        "The test fails loudly if the bridge layer starts returning empty",
+        "Guest libraries that probe cipher support (e.g. undici, node-fetch with custom agent) see a stable list"
+      ],
+      "priority": 137,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 2. `v8-bridge.source.js:17094-17098` catches the bridge parse error and returns `[]`, hiding a real bridge regression from any guest that checks cipher support."
+    },
+    {
+      "id": "US-161",
+      "title": "Remove stale /home/user HOME fallback from Pi adapter and fail loudly on unset HOME",
+      "description": "As a maintainer, I want the Pi ACP adapter to stop hardcoding `/home/user` as a HOME fallback. The kernel-owned guest identity sets HOME to the kernel user's homedir (currently `/root`), and a stale `/home/user` fallback writes Pi settings, bin path, and agent dir to a directory that does not exist in the VM — failing silently rather than loud.",
+      "acceptanceCriteria": [
+        "`registry/agent/pi/src/adapter.ts` lines ~382, ~581, ~667 no longer contain `process.env.HOME || '/home/user'`",
+        "If HOME is unset, the adapter throws a descriptive error (`'Pi adapter requires HOME to be set by the kernel guest identity'`) instead of writing to a hardcoded fallback path",
+        "The adapter's settings, bin path, and agent dir lookups all route through the same HOME resolver (no drift across the three call sites)",
+        "An end-to-end Pi session test confirms settings/bin/agent dir are written under the real kernel HOME (e.g. `/root/.pi/...`) and fails if anything under `/home/user/` is touched"
+      ],
+      "priority": 138,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 2. Kernel-owned guest env (`prepare_guest_runtime_env`) sets HOME to the guest user's homedir — the `/home/user` string in `registry/agent/pi/src/adapter.ts` is dead and misleading."
+    },
+    {
+      "id": "US-162",
+      "title": "Wire os.cpus / totalmem / freemem / availableParallelism to kernel ResourceLimits",
+      "description": "As a maintainer, I want the guest `node:os` polyfill to derive `cpus()`, `totalmem()`, `freemem()`, and `availableParallelism()` from the kernel's per-VM `ResourceLimits` instead of returning hardcoded constants (`1 CPU`, `1 GiB`, `512 MiB`, `parallelism=1`), so that worker-pool libraries like `piscina` and `threads` size themselves to the VM's actual configured memory and parallelism.",
+      "acceptanceCriteria": [
+        "`os.cpus()` returns an array sized to the VM's configured CPU/parallelism setting",
+        "`os.totalmem()` and `os.freemem()` return values derived from the VM's `ResourceLimits` memory cap (totalmem = configured cap; freemem = cap minus kernel-tracked in-use)",
+        "`os.availableParallelism()` matches the VM's parallelism setting, not the hardcoded `1`",
+        "A conformance test spins up two VMs with different `ResourceLimits` and asserts that guest `os.*` sees the per-VM values, not the same constants",
+        "The polyfill does NOT leak real host CPU/memory info — only the VM-scoped values"
+      ],
+      "priority": 139,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 2. `crates/execution/assets/v8-bridge.source.js:7998-8068` hardcodes `1 virtual CPU`, `1 GiB total`, `512 MiB free`, `parallelism=1`. Breaks any npm package that auto-sizes work pools based on `os.availableParallelism()`."
+    },
+    {
+      "id": "US-163",
+      "title": "Bound ACP session event buffers with retention window and drain-on-ack",
+      "description": "As a maintainer, I want the per-session `events: Vec<SequencedEvent>` buffer in the sidecar ACP session state (and the mirrored `session.events` on the TypeScript side) to have a bounded retention window and a drain-on-client-acknowledgement path, so that long-running prompt sessions do not accumulate every `session/update` forever and `state_response()` does not clone a monotonically growing vec on every poll.",
+      "acceptanceCriteria": [
+        "`AcpSessionState.events` in `crates/sidecar/src/acp/session.rs` is bounded — either a ring buffer with a configurable max-size or a TTL-based trim on push",
+        "Clients can acknowledge a sequence-number high-water mark (via a dedicated RPC or piggybacked on existing state polls) and the buffer drains everything up to that mark",
+        "`state_response()` does not clone the full vec on every call — it returns only the events above the caller's acknowledged cursor",
+        "The TypeScript mirror `session.events = mergeSequencedEvents(...)` in `packages/core/src/agent-os.ts` honors the same retention contract and does not grow unbounded",
+        "A long-running session test asserts that event-buffer memory stays bounded after N updates (N >= 10_000)",
+        "`cargo test -p agent-os-sidecar --test acp_session -- --test-threads=1` passes"
+      ],
+      "priority": 140,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 3. `crates/sidecar/src/acp/session.rs:70` declares the field; push at line 214; mirrored host-side merge at `packages/core/src/agent-os.ts:2424,2470`. Real memory leak under sustained agent load."
+    },
+    {
+      "id": "US-164",
+      "title": "Add eviction to ACP seen-inbound-request-id dedupe sets",
+      "description": "As a maintainer, I want the `seen_inbound_request_ids: BTreeSet<JsonRpcId>` dedupe sets on the ACP session and client to evict old entries (via LRU, ring buffer, or sliding window), so that sessions and clients that handle millions of RPCs over their lifetime do not hold a set proportional to total lifetime RPC count.",
+      "acceptanceCriteria": [
+        "`seen_inbound_request_ids` in `crates/sidecar/src/acp/session.rs:77` has a bounded eviction policy (LRU or sliding window)",
+        "The same policy is applied to `seen_inbound_request_ids` in `crates/sidecar/src/acp/client.rs:92`",
+        "The dedupe contract still holds — no request ID within the retention window is ever processed twice",
+        "A unit test drives 100k unique request IDs through the client and asserts the set size stays bounded",
+        "`cargo test -p agent-os-sidecar` passes"
+      ],
+      "priority": 141,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 3. Both dedupe sets only `insert`, never remove. Under a long-lived agent session, unbounded memory growth."
+    },
+    {
+      "id": "US-165",
+      "title": "Bound `_closedSessionIds` tombstone set in agent-os.ts",
+      "description": "As a maintainer, I want the `_closedSessionIds` Set in `packages/core/src/agent-os.ts` to have a bounded eviction policy (ring buffer or TTL) so that long-lived `AgentOs` instances (e.g. cron workers, orchestrators) do not accumulate a monotonically growing Set<string> of every session ID they have ever seen.",
+      "acceptanceCriteria": [
+        "`_closedSessionIds` at `packages/core/src/agent-os.ts:1491` uses a bounded structure (e.g. `BoundedSet` with LRU eviction, or a size-capped ring)",
+        "The tombstone contract still holds — a session ID that was recently closed is still recognized as closed within the retention window",
+        "A unit test closes 10_000 sessions in sequence and asserts the set size stays below a configurable cap",
+        "`pnpm --dir packages/core exec vitest run tests/session-cleanup.test.ts` passes",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 142,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 3. Line 2869 is the only add site; the only `delete` at line 2959 requires the exact same session ID to be recreated. Real memory leak under sustained use."
+    },
+    {
+      "id": "US-166",
+      "title": "Replace identity-only secure-exec public-API test with behavior coverage",
+      "description": "As a maintainer, I want `packages/secure-exec/tests/public-api.test.ts` to actually exercise runtime behavior (e.g. call `createKernel()`, `createNodeRuntime()`, `createDefaultNetworkAdapter()`) instead of only asserting re-export identity (`secureExec.NodeRuntime === CoreNodeRuntime`) and a type-only `expect(true).toBe(true)` sentinel.",
+      "acceptanceCriteria": [
+        "`packages/secure-exec/tests/public-api.test.ts` contains at least one behavior test per re-exported public entrypoint (call the function, assert the return shape)",
+        "No `expect(true).toBe(true)` sentinel remains in the file",
+        "A regression that makes any re-exported helper throw at runtime causes the test to fail",
+        "`pnpm --dir packages/secure-exec test` passes"
+      ],
+      "priority": 143,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 3. Related to US-150 (same class of issue in a different package). Current file at lines 53-113 only checks identity equality plus a type-only block."
+    },
+    {
+      "id": "US-167",
+      "title": "Fix `link()` source permission check to resolve as existing path",
+      "description": "As a maintainer, I want `PermissionedFileSystem::link()` to check the SOURCE path as an existing path (via `resolved_existing_path`), not through `resolved_destination_path` which handles non-existent parent chains. A hard-link source must exist, and routing it through the destination resolver can leak the wrong resolved string into the permission decision.",
+      "acceptanceCriteria": [
+        "`crates/kernel/src/permissions.rs` `FsOperation::Link` source-path check uses the existing-path resolver",
+        "A test exercises `link(denied_existing_source, new_dest)` and asserts the permission denial fires against the correct resolved source",
+        "No behavioral regression in allowed-link paths",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 144,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 3. See `crates/kernel/src/permissions.rs:517-521` and resolver at `:392-397`. Violates CLAUDE.md kernel invariant about permission checks using resolved paths."
+    },
+    {
+      "id": "US-168",
+      "title": "Document or unify read_link/lstat permission-subject strategy",
+      "description": "As a maintainer, I want `PermissionedFileSystem::read_link` and `lstat` in `crates/kernel/src/permissions.rs:507-515` to either (a) route through `check_subject` like every other FS operation for consistency, or (b) carry an explicit comment documenting why they intentionally diverge (inspect the symlink itself, not the target).",
+      "acceptanceCriteria": [
+        "`read_link` and `lstat` permission paths are either aligned with the rest of the trait or annotated with a top-of-method comment describing the intentional difference",
+        "The comment (if chosen) cites why the divergence is correct — e.g. `lstat` must observe the symlink itself, so resolving through the target would be wrong",
+        "A test exercises `lstat(symlink_to_denied_target)` and documents the expected behavior",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 145,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 3. Not a correctness bug — reviewers will keep flagging it unless it is documented or unified."
+    },
+    {
+      "id": "US-169",
+      "title": "Route FsOperation::Remove through resolved-destination-path check",
+      "description": "As a maintainer, I want `permission_subject` for `FsOperation::Remove` in `crates/kernel/src/permissions.rs:398` to flow through `resolved_destination_path` (or equivalent realpath-resolving resolver) rather than returning `normalize_path(path)` directly, so that `unlink('/symlink_to_denied_dir/child')` authorizes against the realpath-resolved target rather than a lexically-normalized guest path.",
+      "acceptanceCriteria": [
+        "`FsOperation::Remove` permission subject uses the same resolver strategy as the other mutating operations",
+        "A test exercises `unlink()` on a path traversing a symlink and asserts the permission decision runs against the resolved real path",
+        "No regression in existing unlink/remove tests",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 146,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 3. Inconsistent with other mutating ops and with the CLAUDE.md invariant about permission checks using resolved paths."
+    },
+    {
+      "id": "US-170",
+      "title": "Reject NUL bytes and control characters in validate_path",
+      "description": "As a maintainer, I want `validate_path` in `crates/kernel/src/vfs.rs:1144-1150` to reject paths containing NUL bytes (which POSIX `open(2)` rejects with EINVAL), and to optionally reject other control characters that are not permitted in POSIX pathnames, so that guest code cannot smuggle NUL-terminator-bearing paths into downstream kernel VFS ops that may use the string as a key or split on separators.",
+      "acceptanceCriteria": [
+        "`validate_path` rejects any path containing a `\\0` byte with a clear error (e.g. `EINVAL` or a typed `PathContainsNul`)",
+        "A test asserts every mutating and read path operation rejects NUL-containing inputs before any kernel state is touched",
+        "A fuzz or property test covers the rejection for at least 1000 generated inputs",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 147,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 3. Current `validate_path` only bounds length. No fuzz coverage for embedded NUL or control chars."
+    },
+    {
+      "id": "US-171",
+      "title": "Propagate ACP write-response errors into session failure state",
+      "description": "As a maintainer, I want the ACP client in `crates/sidecar/src/acp/client.rs:524,563` to stop silently dropping write-response errors (`let _ = write_with_inner(...).await`). If the peer has hung up mid-handler, the client should transition into a failed state so subsequent RPCs do not pile up against a dead writer.",
+      "acceptanceCriteria": [
+        "`crates/sidecar/src/acp/client.rs:524` and `:563` no longer `let _` the write result",
+        "On write failure, the client enters a documented failed state (e.g. `status = Failed`, pending RPCs are drained with a clear error)",
+        "A test simulates a hung-up peer during a response write and asserts subsequent RPCs fail fast with the correct error type",
+        "`cargo test -p agent-os-sidecar --test acp_session` passes"
+      ],
+      "priority": 148,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 3. Silent error swallowing masks real transport failures."
+    },
+    {
+      "id": "US-172",
+      "title": "Log hydration failures in _hydrateSessionState fire-and-forget path",
+      "description": "As a maintainer, I want `_hydrateSessionState` failures in `packages/core/src/agent-os.ts:2706` to surface observability (at minimum a `logger.warn` with session ID and error), instead of being swallowed by `.catch(() => {})`. Silent failure leaves sessions running against stale local state with no metric, no log, and no surfaced error.",
+      "acceptanceCriteria": [
+        "`_hydrateSessionState(session).catch(...)` in `packages/core/src/agent-os.ts` logs the failure with session ID and error context",
+        "The test suite asserts the log is emitted when hydration fails (can be a spy on the logger)",
+        "No unhandled-rejection regression — the caller still proceeds, just with observability",
+        "`pnpm --dir packages/core exec vitest run tests/session-cleanup.test.ts` passes",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 149,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 3. The `.catch(() => {})` pattern is sanctioned in `packages/core/CLAUDE.md` for race-safety, but observability should not be silent."
+    },
+    {
+      "id": "US-173",
+      "title": "Replace panic-on-serialize with fallible ACP notification path",
+      "description": "As a maintainer, I want the `json.to_value(...).expect(\"serialize ACP notification\")` call in `crates/sidecar/src/acp/session.rs:177` to return a typed error (or a `Value::Null` fallback) rather than panicking the dispatch thread on non-serializable params. Agent notifications are user-influenced input and should not crash the sidecar.",
+      "acceptanceCriteria": [
+        "`state_response()` in `crates/sidecar/src/acp/session.rs` no longer calls `.expect(\"serialize ACP notification\")`",
+        "Non-serializable notification params surface as a typed error OR as a logged warning with a safe fallback value",
+        "A test injects a non-serializable value (e.g. f64::NAN in a Number) and asserts the dispatch thread does not panic",
+        "`cargo test -p agent-os-sidecar --test acp_session` passes"
+      ],
+      "priority": 150,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 3. Panic on user-influenced input crashes the dispatch thread."
+    },
+    {
+      "id": "US-174",
+      "title": "Log non-NotFound shadow-path removal errors before mirrored write",
+      "description": "As a maintainer, I want the `fs::remove_file` / `fs::remove_dir_all` calls at `crates/sidecar/src/filesystem.rs:958-959` to log non-`NotFound` errors before the subsequent `fs::write`, so that a partial cleanup failure (e.g. a permission error on a nested file) does not silently leave the shadow root in an unexpected state.",
+      "acceptanceCriteria": [
+        "`crates/sidecar/src/filesystem.rs:958-959` no longer silently discards errors from `remove_file` / `remove_dir_all`",
+        "`NotFound` errors are ignored (expected); all other errors are logged with the shadow path and the error type",
+        "A test exercises the mirrored-write path with a pre-existing conflicting shadow entry and asserts the log fires",
+        "`cargo test -p agent-os-sidecar` passes"
+      ],
+      "priority": 151,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 3. Silent error discard can leave the shadow root in a bad state before the mirrored write."
+    },
+    {
+      "id": "US-175",
+      "title": "v8-runtime session thread must not silently drop TerminateExecution/StreamEvent/BridgeResponse",
+      "description": "As a maintainer, I want the v8-runtime session thread in `crates/v8-runtime/src/session.rs` to handle every `BinaryFrame` variant at the top-level `rx.recv()` loop, or explicitly reject/log unknown variants, instead of silently dropping them via `_ => {}`. Late `BridgeResponse`, `TerminateExecution`, and `StreamEvent` messages that arrive after `run_event_loop` exits currently vanish, masking cancellations, breaking stream chunks, and stranding bridge responses.",
+      "acceptanceCriteria": [
+        "`crates/v8-runtime/src/session.rs` top-level `rx.recv()` match handles `TerminateExecution`, `StreamEvent`, and `BridgeResponse` explicitly — either by dispatching them into the appropriate session state or logging a structured warning and dropping them with a specific error code",
+        "The catch-all `_ => {}` arm at ~line 747 is removed or replaced with a logged-unknown handler",
+        "A test drives a late `TerminateExecution` after the event loop exits and asserts the cancel is either honored or logged (not silently lost)",
+        "A test drives a late `BridgeResponse` and asserts the same",
+        "`cargo test -p agent-os-v8-runtime -- --test-threads=1` passes"
+      ],
+      "priority": 152,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 4. `session.rs:363-750` — catch-all `_ => { // Other messages handled in later stories }` at ~line 747 silently drops cancel, bridge response, and stream event messages. Inbound routing in `main.rs:257-274` forwards them to `send_to_session`, so the drop is real, not a theoretical hazard."
+    },
+    {
+      "id": "US-176",
+      "title": "Fix pi-cli agent config acpAdapter to use full package name",
+      "description": "As a maintainer, I want `AGENT_CONFIGS['pi-cli'].acpAdapter` in `packages/core/src/agents.ts` to use the real npm package name (`@rivet-dev/agent-os-pi-cli`) instead of the bare binary name `pi-acp`, so that adapter resolution matches the rest of the agent config entries and does not mis-resolve or fall through.",
+      "acceptanceCriteria": [
+        "`AGENT_CONFIGS['pi-cli'].acpAdapter` is `@rivet-dev/agent-os-pi-cli`",
+        "The binary name `pi-acp` is moved to a separate field (e.g. `binName` or similar) if the resolver needs it",
+        "A test exercises Pi CLI adapter resolution through the agent config and verifies it loads the real adapter package",
+        "`pnpm --dir packages/core exec vitest run tests/agents.test.ts` (or the agent config truth suite) passes",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 153,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 4. `packages/core/src/agents.ts:121` — every other entry uses `@rivet-dev/agent-os-*` package names, but `pi-cli` uses the bare binary `pi-acp`. The registry package is named `@rivet-dev/agent-os-pi-cli` with binary `pi-acp`."
+    },
+    {
+      "id": "US-177",
+      "title": "Remove stale quickstart duplicates and consolidate on canonical file per feature",
+      "description": "As a maintainer, I want the committed `examples/quickstart/src/` directory to stop shipping both old and new versions of the same example (e.g. `networking.ts` vs `network.ts`, `file-system.ts` vs `filesystem.ts`, `cron-jobs.ts` vs `cron.ts`). The older stubs are trivial or broken (e.g. `networking.ts` references a `server.js` that is never written, calls `os.fetch` with the wrong signature, and crashes on first run).",
+      "acceptanceCriteria": [
+        "Exactly ONE quickstart example file per feature exists under `examples/quickstart/src/`",
+        "The stale duplicates `networking.ts`, `file-system.ts`, `cron-jobs.ts`, plus the trivial stubs `sessions.ts`, `expose-tools.ts`, `extensions.ts` are either deleted or upgraded into real, end-to-end working demos with proper `dispose()` / cleanup",
+        "`networking.ts` is deleted because the canonical `network.ts` already covers the feature",
+        "Running any remaining quickstart file with `node dist/<file>.js` succeeds without a module-not-found or signature-mismatch error",
+        "`pnpm --dir examples/quickstart run check-types` passes",
+        "A short README or `index.ts` pointer lists the canonical example per feature so users do not grep the wrong file"
+      ],
+      "priority": 154,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 4. US-152 only covered the UNCOMMITTED scratch files — the committed duplicates are a separate issue. `networking.ts:6` calls `os.spawn('node', ['server.js'])` with no such file, and the spawn signature is wrong for the VM runtime."
+    },
+    {
+      "id": "US-178",
+      "title": "test -r/-w/-x builtin must consult kernel file mode bits, not just existence",
+      "description": "As a maintainer, I want the `test` WASM builtin in `registry/native/crates/libs/builtins/src/lib.rs` to implement `-r`, `-w`, and `-x` by consulting the kernel file mode bits (via `std::fs::metadata(...).permissions()`), not by collapsing to `exists()`. Agent shell scripts that gate on `[ -x ./script ]` currently get wrong answers silently.",
+      "acceptanceCriteria": [
+        "`registry/native/crates/libs/builtins/src/lib.rs` `-r`, `-w`, `-x` checks consult the mode bits returned by `std::fs::metadata(...).permissions()` (owner/group/other as appropriate for the guest uid/gid)",
+        "The `// simplified` comment is removed",
+        "A test creates files with mode 0o644, 0o444, 0o755, and 0o000 and asserts each `-r`/`-w`/`-x` test returns the POSIX expected result",
+        "Running `[ -x /bin/sh ]` inside a guest shell returns the correct result",
+        "`cargo test -p agent-os-kernel --test wasm_commands` (or the relevant truth suite) passes"
+      ],
+      "priority": 155,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 4. `registry/native/crates/libs/builtins/src/lib.rs:115` — `\"-r\" | \"-w\" | \"-x\" => std::fs::metadata(args[1]).is_ok(), // simplified`."
+    },
+    {
+      "id": "US-179",
+      "title": "Implement test -nt / -ot via mtime comparison in WASM builtins",
+      "description": "As a maintainer, I want the `test` WASM builtin's `-nt` (newer-than) and `-ot` (older-than) operators to return real results based on `std::fs::metadata(...).modified()`, instead of hardcoded `false`. Makefile-style freshness checks inside guest shell scripts currently silently lie.",
+      "acceptanceCriteria": [
+        "`-nt` returns true when the first argument's mtime is strictly greater than the second's",
+        "`-ot` returns true when the first argument's mtime is strictly less than the second's",
+        "Both operators return false if either path does not exist (matching POSIX `test`)",
+        "A test covers both operators with three files whose mtimes are explicitly ordered",
+        "`cargo test -p agent-os-kernel --test wasm_commands` passes"
+      ],
+      "priority": 156,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 4. `registry/native/crates/libs/builtins/src/lib.rs:128-129` hardcodes both to `false` with a `// simplified: newer-than not supported` comment."
+    },
+    {
+      "id": "US-180",
+      "title": "test builtin compound expressions must honor POSIX precedence and paren grouping",
+      "description": "As a maintainer, I want the `test` WASM builtin's compound-expression parser (`-a`, `-o`, `(`, `)`) to honor POSIX precedence — `-a` binds tighter than `-o` — and to support paren grouping. Currently `-a`/`-o` are evaluated left-to-right on first occurrence, and parens are unsupported, so `[ a = b -o c = d -a e = f ]` returns wrong results.",
+      "acceptanceCriteria": [
+        "The `test` parser builds a real precedence-respecting expression tree instead of scanning argv for the first `-a` or `-o`",
+        "`(` and `)` grouping is supported and matches POSIX semantics",
+        "A table-driven test covers at least 15 compound expressions with mixed `-a`/`-o`/parens and negation",
+        "Running non-trivial shell scripts that rely on compound `test` inside a guest shell works",
+        "`cargo test -p agent-os-kernel --test wasm_commands` passes"
+      ],
+      "priority": 157,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 4. `registry/native/crates/libs/builtins/src/lib.rs:137-148` implements `-a`/`-o` naively and has no paren support."
+    },
+    {
+      "id": "US-181",
+      "title": "which shim must verify executable mode bits before reporting a match",
+      "description": "As a maintainer, I want the `which` WASM shim in `registry/native/crates/libs/shims/src/which.rs` to check the executable mode bit before returning a path, not just `path.exists() && path.is_file()`. Currently a regular data file named `python` on PATH is reported as a match, which leaks wrong data into agent feature-detection probes like `which bash`.",
+      "acceptanceCriteria": [
+        "`is_executable_path` in `registry/native/crates/libs/shims/src/which.rs` consults the file mode bits and returns true only when the executable bit is set",
+        "A test creates a non-executable file named `fakebin` on PATH and asserts `which fakebin` returns non-zero and empty output",
+        "A test creates an executable file named `realbin` and asserts `which realbin` returns zero and the correct path",
+        "`cargo test -p agent-os-kernel` (or the relevant suite) passes"
+      ],
+      "priority": 158,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 4. `registry/native/crates/libs/shims/src/which.rs:16-18` — no mode-bit check."
+    },
+    {
+      "id": "US-182",
+      "title": "Replace v8-runtime session slot-acquire busy poll with condvar wait + shutdown wake",
+      "description": "As a maintainer, I want the v8-runtime session thread's concurrency slot acquisition in `crates/v8-runtime/src/session.rs` to wait on a condvar without a 50ms timeout instead of busy-polling 20 times per second per queued session. The current `cvar.wait_timeout(count, 50ms)` loop burns CPU proportional to `queued * 20` and adds up to 50ms latency to Shutdown delivery.",
+      "acceptanceCriteria": [
+        "`crates/v8-runtime/src/session.rs:286-308` no longer uses `wait_timeout(50ms)` in its slot-acquire loop",
+        "The Shutdown path explicitly notifies the slot-acquire condvar (or uses a dedicated cancellation token) so a queued session wakes within ms of a shutdown request",
+        "`notify_one()` at line 767 remains the signal for normal slot release",
+        "A stress test queues 100 sessions and asserts total CPU usage stays bounded (no 20Hz busy poll)",
+        "A test drives a Shutdown while sessions are queued and asserts they wake and exit within <10ms",
+        "`cargo test -p agent-os-v8-runtime -- --test-threads=1` passes"
+      ],
+      "priority": 159,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 4. Real CPU burn and latency bug."
+    },
+    {
+      "id": "US-183",
+      "title": "Bound v8-runtime SnapshotCache with LRU and max entry count",
+      "description": "As a maintainer, I want the `SnapshotCache` in `crates/v8-runtime/src/` to have a bounded LRU eviction policy and a configurable maximum entry count, so that long-running sidecar processes with rotating agent packages or hot-reloading bridge code do not accumulate full V8 startup snapshot blobs indefinitely.",
+      "acceptanceCriteria": [
+        "`SnapshotCache` uses an LRU (or clock/TLRU) eviction policy keyed by bridge-code hash",
+        "The max entry count is configurable (default sized for a typical multi-agent sidecar)",
+        "A unit test inserts N+5 distinct bridge-code strings and asserts the cache size never exceeds N",
+        "`cargo test -p agent-os-v8-runtime -- --test-threads=1` passes",
+        "A long-running memory probe shows bounded snapshot memory under repeated bridge-code rotation"
+      ],
+      "priority": 160,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 4. Sibling to US-163/164/165 (unbounded collections). Each distinct bridge code retains a full snapshot blob permanently."
+    },
+    {
+      "id": "US-184",
+      "title": "ACP inbound request must wait for host response before falling back to -32601",
+      "description": "As a maintainer, I want the ACP client at `crates/sidecar/src/acp/client.rs:513-526` to wait for the host-side response (or a timeout) before returning `-32601 Method not found` for inbound requests. The client currently forwards the notification to the host at lines 502-506 but also immediately replies with `-32601`, so legitimate `fs/read_text_file`, `fs/write_text_file`, `terminal/*` requests from ACP adapters silently fail even when the host would have served them.",
+      "acceptanceCriteria": [
+        "`crates/sidecar/src/acp/client.rs` inbound-request handler waits for the host response on an oneshot/queue with a configurable timeout instead of immediately returning `-32601`",
+        "If the host answers within the timeout, the answer is forwarded to the agent; otherwise `-32601` (or a timeout error) is returned",
+        "A test exercises `fs/read_text_file` from an agent adapter and asserts the host-side handler answer is forwarded",
+        "A test asserts a genuinely unknown method still returns `-32601` after the timeout",
+        "`cargo test -p agent-os-sidecar --test acp_session` passes"
+      ],
+      "priority": 161,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 4. This one is a real behavior bug: `fs/*` and `terminal/*` inbound calls from ACP adapters currently fail with method-not-found even though the host has handlers."
+    },
+    {
+      "id": "US-185",
+      "title": "Validate toolkit names and fail-fast on description length in hostTool/toolKit factories",
+      "description": "As a maintainer, I want `hostTool()` and `toolKit()` in `packages/core/src/host-tools.ts` to validate toolkit names against the documented regex `^[a-z0-9][a-z0-9-]*$` and to enforce the description length limit at factory time, so that authoring errors fail fast instead of only surfacing when `validateToolkits()` is eventually called at some later runtime point.",
+      "acceptanceCriteria": [
+        "`hostTool()` and `toolKit()` throw a clear error at creation time when the description exceeds the documented limit",
+        "`toolKit()` throws at creation time when the name fails the regex `^[a-z0-9][a-z0-9-]*$`",
+        "Error messages cite the offending field, length/regex, and expected format",
+        "Unit tests cover name-regex pass and fail cases",
+        "`pnpm --dir packages/core exec vitest run tests/host-tools.test.ts` (or the relevant suite) passes",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 162,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 4. Extends US-063 (description length) to name validation and fail-fast behavior."
+    },
+    {
+      "id": "US-186",
+      "title": "Expose all sidecar crypto sync RPCs through the guest crypto module surface",
+      "description": "As a maintainer, I want the guest `require('crypto')` module to surface every crypto primitive already implemented in the sidecar sync-RPC handlers, so that popular npm packages (jsonwebtoken, node-jose, bcryptjs, Stripe SDK, most JWT/TLS code) that use `crypto.createCipheriv`, `crypto.createSign`, `crypto.createVerify`, `crypto.createPrivateKey`, `crypto.createPublicKey`, `crypto.publicEncrypt`, `crypto.privateDecrypt`, `crypto.pbkdf2`, `crypto.pbkdf2Sync`, `crypto.scrypt`, `crypto.scryptSync`, `crypto.createDiffieHellman`, `crypto.diffieHellman`, `crypto.generateKeyPair`, and `crypto.generateKeyPairSync` do not hit `TypeError: crypto.<fn> is not a function`.",
+      "acceptanceCriteria": [
+        "`crates/execution/assets/v8-bridge.source.js` `builtinCryptoModule` exports every method listed above, wired to the corresponding sidecar sync-RPC handler in `crates/sidecar/src/execution.rs`",
+        "A conformance test exercises each method against a real Node.js reference and compares outputs",
+        "`jsonwebtoken`, `node-jose`, and `bcryptjs` can be loaded and used end-to-end inside the guest V8",
+        "Any crypto method that genuinely has no sidecar handler throws `ERR_NOT_IMPLEMENTED` with a specific method name — never returns undefined or silently skips",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 163,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 5. `v8-bridge.source.js:22080-22148` only exports a tiny subset. The sidecar already has the handlers (`crates/sidecar/src/execution.rs:9621-9641`); the guest surface just never calls them. Violates the 'Every Node builtin module must be a COMPLETE implementation' rule in `CLAUDE.md`."
+    },
+    {
+      "id": "US-187",
+      "title": "Report real V8 memory/CPU stats and live process.versions in guest process polyfill",
+      "description": "As a maintainer, I want `process.memoryUsage()`, `process.cpuUsage()`, `process.resourceUsage()`, and `process.versions` in the guest V8 polyfill to return real per-isolate values derived from the V8 heap/CPU accounting APIs and the actual bundled runtime versions, instead of hardcoded fake constants. GC/memory-aware npm packages (Claude SDK long-context handling, OpenCode worker pools, LRU caches sized by heap) currently make catastrophically wrong sizing decisions.",
+      "acceptanceCriteria": [
+        "`process.memoryUsage()` returns real per-isolate heap statistics from V8's heap statistics API",
+        "`process.cpuUsage([previousValue])` returns a real microsecond-resolution user/system tuple derived from the sidecar or isolate accounting",
+        "`process.resourceUsage()` returns a real getrusage-style object",
+        "`process.versions.v8` and `process.versions.openssl` reflect the bundled V8 and openssl versions, not stale strings",
+        "A conformance test spins up a guest with a controlled workload and asserts memoryUsage grows as memory is allocated",
+        "`cargo test -p agent-os-sidecar` passes"
+      ],
+      "priority": 164,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 5. `v8-bridge.source.js:20597-20637` hardcodes `rss: 50 MB`, `heapUsed: 10 MB`, etc. `process.versions.v8` is hardcoded to `11.3.244.8`."
+    },
+    {
+      "id": "US-188",
+      "title": "register_toolkit must reject duplicate names and gate tool invocation behind permission checks",
+      "description": "As a maintainer, I want `register_toolkit` in `crates/sidecar/src/tools.rs` to (a) return a structured conflict error when a toolkit name is registered twice instead of silently overwriting the previous registration, and (b) gate tool invocation behind an explicit permission check (e.g. `tools.invoke` permission scoped to the toolkit name) so guests holding the VM cannot invoke arbitrary toolkits regardless of policy.",
+      "acceptanceCriteria": [
+        "Registering a toolkit name that already exists returns `Err(ToolkitAlreadyRegistered)` instead of silently replacing",
+        "A guest invocation of `agentos <tool>` (or the equivalent toolkit dispatch path) runs a permission check against a documented permission name before executing",
+        "The permission is denied by default unless explicitly granted in the VM policy",
+        "Tests cover duplicate registration, denied invocation, and granted invocation",
+        "`cargo test -p agent-os-sidecar --test tools` (or equivalent truth suite) passes"
+      ],
+      "priority": 165,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 5. `crates/sidecar/src/tools.rs:39-75` — `register_toolkit` just calls `vm.toolkits.insert(name, payload)` with no duplicate check, and the file contains zero permission gates. Real security issue for multi-tenant VMs."
+    },
+    {
+      "id": "US-189",
+      "title": "Guest process.setuid/setgid/seteuid/setegid/setgroups must throw EPERM like unprivileged Node",
+      "description": "As a maintainer, I want `process.setuid`, `process.setgid`, `process.seteuid`, `process.setegid`, and `process.setgroups` in the guest V8 polyfill to throw `EPERM` (matching real unprivileged Node.js behavior) instead of silently succeeding. Currently they are empty-bodied functions that accept any argument and return undefined, so guest code like `try { process.setuid(0); /* I'm root */ } catch {}` wrongly believes it gained root. This is a privilege-semantics fingerprint bug.",
+      "acceptanceCriteria": [
+        "`crates/execution/assets/v8-bridge.source.js` `process.setuid/setgid/seteuid/setegid/setgroups` throw an `EPERM` error when called (unless the kernel determines the guest is genuinely root)",
+        "Error shape matches Node.js: `{ code: 'EPERM', syscall: 'setuid' }` etc.",
+        "A conformance test compares the throw against real Node for an unprivileged process",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 166,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 5. `v8-bridge.source.js:20577-20586` — five empty-bodied stub functions. Any Linux-targeted package using this as a capability probe is defeated."
+    },
+    {
+      "id": "US-190",
+      "title": "Gate FindListener/FindBoundUdp/GetProcessSnapshot behind network.inspect / process.inspect permission",
+      "description": "As a maintainer, I want `FindListener`, `FindBoundUdp`, and `GetProcessSnapshot` handlers in `crates/sidecar/src/execution.rs` to check a `network.inspect` / `process.inspect` permission before dumping VM listener/UDP/process state. Currently they only call `require_owned_vm`, so a guest with only `allowAll` in its own scope can enumerate other components' sockets and processes inside the same VM — a side-channel for credential-exfil heuristics and privileged-port discovery.",
+      "acceptanceCriteria": [
+        "`FindListener` checks a `network.inspect` permission before returning the listener table",
+        "`FindBoundUdp` checks the same permission before returning UDP bindings",
+        "`GetProcessSnapshot` checks a `process.inspect` permission before returning the process table",
+        "Denied cases return a specific permission-denied error type, not `Value::Null`",
+        "Tests cover allowed and denied cases for each handler",
+        "`cargo test -p agent-os-sidecar --test permission_flags` (or equivalent) passes"
+      ],
+      "priority": 167,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 5. `crates/sidecar/src/execution.rs:2584-2653, 2604-2625`. Real multi-tenant side channel."
+    },
+    {
+      "id": "US-191",
+      "title": "Replace && false kill-switch in Claude stream-json hook patch with an explicit opt-out env flag",
+      "description": "As a maintainer, I want the Claude CLI patch in `registry/agent/claude/scripts/build-patched-cli.mjs` to stop using `&& false` to permanently disable the `JMK` stream-json hook-event forwarding block. The current patch silently removes that functionality for every run with no env-var gate, so any stream-json consumer relying on hook events never sees them.",
+      "acceptanceCriteria": [
+        "`registry/agent/claude/scripts/build-patched-cli.mjs:190-194` replaces `&& false` with a readable env-var check (e.g. `&& process.env.AGENT_OS_CLAUDE_DISABLE_HOOK_EVENTS !== '1'`)",
+        "The default behavior is UNCHANGED from upstream Claude CLI — the hook forwarding runs unless explicitly disabled",
+        "A test asserts a stream-json consumer receives hook events under default settings",
+        "The patch build script verifies the post-patch output contains the expected env-var guard",
+        "`pnpm --dir registry/agent/claude run build` succeeds"
+      ],
+      "priority": 168,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 5. `registry/agent/claude/scripts/build-patched-cli.mjs:190-194` has `'if($.outputFormat===\"stream-json\"&&$.verbose&&false)JMK((x)=>{'` — the `&&false` makes the hook-forwarding block unreachable unconditionally."
+    },
+    {
+      "id": "US-192",
+      "title": "Fail build-patched-cli loudly when SDK patches can't apply and verify patch count post-write",
+      "description": "As a maintainer, I want `registry/agent/claude/scripts/build-patched-cli.mjs` to fail with a clear error when any of the Claude SDK patches cannot be applied (because the needle is missing or the upstream has renamed a symbol), rather than silently writing an unpatched artifact and updating the manifest. Currently the CLI path throws on missing needles but the SDK path degrades to a pass-through.",
+      "acceptanceCriteria": [
+        "`registry/agent/claude/scripts/build-patched-cli.mjs:297-317` throws when `sdkSource.includes(sdkNeedle)` is false, matching the CLI path's behavior",
+        "After writing the patched SDK, the script re-reads the output and asserts each expected patch marker is present",
+        "A test runs the build script against a synthesized `sdkSource` with a missing needle and asserts the script exits non-zero",
+        "The manifest at `dist/claude-sdk-patched.json` is NOT written if the patch did not apply",
+        "`pnpm --dir registry/agent/claude run build` succeeds under normal conditions and fails loudly under a simulated needle-miss"
+      ],
+      "priority": 169,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 5. Upstream SDK rename = silent unpatched SDK in production. The adapter loads via manifest and has no verification."
+    },
+    {
+      "id": "US-193",
+      "title": "Implement /proc/[pid]/status, /proc/cpuinfo, /proc/meminfo, /proc/loadavg, /proc/uptime, /proc/version in kernel proc layer",
+      "description": "As a maintainer, I want the kernel `/proc` pseudo-filesystem in `crates/kernel/src/kernel.rs` to expose `/proc/[pid]/status`, `/proc/cpuinfo`, `/proc/meminfo`, `/proc/loadavg`, `/proc/uptime`, and `/proc/version`, so that Linux-targeted npm packages (node-gyp, physical-cpu-count, systeminformation, detect-libc) do not see `ENOENT`. `CLAUDE.md` explicitly names `/proc/self/status` as required.",
+      "acceptanceCriteria": [
+        "`ProcNode` in `crates/kernel/src/kernel.rs:3105-3113` lists the new entries and each is readable",
+        "`/proc/[pid]/status` returns the real process status with Name, State, Pid, PPid, Uid, Gid, VmSize, VmRSS, Threads fields matching kernel state",
+        "`/proc/cpuinfo` returns at least one processor block reflecting the VM's CPU config",
+        "`/proc/meminfo` returns MemTotal/MemFree/MemAvailable derived from the VM ResourceLimits",
+        "`/proc/loadavg`, `/proc/uptime`, `/proc/version` return sensible derived values",
+        "A conformance test compares `detect-libc` output inside the guest against the expected libc identification",
+        "`cargo test -p agent-os-kernel --test identity` passes"
+      ],
+      "priority": 170,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 5. `ProcNode` currently only has `mounts`, `self`, `[pid]`, `[pid]/fd`, `[pid]/cmdline`, `[pid]/environ`, `[pid]/cwd`, `[pid]/stat`, `[pid]/fd/[fd]`."
+    },
+    {
+      "id": "US-194",
+      "title": "Propagate SignalState events from nested V8 children instead of dropping them",
+      "description": "As a maintainer, I want `poll_descendant_javascript_child_process` in `crates/sidecar/src/execution.rs:4790` to forward `ActiveExecutionEvent::SignalState` events from nested V8 children rather than dropping them with an empty arm. Nested children's signal-handler registrations are currently swallowed, so once a grandchild installs a SIGCHLD handler the parent sidecar forgets and SIGCHLD-dependent patterns (wait loops, job control) misbehave at depth >= 2.",
+      "acceptanceCriteria": [
+        "`crates/sidecar/src/execution.rs:4790` no longer contains `ActiveExecutionEvent::SignalState { .. } => {}`",
+        "SignalState events from nested V8 children are forwarded to the descendant poll response or logged at debug level",
+        "A test spawns a grandchild that installs SIGCHLD, spawns its own child, and asserts the SIGCHLD delivery is observable from the root",
+        "`cargo test -p agent-os-sidecar --test service` passes"
+      ],
+      "priority": 171,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 5. Real bug in nested signal semantics."
+    },
+    {
+      "id": "US-195",
+      "title": "Distinguish child-missing from no-events in nested descendant poll",
+      "description": "As a maintainer, I want `poll_descendant_javascript_child_process` in `crates/sidecar/src/execution.rs:4583-4590` to return a distinguishable error when the child vanishes between drain and pop, rather than `Ok(Value::Null)` (which is the same shape as 'no events pending'). Currently the guest's poll loop happily continues against a ghost child.",
+      "acceptanceCriteria": [
+        "When the child is `None` after drain, the handler returns a typed error (e.g. `ErrCode::ChildGone`) instead of `Ok(Value::Null)`",
+        "The guest poll loop observes the distinct error and terminates its loop",
+        "A test forces a race between termination and drain and asserts the guest exits its poll on the typed error",
+        "`cargo test -p agent-os-sidecar --test service` passes"
+      ],
+      "priority": 172,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 5."
+    },
+    {
+      "id": "US-196",
+      "title": "Make mkdtempSync collision-safe using crypto entropy and fail on existing path",
+      "description": "As a maintainer, I want `fs.mkdtempSync` in the guest V8 polyfill to generate its suffix from real crypto entropy (matching real Node's `randomBytes(6)` = 2^48 combinations) instead of `Math.random().toString(36).slice(2, 8)` (~2e9 combinations), and to fail EEXIST on an existing path rather than silently succeeding via `mkdirSync(..., { recursive: true })`.",
+      "acceptanceCriteria": [
+        "`crates/execution/assets/v8-bridge.source.js:6618` uses `crypto.randomBytes(6)` or equivalent",
+        "If the generated path already exists, the function retries or fails with EEXIST — never silently reuses an existing directory",
+        "A concurrency test spins up 100 concurrent `mkdtempSync('/tmp/x-')` calls and asserts all 100 paths are distinct",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 173,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 5. `Math.random()` is not crypto-grade and 6 base36 chars is collision-prone."
+    },
+    {
+      "id": "US-197",
+      "title": "Dispatch SIGABRT from guest process.abort() instead of converting to exit(1)",
+      "description": "As a maintainer, I want `process.abort()` in the guest V8 polyfill to raise `SIGABRT` (matching real Node.js behavior) instead of calling `process.exit(1)`. Downstream tooling that attaches to `process.on('SIGABRT')` or watches for signal-6 exit currently sees a normal exit-1 and cannot distinguish real abort from a graceful shutdown.",
+      "acceptanceCriteria": [
+        "`crates/execution/assets/v8-bridge.source.js:20548-20550` no longer maps `process.abort()` to `process.exit(1)`",
+        "Instead it routes to a SIGABRT delivery path on the kernel process and exits with signal-6 shape",
+        "A conformance test asserts a guest `process.abort()` is observed with `{ signal: 'SIGABRT' }` from the spawning side, matching real Node",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 174,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 5. `v8-bridge.source.js:20548-20550` — `abort() { return process2.exit(1); }`."
+    },
+    {
+      "id": "US-198",
+      "title": "Validate --json / --json-file tool payloads against input_schema before dispatch",
+      "description": "As a maintainer, I want `resolve_invocation_input` in `crates/sidecar/src/tools.rs` to validate any `--json` or `--json-file` guest payload against the tool's declared `input_schema` before reaching the host callback, so that a guest cannot hand a host tool's `execute()` callback any shape — extra fields, wrong types, negative numbers, null where a string is required — with zero validation.",
+      "acceptanceCriteria": [
+        "`crates/sidecar/src/tools.rs:301-325` `--json` and `--json-file` branches run JSON schema validation against `tool.input_schema` before dispatch",
+        "Schema validation failure returns a typed error (e.g. `ToolInputSchemaViolation`) with the offending field and the expected type",
+        "A test hands a host tool a `--json-file` payload with wrong types and asserts dispatch is rejected before the host callback runs",
+        "A test hands a host tool a correct `--json` payload and asserts it is still accepted",
+        "`cargo test -p agent-os-sidecar --test tools` (or equivalent) passes"
+      ],
+      "priority": 175,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 6. Only the `parse_argv` branch consults `tool.input_schema`; the two JSON branches return the parsed value directly. Couple with the `--json-file` being read through the kernel VFS and guests can construct arbitrary payloads."
+    },
+    {
+      "id": "US-199",
+      "title": "Return unsubscribe from onCronEvent and stop swallowing cron handler errors",
+      "description": "As a maintainer, I want `CronManager.onEvent()` in `packages/core/src/cron/cron-manager.ts` and its proxy `AgentOs.onCronEvent` in `packages/core/src/agent-os.ts` to return an unsubscribe closure like every other subscribe method on `AgentOs`, so callers that register a handler per session do not leak listeners. I also want `emit()` to stop swallowing handler errors inside `catch {}` and instead log them or propagate them to an error channel.",
+      "acceptanceCriteria": [
+        "`CronManager.onEvent` returns an `() => void` unsubscribe closure that removes the listener",
+        "`AgentOs.onCronEvent` forwards the unsubscribe closure to the caller",
+        "`CronManager.emit()` no longer swallows handler errors silently — errors are logged with the cron ID and handler context",
+        "A test registers 100 listeners, calls each returned unsubscribe, and asserts the listener array is empty",
+        "A test registers a throwing handler and asserts the error is observable through the logger",
+        "`pnpm --dir packages/core exec vitest run tests/cron` passes",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 176,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 6. `cron-manager.ts:112-114` pushes into `listeners` and returns void. `emit()` at line 124 has a `catch {}` block. Related to the US-163/164/165 unbounded-collection theme but specific to the subscribe API shape."
+    },
+    {
+      "id": "US-200",
+      "title": "Stream child I/O through nohup/nice/stdbuf shims instead of buffering via .output()",
+      "description": "As a maintainer, I want `nohup`, `nice`, and `stdbuf` in `registry/native/crates/libs/shims/` to stream child stdout/stderr through inherited stdio (matching `xargs.rs:222`) instead of calling `Command::output()`, which reads the child's output to completion before printing anything. For `nohup` and `stdbuf` in particular, the current behavior is a correctness bug — long-running detached commands buffer all logs in RAM until exit.",
+      "acceptanceCriteria": [
+        "`registry/native/crates/libs/shims/src/nohup.rs`, `nice.rs`, and `stdbuf.rs` use `Command::status()` with inherited stdio rather than `Command::output()`",
+        "A test spawns `nohup` with a command that writes 1 MB of stdout over 2 seconds and asserts the output appears incrementally (not in a single burst at exit)",
+        "`stdbuf` test asserts streaming semantics match real GNU stdbuf for a line-buffered child",
+        "`cargo test -p agent-os-kernel --test wasm_commands` passes"
+      ],
+      "priority": 177,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 6. `nohup.rs:25-38`, `nice.rs:39-52`, `stdbuf.rs:44-57` all call `.output()`, buffering full child output in memory."
+    },
+    {
+      "id": "US-201",
+      "title": "Replace timeout shim 1ms busy-wait loop with blocking wait",
+      "description": "As a maintainer, I want the `timeout` WASM shim in `registry/native/crates/libs/shims/src/timeout.rs` to stop busy-waiting at 1ms per iteration (`Duration::from_millis(1)` + `try_wait()`), which burns a full CPU core for the entire timeout duration on WASI where sleep returns immediately. A guest `timeout 3600 long-job` currently burns 100% CPU for an hour.",
+      "acceptanceCriteria": [
+        "`registry/native/crates/libs/shims/src/timeout.rs:61-79` no longer busy-polls at 1ms intervals",
+        "Either switch to a blocking wait-with-deadline via a wasi-ext call, or exponentially back off the poll interval, or document the gap with a kernel-side wait signal",
+        "A benchmark confirms CPU usage during `timeout 10 sleep 10` is bounded (well under 5% of a core)",
+        "The timeout behavior itself is preserved — the command is still killed at the deadline",
+        "`cargo test -p agent-os-kernel --test wasm_commands` passes"
+      ],
+      "priority": 178,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 6. Comment on line 76 admits WASI sleep returns immediately; combined with 1ms poll = 100% CPU burn."
+    },
+    {
+      "id": "US-202",
+      "title": "Stop panicking in pump_process_events when the VM/process has already been reaped",
+      "description": "As a maintainer, I want the event-processing paths in `crates/sidecar/src/execution.rs` (≥ 26 `.expect(\"VM should exist\")` / `.expect(\"process should still exist\")` sites) to return `Ok(None)` or log-and-skip when the VM or process has already been torn down by a racing `destroy_vm` / `close_session`, rather than panicking the whole sidecar. One misordered cleanup path currently kills every VM on the host.",
+      "acceptanceCriteria": [
+        "Every `self.vms.get_mut(vm_id).expect(...)` and `.expect(\"process should still exist\")` in `crates/sidecar/src/execution.rs` is replaced with a fallible lookup that returns `Ok(None)` or logs at debug level and returns",
+        "Sites include (non-exhaustive): 2271, 2507, 2540, 2831, 2835, 3108, 3117, 3121, 3235, 3239, 3377, 3420, 3424, 3487, 3491, 3787, 3791, 3801, 3805, 3811, 3973, 3985, 3988, 4131, 4135, 4156",
+        "A stress test races event-processing against `destroy_vm` and asserts the sidecar does not panic",
+        "`cargo test -p agent-os-sidecar` passes"
+      ],
+      "priority": 179,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 6. Classic race: event in flight vs async cleanup tears VM/process down. Even if current code holds the invariant today, one ordering bug kills every VM on the host."
+    },
+    {
+      "id": "US-203",
+      "title": "Move v8-runtime session_manager tests out of src/ and replace sleep-based waits with condition signals",
+      "description": "As a maintainer, I want the inline `#[cfg(test)]` tests at `crates/v8-runtime/src/session.rs:1226-1393` moved out of `src/` into `crates/v8-runtime/tests/session_management.rs` (per `crates/CLAUDE.md`: 'integration tests must live in `crates/*/tests/*.rs`, not inline'), and the `std::thread::sleep(Duration::from_millis(200..300))` synchronization replaced with explicit `recv_timeout` condition waits.",
+      "acceptanceCriteria": [
+        "The inline `#[cfg(test)]` block in `crates/v8-runtime/src/session.rs:1226-1393` is deleted",
+        "Equivalent coverage lives at `crates/v8-runtime/tests/session_management.rs`",
+        "No `std::thread::sleep(Duration::from_millis(200..300))` calls remain in the moved tests — use condvars, oneshot channels, or `recv_timeout` instead",
+        "The tests are deterministic on slow CI and fast local boxes (no flakes under 10 runs)",
+        "`cargo test -p agent-os-v8-runtime -- --test-threads=1` passes"
+      ],
+      "priority": 180,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 6. Lines 1289, 1307, 1352, 1360, 1366, 1380 use sleep-based synchronization. Both violates the integration-test-location rule and is flake-prone."
+    },
+    {
+      "id": "US-204",
+      "title": "Replace struct-level dead_code allows in sidecar::state with per-field audits",
+      "description": "As a maintainer, I want the struct-level `#[allow(dead_code)]` on `ConnectionState`, `SessionState`, `VmConfiguration`, `VmLayerStore`, `VmLayer`, `VmOverlayLayer`, `VmState`, and `ActiveProcess` in `crates/sidecar/src/state.rs` replaced with per-field audits. The struct-level suppression hides which subset is actually dead versus actively read, lets typo'd field names through review, and orphan fields from refactors go unnoticed.",
+      "acceptanceCriteria": [
+        "`crates/sidecar/src/state.rs:213, 220, 229, 243, 258, 266, 274, 385` no longer carry struct-level `#[allow(dead_code)]`",
+        "Truly dead fields are deleted; fields with a legitimate dead-but-intentional reason carry per-field `#[allow(dead_code)]` with an inline comment explaining why",
+        "`cargo build -p agent-os-sidecar` produces no new dead-code warnings after the cleanup",
+        "Root `pnpm check-types` and `cargo test -p agent-os-sidecar` still pass"
+      ],
+      "priority": 181,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 6. Related to US-087 (dead-code warning cleanup) but targeted at the sidecar::state struct-level suppressions specifically."
+    },
+    {
+      "id": "US-205",
+      "title": "Propagate write/flush errors in sandbox_agent HTTP error responder",
+      "description": "As a maintainer, I want the `sandbox_agent` HTTP error-response path in `crates/sidecar/src/plugins/sandbox_agent.rs:2056-2058` to stop using `let _ = stream.write_all(...); let _ = stream.flush();`. A partial error response or a lost TLS/socket error is currently invisible, and backpressure-aware callers never learn the write failed.",
+      "acceptanceCriteria": [
+        "`crates/sidecar/src/plugins/sandbox_agent.rs:2056-2058` no longer uses `let _ = stream.write_all/flush`",
+        "Write/flush errors are either propagated as `Err` or logged with the connection ID and error context",
+        "A test exercises a client that closes mid-response and asserts the logged error is observable",
+        "`cargo test -p agent-os-sidecar` passes"
+      ],
+      "priority": 182,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 6. Silent write-error swallowing on the HTTP error-response path."
+    },
+    {
+      "id": "US-206",
+      "title": "Rewrite pi-tool-llmock.test.ts against llmock or delete the silently-skipped suite",
+      "description": "As a maintainer, I want `packages/core/tests/pi-tool-llmock.test.ts` to stop `describe.skipIf(!ANTHROPIC_API_KEY)`'ing the entire Pi tool suite. `packages/core/CLAUDE.md` says 'All tests use @copilotkit/llmock with ANTHROPIC_API_KEY=mock-key'. In default CI and dev environments this test is always a no-op.",
+      "acceptanceCriteria": [
+        "`packages/core/tests/pi-tool-llmock.test.ts` either runs against llmock with `ANTHROPIC_API_KEY='mock-key'` (matching `claude-session.test.ts`) or is deleted",
+        "No `describe.skipIf(!ANTHROPIC_API_KEY)` gate remains in any test under `packages/core/tests/`",
+        "If kept, the test exercises the real Pi tool path through llmock and asserts concrete outputs",
+        "`pnpm --dir packages/core exec vitest run tests/pi-tool-llmock.test.ts` runs meaningful assertions"
+      ],
+      "priority": 183,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 6. Silent no-op test in CI. `claude-session.test.ts` already demonstrates the llmock pattern."
+    },
+    {
+      "id": "US-207",
+      "title": "Wire up ChannelResponseReceiver abort_rx or remove the dead timeout branch",
+      "description": "As a maintainer, I want `ChannelResponseReceiver::with_abort` in `crates/v8-runtime/src/session.rs:1173` either wired into session creation so terminate-execution actually works, or removed entirely along with the unreachable `abort_rx` select arm at lines 1191-1200 so the next reader does not think terminate works.",
+      "acceptanceCriteria": [
+        "`ChannelResponseReceiver` either has all call sites configured with `with_abort` (and terminate-execution uses it end-to-end), OR `with_abort` and the `abort_rx` select arm are deleted",
+        "If kept: a test fires terminate-execution mid-call and asserts the receiver returns the abort error within a deadline",
+        "If deleted: no `#[allow(dead_code)]` remains on `with_abort`, and the 'execution timed out' branch is also removed",
+        "`cargo test -p agent-os-v8-runtime -- --test-threads=1` passes"
+      ],
+      "priority": 184,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 6. `with_abort` is `#[allow(dead_code)]` at line 1173; `new()` never sets `abort_rx`. The select branch is unreachable. Related to US-175 (silent TerminateExecution drop)."
+    },
+    {
+      "id": "US-208",
+      "title": "Harden Python-runtime host path mapping against symlink TOCTOU",
+      "description": "As a maintainer, I want the Python runtime host path mapping in `crates/sidecar/src/filesystem.rs` to use `symlink_metadata` (or explicit in-mapping traversal) instead of `fs::metadata`, `fs::read_dir`, `fs::create_dir`, and `fs::access`, so that a pip install, wheel extraction, or a malicious wheel cannot drop a symlink into the Pyodide cache tree and leak host file metadata through a guest `os.stat(\"/pyodide-cache/pkg/link\")`.",
+      "acceptanceCriteria": [
+        "`crates/sidecar/src/filesystem.rs:620, 644, 668, 676, 700` use `symlink_metadata` for stat-like calls and reject (or explicitly follow after validation) symlinks that leave the mapped region",
+        "Directory listing verifies every entry is within the mapped prefix before including it in guest-visible output",
+        "A test drops a symlink pointing outside the mapped root into the shadow cache and asserts guest `os.stat` returns ENOENT / EPERM, not the host target's metadata",
+        "Host-side metadata leaks (size, mtime, dev, ino of arbitrary host files) are no longer reachable through the Python runtime",
+        "`cargo test -p agent-os-sidecar --test python` passes"
+      ],
+      "priority": 185,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 7. `fs::metadata` follows host symlinks. A malicious wheel or an accidental symlink in the Pyodide cache exposes host file metadata."
+    },
+    {
+      "id": "US-209",
+      "title": "Fix Buffer.concat truncation semantics in v8-bridge",
+      "description": "As a maintainer, I want `Buffer.concat(list, length)` in `crates/execution/assets/v8-bridge.source.js` to match Node semantics when `length` is smaller than the sum of member buffer lengths: real Node truncates the copy silently; the current impl throws `RangeError` on the second or third buffer because it calls `Uint8Array.prototype.set` without clamping. Real packages (undici, tar, node-stream-zip) call `Buffer.concat(chunks, cappedLength)` regularly.",
+      "acceptanceCriteria": [
+        "`Buffer.concat(list, length)` truncates the copy at the supplied length instead of throwing RangeError when the sum of member buffer lengths exceeds it",
+        "`Buffer.concat(list, length)` zero-fills the tail when `length` exceeds the sum, matching Node",
+        "A conformance test compares outputs against real Node for (a) smaller length, (b) exact length, (c) larger length, (d) empty list with non-zero length, (e) non-Buffer inputs that should throw `TypeError`",
+        "undici, tar, and node-stream-zip work end-to-end inside the guest V8",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 186,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 7. `v8-bridge.source.js:530-567` unconditionally copies each buffer without clamping."
+    },
+    {
+      "id": "US-210",
+      "title": "Await shell termination in AgentOs.dispose",
+      "description": "As a maintainer, I want `AgentOs.dispose()` in `packages/core/src/agent-os.ts` to track per-shell exit promises and await them before tearing down the sidecar event listener. Currently `dispose()` iterates `this._shells` and calls `entry.handle.kill()` synchronously with no await, then disposes the bridge listener while killed shells may still be draining stdout — producing sporadic 'bridge closed' errors and orphaned guest shell processes after `dispose()` resolves.",
+      "acceptanceCriteria": [
+        "`packages/core/src/agent-os.ts:3335-3354` tracks a per-shell exit promise",
+        "`dispose()` awaits every outstanding shell exit (with a bounded timeout) before calling `_disposeSidecarEventListener`",
+        "A test spawns 20 shells with pending stdout output, calls `dispose()`, and asserts no 'bridge closed' errors are logged and no shells remain alive",
+        "`pnpm --dir packages/core exec vitest run tests/shell-cleanup.test.ts` (or equivalent) passes",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 187,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 7. Shell teardown races sidecar disposal on the current branch."
+    },
+    {
+      "id": "US-211",
+      "title": "Canonicalize symlink storage in MountTable to match cross-mount check",
+      "description": "As a maintainer, I want `crates/kernel/src/mount_table.rs` `symlink()` to store a canonicalized (mount-relative) target string rather than the raw relative `target`, so the stored symlink cannot textually differ from the version the cross-mount check validated. Today the check runs on a computed absolute target at line ~846 but stores the raw relative string at line ~866, creating a mismatch that relies on the inner per-mount VFS to cap `..` at its root.",
+      "acceptanceCriteria": [
+        "`symlink()` stores the canonicalized target as mount-relative (or an explicit absolute form) matching what the cross-mount check validated",
+        "Alternatively, `read_link`/`readlinkat` revalidate the stored target on follow",
+        "A test creates a symlink whose raw form contains `..` and asserts the stored form is canonical",
+        "A test asserts that nested `..` traversal via a follow still cannot escape the mount",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 188,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 7. Check-store mismatch, no current escape but the invariant relies on inner-VFS details."
+    },
+    {
+      "id": "US-212",
+      "title": "Reject overlapping wildcard/loopback stream binds in socket_table",
+      "description": "As a maintainer, I want `bind_inet` in `crates/kernel/src/socket_table.rs` to detect and reject `EADDRINUSE` when a guest binds `127.0.0.1:N` and a second bind tries `0.0.0.0:N` (or vice versa), matching real Linux kernel semantics. Currently `bound_inet_streams` is keyed on the exact `InetSocketAddress` string, so both binds succeed and the accept loop routes traffic to whichever entry the routing table picks first — not the wildcard listener as Linux would.",
+      "acceptanceCriteria": [
+        "`bind_inet` checks for overlap between wildcard and specific addresses on the same port and returns `EADDRINUSE`",
+        "A test binds `127.0.0.1:8080`, then attempts `0.0.0.0:8080`, and asserts the second bind fails with `EADDRINUSE`",
+        "A test binds `0.0.0.0:8080`, then attempts `127.0.0.1:8080`, and asserts the second bind also fails",
+        "Binds to the same port on genuinely non-overlapping specific addresses (e.g. `127.0.0.1` vs `127.0.0.2`) still succeed",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 189,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 7. `bound_inet_streams` keyed on exact address string misses the wildcard overlap case."
+    },
+    {
+      "id": "US-213",
+      "title": "Fix paused-state handling in v8-bridge Readable.on('data', ...)",
+      "description": "As a maintainer, I want the custom `Readable` class in `crates/execution/assets/v8-bridge.source.js:5441-5451` to respect a prior explicit `stream.pause()` when a subsequent `on('data', ...)` listener is attached, instead of unconditionally flipping `readableFlowing = true`. Packages like tar and node-stream-zip assemble a paused reader then attach listeners and rely on `resume()` to start the flow.",
+      "acceptanceCriteria": [
+        "`Readable.on('data', ...)` only auto-resumes when the stream was not explicitly paused",
+        "`stream.pause(); stream.on('data', fn);` does not drain the stream until `resume()` is called",
+        "A conformance test compares against real Node for (a) pause-then-on-data-then-resume, (b) on-data alone, (c) multiple consecutive pause/resume cycles",
+        "tar and node-stream-zip work end-to-end inside the guest V8",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 190,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 7. Current impl unconditionally starts flowing on first `on('data', ...)` attach, defeating explicit pause."
+    },
+    {
+      "id": "US-214",
+      "title": "Per-method ACP timeouts with adapter-side cancellation on expiry",
+      "description": "As a maintainer, I want the ACP client in `crates/sidecar/src/acp/client.rs:186-202` to support per-method timeout overrides (e.g. `session/prompt` allows minutes, `initialize` enforces seconds) and to send a `session/cancel` to the adapter when a timeout fires, rather than clearing the pending slot and silently dropping the adapter's eventual response via the `no matching pending` path at line 401.",
+      "acceptanceCriteria": [
+        "`AcpClient` exposes a per-method timeout override table (long for `session/prompt`, short for `initialize`, etc.)",
+        "When a request times out, the client forwards a `session/cancel` to the adapter before surfacing the timeout error",
+        "A test exercises a slow `session/prompt` that exceeds the default timeout and asserts (a) the timeout error is returned and (b) `session/cancel` was dispatched to the adapter",
+        "A late response arriving after the cancel is dropped cleanly, not logged as an error",
+        "`cargo test -p agent-os-sidecar --test acp_session` passes"
+      ],
+      "priority": 191,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 7. Single global timeout does not fit prompt-vs-init semantics, and cleared pending slots silently drop late responses."
+    },
+    {
+      "id": "US-215",
+      "title": "Surface mount-point mkdir failures in MountTable",
+      "description": "As a maintainer, I want `mount_boxed` in `crates/kernel/src/mount_table.rs:527-531` to stop discarding the return value of `parent_mount.filesystem.mkdir(&relative_path, true)`. If the parent mount is read-only or a file exists at the mount point, the current `let _ = ...` silently fails and the mount is registered anyway, leaving callers to hit confusing `ENOENT`/`ENOTDIR` errors on first access.",
+      "acceptanceCriteria": [
+        "`mount_boxed` surfaces the mkdir error unless the path already exists as a directory",
+        "A test mounts onto a read-only parent and asserts `mount_boxed` returns an explicit error instead of registering silently",
+        "A test mounts onto a parent where a file of the same name exists and asserts a typed error (`MountTargetIsFile`)",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 192,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 7. Silent failure hides setup bugs until first access."
+    },
+    {
+      "id": "US-216",
+      "title": "Pipe reader length must be honored when writer hands payload to waiter",
+      "description": "As a maintainer, I want `crates/kernel/src/pipe_manager.rs:279-284` to honor the reader's requested `length` when a writer wakes a blocked waiter directly. Today `PendingRead` carries no `length` field, so a guest that called `read(fd, 10)` can receive a 65 536-byte write in a single shot — violating POSIX `read(2)`. Agents parsing protocols line-by-line or with fixed header sizes misread.",
+      "acceptanceCriteria": [
+        "`PendingRead` carries the requested length from the original `read(fd, len)` call",
+        "When a writer hands payload to a blocked waiter, only up to `len` bytes are delivered and the remaining bytes stay buffered for the next read",
+        "The non-blocking `drain_buffer` path continues to honor `length` as it already does",
+        "A test writes 1024 bytes to a pipe while a waiter requested 10 bytes, asserts the waiter receives exactly 10 bytes, and the next read receives the remaining 1014 bytes",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 193,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 8. Direct-handoff fast path in pipe_manager.rs ignores reader length."
+    },
+    {
+      "id": "US-217",
+      "title": "Default sidecar permissions must be deny, not allow-all",
+      "description": "As a maintainer, I want `serializePermissionsForSidecar` in `packages/core/src/sidecar/permissions.ts:7-14` to default to deny-all when called with no argument, so that callers who forget to pass a permissions object do not accidentally grant full FS/network/childProcess/env escape.",
+      "acceptanceCriteria": [
+        "`serializePermissionsForSidecar(undefined)` returns deny-all (`{ fs: 'deny', network: 'deny', childProcess: 'deny', env: 'deny' }`)",
+        "An explicit opt-in helper (e.g. `allowAll()`) is the only way to construct allow-all from the TypeScript side",
+        "A test asserts the default is deny when no argument is passed",
+        "A migration check grep'd across `packages/core/` asserts no caller relies on the old implicit allow-all",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 194,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 8. Silent allow-all for missing-argument is a compound footgun with the rule-matcher gaps in US-218 and US-219."
+    },
+    {
+      "id": "US-218",
+      "title": "Reject empty-operation or empty-path permission rules in sidecar",
+      "description": "As a maintainer, I want `crates/sidecar/src/service.rs:506-515` (and the equivalent `pattern_rule_matches` at 517-534) to stop treating an empty `operations` or empty `paths` vector as a wildcard match. A user-authored rule like `{ mode: Allow, operations: [], paths: ['/tmp'] }` today silently allows every operation against `/tmp`. The last-match-wins loop then stomps any safer default.",
+      "acceptanceCriteria": [
+        "`operations_match` and `paths_match` return `false` when the corresponding vector is empty (wildcard must be expressed explicitly as `['*']`)",
+        "Permission-rule parsing rejects rules with empty operations AND empty paths at construction time with a typed error",
+        "Existing rule tests that relied on implicit-wildcard behavior are updated to use explicit `['*']` wildcards",
+        "A test asserts an empty-operations rule no longer matches",
+        "`cargo test -p agent-os-sidecar --test permission_flags` passes"
+      ],
+      "priority": 195,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 8. Related to US-169/170 permission inconsistencies but specific to the implicit-wildcard footgun in rule matching."
+    },
+    {
+      "id": "US-219",
+      "title": "Permission glob matcher must not let * cross path separators",
+      "description": "As a maintainer, I want `glob_matches` in `crates/sidecar/src/service.rs:543-585` to stop treating `*` as matching `/`. Today pattern `/tmp/*` matches `/tmp/a/b/c/secret` because `*` greedily consumes slashes, silently expanding permission scope. Real shell semantics require `**` for recursive matching.",
+      "acceptanceCriteria": [
+        "`*` in a permission glob matches any characters EXCEPT `/`",
+        "`**` matches across any number of path separators",
+        "A test asserts `/tmp/*` allows `/tmp/a` but denies `/tmp/a/b`",
+        "A test asserts `/tmp/**` allows both `/tmp/a` and `/tmp/a/b/c`",
+        "`cargo test -p agent-os-sidecar --test permission_flags` passes"
+      ],
+      "priority": 196,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 8. Silent permission scope expansion via glob semantics mismatch."
+    },
+    {
+      "id": "US-220",
+      "title": "Host-tool schema conversion must fail closed on unsupported Zod constructs",
+      "description": "As a maintainer, I want `zodToJsonSchema` in `packages/core/src/host-tools-zod.ts:139` to throw a clear error when it encounters a Zod construct it cannot convert, instead of silently coercing every unknown type to `{ type: 'string' }`. The converted schema is the entire tool contract the model sees, so silent truncation gives the model a wildly incorrect contract (e.g. a Zod discriminatedUnion becomes a string).",
+      "acceptanceCriteria": [
+        "`zodToJsonSchema` throws a typed error when it encounters an unsupported Zod type (at minimum: discriminatedUnion, intersection, tuple, record, date, bigint, unwrapped nullable, refinements with metadata, `$ref`/`$defs`)",
+        "The error includes the path to the offending field and the Zod type name",
+        "Supported types (union, literal, enum, object, array, string with min/max/regex, number with min/max, boolean, optional, nullable when directly wrapped) continue to round-trip correctly",
+        "A test builds a tool with a discriminatedUnion param and asserts `hostTool()` (or `zodToJsonSchema`) fails loudly rather than silently producing `{ type: 'string' }`",
+        "`pnpm --dir packages/core exec vitest run tests/host-tools.test.ts` passes",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 197,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 8. Silent coercion of unsupported Zod constructs to `string` means the model receives wrong tool contracts. Related to US-185 (hostTool validation) but specific to the schema converter."
+    },
+    {
+      "id": "US-221",
+      "title": "Share v8-runtime session quota across all connections",
+      "description": "As a maintainer, I want `crates/v8-runtime/src/main.rs:311-438` to construct a single `SessionManager` shared across all accepted UDS connections, so that `SECURE_EXEC_V8_MAX_SESSIONS` is actually a runtime-wide cap rather than a per-connection cap that any client can bypass by opening multiple connections.",
+      "acceptanceCriteria": [
+        "`SessionManager` is constructed once in `main()` and shared (via `Arc`) across every accepted connection",
+        "With N clients, the total concurrent session count across all of them never exceeds `SECURE_EXEC_V8_MAX_SESSIONS`",
+        "A test opens 4 connections and attempts to start `max + 1` concurrent sessions across them, asserting the (max+1)-th creation blocks or errors",
+        "`cargo test -p agent-os-v8-runtime -- --test-threads=1` passes"
+      ],
+      "priority": 198,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 8. Per-connection SessionManager is a quota bypass."
+    },
+    {
+      "id": "US-222",
+      "title": "Full numeric-signal-to-name translation in child_process kill polyfill",
+      "description": "As a maintainer, I want `child_process.kill(signal)` in `crates/execution/assets/v8-bridge.source.js:8786` to translate every POSIX signal number to the corresponding name (and the reverse), instead of only SIGKILL/SIGINT/SIGTERM/0 and stringifying the rest. Today `kill(7)` becomes `\"7\"`, `kill(11)` becomes `\"11\"`, and the kernel signal dispatch does not recognize numeric-string signals.",
+      "acceptanceCriteria": [
+        "`child_process.kill` translates numeric signals 1-31 to the POSIX name table (SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS)",
+        "`child.signalCode` after `kill(N)` matches what Node would set (the signal name string, e.g. `'SIGSEGV'`)",
+        "A conformance test compares `child_process.spawn('sleep', ['10']).kill(11)` guest-side vs host Node and asserts `signalCode === 'SIGSEGV'` in both",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 199,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 8. Current impl only handles 4 signals; the rest stringify and break kernel dispatch."
+    },
+    {
+      "id": "US-223",
+      "title": "Preserve spawn error codes in child_process.exec error callback",
+      "description": "As a maintainer, I want `child_process.exec` in `crates/execution/assets/v8-bridge.source.js:8691` to stop overwriting `err.code = 1` in the `on('error')` path and `err.code = <exit_code>` in the `on('close')` path when the spawn itself failed. Callers checking `err.code === 'ENOENT'` silently miss the error class today.",
+      "acceptanceCriteria": [
+        "`exec()`'s `on('error')` handler preserves `err.code` as the original spawn error code (e.g. `'ENOENT'`, `'EACCES'`)",
+        "`on('close')` only sets a numeric `err.code` if the process actually exited with a non-zero code AND no prior spawn error is present",
+        "A conformance test runs `exec('/definitely/not/a/binary', cb)` and asserts `err.code === 'ENOENT'` (matching real Node)",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 200,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 8. `err.code = 1` clobbers `'ENOENT'` and friends."
+    },
+    {
+      "id": "US-224",
+      "title": "S3 mount teardown must surface or retry dirty-flush failure",
+      "description": "As a maintainer, I want `S3BackedFilesystem::drop` in `crates/sidecar/src/plugins/s3.rs:194-200` to stop silently swallowing `flush_pending` failures with a bare `eprintln!`. Dirty guest writes are currently lost when creds expired, the network is down, or the process is shutting down fast — with no structured bridge event and no retry. Teardown should be explicit via a `shutdown` method and must emit a typed error event on failure.",
+      "acceptanceCriteria": [
+        "`S3BackedFilesystem` exposes an explicit `shutdown()` method that returns a `Result`",
+        "The sidecar calls `shutdown()` before dropping the filesystem and propagates any error as a typed bridge event",
+        "`Drop` is a best-effort fallback that logs via the structured logger, not `eprintln!`",
+        "A test drops a filesystem with pending writes in a simulated network failure and asserts a typed error event reaches the host",
+        "`cargo test -p agent-os-sidecar` passes"
+      ],
+      "priority": 201,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 8. Silent data loss on teardown."
+    },
+    {
+      "id": "US-225",
+      "title": "child_process.fork must return an EventEmitter that emits error async",
+      "description": "As a maintainer, I want `child_process.fork` in `crates/execution/assets/v8-bridge.source.js:8971-8973` to return a `ChildProcess` EventEmitter and emit an `error` event on next tick, matching the Node.js contract, instead of throwing synchronously. Real packages do `const c = fork(...); c.on('error', handler)` and the current polyfill crashes them before the handler is attached.",
+      "acceptanceCriteria": [
+        "`child_process.fork` returns a `ChildProcess`-shaped EventEmitter",
+        "If the operation is unsupported, `queueMicrotask(() => child.emit('error', err))` emits the error asynchronously after the caller has a chance to attach a listener",
+        "A conformance test asserts `const c = fork('x'); c.on('error', ok)` observes the error via the listener (not via a synchronous throw)",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 202,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 8. Synchronous throw crashes packages that use the async error-event pattern."
+    },
+    {
+      "id": "US-226",
+      "title": "Add bridge contract version handshake check to protocol Authenticate",
+      "description": "As a maintainer, I want `crates/bridge/bridge-contract.json` `version` to be propagated into the `Authenticate` frame and verified on both sides during session handshake, so that a newer guest/client connecting to an older sidecar (or vice versa) fails fast with an explicit version-mismatch error instead of succeeding silently and crashing on the first divergent call.",
+      "acceptanceCriteria": [
+        "`crates/sidecar/src/protocol.rs` `AuthenticateRequest` carries a `bridge_version` field",
+        "The sidecar rejects a handshake whose version does not match its compiled-in `BridgeContract::version` with a typed `ErrCode::BridgeVersionMismatch` error",
+        "The guest/client sends its compiled-in contract version on every handshake",
+        "A test connects a guest compiled at version N against a sidecar compiled at version N+1 and asserts the handshake fails with the typed error",
+        "`cargo test -p agent-os-bridge -p agent-os-sidecar` passes"
+      ],
+      "priority": 203,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 9. `bridge-contract.json:2` has `version: 1` and `crates/bridge/src/lib.rs:510` parses it, but the only consumer is a unit test asserting `version > 0`. No runtime handshake check."
+    },
+    {
+      "id": "US-227",
+      "title": "v8-bridge require() must throw ERR_REQUIRE_ESM on ESM-only modules",
+      "description": "As a maintainer, I want the CJS `require()` path in `crates/execution/assets/v8-bridge.source.js` (`requireFrom`/`_requireFrom` around lines 22980-23018) to detect ESM-only modules and throw `ERR_REQUIRE_ESM` with the correct error code, matching the CLAUDE.md rule: 'If require() is called on an ESM-only package, throw ERR_REQUIRE_ESM immediately — never recurse infinitely or hang.' Today the loader unconditionally uses the CJS compiler even for `.mjs` files or files under a `type:module` package, producing a vague SyntaxError or silently unwrapping a namespace default.",
+      "acceptanceCriteria": [
+        "`require()` inspects the resolved file's extension AND the nearest `package.json` `type` field",
+        "ESM-only files trigger an `Error` with `error.code === 'ERR_REQUIRE_ESM'` and `error.url` / `error.requestedPath` fields matching real Node",
+        "A conformance test calls `require('./esm-only.mjs')` and asserts the thrown error has the correct code",
+        "A test exercises `require()` on a package with `type: 'module'` and asserts the same",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 204,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 9. Grep for `ERR_REQUIRE_ESM` in the whole v8-bridge bundle returns nothing. Violates the CLAUDE.md rule directly."
+    },
+    {
+      "id": "US-228",
+      "title": "KernelVm must have a Drop impl that runs dispose() to avoid resource leaks",
+      "description": "As a maintainer, I want `crates/kernel/src/kernel.rs` `KernelVm<F>` to have an `impl Drop` that calls `dispose()` (or equivalent teardown) so that dropping a VM without an explicit dispose (panic unwind, test harness shortcut, integration path that lets ownership fall) still terminates processes, cleans per-PID FDs, and clears driver PIDs instead of leaking pipes, PTY ttys, and socket table entries.",
+      "acceptanceCriteria": [
+        "`impl<F> Drop for KernelVm<F>` exists and calls `let _ = self.dispose();` if `terminated` is false",
+        "A test creates a `KernelVm`, opens several processes/pipes/sockets, then drops it without calling `dispose()` and asserts the underlying resources are released (via resource accounting or handle counts)",
+        "A panic inside an integration test leaves no leaked kernel state",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 205,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 9. `dispose()` at kernel.rs:2412 is explicit teardown only. No Drop impl runs it."
+    },
+    {
+      "id": "US-229",
+      "title": "Wire MAX_FDS_PER_PROCESS and kernel resource caps to ResourceLimits with sane defaults",
+      "description": "As a maintainer, I want `MAX_FDS_PER_PROCESS` in `crates/kernel/src/fd_table.rs:7` to derive from the VM's `ResourceLimits` rather than being a hardcoded const. I also want `max_processes`, `max_pipes`, `max_ptys`, `max_sockets`, `max_connections` in `crates/kernel/src/resource_accounting.rs` to have non-`None` defaults, so the CLAUDE.md invariant 'Resource consumption must be bounded' holds without requiring every caller to configure limits explicitly.",
+      "acceptanceCriteria": [
+        "`MAX_FDS_PER_PROCESS` is configurable via `ResourceLimits` with a sane default (e.g. 256)",
+        "`ResourceLimits::Default` sets sensible non-None defaults for `max_processes`, `max_pipes`, `max_ptys`, `max_sockets`, `max_connections`, `max_open_fds`",
+        "A guest that exhausts any of these limits observes the correct POSIX error (`EMFILE`, `ENFILE`, `EAGAIN`)",
+        "A test exhausts each limit and asserts the typed error",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 206,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 9. Today a VM operator setting `max_open_fds=100` still allows each process 256 FDs because the per-process cap is a `const`. Every other resource except filesystem bytes/inodes defaults to `None` (unlimited)."
+    },
+    {
+      "id": "US-230",
+      "title": "Wrap S3 and Google Drive credentials in a redacting Secret newtype",
+      "description": "As a maintainer, I want `S3MountCredentials` in `crates/sidecar/src/plugins/s3.rs:30` and the `GoogleDrive` credentials struct in `crates/sidecar/src/plugins/google_drive.rs:31-36` to wrap their secret fields (`secret_access_key`, `private_key`) in a newtype with a manual `Debug` impl that prints `[REDACTED]`, so that any `{:?}` format of the enclosing config (log line, panic message, error chain) does not leak the AWS secret or RSA private key.",
+      "acceptanceCriteria": [
+        "`S3MountCredentials::secret_access_key` is `Secret<String>` (or equivalent newtype) with `Debug` printing `[REDACTED]`",
+        "`GoogleDrive` credentials struct `private_key` is similarly wrapped",
+        "A test asserts `format!(\"{:?}\", creds)` does not contain the real secret string",
+        "Existing call sites that access the value are updated to use an explicit `.expose_secret()` or equivalent method",
+        "`cargo test -p agent-os-sidecar` passes"
+      ],
+      "priority": 207,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 9. `#[derive(Debug)]` on credentials is a textbook secret-leak pattern."
+    },
+    {
+      "id": "US-231",
+      "title": "Consolidate workspace dependencies and upgrade EOL jsonwebtoken",
+      "description": "As a maintainer, I want the Cargo workspace at `/home/nathan/a5/Cargo.toml` to define shared dependencies in `[workspace.dependencies]` and have every crate reference them by inheriting, so that `serde`, `serde_json`, `tokio`, `base64`, `getrandom`, `nix`, `hickory-resolver` are all on the same version with the same features. I also want `jsonwebtoken` (currently pinned to 8.3.0 in sidecar) upgraded to 9.x, and `hickory-resolver` moved off the 0.26.0-beta.3 DNS library to a stable release.",
+      "acceptanceCriteria": [
+        "Root `Cargo.toml` has a `[workspace.dependencies]` table covering at minimum `serde`, `serde_json`, `tokio`, `base64`, `getrandom`, `nix`, `hickory-resolver`, `jsonwebtoken`",
+        "Every crate under `crates/` that previously declared these deps now uses `dep.workspace = true`",
+        "`jsonwebtoken` is on 9.x or later",
+        "`hickory-resolver` is on a stable (non-beta) release",
+        "`cargo check --workspace` passes",
+        "`cargo tree -d` shows no duplicate versions of these crates in the workspace"
+      ],
+      "priority": 208,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 9. Each crate currently pins independently, leading to version drift and dupes."
+    },
+    {
+      "id": "US-232",
+      "title": "cleanup_process_resources must snapshot and close FDs under one critical section",
+      "description": "As a maintainer, I want `cleanup_process_resources` in `crates/kernel/src/kernel.rs:294-317` to stop dropping and re-acquiring the `fd_tables` lock between the snapshot pass and the close pass. Another thread can `dup2` into one of those FDs or mutate the process between the two critical sections, so any FD opened between the acquisitions is leaked. Collapse into a single critical section that both snapshots and removes atomically.",
+      "acceptanceCriteria": [
+        "`cleanup_process_resources` holds the `fd_tables` lock for the entire snapshot + close operation",
+        "A race test spawns concurrent `dup2` operations during cleanup and asserts no FD is leaked",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 209,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 9. Classic snapshot-drop-reacquire race."
+    },
+    {
+      "id": "US-233",
+      "title": "Rename packages/core/src/test/ to test-support/ and clarify CLAUDE.md naming",
+      "description": "As a maintainer, I want `packages/core/src/test/` (which contains helper modules like `docker.ts`, `file-system.ts`, `runtime.ts`, `terminal-harness.ts` — NOT test files) renamed to `packages/core/src/test-support/` (or `src/testing/`) so consumers do not tree-shake them thinking they are dead test code, and so the directory name matches its actual contents. `packages/core/CLAUDE.md` also refers to a `src/test-runtime/` path that does not exist — update the comment to cite the real path.",
+      "acceptanceCriteria": [
+        "`packages/core/src/test/` is renamed to `packages/core/src/test-support/` (or `src/testing/`)",
+        "All imports of `@rivet-dev/agent-os-core/test/*` are updated to the new subpath name",
+        "`packages/core/CLAUDE.md` reference to `src/test-runtime/` is corrected to point at the real path",
+        "Root `pnpm check-types` passes",
+        "`pnpm --dir packages/core exec vitest run` still finds and runs all tests"
+      ],
+      "priority": 210,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 9. Naming mismatch + stale CLAUDE.md comment."
+    },
+    {
+      "id": "US-BB-001",
+      "title": "Get the Browserbase CLI working end-to-end inside an Agent OS VM",
+      "description": "As a maintainer, I want the Browserbase CLI (https://docs.browserbase.com/integrations/skills/browserbase-cli) installed, configured, and working end-to-end inside an Agent OS VM, so an agent session running in the kernel sidecar can open a real Browserbase session, navigate a URL, take a screenshot, and return the result — proving the whole VM → CLI → Browserbase API → remote browser → kernel filesystem round-trip works without host escapes.\n\nThe Browserbase API key and project ID live in `~/misc/env.txt` as `BROWSER_BASE_API_KEY` and `BROWSER_BASE_PROJECT_ID`. Do NOT commit these values; load them at test time from `process.env` (sourced from `~/misc/env.txt`) and pass them through the existing VM env-injection path. Note: Browserbase's own documentation uses the names `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID` (no underscore between 'Browser' and 'Base'); the env.txt file uses underscored names, so wire an alias or rename at the injection boundary.",
+      "acceptanceCriteria": [
+        "The Browserbase CLI is installed into the VM (either bundled as a registry software package under `registry/software/browserbase-cli/` or installed via `npm install -g @browserbasehq/cli` inside the guest)",
+        "Credentials from `~/misc/env.txt` (`BROWSER_BASE_API_KEY`, `BROWSER_BASE_PROJECT_ID`) are loaded at test time and injected into the VM guest env as `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID` (aliased to match the CLI's expected names)",
+        "An end-to-end test under `examples/quickstart/src/browserbase-e2e.ts` (or `packages/core/tests/browserbase-e2e.test.ts`) spins up a VM, runs the Browserbase CLI to create a session, navigates to a deterministic URL (e.g. https://example.com), captures a screenshot, and verifies the screenshot PNG is >= 1KB and stored inside the VM's kernel filesystem — not on the host",
+        "The test uses `vm.exec()` / child_process.spawn() through the V8 isolate — no host-side `Command::new` or direct API calls outside the VM",
+        "The test is gated on `BROWSER_BASE_API_KEY` and `BROWSER_BASE_PROJECT_ID` being present in the environment, and is SKIPPED with a clear log line (not silently dropped) when they are absent",
+        "The test runs in under 60 seconds under normal network conditions",
+        "Permissions are scoped: the VM is granted network egress to `*.browserbase.com` and nothing else; the test asserts egress to an unrelated domain is still denied",
+        "No Browserbase credentials end up committed to the repo — the test reads them at runtime from `process.env`, and the test setup documents how to source `~/misc/env.txt`",
+        "A one-paragraph entry is added to `docs-internal/` (or `examples/quickstart/README` if one exists) explaining how to run the Browserbase e2e test and where the credentials must come from",
+        "Root `pnpm check-types` passes",
+        "`pnpm exec vitest run tests/browserbase-e2e` (or the chosen test command) passes with real credentials set"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "Added 2026-04-10 per user /loop request. TOP PRIORITY — jumps ahead of the migration backlog (US-069..US-233). Priority=1 so Ralph picks this up first on the next iteration. Credentials live in `~/misc/env.txt` as `BROWSER_BASE_API_KEY` and `BROWSER_BASE_PROJECT_ID`; they must be aliased to the names `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID` that the CLI actually reads. Source: https://docs.browserbase.com/integrations/skills/browserbase-cli"
+    },
+    {
+      "id": "US-234",
+      "title": "Return EXDEV for cross-mount rename in guest filesystem RPC",
+      "description": "As a maintainer, I want `rename_mapped_host_path` in `crates/sidecar/src/filesystem.rs:1122-1145` to return a `EXDEV` errno (not a generic `InvalidState` protocol error) when one side of the rename is host-mapped and the other is kernel-backed. POSIX `rename(2)` returning `EXDEV` is the agreed signal that tells `mv`, `rsync --inplace`, and `git mv` to fall back to copy+unlink. The current generic protocol error breaks all three.",
+      "acceptanceCriteria": [
+        "Cross-mount rename in `rename_mapped_host_path` returns a typed error that serializes as errno `EXDEV` on the guest",
+        "A test exercises `fs.renameSync('/mapped/file', '/kernel/file')` in the guest and asserts the thrown error has `code: 'EXDEV'`",
+        "A test exercises `mv /mapped/file /kernel/file` in a guest shell and asserts the shell falls back to copy+unlink successfully",
+        "`cargo test -p agent-os-sidecar --test filesystem` passes"
+      ],
+      "priority": 211,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 10. Generic `InvalidState` breaks coreutils `mv`, `rsync`, `git mv`."
+    },
+    {
+      "id": "US-235",
+      "title": "Mirror guest filesystem symlinks and hard links into the VM shadow root",
+      "description": "As a maintainer, I want `GuestFilesystemOperation::Symlink` and `Link` in `crates/sidecar/src/filesystem.rs:227-276` to mirror their results into the VM shadow root (the same way `WriteFile` and `Mkdir` already do), so a guest `ls`/`cat` via WASM coreutils reading the shadow root sees host-created symlinks and hard links. Today `vm.symlink`/`vm.link` create kernel state only, so `vm.stat` sees them but WASM tool invocations miss them entirely.",
+      "acceptanceCriteria": [
+        "`Symlink` and `Link` handlers in `crates/sidecar/src/filesystem.rs` call the shadow-mirror helper after the kernel operation succeeds",
+        "A test creates a symlink via `vm.symlink()`, then runs `vm.exec('ls -l /path')` and asserts the symlink is visible in the WASM shell output",
+        "A similar test covers hard links via `vm.link()`",
+        "`cargo test -p agent-os-sidecar --test filesystem` passes"
+      ],
+      "priority": 212,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 10. Violates the 'host FS API writes must mirror into the shadow root immediately' rule in `CLAUDE.md`."
+    },
+    {
+      "id": "US-236",
+      "title": "Extend utimes RPC to cover lutimes/futimes and nanosecond timespecs",
+      "description": "As a maintainer, I want the `utimes` RPC handlers in `crates/sidecar/src/filesystem.rs:314-330, 896-906` to accept nanosecond precision, allow pre-1970 epochs, and expose `lutimes` (no-follow), `futimes` (fd-based), and `utimensat` special values (`UTIME_NOW`, `UTIME_OMIT`). Current `atime_ms`/`mtime_ms` as `u64` drops sub-ms precision, rejects negative epochs, and discards nanoseconds — tar/rsync preserving sub-second mtimes silently corrupt timestamps.",
+      "acceptanceCriteria": [
+        "`utimes`/`utimesSync` accepts `{ atime: { sec, nsec }, mtime: { sec, nsec } }` timespecs with signed seconds",
+        "`fs.lutimes` handler is added and does NOT follow symlinks",
+        "`fs.futimes` fd-based handler is added",
+        "`UTIME_NOW` and `UTIME_OMIT` special values are honored through an `utimensat`-style API",
+        "A conformance test round-trips sub-millisecond mtimes through a tar extraction and asserts the extracted timestamps match the source exactly",
+        "`cargo test -p agent-os-sidecar --test filesystem` passes"
+      ],
+      "priority": 213,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 10. Current `u64` ms-only representation loses precision."
+    },
+    {
+      "id": "US-237",
+      "title": "Implement UDP socket options (REUSEADDR/REUSEPORT/BROADCAST/multicast) in kernel socket table",
+      "description": "As a maintainer, I want `crates/kernel/src/socket_table.rs` UDP socket handling to support `SO_REUSEADDR`, `SO_REUSEPORT`, `SO_BROADCAST`, and `IP_ADD_MEMBERSHIP`/`IP_DROP_MEMBERSHIP` multicast join/leave. Today the file has zero occurrences of REUSE/broadcast/multicast/setsockopt; any guest using `dgram.setBroadcast(true)`, `socket.addMembership()`, or `SO_REUSEPORT` for multi-accept is silently broken. mDNS, DHCP, SSDP, and UDP load balancing cannot work.",
+      "acceptanceCriteria": [
+        "`socket_table.rs` exposes `setsockopt` handlers for `SO_REUSEADDR`, `SO_REUSEPORT`, `SO_BROADCAST`",
+        "`IP_ADD_MEMBERSHIP`/`IP_DROP_MEMBERSHIP` add/remove guest sockets from a kernel-tracked multicast group",
+        "`bind_inet` honors REUSEADDR/REUSEPORT when deciding whether a collision is fatal",
+        "A test exercises two sockets with `SO_REUSEPORT` on the same port and asserts both bind succeed",
+        "A test exercises `dgram.setBroadcast(true)` and verifies broadcast flag is set in kernel state",
+        "A test exercises `addMembership`/`dropMembership` for a multicast address",
+        "`cargo test -p agent-os-kernel` passes"
+      ],
+      "priority": 214,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 10. Grep for REUSE/broadcast/multicast/setsockopt in socket_table.rs returns zero."
+    },
+    {
+      "id": "US-238",
+      "title": "Make fallback URLSearchParams WHATWG-compliant (form encoding, sort order, set semantics)",
+      "description": "As a maintainer, I want the fallback `URLSearchParams` polyfill in `crates/execution/assets/v8-bridge.source.js:18417-18496` to comply with the WHATWG URL spec: (1) the urlencoded parser must convert `+` to space before percent-decoding and must never throw on invalid `%` sequences, (2) `sort()` must use Unicode code-unit stable ordering not `localeCompare`, (3) `set()` must replace the first match in place and remove subsequent matches, and (4) expose the `size` getter.",
+      "acceptanceCriteria": [
+        "`URLSearchParams` decodes `+` as space before percent-decoding",
+        "Invalid `%` sequences do not throw — they are preserved as literal characters per the spec",
+        "`sort()` uses Unicode code-unit stable order",
+        "`set()` replaces the first occurrence and removes all subsequent occurrences",
+        "`URLSearchParams.size` getter is exposed and returns the current pair count",
+        "A conformance test compares against real Node for `?a=foo+bar`, invalid `%` decoding, `sort()` output, and `set()` positional semantics",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 215,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 10. Multiple WHATWG violations in the fallback polyfill."
+    },
+    {
+      "id": "US-239",
+      "title": "Wire guest timer ref/unref/hasRef/refresh semantics through the kernel timer state",
+      "description": "As a maintainer, I want `TimerHandle.ref()`, `unref()`, `hasRef()`, and `refresh()` in `crates/execution/assets/v8-bridge.source.js:21451-21473` to implement real ref-counted keepalive semantics against the kernel event loop, instead of being no-ops. Current behavior: `unref()` does nothing so isolates never exit when keepalive timers are registered; `hasRef()` always returns `true`; `refresh()` is a no-op so `net.Socket` idle-timeout enforcement is broken. This hangs guest processes that rely on unref'd timers (undici, DNS, HTTP agents, OpenCode Effect runtime).",
+      "acceptanceCriteria": [
+        "`TimerHandle.ref()` registers the timer as a keepalive against the guest isolate event loop",
+        "`TimerHandle.unref()` removes the keepalive so the isolate can exit if no other refs remain",
+        "`TimerHandle.hasRef()` returns the actual current ref state",
+        "`TimerHandle.refresh()` resets the timer's due time to `now + delay` for subsequent firing (matching Node's `net.Socket` idle-timeout pattern)",
+        "`setTimeout(0)` and `setInterval(0)` both normalize to 1ms minimum matching Node",
+        "A test creates an unref'd `setTimeout(..., 10000)` and asserts the guest isolate exits without waiting for it",
+        "A test calls `refresh()` on a timer and asserts it fires at `refresh_time + delay` instead of the original schedule",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 216,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 10. Four timer lifecycle methods are all no-ops. Real correctness bugs for any npm package relying on unref/refresh semantics."
+    },
+    {
+      "id": "US-240",
+      "title": "Cover sidecar/kernel/bridge in CI, fix build ordering, frozen lockfile on release, gate network tests",
+      "description": "As a maintainer, I want the CI workflows at `.github/workflows/ci.yml` and `release.yml` updated to: (1) run `cargo test -p agent-os-sidecar`, `-p agent-os-kernel`, `-p agent-os-bridge` in addition to the current execution/v8-runtime coverage, (2) install and build the pnpm workspace BEFORE running any cargo tests that load `v8-bridge.js` or other generated artifacts, (3) add `cargo fmt --check`, `cargo clippy`, `pnpm lint` steps, (4) gate `AGENTOS_E2E_NETWORK=1` on a workflow condition that excludes fork PRs, and (5) use `pnpm install --frozen-lockfile` in `release.yml`.",
+      "acceptanceCriteria": [
+        "`ci.yml` runs `cargo test -p agent-os-sidecar -p agent-os-kernel -p agent-os-bridge` (or equivalent scope) on every PR",
+        "`ci.yml` step order is: `pnpm install --frozen-lockfile` → `pnpm build` → `cargo test ...`",
+        "`cargo fmt --check`, `cargo clippy -- -D warnings`, and `pnpm lint` are CI steps that fail the build on regression",
+        "`AGENTOS_E2E_NETWORK=1` is only set when `github.event.pull_request.head.repo.full_name == github.repository` (not fork PRs)",
+        "`release.yml:46` uses `pnpm install --frozen-lockfile`",
+        "Local verification: the full CI matrix can be reproduced via a single `bash scripts/ci.sh` script",
+        "CI green on a test PR that exercises the new matrix"
+      ],
+      "priority": 217,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 10. Sidecar/kernel/bridge get zero CI coverage currently; the three crates with the most business logic are unprotected against PR regressions."
+    },
+    {
+      "id": "US-241",
+      "title": "Graceful ACP session termination — send cancel notification + SIGTERM grace window before SIGKILL",
+      "description": "As a maintainer, I want `terminate_acp_process` in `crates/sidecar/src/service.rs:2647-2683` to send a `session/cancel` ACP notification to the agent, then SIGTERM, then wait up to N seconds, then SIGKILL — matching Linux convention. Current flow is `mark_termination_requested()` → immediate SIGKILL → 5s wait loop, giving the agent zero opportunity to flush pending tool calls, persist session state, or return in-flight responses. Also, `session.closed` is only set on the `Exited` event (line 3197), so if a caller observes the session between cancel and exit it sees `closed: false` on a doomed process.",
+      "acceptanceCriteria": [
+        "`terminate_acp_process` emits a `session/cancel` ACP notification before sending any OS signal",
+        "After cancel, the process receives SIGTERM and is given a grace window (configurable, default 3-5s)",
+        "If the process has not exited after the grace window, SIGKILL is sent",
+        "`session.closed` is set to `true` as soon as termination is initiated (not only on `Exited`)",
+        "A test exercises the graceful-termination path and asserts the agent receives a cancel notification, has time to emit a final response, and then exits cleanly",
+        "A test exercises the timeout path (agent ignores cancel + SIGTERM) and asserts SIGKILL fires after the grace window",
+        "`cargo test -p agent-os-sidecar --test service` passes"
+      ],
+      "priority": 218,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 10. Distinct from US-214 (client-side per-method timeouts) — this is server-side process termination. Agents currently lose state on every dispose."
+    },
+    {
+      "id": "US-242",
+      "title": "Handle non-string ACP config values and malformed option entries with structured errors",
+      "description": "As a maintainer, I want `apply_request_success` and `apply_local_config_update` in `crates/sidecar/src/acp/session.rs:253-272, 353-374` to handle `set_config_option` payloads whose `params.value` is not a string (booleans, numbers, objects — all valid ACP config values) with a typed error or a correct branch instead of silently dropping the entire update. The current `if let (Some(config_id), Some(value))` guard requires a string and drops non-string updates without logging or synthesizing a `session/update` notification.",
+      "acceptanceCriteria": [
+        "`apply_request_success` and `apply_local_config_update` accept non-string ACP config values (bool, number, object) as first-class",
+        "Malformed option entries (e.g. non-object entries) return a typed error instead of silently preserving stale state",
+        "A test exercises `session/set_config_option` with a boolean value and asserts the session state reflects the new bool",
+        "A test exercises a malformed payload and asserts a typed error propagates to the caller with a clear message",
+        "`cargo test -p agent-os-sidecar --test acp_session` passes"
+      ],
+      "priority": 219,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 10. ACP config options can legitimately be non-string; silently dropping them loses agent state changes."
+    },
+    {
+      "id": "US-243",
+      "title": "Route guest http/https.request through undici + kernel socket table, not _networkHttpRequestRaw",
+      "description": "As a maintainer, I want `http.request()` / `https.request()` in `crates/execution/assets/v8-bridge.source.js:9785-9798` to stop funneling through the `_networkHttpRequestRaw` host bridge call. That call performs the entire HTTP round-trip on the host, bypassing the kernel socket table, loopback exempt ports, TLS permission options, and the DNS resolver. This is the same anti-pattern CLAUDE.md calls out for `_networkFetchRaw`. Route through undici + `net.connect` → kernel socket table, matching the fetch() rule.",
+      "acceptanceCriteria": [
+        "`ClientRequest._dispatchWithSocket` in `v8-bridge.source.js` no longer calls `_networkHttpRequestRaw` — the request path goes through undici or the guest `net.connect` polyfill",
+        "Bytes flow guest → undici → net.connect → kernel socket table → host network adapter (same path as `fetch()` per CLAUDE.md)",
+        "The `http.Agent` pool (keep-alive, maxSockets, freeSockets) becomes real — sockets are actual `net.Socket` instances, not inert `FakeSocket` stubs",
+        "Permission flags that gate network egress are honored for `http`/`https` the same way they are for `fetch`",
+        "A conformance test exercises `http.request` with a custom `Agent({ keepAlive: true })` and verifies a second request reuses the connection",
+        "A test asserts a denied egress throws the correct permission error instead of succeeding through the host bypass",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 220,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 11. Same class of rule violation as `_networkFetchRaw` — a bypass that skips the kernel permission + loopback routing. Related to (but distinct from) US-159 (FakeSocket silent writes) and the http.Agent pooling fakeness that follows from this finding."
+    },
+    {
+      "id": "US-244",
+      "title": "Default http.globalAgent to keepAlive: true to match Node 19+ behavior",
+      "description": "As a maintainer, I want `http.globalAgent` in `crates/execution/assets/v8-bridge.source.js:12783` to default to `keepAlive: true` with `keepAliveMsecs: 1000`, matching real Node 19+ behavior. Once US-243 routes HTTP through the kernel socket table, the current `keepAlive: false` default will silently double connection counts for libraries relying on the global agent.",
+      "acceptanceCriteria": [
+        "`createHttpModule` constructs `moduleAgent = new Agent({ keepAlive: true, keepAliveMsecs: 1000 })`",
+        "A test asserts `http.globalAgent.keepAlive === true` matching real Node 19+",
+        "A conformance test makes two back-to-back `http.get` calls to the same origin and asserts the connection is reused",
+        "`cargo test -p agent-os-sidecar --test builtin_conformance` passes"
+      ],
+      "priority": 221,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 11. Follow-up to US-243 — without keepAlive true, the real pooling fix still silently regresses perf for libs that rely on the global agent."
+    },
+    {
+      "id": "US-245",
+      "title": "Cap ACP read_loop line length to prevent sidecar OOM on misbehaving agent",
+      "description": "As a maintainer, I want `read_loop` in `crates/sidecar/src/acp/client.rs:384-395` to bound the maximum line length `BufReader::lines().next_line()` will buffer from an ACP adapter's stdout. Today there is no cap, so a rogue or malformed ACP adapter that emits a multi-megabyte or unbounded JSON blob without a terminating newline balloons the sidecar heap until it OOMs.",
+      "acceptanceCriteria": [
+        "`read_loop` uses a bounded-size line buffer with a configurable max (e.g. 16 MiB by default)",
+        "Exceeding the cap records a `transport_error` activity entry and transitions the client into a failed state (no more reads from that adapter)",
+        "A test pipes a 20 MiB line of garbage at the reader and asserts the client fails with a typed error instead of OOMing",
+        "`cargo test -p agent-os-sidecar --test acp_session` passes"
+      ],
+      "priority": 222,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 11. Unbounded line buffer is a DoS surface from any misbehaving adapter."
+    },
+    {
+      "id": "US-246",
+      "title": "Document or stub git WASM command limits (no auth, push, SSH, GPG, submodules)",
+      "description": "As a maintainer, I want the `git` WASM command in `registry/native/crates/libs/git/src/lib.rs` to either (a) loudly fail with `git subcommand not supported in VM` for `push`, `ssh://` URLs, `git@` URLs, credential helpers, `.netrc`, GPG signing, and `.gitmodules`, OR (b) implement a minimal bearer-token credential path plus the missing commands. Today `fetch_remote_advertisement` at lines 233-287 issues a bare HTTP GET with no `Authorization` header, so private repo clones return HTTP 401 with a cryptic error. The module docstring only claims `init/add/commit/branch/checkout/clone` but the dispatcher silently accepts push/submodule/credential calls and fails weirdly.",
+      "acceptanceCriteria": [
+        "Unsupported git subcommands return a typed `GitSubcommandUnsupported` error with the subcommand name and a pointer to documented support",
+        "OR: `fetch_remote_advertisement` accepts a bearer token (from env, credential helper, or .netrc) and HTTPS auth works end-to-end",
+        "A test exercises `git clone https://private@host/repo` with an auth env var and asserts either the bearer path works or the typed error fires",
+        "A test exercises `git push` and `git@` URLs and asserts the typed error fires loudly instead of a weird HTTP 401",
+        "`registry/native/crates/libs/git/README.md` (or equivalent) documents which subcommands are supported and which are not"
+      ],
+      "priority": 223,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 11. Nearly every real-world git workflow silently fails today; the error messages lead users down the wrong rabbit holes."
+    },
+    {
+      "id": "US-247",
+      "title": "getpwuid/getgrgid must return ENOENT for unknown UIDs, not synthesize entries",
+      "description": "As a maintainer, I want `UserManager::getpwuid(uid)` and `getgrgid(gid)` in `crates/kernel/src/user.rs:95-114` to return `NULL`/`ENOENT` for UIDs/GIDs that are not the current process identity, matching real POSIX behavior, instead of synthesizing `user{uid}:x:{uid}:{uid}::/home/user{uid}:/bin/sh` entries. The synthesis breaks any agent that walks `/etc/passwd` looking for 'does user X exist' checks. Also, the group-line formatter omits supplementary members.",
+      "acceptanceCriteria": [
+        "`getpwuid(uid)` returns `None`/`ENOENT` for any UID that is not the current guest identity (unless the VM is explicitly configured with additional passwd entries)",
+        "`getgrgid(gid)` follows the same rule",
+        "Group formatting preserves supplementary member lists rather than always emitting empty-member-list lines",
+        "A test walks `/etc/passwd` from the guest and asserts only the current user's entry is present",
+        "A test exercises `getpwuid(9999)` and asserts the call returns ENOENT",
+        "`cargo test -p agent-os-kernel --test identity` passes"
+      ],
+      "priority": 224,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 11. Synthesizing unknown-UID entries is a POSIX semantics fingerprint bug and breaks user-exists probes."
+    },
+    {
+      "id": "US-248",
+      "title": "onSessionEvent must replay buffered events to late subscribers",
+      "description": "As a maintainer, I want `onSessionEvent` in `packages/core/src/agent-os.ts:3294-3300` to replay any already-buffered session events (in sequence order) to a handler that subscribes after session creation, so callers who create a session in one method and subscribe in another do not miss events enqueued between the two calls. Also, `_handleSidecarEvent` at line 2606 records events in arrival order, not `sequenceNumber` order — fix both in the same pass.",
+      "acceptanceCriteria": [
+        "`onSessionEvent` iterates `session.events` (in sequence-number order) and invokes the new handler for every buffered event before returning",
+        "Subsequent live events continue to dispatch to the handler as they arrive",
+        "`_handleSidecarEvent` orders events by `sequenceNumber` on delivery (not by arrival order), so sidecar reconnect with re-ordered frames lands correctly",
+        "A test creates a session, waits for events to enqueue, subscribes, and asserts the new handler sees the replayed events followed by new ones in order",
+        "A test exercises out-of-order sequence delivery and asserts the consumer sees them in sequence order",
+        "`pnpm --dir packages/core exec vitest run tests/session-event-ordering.test.ts` (or equivalent) passes",
+        "Root `pnpm check-types` passes"
+      ],
+      "priority": 225,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 11. Late-subscriber pattern is common (create in one method, consume in another) — current behavior silently loses events."
+    },
+    {
+      "id": "US-249",
+      "title": "Deregister v8-host session on early return in start_execution",
+      "description": "As a maintainer, I want `start_execution` in `crates/execution/src/javascript.rs:1172-1182` to wrap the `v8_host.register_session(&session_id)` call in a guard that deregisters on any early return. Today a `send_frame(CreateSession)` failure leaks the previously-inserted frame receiver in the host session table, so repeated spawn failures leak session slots on the shared host.",
+      "acceptanceCriteria": [
+        "`register_session` is paired with a scope guard that calls `v8_host.deregister_session(&session_id)` on early return",
+        "A `JavascriptExecution` drop path still runs the normal cleanup without double-deregistering",
+        "A test simulates a `send_frame` failure during start_execution and asserts the session table is empty afterwards",
+        "`cargo test -p agent-os-execution` passes"
+      ],
+      "priority": 226,
+      "passes": false,
+      "notes": "Found during 2026-04-10 code review pass 11. Session-slot leak on spawn failure accumulates over time."
     }
   ]
 }

@@ -2,9 +2,7 @@ use crate::common::stable_hash64;
 use crate::node_import_cache::{
     NodeImportCache, NodeImportCacheCleanup, NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
 };
-use crate::node_process::{
-    LinePrefixFilter, NodeControlMessage, NodeSignalHandlerRegistration,
-};
+use crate::node_process::{LinePrefixFilter, NodeControlMessage, NodeSignalHandlerRegistration};
 use crate::runtime_support::{
     NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
     NODE_SANDBOX_ROOT_ENV,
@@ -16,7 +14,7 @@ use getrandom::getrandom;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -24,7 +22,7 @@ use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::{
     mpsc::{self, Receiver, SyncSender, TrySendError},
-    Arc, Mutex, OnceLock,
+    Arc, Condvar, Mutex, OnceLock,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -59,6 +57,7 @@ const NODE_SYNC_RPC_REQUEST_FD_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_REQUEST_FD";
 const NODE_SYNC_RPC_RESPONSE_FD_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_RESPONSE_FD";
 const NODE_SYNC_RPC_DATA_BYTES_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_DATA_BYTES";
 const NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_WAIT_TIMEOUT_MS";
+const V8_HEAP_LIMIT_MB_ENV: &str = "AGENT_OS_V8_HEAP_LIMIT_MB";
 const NODE_SYNC_RPC_DEFAULT_DATA_BYTES: usize = 4 * 1024 * 1024;
 const NODE_SYNC_RPC_DEFAULT_WAIT_TIMEOUT_MS: u64 = 30_000;
 const NODE_SYNC_RPC_RESPONSE_QUEUE_CAPACITY: usize = 1;
@@ -283,7 +282,20 @@ struct LocalBridgeState {
     handle_descriptions: HashMap<String, String>,
     next_timer_id: u64,
     timers: Arc<Mutex<HashMap<u64, LocalTimerEntry>>>,
+    kernel_stdin: Arc<LocalKernelStdinBridge>,
     v8_session: Option<V8SessionHandle>,
+}
+
+#[derive(Debug, Default)]
+struct LocalKernelStdinBridge {
+    state: Mutex<LocalKernelStdinState>,
+    ready: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct LocalKernelStdinState {
+    bytes: VecDeque<u8>,
+    closed: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -868,6 +880,7 @@ pub struct JavascriptExecution {
     child_pid: u32,
     events: RefCell<UnboundedReceiver<JavascriptExecutionEvent>>,
     pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
+    kernel_stdin: Arc<LocalKernelStdinBridge>,
     _import_cache_guard: Arc<NodeImportCacheCleanup>,
     v8_session: V8SessionHandle,
 }
@@ -881,21 +894,26 @@ impl JavascriptExecution {
         self.child_pid
     }
 
+    pub(crate) fn v8_session_handle(&self) -> V8SessionHandle {
+        self.v8_session.clone()
+    }
+
     pub fn uses_shared_v8_runtime(&self) -> bool {
         true
     }
 
     pub fn write_stdin(&mut self, chunk: &[u8]) -> Result<(), JavascriptExecutionError> {
+        self.kernel_stdin.write(chunk);
         let payload =
             v8_runtime::json_to_cbor_payload(&Value::String(String::from_utf8_lossy(chunk).into()))
-            .map_err(JavascriptExecutionError::Stdin)
-            ?;
+                .map_err(JavascriptExecutionError::Stdin)?;
         self.v8_session
             .send_stream_event("stdin", payload)
             .map_err(JavascriptExecutionError::Stdin)
     }
 
     pub fn close_stdin(&mut self) -> Result<(), JavascriptExecutionError> {
+        self.kernel_stdin.close();
         let _ = self.v8_session.send_stream_event("stdin_end", vec![]);
         Ok(())
     }
@@ -1158,7 +1176,7 @@ impl JavascriptExecutionEngine {
         v8_host
             .send_frame(&BinaryFrame::CreateSession {
                 session_id: session_id.clone(),
-                heap_limit_mb: 0, // no limit for now
+                heap_limit_mb: javascript_heap_limit_mb(&request),
                 cpu_time_limit_ms: 0,
             })
             .map_err(JavascriptExecutionError::Spawn)?;
@@ -1222,6 +1240,7 @@ impl JavascriptExecutionEngine {
 
         // Spawn V8 event bridge thread that converts BinaryFrame → JavascriptExecutionEvent
         let pending_sync_rpc = Arc::new(Mutex::new(None));
+        let kernel_stdin = Arc::new(LocalKernelStdinBridge::default());
         let events = spawn_v8_event_bridge(
             frame_receiver,
             pending_sync_rpc.clone(),
@@ -1229,6 +1248,7 @@ impl JavascriptExecutionEngine {
             v8_session.clone(),
             LocalBridgeState {
                 translator,
+                kernel_stdin: kernel_stdin.clone(),
                 v8_session: Some(v8_session.clone()),
                 ..Default::default()
             },
@@ -1239,6 +1259,7 @@ impl JavascriptExecutionEngine {
             child_pid: v8_host.child_pid(),
             events: RefCell::new(events),
             pending_sync_rpc,
+            kernel_stdin,
             _import_cache_guard: import_cache_guard,
             v8_session,
         })
@@ -1315,6 +1336,15 @@ fn javascript_sync_rpc_timeout(request: &StartJavascriptExecutionRequest) -> Dur
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(NODE_SYNC_RPC_DEFAULT_WAIT_TIMEOUT_MS);
     Duration::from_millis(timeout_ms)
+}
+
+fn javascript_heap_limit_mb(request: &StartJavascriptExecutionRequest) -> u32 {
+    request
+        .env
+        .get(V8_HEAP_LIMIT_MB_ENV)
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(0)
 }
 
 fn spawn_javascript_sync_rpc_timeout(
@@ -1534,6 +1564,56 @@ fn prepend_v8_runtime_shim(
       ...(process.env || {{}}),
       ...visibleEnv,
     }};
+    const configuredHeapLimitMb = Number.parseInt(
+      nextEnv.AGENT_OS_V8_HEAP_LIMIT_MB ?? "",
+      10,
+    );
+    if (Number.isFinite(configuredHeapLimitMb) && configuredHeapLimitMb > 0) {{
+      Object.defineProperty(globalThis, "__agentOsV8HeapLimitBytes", {{
+        configurable: true,
+        enumerable: false,
+        value: configuredHeapLimitMb * 1024 * 1024,
+        writable: true,
+      }});
+    }}
+    if (nextEnv.AGENT_OS_ALLOW_PROCESS_BINDINGS === "1" && typeof process.binding === "function") {{
+      const originalProcessBinding = process.binding.bind(process);
+      process.binding = (name) => {{
+        const bindingName = String(name);
+        if (
+          bindingName === "constants" &&
+          typeof __agentOsConstantsBinding !== "undefined"
+        ) {{
+          const constantsBinding =
+            __agentOsConstantsBinding.default ?? __agentOsConstantsBinding;
+          return {{
+            fs: constantsBinding,
+            crypto: constantsBinding,
+            zlib: constantsBinding,
+            trace: constantsBinding,
+            internal: constantsBinding,
+            os: {{
+              UV_UDP_REUSEADDR: constantsBinding.UV_UDP_REUSEADDR,
+              dlopen: constantsBinding.dlopen,
+              errno: constantsBinding.errno,
+              signals: constantsBinding.signals,
+              priority: constantsBinding.priority,
+            }},
+          }};
+        }}
+        try {{
+          return originalProcessBinding(name);
+        }} catch (error) {{
+          const originalMessage =
+            error && typeof error === "object" && typeof error.message === "string"
+              ? error.message
+              : String(error);
+          throw new Error(
+            `process.binding(${{bindingName}}) failed: ${{originalMessage}}`
+          );
+        }}
+      }};
+    }}
     const nextPid = Number(nextEnv.AGENT_OS_VIRTUAL_PROCESS_PID);
     if (Number.isFinite(nextPid) && nextPid > 0) {{
       process.pid = nextPid;
@@ -1628,7 +1708,6 @@ fn spawn_v8_event_bridge(
                             })
                             .collect::<Vec<_>>()
                             .join(" ");
-                        let msg_with_newline = format!("{msg}\n");
                         // Respond to the bridge call
                         let _ = v8_session.send_bridge_response(
                             call_id,
@@ -1636,13 +1715,9 @@ fn spawn_v8_event_bridge(
                             v8_runtime::json_to_cbor_payload(&Value::Null).unwrap_or_default(),
                         );
                         if method == "_log" {
-                            let _ = sender.send(JavascriptExecutionEvent::Stdout(
-                                msg_with_newline.into_bytes(),
-                            ));
+                            let _ = sender.send(JavascriptExecutionEvent::Stdout(msg.into_bytes()));
                         } else {
-                            let _ = sender.send(JavascriptExecutionEvent::Stderr(
-                                msg_with_newline.into_bytes(),
-                            ));
+                            let _ = sender.send(JavascriptExecutionEvent::Stderr(msg.into_bytes()));
                         }
                         continue;
                     }
@@ -1801,6 +1876,9 @@ impl LocalBridgeState {
                     bytes[15],
                 ))))
             }
+            "_kernelStdinRead" => Some(LocalBridgeCallResult::Immediate(
+                self.kernel_stdin.read(args),
+            )),
             "_scheduleTimer" => {
                 self.schedule_bridge_timer_response(call_id, timer_delay_ms(args.first()));
                 Some(LocalBridgeCallResult::Deferred)
@@ -2311,6 +2389,58 @@ impl LocalBridgeState {
     }
 }
 
+impl LocalKernelStdinBridge {
+    fn write(&self, chunk: &[u8]) {
+        let mut state = self.state.lock().expect("kernel stdin state poisoned");
+        state.bytes.extend(chunk.iter().copied());
+        self.ready.notify_all();
+    }
+
+    fn close(&self) {
+        let mut state = self.state.lock().expect("kernel stdin state poisoned");
+        state.closed = true;
+        self.ready.notify_all();
+    }
+
+    fn read(&self, args: &[Value]) -> Value {
+        let max_bytes = args
+            .first()
+            .and_then(Value::as_u64)
+            .map(|value| value.clamp(1, 64 * 1024) as usize)
+            .unwrap_or(64 * 1024);
+        let timeout = Duration::from_millis(args.get(1).and_then(Value::as_u64).unwrap_or(100));
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock().expect("kernel stdin state poisoned");
+
+        while state.bytes.is_empty() && !state.closed {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Value::Null;
+            }
+            let (next_state, wait_result) = self
+                .ready
+                .wait_timeout(state, remaining)
+                .expect("kernel stdin wait poisoned");
+            state = next_state;
+            if wait_result.timed_out() && state.bytes.is_empty() && !state.closed {
+                return Value::Null;
+            }
+        }
+
+        if !state.bytes.is_empty() {
+            let read_len = state.bytes.len().min(max_bytes);
+            let bytes = state.bytes.drain(..read_len).collect::<Vec<_>>();
+            return json!({
+                "dataBase64": v8_runtime::base64_encode_pub(&bytes),
+            });
+        }
+
+        json!({
+            "done": true,
+        })
+    }
+}
+
 fn normalize_module_resolve_context(path: &str) -> String {
     let normalized = normalize_guest_path(path);
     if normalized.ends_with(".js")
@@ -2740,6 +2870,57 @@ export default pathModule;
         return String::from(
             r#"const NativeURL = globalThis.URL;
 
+function normalizeFilePath(value) {
+  const path = String(value ?? "");
+  if (path.length === 0) {
+    return "/";
+  }
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+function encodeFilePath(path) {
+  return path
+    .split("/")
+    .map((segment, index) =>
+      index === 0
+        ? ""
+        : encodeURIComponent(segment).replace(/[!'()*]/g, (char) =>
+            `%${char.charCodeAt(0).toString(16).toUpperCase()}`
+          )
+    )
+    .join("/");
+}
+
+function buildFileUrlRecord(href, pathname) {
+  const searchParams = new URLSearchParams();
+  return {
+    href,
+    origin: "null",
+    protocol: "file:",
+    username: "",
+    password: "",
+    host: "",
+    hostname: "",
+    port: "",
+    pathname,
+    search: "",
+    searchParams,
+    hash: "",
+    toString() {
+      return href;
+    },
+    toJSON() {
+      return href;
+    },
+    valueOf() {
+      return href;
+    },
+    [Symbol.toPrimitive]() {
+      return href;
+    },
+  };
+}
+
 function fileURLToPath(value) {
   const raw =
     typeof value === "string"
@@ -2750,9 +2931,26 @@ function fileURLToPath(value) {
   if (raw.startsWith("/")) {
     return raw;
   }
-  if (raw.startsWith("file://")) {
-    const pathname = raw.slice("file://".length);
-    return decodeURIComponent(pathname.startsWith("/") ? pathname : `/${pathname}`);
+  if (raw.startsWith("file:")) {
+    let pathname = raw.startsWith("file://")
+      ? raw.slice("file://".length)
+      : raw.slice("file:".length);
+    const terminatorIndex = pathname.search(/[?#]/);
+    if (terminatorIndex >= 0) {
+      pathname = pathname.slice(0, terminatorIndex);
+    }
+    if (!pathname.startsWith("/")) {
+      const slashIndex = pathname.indexOf("/");
+      if (slashIndex === -1) {
+        return "/";
+      }
+      const host = pathname.slice(0, slashIndex);
+      if (host && host !== "localhost") {
+        throw new Error(`Expected file URL with an empty host, received ${host}`);
+      }
+      pathname = pathname.slice(slashIndex);
+    }
+    return decodeURIComponent(pathname || "/");
   }
   const url = value instanceof NativeURL ? value : new NativeURL(raw);
   if (url.protocol !== "file:") {
@@ -2762,9 +2960,19 @@ function fileURLToPath(value) {
 }
 
 function pathToFileURL(path) {
-  const normalized = String(path || "");
-  const absolute = normalized.startsWith("/") ? normalized : `/${normalized}`;
-  return new NativeURL(`file://${absolute}`);
+  const absolute = normalizeFilePath(path);
+  const pathname = encodeFilePath(absolute);
+  const href = `file://${pathname}`;
+
+  try {
+    const url = new NativeURL("file:///");
+    url.pathname = pathname;
+    if (typeof url.href === "string" && url.href.startsWith("file:///")) {
+      return url;
+    }
+  } catch {}
+
+  return buildFileUrlRecord(href, pathname);
 }
 
 function parse(input, parseQueryString = false) {
@@ -3724,14 +3932,23 @@ function getHeapCodeStatistics() {
   };
 }
 
+function configuredHeapLimitBytes() {
+  const configured = Number(globalThis.__agentOsV8HeapLimitBytes);
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return 0;
+  }
+  return configured;
+}
+
 function getHeapStatistics() {
+  const heapLimit = configuredHeapLimitBytes();
   return {
     total_heap_size: 0,
     total_heap_size_executable: 0,
     total_physical_size: 0,
     total_available_size: 0,
     used_heap_size: 0,
-    heap_size_limit: 0,
+    heap_size_limit: heapLimit,
     malloced_memory: 0,
     peak_malloced_memory: 0,
     does_zap_garbage: 0,

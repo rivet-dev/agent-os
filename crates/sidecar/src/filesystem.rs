@@ -1,5 +1,6 @@
 //! Guest filesystem and VFS dispatch extracted from service.rs.
 
+use crate::execution::host_path_from_runtime_guest_mappings;
 use crate::protocol::{
     GuestFilesystemCallRequest, GuestFilesystemOperation, GuestFilesystemResultResponse,
     GuestFilesystemStat, RequestFrame, ResponsePayload, RootFilesystemEntryEncoding,
@@ -22,12 +23,17 @@ use agent_os_execution::{
 };
 use agent_os_kernel::vfs::VirtualStat;
 use base64::Engine;
+use nix::libc;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::fmt;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+
+const PYTHON_PYODIDE_GUEST_ROOT: &str = "/__agent_os_pyodide";
+const PYTHON_PYODIDE_CACHE_GUEST_ROOT: &str = "/__agent_os_pyodide_cache";
 
 pub(crate) async fn guest_filesystem_call<B>(
     sidecar: &mut NativeSidecar<B>,
@@ -482,6 +488,7 @@ pub(crate) fn normalize_python_vfs_rpc_path(path: &str) -> Result<String, Sideca
 
 pub(crate) fn service_javascript_fs_sync_rpc(
     kernel: &mut SidecarKernel,
+    process: &mut ActiveProcess,
     kernel_pid: u32,
     request: &JavascriptSyncRpcRequest,
 ) -> Result<Value, SidecarError> {
@@ -491,6 +498,13 @@ pub(crate) fn service_javascript_fs_sync_rpc(
             let flags = javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem open flags")?;
             let mode =
                 javascript_sync_rpc_arg_u32_optional(&request.args, 2, "filesystem open mode")?;
+            if let Some(host_path) = mapped_python_runtime_host_path(
+                process,
+                path,
+                mapped_host_open_is_writable(flags),
+            ) {
+                return open_mapped_host_fd(process, path, host_path, flags, mode);
+            }
             kernel
                 .fd_open(EXECUTION_DRIVER_NAME, kernel_pid, path, flags, mode)
                 .map(|fd| json!(fd))
@@ -510,6 +524,9 @@ pub(crate) fn service_javascript_fs_sync_rpc(
             })?;
             let position =
                 javascript_sync_rpc_arg_u64_optional(&request.args, 2, "filesystem read position")?;
+            if let Some(mapped) = process.mapped_host_fd_mut(fd) {
+                return read_mapped_host_fd(mapped, fd, length, position);
+            }
             let bytes = match position {
                 Some(offset) => {
                     kernel.fd_pread(EXECUTION_DRIVER_NAME, kernel_pid, fd, length, offset)
@@ -528,6 +545,9 @@ pub(crate) fn service_javascript_fs_sync_rpc(
                 2,
                 "filesystem write position",
             )?;
+            if let Some(mapped) = process.mapped_host_fd_mut(fd) {
+                return write_mapped_host_fd(mapped, fd, &contents, position);
+            }
             match position {
                 Some(offset) => kernel
                     .fd_pwrite(EXECUTION_DRIVER_NAME, kernel_pid, fd, &contents, offset)
@@ -541,6 +561,9 @@ pub(crate) fn service_javascript_fs_sync_rpc(
         }
         "fs.close" | "fs.closeSync" => {
             let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem close fd")?;
+            if process.close_mapped_host_fd(fd) {
+                return Ok(Value::Null);
+            }
             kernel
                 .fd_close(EXECUTION_DRIVER_NAME, kernel_pid, fd)
                 .map(|()| Value::Null)
@@ -548,6 +571,15 @@ pub(crate) fn service_javascript_fs_sync_rpc(
         }
         "fs.fstat" | "fs.fstatSync" => {
             let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem fstat fd")?;
+            if let Some(mapped) = process.mapped_host_fd(fd) {
+                let metadata = mapped.file.metadata().map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to stat mapped guest fd {fd} -> {}: {error}",
+                        mapped.path.display()
+                    ))
+                })?;
+                return Ok(javascript_sync_rpc_host_stat_value(&metadata));
+            }
             kernel
                 .fd_stat(EXECUTION_DRIVER_NAME, kernel_pid, fd)
                 .map_err(kernel_error)?;
@@ -559,6 +591,21 @@ pub(crate) fn service_javascript_fs_sync_rpc(
         "fs.readFileSync" | "fs.promises.readFile" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readFile path")?;
             let encoding = javascript_sync_rpc_encoding(&request.args);
+            if let Some(host_path) = mapped_python_runtime_host_path(process, path, false) {
+                let content = fs::read(&host_path).map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to read mapped guest file {} -> {}: {error}",
+                        path,
+                        host_path.display()
+                    ))
+                })?;
+                return Ok(match encoding.as_deref() {
+                    Some("utf8") | Some("utf-8") => {
+                        Value::String(String::from_utf8_lossy(&content).into_owned())
+                    }
+                    _ => javascript_sync_rpc_bytes_value(&content),
+                });
+            }
             kernel
                 .read_file_for_process(EXECUTION_DRIVER_NAME, kernel_pid, path)
                 .map(|content| match encoding.as_deref() {
@@ -573,6 +620,16 @@ pub(crate) fn service_javascript_fs_sync_rpc(
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem writeFile path")?;
             let contents =
                 javascript_sync_rpc_bytes_arg(&request.args, 1, "filesystem writeFile contents")?;
+            if let Some(host_path) = mapped_python_runtime_host_path(process, path, true) {
+                fs::write(&host_path, contents).map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to write mapped guest file {} -> {}: {error}",
+                        path,
+                        host_path.display()
+                    ))
+                })?;
+                return Ok(Value::Null);
+            }
             kernel
                 .write_file_for_process(
                     EXECUTION_DRIVER_NAME,
@@ -586,6 +643,16 @@ pub(crate) fn service_javascript_fs_sync_rpc(
         }
         "fs.statSync" | "fs.promises.stat" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem stat path")?;
+            if let Some(host_path) = mapped_python_runtime_host_path(process, path, false) {
+                let metadata = fs::metadata(&host_path).map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to stat mapped guest path {} -> {}: {error}",
+                        path,
+                        host_path.display()
+                    ))
+                })?;
+                return Ok(javascript_sync_rpc_host_stat_value(&metadata));
+            }
             kernel
                 .stat_for_process(EXECUTION_DRIVER_NAME, kernel_pid, path)
                 .map(javascript_sync_rpc_stat_value)
@@ -600,6 +667,20 @@ pub(crate) fn service_javascript_fs_sync_rpc(
         }
         "fs.readdirSync" | "fs.promises.readdir" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem readdir path")?;
+            if let Some(host_path) = mapped_python_runtime_host_path(process, path, false) {
+                let entries = fs::read_dir(&host_path)
+                    .map_err(|error| {
+                        SidecarError::Io(format!(
+                            "failed to read mapped guest directory {} -> {}: {error}",
+                            path,
+                            host_path.display()
+                        ))
+                    })?
+                    .filter_map(|entry| entry.ok())
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .collect::<Vec<_>>();
+                return Ok(javascript_sync_rpc_readdir_value(entries));
+            }
             kernel
                 .read_dir_for_process(EXECUTION_DRIVER_NAME, kernel_pid, path)
                 .map(javascript_sync_rpc_readdir_value)
@@ -609,6 +690,26 @@ pub(crate) fn service_javascript_fs_sync_rpc(
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem mkdir path")?;
             let recursive =
                 javascript_sync_rpc_option_bool(&request.args, 1, "recursive").unwrap_or(false);
+            if let Some(host_path) = mapped_python_runtime_host_path(process, path, true) {
+                if recursive {
+                    fs::create_dir_all(&host_path).map_err(|error| {
+                        SidecarError::Io(format!(
+                            "failed to create mapped guest directory {} -> {}: {error}",
+                            path,
+                            host_path.display()
+                        ))
+                    })?;
+                } else {
+                    fs::create_dir(&host_path).map_err(|error| {
+                        SidecarError::Io(format!(
+                            "failed to create mapped guest directory {} -> {}: {error}",
+                            path,
+                            host_path.display()
+                        ))
+                    })?;
+                }
+                return Ok(Value::Null);
+            }
             kernel
                 .mkdir_for_process(
                     EXECUTION_DRIVER_NAME,
@@ -622,6 +723,16 @@ pub(crate) fn service_javascript_fs_sync_rpc(
         }
         "fs.accessSync" | "fs.promises.access" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem access path")?;
+            if let Some(host_path) = mapped_python_runtime_host_path(process, path, false) {
+                fs::metadata(&host_path).map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to access mapped guest path {} -> {}: {error}",
+                        path,
+                        host_path.display()
+                    ))
+                })?;
+                return Ok(Value::Null);
+            }
             kernel
                 .stat_for_process(EXECUTION_DRIVER_NAME, kernel_pid, path)
                 .map(|_| Value::Null)
@@ -632,6 +743,43 @@ pub(crate) fn service_javascript_fs_sync_rpc(
                 javascript_sync_rpc_arg_str(&request.args, 0, "filesystem copyFile source")?;
             let destination =
                 javascript_sync_rpc_arg_str(&request.args, 1, "filesystem copyFile destination")?;
+            let source_host = mapped_python_runtime_host_path(process, source, false);
+            let destination_host = mapped_python_runtime_host_path(process, destination, true);
+            if source_host.is_some() || destination_host.is_some() {
+                let contents = match source_host {
+                    Some(ref host_path) => fs::read(host_path).map_err(|error| {
+                        SidecarError::Io(format!(
+                            "failed to read mapped guest file {} -> {}: {error}",
+                            source,
+                            host_path.display()
+                        ))
+                    })?,
+                    None => kernel
+                        .read_file_for_process(EXECUTION_DRIVER_NAME, kernel_pid, source)
+                        .map_err(kernel_error)?,
+                };
+                return match destination_host {
+                    Some(host_path) => fs::write(&host_path, contents)
+                        .map(|()| Value::Null)
+                        .map_err(|error| {
+                            SidecarError::Io(format!(
+                                "failed to write mapped guest file {} -> {}: {error}",
+                                destination,
+                                host_path.display()
+                            ))
+                        }),
+                    None => kernel
+                        .write_file_for_process(
+                            EXECUTION_DRIVER_NAME,
+                            kernel_pid,
+                            destination,
+                            contents,
+                            None,
+                        )
+                        .map(|()| Value::Null)
+                        .map_err(kernel_error),
+                };
+            }
             let contents = kernel
                 .read_file_for_process(EXECUTION_DRIVER_NAME, kernel_pid, source)
                 .map_err(kernel_error)?;
@@ -648,6 +796,9 @@ pub(crate) fn service_javascript_fs_sync_rpc(
         }
         "fs.existsSync" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem exists path")?;
+            if let Some(host_path) = mapped_python_runtime_host_path(process, path, false) {
+                return Ok(Value::Bool(host_path.exists()));
+            }
             kernel
                 .exists_for_process(EXECUTION_DRIVER_NAME, kernel_pid, path)
                 .map(Value::Bool)
@@ -683,6 +834,11 @@ pub(crate) fn service_javascript_fs_sync_rpc(
             let source = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem rename source")?;
             let destination =
                 javascript_sync_rpc_arg_str(&request.args, 1, "filesystem rename destination")?;
+            let source_host = mapped_python_runtime_host_path(process, source, false);
+            let destination_host = mapped_python_runtime_host_path(process, destination, true);
+            if source_host.is_some() || destination_host.is_some() {
+                return rename_mapped_host_path(source, source_host, destination, destination_host);
+            }
             kernel
                 .rename(source, destination)
                 .map(|()| Value::Null)
@@ -690,6 +846,15 @@ pub(crate) fn service_javascript_fs_sync_rpc(
         }
         "fs.rmdirSync" | "fs.promises.rmdir" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem rmdir path")?;
+            if let Some(host_path) = mapped_python_runtime_host_path(process, path, true) {
+                return fs::remove_dir(&host_path).map(|()| Value::Null).map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to remove mapped guest directory {} -> {}: {error}",
+                        path,
+                        host_path.display()
+                    ))
+                });
+            }
             kernel
                 .remove_dir(path)
                 .map(|()| Value::Null)
@@ -697,6 +862,15 @@ pub(crate) fn service_javascript_fs_sync_rpc(
         }
         "fs.unlinkSync" | "fs.promises.unlink" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem unlink path")?;
+            if let Some(host_path) = mapped_python_runtime_host_path(process, path, true) {
+                return fs::remove_file(&host_path).map(|()| Value::Null).map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to remove mapped guest file {} -> {}: {error}",
+                        path,
+                        host_path.display()
+                    ))
+                });
+            }
             kernel
                 .remove_file(path)
                 .map(|()| Value::Null)
@@ -800,6 +974,177 @@ fn javascript_sync_rpc_stat_value(stat: VirtualStat) -> Value {
     })
 }
 
+fn javascript_sync_rpc_host_stat_value(metadata: &fs::Metadata) -> Value {
+    json!({
+        "mode": metadata.mode(),
+        "size": metadata.size(),
+        "blocks": metadata.blocks(),
+        "dev": metadata.dev(),
+        "rdev": metadata.rdev(),
+        "isDirectory": metadata.is_dir(),
+        "isSymbolicLink": metadata.file_type().is_symlink(),
+        "atimeMs": metadata.atime() * 1000 + (metadata.atime_nsec() / 1_000_000),
+        "mtimeMs": metadata.mtime() * 1000 + (metadata.mtime_nsec() / 1_000_000),
+        "ctimeMs": metadata.ctime() * 1000 + (metadata.ctime_nsec() / 1_000_000),
+        "birthtimeMs": metadata.ctime() * 1000 + (metadata.ctime_nsec() / 1_000_000),
+        "ino": metadata.ino(),
+        "nlink": metadata.nlink(),
+        "uid": metadata.uid(),
+        "gid": metadata.gid(),
+    })
+}
+
+fn mapped_python_runtime_host_path(
+    process: &ActiveProcess,
+    guest_path: &str,
+    writable: bool,
+) -> Option<PathBuf> {
+    let normalized = normalize_path(guest_path);
+    let mapped = host_path_from_runtime_guest_mappings(&process.env, &normalized)?;
+    let is_asset_path = normalized == PYTHON_PYODIDE_GUEST_ROOT
+        || normalized.starts_with(&format!("{PYTHON_PYODIDE_GUEST_ROOT}/"));
+    let is_cache_path = normalized == PYTHON_PYODIDE_CACHE_GUEST_ROOT
+        || normalized.starts_with(&format!("{PYTHON_PYODIDE_CACHE_GUEST_ROOT}/"));
+    if is_asset_path && !writable {
+        return Some(mapped);
+    }
+    if is_cache_path {
+        return Some(mapped);
+    }
+    None
+}
+
+fn mapped_host_open_is_writable(flags: u32) -> bool {
+    let access_mode = flags & libc::O_ACCMODE as u32;
+    access_mode == libc::O_WRONLY as u32
+        || access_mode == libc::O_RDWR as u32
+        || flags & libc::O_APPEND as u32 != 0
+        || flags & libc::O_CREAT as u32 != 0
+        || flags & libc::O_TRUNC as u32 != 0
+}
+
+fn open_mapped_host_fd(
+    process: &mut ActiveProcess,
+    guest_path: &str,
+    host_path: PathBuf,
+    flags: u32,
+    mode: Option<u32>,
+) -> Result<Value, SidecarError> {
+    let access_mode = flags & libc::O_ACCMODE as u32;
+    let mut options = OpenOptions::new();
+    match access_mode {
+        x if x == libc::O_WRONLY as u32 => {
+            options.write(true);
+        }
+        x if x == libc::O_RDWR as u32 => {
+            options.read(true).write(true);
+        }
+        _ => {
+            options.read(true);
+        }
+    }
+    if flags & libc::O_APPEND as u32 != 0 {
+        options.append(true);
+    }
+    if flags & libc::O_CREAT as u32 != 0 {
+        options.create(true);
+    }
+    if flags & libc::O_EXCL as u32 != 0 {
+        options.create_new(true);
+    }
+    if flags & libc::O_TRUNC as u32 != 0 {
+        options.truncate(true);
+    }
+
+    let masked_flags = flags
+        & !(libc::O_ACCMODE as u32
+            | libc::O_APPEND as u32
+            | libc::O_CREAT as u32
+            | libc::O_EXCL as u32
+            | libc::O_TRUNC as u32);
+    options.mode(mode.unwrap_or(0o666));
+    options.custom_flags(masked_flags as i32);
+
+    let file = options.open(&host_path).map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to open mapped guest file {} -> {}: {error}",
+            guest_path,
+            host_path.display()
+        ))
+    })?;
+    let fd = process.allocate_mapped_host_fd(crate::state::ActiveMappedHostFd {
+        file,
+        path: host_path,
+    });
+    Ok(json!(fd))
+}
+
+fn read_mapped_host_fd(
+    mapped: &mut crate::state::ActiveMappedHostFd,
+    fd: u32,
+    length: usize,
+    position: Option<u64>,
+) -> Result<Value, SidecarError> {
+    let mut bytes = vec![0_u8; length];
+    let read = match position {
+        Some(offset) => mapped.file.read_at(&mut bytes, offset),
+        None => mapped.file.read(&mut bytes),
+    }
+    .map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to read mapped guest fd {fd} -> {}: {error}",
+            mapped.path.display()
+        ))
+    })?;
+    bytes.truncate(read);
+    Ok(javascript_sync_rpc_bytes_value(&bytes))
+}
+
+fn write_mapped_host_fd(
+    mapped: &mut crate::state::ActiveMappedHostFd,
+    fd: u32,
+    contents: &[u8],
+    position: Option<u64>,
+) -> Result<Value, SidecarError> {
+    let written = match position {
+        Some(offset) => mapped.file.write_at(contents, offset),
+        None => mapped.file.write(contents),
+    }
+    .map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to write mapped guest fd {fd} -> {}: {error}",
+            mapped.path.display()
+        ))
+    })?;
+    Ok(json!(written))
+}
+
+fn rename_mapped_host_path(
+    source: &str,
+    source_host: Option<PathBuf>,
+    destination: &str,
+    destination_host: Option<PathBuf>,
+) -> Result<Value, SidecarError> {
+    match (source_host, destination_host) {
+        (Some(source_host), Some(destination_host)) => {
+            fs::rename(&source_host, &destination_host)
+                .map(|()| Value::Null)
+                .map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to rename mapped guest path {} -> {} ({} -> {}): {error}",
+                        source,
+                        destination,
+                        source_host.display(),
+                        destination_host.display()
+                    ))
+                })
+        }
+        _ => Err(SidecarError::InvalidState(format!(
+            "cannot rename across mapped and kernel-backed paths: {source} -> {destination}"
+        ))),
+    }
+}
+
 fn javascript_sync_rpc_readdir_value(entries: Vec<String>) -> Value {
     json!(entries
         .into_iter()
@@ -838,16 +1183,14 @@ fn mirror_guest_file_write_to_shadow(
     })?;
 
     let stat = vm.kernel.lstat(&guest_path).map_err(kernel_error)?;
-    fs::set_permissions(
-        &shadow_path,
-        fs::Permissions::from_mode(stat.mode & 0o7777),
-    )
-    .map_err(|error| {
-        SidecarError::Io(format!(
-            "failed to set shadow mode for {}: {error}",
-            guest_path
-        ))
-    })?;
+    fs::set_permissions(&shadow_path, fs::Permissions::from_mode(stat.mode & 0o7777)).map_err(
+        |error| {
+            SidecarError::Io(format!(
+                "failed to set shadow mode for {}: {error}",
+                guest_path
+            ))
+        },
+    )?;
 
     Ok(())
 }
@@ -867,16 +1210,14 @@ fn mirror_guest_directory_write_to_shadow(
     })?;
 
     let stat = vm.kernel.lstat(&guest_path).map_err(kernel_error)?;
-    fs::set_permissions(
-        &shadow_path,
-        fs::Permissions::from_mode(stat.mode & 0o7777),
-    )
-    .map_err(|error| {
-        SidecarError::Io(format!(
-            "failed to set shadow mode for directory {}: {error}",
-            guest_path
-        ))
-    })?;
+    fs::set_permissions(&shadow_path, fs::Permissions::from_mode(stat.mode & 0o7777)).map_err(
+        |error| {
+            SidecarError::Io(format!(
+                "failed to set shadow mode for directory {}: {error}",
+                guest_path
+            ))
+        },
+    )?;
 
     Ok(())
 }
@@ -976,7 +1317,10 @@ fn resolve_process_guest_path_to_host(
     {
         host_root = host_root.parent()?.to_path_buf();
     }
-    Some(shadow_host_path_for_guest(&host_root, &normalized_guest_path))
+    Some(shadow_host_path_for_guest(
+        &host_root,
+        &normalized_guest_path,
+    ))
 }
 
 fn sync_host_directory_to_kernel(
@@ -1004,7 +1348,9 @@ fn sync_host_file_to_kernel(
             host_path.display()
         ))
     })?;
-    vm.kernel.write_file(guest_path, bytes).map_err(kernel_error)?;
+    vm.kernel
+        .write_file(guest_path, bytes)
+        .map_err(kernel_error)?;
     vm.kernel
         .chmod(guest_path, metadata.permissions().mode() & 0o7777)
         .map_err(kernel_error)?;

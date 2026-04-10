@@ -16,7 +16,6 @@ const ARG_PREFIX: &str = "ARG=";
 const ENV_PREFIX: &str = "ENV=";
 const INVOCATION_BREAK: &str = "--END--";
 const NODE_ALLOW_WASI_FLAG: &str = "--allow-wasi";
-const NODE_MAX_OLD_SPACE_SIZE_FLAG_PREFIX: &str = "--max-old-space-size=";
 const NODE_WASM_MAX_MEM_PAGES_FLAG_PREFIX: &str = "--wasm-max-mem-pages=";
 const PYTHON_MAX_OLD_SPACE_MB_ENV: &str = "AGENT_OS_PYTHON_MAX_OLD_SPACE_MB";
 const WASM_MAX_FUEL_ENV: &str = "AGENT_OS_WASM_MAX_FUEL";
@@ -237,22 +236,31 @@ fn node_permission_flags_only_propagate_nested_child_capabilities_when_parent_ex
 }
 
 #[test]
-fn python_execution_applies_configured_heap_limit_to_prewarm_and_exec_processes() {
+fn python_execution_applies_configured_heap_limit_to_v8_runtime() {
     let temp = tempdir().expect("create temp dir");
-    let fake_node_path = temp.path().join("fake-node.sh");
-    let log_path = temp.path().join("node-args.log");
-    write_fake_node_binary(&fake_node_path, &log_path);
-    let _node_binary = EnvVarGuard::set("AGENT_OS_NODE_BINARY", &fake_node_path);
-
     let pyodide_dir = temp.path().join("pyodide-dist");
     fs::create_dir_all(&pyodide_dir).expect("create pyodide dist dir");
     fs::write(
         pyodide_dir.join("pyodide.mjs"),
-        "export async function loadPyodide() { return { async runPythonAsync() {} }; }\n",
+        r#"
+export async function loadPyodide() {
+  const v8 = await import("node:v8");
+  const heapLimit = v8.getHeapStatistics().heap_size_limit;
+  return {
+    setStdin(_stdin) {},
+    async runPythonAsync() {
+      console.log(String(heapLimit));
+    },
+  };
+}
+"#,
     )
     .expect("write pyodide fixture");
     fs::write(pyodide_dir.join("pyodide-lock.json"), "{\"packages\":[]}\n")
         .expect("write pyodide lock fixture");
+    for asset in ["pyodide.asm.js", "pyodide.asm.wasm", "python_stdlib.zip"] {
+        fs::write(pyodide_dir.join(asset), []).expect("write pyodide runtime fixture");
+    }
 
     let mut python_engine = PythonExecutionEngine::default();
     let context = python_engine.create_context(CreatePythonContextRequest {
@@ -264,33 +272,28 @@ fn python_execution_applies_configured_heap_limit_to_prewarm_and_exec_processes(
         .start_execution(StartPythonExecutionRequest {
             vm_id: String::from("vm-python"),
             context_id: context.context_id,
-            code: String::from("print('ignored')"),
+            code: String::from("print('heap limit')"),
             file_path: None,
             env: BTreeMap::from([(
                 String::from(PYTHON_MAX_OLD_SPACE_MB_ENV),
-                String::from("256"),
+                String::from("64"),
             )]),
             cwd: temp.path().to_path_buf(),
         })
         .expect("start python execution")
         .wait(None)
         .expect("wait for python execution");
+
     assert_eq!(result.exit_code, 0);
-
-    let invocations = parse_invocations(&log_path);
-    assert_eq!(
-        invocations.len(),
-        2,
-        "expected one prewarm invocation and one execution invocation"
+    let heap_limit = String::from_utf8(result.stdout)
+        .expect("stdout utf8")
+        .trim()
+        .parse::<u64>()
+        .expect("parse heap limit");
+    assert!(
+        heap_limit >= 16 * 1024 * 1024 && heap_limit < 256 * 1024 * 1024,
+        "expected configured Python heap limit to shape the V8 isolate, got {heap_limit} bytes",
     );
-
-    for args in &invocations {
-        assert!(
-            args.iter()
-                .any(|arg| arg == &format!("{NODE_MAX_OLD_SPACE_SIZE_FLAG_PREFIX}256")),
-            "python invocations should apply the configured Node heap limit: {args:?}"
-        );
-    }
 }
 
 #[test]
