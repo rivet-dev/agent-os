@@ -1,7 +1,7 @@
 use std::collections::{btree_map::Values, BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 pub const MAX_FDS_PER_PROCESS: usize = 256;
@@ -14,6 +14,12 @@ pub const O_EXCL: u32 = 0o200;
 pub const O_TRUNC: u32 = 0o1000;
 pub const O_APPEND: u32 = 0o2000;
 pub const O_NONBLOCK: u32 = 0o4000;
+pub const F_DUPFD: u32 = 0;
+pub const F_GETFD: u32 = 1;
+pub const F_SETFD: u32 = 2;
+pub const F_GETFL: u32 = 3;
+pub const F_SETFL: u32 = 4;
+pub const FD_CLOEXEC: u32 = 1;
 pub const LOCK_SH: u32 = 1;
 pub const LOCK_EX: u32 = 2;
 pub const LOCK_NB: u32 = 4;
@@ -83,7 +89,7 @@ pub struct FileDescription {
     path: String,
     lock_target: Option<FileLockTarget>,
     cursor: AtomicU64,
-    flags: u32,
+    flags: AtomicU32,
     ref_count: AtomicUsize,
 }
 
@@ -117,7 +123,7 @@ impl FileDescription {
             path: path.into(),
             lock_target,
             cursor: AtomicU64::new(0),
-            flags,
+            flags: AtomicU32::new(flags),
             ref_count: AtomicUsize::new(ref_count),
         }
     }
@@ -143,7 +149,21 @@ impl FileDescription {
     }
 
     pub fn flags(&self) -> u32 {
-        self.flags
+        self.flags.load(Ordering::SeqCst)
+    }
+
+    pub fn update_flags(&self, mask: u32, flags: u32) -> u32 {
+        let mut current = self.flags();
+        loop {
+            let next = (current & !mask) | (flags & mask);
+            match self
+                .flags
+                .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return next,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     pub fn ref_count(&self) -> usize {
@@ -174,6 +194,7 @@ pub struct FdEntry {
     pub fd: u32,
     pub description: SharedFileDescription,
     pub status_flags: u32,
+    pub fd_flags: u32,
     pub rights: u64,
     pub filetype: u8,
 }
@@ -293,6 +314,7 @@ impl ProcessFdTable {
                 fd: 0,
                 description: stdin_desc,
                 status_flags: 0,
+                fd_flags: 0,
                 rights: 0,
                 filetype: FILETYPE_CHARACTER_DEVICE,
             },
@@ -303,6 +325,7 @@ impl ProcessFdTable {
                 fd: 1,
                 description: stdout_desc,
                 status_flags: 0,
+                fd_flags: 0,
                 rights: 0,
                 filetype: FILETYPE_CHARACTER_DEVICE,
             },
@@ -313,6 +336,7 @@ impl ProcessFdTable {
                 fd: 2,
                 description: stderr_desc,
                 status_flags: 0,
+                fd_flags: 0,
                 rights: 0,
                 filetype: FILETYPE_CHARACTER_DEVICE,
             },
@@ -337,6 +361,7 @@ impl ProcessFdTable {
                 fd: 0,
                 description: stdin_desc,
                 status_flags: 0,
+                fd_flags: 0,
                 rights: 0,
                 filetype: stdin_type,
             },
@@ -347,6 +372,7 @@ impl ProcessFdTable {
                 fd: 1,
                 description: stdout_desc,
                 status_flags: 0,
+                fd_flags: 0,
                 rights: 0,
                 filetype: stdout_type,
             },
@@ -357,6 +383,7 @@ impl ProcessFdTable {
                 fd: 2,
                 description: stderr_desc,
                 status_flags: 0,
+                fd_flags: 0,
                 rights: 0,
                 filetype: stderr_type,
             },
@@ -388,6 +415,7 @@ impl ProcessFdTable {
                 fd,
                 description,
                 status_flags: status_flags(flags),
+                fd_flags: 0,
                 rights: 0,
                 filetype,
             },
@@ -415,6 +443,7 @@ impl ProcessFdTable {
                 fd,
                 description,
                 status_flags: 0,
+                fd_flags: 0,
                 rights: 0,
                 filetype,
             },
@@ -449,18 +478,12 @@ impl ProcessFdTable {
             .cloned()
             .ok_or_else(|| FdTableError::bad_file_descriptor(fd))?;
         let new_fd = self.allocate_fd()?;
-        entry.description.increment_ref_count();
-        self.entries.insert(
+        self.duplicate_entry(
+            &entry,
             new_fd,
-            FdEntry {
-                fd: new_fd,
-                description: entry.description,
-                status_flags: status_flags_override.unwrap_or(entry.status_flags),
-                rights: entry.rights,
-                filetype: entry.filetype,
-            },
-        );
-        Ok(new_fd)
+            status_flags_override.unwrap_or(entry.status_flags),
+            0,
+        )
     }
 
     pub fn dup2(&mut self, old_fd: u32, new_fd: u32) -> FdResult<()> {
@@ -478,17 +501,7 @@ impl ProcessFdTable {
             self.close(new_fd);
         }
 
-        entry.description.increment_ref_count();
-        self.entries.insert(
-            new_fd,
-            FdEntry {
-                fd: new_fd,
-                description: entry.description,
-                status_flags: entry.status_flags,
-                rights: entry.rights,
-                filetype: entry.filetype,
-            },
-        );
+        self.duplicate_entry(&entry, new_fd, entry.status_flags, 0)?;
         Ok(())
     }
 
@@ -499,9 +512,61 @@ impl ProcessFdTable {
             .ok_or_else(|| FdTableError::bad_file_descriptor(fd))?;
         Ok(FdStat {
             filetype: entry.filetype,
-            flags: entry.description.flags() | entry.status_flags,
+            flags: visible_fd_flags(entry.description.flags(), entry.status_flags),
             rights: entry.rights,
         })
+    }
+
+    pub fn fcntl(&mut self, fd: u32, command: u32, arg: u32) -> FdResult<u32> {
+        match command {
+            F_DUPFD => {
+                let entry = self
+                    .entries
+                    .get(&fd)
+                    .cloned()
+                    .ok_or_else(|| FdTableError::bad_file_descriptor(fd))?;
+                let min_fd = validate_fcntl_dup_min(arg)?;
+                let new_fd = self.allocate_fd_from(min_fd)?;
+                self.duplicate_entry(&entry, new_fd, entry.status_flags, 0)
+            }
+            F_GETFD => {
+                let entry = self
+                    .entries
+                    .get(&fd)
+                    .ok_or_else(|| FdTableError::bad_file_descriptor(fd))?;
+                Ok(entry.fd_flags & FD_CLOEXEC)
+            }
+            F_SETFD => {
+                let entry = self
+                    .entries
+                    .get_mut(&fd)
+                    .ok_or_else(|| FdTableError::bad_file_descriptor(fd))?;
+                entry.fd_flags = arg & FD_CLOEXEC;
+                Ok(0)
+            }
+            F_GETFL => {
+                let entry = self
+                    .entries
+                    .get(&fd)
+                    .ok_or_else(|| FdTableError::bad_file_descriptor(fd))?;
+                Ok(visible_fd_flags(
+                    entry.description.flags(),
+                    entry.status_flags,
+                ))
+            }
+            F_SETFL => {
+                let entry = self
+                    .entries
+                    .get_mut(&fd)
+                    .ok_or_else(|| FdTableError::bad_file_descriptor(fd))?;
+                entry.status_flags = arg & ENTRY_STATUS_FLAG_MASK;
+                entry.description.update_flags(SHARED_STATUS_FLAG_MASK, arg);
+                Ok(0)
+            }
+            _ => Err(FdTableError::invalid_argument(format!(
+                "unsupported fcntl command {command}"
+            ))),
+        }
     }
 
     pub fn fork(&self) -> Self {
@@ -516,6 +581,7 @@ impl ProcessFdTable {
                     fd: *fd,
                     description: Arc::clone(&entry.description),
                     status_flags: entry.status_flags,
+                    fd_flags: entry.fd_flags,
                     rights: entry.rights,
                     filetype: entry.filetype,
                 },
@@ -560,6 +626,49 @@ impl ProcessFdTable {
 
         Err(FdTableError::too_many_open_files())
     }
+
+    fn allocate_fd_from(&mut self, min_fd: u32) -> FdResult<u32> {
+        if self.entries.len() >= MAX_FDS_PER_PROCESS {
+            return Err(FdTableError::too_many_open_files());
+        }
+
+        if min_fd as usize >= MAX_FDS_PER_PROCESS {
+            return Err(FdTableError::invalid_argument(format!(
+                "fd {min_fd} exceeds process fd limit"
+            )));
+        }
+
+        for candidate in min_fd..MAX_FDS_PER_PROCESS as u32 {
+            if !self.entries.contains_key(&candidate) {
+                self.next_fd = candidate.saturating_add(1);
+                return Ok(candidate);
+            }
+        }
+
+        Err(FdTableError::too_many_open_files())
+    }
+
+    fn duplicate_entry(
+        &mut self,
+        entry: &FdEntry,
+        new_fd: u32,
+        status_flags: u32,
+        fd_flags: u32,
+    ) -> FdResult<u32> {
+        entry.description.increment_ref_count();
+        self.entries.insert(
+            new_fd,
+            FdEntry {
+                fd: new_fd,
+                description: Arc::clone(&entry.description),
+                status_flags,
+                fd_flags,
+                rights: entry.rights,
+                filetype: entry.filetype,
+            },
+        );
+        Ok(new_fd)
+    }
 }
 
 fn validate_fd_bounds(fd: u32) -> FdResult<()> {
@@ -574,8 +683,25 @@ fn description_flags(flags: u32) -> u32 {
 }
 
 fn status_flags(flags: u32) -> u32 {
-    flags & O_NONBLOCK
+    flags & ENTRY_STATUS_FLAG_MASK
 }
+
+fn visible_fd_flags(description_flags: u32, entry_status_flags: u32) -> u32 {
+    (description_flags & (0b11 | SHARED_STATUS_FLAG_MASK))
+        | (entry_status_flags & ENTRY_STATUS_FLAG_MASK)
+}
+
+fn validate_fcntl_dup_min(min_fd: u32) -> FdResult<u32> {
+    if min_fd as usize >= MAX_FDS_PER_PROCESS {
+        return Err(FdTableError::invalid_argument(format!(
+            "fd {min_fd} exceeds process fd limit"
+        )));
+    }
+    Ok(min_fd)
+}
+
+const SHARED_STATUS_FLAG_MASK: u32 = O_APPEND;
+const ENTRY_STATUS_FLAG_MASK: u32 = O_NONBLOCK;
 
 impl<'a> IntoIterator for &'a ProcessFdTable {
     type Item = &'a FdEntry;

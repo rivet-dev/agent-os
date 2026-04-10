@@ -8,8 +8,8 @@ use crate::dns::{
 use crate::fd_table::{
     FdEntry, FdStat, FdTableError, FdTableManager, FileDescription, FileLockManager,
     FileLockTarget, FlockOperation, ProcessFdTable, FILETYPE_CHARACTER_DEVICE, FILETYPE_DIRECTORY,
-    FILETYPE_PIPE, FILETYPE_REGULAR_FILE, FILETYPE_SYMBOLIC_LINK, O_APPEND, O_CREAT, O_EXCL,
-    O_NONBLOCK, O_TRUNC,
+    FILETYPE_PIPE, FILETYPE_REGULAR_FILE, FILETYPE_SYMBOLIC_LINK, F_DUPFD, O_APPEND, O_CREAT,
+    O_EXCL, O_NONBLOCK, O_TRUNC,
 };
 use crate::mount_table::{MountEntry, MountOptions, MountTable, MountedFileSystem};
 use crate::permissions::{
@@ -493,7 +493,9 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 
     pub fn getgroups(&self, requester_driver: &str, pid: u32) -> KernelResult<Vec<u32>> {
-        Ok(self.process_identity(requester_driver, pid)?.supplementary_gids)
+        Ok(self
+            .process_identity(requester_driver, pid)?
+            .supplementary_gids)
     }
 
     pub fn getpwuid(&self, uid: u32) -> String {
@@ -2156,6 +2158,26 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         };
         self.close_special_resource_if_needed(&description, filetype);
         Ok(())
+    }
+
+    pub fn fd_fcntl(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        command: u32,
+        arg: u32,
+    ) -> KernelResult<u32> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        let mut tables = lock_or_recover(&self.fd_tables);
+        let table = tables
+            .get_mut(pid)
+            .ok_or_else(|| KernelError::no_such_process(pid))?;
+        let result = table.fcntl(fd, command, arg)?;
+        if command == F_DUPFD {
+            self.poll_notifier.notify();
+        }
+        Ok(result)
     }
 
     pub fn fd_flock(

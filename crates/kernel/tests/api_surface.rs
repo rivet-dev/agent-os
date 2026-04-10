@@ -1,6 +1,7 @@
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::fd_table::{
-    LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN, O_APPEND, O_CREAT, O_EXCL, O_NONBLOCK, O_RDWR,
+    FD_CLOEXEC, F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN,
+    O_APPEND, O_CREAT, O_EXCL, O_NONBLOCK, O_RDWR,
 };
 use agent_os_kernel::kernel::{
     ExecOptions, KernelVm, KernelVmConfig, OpenShellOptions, SpawnOptions, WaitPidFlags,
@@ -515,6 +516,68 @@ fn kernel_fd_surface_supports_nonblocking_pipe_duplicates_via_dev_fd() {
     assert_kernel_error_code(
         kernel.fd_write("shell", process.pid(), nonblocking_write_fd, &[8]),
         "EAGAIN",
+    );
+
+    process.finish(0);
+    kernel.waitpid(process.pid()).expect("wait for shell");
+}
+
+#[test]
+fn kernel_fd_surface_supports_fcntl_status_and_descriptor_flags() {
+    let mut config = KernelVmConfig::new("vm-api-fcntl");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let process = spawn_shell(&mut kernel);
+    let (read_fd, _write_fd) = kernel.open_pipe("shell", process.pid()).expect("open pipe");
+
+    assert_eq!(
+        kernel
+            .fd_fcntl("shell", process.pid(), read_fd, F_GETFL, 0)
+            .expect("initial F_GETFL"),
+        0
+    );
+    kernel
+        .fd_fcntl("shell", process.pid(), read_fd, F_SETFL, O_NONBLOCK)
+        .expect("set O_NONBLOCK");
+    assert_eq!(
+        kernel
+            .fd_fcntl("shell", process.pid(), read_fd, F_GETFL, 0)
+            .expect("updated F_GETFL")
+            & O_NONBLOCK,
+        O_NONBLOCK
+    );
+    assert_kernel_error_code(kernel.fd_read("shell", process.pid(), read_fd, 1), "EAGAIN");
+
+    kernel
+        .fd_fcntl("shell", process.pid(), read_fd, F_SETFD, FD_CLOEXEC)
+        .expect("set cloexec");
+    assert_eq!(
+        kernel
+            .fd_fcntl("shell", process.pid(), read_fd, F_GETFD, 0)
+            .expect("read cloexec"),
+        FD_CLOEXEC
+    );
+
+    let dup_fd = kernel
+        .fd_fcntl("shell", process.pid(), read_fd, F_DUPFD, 10)
+        .expect("duplicate with minimum fd");
+    assert_eq!(dup_fd, 10);
+    assert_eq!(
+        kernel
+            .fd_fcntl("shell", process.pid(), dup_fd, F_GETFD, 0)
+            .expect("dup cloexec should be clear"),
+        0
+    );
+    assert_eq!(
+        kernel
+            .fd_fcntl("shell", process.pid(), dup_fd, F_GETFL, 0)
+            .expect("dup status flags")
+            & O_NONBLOCK,
+        O_NONBLOCK
     );
 
     process.finish(0);

@@ -1,7 +1,8 @@
 use agent_os_kernel::fd_table::{
     FdResult, FdTableManager, FileDescription, FileLockManager, FileLockTarget, FlockOperation,
-    FILETYPE_CHARACTER_DEVICE, FILETYPE_REGULAR_FILE, LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN,
-    MAX_FDS_PER_PROCESS, O_NONBLOCK, O_RDONLY, O_WRONLY,
+    FD_CLOEXEC, FILETYPE_CHARACTER_DEVICE, FILETYPE_REGULAR_FILE, F_DUPFD, F_GETFD, F_GETFL,
+    F_SETFD, F_SETFL, LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN, MAX_FDS_PER_PROCESS, O_APPEND,
+    O_NONBLOCK, O_RDONLY, O_WRONLY,
 };
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -214,6 +215,107 @@ fn nonblocking_status_flags_are_tracked_per_fd_entry() {
             .description
             .flags(),
         O_WRONLY
+    );
+}
+
+#[test]
+fn fcntl_getfl_and_setfl_report_visible_status_flags() {
+    let mut manager = FdTableManager::new();
+    manager.create(1);
+
+    let table = manager.get_mut(1).expect("FD table should exist");
+    let fd = table
+        .open_with_filetype("/tmp/test.txt", O_WRONLY | O_APPEND, FILETYPE_REGULAR_FILE)
+        .expect("open append file");
+
+    assert_eq!(
+        table.fcntl(fd, F_GETFL, 0).expect("initial F_GETFL"),
+        O_WRONLY | O_APPEND
+    );
+
+    table
+        .fcntl(fd, F_SETFL, O_APPEND | O_NONBLOCK)
+        .expect("set append and nonblocking");
+
+    assert_eq!(
+        table.fcntl(fd, F_GETFL, 0).expect("updated F_GETFL"),
+        O_WRONLY | O_APPEND | O_NONBLOCK
+    );
+    assert_eq!(
+        table.stat(fd).expect("stat after F_SETFL").flags,
+        O_WRONLY | O_APPEND | O_NONBLOCK
+    );
+}
+
+#[test]
+fn fcntl_fd_flags_are_per_descriptor() {
+    let mut manager = FdTableManager::new();
+    manager.create(1);
+
+    let table = manager.get_mut(1).expect("FD table should exist");
+    let fd = table
+        .open("/tmp/test.txt", O_RDONLY)
+        .expect("open source FD");
+    let dup_fd = table.dup(fd).expect("duplicate FD");
+
+    table
+        .fcntl(fd, F_SETFD, FD_CLOEXEC)
+        .expect("set cloexec on source");
+
+    assert_eq!(
+        table.fcntl(fd, F_GETFD, 0).expect("read source FD flags"),
+        FD_CLOEXEC
+    );
+    assert_eq!(
+        table
+            .fcntl(dup_fd, F_GETFD, 0)
+            .expect("read duplicate FD flags"),
+        0
+    );
+}
+
+#[test]
+fn fcntl_dupfd_uses_lowest_available_fd_at_or_above_minimum() {
+    let mut manager = FdTableManager::new();
+    manager.create(1);
+
+    let table = manager.get_mut(1).expect("FD table should exist");
+    let fd = table
+        .open("/tmp/test.txt", O_RDONLY)
+        .expect("open source FD");
+    let filler_a = table.open("/tmp/a.txt", O_RDONLY).expect("open filler a");
+    let filler_b = table.open("/tmp/b.txt", O_RDONLY).expect("open filler b");
+    let filler_c = table.open("/tmp/c.txt", O_RDONLY).expect("open filler c");
+    assert_eq!((fd, filler_a, filler_b, filler_c), (3, 4, 5, 6));
+
+    assert!(table.close(5), "fd 5 should be available for F_DUPFD reuse");
+
+    let duplicated = table
+        .fcntl(fd, F_DUPFD, 5)
+        .expect("duplicate into lowest fd >= 5");
+
+    assert_eq!(duplicated, 5);
+    assert_eq!(
+        table
+            .fcntl(duplicated, F_GETFD, 0)
+            .expect("new duplicate should clear FD flags"),
+        0
+    );
+}
+
+#[test]
+fn fcntl_dupfd_rejects_minimum_fd_past_the_process_limit() {
+    let mut manager = FdTableManager::new();
+    manager.create(1);
+
+    let table = manager.get_mut(1).expect("FD table should exist");
+    let fd = table
+        .open("/tmp/test.txt", O_RDONLY)
+        .expect("open source FD");
+
+    assert_error_code(
+        table.fcntl(fd, F_DUPFD, MAX_FDS_PER_PROCESS as u32),
+        "EINVAL",
     );
 }
 

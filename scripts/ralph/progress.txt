@@ -17,6 +17,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Kernel DNS resolution should live behind `KernelVm::resolve_dns()` / `crates/kernel/src/dns.rs`; explicit guest DNS APIs use `DnsLookupPolicy::CheckPermissions`, while TCP/UDP/HTTP helpers that already gate egress separately should use `SkipPermissions` so the DNS migration does not add an extra permission requirement.
 - Mixed kernel readiness coverage should use `KernelVm::poll_targets()` with `PollTargetEntry::fd(...)` for FD-backed pipes/PTYS and `PollTargetEntry::socket(...)` for socket-table entries so one notifier-driven poll loop is exercised across subsystems.
 - Kernel guest identity should live on `ProcessContext.identity` / `ProcessInfo.identity`, while passwd/group string formatting stays centralized in `crates/kernel/src/user.rs`; do not infer uid/gid/user state back out of env vars or `/etc/*` snapshots.
+- Kernel `fcntl` support should keep `O_APPEND` on the shared `FileDescription` while storing `O_NONBLOCK` and `FD_CLOEXEC` on `FdEntry`, so append mode stays shared across dup/fork without losing descriptor-local flag behavior.
 - Guest runtime identity defaults must keep `HOME` tied to the kernel user's homedir and `PWD` tied to the execution cwd; JS, WASM, and Python all need to consume the same prepared env so guest-visible identity probes do not fall back to host or runtime defaults.
 - Root filesystem bootstrap entries must suppress kernel-owned pseudo-filesystem paths under `/dev`, `/proc`, and `/sys`; those directories stay reserved for synthetic kernel state and should not be snapshotted from the writable upper.
 - Sidecar/V8 networking integration tests should prefer VM-local loopback peers inside the guest (for example a guest `net` server/client pair or paired `dgram` sockets) instead of host loopback fixtures plus `LOOPBACK_EXEMPT_PORTS_ENV`, so the test actually exercises kernel-owned socket routing.
@@ -381,4 +382,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Root filesystem bootstrap filtering belongs in `crates/kernel/src/root_fs.rs` so every VM construction path that replays `bootstrap_entries` inherits the same reserved-path suppression automatically.
   - Treat `/dev`, `/proc`, and `/sys` as kernel-owned pseudo-filesystem prefixes, not just single directories; writable-upper snapshots must not persist descendants under those trees.
   - The active truth path for this story is `cargo test -p agent-os-kernel --test root_fs -- --test-threads=1` and root `pnpm check-types`.
+---
+## 2026-04-10 04:17:01 PDT - US-061
+- Added kernel FD-table `fcntl` support for `F_DUPFD`, `F_GETFD`, `F_SETFD`, `F_GETFL`, and `F_SETFL`, including per-descriptor `FD_CLOEXEC`, descriptor-local `O_NONBLOCK`, shared `O_APPEND`, and minimum-fd duplication semantics.
+- Surfaced the new behavior through `KernelVm::fd_fcntl()` and added focused FD-table plus kernel API coverage for status-flag toggling, descriptor flags, and duplicate-fd allocation.
+- Files changed: `crates/kernel/CLAUDE.md`, `crates/kernel/src/fd_table.rs`, `crates/kernel/src/kernel.rs`, `crates/kernel/tests/api_surface.rs`, `crates/kernel/tests/fd_table.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Kernel `fcntl` needs a split flag model: keep `O_APPEND` on `FileDescription` so dup/fork handles share append semantics, but keep `O_NONBLOCK` and `FD_CLOEXEC` on `FdEntry` because those remain descriptor-local in the current kernel.
+  - `F_GETFL` should expose only the visible access/status bits (`O_APPEND`, `O_NONBLOCK`, and access mode), not one-shot open flags like `O_CREAT` or `O_TRUNC`.
+  - The active truth path for this story is `cargo test -p agent-os-kernel --test fd_table --test api_surface -- --test-threads=1` plus root `pnpm check-types`.
 ---
