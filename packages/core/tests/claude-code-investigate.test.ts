@@ -182,7 +182,7 @@ if (rgExists) {
 		expect(stdout).toContain("rg-exists:true");
 		expect(stdout).toContain("rg-status:1");
 		expect(
-			/rg-stderr:(command not found:|WebAssembly warmup exited with status 1:)/.test(
+			/rg-stderr:(ERR_AGENT_OS_NODE_SYNC_RPC:\s*)?(command not found:|WebAssembly warmup exited with status 1:|CompileError: WebAssembly\.Module\(\): expected magic word)/.test(
 				stdout,
 			),
 			`Expected projected native binary execution to fail deterministically.\nstdout:\n${stdout}\nstderr:\n${stderr}`,

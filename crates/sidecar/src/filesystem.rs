@@ -170,6 +170,7 @@ where
         },
         GuestFilesystemOperation::RemoveFile => {
             vm.kernel.remove_file(&payload.path).map_err(kernel_error)?;
+            remove_guest_shadow_path(vm, &payload.path)?;
             GuestFilesystemResultResponse {
                 operation: payload.operation,
                 path: payload.path,
@@ -183,6 +184,7 @@ where
         }
         GuestFilesystemOperation::RemoveDir => {
             vm.kernel.remove_dir(&payload.path).map_err(kernel_error)?;
+            remove_guest_shadow_path(vm, &payload.path)?;
             GuestFilesystemResultResponse {
                 operation: payload.operation,
                 path: payload.path,
@@ -203,6 +205,7 @@ where
             vm.kernel
                 .rename(&payload.path, &destination)
                 .map_err(kernel_error)?;
+            rename_guest_shadow_path(vm, &payload.path, &destination)?;
             GuestFilesystemResultResponse {
                 operation: payload.operation,
                 path: payload.path,
@@ -1222,6 +1225,75 @@ fn mirror_guest_directory_write_to_shadow(
     Ok(())
 }
 
+fn remove_guest_shadow_path(vm: &mut VmState, guest_path: &str) -> Result<(), SidecarError> {
+    let guest_path = normalize_path(guest_path);
+    let shadow_path = shadow_host_path_for_guest(&vm.cwd, &guest_path);
+    remove_shadow_path_if_exists(&shadow_path, &guest_path)
+}
+
+fn rename_guest_shadow_path(
+    vm: &mut VmState,
+    from_path: &str,
+    to_path: &str,
+) -> Result<(), SidecarError> {
+    let from_path = normalize_path(from_path);
+    let to_path = normalize_path(to_path);
+    let from_shadow_path = shadow_host_path_for_guest(&vm.cwd, &from_path);
+    let to_shadow_path = shadow_host_path_for_guest(&vm.cwd, &to_path);
+
+    if !from_shadow_path.exists() {
+        remove_shadow_path_if_exists(&to_shadow_path, &to_path)?;
+        return Ok(());
+    }
+
+    if let Some(parent) = to_shadow_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            SidecarError::Io(format!(
+                "failed to create shadow parent for rename {} -> {}: {error}",
+                from_path, to_path
+            ))
+        })?;
+    }
+
+    remove_shadow_path_if_exists(&to_shadow_path, &to_path)?;
+    fs::rename(&from_shadow_path, &to_shadow_path).map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to mirror guest rename {} -> {} into shadow root: {error}",
+            from_path, to_path
+        ))
+    })?;
+
+    Ok(())
+}
+
+fn remove_shadow_path_if_exists(shadow_path: &Path, guest_path: &str) -> Result<(), SidecarError> {
+    match fs::symlink_metadata(shadow_path) {
+        Ok(metadata) => {
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                fs::remove_dir_all(shadow_path).map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to remove shadow directory for {}: {error}",
+                        guest_path
+                    ))
+                })?;
+            } else {
+                fs::remove_file(shadow_path).map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to remove shadow path for {}: {error}",
+                        guest_path
+                    ))
+                })?;
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(SidecarError::Io(format!(
+            "failed to inspect shadow path for {}: {error}",
+            guest_path
+        ))),
+    }
+}
+ 
 fn sync_active_shadow_path_to_kernel(
     vm: &mut VmState,
     guest_path: &str,
