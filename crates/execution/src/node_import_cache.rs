@@ -2939,6 +2939,20 @@ function normalizeFsFd(value) {
   return normalizeFsInteger(value, 'fd');
 }
 
+function isStdioFd(fd) {
+  return fd === 0 || fd === 1 || fd === 2;
+}
+
+function writeToStdioFd(fd, value) {
+  const stream =
+    fd === 1 ? process.stdout : fd === 2 ? process.stderr : null;
+  if (!stream || typeof stream.write !== 'function') {
+    throw new Error(`Agent OS cannot write stdio fd ${fd}`);
+  }
+  stream.write(value);
+  return typeof value === 'string' ? Buffer.byteLength(value) : value.byteLength;
+}
+
 function normalizeFsMode(mode) {
   if (mode == null) {
     return null;
@@ -8814,6 +8828,13 @@ function routeChunkToFd(fd, bytes) {
     bytes: Buffer.from(bytes ?? []).length,
   });
   if (!handle) {
+    if (isStdioFd(numericFd) && routeChunkToDelegateFd(numericFd, bytes)) {
+      return;
+    }
+    if (isStdioFd(numericFd)) {
+      writeToStdioFd(numericFd, Buffer.from(bytes ?? []));
+      return;
+    }
     if (
       numericFd > 2 &&
       delegateManagedFdRefCounts.has(numericFd) &&
@@ -8826,6 +8847,13 @@ function routeChunkToFd(fd, bytes) {
   }
 
   if (handle.kind === 'passthrough') {
+    if (routeChunkToDelegateFd(handle.targetFd, bytes)) {
+      return;
+    }
+    if (isStdioFd(handle.targetFd)) {
+      writeToStdioFd(handle.targetFd, Buffer.from(bytes ?? []));
+      return;
+    }
     writeSync(handle.targetFd, bytes);
     return;
   }
@@ -8871,7 +8899,9 @@ function routeChunkToDelegateFd(fd, bytes) {
 
 function finalizeChildExit(record, exitCode, signal) {
   const status =
-    signal == null ? (exitCode ?? 1) : 128 + signalNumberFromName(signal);
+    signal == null
+      ? ((Number(exitCode ?? 1) & 0xff) << 8)
+      : (signalNumberFromName(signal) & 0x7f);
   record.exitStatus = status;
   for (const fd of record.delegateRetainedFds ?? []) {
     if (releaseDelegateFd(fd) && typeof delegateManagedFdClose === 'function') {
@@ -9977,6 +10007,17 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
 
 wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
   const handle = lookupFdHandle(fd);
+  const numericFd = Number(fd) >>> 0;
+  if (numericFd === 1 || numericFd === 2) {
+    try {
+      const bytes = collectGuestIovBytes(iovs, iovsLen);
+      (numericFd === 1 ? process.stdout : process.stderr).write(bytes);
+      return writeGuestUint32(nwrittenPtr, bytes.length);
+    } catch {
+      return WASI_ERRNO_FAULT;
+    }
+  }
+
   if (handle?.kind === 'pipe-write') {
     try {
       const bytes = collectGuestIovBytes(iovs, iovsLen);

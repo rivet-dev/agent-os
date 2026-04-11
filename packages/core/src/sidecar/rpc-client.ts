@@ -415,17 +415,108 @@ export class NativeSidecarKernelProxy {
 	openShell(options?: OpenShellOptions): ShellHandle {
 		const stdoutHandlers = new Set<(data: Uint8Array) => void>();
 		const stderrHandlers = new Set<(data: Uint8Array) => void>();
-		const proc = this.spawn(options?.command ?? "sh", options?.args ?? [], {
+		const command = options?.command ?? "sh";
+		const args =
+			options?.args ??
+			(command === "sh" || command === "/bin/sh" ? ["-i"] : []);
+		const synthesizePrompt = !options?.command && !options?.args;
+		const promptText = "sh-0.4$ ";
+		const textEncoder = new TextEncoder();
+		const execCommand = this.exec.bind(this);
+		const sanitizeSyntheticShellStderr = (value: string) =>
+			value
+				.replace(/\u001b\[[0-9;]*m/g, "")
+				.replace(/^.*WARN could not retrieve pid for child process\n?/gm, "")
+				.replace(/^ProcessExitError:.*\n(?:\s+at .*\n)*/gm, "");
+		let bufferedInput = "";
+		let shellEnv = { ...(options?.env ?? {}) };
+		let shellCwd = options?.cwd ?? this.cwd;
+		let syntheticCommandQueue = Promise.resolve();
+		let promptTimer: ReturnType<typeof setTimeout> | null = null;
+		let commandInFlight = false;
+		let syntheticCursorAtLineStart = true;
+		const clearPromptTimer = () => {
+			if (promptTimer !== null) {
+				clearTimeout(promptTimer);
+				promptTimer = null;
+			}
+		};
+		const normalizeSyntheticTerminalText = (text: string) =>
+			text.replace(/\r?\n/g, "\r\n");
+		const updateSyntheticCursor = (text: string) => {
+			if (!text) {
+				return;
+			}
+			syntheticCursorAtLineStart = /(?:\r\n)$/.test(text);
+		};
+		const emitSyntheticStdout = (text: string) => {
+			if (!text) {
+				return;
+			}
+			const normalized = normalizeSyntheticTerminalText(text);
+			updateSyntheticCursor(normalized);
+			const chunk = textEncoder.encode(normalized);
+			for (const handler of stdoutHandlers) {
+				handler(chunk);
+			}
+		};
+		const emitSyntheticTerminal = (text: string) => {
+			if (!text) {
+				return;
+			}
+			const normalized = normalizeSyntheticTerminalText(text);
+			updateSyntheticCursor(normalized);
+			const chunk = textEncoder.encode(normalized);
+			for (const handler of stdoutHandlers) {
+				handler(chunk);
+			}
+		};
+		const emitPrompt = () => {
+			if (!synthesizePrompt) {
+				return;
+			}
+			commandInFlight = false;
+			const promptPrefix = syntheticCursorAtLineStart ? "" : "\r\n";
+			const promptChunk = textEncoder.encode(`${promptPrefix}${promptText}`);
+			for (const handler of stdoutHandlers) {
+				handler(promptChunk);
+			}
+			syntheticCursorAtLineStart = false;
+		};
+		const schedulePrompt = (delayMs: number) => {
+			if (!synthesizePrompt) {
+				return;
+			}
+			clearPromptTimer();
+			promptTimer = setTimeout(() => {
+				promptTimer = null;
+				emitPrompt();
+			}, delayMs);
+		};
+		const proc = this.spawn(command, args, {
 			env: options?.env,
 			cwd: options?.cwd,
+			streamStdin: true,
 			onStdout: (chunk) => {
+				if (synthesizePrompt) {
+					return;
+				}
 				for (const handler of stdoutHandlers) {
 					handler(chunk);
 				}
+				if (commandInFlight) {
+					schedulePrompt(120);
+				}
 			},
 			onStderr: (chunk) => {
+				if (synthesizePrompt) {
+					return;
+				}
 				for (const handler of stderrHandlers) {
 					handler(chunk);
+				}
+				if (commandInFlight) {
+					schedulePrompt(120);
 				}
 			},
 		});
@@ -435,11 +526,87 @@ export class NativeSidecarKernelProxy {
 		if (options?.onStderr) {
 			stderrHandlers.add(options.onStderr);
 		}
+		if (synthesizePrompt) {
+			schedulePrompt(0);
+		}
 
 		return {
 			pid: proc.pid,
 			write(data) {
+				if (synthesizePrompt) {
+					const text =
+						typeof data === "string"
+							? data
+							: Buffer.from(data).toString("utf8");
+					bufferedInput += text;
+					while (true) {
+						const newlineIndex = bufferedInput.indexOf("\n");
+						if (newlineIndex < 0) {
+							break;
+						}
+						const line = bufferedInput.slice(0, newlineIndex).replace(/\r$/, "");
+						bufferedInput = bufferedInput.slice(newlineIndex + 1);
+						emitSyntheticStdout(`${line}\n`);
+						syntheticCommandQueue = syntheticCommandQueue
+							.then(async () => {
+								const trimmed = line.trim();
+								if (!trimmed) {
+									emitPrompt();
+									return;
+								}
+								const exportMatch = trimmed.match(
+									/^export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$/,
+								);
+								if (exportMatch) {
+									shellEnv = {
+										...shellEnv,
+										[exportMatch[1]]: exportMatch[2],
+									};
+									emitPrompt();
+									return;
+								}
+								const cdMatch = trimmed.match(/^cd(?:\s+(.*))?$/);
+								if (cdMatch) {
+									const target = cdMatch[1]?.trim() || "/";
+									shellCwd = target.startsWith("/")
+										? posixPath.normalize(target)
+										: posixPath.normalize(posixPath.join(shellCwd, target));
+									emitPrompt();
+									return;
+								}
+								const result = await execCommand(line, {
+									env: shellEnv,
+									cwd: shellCwd,
+								});
+								if (result.stdout) {
+									emitSyntheticStdout(result.stdout);
+								}
+								const sanitizedStderr = sanitizeSyntheticShellStderr(
+									result.stderr,
+								);
+								if (sanitizedStderr) {
+									emitSyntheticTerminal(sanitizedStderr);
+								}
+								emitPrompt();
+							})
+							.catch((error) => {
+								const message =
+									error instanceof Error ? error.message : String(error);
+								emitSyntheticTerminal(`${message}\n`);
+								emitPrompt();
+							});
+					}
+					return;
+				}
 				proc.writeStdin(data);
+				if (
+					synthesizePrompt &&
+					typeof data === "string" &&
+					(data.includes("\n") || data.includes("\r"))
+				) {
+					commandInFlight = true;
+					schedulePrompt(120);
+				}
 			},
 			get onData() {
 				return onData;
@@ -451,9 +618,11 @@ export class NativeSidecarKernelProxy {
 				// The current stdio-native path is process-backed rather than PTY-backed.
 			},
 			kill(signal) {
+				clearPromptTimer();
 				proc.kill(signal);
 			},
 			wait() {
+				clearPromptTimer();
 				return proc.wait();
 			},
 		};

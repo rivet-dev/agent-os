@@ -59,6 +59,7 @@ Each agent type needs:
   - Use low timeouts for test commands (60000ms max).
 - For `tests/wasm-commands.test.ts`, broad `-t "grep"` or `-t "sed"` filters can pull in unrelated `rg`, `gzip`, or cross-package pipeline coverage via substring matches. When a story only gates the `grep`/`sed` blocks, use the explicit case names or a narrower `--testNamePattern` that only matches those block entries.
 - Cross-workspace suites like `registry/tests/*` import `@rivet-dev/agent-os-core` from `packages/core/dist`, not directly from `src/`. After changing exported test-runtime code such as `src/runtime-compat.ts`, rebuild `packages/core` before trusting registry/package Vitest results.
+- The synthetic `openShell()` fallback in `src/sidecar/rpc-client.ts` needs PTY-style output semantics for xterm-based harnesses: normalize terminal-visible line endings to `\r\n`, and route command stderr through the main `onData` stream instead of treating it like a separate non-PTY stderr channel.
 - **Always verify related tests pass before considering work done.**
 - **All tests run inside the VM** -- network servers, file I/O, agent processes.
 - For `vm.exec()` cwd/path tests, prefer setting up files from inside the guest shell when the assertion is about command resolution or relative paths. VM filesystem API writes becoming visible to host-backed runtimes is a separate shadow-sync surface and should be tested independently.

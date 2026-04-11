@@ -15,6 +15,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - `HostDirFilesystem` mutations should stay on the anchored `openat2(... RESOLVE_BENEATH ...)` path and then operate through the `/proc/self/fd/<fd>` handle; that keeps direct operations like `pwrite` host-backed without reintroducing path-escape races or falling back to whole-file rewrites.
 - For `RootFilesystemDescriptor`, order `lowers` from highest to lowest precedence and let `bootstrap_entries` act like the single writable upper; bootstrap directory entries must be applied with `mkdir`-style semantics so upper snapshots can repeat lower directories without failing on `EEXIST`.
 - Cross-workspace Vitest suites such as `registry/tests/*` load `@rivet-dev/agent-os-core` from `packages/core/dist`; after changing exported runtime-compat/test-runtime code, rebuild `packages/core` before trusting those results.
+- The synthetic `openShell()` fallback in `packages/core/src/sidecar/rpc-client.ts` has to behave like a PTY for `TerminalHarness`/xterm consumers: normalize emitted newlines to `\r\n` and surface terminal-visible stderr through the main `onData` stream or prompt/output assertions will drift by column.
 - Compat `createKernel()` loopback exemptions must be carried in both create-VM env metadata and every later `configureVm()` call, because native-sidecar VM reconfiguration overwrites prior loopback exemption state.
 - Kernel-owned network scaffolding should register per-process socket lifecycle state in `crates/kernel/src/socket_table.rs` and rely on `cleanup_process_resources()` for exit cleanup instead of keeping separate socket counters elsewhere.
 - For migrated sidecar networking paths, derive listener and bound-UDP snapshots plus VM-wide socket counts from `vm.kernel` socket records; `ActiveProcess` TCP/UDP maps are handle registries and may contain stale or duplicate guest-address copies for kernel-backed sockets.
@@ -178,4 +179,12 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - When a pnpm-symlinked package entrypoint resolves a bare dependency, generic `.pnpm/node_modules/<pkg>` hoists must stay behind package-specific virtual-store scans or guest ESM imports can downgrade to an older hoisted CJS copy and lose named exports.
   - The fastest way to debug ACP `session/new` failures is often to spawn the adapter directly in a VM and inspect stdout/stderr JSON-RPC output; that surfaced the real `minimatch` export mismatch immediately.
   - `cargo test -p agent-os-execution --test module_resolution -- --test-threads=1`, `pnpm --dir packages/core exec vitest run tests/pi-tool-llmock.test.ts --reporter=verbose`, and `pnpm --dir packages/core check-types` are sufficient proof for this story.
+---
+## [2026-04-11 03:55:13 PDT] - US-079
+- Made the registry node-binary behavior suite green by fixing native-sidecar Node command resolution for `node --version` and bare `node`, correcting shell child exit-status encoding and shared JS stdio routing, restoring bootstrap root directories like `/tmp` in compat VM filesystem setup, and making the headless `openShell()` fallback behave like a PTY for xterm-based terminal assertions.
+- Files changed: `crates/execution/src/node_import_cache.rs`, `crates/sidecar/src/execution.rs`, `packages/core/CLAUDE.md`, `packages/core/src/runtime-compat.ts`, `packages/core/src/sidecar/rpc-client.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The registry `node-binary-behavior` terminal cases exercise `packages/core`'s headless `openShell()` path through `TerminalHarness`, so newline semantics need to be PTY-like (`\r\n`, merged terminal stream) rather than raw pipe semantics.
+  - In compat VM setup, the provided in-memory root snapshot should be merged with the POSIX bootstrap entries instead of replacing them outright, or guest Node `fs.readdirSync("/")` probes will miss expected defaults like `/tmp`.
+  - For this story, the truthful acceptance commands were `pnpm --dir registry exec vitest run tests/kernel/node-binary-behavior.test.ts --reporter=verbose` and root `pnpm check-types`.
 ---

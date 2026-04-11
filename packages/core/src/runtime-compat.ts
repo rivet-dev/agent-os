@@ -1765,6 +1765,20 @@ function createBootstrapEntries(commandNames: string[]): RootFilesystemEntry[] {
 	return entries;
 }
 
+function mergeRootFilesystemEntries(
+	baseEntries: RootFilesystemEntry[],
+	overrideEntries: RootFilesystemEntry[],
+): RootFilesystemEntry[] {
+	const merged = new Map<string, RootFilesystemEntry>();
+	for (const entry of baseEntries) {
+		merged.set(entry.path, entry);
+	}
+	for (const entry of overrideEntries) {
+		merged.set(entry.path, entry);
+	}
+	return [...merged.values()];
+}
+
 async function snapshotFilesystemEntries(
 	filesystem: VirtualFileSystem,
 	targetPath = "/",
@@ -2191,12 +2205,16 @@ class NativeKernel implements Kernel {
 				this.loopbackExemptPorts,
 			);
 		}
+		const snapshotEntries = await snapshotFilesystemEntries(this.options.filesystem);
 		const rootFilesystem = {
 			disableDefaultBaseLayer: true,
 			lowers: [
 				{
 					kind: "snapshot" as const,
-					entries: await snapshotFilesystemEntries(this.options.filesystem),
+					entries: mergeRootFilesystemEntries(
+						createBootstrapEntries([]),
+						snapshotEntries,
+					),
 				},
 			],
 		};

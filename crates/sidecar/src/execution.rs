@@ -4072,61 +4072,90 @@ where
         }
 
         if is_node_runtime_command(&command) {
+            if process_args.is_empty() {
+                env.insert(String::from("AGENT_OS_NODE_EVAL"), String::new());
+                prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, None)?;
+
+                return Ok(ResolvedChildProcessExecution {
+                    command: command.clone(),
+                    process_args: vec![command.clone()],
+                    runtime: GuestRuntimeKind::JavaScript,
+                    entrypoint: String::from("-e"),
+                    execution_args: Vec::new(),
+                    env,
+                    guest_cwd,
+                    host_cwd,
+                    wasm_permission_tier: None,
+                    tool_command: false,
+                });
+            }
+
+            if let Some((entrypoint, execution_args)) =
+                resolve_special_node_cli_invocation(&process_args, &mut env)
+            {
+                prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, None)?;
+
+                return Ok(ResolvedChildProcessExecution {
+                    command: command.clone(),
+                    process_args: std::iter::once(command.clone())
+                        .chain(process_args.iter().cloned())
+                        .collect(),
+                    runtime: GuestRuntimeKind::JavaScript,
+                    entrypoint,
+                    execution_args,
+                    env,
+                    guest_cwd,
+                    host_cwd,
+                    wasm_permission_tier: None,
+                    tool_command: false,
+                });
+            }
+
             let Some(entrypoint_specifier) = process_args.first() else {
                 return Err(SidecarError::InvalidState(format!(
                     "{command} child_process spawn requires an entrypoint"
                 )));
             };
 
-            let (entrypoint, execution_args) =
-                if matches!(entrypoint_specifier.as_str(), "-e" | "--eval") {
-                    env.insert(
-                        String::from("AGENT_OS_NODE_EVAL"),
-                        process_args.get(1).cloned().unwrap_or_default(),
-                    );
-                    (
-                        entrypoint_specifier.clone(),
-                        process_args.iter().skip(2).cloned().collect(),
-                    )
-                } else if is_path_like_specifier(entrypoint_specifier) {
-                    let guest_entrypoint = if entrypoint_specifier.starts_with('/') {
-                        normalize_path(entrypoint_specifier)
-                    } else if entrypoint_specifier.starts_with("file:") {
-                        normalize_path(entrypoint_specifier.trim_start_matches("file:"))
-                    } else {
-                        normalize_path(&format!("{guest_cwd}/{entrypoint_specifier}"))
-                    };
-                    let host_entrypoint = if entrypoint_specifier.starts_with("./")
-                        || entrypoint_specifier.starts_with("../")
-                    {
-                        host_cwd.join(entrypoint_specifier)
-                    } else {
-                        host_runtime_path_for_guest_path_with_env(
-                            vm,
-                            &runtime_env,
-                            &guest_entrypoint,
-                            parent_host_cwd,
-                        )
-                        .unwrap_or_else(|| {
-                            let candidate = PathBuf::from(&guest_entrypoint);
-                            if candidate.is_absolute() {
-                                candidate
-                            } else {
-                                host_cwd.join(&guest_entrypoint)
-                            }
-                        })
-                    };
-                    env.insert(String::from("AGENT_OS_GUEST_ENTRYPOINT"), guest_entrypoint);
-                    (
-                        host_entrypoint.to_string_lossy().into_owned(),
-                        process_args.iter().skip(1).cloned().collect(),
-                    )
+            let (entrypoint, execution_args) = if is_path_like_specifier(entrypoint_specifier) {
+                let guest_entrypoint = if entrypoint_specifier.starts_with('/') {
+                    normalize_path(entrypoint_specifier)
+                } else if entrypoint_specifier.starts_with("file:") {
+                    normalize_path(entrypoint_specifier.trim_start_matches("file:"))
                 } else {
-                    (
-                        entrypoint_specifier.clone(),
-                        process_args.iter().skip(1).cloned().collect(),
-                    )
+                    normalize_path(&format!("{guest_cwd}/{entrypoint_specifier}"))
                 };
+                let host_entrypoint = if entrypoint_specifier.starts_with("./")
+                    || entrypoint_specifier.starts_with("../")
+                {
+                    host_cwd.join(entrypoint_specifier)
+                } else {
+                    host_runtime_path_for_guest_path_with_env(
+                        vm,
+                        &runtime_env,
+                        &guest_entrypoint,
+                        parent_host_cwd,
+                    )
+                    .unwrap_or_else(|| {
+                        let candidate = PathBuf::from(&guest_entrypoint);
+                        if candidate.is_absolute() {
+                            candidate
+                        } else {
+                            host_cwd.join(&guest_entrypoint)
+                        }
+                    })
+                };
+                env.insert(String::from("AGENT_OS_GUEST_ENTRYPOINT"), guest_entrypoint);
+                (
+                    host_entrypoint.to_string_lossy().into_owned(),
+                    process_args.iter().skip(1).cloned().collect(),
+                )
+            } else {
+                (
+                    entrypoint_specifier.clone(),
+                    process_args.iter().skip(1).cloned().collect(),
+                )
+            };
             let guest_entrypoint = env.get("AGENT_OS_GUEST_ENTRYPOINT").cloned();
             prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
 
@@ -5652,59 +5681,87 @@ fn resolve_command_execution(
     env.extend(extra_env.clone());
 
     if is_node_runtime_command(command) {
+        if args.is_empty() {
+            env.insert(String::from("AGENT_OS_NODE_EVAL"), String::new());
+            prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, None)?;
+
+            return Ok(ResolvedChildProcessExecution {
+                command: String::from(JAVASCRIPT_COMMAND),
+                process_args: vec![command.to_owned()],
+                runtime: GuestRuntimeKind::JavaScript,
+                entrypoint: String::from("-e"),
+                execution_args: Vec::new(),
+                env,
+                guest_cwd,
+                host_cwd,
+                wasm_permission_tier: None,
+                tool_command: false,
+            });
+        }
+
+        if let Some((entrypoint, execution_args)) =
+            resolve_special_node_cli_invocation(args, &mut env)
+        {
+            prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, None)?;
+
+            return Ok(ResolvedChildProcessExecution {
+                command: String::from(JAVASCRIPT_COMMAND),
+                process_args: std::iter::once(command.to_owned())
+                    .chain(args.iter().cloned())
+                    .collect(),
+                runtime: GuestRuntimeKind::JavaScript,
+                entrypoint,
+                execution_args,
+                env,
+                guest_cwd,
+                host_cwd,
+                wasm_permission_tier: None,
+                tool_command: false,
+            });
+        }
+
         let Some(entrypoint_specifier) = args.first() else {
             return Err(SidecarError::InvalidState(format!(
                 "{command} execution requires an entrypoint"
             )));
         };
 
-        let (entrypoint, execution_args, guest_entrypoint) =
-            if matches!(entrypoint_specifier.as_str(), "-e" | "--eval") {
-                env.insert(
-                    String::from("AGENT_OS_NODE_EVAL"),
-                    args.get(1).cloned().unwrap_or_default(),
-                );
-                (
-                    entrypoint_specifier.clone(),
-                    args.iter().skip(2).cloned().collect(),
-                    None,
-                )
-            } else {
-                let requested_host_entrypoint =
-                    resolve_host_entrypoint_within_vm_host_cwd(vm, entrypoint_specifier);
-                if requested_host_entrypoint.is_some() && !allow_host_path_overrides {
-                    let requested_cwd = cwd.unwrap_or(guest_cwd.as_str());
-                    return Err(SidecarError::InvalidState(format!(
-                        "execution cwd {requested_cwd} is outside sandbox root {}",
-                        vm.host_cwd.to_string_lossy()
-                    )));
-                }
-                let host_entrypoint_override = allow_host_path_overrides
-                    .then(|| resolve_host_entrypoint_within_vm_host_cwd(vm, entrypoint_specifier))
-                    .flatten();
-                let guest_entrypoint = host_entrypoint_override
-                    .as_ref()
-                    .map(|(guest_entrypoint, _)| guest_entrypoint.clone())
-                    .or_else(|| guest_entrypoint_for_specifier(&guest_cwd, entrypoint_specifier));
-                let entrypoint = host_entrypoint_override.map_or_else(
-                    || {
-                        guest_entrypoint.as_ref().map_or_else(
-                            || entrypoint_specifier.clone(),
-                            |guest_entrypoint| {
-                                resolve_vm_guest_path_to_host(vm, guest_entrypoint)
-                                    .to_string_lossy()
-                                    .into_owned()
-                            },
-                        )
-                    },
-                    |(_, host_entrypoint)| host_entrypoint,
-                );
-                (
-                    entrypoint,
-                    args.iter().skip(1).cloned().collect(),
-                    guest_entrypoint,
-                )
-            };
+        let (entrypoint, execution_args, guest_entrypoint) = {
+            let requested_host_entrypoint =
+                resolve_host_entrypoint_within_vm_host_cwd(vm, entrypoint_specifier);
+            if requested_host_entrypoint.is_some() && !allow_host_path_overrides {
+                let requested_cwd = cwd.unwrap_or(guest_cwd.as_str());
+                return Err(SidecarError::InvalidState(format!(
+                    "execution cwd {requested_cwd} is outside sandbox root {}",
+                    vm.host_cwd.to_string_lossy()
+                )));
+            }
+            let host_entrypoint_override = allow_host_path_overrides
+                .then(|| resolve_host_entrypoint_within_vm_host_cwd(vm, entrypoint_specifier))
+                .flatten();
+            let guest_entrypoint = host_entrypoint_override
+                .as_ref()
+                .map(|(guest_entrypoint, _)| guest_entrypoint.clone())
+                .or_else(|| guest_entrypoint_for_specifier(&guest_cwd, entrypoint_specifier));
+            let entrypoint = host_entrypoint_override.map_or_else(
+                || {
+                    guest_entrypoint.as_ref().map_or_else(
+                        || entrypoint_specifier.clone(),
+                        |guest_entrypoint| {
+                            resolve_vm_guest_path_to_host(vm, guest_entrypoint)
+                                .to_string_lossy()
+                                .into_owned()
+                        },
+                    )
+                },
+                |(_, host_entrypoint)| host_entrypoint,
+            );
+            (
+                entrypoint,
+                args.iter().skip(1).cloned().collect(),
+                guest_entrypoint,
+            )
+        };
 
         prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, guest_entrypoint)?;
 
@@ -6123,6 +6180,30 @@ fn is_node_runtime_command(command: &str) -> bool {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| matches!(name, "node" | "npm" | "npx"))
+}
+
+fn resolve_special_node_cli_invocation(
+    args: &[String],
+    env: &mut BTreeMap<String, String>,
+) -> Option<(String, Vec<String>)> {
+    let first = args.first()?;
+    match first.as_str() {
+        "-e" | "--eval" => {
+            env.insert(
+                String::from("AGENT_OS_NODE_EVAL"),
+                args.get(1).cloned().unwrap_or_default(),
+            );
+            Some((first.clone(), args.iter().skip(2).cloned().collect()))
+        }
+        "-v" | "--version" => {
+            env.insert(
+                String::from("AGENT_OS_NODE_EVAL"),
+                String::from("console.log(process.version);"),
+            );
+            Some((String::from("-e"), args.to_vec()))
+        }
+        _ => None,
+    }
 }
 
 fn resolve_guest_command_entrypoint(
