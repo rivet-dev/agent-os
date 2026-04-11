@@ -1252,7 +1252,11 @@ impl JavascriptExecutionEngine {
                 .as_deref()
                 .is_some_and(inline_code_uses_module_mode);
         let user_code = if let Some(inline_code) = inline_code {
-            inline_code
+            if matches!(guest_entrypoint.as_str(), "-e" | "--eval") {
+                inline_code
+            } else {
+                format!("{inline_code}\n//# sourceURL={guest_entrypoint}")
+            }
         } else if use_module_mode {
             strip_javascript_hashbang(&fs::read_to_string(&host_entrypoint).map_err(|error| {
                 JavascriptExecutionError::PrepareImportCache(std::io::Error::new(
@@ -1545,8 +1549,9 @@ fn build_v8_user_code(entrypoint: &str, env: &BTreeMap<String, String>) -> Strin
     } else {
         // Module entrypoint - use require to load it
         format!(
-            "require({});",
-            serde_json::to_string(entrypoint).unwrap_or_else(|_| format!("\"{}\"", entrypoint))
+            "require({});\n//# sourceURL={}",
+            serde_json::to_string(entrypoint).unwrap_or_else(|_| format!("\"{}\"", entrypoint)),
+            entrypoint
         )
     }
 }
@@ -2281,8 +2286,7 @@ impl LocalBridgeState {
         let mut dir = normalize_guest_path(from_dir);
         let mut scanned_pnpm_roots = HashSet::new();
         loop {
-            let candidate_dirs = node_modules_candidate_dirs(&dir, package_name);
-            for package_dir in candidate_dirs {
+            for package_dir in node_modules_direct_candidate_dirs(&dir, package_name) {
                 if let Some(entry) =
                     self.resolve_package_entry_from_dir(&package_dir, subpath, mode)
                 {
@@ -2299,6 +2303,13 @@ impl LocalBridgeState {
                     ) {
                         return Some(entry);
                     }
+                }
+            }
+            for package_dir in node_modules_pnpm_fallback_candidate_dirs(&dir, package_name) {
+                if let Some(entry) =
+                    self.resolve_package_entry_from_dir(&package_dir, subpath, mode)
+                {
+                    return Some(entry);
                 }
             }
             if dir == "/" {
@@ -3710,7 +3721,8 @@ function isDisturbed(stream) {
   );
 }
 
-const streamModule = {
+const streamModule = Stream;
+Object.assign(streamModule, {
   Duplex,
   PassThrough,
   Readable,
@@ -3725,7 +3737,7 @@ const streamModule = {
   isReadable,
   isWritable,
   pipeline,
-};
+});
 
 export {
   Duplex,
@@ -4741,19 +4753,26 @@ fn split_package_request(request: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn node_modules_candidate_dirs(dir: &str, package_name: &str) -> Vec<String> {
+fn node_modules_direct_candidate_dirs(dir: &str, package_name: &str) -> Vec<String> {
     let mut candidates = HashSet::new();
     candidates.insert(join_guest_path(
         dir,
         &format!("node_modules/{package_name}"),
     ));
+    if dir == "/node_modules" || dir.ends_with("/node_modules") {
+        candidates.insert(join_guest_path(dir, package_name));
+    }
+    let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+    candidates.sort();
+    candidates
+}
+
+fn node_modules_pnpm_fallback_candidate_dirs(dir: &str, package_name: &str) -> Vec<String> {
+    let mut candidates = HashSet::new();
     candidates.insert(join_guest_path(
         dir,
         &format!("node_modules/.pnpm/node_modules/{package_name}"),
     ));
-    if dir == "/node_modules" || dir.ends_with("/node_modules") {
-        candidates.insert(join_guest_path(dir, package_name));
-    }
     if let Some(index) = dir.rfind("/node_modules/") {
         let root = &dir[..index + "/node_modules".len()];
         candidates.insert(join_guest_path(

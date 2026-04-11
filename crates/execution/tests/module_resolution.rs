@@ -606,6 +606,49 @@ fn pnpm_symlinked_referrer_can_resolve_virtual_store_dependency() {
 }
 
 #[test]
+fn pnpm_symlinked_referrer_prefers_package_store_dependency_over_generic_hoist() {
+    let fixture = Fixture::new();
+    fixture.write_json(
+        "node_modules/.pnpm/node_modules/dep/package.json",
+        serde_json::json!({ "main": "./index.js" }),
+    );
+    fixture.write(
+        "node_modules/.pnpm/node_modules/dep/index.js",
+        "module.exports = 'generic';",
+    );
+    fixture.write(
+        "node_modules/.pnpm/pkg-a@1.0.0/node_modules/pkg-a/index.js",
+        "import { named } from 'dep';\nexport default named;\n",
+    );
+    fixture.write_json(
+        "node_modules/.pnpm/pkg-a@1.0.0/node_modules/pkg-a/package.json",
+        serde_json::json!({ "type": "module" }),
+    );
+    fixture.write(
+        "node_modules/.pnpm/pkg-a@1.0.0/node_modules/dep/index.js",
+        "export const named = 1;",
+    );
+    fixture.write_json(
+        "node_modules/.pnpm/pkg-a@1.0.0/node_modules/dep/package.json",
+        serde_json::json!({
+            "type": "module",
+            "exports": "./index.js",
+        }),
+    );
+    fixture.symlink_dir(
+        "node_modules/.pnpm/pkg-a@1.0.0/node_modules/pkg-a",
+        "node_modules/pkg-a",
+    );
+
+    assert_import(
+        &fixture,
+        "dep",
+        "/root/node_modules/pkg-a/index.js",
+        "/root/node_modules/.pnpm/pkg-a@1.0.0/node_modules/dep/index.js",
+    );
+}
+
+#[test]
 fn root_node_modules_fallback_is_checked_last() {
     let fixture = Fixture::new();
     fixture.mkdir("project/src");

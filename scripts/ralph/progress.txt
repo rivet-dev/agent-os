@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- In `crates/execution/src/javascript.rs`, pnpm generic hoist paths like `.pnpm/node_modules/<pkg>` should stay behind package-specific virtual-store resolution for symlinked package entrypoints; otherwise guest ESM imports can silently pick an older hoisted CJS copy and lose named exports.
 - Sidecar shadow-root reconciliation should prefer active-process shadow paths and only fall back to the VM cwd shadow root when the guest path is still absent in the kernel; native-sidecar JS bridge tests that cover mounted host files need to answer the bridge's `exists`/`stat`/`lstat` probes consistently with the real host file state.
 - In `crates/execution`, keep any real-host Node helpers isolated to host-only modules used by benchmarks or import-cache tests; shared guest runtime helpers like signal metadata should live in neutral modules that JS/WASM/Python can use without depending on host launch scaffolding.
 - WASM prewarm still runs the embedded V8 runner, so `prewarm_wasm_path()` must service the runner's internal `node:fs` sync-RPC traffic just like normal execution; dropping those requests turns downstream sidecar socket-state failures into warmup timeouts.
@@ -169,4 +170,12 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - If an execution-side V8 test exercises guest `child_process`, the harness must service the sync RPC bridge instead of calling `execution.wait()` directly; otherwise the test fails on pending RPCs before reaching the behavioral assertion.
   - Sync child-process parity is an end-to-end contract across `v8-bridge.source.js`, sidecar spawn-request parsing, and the sync poll loop; carrying `input` in only one layer is not enough.
   - `cargo test -p agent-os-execution --test javascript_v8 -- --test-threads=1`, root `pnpm check-types`, and a sidecar `cargo test -p agent-os-sidecar --no-run` compile pass are sufficient to prove this story’s execution-side change set is green without rerunning the unrelated sidecar integration suites.
+---
+## [2026-04-11 03:04:59 PDT] - US-078
+- Replaced the real-key-gated `packages/core/tests/pi-tool-llmock.test.ts` with llmock-backed Pi tool coverage and fixed the underlying pnpm module-resolution bug that made `createSession("pi")` pull a stale hoisted CJS `minimatch` instead of the package-specific ESM dependency.
+- Files changed: `crates/execution/AGENTS.md`, `crates/execution/src/javascript.rs`, `crates/execution/tests/module_resolution.rs`, `packages/core/tests/pi-tool-llmock.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - When a pnpm-symlinked package entrypoint resolves a bare dependency, generic `.pnpm/node_modules/<pkg>` hoists must stay behind package-specific virtual-store scans or guest ESM imports can downgrade to an older hoisted CJS copy and lose named exports.
+  - The fastest way to debug ACP `session/new` failures is often to spawn the adapter directly in a VM and inspect stdout/stderr JSON-RPC output; that surfaced the real `minimatch` export mismatch immediately.
+  - `cargo test -p agent-os-execution --test module_resolution -- --test-threads=1`, `pnpm --dir packages/core exec vitest run tests/pi-tool-llmock.test.ts --reporter=verbose`, and `pnpm --dir packages/core check-types` are sufficient proof for this story.
 ---

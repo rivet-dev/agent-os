@@ -141,7 +141,7 @@
         "Typecheck passes"
       ],
       "priority": 52,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -3361,6 +3361,188 @@
       "priority": 270,
       "passes": false,
       "notes": "Found during 2026-04-10 code review pass 17. Asymmetric cleanup — not a correctness bug today but wastes work and is a future-refactor footgun."
+    },
+    {
+      "id": "US-294",
+      "title": "Add `ended` to bridged net.Socket `_readableState` so ssh2 isWritable() returns true",
+      "description": "As a developer running `ssh2`/`ssh2-sftp-client` (or any package that uses the same `isWritable()` shape) inside the VM, I want the bridged `net.Socket` polyfill in `crates/execution/assets/v8-bridge.source.js` to expose `_readableState.ended` so that `ssh2`'s `isWritable(stream)` returns `true`. Today the polyfill only exposes `_readableState = { endEmitted: false }`; `ssh2/lib/utils.js` checks `stream._readableState.ended === false`, and because `undefined === false` is `false`, `ssh2` decides the socket is closed and never calls `sock.write()` — KEXINIT packets never go out and the handshake times out (`Timed out while waiting for handshake`). Reported upstream as rivet-dev/secure-exec#71 finding 2.",
+      "acceptanceCriteria": [
+        "`v8-bridge.source.js` net.Socket polyfill (line ~10409) initializes `_readableState = { endEmitted: false, ended: false }`",
+        "Same fix applied to the second socket polyfill site (line ~12613) and any equivalent stub used by `tls.TLSSocket` / connection wrappers",
+        "`_readableState.ended` is set to `true` in `_closeLoopbackReadable()`, in the null-chunk handler of `_pumpBridgeReads()`, and in `destroy()` — i.e. wherever `endEmitted = true` is currently set",
+        "Conformance test in `crates/sidecar/tests/` (or `crates/execution/tests/javascript_v8.rs`) constructs a guest `net.Socket`, asserts the ssh2 shape `socket._readableState.ended === false` while open and `=== true` after destroy, and asserts a minimal `isWritable(socket)` polyfill returns true while the socket is open",
+        "Generated `v8-bridge.js` regenerated from source via `pnpm --filter agent-os-execution build:v8-bridge` (or whatever the canonical build command is)",
+        "`cargo test -p agent-os-execution --test javascript_v8 -- --test-threads=1` passes",
+        "`cargo test -p agent-os-sidecar` passes"
+      ],
+      "priority": 50,
+      "passes": false,
+      "notes": "Upstream: rivet-dev/secure-exec#71 finding 2. Concrete compat bug independent of any WASM/security policy question. Validated locally by reporter against a live OpenSSH container — fixing this alone unblocks `ssh2` write path; full SSH/SFTP also needs US-295 (WASM enable) for poly1305 init. Keep `endEmitted` working — only ADD `ended`, do not rename or replace."
+    },
+    {
+      "id": "US-295",
+      "title": "Allow WebAssembly code generation inside guest V8 isolates",
+      "description": "As a developer running npm packages that use WebAssembly internally (`ssh2` for poly1305, plus dozens of other crypto/codec packages), I want guest V8 isolates to permit WebAssembly compilation so `WebAssembly.instantiate()` / `new WebAssembly.Module(bytes)` does not throw `WebAssembly.instantiate(): Wasm code generation disallowed by embedder`. Today `crates/v8-runtime/src/execution.rs:39-49` defines `deny_wasm_code_generation()` returning `false`, calls `set_allow_wasm_code_generation_callback()` from `disable_wasm()`, and `disable_wasm()` is invoked everywhere a fresh isolate is created and after every snapshot restore (`execution.rs:2016,3857,3888,3914`, `snapshot.rs:484,574,961`). Reported upstream as rivet-dev/secure-exec#71 finding 1. The kernel-isolation invariant in CLAUDE.md is about NOT spawning host processes / NOT touching the host filesystem / NOT calling real Node builtins — guest-side WebAssembly compilation is in-isolate sandboxed by V8 itself and does not violate any of those rules. Disabling it was a defensive default that breaks real npm package compatibility (one of CLAUDE.md's hard rules: \"npm packages must work UNMODIFIED inside the VM\").",
+      "acceptanceCriteria": [
+        "`disable_wasm()` is removed from the default isolate construction path in `crates/v8-runtime/src/execution.rs` (or kept but no longer called by default — explicit opt-in only)",
+        "`set_allow_wasm_code_generation_callback` either is not installed at all (V8 default = allow) or installs a callback returning `true`",
+        "All call sites in `execution.rs` (lines 2016, 3857, 3888, 3914) and `snapshot.rs` (lines 484, 574, 961) updated consistently — no dead `disable_wasm()` calls left behind, no comment drift",
+        "Existing `crates/v8-runtime/src/snapshot.rs` test that previously asserted \"WASM should be blocked after snapshot restore\" is rewritten to assert WASM IS available after snapshot restore (do NOT delete the test — invert the assertion so we keep coverage of the snapshot-restore code path)",
+        "New conformance test: a guest module successfully calls `new WebAssembly.Module(bytes)` and `new WebAssembly.Instance(module, imports)` for a 2-line hand-rolled WAT-compiled module that exports an `add` function",
+        "New negative test: confirm V8 still enforces its own WebAssembly resource limits (max compiled module size, max total memory) — i.e. we are loosening the embedder callback, not removing V8's built-in safety",
+        "If kept as opt-in: the kernel runtime config must default to ENABLED (npm-package-compat outranks defensive lockdown for guest-side compute)",
+        "Update `crates/v8-runtime/CLAUDE.md` and `crates/execution/CLAUDE.md` to document that guest WASM is allowed and to point at this story's reasoning",
+        "`cargo test -p agent-os-v8-runtime` passes (note: the snapshot test currently has to run with `--test-threads=1` per CLAUDE.md)",
+        "`cargo test -p agent-os-execution` passes"
+      ],
+      "priority": 51,
+      "passes": false,
+      "notes": "Upstream: rivet-dev/secure-exec#71 finding 1. The original `disable_wasm()` choice predates the npm-package-compat invariant in CLAUDE.md (\"npm packages must work UNMODIFIED inside the VM\") and breaks `ssh2`, `ssh2-sftp-client`, and any package that ships a wasm crypto/codec helper. V8's WASM JIT runs inside the same sandboxed isolate as the rest of the guest JS — it does not violate the kernel-isolation invariants (no host syscalls, no host fs, no host network). Validated upstream against a live OpenSSH container after enabling. Pair this with US-294 to unblock end-to-end ssh2/sftp. After this lands, US-296 covers the remaining async-instantiate hang."
+    },
+    {
+      "id": "US-296",
+      "title": "Fix async `WebAssembly.instantiate()` hang inside guest V8 isolates",
+      "description": "As a developer running npm packages that prefer the async `WebAssembly.instantiate(bytes, imports)` API over the sync `new WebAssembly.Module()` / `new WebAssembly.Instance()` pair, I want the async path to actually resolve inside the guest V8 isolate. Today (after US-295 enables WASM at all) the sync path works but `await WebAssembly.instantiate(bytes, imports)` hangs until the wall-clock execution timeout fires. The reporter (rivet-dev/secure-exec#71 finding 3) worked around it with a JS shim that monkey-patches `WebAssembly.instantiate` to use the sync API internally, but the runtime should handle the native async path correctly. The hang strongly suggests an interaction between V8's async WASM compilation microtasks and our isolate event-loop driver in `crates/v8-runtime/src/execution.rs` — possibly because the async-WASM-compile foreground task is not pumped, the resulting promise resolution microtask is not drained, or the embedder's microtask policy is set in a way that defers WASM resolution forever.",
+      "acceptanceCriteria": [
+        "Guest-side `await WebAssembly.instantiate(bytes, imports)` resolves with `{ module, instance }` for a small valid wasm payload, within the same wall-clock budget that the sync path uses",
+        "Guest-side `await WebAssembly.instantiateStreaming(fetch(url))` is either implemented correctly OR throws a clear `ERR_NOT_IMPLEMENTED` (per CLAUDE.md polyfill rule: never silently hang or return undefined)",
+        "Root-cause notes added to `crates/v8-runtime/CLAUDE.md` (or `crates/execution/CLAUDE.md`) explaining which V8 callback/microtask hook drives async wasm compilation in this runtime, so future debugging is faster",
+        "Conformance test in `crates/v8-runtime/tests/` or `crates/execution/tests/javascript_v8.rs` that compiles + runs a small wasm module via the async API and asserts: (a) promise resolves, (b) returns the documented `{module, instance}` shape, (c) the exported function returns the expected value when called from JS",
+        "Negative test: a wasm payload that fails to compile rejects the promise with a `WebAssembly.CompileError` instead of hanging",
+        "No regression in the sync path tests added by US-295",
+        "`cargo test -p agent-os-v8-runtime -- --test-threads=1` passes",
+        "`cargo test -p agent-os-execution --test javascript_v8 -- --test-threads=1` passes"
+      ],
+      "priority": 80,
+      "passes": false,
+      "notes": "Upstream: rivet-dev/secure-exec#71 finding 3. Depends on US-295 (WASM enabled at all). Lower priority than US-294/US-295 because the reporter's monkey-patch shim works as a stopgap, but the right long-term fix is for the runtime's async WASM path to work natively. Likely root cause is in how `crates/v8-runtime/src/execution.rs` pumps V8 foreground tasks / microtasks vs. how V8 schedules async WASM compilation — start by checking `set_microtasks_policy`, `perform_microtask_checkpoint`, and any `set_wasm_async_resolve_promise_callback` / streaming compilation hooks."
+    },
+    {
+      "id": "US-297",
+      "title": "LoopbackTlsEndpoint::read() panics on concurrent drain — guest-escapable DoS",
+      "description": "As a maintainer hardening the sidecar against guest-controlled input, I want `impl Read for LoopbackTlsEndpoint::read()` in `crates/sidecar/src/execution.rs` (~line 688) to stop using `incoming.pop_front().expect(\"loopback TLS transport should contain buffered bytes\")`. The current code does `while !incoming.is_empty() { ... incoming.pop_front().expect(...) }` with no synchronization between the `is_empty()` check and the `pop_front()`. If any other thread drains the queue between those two calls, the `expect()` panics the sidecar thread. Guest TLS ClientHello/handshake bytes flow through this exact buffer during concurrent loopback TLS connections, so a malicious or unlucky guest can trigger the race and take down the entire VM session.",
+      "acceptanceCriteria": [
+        "`LoopbackTlsEndpoint::read()` no longer contains any `.expect()` on the pop result — use `if let Some(byte) = incoming.pop_front()` or equivalent and break the copy loop on `None`",
+        "Same audit applied to any sibling `LoopbackTlsEndpoint::write`/`peek`/`flush` methods and to `peek_loopback_tls_client_hello` (no unwrap/expect on guest-controlled state)",
+        "Conformance test spawns N concurrent guest TLS handshakes against the loopback transport and asserts the sidecar never panics (use a panic hook + `Arc<AtomicUsize>` panic counter)",
+        "Conformance test specifically exercises a concurrent drain race: one thread reads in a loop while another drops the endpoint mid-stream; sidecar must survive",
+        "`cargo test -p agent-os-sidecar --test service -- --test-threads=4` passes (multi-threaded intentionally to exercise the race)"
+      ],
+      "priority": 45,
+      "passes": false,
+      "notes": "Introduced by US-074 (commit 667347e). Subagent review pass 40 flagged as CRITICAL. Guest TLS handshake bytes are untrusted input; a panic here is a guest→host DoS and crashes the entire VM session, not just the offending socket."
+    },
+    {
+      "id": "US-298",
+      "title": "wait_for_loopback_peer_socket_id 500ms timeout is too short and masks races",
+      "description": "As a maintainer keeping the sidecar TLS test suite deterministic, I want `wait_for_loopback_peer_socket_id()` in `crates/sidecar/src/execution.rs` (~line 633) to either (a) synchronize on a Condvar signalled by the accept path when the peer socket lands in the kernel, or (b) dramatically raise the polling timeout from the current 50 iterations × 10ms = 500ms total. On slow/loaded CI runners a just-accepted server socket frequently needs longer than 500ms to acquire its peer reference before the guest's TLS upgrade call fires, which surfaces as spurious \"no peer for TLS upgrade\" failures. US-074 papered over the flakiness with retry loops in the TLS test itself — that defers the race rather than fixing it.",
+      "acceptanceCriteria": [
+        "`wait_for_loopback_peer_socket_id` replaces the 50×10ms polling loop with a Condvar notified by the kernel accept path when a peer lands, OR raises the total timeout to at least 5 seconds with monotonic sleeps",
+        "`loopback_tls_transport_registry()` insert/lookup path signals any parked waiter with `notify_all()` whenever a new entry lands that could satisfy a pending lookup",
+        "TLS test in `crates/sidecar/tests/service.rs` removes the 30×10ms retry loop that was added as a workaround — the underlying sync is now deterministic",
+        "Stress test: spawn 20 concurrent TLS connections over loopback, assert all handshakes complete, assert no \"no peer for TLS upgrade\" error",
+        "`cargo test -p agent-os-sidecar --test service javascript_tls -- --test-threads=1` passes 5 runs in a row (can be automated with `--count 5` or a shell loop)"
+      ],
+      "priority": 60,
+      "passes": false,
+      "notes": "Introduced/exposed by US-074 (commit 667347e). Subagent review pass 40 flagged as HIGH. The TLS test was the exact test that killed the previous Ralph run for ~40 min; US-074 made it pass but the underlying race is still there and the retry loop is a band-aid."
+    },
+    {
+      "id": "US-299",
+      "title": "dns.resolve rrtype coverage is incomplete in v8-bridge — only A/AAAA work",
+      "description": "As a developer running npm packages that call `dns.resolve('example.com', 'MX'|'TXT'|'SRV'|'CNAME'|'PTR'|'NS'|'SOA', cb)` inside the VM, I want the guest `dns` polyfill to actually resolve those record types instead of rejecting them with \"Unsupported DNS rrtype\". US-074 (commit 667347e) changed `dns.resolve*` in `crates/execution/assets/v8-bridge.source.js` (~lines 9314-9321) to go through the bridged DNS lookup path with explicit family filtering — but the implementation only handles A (family=4) and AAAA (family=6). Every other rrtype errors out. This is a regression vs. the previous path (which at least fell through to `dns.lookup()`) and violates the CLAUDE.md rule \"Every Node.js builtin module must be a COMPLETE implementation, not a stub.\" The sidecar kernel's DNS resolver (HickoryDnsResolver) already supports all standard rrtypes — only the bridge glue is the gap.",
+      "acceptanceCriteria": [
+        "`dns.resolve4` / `dns.resolve6` / `dns.resolveMx` / `dns.resolveTxt` / `dns.resolveSrv` / `dns.resolveCname` / `dns.resolvePtr` / `dns.resolveNs` / `dns.resolveSoa` / `dns.resolveNaptr` / `dns.resolveCaa` all route to a bridge RPC that returns the correct record shape per Node.js docs (e.g. MX → `[{priority, exchange}]`, SRV → `[{priority, weight, port, name}]`, TXT → `string[][]`)",
+        "`dns.resolveAny()` returns the combined per-rrtype shape Node.js documents",
+        "`dns.promises.resolve*()` variants work identically (they share the bridge path)",
+        "Stub rrtypes that genuinely cannot be resolved throw `ERR_NOT_IMPLEMENTED` with a clear message, per CLAUDE.md polyfill rules — never return undefined or silently skip",
+        "Conformance test resolves known records against a fixture DNS server: A, AAAA, MX, TXT, SRV, CNAME minimum",
+        "Regenerated `v8-bridge.js` from source + `pnpm --dir packages/core snapshot:alpine-defaults` if needed",
+        "`cargo test -p agent-os-sidecar --test service javascript_network_dns -- --test-threads=1` passes"
+      ],
+      "priority": 65,
+      "passes": false,
+      "notes": "Introduced by US-074 (commit 667347e). Subagent review pass 40 flagged as HIGH. The new DNS path was an intentional upgrade for rrtype preservation but only half the shape work was done. Any package using MX/TXT/SRV (e.g. email libs, SMTP clients, SIP stacks, DNSBL checkers) will break."
+    },
+    {
+      "id": "US-300",
+      "title": "Loopback TLS transport registry key vulnerable to socket-id reuse collisions",
+      "description": "As a maintainer ensuring guest session isolation, I want `loopback_tls_transport_key()` in `crates/sidecar/src/execution.rs` (~line 514-519) to be robust to socket id reuse or wrap. Today the key is `(vm_id, min(socket_id, peer_socket_id), max(socket_id, peer_socket_id))` with `is_lower_socket = socket_id <= peer_socket_id` used to pick transport direction. If the kernel ever reuses a `SocketId` value (after close + new allocation) within the same vm_id, two distinct TLS sessions can collide in the registry and cross-leak handshake state between unrelated sockets. The socket id comparison also assumes monotonic allocation — a u64 wrap would invert the `is_lower_socket` ordering for the wrapped pair.",
+      "acceptanceCriteria": [
+        "Either: (a) the registry key includes a monotonic generation counter / creation epoch that guarantees uniqueness even with socket id reuse, OR (b) the socket table's `SocketId` allocator is verified never to reuse ids within a vm_id for the lifetime of the loopback transport registry entry",
+        "Test: close a TLS socket, force the sidecar to allocate a new one that would collide on id (if (b)), assert no cross-session leakage — OR assert that registry key uniqueness holds even with artificially colliding ids (if (a))",
+        "Document in `crates/sidecar/src/execution.rs` how the registry key guarantees uniqueness so future changes don't break the invariant",
+        "`cargo test -p agent-os-sidecar --test service` passes"
+      ],
+      "priority": 180,
+      "passes": false,
+      "notes": "Introduced by US-074 (commit 667347e). Subagent review pass 40 flagged as MEDIUM. Socket id reuse is rare in practice but the cross-session-leak blast radius is severe (one guest sees another guest's TLS ClientHello). Worth documenting the uniqueness invariant even if no code change is required."
+    },
+    {
+      "id": "US-301",
+      "title": "bridge_error_code() allows guest to spoof sidecar errno via colon-delimited segments",
+      "description": "As a maintainer hardening guest→host error-code boundaries, I want `bridge_error_code()` in `crates/v8-runtime/src/bridge.rs` (~lines 750-756) and the sibling `guest_errno_code()` in `crates/sidecar/src/execution.rs` (~lines 16221-16228) to reject error-code extractions from user-controlled segments. US-074 changed these from `split_once(':')` (first segment only) to `split(':').find(|code| code.starts_with('E') && ...)` (any segment that syntactically looks like an errno). The new behavior scans ALL colon-delimited segments, so a guest that controls any part of the error string — e.g. a rejected JSON RPC response, a parsed guest-side exception message, an upstream HTTP error body — can inject `EACCES` / `EPERM` / `EEXIST` anywhere in the string and have it promoted to `error.code`. Guest JS consumers checking `error.code === 'EACCES'` for permission-denied branches can now be spoofed by any string the guest partially controls.",
+      "acceptanceCriteria": [
+        "`bridge_error_code()` only inspects the FIRST colon-delimited segment (or a whitelist of sidecar-produced prefixes: `ERR_AGENT_OS_NODE_SYNC_RPC`, `ERR_AGENT_OS_BRIDGE`, ...)",
+        "OR: the extraction is scoped to a semantic token — e.g. `parse_sidecar_error(message)` that matches the exact `ERR_AGENT_OS_*: EXXXX: ...` grammar and rejects anything else",
+        "`guest_errno_code()` in sidecar/src/execution.rs gets the same fix",
+        "Conformance test: a guest-controlled error message `\"user said 'EACCES: denied'\"` does NOT produce `error.code === 'EACCES'` (it should be undefined or `'ERR_UNKNOWN'`)",
+        "Positive test: a real sidecar-produced `\"ERR_AGENT_OS_NODE_SYNC_RPC: EACCES: permission denied on /foo\"` still maps to `error.code === 'EACCES'`",
+        "`cargo test -p agent-os-v8-runtime` passes",
+        "`cargo test -p agent-os-sidecar` passes"
+      ],
+      "priority": 150,
+      "passes": false,
+      "notes": "Introduced by US-074 (commit 667347e). Subagent review pass 40 flagged as MEDIUM. Guest error-code spoofing is a real concern for any permission-sensitive guest library (fs/net retry logic, auth flows, anything that branches on EACCES/EPERM). The old `split_once(':')` behavior was stricter — the generalization was unnecessary for the US-074 goal."
+    },
+    {
+      "id": "US-302",
+      "title": "WASM signal-state control message uses in-band stdout stripping vulnerable to write-batching",
+      "description": "As a maintainer of the WASM execution path introduced in US-075 (commit 217924d), I want `translate_wasm_signal_state_stream_event()` in `crates/execution/src/wasm.rs:867-878` to use a framed/sideband signal-state channel instead of `.trim().strip_prefix()` on a stdout chunk. Today the function scans the whole stdout UTF-8 chunk for a `__AGENT_OS_WASM_SIGNAL_STATE__:` prefix and trims leading bytes — which misbehaves in two real ways: (1) if a guest writes `\"hello\\n__AGENT_OS_WASM_SIGNAL_STATE__:...\"` as a single `process.stdout.write()` call, the `.trim()` strips the `\"hello\"` prefix and the signal state parse will silently corrupt or drop the preceding application output; (2) if the guest writes the marker in two `write()` calls and the runtime batches them differently across runs, the split can land mid-marker and the prefix match silently fails — leading to flaky tests and silently dropped signal state updates. The root-cause fix in US-075 was to the v8 event-bridge startup ordering, NOT to how signal state is transported — so the in-band stdout marker is still the active transport and is still fragile.",
+      "acceptanceCriteria": [
+        "Signal-state messages travel over a dedicated framed channel (separate stream event variant, separate fd, or length-prefixed record in a sideband pipe) — NOT stripped from stdout",
+        "OR: the in-band stdout path is made robust by (a) requiring the marker to occupy a whole line with its own terminating `\\n`, (b) parsing stdout as a line-oriented stream (split_on_newline), and (c) only matching markers that are on their own line, preserving all other bytes intact for application stdout",
+        "Conformance test: guest writes `\"hello\\n__AGENT_OS_WASM_SIGNAL_STATE__:{...}\\n\"` in one `write()` call, asserts: (a) stdout event contains `\"hello\\n\"`, (b) signal-state event is delivered with the parsed JSON payload, (c) neither is dropped or corrupted",
+        "Conformance test: guest writes `__AGENT_OS_WASM_SIGNAL_STATE__:` prefix in chunk A and the rest of the JSON + `\\n` in chunk B; assert signal state is reconstructed correctly OR an error is surfaced (not silently dropped)",
+        "`cargo test -p agent-os-execution --test wasm` passes",
+        "`cargo test -p agent-os-sidecar --test socket_state_queries` passes"
+      ],
+      "priority": 75,
+      "passes": false,
+      "notes": "Found during 2026-04-10 subagent review pass 41 of commit 217924d (US-075). Medium-severity but high blast-radius: any guest WASM program that legitimately writes the marker substring (or any prefix of it) as application stdout will be silently mis-parsed. The prior US-075 hang was rooted in an event-bridge startup race (javascript.rs execute-vs-spawn ordering) and did not touch this transport — so this finding is an *existing* fragility that the new test regime will exercise more."
+    },
+    {
+      "id": "US-303",
+      "title": "inline_code_uses_module_mode() regex heuristic false-matches ESM keywords inside strings and comments",
+      "description": "As a maintainer of the inline-code execution path in `crates/execution/src/javascript.rs:1561-1606` (touched in US-075 commit 217924d), I want `inline_code_uses_module_mode()` to correctly distinguish ES-module source from CommonJS source without false-positives on bundle preambles, string literals, or source-map comments. Today the function scans line-by-line for patterns starting with `import `, `import{`, `import*`, or `export ` — which fires on (a) comments like `// import the auth module`, (b) string literals containing `\"import { x } from 'y'\"` inside bundle wrapper code, (c) multi-line imports where `import` is on its own line followed by `\\n  { default }` on the next, and (d) CJS tool output that embeds ESM examples in the header banner. A false-positive forces CJS code into ESM mode, causing mismatched execution semantics (no `require()`, no `module.exports`, different `this` binding, strict mode) and hard-to-diagnose silent failures before the real test assertions run.",
+      "acceptanceCriteria": [
+        "`inline_code_uses_module_mode()` either uses a real tokenizer/AST (cheaper alternative: strip comments + string literals first, then scan), OR switches to a positive CJS signal (`module.exports =`, `exports.X =`, top-level `require()`) combined with ESM signal, with explicit tie-break rules",
+        "Conformance test: source `// import { x } from 'y';\\nmodule.exports = { foo: 1 };` is detected as CJS (not ESM)",
+        "Conformance test: source `const msg = \"run: import x from 'y'\";\\nmodule.exports.msg = msg;` is detected as CJS",
+        "Conformance test: source `import\\n  { default as foo }\\nfrom 'bar';` (multi-line import) is detected as ESM",
+        "Conformance test: real ESM source `import { foo } from 'bar';\\nexport const baz = 1;` still detected as ESM",
+        "Negative test: empty source, source that is only comments, and source with `export` inside a template literal all produce deterministic (documented) detection results",
+        "`cargo test -p agent-os-execution` passes"
+      ],
+      "priority": 180,
+      "passes": false,
+      "notes": "Found during 2026-04-10 subagent review pass 41 of commit 217924d (US-075). Medium priority: most well-formed source will be classified correctly, but tool-generated preambles and bundle wrappers can trigger false positives that cause non-obvious silent failures in the early execution path. The right long-term fix is a proper tokenizer — node-stdlib-browser's module-mode detection or `es-module-lexer` (used by Vite) are fast reference implementations."
+    },
+    {
+      "id": "US-304",
+      "title": "US-077 conformance probe bypasses real sidecar child_process spawn/poll path",
+      "description": "As a maintainer verifying the sidecar's guest child_process implementation, I want the `javascript_execution_v8_child_process_conformance_matches_host_node` test (unignored in US-077 / commit 0e29621) to exercise the actual sidecar `spawn_javascript_child_process()` and `poll_javascript_child_process()` code path, NOT a test-side `wait_with_host_child_process_bridge` mock that intercepts SyncRpcRequest events and runs real host `Command::new()` processes to satisfy the guest's child_process requests. As-is, the test passes whenever the V8 bridge correctly shapes the sync-RPC request and whenever the test harness's mock subprocess layer handles it — the real sidecar JS-child-process path in `crates/sidecar/src/execution.rs` is never touched. That is a conformance-probe (guest bridge + harness) not a sidecar conformance test, so a regression in the sidecar's spawn/poll/stdin handling would go undetected by this test alone.",
+      "acceptanceCriteria": [
+        "Add a new test that runs a guest child_process.spawn(...) call against the REAL sidecar (agent-os-sidecar service path), asserting stdout/stderr/exitCode match Node.js semantics for at least: (a) spawn with no args, (b) spawn with argv, (c) spawn with stdio pipes (stdin write + stdout read), (d) spawn that fails ENOENT, (e) spawn that exits non-zero",
+        "The new test MUST go through `crates/sidecar/src/execution.rs` spawn_javascript_child_process + poll_javascript_child_process, not a test-side mock",
+        "The existing `javascript_execution_v8_child_process_conformance_matches_host_node` test + `wait_with_host_child_process_bridge` helper stay (they cover V8-bridge shape), but the doc-comment on the helper must clearly state it is a test-harness mock, NOT a sidecar conformance test, to prevent future confusion",
+        "Add a one-line CLAUDE.md note under crates/sidecar/ or crates/execution/ explaining the distinction so future test-coverage audits catch this kind of gap early",
+        "`cargo test -p agent-os-execution --test javascript_v8` passes",
+        "`cargo test -p agent-os-sidecar --test service javascript_child_process -- --test-threads=1` passes (new test)"
+      ],
+      "priority": 170,
+      "passes": false,
+      "notes": "Found during 2026-04-11 subagent review pass 43 of commit 0e29621 (US-077). Medium severity — no security or isolation bug, but a real test-coverage gap that makes US-077 weaker than its title claims. The reviewer graded assertion strength as FAIR and said verbatim: 'The test exercises guest code path + test-side bridging, not the actual sidecar child_process path' and 'True sidecar child_process unit coverage would test crates/sidecar/src/execution.rs spawn_javascript_child_process / poll_javascript_child_process directly. This commit is appropriate for unblocking the V8 bridge's child_process module compliance without claiming the sidecar's subprocess handling is fully validated.' Worth closing the gap before more stories build on the US-077 green state."
     }
   ]
 }
