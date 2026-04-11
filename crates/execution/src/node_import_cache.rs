@@ -11599,7 +11599,7 @@ fn write_file_if_changed(path: &Path, contents: &str) -> Result<(), io::Error> {
 #[cfg(test)]
 mod tests {
     use super::{NodeImportCache, NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_MS};
-    use crate::node_process::node_binary;
+    use crate::host_node::node_binary;
     use serde_json::Value;
     use std::collections::BTreeSet;
     use std::fs;

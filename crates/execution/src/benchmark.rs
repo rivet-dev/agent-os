@@ -2588,7 +2588,7 @@ fn run_host_node_sample(
     scenario: &ScenarioDefinition,
 ) -> Result<SampleMeasurement, JavascriptBenchmarkError> {
     let started_at = Instant::now();
-    let output = Command::new(crate::node_process::node_binary())
+    let output = Command::new(crate::host_node::node_binary())
         .arg(scenario.entrypoint)
         .current_dir(&workspace.root)
         .envs(scenario_env(workspace, scenario))
@@ -2857,7 +2857,7 @@ fn load_benchmark_artifact(
 }
 
 fn benchmark_host() -> Result<BenchmarkHost, JavascriptBenchmarkError> {
-    let node_binary = crate::node_process::node_binary();
+    let node_binary = crate::host_node::node_binary();
     let output = Command::new(&node_binary)
         .arg("--version")
         .output()

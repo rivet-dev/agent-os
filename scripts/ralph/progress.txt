@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- In `crates/execution`, keep any real-host Node helpers isolated to host-only modules used by benchmarks or import-cache tests; shared guest runtime helpers like signal metadata should live in neutral modules that JS/WASM/Python can use without depending on host launch scaffolding.
 - In `python-runner.mjs`, keep bundled Pyodide bootstrap package loading on `/__agent_os_pyodide` and only switch to `AGENT_OS_PYODIDE_PACKAGE_BASE_URL` after `pyodide.loadPackage("micropip")`; user `micropip.install(...)` URLs and bundled wheel/bootstrap URLs cannot share the same base.
 - V8 builtin coverage should treat `node:vm`, `node:v8`, and `node:worker_threads` as compatibility shims, not denied imports; keep true escape builtins like `node:inspector` and `node:cluster` on `ERR_ACCESS_DENIED`, and assert `worker_threads.Worker` fails with `ERR_NOT_IMPLEMENTED` instead of requiring the module import to fail.
 - Guest-visible runtime env is a shared cross-runtime contract: `prepare_guest_runtime_env(...)` should supply stable kernel-owned identity vars including `PATH`, Python should mirror only that guest-facing subset into `os.environ`, and the WASM `AGENT_OS_GUEST_ENV` payload must strip internal control vars like `AGENT_OS_*` / `NODE_SYNC_RPC_*` before they reach WASI guest code.
@@ -100,4 +101,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - The embedded WASM runner still exercises guest `node:fs` surfaces for its own module and file operations, so V8 migration work must answer those sync-RPC calls inside `wasm.rs` rather than surfacing them to callers.
   - Signal-state delivery on the shared V8 path cannot rely on the old control-pipe fd alone; keep a marker fallback in the runner and translate it back into `WasmExecutionEvent::SignalState` in `wasm.rs`.
   - Once WASM stays inside V8, permission regression tests that inspect host-Node argv/env are stale; the durable check is absence of `AGENT_OS_NODE_BINARY` launches plus focused runtime behavior.
+---
+## [2026-04-10 17:38:51 PDT] - US-071
+- Deleted `crates/execution/src/node_process.rs` and split its remaining responsibilities into a host-only `host_node.rs` helper plus a neutral `signal.rs` module, so guest JS/WASM runtime code no longer depends on a file that also owns host-Node launch scaffolding.
+- Localized the V8 stderr/control-message parsing helpers inside `javascript.rs`, kept WASM path resolution self-contained in `wasm.rs`, and updated benchmark/import-cache host Node call sites plus execution crate guidance to follow the new separation.
+- Files changed: `crates/execution/AGENTS.md`, `crates/execution/src/benchmark.rs`, `crates/execution/src/host_node.rs`, `crates/execution/src/javascript.rs`, `crates/execution/src/lib.rs`, `crates/execution/src/node_import_cache.rs`, `crates/execution/src/signal.rs`, `crates/execution/src/wasm.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Host-Node comparison code can stay for benchmarks or import-cache tests, but it should live behind a dedicated host-only helper module instead of being shared with guest runtime logic.
+  - Signal registration types are shared runtime contract data between execution and sidecar; keep them in a neutral module so cleanup of launch scaffolding does not ripple into protocol users.
+  - Focused migration verification for this cleanup is `cargo test -p agent-os-execution --test javascript_v8 -- --test-threads=1`, `cargo test -p agent-os-sidecar --test python -- --test-threads=1`, `cargo test -p agent-os-execution --test wasm -- --test-threads=1`, and root `pnpm check-types`.
 ---

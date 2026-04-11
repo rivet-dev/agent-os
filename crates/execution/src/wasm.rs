@@ -1,15 +1,14 @@
-use crate::common::{encode_json_string, frozen_time_ms};
+use crate::common::{
+    encode_json_string, encode_json_string_array, encode_json_string_map, frozen_time_ms,
+};
 use crate::javascript::{
     CreateJavascriptContextRequest, JavascriptExecution, JavascriptExecutionEngine,
     JavascriptExecutionError, JavascriptExecutionEvent, JavascriptSyncRpcRequest,
     StartJavascriptExecutionRequest,
 };
 use crate::node_import_cache::NodeImportCache;
-use crate::node_process::{
-    encode_json_string_array, encode_json_string_map, resolve_path_like_specifier,
-    NodeSignalDispositionAction, NodeSignalHandlerRegistration,
-};
 use crate::runtime_support::{env_flag_enabled, file_fingerprint, warmup_marker_path};
+use crate::signal::{NodeSignalDispositionAction, NodeSignalHandlerRegistration};
 use crate::v8_runtime;
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -385,11 +384,7 @@ impl WasmExecution {
         &mut self,
         request: &JavascriptSyncRpcRequest,
     ) -> Result<bool, WasmExecutionError> {
-        handle_internal_wasm_sync_rpc_request(
-            &mut self.inner,
-            &mut self.internal_sync_rpc,
-            request,
-        )
+        handle_internal_wasm_sync_rpc_request(&mut self.inner, &mut self.internal_sync_rpc, request)
     }
 
     fn handle_signal_state_sync_rpc(
@@ -427,10 +422,8 @@ impl WasmExecutionEngine {
             vm_id: request.vm_id,
             module_path: request.module_path,
         };
-        self.javascript_context_ids.insert(
-            context.context_id.clone(),
-            javascript_context.context_id,
-        );
+        self.javascript_context_ids
+            .insert(context.context_id.clone(), javascript_context.context_id);
         self.contexts
             .insert(context.context_id.clone(), context.clone());
         context
@@ -503,7 +496,10 @@ impl WasmExecutionEngine {
             inner: javascript_execution,
             execution_timeout,
             internal_sync_rpc: WasmInternalSyncRpc {
-                module_guest_paths: wasm_guest_module_paths(&resolved_module.specifier, &request.env),
+                module_guest_paths: wasm_guest_module_paths(
+                    &resolved_module.specifier,
+                    &request.env,
+                ),
                 module_host_path: resolved_module.resolved_path.clone(),
                 guest_cwd: wasm_guest_cwd(&request.env),
                 host_cwd: request.cwd.clone(),
@@ -538,11 +534,9 @@ fn map_javascript_error(error: JavascriptExecutionError) -> WasmExecutionError {
             WasmExecutionError::PrepareWarmPath(error)
         }
         JavascriptExecutionError::Spawn(error) => WasmExecutionError::Spawn(error),
-        JavascriptExecutionError::PendingSyncRpcRequest(id) => {
-            WasmExecutionError::RpcResponse(format!(
-                "guest WebAssembly sync RPC request {id} is still pending"
-            ))
-        }
+        JavascriptExecutionError::PendingSyncRpcRequest(id) => WasmExecutionError::RpcResponse(
+            format!("guest WebAssembly sync RPC request {id} is still pending"),
+        ),
         JavascriptExecutionError::ExpiredSyncRpcRequest(id) => WasmExecutionError::RpcResponse(
             format!("guest WebAssembly sync RPC request {id} is no longer pending"),
         ),
@@ -584,22 +578,32 @@ fn handle_internal_wasm_sync_rpc_request(
         .args
         .first()
         .and_then(Value::as_str)
-        .is_some_and(|path| internal_sync_rpc.module_guest_paths.iter().any(|candidate| candidate == path))
+        .is_some_and(|path| {
+            internal_sync_rpc
+                .module_guest_paths
+                .iter()
+                .any(|candidate| candidate == path)
+        })
     {
-        let module_bytes = fs::read(&internal_sync_rpc.module_host_path).map_err(WasmExecutionError::Spawn)?;
-        execution.respond_sync_rpc_success(
-            request.id,
-            json!({
-                "__agentOsType": "bytes",
-                "base64": v8_runtime::base64_encode_pub(&module_bytes),
-            }),
-        ).map_err(map_javascript_error)?;
+        let module_bytes =
+            fs::read(&internal_sync_rpc.module_host_path).map_err(WasmExecutionError::Spawn)?;
+        execution
+            .respond_sync_rpc_success(
+                request.id,
+                json!({
+                    "__agentOsType": "bytes",
+                    "base64": v8_runtime::base64_encode_pub(&module_bytes),
+                }),
+            )
+            .map_err(map_javascript_error)?;
         return Ok(true);
     }
 
     if request.method == "fs.openSync" {
         let Some(path) = request.args.first().and_then(Value::as_str) else {
-            return Err(WasmExecutionError::RpcResponse(String::from("missing fs.openSync path")));
+            return Err(WasmExecutionError::RpcResponse(String::from(
+                "missing fs.openSync path",
+            )));
         };
         let Some(host_path) = translate_wasm_guest_path(path, internal_sync_rpc) else {
             return Err(WasmExecutionError::RpcResponse(format!(
@@ -619,7 +623,9 @@ fn handle_internal_wasm_sync_rpc_request(
 
     if request.method == "fs.closeSync" {
         let Some(fd) = request.args.first().and_then(Value::as_u64) else {
-            return Err(WasmExecutionError::RpcResponse(String::from("missing fs.closeSync fd")));
+            return Err(WasmExecutionError::RpcResponse(String::from(
+                "missing fs.closeSync fd",
+            )));
         };
         internal_sync_rpc.open_files.remove(&(fd as u32));
         execution
@@ -630,13 +636,18 @@ fn handle_internal_wasm_sync_rpc_request(
 
     if request.method == "fs.writeSync" {
         let Some(fd) = request.args.first().and_then(Value::as_u64) else {
-            return Err(WasmExecutionError::RpcResponse(String::from("missing fs.writeSync fd")));
+            return Err(WasmExecutionError::RpcResponse(String::from(
+                "missing fs.writeSync fd",
+            )));
         };
-        let bytes = decode_wasm_bytes_arg(request.args.get(1))
-            .ok_or_else(|| WasmExecutionError::RpcResponse(String::from("missing fs.writeSync bytes")))?;
+        let bytes = decode_wasm_bytes_arg(request.args.get(1)).ok_or_else(|| {
+            WasmExecutionError::RpcResponse(String::from("missing fs.writeSync bytes"))
+        })?;
         let position = request.args.get(2).and_then(Value::as_u64);
         let Some(file) = internal_sync_rpc.open_files.get_mut(&(fd as u32)) else {
-            return Err(WasmExecutionError::RpcResponse(format!("unknown fs.writeSync fd: {fd}")));
+            return Err(WasmExecutionError::RpcResponse(format!(
+                "unknown fs.writeSync fd: {fd}"
+            )));
         };
         if let Some(position) = position {
             file.seek(SeekFrom::Start(position))
@@ -651,12 +662,16 @@ fn handle_internal_wasm_sync_rpc_request(
 
     if request.method == "fs.readSync" {
         let Some(fd) = request.args.first().and_then(Value::as_u64) else {
-            return Err(WasmExecutionError::RpcResponse(String::from("missing fs.readSync fd")));
+            return Err(WasmExecutionError::RpcResponse(String::from(
+                "missing fs.readSync fd",
+            )));
         };
         let length = request.args.get(1).and_then(Value::as_u64).unwrap_or(0) as usize;
         let position = request.args.get(2).and_then(Value::as_u64);
         let Some(file) = internal_sync_rpc.open_files.get_mut(&(fd as u32)) else {
-            return Err(WasmExecutionError::RpcResponse(format!("unknown fs.readSync fd: {fd}")));
+            return Err(WasmExecutionError::RpcResponse(format!(
+                "unknown fs.readSync fd: {fd}"
+            )));
         };
         if let Some(position) = position {
             file.seek(SeekFrom::Start(position))
@@ -680,7 +695,10 @@ fn handle_internal_wasm_sync_rpc_request(
     Ok(false)
 }
 
-fn translate_wasm_guest_path(path: &str, internal_sync_rpc: &WasmInternalSyncRpc) -> Option<PathBuf> {
+fn translate_wasm_guest_path(
+    path: &str,
+    internal_sync_rpc: &WasmInternalSyncRpc,
+) -> Option<PathBuf> {
     if path == internal_sync_rpc.module_host_path.to_string_lossy() {
         return Some(internal_sync_rpc.module_host_path.clone());
     }
@@ -718,11 +736,10 @@ fn join_host_path(base: &Path, suffix: &str) -> PathBuf {
 
 fn decode_wasm_bytes_arg(value: Option<&Value>) -> Option<Vec<u8>> {
     let value = value?;
-    let base64 = value
-        .as_object()?
-        .get("base64")?
-        .as_str()?;
-    base64::engine::general_purpose::STANDARD.decode(base64).ok()
+    let base64 = value.as_object()?.get("base64")?.as_str()?;
+    base64::engine::general_purpose::STANDARD
+        .decode(base64)
+        .ok()
 }
 
 fn open_wasm_guest_file(path: &Path, flags: &Value) -> Result<fs::File, WasmExecutionError> {
@@ -804,7 +821,12 @@ fn translate_wasm_signal_state_sync_rpc_request(
         .first()
         .and_then(Value::as_u64)
         .ok_or_else(|| WasmExecutionError::RpcResponse(String::from("missing signal number")))?;
-    let action = match request.args.get(1).and_then(Value::as_str).unwrap_or("default") {
+    let action = match request
+        .args
+        .get(1)
+        .and_then(Value::as_str)
+        .unwrap_or("default")
+    {
         "ignore" => WasmSignalDispositionAction::Ignore,
         "user" => WasmSignalDispositionAction::User,
         _ => WasmSignalDispositionAction::Default,
@@ -859,7 +881,9 @@ fn translate_wasm_signal_state_stream_event(
     let registration = message
         .get("registration")
         .and_then(Value::as_object)
-        .ok_or_else(|| WasmExecutionError::RpcResponse(String::from("missing signal registration")))?;
+        .ok_or_else(|| {
+            WasmExecutionError::RpcResponse(String::from("missing signal registration"))
+        })?;
     let action = match registration
         .get("action")
         .and_then(Value::as_str)
@@ -905,12 +929,8 @@ fn start_wasm_javascript_execution(
     prewarm_only: bool,
     warmup_metrics: Option<&[u8]>,
 ) -> Result<JavascriptExecution, WasmExecutionError> {
-    let internal_env = build_wasm_internal_env(
-        resolved_module,
-        request,
-        frozen_time_ms,
-        prewarm_only,
-    );
+    let internal_env =
+        build_wasm_internal_env(resolved_module, request, frozen_time_ms, prewarm_only);
     let inline_code = build_wasm_runner_module_source(import_cache, &internal_env, warmup_metrics)?;
     let mut env = request.env.clone();
     env.extend(internal_env);
@@ -940,7 +960,10 @@ fn build_wasm_internal_env(
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<BTreeMap<_, _>>();
 
-    internal_env.insert(WASM_MODULE_PATH_ENV.to_string(), resolved_module.specifier.clone());
+    internal_env.insert(
+        WASM_MODULE_PATH_ENV.to_string(),
+        resolved_module.specifier.clone(),
+    );
     internal_env.insert(
         WASM_GUEST_ARGV_ENV.to_string(),
         encode_json_string_array(&warmup_guest_argv(resolved_module, request)),
@@ -1508,20 +1531,20 @@ fn prewarm_wasm_path(
                 break;
             }
             Some(JavascriptExecutionEvent::SyncRpcRequest(sync_request)) => {
-        let mut internal_sync_rpc = WasmInternalSyncRpc {
-            module_guest_paths: wasm_guest_module_paths(
-                &resolved_module.specifier,
-                &request.env,
-            ),
-            module_host_path: resolved_module.resolved_path.clone(),
-            guest_cwd: wasm_guest_cwd(&request.env),
-            host_cwd: request.cwd.clone(),
-            next_fd: 64,
-            open_files: BTreeMap::new(),
-        };
-        let handled = handle_internal_wasm_sync_rpc_request(
-            &mut prewarm_execution,
-            &mut internal_sync_rpc,
+                let mut internal_sync_rpc = WasmInternalSyncRpc {
+                    module_guest_paths: wasm_guest_module_paths(
+                        &resolved_module.specifier,
+                        &request.env,
+                    ),
+                    module_host_path: resolved_module.resolved_path.clone(),
+                    guest_cwd: wasm_guest_cwd(&request.env),
+                    host_cwd: request.cwd.clone(),
+                    next_fd: 64,
+                    open_files: BTreeMap::new(),
+                };
+                let handled = handle_internal_wasm_sync_rpc_request(
+                    &mut prewarm_execution,
+                    &mut internal_sync_rpc,
                     &sync_request,
                 )?;
                 if !handled {
@@ -1568,10 +1591,7 @@ fn guest_argv(
     }
 }
 
-fn wasm_guest_module_paths(
-    specifier: &str,
-    env: &BTreeMap<String, String>,
-) -> Vec<String> {
+fn wasm_guest_module_paths(specifier: &str, env: &BTreeMap<String, String>) -> Vec<String> {
     let mut candidates = Vec::new();
     candidates.push(specifier.to_owned());
 
@@ -2048,6 +2068,23 @@ impl From<NodeSignalHandlerRegistration> for WasmSignalHandlerRegistration {
             flags: value.flags,
         }
     }
+}
+
+fn resolve_path_like_specifier(cwd: &Path, specifier: &str) -> Option<PathBuf> {
+    if specifier.starts_with("file://") {
+        return Some(PathBuf::from(specifier.trim_start_matches("file://")));
+    }
+    if specifier.starts_with("file:") {
+        return Some(PathBuf::from(specifier.trim_start_matches("file:")));
+    }
+    if specifier.starts_with('/') {
+        return Some(PathBuf::from(specifier));
+    }
+    if specifier.starts_with("./") || specifier.starts_with("../") {
+        return Some(cwd.join(specifier));
+    }
+
+    None
 }
 
 #[cfg(test)]

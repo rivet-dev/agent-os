@@ -3,9 +3,10 @@
 //! Native execution plane scaffold for the Agent OS runtime migration.
 
 mod common;
+mod host_node;
 mod node_import_cache;
-mod node_process;
 mod runtime_support;
+mod signal;
 pub mod v8_host;
 pub mod v8_ipc;
 pub mod v8_runtime;
@@ -22,13 +23,13 @@ pub use javascript::{
     JavascriptExecutionEngine, JavascriptExecutionError, JavascriptExecutionEvent,
     JavascriptExecutionResult, JavascriptSyncRpcRequest, StartJavascriptExecutionRequest,
 };
-pub use node_process::{NodeSignalDispositionAction, NodeSignalHandlerRegistration};
 pub use python::{
     CreatePythonContextRequest, PythonContext, PythonExecution, PythonExecutionEngine,
     PythonExecutionError, PythonExecutionEvent, PythonExecutionResult, PythonVfsRpcMethod,
     PythonVfsRpcRequest, PythonVfsRpcResponsePayload, PythonVfsRpcStat,
     StartPythonExecutionRequest,
 };
+pub use signal::{NodeSignalDispositionAction, NodeSignalHandlerRegistration};
 pub use wasm::{
     CreateWasmContextRequest, StartWasmExecutionRequest, WasmContext, WasmExecution,
     WasmExecutionEngine, WasmExecutionError, WasmExecutionEvent, WasmExecutionResult,

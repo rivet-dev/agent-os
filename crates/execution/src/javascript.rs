@@ -2,16 +2,17 @@ use crate::common::stable_hash64;
 use crate::node_import_cache::{
     NodeImportCache, NodeImportCacheCleanup, NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
 };
-use crate::node_process::{LinePrefixFilter, NodeControlMessage, NodeSignalHandlerRegistration};
 use crate::runtime_support::{
     NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
     NODE_SANDBOX_ROOT_ENV,
 };
+use crate::signal::NodeSignalHandlerRegistration;
 use crate::v8_host::{V8RuntimeHost, V8SessionHandle};
 use crate::v8_ipc::BinaryFrame;
 use crate::v8_runtime;
 use getrandom::getrandom;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -102,6 +103,27 @@ const RESERVED_NODE_ENV_KEYS: &[&str] = &[
     NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV,
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum NodeControlMessage {
+    NodeImportCacheMetrics {
+        metrics: serde_json::Value,
+    },
+    PythonExit {
+        #[serde(rename = "exitCode")]
+        exit_code: i32,
+    },
+    SignalState {
+        signal: u32,
+        registration: NodeSignalHandlerRegistration,
+    },
+}
+
+#[derive(Debug, Default)]
+struct LinePrefixFilter {
+    pending: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavascriptSyncRpcRequest {
     pub id: u64,
@@ -122,6 +144,28 @@ struct JavascriptSyncRpcChannels {
     parent_response_writer: File,
     child_request_writer: OwnedFd,
     child_response_reader: OwnedFd,
+}
+
+impl LinePrefixFilter {
+    fn filter_chunk(&mut self, chunk: &[u8], prefixes: &[&str]) -> Vec<u8> {
+        self.pending.extend_from_slice(chunk);
+        let mut filtered = Vec::new();
+
+        while let Some(newline_index) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line = self.pending.drain(..=newline_index).collect::<Vec<_>>();
+            if !has_control_prefix(&line, prefixes) {
+                filtered.extend_from_slice(&line);
+            }
+        }
+
+        filtered
+    }
+}
+
+fn has_control_prefix(line: &[u8], prefixes: &[&str]) -> bool {
+    let text = String::from_utf8_lossy(line);
+    let trimmed = text.trim_end_matches(['\r', '\n']);
+    prefixes.iter().any(|prefix| trimmed.starts_with(prefix))
 }
 
 #[derive(Debug)]

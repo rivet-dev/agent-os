@@ -16,6 +16,8 @@ If tests fail because they were written for the old `Command::new("node")` path,
 
 Guest JavaScript entrypoints in `javascript.rs` now run only through the shared V8 runtime. The remaining gaps are polyfill completeness and builtin isolation parity: some builtins still need deeper kernel-backed implementations or broader conformance coverage, but restoring a host-Node guest execution fallback is not allowed.
 
+- Keep any real-host Node helpers isolated to clearly host-only modules used by benchmarks or import-cache tests. Guest JS/WASM/Python runtime code should depend only on neutral shared helpers (for example signal metadata or path resolution), not on files that also own host launch behavior.
+
 **Recovery reference:** The complete working polyfill + V8 isolate code from the original `@secure-exec/core` + `@secure-exec/nodejs` + `@secure-exec/v8` packages has been recovered to `.agent/recovery/secure-exec/`. Key files to port:
 - `nodejs/src/bridge/fs.ts` (3,974 lines) -- full kernel-backed `fs`/`fs/promises` polyfill
 - `nodejs/src/bridge/network.ts` (11,149 lines) -- full `net`/`dgram`/`dns` polyfill via kernel socket table
