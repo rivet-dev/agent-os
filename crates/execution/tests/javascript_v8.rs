@@ -1,14 +1,20 @@
 use agent_os_execution::{
-    v8_runtime::map_bridge_method, CreateJavascriptContextRequest, JavascriptExecutionEngine,
-    JavascriptExecutionEvent, StartJavascriptExecutionRequest,
+    v8_runtime::map_bridge_method, CreateJavascriptContextRequest, JavascriptExecution,
+    JavascriptExecutionEngine, JavascriptExecutionEvent, JavascriptExecutionResult,
+    JavascriptSyncRpcRequest, StartJavascriptExecutionRequest,
 };
+use base64::Engine;
+use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
+use std::io::{Read, Write};
 use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -67,6 +73,566 @@ fn write_fake_node_binary(path: &Path, log_path: &Path) {
         .permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions).expect("chmod fake node binary");
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TestJavascriptChildProcessSpawnOptions {
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    internal_bootstrap_env: BTreeMap<String, String>,
+    #[serde(default)]
+    shell: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TestJavascriptChildProcessSpawnRequest {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    options: TestJavascriptChildProcessSpawnOptions,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TestLegacyJavascriptChildProcessSpawnOptions {
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    input: Option<Value>,
+    #[serde(default)]
+    shell: bool,
+    #[serde(default, rename = "maxBuffer")]
+    max_buffer: Option<usize>,
+}
+
+enum HostChildOutputEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    StreamClosed,
+}
+
+struct HostChildRecord {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    output_events: Receiver<HostChildOutputEvent>,
+    pending_events: VecDeque<Value>,
+    exit_status: Option<i32>,
+    open_streams: usize,
+}
+
+#[derive(Default)]
+struct HostChildProcessHarness {
+    next_child_id: usize,
+    children: BTreeMap<String, HostChildRecord>,
+}
+
+impl HostChildProcessHarness {
+    fn handle_request(
+        &mut self,
+        host_cwd: &Path,
+        request: JavascriptSyncRpcRequest,
+    ) -> Result<Value, String> {
+        match request.method.as_str() {
+            "child_process.spawn" => self.spawn(host_cwd, &request.args),
+            "child_process.spawn_sync" => self.spawn_sync(host_cwd, &request.args),
+            "child_process.poll" => self.poll(&request.args),
+            "child_process.write_stdin" => self.write_stdin(&request.args),
+            "child_process.close_stdin" => self.close_stdin(&request.args),
+            "child_process.kill" => self.kill(&request.args),
+            "fs.writeFileSync" => self.write_file(host_cwd, &request.args),
+            other => Err(format!("unsupported sync RPC method: {other}")),
+        }
+    }
+
+    fn spawn(&mut self, host_cwd: &Path, args: &[Value]) -> Result<Value, String> {
+        let request = parse_test_child_process_spawn_request(args)?;
+
+        let child_id = {
+            self.next_child_id += 1;
+            format!("child-{}", self.next_child_id)
+        };
+
+        let mut command = if request.options.shell {
+            let mut command = Command::new("/bin/sh");
+            command.arg("-c").arg(&request.command);
+            command.args(&request.args);
+            command
+        } else {
+            let mut command = Command::new(self.map_guest_path(host_cwd, &request.command));
+            command.args(
+                request
+                    .args
+                    .iter()
+                    .map(|arg| self.map_guest_path(host_cwd, arg)),
+            );
+            command
+        };
+
+        let child_cwd = request
+            .options
+            .cwd
+            .as_deref()
+            .map(|cwd| std::path::PathBuf::from(self.map_guest_path(host_cwd, cwd)))
+            .unwrap_or_else(|| host_cwd.to_path_buf());
+
+        command
+            .current_dir(child_cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env_clear()
+            .envs(&request.options.env)
+            .envs(&request.options.internal_bootstrap_env);
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("spawn {} failed: {error}", request.command))?;
+
+        let stdin = child.stdin.take();
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| String::from("spawned child stdout pipe missing"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| String::from("spawned child stderr pipe missing"))?;
+        let (output_sender, output_events) = mpsc::channel();
+        spawn_output_reader(stdout, output_sender.clone(), true);
+        spawn_output_reader(stderr, output_sender, false);
+
+        let pid = child.id();
+        self.children.insert(
+            child_id.clone(),
+            HostChildRecord {
+                child,
+                stdin,
+                output_events,
+                pending_events: VecDeque::new(),
+                exit_status: None,
+                open_streams: 2,
+            },
+        );
+
+        Ok(json!({
+            "childId": child_id,
+            "pid": pid,
+            "command": request.command,
+            "args": request.args,
+        }))
+    }
+
+    fn poll(&mut self, args: &[Value]) -> Result<Value, String> {
+        let child_id = args
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| String::from("child_process.poll missing child id"))?;
+        let wait_ms = args.get(1).and_then(Value::as_u64).unwrap_or_default();
+        let child = self
+            .children
+            .get_mut(child_id)
+            .ok_or_else(|| format!("unknown child process {child_id}"))?;
+
+        let deadline = std::time::Instant::now() + Duration::from_millis(wait_ms);
+        loop {
+            drain_child_output(child);
+            if let Some(event) = child.pending_events.pop_front() {
+                return Ok(event);
+            }
+
+            if child.exit_status.is_none() {
+                if let Some(status) = child
+                    .child
+                    .try_wait()
+                    .map_err(|error| format!("try_wait {child_id} failed: {error}"))?
+                {
+                    child.exit_status = Some(status.code().unwrap_or(1));
+                }
+            }
+
+            if let Some(exit_code) = child.exit_status {
+                if child.pending_events.is_empty()
+                    && (child.open_streams == 0 || std::time::Instant::now() >= deadline)
+                {
+                    self.children.remove(child_id);
+                    return Ok(json!({
+                        "type": "exit",
+                        "exitCode": exit_code,
+                    }));
+                }
+            }
+
+            if std::time::Instant::now() >= deadline {
+                return Ok(Value::Null);
+            }
+
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn spawn_sync(&mut self, host_cwd: &Path, args: &[Value]) -> Result<Value, String> {
+        let (request, max_buffer, input) = parse_test_child_process_spawn_sync_request(args)?;
+        let mut command = if request.options.shell {
+            let mut command = Command::new("/bin/sh");
+            command.arg("-c").arg(&request.command);
+            command.args(&request.args);
+            command
+        } else {
+            let mut command = Command::new(self.map_guest_path(host_cwd, &request.command));
+            command.args(
+                request
+                    .args
+                    .iter()
+                    .map(|arg| self.map_guest_path(host_cwd, arg)),
+            );
+            command
+        };
+
+        let child_cwd = request
+            .options
+            .cwd
+            .as_deref()
+            .map(|cwd| std::path::PathBuf::from(self.map_guest_path(host_cwd, cwd)))
+            .unwrap_or_else(|| host_cwd.to_path_buf());
+
+        command
+            .current_dir(child_cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env_clear()
+            .envs(&request.options.env)
+            .envs(&request.options.internal_bootstrap_env);
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("spawnSync {} failed: {error}", request.command))?;
+        if let Some(input) = input.as_deref() {
+            let stdin = child
+                .stdin
+                .as_mut()
+                .ok_or_else(|| String::from("spawnSync child stdin pipe missing"))?;
+            stdin
+                .write_all(input)
+                .map_err(|error| format!("write spawnSync stdin failed: {error}"))?;
+        }
+        child.stdin.take();
+
+        let output = child
+            .wait_with_output()
+            .map_err(|error| format!("wait_with_output for {} failed: {error}", request.command))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let max_buffer = max_buffer.unwrap_or(1024 * 1024);
+        let max_buffer_exceeded =
+            output.stdout.len() > max_buffer || output.stderr.len() > max_buffer;
+
+        Ok(json!({
+            "stdout": stdout,
+            "stderr": stderr,
+            "code": output.status.code().unwrap_or(1),
+            "maxBufferExceeded": max_buffer_exceeded,
+        }))
+    }
+
+    fn write_stdin(&mut self, args: &[Value]) -> Result<Value, String> {
+        let child_id = args
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| String::from("child_process.write_stdin missing child id"))?;
+        let chunk = decode_guest_bytes(
+            args.get(1)
+                .ok_or_else(|| String::from("child_process.write_stdin missing chunk"))?,
+        )?;
+        let child = self
+            .children
+            .get_mut(child_id)
+            .ok_or_else(|| format!("unknown child process {child_id}"))?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(&chunk)
+                .map_err(|error| format!("write stdin for {child_id} failed: {error}"))?;
+        }
+        Ok(Value::Null)
+    }
+
+    fn close_stdin(&mut self, args: &[Value]) -> Result<Value, String> {
+        let child_id = args
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| String::from("child_process.close_stdin missing child id"))?;
+        let child = self
+            .children
+            .get_mut(child_id)
+            .ok_or_else(|| format!("unknown child process {child_id}"))?;
+        child.stdin.take();
+        Ok(Value::Null)
+    }
+
+    fn kill(&mut self, args: &[Value]) -> Result<Value, String> {
+        let child_id = args
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| String::from("child_process.kill missing child id"))?;
+        let child = self
+            .children
+            .get_mut(child_id)
+            .ok_or_else(|| format!("unknown child process {child_id}"))?;
+        child
+            .child
+            .kill()
+            .map_err(|error| format!("kill {child_id} failed: {error}"))?;
+        Ok(Value::Null)
+    }
+
+    fn write_file(&mut self, host_cwd: &Path, args: &[Value]) -> Result<Value, String> {
+        let path = args
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| String::from("fs.writeFileSync missing path"))?;
+        let contents = decode_guest_bytes(
+            args.get(1)
+                .ok_or_else(|| String::from("fs.writeFileSync missing contents"))?,
+        )?;
+        let mapped_path = std::path::PathBuf::from(self.map_guest_path(host_cwd, path));
+        if let Some(parent) = mapped_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("create parent dirs for {} failed: {error}", path))?;
+        }
+        fs::write(&mapped_path, contents)
+            .map_err(|error| format!("write guest file {} failed: {error}", path))?;
+        Ok(Value::Null)
+    }
+
+    fn map_guest_path(&self, host_cwd: &Path, candidate: &str) -> String {
+        if !candidate.starts_with('/') {
+            return String::from(candidate);
+        }
+
+        for prefix in ["/root", "/workspace"] {
+            if candidate == prefix {
+                return host_cwd.to_string_lossy().into_owned();
+            }
+            if let Some(relative) = candidate.strip_prefix(&format!("{prefix}/")) {
+                return host_cwd.join(relative).to_string_lossy().into_owned();
+            }
+        }
+
+        String::from(candidate)
+    }
+}
+
+impl Drop for HostChildProcessHarness {
+    fn drop(&mut self) {
+        for child in self.children.values_mut() {
+            let _ = child.child.kill();
+            let _ = child.child.wait();
+        }
+    }
+}
+
+fn spawn_output_reader(
+    mut reader: impl Read + Send + 'static,
+    sender: Sender<HostChildOutputEvent>,
+    stdout: bool,
+) {
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = sender.send(HostChildOutputEvent::StreamClosed);
+                    break;
+                }
+                Ok(read) => {
+                    let event = if stdout {
+                        HostChildOutputEvent::Stdout(buffer[..read].to_vec())
+                    } else {
+                        HostChildOutputEvent::Stderr(buffer[..read].to_vec())
+                    };
+                    if sender.send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    let _ = sender.send(HostChildOutputEvent::StreamClosed);
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn drain_child_output(child: &mut HostChildRecord) {
+    loop {
+        match child.output_events.try_recv() {
+            Ok(HostChildOutputEvent::Stdout(chunk)) => {
+                child.pending_events.push_back(json!({
+                    "type": "stdout",
+                    "data": encode_guest_bytes(&chunk),
+                }));
+            }
+            Ok(HostChildOutputEvent::Stderr(chunk)) => {
+                child.pending_events.push_back(json!({
+                    "type": "stderr",
+                    "data": encode_guest_bytes(&chunk),
+                }));
+            }
+            Ok(HostChildOutputEvent::StreamClosed) => {
+                child.open_streams = child.open_streams.saturating_sub(1);
+            }
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+fn encode_guest_bytes(bytes: &[u8]) -> Value {
+    json!({
+        "__agentOsType": "bytes",
+        "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
+fn decode_guest_bytes(value: &Value) -> Result<Vec<u8>, String> {
+    let encoded = value
+        .as_object()
+        .ok_or_else(|| String::from("expected bytes payload object"))?;
+    let base64 = encoded
+        .get("base64")
+        .and_then(Value::as_str)
+        .ok_or_else(|| String::from("bytes payload missing base64"))?;
+    base64::engine::general_purpose::STANDARD
+        .decode(base64)
+        .map_err(|error| format!("invalid base64 bytes payload: {error}"))
+}
+
+fn parse_test_child_process_spawn_request(
+    args: &[Value],
+) -> Result<TestJavascriptChildProcessSpawnRequest, String> {
+    if let Some(value) = args.first().cloned() {
+        if let Ok(request) = serde_json::from_value::<TestJavascriptChildProcessSpawnRequest>(value)
+        {
+            return Ok(request);
+        }
+    }
+
+    let command = args
+        .first()
+        .and_then(Value::as_str)
+        .ok_or_else(|| String::from("child_process.spawn missing command"))?;
+    let parsed_args = args
+        .get(1)
+        .and_then(Value::as_str)
+        .ok_or_else(|| String::from("child_process.spawn missing args payload"))
+        .and_then(|value| {
+            serde_json::from_str::<Vec<String>>(value)
+                .map_err(|error| format!("invalid child_process.spawn args payload: {error}"))
+        })?;
+    let parsed_options = args
+        .get(2)
+        .and_then(Value::as_str)
+        .ok_or_else(|| String::from("child_process.spawn missing options payload"))
+        .and_then(|value| {
+            serde_json::from_str::<TestLegacyJavascriptChildProcessSpawnOptions>(value)
+                .map_err(|error| format!("invalid child_process.spawn options payload: {error}"))
+        })?;
+
+    Ok(TestJavascriptChildProcessSpawnRequest {
+        command: String::from(command),
+        args: parsed_args,
+        options: TestJavascriptChildProcessSpawnOptions {
+            cwd: parsed_options.cwd,
+            env: parsed_options.env,
+            internal_bootstrap_env: BTreeMap::new(),
+            shell: parsed_options.shell,
+        },
+    })
+}
+
+fn parse_test_child_process_spawn_sync_request(
+    args: &[Value],
+) -> Result<
+    (
+        TestJavascriptChildProcessSpawnRequest,
+        Option<usize>,
+        Option<Vec<u8>>,
+    ),
+    String,
+> {
+    let request = parse_test_child_process_spawn_request(args)?;
+    let parsed_options = args
+        .get(2)
+        .and_then(Value::as_str)
+        .ok_or_else(|| String::from("child_process.spawn_sync missing options payload"))
+        .and_then(|value| {
+            serde_json::from_str::<TestLegacyJavascriptChildProcessSpawnOptions>(value).map_err(
+                |error| format!("invalid child_process.spawn_sync options payload: {error}"),
+            )
+        })?;
+
+    let input = parsed_options
+        .input
+        .as_ref()
+        .map(decode_guest_or_string_bytes)
+        .transpose()?;
+
+    Ok((request, parsed_options.max_buffer, input))
+}
+
+fn decode_guest_or_string_bytes(value: &Value) -> Result<Vec<u8>, String> {
+    match value {
+        Value::String(text) => Ok(text.as_bytes().to_vec()),
+        other => decode_guest_bytes(other),
+    }
+}
+
+fn wait_with_host_child_process_bridge(
+    mut execution: JavascriptExecution,
+    host_cwd: &Path,
+) -> JavascriptExecutionResult {
+    execution.close_stdin().expect("close JavaScript stdin");
+    let mut harness = HostChildProcessHarness::default();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    loop {
+        match execution
+            .poll_event_blocking(Duration::from_secs(5))
+            .expect("poll JavaScript execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                let request_id = request.id;
+                match harness.handle_request(host_cwd, request) {
+                    Ok(result) => execution
+                        .respond_sync_rpc_success(request_id, result)
+                        .expect("respond to child_process sync RPC"),
+                    Err(message) => execution
+                        .respond_sync_rpc_error(request_id, "ERR_TEST_CHILD_PROCESS_RPC", message)
+                        .expect("respond to child_process sync RPC error"),
+                }
+            }
+            Some(JavascriptExecutionEvent::Exited(exit_code)) => {
+                return JavascriptExecutionResult {
+                    execution_id: String::new(),
+                    exit_code,
+                    stdout,
+                    stderr,
+                };
+            }
+            None => panic!("JavaScript execution timed out while awaiting exit"),
+        }
+    }
 }
 
 struct EnvVarGuard {
@@ -1417,7 +1983,6 @@ if (typeof basename !== "function" || typeof dirname !== "function" || typeof is
 }
 
 #[test]
-#[ignore = "Guest child_process command resolution is still broken on this branch; sidecar/execution conformance for the remaining builtins is active"]
 fn javascript_execution_v8_child_process_conformance_matches_host_node() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(
@@ -1525,7 +2090,7 @@ console.log(JSON.stringify({
         })
         .expect("start JavaScript execution");
 
-    let result = execution.wait().expect("wait for JavaScript execution");
+    let result = wait_with_host_child_process_bridge(execution, temp.path());
     let stdout = String::from_utf8(result.stdout).expect("stdout utf8");
     let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
     assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");

@@ -8716,7 +8716,13 @@ var __bridge = (() => {
     const jsonResult = _childProcessSpawnSync.applySyncPromise(void 0, [
       command,
       JSON.stringify([]),
-      JSON.stringify({ cwd: effectiveCwd, env: opts.env, maxBuffer, shell: true })
+      JSON.stringify({
+        cwd: effectiveCwd,
+        env: opts.env,
+        input: opts.input == null ? null : encodeBridgeBytes(opts.input),
+        maxBuffer,
+        shell: true
+      })
     ]);
     const result = typeof jsonResult === "string" ? JSON.parse(jsonResult) : jsonResult;
     if (result.maxBufferExceeded) {
@@ -8842,6 +8848,7 @@ var __bridge = (() => {
         JSON.stringify({
           cwd: effectiveCwd,
           env: opts.env,
+          input: opts.input == null ? null : encodeBridgeBytes(opts.input),
           maxBuffer,
           shell: opts.shell === true || typeof opts.shell === "string"
         })

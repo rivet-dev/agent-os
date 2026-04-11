@@ -130,6 +130,8 @@ struct LegacyJavascriptChildProcessSpawnOptions {
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
+    input: Option<Value>,
+    #[serde(default)]
     shell: bool,
     #[serde(default, rename = "maxBuffer")]
     max_buffer: Option<usize>,
@@ -186,6 +188,7 @@ pub(crate) fn parse_javascript_child_process_spawn_request(
                 internal_bootstrap_env: sanitize_javascript_child_process_internal_bootstrap_env(
                     &vm.guest_env,
                 ),
+                input: parsed_options.input,
                 shell: parsed_options.shell,
             },
         },

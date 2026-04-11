@@ -2137,6 +2137,8 @@ pub struct JavascriptChildProcessSpawnOptions {
     #[serde(rename = "internalBootstrapEnv", default)]
     pub internal_bootstrap_env: BTreeMap<String, String>,
     #[serde(default)]
+    pub input: Option<Value>,
+    #[serde(default)]
     pub shell: bool,
 }
 

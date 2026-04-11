@@ -3852,6 +3852,7 @@ where
                         cwd,
                         env: request.env.clone(),
                         internal_bootstrap_env,
+                        input: None,
                         shell: request.shell,
                     },
                 },
@@ -4426,6 +4427,7 @@ where
         request: JavascriptChildProcessSpawnRequest,
         max_buffer: Option<usize>,
     ) -> Result<Value, SidecarError> {
+        let sync_input = javascript_child_process_sync_input_bytes(request.options.input.as_ref())?;
         let spawned = self.spawn_javascript_child_process(vm_id, process_id, request)?;
         let child_process_id = spawned
             .get("childId")
@@ -4436,6 +4438,11 @@ where
                 ))
             })?
             .to_owned();
+
+        if let Some(input) = sync_input.as_deref() {
+            self.write_javascript_child_process_stdin(vm_id, process_id, &child_process_id, input)?;
+        }
+        self.close_javascript_child_process_stdin(vm_id, process_id, &child_process_id)?;
 
         let max_buffer = max_buffer.unwrap_or(1024 * 1024);
         let mut stdout = Vec::new();
@@ -4773,6 +4780,7 @@ where
         request: JavascriptChildProcessSpawnRequest,
         max_buffer: Option<usize>,
     ) -> Result<Value, SidecarError> {
+        let sync_input = javascript_child_process_sync_input_bytes(request.options.input.as_ref())?;
         let spawned = self.spawn_descendant_javascript_child_process(
             vm_id,
             process_id,
@@ -4788,6 +4796,22 @@ where
                 ))
             })?
             .to_owned();
+
+        if let Some(input) = sync_input.as_deref() {
+            self.write_descendant_javascript_child_process_stdin(
+                vm_id,
+                process_id,
+                current_process_path,
+                &child_process_id,
+                input,
+            )?;
+        }
+        self.close_descendant_javascript_child_process_stdin(
+            vm_id,
+            process_id,
+            current_process_path,
+            &child_process_id,
+        )?;
 
         let max_buffer = max_buffer.unwrap_or(1024 * 1024);
         let mut stdout = Vec::new();
@@ -5523,6 +5547,23 @@ fn map_node_signal_registration(
         },
         mask: registration.mask,
         flags: registration.flags,
+    }
+}
+
+fn javascript_child_process_sync_input_bytes(
+    value: Option<&Value>,
+) -> Result<Option<Vec<u8>>, SidecarError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    match value {
+        Value::Null => Ok(None),
+        Value::String(text) => Ok(Some(text.as_bytes().to_vec())),
+        other => {
+            javascript_sync_rpc_bytes_arg(&[other.clone()], 0, "child_process.spawn_sync input")
+                .map(Some)
+        }
     }
 }
 
