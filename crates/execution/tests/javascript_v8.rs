@@ -2674,11 +2674,24 @@ import {
   isReadable,
   isWritable,
 } from "node:stream";
+import { createRequire } from "node:module";
 
 for (const [name, value] of Object.entries({ Duplex, PassThrough, Readable, Transform, Writable })) {
   if (typeof value !== "function") {
     throw new Error(`${name} was not exported as a constructor`);
   }
+}
+
+const require = createRequire(import.meta.url);
+const cjsStream = require("stream");
+if (typeof cjsStream !== "function") {
+  throw new Error("require('stream') should return the legacy Stream constructor");
+}
+if (cjsStream !== cjsStream.Stream) {
+  throw new Error("require('stream').Stream should alias the CommonJS export");
+}
+if (typeof cjsStream.Readable !== "function") {
+  throw new Error("require('stream').Readable should stay available on the constructor export");
 }
 
 const pass = new PassThrough();
@@ -2697,6 +2710,358 @@ if (output !== "hello") {
 }
 if (!isReadable(pass) || !isWritable(pass)) {
   throw new Error("stream helpers misreported passthrough readability");
+}
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: None,
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn javascript_execution_v8_buffer_wrapper_exposes_commonjs_constants() {
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const bufferModule = require("buffer");
+
+if (typeof bufferModule.constants !== "object" || bufferModule.constants === null) {
+  throw new Error("require('buffer').constants was not exported");
+}
+if (typeof bufferModule.constants.MAX_STRING_LENGTH !== "number") {
+  throw new Error("require('buffer').constants.MAX_STRING_LENGTH was not exported");
+}
+if (typeof bufferModule.kMaxLength !== "number") {
+  throw new Error("require('buffer').kMaxLength was not exported");
+}
+if (bufferModule.Buffer?.constants?.MAX_STRING_LENGTH !== bufferModule.constants.MAX_STRING_LENGTH) {
+  throw new Error("buffer module constants diverged from Buffer.constants");
+}
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: None,
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn javascript_execution_v8_commonjs_stack_frames_preserve_module_paths() {
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+require("./probe.cjs");
+"#,
+    );
+    write_fixture(
+        &temp.path().join("probe.cjs"),
+        r#"
+const previousPrepare = Error.prepareStackTrace;
+try {
+  Error.prepareStackTrace = (_error, stack) => stack;
+  const stack = new Error("probe").stack ?? [];
+  const frame = stack.find((callsite) => {
+    const path =
+      callsite.getFileName?.() ?? callsite.getScriptNameOrSourceURL?.();
+    return typeof path === "string" && path.endsWith("/probe.cjs");
+  });
+  if (!frame) {
+    const summary = stack.map((callsite) => ({
+      fileName: callsite.getFileName?.() ?? null,
+      scriptName: callsite.getScriptNameOrSourceURL?.() ?? null,
+      text: String(callsite),
+    }));
+    throw new Error(
+      "CommonJS stack frames did not preserve the module path: " +
+        JSON.stringify(summary),
+    );
+  }
+} finally {
+  Error.prepareStackTrace = previousPrepare;
+}
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: None,
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn javascript_execution_v8_commonjs_main_entrypoints_preserve_entrypoint_paths() {
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.cjs"),
+        r#"
+const EVAL_FRAMES = new Set(["[eval]", "[eval]-wrapper"]);
+const INTERNAL_FRAME_NAMES = new Set([
+  "readCallsites",
+  "resolveCallerFilePath",
+  "getCurrentFilePath",
+]);
+
+function readCallsites() {
+  const previousPrepare = Error.prepareStackTrace;
+  try {
+    Error.prepareStackTrace = (_error, stack) => stack;
+    return new Error("probe").stack ?? [];
+  } finally {
+    Error.prepareStackTrace = previousPrepare;
+  }
+}
+
+function readCallsitePath(callsite) {
+  const rawPath =
+    callsite.getFileName?.() ?? callsite.getScriptNameOrSourceURL?.();
+  if (!rawPath || rawPath.startsWith("node:") || EVAL_FRAMES.has(rawPath)) {
+    return null;
+  }
+  return rawPath;
+}
+
+function isInternalCallsite(callsite) {
+  const functionName = callsite.getFunctionName?.();
+  if (functionName && INTERNAL_FRAME_NAMES.has(functionName)) {
+    return true;
+  }
+  const methodName = callsite.getMethodName?.();
+  if (methodName && INTERNAL_FRAME_NAMES.has(methodName)) {
+    return true;
+  }
+  const callsiteString = String(callsite);
+  for (const frameName of INTERNAL_FRAME_NAMES) {
+    if (
+      callsiteString.includes(`${frameName} (`) ||
+      callsiteString.includes(`.${frameName} (`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function resolveCallerFilePath() {
+  for (const callsite of readCallsites()) {
+    const filePath = readCallsitePath(callsite);
+    if (!filePath || isInternalCallsite(callsite)) {
+      continue;
+    }
+    return filePath;
+  }
+  throw new Error("Unable to resolve caller file path.");
+}
+
+const resolved = resolveCallerFilePath();
+if (!resolved.endsWith("/entry.cjs")) {
+  throw new Error(`resolved ${resolved} instead of /entry.cjs`);
+}
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.cjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: None,
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn javascript_execution_v8_inline_commonjs_entrypoints_preserve_entrypoint_paths() {
+    let temp = tempdir().expect("create temp dir");
+    let source = String::from(
+        r#"
+const EVAL_FRAMES = new Set(["[eval]", "[eval]-wrapper"]);
+const INTERNAL_FRAME_NAMES = new Set([
+  "readCallsites",
+  "resolveCallerFilePath",
+  "getCurrentFilePath",
+]);
+
+function readCallsites() {
+  const previousPrepare = Error.prepareStackTrace;
+  try {
+    Error.prepareStackTrace = (_error, stack) => stack;
+    return new Error("probe").stack ?? [];
+  } finally {
+    Error.prepareStackTrace = previousPrepare;
+  }
+}
+
+function readCallsitePath(callsite) {
+  const rawPath =
+    callsite.getFileName?.() ?? callsite.getScriptNameOrSourceURL?.();
+  if (!rawPath || rawPath.startsWith("node:") || EVAL_FRAMES.has(rawPath)) {
+    return null;
+  }
+  return rawPath;
+}
+
+function isInternalCallsite(callsite) {
+  const functionName = callsite.getFunctionName?.();
+  if (functionName && INTERNAL_FRAME_NAMES.has(functionName)) {
+    return true;
+  }
+  const methodName = callsite.getMethodName?.();
+  if (methodName && INTERNAL_FRAME_NAMES.has(methodName)) {
+    return true;
+  }
+  const callsiteString = String(callsite);
+  for (const frameName of INTERNAL_FRAME_NAMES) {
+    if (
+      callsiteString.includes(`${frameName} (`) ||
+      callsiteString.includes(`.${frameName} (`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function resolveCallerFilePath() {
+  for (const callsite of readCallsites()) {
+    const filePath = readCallsitePath(callsite);
+    if (!filePath || isInternalCallsite(callsite)) {
+      continue;
+    }
+    return filePath;
+  }
+  throw new Error("Unable to resolve caller file path.");
+}
+
+const resolved = resolveCallerFilePath();
+if (!resolved.endsWith("/entry.cjs")) {
+  throw new Error(`resolved ${resolved} instead of /entry.cjs`);
+}
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.cjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(source),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn javascript_execution_v8_https_agents_expose_options_objects() {
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const http = require("http");
+const https = require("https");
+
+for (const [name, module] of Object.entries({ http, https })) {
+  if (!module.globalAgent || typeof module.globalAgent.options !== "object") {
+    throw new Error(`${name}.globalAgent.options was not initialized`);
+  }
+  const agent = new module.Agent({ keepAlive: true });
+  if (!agent.options || agent.options.keepAlive !== true) {
+    throw new Error(`${name}.Agent did not preserve constructor options`);
+  }
 }
 "#,
     );

@@ -43,7 +43,6 @@ const MAX_WASM_VARUINT_BYTES: usize = 10;
 // Warmup is a best-effort compile-cache optimization; fall back to a cold start
 // instead of burning minutes on a stalled prewarm session.
 const DEFAULT_WASM_PREWARM_TIMEOUT_MS: u64 = 30_000;
-const WASM_MAX_MEM_PAGES_FLAG: &str = "--wasm-max-mem-pages=";
 const WASM_INLINE_RUNNER_ENTRYPOINT: &str = "./__agent_os_wasm_runner__.mjs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,14 +69,6 @@ impl WasmPermissionTier {
             Self::ReadOnly => "read-only",
             Self::Isolated => "isolated",
         }
-    }
-
-    fn workspace_write_enabled(self) -> bool {
-        matches!(self, Self::Full | Self::ReadWrite)
-    }
-
-    fn wasi_enabled(self) -> bool {
-        !matches!(self, Self::Isolated)
     }
 }
 
@@ -611,9 +602,7 @@ fn handle_internal_wasm_sync_rpc_request(
             )));
         };
         let Some(host_path) = translate_wasm_guest_path(path, internal_sync_rpc) else {
-            return Err(WasmExecutionError::RpcResponse(format!(
-                "unmapped guest path for fs.openSync: {path}"
-            )));
+            return Ok(false);
         };
         let flags = request.args.get(1).unwrap_or(&Value::Null);
         let file = open_wasm_guest_file(&host_path, flags)?;
@@ -632,7 +621,9 @@ fn handle_internal_wasm_sync_rpc_request(
                 "missing fs.closeSync fd",
             )));
         };
-        internal_sync_rpc.open_files.remove(&(fd as u32));
+        if internal_sync_rpc.open_files.remove(&(fd as u32)).is_none() {
+            return Ok(false);
+        }
         execution
             .respond_sync_rpc_success(request.id, Value::Null)
             .map_err(map_javascript_error)?;
@@ -650,9 +641,7 @@ fn handle_internal_wasm_sync_rpc_request(
         })?;
         let position = request.args.get(2).and_then(Value::as_u64);
         let Some(file) = internal_sync_rpc.open_files.get_mut(&(fd as u32)) else {
-            return Err(WasmExecutionError::RpcResponse(format!(
-                "unknown fs.writeSync fd: {fd}"
-            )));
+            return Ok(false);
         };
         if let Some(position) = position {
             file.seek(SeekFrom::Start(position))
@@ -674,9 +663,7 @@ fn handle_internal_wasm_sync_rpc_request(
         let length = request.args.get(1).and_then(Value::as_u64).unwrap_or(0) as usize;
         let position = request.args.get(2).and_then(Value::as_u64);
         let Some(file) = internal_sync_rpc.open_files.get_mut(&(fd as u32)) else {
-            return Err(WasmExecutionError::RpcResponse(format!(
-                "unknown fs.readSync fd: {fd}"
-            )));
+            return Ok(false);
         };
         if let Some(position) = position {
             file.seek(SeekFrom::Start(position))
@@ -1049,10 +1036,37 @@ const __agentOsRequireBuiltin = (specifier) => {{
 if (typeof globalThis !== "undefined" && typeof globalThis.__agentOsWasiModule === "undefined") {{
   const __agentOsFs = () => __agentOsRequireBuiltin("node:fs");
   const __agentOsPath = () => __agentOsRequireBuiltin("node:path");
+  const __agentOsCrypto = () => __agentOsRequireBuiltin("node:crypto");
   const __agentOsWasiErrnoSuccess = 0;
   const __agentOsWasiErrnoBadf = 8;
+  const __agentOsWasiErrnoExist = 20;
   const __agentOsWasiErrnoFault = 21;
+  const __agentOsWasiErrnoInval = 28;
+  const __agentOsWasiErrnoIo = 29;
+  const __agentOsWasiErrnoNoent = 44;
   const __agentOsWasiErrnoNosys = 52;
+  const __agentOsWasiErrnoNotdir = 54;
+  const __agentOsWasiFiletypeUnknown = 0;
+  const __agentOsWasiFiletypeCharacterDevice = 2;
+  const __agentOsWasiFiletypeDirectory = 3;
+  const __agentOsWasiFiletypeRegularFile = 4;
+  const __agentOsWasiFiletypeSymbolicLink = 7;
+  const __agentOsWasiLookupSymlinkFollow = 1;
+  const __agentOsWasiOpenCreate = 1;
+  const __agentOsWasiOpenDirectory = 2;
+  const __agentOsWasiOpenExclusive = 4;
+  const __agentOsWasiOpenTruncate = 8;
+  const __agentOsWasiDebugEnabled = () => process?.env?.AGENT_OS_WASM_WASI_DEBUG === "1";
+  const __agentOsWasiDebug = (message) => {{
+    if (!__agentOsWasiDebugEnabled() || typeof process?.stderr?.write !== "function") {{
+      return;
+    }}
+    try {{
+      process.stderr.write(`[agent-os-wasi] ${{message}}\n`);
+    }} catch {{
+      // Ignore debug logging failures.
+    }}
+  }};
 
   class WASI {{
     constructor(options = {{}}) {{
@@ -1080,15 +1094,28 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOsWasiModule =
         }});
       }}
       this.wasiImport = {{
+        args_get: (...args) => this._argsGet(...args),
+        args_sizes_get: (...args) => this._argsSizesGet(...args),
         clock_time_get: (...args) => this._clockTimeGet(...args),
         clock_res_get: (...args) => this._clockResGet(...args),
+        environ_get: (...args) => this._environGet(...args),
+        environ_sizes_get: (...args) => this._environSizesGet(...args),
         fd_close: (...args) => this._fdClose(...args),
+        fd_fdstat_get: (...args) => this._fdFdstatGet(...args),
+        fd_filestat_get: (...args) => this._fdFilestatGet(...args),
+        fd_prestat_dir_name: (...args) => this._fdPrestatDirName(...args),
+        fd_prestat_get: (...args) => this._fdPrestatGet(...args),
         fd_pwrite: (...args) => this._fdPwrite(...args),
+        fd_readdir: (...args) => this._fdReaddir(...args),
         fd_read: (...args) => this._fdRead(...args),
         fd_write: (...args) => this._fdWrite(...args),
+        path_filestat_get: (...args) => this._pathFilestatGet(...args),
         path_open: (...args) => this._pathOpen(...args),
+        path_readlink: (...args) => this._pathReadlink(...args),
         poll_oneoff: (...args) => this._pollOneoff(...args),
         proc_exit: (...args) => this._procExit(...args),
+        random_get: (...args) => this._randomGet(...args),
+        sched_yield: (...args) => this._schedYield(...args),
       }};
     }}
 
@@ -1128,6 +1155,7 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOsWasiModule =
         this._memoryView().setUint32(Number(ptr) >>> 0, Number(value) >>> 0, true);
         return __agentOsWasiErrnoSuccess;
       }} catch {{
+        __agentOsWasiDebug(`writeUint32 failed ptr=${{Number(ptr)}} value=${{Number(value)}}`);
         return __agentOsWasiErrnoFault;
       }}
     }}
@@ -1137,6 +1165,17 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOsWasiModule =
         this._memoryView().setBigUint64(Number(ptr) >>> 0, BigInt(value), true);
         return __agentOsWasiErrnoSuccess;
       }} catch {{
+        __agentOsWasiDebug(`writeUint64 failed ptr=${{Number(ptr)}} value=${{String(value)}}`);
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _writeBytes(ptr, bytes) {{
+      try {{
+        this._memoryBytes().set(bytes, Number(ptr) >>> 0);
+        return __agentOsWasiErrnoSuccess;
+      }} catch {{
+        __agentOsWasiDebug(`writeBytes failed ptr=${{Number(ptr)}} len=${{bytes?.length ?? 0}}`);
         return __agentOsWasiErrnoFault;
       }}
     }}
@@ -1176,6 +1215,172 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOsWasiModule =
         sourceOffset += chunk.length;
       }}
       return sourceOffset;
+    }}
+
+    _stringTable(values) {{
+      return values.map((value) => Buffer.from(`${{String(value)}}\0`, "utf8"));
+    }}
+
+    _writeStringTable(values, offsetsPtr, bufferPtr) {{
+      try {{
+        const view = this._memoryView();
+        const memory = this._memoryBytes();
+        let cursor = Number(bufferPtr) >>> 0;
+        for (let index = 0; index < values.length; index += 1) {{
+          const bytes = values[index];
+          view.setUint32((Number(offsetsPtr) >>> 0) + index * 4, cursor, true);
+          memory.set(bytes, cursor);
+          cursor += bytes.length;
+        }}
+        return __agentOsWasiErrnoSuccess;
+      }} catch {{
+        __agentOsWasiDebug(
+          `writeStringTable failed offsetsPtr=${{Number(offsetsPtr)}} bufferPtr=${{Number(bufferPtr)}} count=${{values.length}}`,
+        );
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _filetypeForStats(stats) {{
+      if (!stats) {{
+        return __agentOsWasiFiletypeUnknown;
+      }}
+      if (typeof stats.isDirectory === "function" && stats.isDirectory()) {{
+        return __agentOsWasiFiletypeDirectory;
+      }}
+      if (typeof stats.isFile === "function" && stats.isFile()) {{
+        return __agentOsWasiFiletypeRegularFile;
+      }}
+      if (typeof stats.isSymbolicLink === "function" && stats.isSymbolicLink()) {{
+        return __agentOsWasiFiletypeSymbolicLink;
+      }}
+      if (typeof stats.isCharacterDevice === "function" && stats.isCharacterDevice()) {{
+        return __agentOsWasiFiletypeCharacterDevice;
+      }}
+      return __agentOsWasiFiletypeUnknown;
+    }}
+
+    _fdFiletype(entry) {{
+      if (!entry) {{
+        return __agentOsWasiFiletypeUnknown;
+      }}
+      if (
+        entry.kind === "stdin" ||
+        entry.kind === "stdout" ||
+        entry.kind === "stderr"
+      ) {{
+        return __agentOsWasiFiletypeCharacterDevice;
+      }}
+      if (entry.kind === "preopen" || entry.kind === "directory") {{
+        return __agentOsWasiFiletypeDirectory;
+      }}
+      if (entry.kind === "symlink") {{
+        return __agentOsWasiFiletypeSymbolicLink;
+      }}
+      return __agentOsWasiFiletypeRegularFile;
+    }}
+
+    _mapFsError(error) {{
+      switch (error?.code) {{
+        case "ENOENT":
+          return __agentOsWasiErrnoNoent;
+        case "ENOTDIR":
+          return __agentOsWasiErrnoNotdir;
+        case "EEXIST":
+          return __agentOsWasiErrnoExist;
+        case "EINVAL":
+          return __agentOsWasiErrnoInval;
+        default:
+          return __agentOsWasiErrnoIo;
+      }}
+    }}
+
+    _descriptorEntry(fd) {{
+      return this.fdTable.get(Number(fd) >>> 0) ?? null;
+    }}
+
+    _descriptorHostPath(entry) {{
+      if (!entry) {{
+        return null;
+      }}
+      if (typeof entry.hostPath === "string") {{
+        return entry.hostPath;
+      }}
+      if (typeof entry.realFd === "number") {{
+        return __agentOsFs().readlinkSync(`/proc/self/fd/${{entry.realFd}}`);
+      }}
+      return null;
+    }}
+
+    _resolveDescriptorPath(fd, pathPtr, pathLen) {{
+      const entry = this._descriptorEntry(fd);
+      if (!entry) {{
+        return {{ error: __agentOsWasiErrnoBadf }};
+      }}
+      const basePath = this._descriptorHostPath(entry);
+      if (typeof basePath !== "string") {{
+        return {{ error: __agentOsWasiErrnoBadf }};
+      }}
+      const target = this._readString(pathPtr, pathLen);
+      return {{
+        error: __agentOsWasiErrnoSuccess,
+        hostPath: __agentOsPath().resolve(basePath, target),
+      }};
+    }}
+
+    _writeFilestat(statPtr, stats, fallbackType) {{
+      try {{
+        const view = this._memoryView();
+        const offset = Number(statPtr) >>> 0;
+        const filetype = stats ? this._filetypeForStats(stats) : fallbackType;
+        view.setBigUint64(offset, 0n, true);
+        view.setBigUint64(offset + 8, BigInt(stats?.ino ?? 0), true);
+        view.setUint8(offset + 16, filetype);
+        view.setBigUint64(offset + 24, BigInt(stats?.nlink ?? 1), true);
+        view.setBigUint64(offset + 32, BigInt(stats?.size ?? 0), true);
+        view.setBigUint64(offset + 40, BigInt(Math.trunc((stats?.atimeMs ?? 0) * 1000000)), true);
+        view.setBigUint64(offset + 48, BigInt(Math.trunc((stats?.mtimeMs ?? 0) * 1000000)), true);
+        view.setBigUint64(offset + 56, BigInt(Math.trunc((stats?.ctimeMs ?? 0) * 1000000)), true);
+        return __agentOsWasiErrnoSuccess;
+      }} catch {{
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _argsSizesGet(argcPtr, argvBufSizePtr) {{
+      const values = this._stringTable(this.args);
+      const total = values.reduce((sum, value) => sum + value.length, 0);
+      const argcStatus = this._writeUint32(argcPtr, values.length);
+      if (argcStatus !== __agentOsWasiErrnoSuccess) {{
+        return argcStatus;
+      }}
+      return this._writeUint32(argvBufSizePtr, total);
+    }}
+
+    _argsGet(argvPtr, argvBufPtr) {{
+      return this._writeStringTable(this._stringTable(this.args), argvPtr, argvBufPtr);
+    }}
+
+    _environEntries() {{
+      return Object.entries(this.env).map(([key, value]) => `${{key}}=${{value}}`);
+    }}
+
+    _environSizesGet(countPtr, bufSizePtr) {{
+      const values = this._stringTable(this._environEntries());
+      const total = values.reduce((sum, value) => sum + value.length, 0);
+      const countStatus = this._writeUint32(countPtr, values.length);
+      if (countStatus !== __agentOsWasiErrnoSuccess) {{
+        return countStatus;
+      }}
+      return this._writeUint32(bufSizePtr, total);
+    }}
+
+    _environGet(environPtr, environBufPtr) {{
+      return this._writeStringTable(
+        this._stringTable(this._environEntries()),
+        environPtr,
+        environBufPtr,
+      );
     }}
 
     _clockTimeGet(_clockId, _precision, resultPtr) {{
@@ -1283,6 +1488,130 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOsWasiModule =
       }}
     }}
 
+    _fdFdstatGet(fd, statPtr) {{
+      try {{
+        const entry = this._descriptorEntry(fd);
+        if (!entry) {{
+          return __agentOsWasiErrnoBadf;
+        }}
+        const view = this._memoryView();
+        const offset = Number(statPtr) >>> 0;
+        view.setUint8(offset, this._fdFiletype(entry));
+        view.setUint16(offset + 2, 0, true);
+        view.setBigUint64(offset + 8, 0xffffffffffffffffn, true);
+        view.setBigUint64(offset + 16, 0xffffffffffffffffn, true);
+        return __agentOsWasiErrnoSuccess;
+      }} catch {{
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _fdFilestatGet(fd, statPtr) {{
+      try {{
+        const entry = this._descriptorEntry(fd);
+        if (!entry) {{
+          return __agentOsWasiErrnoBadf;
+        }}
+        if (
+          entry.kind === "stdin" ||
+          entry.kind === "stdout" ||
+          entry.kind === "stderr"
+        ) {{
+          return this._writeFilestat(statPtr, null, __agentOsWasiFiletypeCharacterDevice);
+        }}
+        if (entry.kind === "preopen") {{
+          const stats = __agentOsFs().statSync(entry.hostPath);
+          return this._writeFilestat(statPtr, stats, __agentOsWasiFiletypeDirectory);
+        }}
+        const stats =
+          typeof entry.realFd === "number"
+            ? __agentOsFs().fstatSync(entry.realFd)
+            : __agentOsFs().statSync(entry.hostPath);
+        return this._writeFilestat(statPtr, stats, this._fdFiletype(entry));
+      }} catch (error) {{
+        return this._mapFsError(error);
+      }}
+    }}
+
+    _fdPrestatGet(fd, prestatPtr) {{
+      try {{
+        const entry = this._descriptorEntry(fd);
+        if (!entry || entry.kind !== "preopen") {{
+          return __agentOsWasiErrnoBadf;
+        }}
+        const view = this._memoryView();
+        const offset = Number(prestatPtr) >>> 0;
+        view.setUint8(offset, 0);
+        view.setUint32(offset + 4, Buffer.byteLength(entry.guestPath), true);
+        return __agentOsWasiErrnoSuccess;
+      }} catch {{
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _fdPrestatDirName(fd, pathPtr, pathLen) {{
+      try {{
+        const entry = this._descriptorEntry(fd);
+        if (!entry || entry.kind !== "preopen") {{
+          return __agentOsWasiErrnoBadf;
+        }}
+        const bytes = Buffer.from(entry.guestPath, "utf8");
+        if ((Number(pathLen) >>> 0) < bytes.length) {{
+          return __agentOsWasiErrnoFault;
+        }}
+        return this._writeBytes(pathPtr, bytes);
+      }} catch {{
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _fdReaddir(fd, bufPtr, bufLen, cookie, bufUsedPtr) {{
+      try {{
+        const entry = this._descriptorEntry(fd);
+        const hostPath = this._descriptorHostPath(entry);
+        if (
+          !entry ||
+          (entry.kind !== "preopen" && entry.kind !== "directory") ||
+          typeof hostPath !== "string"
+        ) {{
+          return __agentOsWasiErrnoBadf;
+        }}
+        const dirents = __agentOsFs()
+          .readdirSync(hostPath, {{ withFileTypes: true }})
+          .sort((left, right) => left.name.localeCompare(right.name));
+        const view = this._memoryView();
+        const memory = this._memoryBytes();
+        let offset = Number(bufPtr) >>> 0;
+        const limit = offset + (Number(bufLen) >>> 0);
+        let used = 0;
+        for (let index = Number(cookie) >>> 0; index < dirents.length; index += 1) {{
+          const dirent = dirents[index];
+          const nameBytes = Buffer.from(dirent.name, "utf8");
+          const recordLen = 24 + nameBytes.length;
+          if (offset + recordLen > limit) {{
+            break;
+          }}
+          view.setBigUint64(offset, BigInt(index + 1), true);
+          view.setBigUint64(offset + 8, BigInt(index + 1), true);
+          view.setUint32(offset + 16, nameBytes.length, true);
+          view.setUint8(
+            offset + 20,
+            dirent.isDirectory()
+              ? __agentOsWasiFiletypeDirectory
+              : dirent.isSymbolicLink()
+                ? __agentOsWasiFiletypeSymbolicLink
+                : __agentOsWasiFiletypeRegularFile,
+          );
+          memory.set(nameBytes, offset + 24);
+          offset += recordLen;
+          used += recordLen;
+        }}
+        return this._writeUint32(bufUsedPtr, used);
+      }} catch (error) {{
+        return this._mapFsError(error);
+      }}
+    }}
+
     _pathOpen(fd, _dirflags, pathPtr, pathLen, oflags, _rightsBase, _rightsInheriting, _fdflags, openedFdPtr) {{
       try {{
         const descriptor = Number(fd) >>> 0;
@@ -1292,18 +1621,77 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOsWasiModule =
         }}
         const target = this._readString(pathPtr, pathLen);
         const hostPath = __agentOsPath().resolve(entry.hostPath, target);
-        const mode = (Number(oflags) & 0x1) !== 0 || (Number(oflags) & 0x8) !== 0 ? "w+" : "r";
+        const requestedFlags = Number(oflags) >>> 0;
+        const mode =
+          (requestedFlags & __agentOsWasiOpenCreate) !== 0 ||
+          (requestedFlags & __agentOsWasiOpenTruncate) !== 0
+            ? "w+"
+            : "r";
+        const stats = __agentOsFs().statSync(hostPath);
         const realFd = __agentOsFs().openSync(hostPath, mode);
         const openedFd = this.nextFd++;
-        this.fdTable.set(openedFd, {{ kind: "file", realFd }});
+        this.fdTable.set(openedFd, {{
+          kind: stats.isDirectory() ? "directory" : "file",
+          hostPath,
+          realFd,
+        }});
         return this._writeUint32(openedFdPtr, openedFd);
-      }} catch {{
-        return __agentOsWasiErrnoFault;
+      }} catch (error) {{
+        return this._mapFsError(error);
+      }}
+    }}
+
+    _pathFilestatGet(fd, flags, pathPtr, pathLen, statPtr) {{
+      try {{
+        const resolved = this._resolveDescriptorPath(fd, pathPtr, pathLen);
+        if (resolved.error !== __agentOsWasiErrnoSuccess) {{
+          return resolved.error;
+        }}
+        const follow = (Number(flags) & __agentOsWasiLookupSymlinkFollow) !== 0;
+        const stats = follow
+          ? __agentOsFs().statSync(resolved.hostPath)
+          : __agentOsFs().lstatSync(resolved.hostPath);
+        return this._writeFilestat(statPtr, stats, this._filetypeForStats(stats));
+      }} catch (error) {{
+        return this._mapFsError(error);
+      }}
+    }}
+
+    _pathReadlink(fd, pathPtr, pathLen, bufPtr, bufLen, bufUsedPtr) {{
+      try {{
+        const resolved = this._resolveDescriptorPath(fd, pathPtr, pathLen);
+        if (resolved.error !== __agentOsWasiErrnoSuccess) {{
+          return resolved.error;
+        }}
+        const bytes = Buffer.from(__agentOsFs().readlinkSync(resolved.hostPath), "utf8");
+        const length = Math.min(bytes.length, Number(bufLen) >>> 0);
+        const writeStatus = this._writeBytes(bufPtr, bytes.subarray(0, length));
+        if (writeStatus !== __agentOsWasiErrnoSuccess) {{
+          return writeStatus;
+        }}
+        return this._writeUint32(bufUsedPtr, length);
+      }} catch (error) {{
+        return this._mapFsError(error);
       }}
     }}
 
     _pollOneoff(_inPtr, _outPtr, _nsubscriptions, neventsPtr) {{
       return this._writeUint32(neventsPtr, 0);
+    }}
+
+    _randomGet(bufPtr, bufLen) {{
+      try {{
+        const length = Number(bufLen) >>> 0;
+        const bytes = Buffer.allocUnsafe(length);
+        __agentOsCrypto().randomFillSync(bytes);
+        return this._writeBytes(bufPtr, bytes);
+      }} catch {{
+        return __agentOsWasiErrnoFault;
+      }}
+    }}
+
+    _schedYield() {{
+      return __agentOsWasiErrnoSuccess;
     }}
 
     _procExit(code) {{
@@ -1594,20 +1982,6 @@ fn prewarm_wasm_path(
     ))
 }
 
-fn guest_argv(
-    context: &WasmContext,
-    request: &StartWasmExecutionRequest,
-) -> Result<Vec<String>, WasmExecutionError> {
-    if !request.argv.is_empty() {
-        return Ok(request.argv.clone());
-    }
-
-    match &context.module_path {
-        Some(module_path) => Ok(vec![module_path.clone()]),
-        None => Err(WasmExecutionError::MissingModulePath),
-    }
-}
-
 fn wasm_guest_module_paths(specifier: &str, env: &BTreeMap<String, String>) -> Vec<String> {
     let mut candidates = Vec::new();
     candidates.push(specifier.to_owned());
@@ -1828,18 +2202,13 @@ fn warmup_guest_argv(
     vec![resolved_module.specifier.clone()]
 }
 
-fn wasm_stack_limit_bytes(
-    request: &StartWasmExecutionRequest,
-) -> Result<Option<usize>, WasmExecutionError> {
-    wasm_limit_usize(&request.env, WASM_MAX_STACK_BYTES_ENV)
-}
-
 fn wasm_memory_limit_bytes(
     request: &StartWasmExecutionRequest,
 ) -> Result<Option<u64>, WasmExecutionError> {
     wasm_limit_u64(&request.env, WASM_MAX_MEMORY_BYTES_ENV)
 }
 
+#[cfg(test)]
 fn wasm_memory_limit_pages(memory_limit_bytes: u64) -> Result<u32, WasmExecutionError> {
     let pages = memory_limit_bytes / WASM_PAGE_BYTES;
     u32::try_from(pages).map_err(|_| {
@@ -1858,19 +2227,6 @@ fn wasm_limit_u64(
     };
     value
         .parse::<u64>()
-        .map(Some)
-        .map_err(|error| WasmExecutionError::InvalidLimit(format!("{key}={value}: {error}")))
-}
-
-fn wasm_limit_usize(
-    env: &BTreeMap<String, String>,
-    key: &str,
-) -> Result<Option<usize>, WasmExecutionError> {
-    let Some(value) = env.get(key) else {
-        return Ok(None);
-    };
-    value
-        .parse::<usize>()
         .map(Some)
         .map_err(|error| WasmExecutionError::InvalidLimit(format!("{key}={value}: {error}")))
 }

@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- When `crates/sidecar/tests/*` includes a shared `src/*.rs` module, keep any harness-only helpers and imports behind `#[cfg(test)]`; otherwise focused library targets will keep warning on dead test scaffolding that production code never touches.
 - In `examples/quickstart`, the supported first-party example surface is the set of scripts exported by `examples/quickstart/package.json`; unreferenced probe/debug files should be removed instead of drifting beside the canonical examples.
 - Sidecar wire-protocol migrations should keep the native 4-byte big-endian frame prefix stable and use a temporary `JsonUtf8`/JSON-text boundary for existing `serde_json::Value` fields first; change payload codecs separately from outer framing so Rust and TypeScript can roll forward independently.
 - In the native sidecar BARE protocol, `SessionCreatedResponse` is positional and starts with `sessionId`; if the TypeScript decoder reads `session_id` after `pid`/`modes`/`config_options`, every `createSession()` result desynchronizes before prompt flow starts.
@@ -258,4 +259,14 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - In `examples/quickstart`, the canonical supported examples are the files wired into `package.json` scripts; extra tracked probes and legacy variants quickly turn into stale first-party API docs.
   - Old quickstart files that still show pre-migration API shapes, like legacy extension or session setup, should be removed rather than left beside the maintained examples with overlapping behavior.
   - Truthful acceptance for this story was `pnpm --dir examples/quickstart check-types` plus root `pnpm check-types`.
+---
+## [2026-04-11 06:36:26 PDT] - US-087
+- Cleared the focused Rust warning budget in `agent-os-execution` and `agent-os-sidecar` by deleting stale runtime helpers and nested child-process wrappers, restoring the missing `javascript_execution_v8_https_agents_expose_options_objects` test, and moving sidecar-only test scaffolding behind `#[cfg(test)]` so lib-focused runs stop compiling dead harness code.
+- Trimmed the post-extraction import surface in `crates/sidecar/src/service.rs`, removed unused HTTP/2/TLS state fields, and deleted dead JS bridge/request helpers that were no longer read after the sidecar module split.
+- Updated `crates/CLAUDE.md` and the top-level Codebase Patterns section with the reusable rule for `#[path]/include!`-shared test modules.
+- Files changed: `crates/CLAUDE.md`, `crates/execution/src/node_import_cache.rs`, `crates/execution/src/runtime_support.rs`, `crates/execution/src/wasm.rs`, `crates/execution/tests/javascript_v8.rs`, `crates/sidecar/src/bridge.rs`, `crates/sidecar/src/execution.rs`, `crates/sidecar/src/plugins/js_bridge.rs`, `crates/sidecar/src/service.rs`, `crates/sidecar/src/state.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Shared `src/*.rs` modules that are re-used from `crates/sidecar/tests/*` need `#[cfg(test)]` around harness-only helpers and imports; otherwise focused library targets keep surfacing dead-code warnings for test scaffolding.
+  - Warning cleanup after the sidecar module split is mostly import hygiene: once helper ownership moves into `execution.rs` or `filesystem.rs`, `service.rs` should stop re-exporting or importing symbols that the dispatch hub no longer touches.
+  - Truthful acceptance for this story was `cargo test -p agent-os-execution --test javascript_v8 -- --test-threads=1`, `cargo test -p agent-os-sidecar --test protocol -- --test-threads=1`, and root `pnpm check-types`.
 ---

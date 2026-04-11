@@ -2,19 +2,12 @@
 
 use crate::plugins::register_native_mount_plugins;
 use crate::service::{
-    audit_fields, dirname, emit_security_audit_event, filesystem_permission_capability,
-    normalize_path, plugin_error,
+    audit_fields, emit_security_audit_event, filesystem_permission_capability, plugin_error,
 };
-use crate::state::{
-    BridgeError, SharedBridge, SharedSidecarRequestClient, HOST_REALPATH_MAX_SYMLINK_DEPTH,
-};
+use crate::state::{BridgeError, SharedBridge, SharedSidecarRequestClient};
 use crate::{NativeSidecarBridge, SidecarError};
 
-use agent_os_bridge::{
-    ChmodRequest, CreateDirRequest, FileKind, FileMetadata, FilesystemAccess, PathRequest,
-    ReadDirRequest, ReadFileRequest, RenameRequest, SymlinkRequest, TruncateRequest,
-    WriteFileRequest,
-};
+use agent_os_bridge::FilesystemAccess;
 use agent_os_kernel::mount_plugin::{
     FileSystemPluginFactory, FileSystemPluginRegistry, OpenFileSystemPluginRequest, PluginError,
 };
@@ -23,16 +16,31 @@ use agent_os_kernel::permissions::{
     CommandAccessRequest, EnvAccessRequest, FsAccessRequest, FsOperation, NetworkAccessRequest,
     PermissionDecision, Permissions,
 };
-use agent_os_kernel::vfs::{
-    MemoryFileSystem, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
-};
-use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use agent_os_kernel::vfs::MemoryFileSystem;
 use std::fmt;
+use std::sync::Arc;
+
+#[cfg(test)]
+use crate::service::{dirname, normalize_path};
+#[cfg(test)]
+use crate::state::HOST_REALPATH_MAX_SYMLINK_DEPTH;
+#[cfg(test)]
+use agent_os_bridge::{
+    ChmodRequest, CreateDirRequest, FileKind, FileMetadata, PathRequest, ReadDirRequest,
+    ReadFileRequest, RenameRequest, SymlinkRequest, TruncateRequest, WriteFileRequest,
+};
+#[cfg(test)]
+use agent_os_kernel::vfs::{VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat};
+#[cfg(test)]
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::sync::Mutex;
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct HostFilesystem<B> {
     bridge: SharedBridge<B>,
@@ -40,6 +48,7 @@ pub(crate) struct HostFilesystem<B> {
     links: Arc<Mutex<HostFilesystemLinkState>>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 struct HostFilesystemMetadataState {
     uid: Option<u32>,
@@ -50,6 +59,7 @@ struct HostFilesystemMetadataState {
     birthtime_ms: Option<u64>,
 }
 
+#[cfg(test)]
 impl HostFilesystemMetadataState {
     fn apply_to_stat(&self, stat: &mut VirtualStat) {
         if let Some(uid) = self.uid {
@@ -73,6 +83,7 @@ impl HostFilesystemMetadataState {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct HostFilesystemLinkedInode {
     canonical_path: String,
@@ -80,6 +91,7 @@ struct HostFilesystemLinkedInode {
     metadata: HostFilesystemMetadataState,
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct HostFilesystemLinkState {
     next_ino: u64,
@@ -87,6 +99,7 @@ struct HostFilesystemLinkState {
     inodes: BTreeMap<u64, HostFilesystemLinkedInode>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct HostFilesystemTrackedIdentity {
     canonical_path: String,
@@ -95,6 +108,7 @@ struct HostFilesystemTrackedIdentity {
     metadata: HostFilesystemMetadataState,
 }
 
+#[cfg(test)]
 impl<B> HostFilesystem<B> {
     pub(crate) fn new(bridge: SharedBridge<B>, vm_id: impl Into<String>) -> Self {
         Self {
@@ -393,6 +407,7 @@ impl<B> HostFilesystem<B> {
     }
 }
 
+#[cfg(test)]
 impl<B> VirtualFileSystem for HostFilesystem<B>
 where
     B: NativeSidecarBridge + Send + 'static,
@@ -834,12 +849,14 @@ where
     }
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct ScopedHostFilesystem<B> {
     inner: HostFilesystem<B>,
     guest_root: String,
 }
 
+#[cfg(test)]
 impl<B> ScopedHostFilesystem<B> {
     pub(crate) fn new(inner: HostFilesystem<B>, guest_root: impl Into<String>) -> Self {
         Self {
@@ -892,6 +909,7 @@ impl<B> ScopedHostFilesystem<B> {
     }
 }
 
+#[cfg(test)]
 impl<B> VirtualFileSystem for ScopedHostFilesystem<B>
 where
     B: NativeSidecarBridge + Send + 'static,

@@ -11,55 +11,33 @@ use crate::acp::{
 };
 use crate::bridge::{build_mount_plugin_registry, MountPluginContext};
 pub(crate) use crate::execution::{
-    build_javascript_socket_path_context, error_code, format_dns_resource, format_tcp_resource,
-    ignore_stale_javascript_sync_rpc_response, javascript_sync_rpc_arg_str,
-    javascript_sync_rpc_arg_u32, javascript_sync_rpc_arg_u32_optional, javascript_sync_rpc_arg_u64,
-    javascript_sync_rpc_arg_u64_optional, javascript_sync_rpc_bytes_arg,
-    javascript_sync_rpc_bytes_value, javascript_sync_rpc_encoding, javascript_sync_rpc_error_code,
-    javascript_sync_rpc_option_bool, javascript_sync_rpc_option_u32, parse_signal,
-    runtime_child_is_alive, sanitize_javascript_child_process_internal_bootstrap_env,
-    service_javascript_net_sync_rpc, service_javascript_sync_rpc, signal_runtime_process,
-    vm_network_resource_counts, write_kernel_process_stdin,
+    build_javascript_socket_path_context, error_code, ignore_stale_javascript_sync_rpc_response,
+    javascript_sync_rpc_arg_str, javascript_sync_rpc_arg_u32, javascript_sync_rpc_arg_u32_optional,
+    javascript_sync_rpc_arg_u64, javascript_sync_rpc_arg_u64_optional,
+    javascript_sync_rpc_bytes_arg, javascript_sync_rpc_bytes_value, javascript_sync_rpc_encoding,
+    javascript_sync_rpc_error_code, javascript_sync_rpc_option_bool,
+    javascript_sync_rpc_option_u32, parse_signal, runtime_child_is_alive,
+    sanitize_javascript_child_process_internal_bootstrap_env, service_javascript_sync_rpc,
+    signal_runtime_process, vm_network_resource_counts, write_kernel_process_stdin,
 };
-use crate::filesystem::{
-    guest_filesystem_call as filesystem_guest_filesystem_call,
-    handle_python_vfs_rpc_request as filesystem_handle_python_vfs_rpc_request,
-    service_javascript_fs_sync_rpc,
-};
+use crate::filesystem::guest_filesystem_call as filesystem_guest_filesystem_call;
 use crate::protocol::{
-    AgentSessionClosedResponse, AuthenticatedResponse, BoundUdpSnapshotResponse,
-    CloseAgentSessionRequest, CloseStdinRequest, CreateSessionRequest, DisposeReason, EventFrame,
-    EventPayload, ExecuteRequest, FindBoundUdpRequest, FindListenerRequest, FsPermissionScope,
-    GetSessionStateRequest, GetSignalStateRequest, GetZombieTimerCountRequest,
-    GuestFilesystemCallRequest, GuestRuntimeKind, JavascriptChildProcessSpawnOptions,
-    JavascriptChildProcessSpawnRequest, JavascriptDgramBindRequest,
-    JavascriptDgramCreateSocketRequest, JavascriptDgramSendRequest, JavascriptDnsLookupRequest,
-    JavascriptDnsResolveRequest, JavascriptNetConnectRequest, JavascriptNetListenRequest,
-    KillProcessRequest, ListenerSnapshotResponse, OpenSessionRequest, OwnershipScope,
-    PatternPermissionRule, PatternPermissionScope, PermissionMode, PermissionsPolicy,
-    ProcessExitedEvent, ProcessKilledResponse, ProcessOutputEvent, ProcessStartedResponse,
-    ProtocolSchema, RejectedResponse, RequestFrame, RequestId, RequestPayload, ResponseFrame,
-    ResponsePayload, SessionOpenedResponse, SessionRequest as AgentSessionRequest,
+    AgentSessionClosedResponse, AuthenticatedResponse, CloseAgentSessionRequest,
+    CreateSessionRequest, DisposeReason, EventFrame, EventPayload, ExecuteRequest,
+    FsPermissionScope, GetSessionStateRequest, GuestFilesystemCallRequest,
+    JavascriptChildProcessSpawnOptions, JavascriptChildProcessSpawnRequest, OpenSessionRequest,
+    OwnershipScope, PatternPermissionRule, PatternPermissionScope, PermissionMode,
+    PermissionsPolicy, ProtocolSchema, RejectedResponse, RequestFrame, RequestId, RequestPayload,
+    ResponseFrame, ResponsePayload, SessionOpenedResponse, SessionRequest as AgentSessionRequest,
     SessionRpcResponse, SidecarPermissionRequest, SidecarRequestFrame, SidecarRequestPayload,
     SidecarResponseFrame, SidecarResponsePayload, SidecarResponseTracker,
     SidecarResponseTrackerError, SignalDispositionAction, SignalHandlerRegistration,
-    SignalStateResponse, SocketStateEntry, StdinClosedResponse, StdinWrittenResponse,
-    StreamChannel, StructuredEvent, VmLifecycleEvent, VmLifecycleState, WasmPermissionTier,
-    WriteStdinRequest, ZombieTimerCountResponse,
+    StructuredEvent, VmLifecycleEvent, VmLifecycleState,
 };
 use crate::state::{
-    ActiveExecution, ActiveExecutionEvent, ActiveProcess, ActiveTcpListener, ActiveTcpSocket,
-    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError, ConnectionState,
-    JavascriptSocketFamily, JavascriptSocketPathContext, JavascriptTcpListenerEvent,
-    JavascriptTcpSocketEvent, JavascriptUdpFamily, JavascriptUdpSocketEvent,
-    JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket, PendingUnixSocket,
-    ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution, ResolvedTcpConnectAddr,
-    SessionState, SharedBridge, SharedSidecarRequestClient, SidecarKernel,
-    SidecarRequestTransport, SocketQueryKind, VmDnsConfig, VmListenPolicy, VmState,
-    DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
-    JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND,
-    VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
-    VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
+    ActiveExecution, ActiveExecutionEvent, BridgeError, ConnectionState, JavascriptSocketFamily,
+    JavascriptSocketPathContext, ProcessEventEnvelope, SessionState, SharedBridge,
+    SharedSidecarRequestClient, SidecarRequestTransport, VmState, EXECUTION_DRIVER_NAME,
 };
 use crate::tools::register_toolkit;
 use crate::NativeSidecarBridge;
@@ -68,31 +46,19 @@ use agent_os_bridge::{
     FilesystemPermissionRequest, LifecycleEventRecord, LifecycleState, LogLevel, LogRecord,
     NetworkAccess, NetworkPermissionRequest, StructuredEventRecord,
 };
-use agent_os_execution::wasm::{
-    WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV,
-};
 use agent_os_execution::{
-    CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
-    JavascriptExecutionEngine, JavascriptExecutionError, JavascriptExecutionEvent,
-    JavascriptSyncRpcRequest, NodeSignalDispositionAction, NodeSignalHandlerRegistration,
-    PythonExecutionEngine, PythonExecutionError, PythonExecutionEvent, PythonVfsRpcRequest,
-    PythonVfsRpcResponsePayload, StartJavascriptExecutionRequest, StartPythonExecutionRequest,
-    StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionError, WasmExecutionEvent,
-    WasmPermissionTier as ExecutionWasmPermissionTier,
+    JavascriptExecutionEngine, JavascriptExecutionError, JavascriptSyncRpcRequest,
+    PythonExecutionEngine, PythonExecutionError, WasmExecutionEngine, WasmExecutionError,
 };
-use agent_os_kernel::kernel::{KernelError, KernelProcessHandle, SpawnOptions};
+use agent_os_kernel::kernel::KernelError;
 use agent_os_kernel::mount_plugin::{FileSystemPluginRegistry, PluginError};
 use agent_os_kernel::permissions::{
     CommandAccessRequest, EnvAccessRequest, EnvironmentOperation, NetworkAccessRequest,
     NetworkOperation, PermissionDecision,
 };
-use agent_os_kernel::process_table::{SIGKILL, SIGTERM};
-use agent_os_kernel::resource_accounting::ResourceLimits;
+use agent_os_kernel::process_table::SIGKILL;
 // root_fs types moved to crate::vm
 use agent_os_kernel::vfs::VfsError;
-use base64::Engine;
-use nix::libc;
-use nix::sys::signal::{kill as send_signal, Signal};
 use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use serde::Deserialize;
@@ -100,16 +66,8 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::fs;
-use std::io::{Read, Write};
-use std::net::{
-    IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
-    UdpSocket,
-};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{SocketAddr as UnixSocketAddr, UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -133,6 +91,8 @@ struct LegacyJavascriptChildProcessSpawnOptions {
     input: Option<Value>,
     #[serde(default)]
     shell: bool,
+    #[serde(default)]
+    detached: bool,
     #[serde(default, rename = "maxBuffer")]
     max_buffer: Option<usize>,
 }
@@ -190,6 +150,7 @@ pub(crate) fn parse_javascript_child_process_spawn_request(
                 ),
                 input: parsed_options.input,
                 shell: parsed_options.shell,
+                detached: parsed_options.detached,
             },
         },
         parsed_options.max_buffer,

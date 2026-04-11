@@ -376,7 +376,7 @@ function parseControlPipeFd(value) {
   }
 
   const parsed = Number.parseInt(value, 10);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+  return Number.isInteger(parsed) && parsed >= 3 ? parsed : null;
 }
 
 function emitControlMessage(message) {
@@ -3221,7 +3221,17 @@ function createRpcBackedFsCallbacks(fromGuestDir = '/') {
         lengthOrEncoding,
         position,
       );
-      call('fs.write', [normalizeFsFd(fd), write.payload, write.position]).then(
+      const normalizedFd = normalizeFsFd(fd);
+      if (isStdioFd(normalizedFd)) {
+        try {
+          const bytesWritten = writeToStdioFd(normalizedFd, write.payload);
+          invokeFsCallback(done, null, bytesWritten, write.result);
+        } catch (error) {
+          invokeFsCallback(done, error);
+        }
+        return;
+      }
+      call('fs.write', [normalizedFd, write.payload, write.position]).then(
         (bytesWritten) =>
           invokeFsCallback(
             done,
@@ -3245,7 +3255,13 @@ function createRpcBackedFsSync(fromGuestDir = '/') {
       callSync('fs.chmodSync', [resolveGuestFsPath(target, fromGuestDir), mode]),
     chownSync: (target, uid, gid) =>
       callSync('fs.chownSync', [resolveGuestFsPath(target, fromGuestDir), uid, gid]),
-    closeSync: (fd) => callSync('fs.closeSync', [normalizeFsFd(fd)]),
+    closeSync: (fd) => {
+      const normalizedFd = normalizeFsFd(fd);
+      if (isStdioFd(normalizedFd)) {
+        return undefined;
+      }
+      return callSync('fs.closeSync', [normalizedFd]);
+    },
     copyFileSync: (source, destination, mode) =>
       callSync('fs.copyFileSync', [
         resolveGuestFsPath(source, fromGuestDir),
@@ -3259,8 +3275,13 @@ function createRpcBackedFsSync(fromGuestDir = '/') {
         return false;
       }
     },
-    fstatSync: (fd) =>
-      createGuestFsStats(callSync('fs.fstatSync', [normalizeFsFd(fd)])),
+    fstatSync: (fd) => {
+      const normalizedFd = normalizeFsFd(fd);
+      if (isStdioFd(normalizedFd)) {
+        return hostFs.fstatSync(normalizedFd);
+      }
+      return createGuestFsStats(callSync('fs.fstatSync', [normalizedFd]));
+    },
     linkSync: (existingPath, newPath) =>
       callSync('fs.linkSync', [
         resolveGuestFsPath(existingPath, fromGuestDir),
@@ -3284,10 +3305,20 @@ function createRpcBackedFsSync(fromGuestDir = '/') {
         normalizeFsReadOptions(options),
       ]),
     readSync: (fd, buffer, offset, length, position) => {
+      const normalizedFd = normalizeFsFd(fd);
       const target = normalizeFsReadTarget(buffer, offset, length);
+      if (isStdioFd(normalizedFd)) {
+        return hostFs.readSync(
+          normalizedFd,
+          target.target,
+          target.offset,
+          target.length,
+          position,
+        );
+      }
       const chunk = decodeFsBytesPayload(
         callSync('fs.readSync', [
-          normalizeFsFd(fd),
+          normalizedFd,
           target.length,
           normalizeFsPosition(position),
         ]),
@@ -3337,14 +3368,18 @@ function createRpcBackedFsSync(fromGuestDir = '/') {
         normalizeFsTimeValue(mtime),
       ]),
     writeSync: (fd, value, offsetOrPosition, lengthOrEncoding, position) => {
+      const normalizedFd = normalizeFsFd(fd);
       const write = normalizeFsWriteOperation(
         value,
         offsetOrPosition,
         lengthOrEncoding,
         position,
       );
+      if (isStdioFd(normalizedFd)) {
+        return writeToStdioFd(normalizedFd, write.payload);
+      }
       return normalizeFsBytesResult(
-        callSync('fs.writeSync', [normalizeFsFd(fd), write.payload, write.position]),
+        callSync('fs.writeSync', [normalizedFd, write.payload, write.position]),
         'fs.writeSync result',
       );
     },
@@ -8380,7 +8415,7 @@ function parseControlPipeFd(value) {
   }
 
   const parsed = Number.parseInt(value, 10);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+  return Number.isInteger(parsed) && parsed >= 3 ? parsed : null;
 }
 
 function emitControlMessage(message) {
@@ -8436,6 +8471,9 @@ function denyReadOnlyMutation() {
 
 function writeGuestUint32(ptr, value) {
   if (!(instanceMemory instanceof WebAssembly.Memory)) {
+    try {
+      process.stderr.write(`[agent-os-wasi] writeGuestUint32 no memory ptr=${Number(ptr)} value=${Number(value) >>> 0}\n`);
+    } catch {}
     return WASI_ERRNO_FAULT;
   }
 
@@ -8443,6 +8481,9 @@ function writeGuestUint32(ptr, value) {
     new DataView(instanceMemory.buffer).setUint32(Number(ptr), Number(value) >>> 0, true);
     return WASI_ERRNO_SUCCESS;
   } catch {
+    try {
+      process.stderr.write(`[agent-os-wasi] writeGuestUint32 fault ptr=${Number(ptr)} value=${Number(value) >>> 0} mem=${instanceMemory.buffer.byteLength}\n`);
+    } catch {}
     return WASI_ERRNO_FAULT;
   }
 }
@@ -10678,6 +10719,7 @@ impl NodeImportCache {
         &self.python_runner_path
     }
 
+    #[cfg(test)]
     pub(crate) fn timing_bootstrap_path(&self) -> &Path {
         &self.timing_bootstrap_path
     }

@@ -14,7 +14,6 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -96,34 +95,6 @@ impl JsBridgeFilesystem {
             "js-bridge-call-{}",
             self.next_call_id.fetch_add(1, Ordering::Relaxed)
         )
-    }
-
-    fn request(&self, operation: &str, args: Value) -> VfsResult<Option<Value>> {
-        let payload = SidecarRequestPayload::JsBridgeCall(JsBridgeCallRequest {
-            call_id: self.next_call_id(),
-            mount_id: self.mount_id.clone(),
-            operation: operation.to_owned(),
-            args,
-        });
-        match self
-            .requests
-            .invoke(self.ownership.clone(), payload, JS_BRIDGE_TIMEOUT)
-            .map_err(|error| Self::sidecar_error_to_vfs(operation, "/", error))?
-        {
-            SidecarResponsePayload::JsBridgeResult(JsBridgeResultResponse {
-                result,
-                error,
-                ..
-            }) => {
-                if let Some(error) = error {
-                    return Err(Self::js_error_to_vfs(operation, "/", &error));
-                }
-                Ok(result)
-            }
-            other => Err(VfsError::io(format!(
-                "unexpected js_bridge response payload: {other:?}"
-            ))),
-        }
     }
 
     fn request_path(&self, operation: &str, path: &str, args: Value) -> VfsResult<Option<Value>> {

@@ -31,7 +31,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -52,6 +52,7 @@ pub(crate) const PYTHON_COMMAND: &str = "python";
 pub(crate) const WASM_COMMAND: &str = "wasm";
 pub(crate) const PYTHON_VFS_RPC_GUEST_ROOT: &str = "/workspace";
 pub(crate) const EXECUTION_SANDBOX_ROOT_ENV: &str = "AGENT_OS_SANDBOX_ROOT";
+#[cfg(test)]
 pub(crate) const HOST_REALPATH_MAX_SYMLINK_DEPTH: usize = 40;
 pub(crate) const DISPOSE_VM_SIGTERM_GRACE: std::time::Duration =
     std::time::Duration::from_millis(100);
@@ -152,13 +153,6 @@ impl Default for SharedSidecarRequestClient {
 }
 
 impl SharedSidecarRequestClient {
-    pub(crate) fn with_transport(transport: Arc<dyn SidecarRequestTransport>) -> Self {
-        Self {
-            transport: Some(transport),
-            next_request_id: Arc::new(AtomicI64::new(-1)),
-        }
-    }
-
     pub(crate) fn set_transport(&mut self, transport: Arc<dyn SidecarRequestTransport>) {
         self.transport = Some(transport);
     }
@@ -292,6 +286,7 @@ pub(crate) struct VmState {
     pub(crate) command_permissions: BTreeMap<String, WasmPermissionTier>,
     pub(crate) toolkits: BTreeMap<String, RegisterToolkitRequest>,
     pub(crate) active_processes: BTreeMap<String, ActiveProcess>,
+    pub(crate) detached_child_processes: BTreeSet<String>,
     pub(crate) signal_states: BTreeMap<String, BTreeMap<u32, SignalHandlerRegistration>>,
 }
 
@@ -304,27 +299,6 @@ pub(crate) struct VmDnsConfig {
     pub(crate) name_servers: Vec<SocketAddr>,
     pub(crate) overrides: BTreeMap<String, Vec<IpAddr>>,
 }
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum DnsResolutionSource {
-    Literal,
-    Override,
-    Resolver,
-}
-
-impl DnsResolutionSource {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Literal => "literal",
-            Self::Override => "override",
-            Self::Resolver => "resolver",
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Network context / policy
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub(crate) struct JavascriptSocketPathContext {
@@ -390,6 +364,7 @@ pub(crate) struct ActiveProcess {
     pub(crate) kernel_handle: KernelProcessHandle,
     pub(crate) kernel_stdin_writer_fd: Option<u32>,
     pub(crate) runtime: GuestRuntimeKind,
+    pub(crate) detached: bool,
     pub(crate) execution: ActiveExecution,
     pub(crate) guest_cwd: String,
     pub(crate) env: BTreeMap<String, String>,
@@ -507,23 +482,13 @@ pub(crate) struct ActiveHttp2Server {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveHttp2Session {
-    pub(crate) server_id: Option<u64>,
-    pub(crate) secure: bool,
     pub(crate) command_tx: UnboundedSender<Http2SessionCommand>,
-    pub(crate) snapshot: Arc<Mutex<Http2SessionSnapshot>>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveHttp2Stream {
     pub(crate) session_id: u64,
-    pub(crate) direction: Http2StreamDirection,
     pub(crate) paused: Arc<AtomicBool>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Http2StreamDirection {
-    Client,
-    Server,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -614,7 +579,6 @@ pub(crate) enum Http2SessionCommand {
     StreamPush {
         stream_id: u64,
         headers_json: String,
-        options_json: String,
         respond_to: Sender<Result<Value, String>>,
     },
     StreamWrite {
@@ -693,10 +657,40 @@ pub(crate) struct ActiveTcpSocket {
     pub(crate) close_notified: Arc<AtomicBool>,
 }
 
+pub(crate) struct LoopbackTlsTransportPair {
+    pub(crate) state: Mutex<LoopbackTlsTransportPairState>,
+    pub(crate) ready: Condvar,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct LoopbackTlsTransportPairState {
+    pub(crate) lower_to_higher: VecDeque<u8>,
+    pub(crate) higher_to_lower: VecDeque<u8>,
+    pub(crate) lower_write_closed: bool,
+    pub(crate) higher_write_closed: bool,
+    pub(crate) lower_closed: bool,
+    pub(crate) higher_closed: bool,
+}
+
+pub(crate) struct LoopbackTlsEndpoint {
+    pub(crate) pair: Arc<LoopbackTlsTransportPair>,
+    pub(crate) is_lower_socket: bool,
+}
+
+impl fmt::Debug for LoopbackTlsEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LoopbackTlsEndpoint")
+            .field("is_lower_socket", &self.is_lower_socket)
+            .finish()
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum ActiveTlsStream {
     Client(StreamOwned<ClientConnection, TcpStream>),
     Server(StreamOwned<ServerConnection, TcpStream>),
+    LoopbackClient(StreamOwned<ClientConnection, LoopbackTlsEndpoint>),
+    LoopbackServer(StreamOwned<ServerConnection, LoopbackTlsEndpoint>),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -747,8 +741,6 @@ pub(crate) enum JavascriptTlsDataValue {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ActiveTlsState {
-    pub(crate) authorized: bool,
-    pub(crate) authorization_error: Option<String>,
     pub(crate) client_hello: Option<JavascriptTlsClientHello>,
     pub(crate) local_certificates: Vec<Vec<u8>>,
     pub(crate) session_reused: bool,
