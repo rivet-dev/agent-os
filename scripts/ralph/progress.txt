@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- In `examples/quickstart`, the supported first-party example surface is the set of scripts exported by `examples/quickstart/package.json`; unreferenced probe/debug files should be removed instead of drifting beside the canonical examples.
 - Sidecar wire-protocol migrations should keep the native 4-byte big-endian frame prefix stable and use a temporary `JsonUtf8`/JSON-text boundary for existing `serde_json::Value` fields first; change payload codecs separately from outer framing so Rust and TypeScript can roll forward independently.
 - In the native sidecar BARE protocol, `SessionCreatedResponse` is positional and starts with `sessionId`; if the TypeScript decoder reads `session_id` after `pid`/`modes`/`config_options`, every `createSession()` result desynchronizes before prompt flow starts.
 - In `crates/sidecar/src/protocol.rs`, the BARE schema's enums/unions use explicit 1-based discriminants, so Rust must not rely on Serde's default enum numbering; keep manual tag mappings aligned with `protocol/agent_os_sidecar_v1.bare` while preserving the current human-readable JSON shape during the migration window.
@@ -248,4 +249,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - BARE response structs are positional across the Rust/TypeScript boundary, so even a one-field reorder in the TypeScript decoder can break every `createSession()` call before any agent logic runs.
   - A deterministic mock ACP adapter is the cheapest stable way to cover session/prompt/update/destroy flow in parity tests without depending on external model SDK behavior.
   - Truthful acceptance for this story was `pnpm test:migration-parity` plus `pnpm --dir packages/core check-types`.
+---
+## [2026-04-11 06:25:26 PDT] - US-086
+- Removed the stale tracked quickstart drift files that duplicated or predated the supported example surface, leaving `examples/quickstart/package.json` as the authoritative index for filesystem, networking, session, tool, and extension examples.
+- Added a package description that explicitly points readers at the supported script entrypoints.
+- Files changed: `examples/quickstart/package.json`, `examples/quickstart/src/cron-jobs.ts`, `examples/quickstart/src/expose-tools.ts`, `examples/quickstart/src/extensions.ts`, `examples/quickstart/src/file-system.ts`, `examples/quickstart/src/networking.ts`, `examples/quickstart/src/sessions.ts`, `examples/quickstart/test-signal-exit.ts`, `examples/quickstart/test2.ts`, `examples/quickstart/test3.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - In `examples/quickstart`, the canonical supported examples are the files wired into `package.json` scripts; extra tracked probes and legacy variants quickly turn into stale first-party API docs.
+  - Old quickstart files that still show pre-migration API shapes, like legacy extension or session setup, should be removed rather than left beside the maintained examples with overlapping behavior.
+  - Truthful acceptance for this story was `pnpm --dir examples/quickstart check-types` plus root `pnpm check-types`.
 ---

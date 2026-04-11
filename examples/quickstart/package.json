@@ -2,6 +2,7 @@
 	"name": "@rivet-dev/agent-os-quickstart",
 	"version": "0.1.0",
 	"private": true,
+	"description": "Quickstart examples for Agent OS. The scripts in this package are the supported example entrypoints.",
 	"type": "module",
 	"scripts": {
 		"check-types": "tsc --noEmit",
