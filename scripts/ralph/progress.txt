@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- Sidecar shadow-root reconciliation should prefer active-process shadow paths and only fall back to the VM cwd shadow root when the guest path is still absent in the kernel; native-sidecar JS bridge tests that cover mounted host files need to answer the bridge's `exists`/`stat`/`lstat` probes consistently with the real host file state.
 - In `crates/execution`, keep any real-host Node helpers isolated to host-only modules used by benchmarks or import-cache tests; shared guest runtime helpers like signal metadata should live in neutral modules that JS/WASM/Python can use without depending on host launch scaffolding.
 - WASM prewarm still runs the embedded V8 runner, so `prewarm_wasm_path()` must service the runner's internal `node:fs` sync-RPC traffic just like normal execution; dropping those requests turns downstream sidecar socket-state failures into warmup timeouts.
 - In `python-runner.mjs`, keep bundled Pyodide bootstrap package loading on `/__agent_os_pyodide` and only switch to `AGENT_OS_PYODIDE_PACKAGE_BASE_URL` after `pyodide.loadPackage("micropip")`; user `micropip.install(...)` URLs and bundled wheel/bootstrap URLs cannot share the same base.
@@ -150,4 +151,12 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - When inline guest code starts with ESM syntax, `JavascriptExecutionEngine::start_execution()` must infer module mode from `inline_code`, not just the host entrypoint path, or embedded runners like the WASM bootstrap will mis-execute before tests even reach their real assertions.
   - The embedded WASM runner is sensitive to sync-vs-async WebAssembly construction in V8; `new WebAssembly.Module(...)` plus `new WebAssembly.Instance(...)` avoids the prewarm/execute stall that showed up as sidecar socket-state timeouts.
   - Truthful acceptance for this story is the full `cargo test -p agent-os-sidecar --test service -- --test-threads=1`, `cargo test -p agent-os-sidecar --test socket_state_queries`, and root `pnpm check-types` path, with the lingering ignored nested-child-process test still belonging to `US-076`.
+---
+## [2026-04-11 02:20:57 PDT] - US-076
+- Unignored the remaining sidecar V8 harness coverage for nested child-processes, stdio framing, and VM lifecycle, then fixed the guest shadow-path reconciliation and V8 bridge default-agent/TLS behavior needed for the broader service suite to stay green.
+- Files changed: `crates/execution/CLAUDE.md`, `crates/execution/assets/v8-bridge.js`, `crates/execution/assets/v8-bridge.source.js`, `crates/sidecar/src/filesystem.rs`, `crates/sidecar/tests/service.rs`, `crates/sidecar/tests/stdio_binary.rs`, `crates/sidecar/tests/vm_lifecycle.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - In `v8-bridge.source.js`, keep `http` and `https` default agents module-scoped; a shared global default agent can make `http.request()` inherit HTTPS TLS upgrade behavior.
+  - Guest-local loopback TLS sockets can complete entirely on the bridge fast path without a kernel socket id, so TLS-finalization helpers must skip `queryTlsSocket(...)` / sidecar upgrade RPCs for those sockets.
+  - The native-sidecar JS bridge filesystem tests now rely on the real shadow-sync preflight path, so mounted-host-file fixtures must answer `exists` before writes and `stat`/`lstat` after writes in the same shape the bridge expects.
 ---

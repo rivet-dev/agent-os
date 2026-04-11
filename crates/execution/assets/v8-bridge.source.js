@@ -9376,7 +9376,6 @@ var __bridge = (() => {
     error.code = "ABORT_ERR";
     return error;
   }
-  var _moduleGlobalAgent = null;
   var IncomingMessage = class {
     headers;
     rawHeaders;
@@ -9756,8 +9755,10 @@ var __bridge = (() => {
         this._agent = null;
       } else if (agentOpt instanceof Agent) {
         this._agent = agentOpt;
+      } else if (this._options._agentOsDefaultAgent instanceof Agent) {
+        this._agent = this._options._agentOsDefaultAgent;
       } else {
-        this._agent = _moduleGlobalAgent;
+        this._agent = null;
       }
       this._hostKey = this._agent ? this._agent._getHostKey(this._options) : "";
       this._bindAbortSignal();
@@ -12818,11 +12819,44 @@ ${headerLines}\r
   });
   function createHttpModule(protocol) {
     const defaultProtocol = protocol === "https" ? "https:" : "http:";
-    const moduleAgent = new Agent({ keepAlive: false });
-    _moduleGlobalAgent = moduleAgent;
+    const moduleAgent = new Agent({
+      keepAlive: false,
+      createConnection(options, cb) {
+        const host = options.hostname || options.host || "localhost";
+        const port = Number(options.port) || (defaultProtocol === "https:" ? 443 : 80);
+        const socket = defaultProtocol === "https:" ? tlsConnect({
+          host,
+          port,
+          servername: options.servername || host,
+          rejectUnauthorized: options.rejectUnauthorized,
+          socket: options.socket
+        }) : netConnect({
+          host,
+          port,
+          path: options.socketPath,
+          keepAlive: options.keepAlive,
+          keepAliveInitialDelay: options.keepAliveInitialDelay
+        });
+        if (cb) {
+          const readyEvent = socketReadyEventNameForProtocol(defaultProtocol);
+          socket.once(readyEvent, () => cb(null, socket));
+          socket.once("error", (error) => cb(error));
+        }
+        return socket;
+      }
+    });
     function ensureProtocol(opts) {
       if (!opts.protocol) return { ...opts, protocol: defaultProtocol };
       return opts;
+    }
+    function withModuleDefaultAgent(opts) {
+      if (opts.agent !== void 0) {
+        return opts;
+      }
+      return {
+        ...opts,
+        _agentOsDefaultAgent: moduleAgent
+      };
     }
     return {
       request(options, optionsOrCallback, maybeCallback) {
@@ -12851,7 +12885,7 @@ ${headerLines}\r
             ...typeof optionsOrCallback === "object" && optionsOrCallback ? optionsOrCallback : {}
           };
         }
-        return new ClientRequest(ensureProtocol(opts), callback);
+        return new ClientRequest(withModuleDefaultAgent(ensureProtocol(opts)), callback);
       },
       get(options, optionsOrCallback, maybeCallback) {
         let opts;
@@ -12882,7 +12916,7 @@ ${headerLines}\r
             method: "GET"
           };
         }
-        const req = new ClientRequest(ensureProtocol(opts), callback);
+        const req = new ClientRequest(withModuleDefaultAgent(ensureProtocol(opts)), callback);
         req.end();
         return req;
       },
@@ -15560,17 +15594,19 @@ ${headerLines}\r
     socket._tlsUpgrading = false;
     socket.encrypted = true;
     socket.authorized = socket.authorizationError == null;
-    const protocol = queryTlsSocket(socket._socketId, "getProtocol");
-    if (typeof protocol === "string" || protocol === null) {
-      socket._tlsProtocol = protocol;
-    }
-    const cipher = queryTlsSocket(socket._socketId, "getCipher");
-    if (cipher !== void 0) {
-      socket._tlsCipher = cipher;
-    }
-    const reused = queryTlsSocket(socket._socketId, "isSessionReused");
-    if (typeof reused === "boolean") {
-      socket._tlsSessionReused = reused;
+    if (typeof socket._socketId === "string" && socket._socketId.length > 0) {
+      const protocol = queryTlsSocket(socket._socketId, "getProtocol");
+      if (typeof protocol === "string" || protocol === null) {
+        socket._tlsProtocol = protocol;
+      }
+      const cipher = queryTlsSocket(socket._socketId, "getCipher");
+      if (cipher !== void 0) {
+        socket._tlsCipher = cipher;
+      }
+      const reused = queryTlsSocket(socket._socketId, "isSessionReused");
+      if (typeof reused === "boolean") {
+        socket._tlsSessionReused = reused;
+      }
     }
     socket._touchTimeout();
     socket._emitNet(eventName);
@@ -16445,6 +16481,14 @@ ${headerLines}\r
         throw new Error("tls.connect is not supported in sandbox (bridge not available)");
       }
       this._tlsUpgrading = true;
+      if (this._loopbackServer && (typeof this._socketId !== "string" || this._socketId.length === 0)) {
+        queueMicrotask(() => {
+          if (!this.destroyed) {
+            finalizeTlsUpgrade(this);
+          }
+        });
+        return;
+      }
       _netSocketUpgradeTlsRaw.applySync(void 0, [this._socketId, JSON.stringify(options ?? {})]);
       queueMicrotask(() => {
         if (!this.destroyed) {

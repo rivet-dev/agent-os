@@ -10696,7 +10696,6 @@ console.log(JSON.stringify(summary));
         }
 
         #[test]
-        #[ignore = "V8 nested child_process output/lifecycle delivery is flaky in the sidecar harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_child_process_rpc_spawns_nested_node_processes_inside_vm_kernel() {
             assert_node_available();
 

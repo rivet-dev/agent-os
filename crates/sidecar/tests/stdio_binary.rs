@@ -239,7 +239,6 @@ fn write_script(root: &Path) {
 }
 
 #[test]
-#[ignore = "V8 sidecar stdio stdout delivery is flaky in this harness; execution-layer tests cover the V8 bridge path"]
 fn native_sidecar_binary_runs_the_framed_protocol_over_stdio() {
     let temp = temp_dir("stdio-binary");
     write_script(&temp);
@@ -837,6 +836,13 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
                 call.operation.as_str(),
                 call.args["path"].as_str().expect("read path"),
             ) {
+                ("exists", "/existing.txt") => SidecarResponsePayload::JsBridgeResult(
+                    agent_os_sidecar::protocol::JsBridgeResultResponse {
+                        call_id: call.call_id.clone(),
+                        result: Some(serde_json::Value::Bool(true)),
+                        error: None,
+                    },
+                ),
                 ("realpath", "/existing.txt") => SidecarResponsePayload::JsBridgeResult(
                     agent_os_sidecar::protocol::JsBridgeResultResponse {
                         call_id: call.call_id.clone(),
@@ -906,17 +912,52 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
                 return response;
             }
             if call.args["path"].as_str() == Some("/generated.txt") {
+                let generated_path = host_root.join("generated.txt");
                 match call.operation.as_str() {
                     "exists" => {
                         return SidecarResponsePayload::JsBridgeResult(
                             agent_os_sidecar::protocol::JsBridgeResultResponse {
                                 call_id: call.call_id.clone(),
-                                result: Some(serde_json::Value::Bool(false)),
+                                result: Some(serde_json::Value::Bool(generated_path.exists())),
                                 error: None,
                             },
                         );
                     }
-                    "stat" | "lstat" | "realpath" => {
+                    "stat" | "lstat" => {
+                        if let Ok(metadata) = fs::metadata(&generated_path) {
+                            return SidecarResponsePayload::JsBridgeResult(
+                                agent_os_sidecar::protocol::JsBridgeResultResponse {
+                                    call_id: call.call_id.clone(),
+                                    result: Some(json!({
+                                        "mode": 0o644,
+                                        "size": metadata.len(),
+                                        "blocks": 0,
+                                        "dev": 1,
+                                        "rdev": 0,
+                                        "isDirectory": false,
+                                        "isSymbolicLink": false,
+                                        "atimeMs": 0,
+                                        "mtimeMs": 0,
+                                        "ctimeMs": 0,
+                                        "birthtimeMs": 0,
+                                        "ino": 2,
+                                        "nlink": 1,
+                                        "uid": 0,
+                                        "gid": 0,
+                                    })),
+                                    error: None,
+                                },
+                            );
+                        }
+                        return SidecarResponsePayload::JsBridgeResult(
+                            agent_os_sidecar::protocol::JsBridgeResultResponse {
+                                call_id: call.call_id.clone(),
+                                result: None,
+                                error: Some(String::from("not found")),
+                            },
+                        );
+                    }
+                    "realpath" => {
                         return SidecarResponsePayload::JsBridgeResult(
                             agent_os_sidecar::protocol::JsBridgeResultResponse {
                                 call_id: call.call_id.clone(),

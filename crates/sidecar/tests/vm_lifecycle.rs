@@ -14,7 +14,6 @@ use support::{
 };
 
 #[test]
-#[ignore = "V8 sidecar lifecycle stdout delivery is flaky in this harness; execution-layer tests cover the V8 bridge path"]
 fn native_sidecar_composes_vm_lifecycle_bridge_callbacks_and_guest_execution() {
     assert_node_available();
 

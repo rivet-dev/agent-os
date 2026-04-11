@@ -1227,7 +1227,12 @@ fn sync_active_shadow_path_to_kernel(
     guest_path: &str,
 ) -> Result<(), SidecarError> {
     let guest_path = normalize_path(guest_path);
-    for host_path in active_shadow_host_paths_for_guest(vm, &guest_path) {
+    let mut host_paths = active_process_shadow_host_paths_for_guest(vm, &guest_path);
+    if host_paths.is_empty() && !vm.kernel.exists(&guest_path).unwrap_or(false) {
+        host_paths.push(shadow_host_path_for_guest(&vm.cwd, &guest_path));
+    }
+
+    for host_path in host_paths {
         let metadata = match fs::symlink_metadata(&host_path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -1258,7 +1263,7 @@ fn sync_active_shadow_path_to_kernel(
     Ok(())
 }
 
-fn active_shadow_host_paths_for_guest(vm: &VmState, guest_path: &str) -> Vec<PathBuf> {
+fn active_process_shadow_host_paths_for_guest(vm: &VmState, guest_path: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -1267,12 +1272,6 @@ fn active_shadow_host_paths_for_guest(vm: &VmState, guest_path: &str) -> Vec<Pat
             push_unique_host_path(&mut candidates, &mut seen, host_path);
         }
     }
-
-    push_unique_host_path(
-        &mut candidates,
-        &mut seen,
-        shadow_host_path_for_guest(&vm.cwd, guest_path),
-    );
 
     candidates
 }
