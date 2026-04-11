@@ -9365,9 +9365,7 @@ const hostNetImport = {
       if ((Number(flags) >>> 0) !== 0) {
         // Non-zero send flags are currently ignored in the WASM host_net shim.
       }
-      const written =
-        Number(callSyncRpc('net.write', [socket.socketId, Buffer.from(chunk).toString('base64')])) >>>
-        0;
+      const written = Number(callSyncRpc('net.write', [socket.socketId, chunk])) >>> 0;
       return writeGuestUint32(retSentPtr, written);
     } catch {
       return WASI_ERRNO_FAULT;

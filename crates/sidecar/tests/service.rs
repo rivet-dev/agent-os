@@ -4993,9 +4993,17 @@ ykAheWCsAteSEWVc0w==\n\
                 .guest_env
                 .get("PATH")
                 .expect("configured PATH should exist");
+            let path_entries = path.split(':').collect::<Vec<_>>();
             assert!(
-                path.split(':')
-                    .any(|entry| entry == "/__agentos/commands/0"),
+                path_entries
+                    .first()
+                    .is_some_and(|entry| *entry == "/__agentos/commands/0"),
+                "PATH should prioritize mounted command root: {path}"
+            );
+            assert!(
+                path_entries
+                    .iter()
+                    .any(|entry| *entry == "/__agentos/commands/0"),
                 "PATH should include mounted command root: {path}"
             );
 

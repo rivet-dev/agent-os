@@ -1287,13 +1287,6 @@ fn refresh_guest_command_path_env(
     let mut merged = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for segment in DEFAULT_GUEST_PATH_ENV.split(':') {
-        let normalized = normalize_path(segment);
-        if seen.insert(normalized.clone()) {
-            merged.push(normalized);
-        }
-    }
-
     for guest_path in command_guest_paths.values() {
         let Some(parent) = Path::new(guest_path)
             .parent()
@@ -1305,6 +1298,13 @@ fn refresh_guest_command_path_env(
         if normalized == "/" {
             continue;
         }
+        if seen.insert(normalized.clone()) {
+            merged.push(normalized);
+        }
+    }
+
+    for segment in DEFAULT_GUEST_PATH_ENV.split(':') {
+        let normalized = normalize_path(segment);
         if seen.insert(normalized.clone()) {
             merged.push(normalized);
         }

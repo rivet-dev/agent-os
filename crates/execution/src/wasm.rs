@@ -1411,6 +1411,11 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOsSyncRpc === 
             throw new Error("Agent OS WASM net.connect bridge is unavailable");
           }}
           return _netSocketConnectRaw.applySync(void 0, args);
+        case "net.poll":
+          if (typeof _netSocketPollRaw === "undefined") {{
+            throw new Error("Agent OS WASM net.poll bridge is unavailable");
+          }}
+          return _netSocketPollRaw.applySync(void 0, args);
         case "net.write":
           if (typeof _netSocketWriteRaw === "undefined") {{
             throw new Error("Agent OS WASM net.write bridge is unavailable");

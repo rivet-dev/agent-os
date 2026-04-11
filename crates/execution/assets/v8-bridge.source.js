@@ -3497,6 +3497,11 @@ var __bridge = (() => {
       rationale: "Host net socket connect bridge reference."
     },
     {
+      name: "_netSocketPollRaw",
+      classification: "hardened",
+      rationale: "Host net socket poll bridge reference."
+    },
+    {
       name: "_netSocketWaitConnectRaw",
       classification: "hardened",
       rationale: "Host net socket connect-wait bridge reference."

@@ -162,6 +162,7 @@ ESM loader hooks (`loader.mjs`) and CJS `Module._load` patches (`runner.mjs`) ar
 - Sidecar-managed loopback `net.listen` / `dgram.bind` listeners now use guest-port to host-port translation in `crates/sidecar/src/service.rs`: preserve guest-visible loopback addresses/ports in RPC responses and socket snapshots, but use the hidden host-bound port for external host-side probes and test clients.
 - V8 `node:dgram` support in `crates/execution/assets/v8-bridge.js` depends on both `loadBuiltinModule("dgram")` and `"dgram"` appearing in `Module.builtinModules`; keep those lists aligned, and keep the bridge payloads aligned with the current sidecar RPC contract (`createSocket` object payload, `send` bytes plus `{ address, port }`, `poll` object-or-null responses).
 - Sidecar JavaScript networking policy should read internal bootstrap env like `AGENT_OS_LOOPBACK_EXEMPT_PORTS` from `VmState.metadata` / `env.*`, not `vm.guest_env`; `guest_env` is permission-filtered and may be empty even when sidecar-only policy still needs the value.
+- When adding a new raw V8 bridge method used by WASM host shims, keep `crates/execution/src/wasm.rs`, `crates/execution/src/v8_runtime.rs`, `crates/v8-runtime/src/session.rs`, `crates/bridge/bridge-contract.json`, and `crates/execution/assets/v8-bridge.source.js` aligned, then rebuild `cargo build -p agent-os-v8-runtime --bin agent-os-v8`; otherwise the method can compile cleanly while still being unavailable at runtime.
 
 ## Guest `tls`
 

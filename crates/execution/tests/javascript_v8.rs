@@ -2597,6 +2597,7 @@ fn javascript_execution_v8_crypto_basic_operations_emit_expected_sync_rpcs() {
         map_bridge_method("_netSocketConnectRaw"),
         ("net.connect", false)
     );
+    assert_eq!(map_bridge_method("_netSocketPollRaw"), ("net.poll", false));
 }
 
 #[test]

@@ -471,6 +471,7 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
         "_upgradeSocketEndRaw" => ("net.upgrade_socket_end", false),
         "_upgradeSocketDestroyRaw" => ("net.upgrade_socket_destroy", false),
         "_netSocketConnectRaw" => ("net.connect", false),
+        "_netSocketPollRaw" => ("net.poll", false),
         "_netSocketWaitConnectRaw" => ("net.socket_wait_connect", false),
         "_netSocketReadRaw" => ("net.socket_read", false),
         "_netSocketSetNoDelayRaw" => ("net.socket_set_no_delay", false),
