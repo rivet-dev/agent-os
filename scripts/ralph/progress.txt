@@ -5,6 +5,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
 - Sidecar wire-protocol migrations should keep the native 4-byte big-endian frame prefix stable and use a temporary `JsonUtf8`/JSON-text boundary for existing `serde_json::Value` fields first; change payload codecs separately from outer framing so Rust and TypeScript can roll forward independently.
+- In `crates/sidecar/src/protocol.rs`, the BARE schema's enums/unions use explicit 1-based discriminants, so Rust must not rely on Serde's default enum numbering; keep manual tag mappings aligned with `protocol/agent_os_sidecar_v1.bare` while preserving the current human-readable JSON shape during the migration window.
 - In `crates/execution/src/javascript.rs`, pnpm generic hoist paths like `.pnpm/node_modules/<pkg>` should stay behind package-specific virtual-store resolution for symlinked package entrypoints; otherwise guest ESM imports can silently pick an older hoisted CJS copy and lose named exports.
 - Sidecar shadow-root reconciliation should prefer active-process shadow paths and only fall back to the VM cwd shadow root when the guest path is still absent in the kernel; native-sidecar JS bridge tests that cover mounted host files need to answer the bridge's `exists`/`stat`/`lstat` probes consistently with the real host file state.
 - In `crates/execution`, keep any real-host Node helpers isolated to host-only modules used by benchmarks or import-cache tests; shared guest runtime helpers like signal metadata should live in neutral modules that JS/WASM/Python can use without depending on host launch scaffolding.
@@ -99,7 +100,6 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - `AGENT_OS_PYODIDE_PACKAGE_BASE_URL` is a user-install source knob, not the right source for the bundled `micropip` bootstrap package.
   - `micropip` inside Pyodide uses `pyodide.http.pyfetch`, so urllib/requests shims alone are not enough for wheel-install coverage.
   - The active acceptance commands for `US-069` are sufficient to catch both the bundled bootstrap path and the bridged external-wheel install path once the sidecar Python test suite is run end to end.
----
 - Pi SDK `createAgentSession({ tools })` only uses the passed tools to seed active built-in tool names; if the adapter must override Pi's default `bash`/`read`/`edit`/`write` implementations, rebuild the returned `AgentSession` with `_baseToolsOverride` or construct `AgentSession` directly.
 - Sidecar layer IDs are VM-local handles, not global identifiers. `VmLayerStore` restarts its `layer-N` sequence for each VM, so tests should prove isolation through VM ownership scope and exported snapshot contents rather than global ID uniqueness.
 - Layer lifecycle coverage is split across two truth suites: `packages/core/tests/layers.test.ts` owns in-memory snapshot reuse and multi-layer composition semantics, while `crates/sidecar/tests/layer_management.rs` owns VM-scoped layer RPC isolation and per-VM ownership boundaries.
@@ -111,7 +111,6 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - The embedded WASM runner still exercises guest `node:fs` surfaces for its own module and file operations, so V8 migration work must answer those sync-RPC calls inside `wasm.rs` rather than surfacing them to callers.
   - Signal-state delivery on the shared V8 path cannot rely on the old control-pipe fd alone; keep a marker fallback in the runner and translate it back into `WasmExecutionEvent::SignalState` in `wasm.rs`.
   - Once WASM stays inside V8, permission regression tests that inspect host-Node argv/env are stale; the durable check is absence of `AGENT_OS_NODE_BINARY` launches plus focused runtime behavior.
----
 ## [2026-04-10 17:38:51 PDT] - US-071
 - Deleted `crates/execution/src/node_process.rs` and split its remaining responsibilities into a host-only `host_node.rs` helper plus a neutral `signal.rs` module, so guest JS/WASM runtime code no longer depends on a file that also owns host-Node launch scaffolding.
 - Localized the V8 stderr/control-message parsing helpers inside `javascript.rs`, kept WASM path resolution self-contained in `wasm.rs`, and updated benchmark/import-cache host Node call sites plus execution crate guidance to follow the new separation.
@@ -215,4 +214,14 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - The safest BARE migration path is to keep the native 4-byte big-endian frame prefix unchanged and swap only the payload codec first; that preserves the existing stdio/native-process framing contract while Rust and TypeScript migrate.
   - BARE v1 cannot model recursive arbitrary JSON cleanly, so current `serde_json::Value` fields need an explicit UTF-8 JSON text boundary (`JsonUtf8`) until later stories replace them with typed BARE payloads.
   - Truthful acceptance for this story is `cargo test -p agent-os-sidecar --test protocol -- --test-threads=1` plus root `pnpm check-types`.
+---
+## [2026-04-11 05:04:16 PDT] - US-083
+- Implemented a dual-stack native sidecar payload codec in Rust: `NativeFrameCodec` now supports explicit JSON and BARE payload modes, auto-detects inbound frames, and preserves the existing 4-byte big-endian frame prefix while routing `serde_json::Value` fields through the schema's `JsonUtf8` boundary on the BARE path.
+- Wired stdio transport codec pinning so once the first inbound frame is decoded as JSON or BARE, outbound sidecar responses and events use the same payload codec for the rest of that transport.
+- Added focused protocol coverage for BARE round-trips with `JsonUtf8` fields plus JSON/BARE coexistence detection, and documented the explicit-discriminant rule in `crates/CLAUDE.md`.
+- Files changed: `Cargo.lock`, `crates/CLAUDE.md`, `crates/sidecar/Cargo.toml`, `crates/sidecar/src/protocol.rs`, `crates/sidecar/src/stdio.rs`, `crates/sidecar/tests/protocol.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The checked-in sidecar BARE schema uses explicit 1-based discriminants for enums and unions, so Rust cannot depend on Serde's default enum numbering and still match the schema on the wire.
+  - `serde_json::Value` fields can stay on the existing public Rust structs during the migration window if the BARE codec serializes them through explicit JSON-text helpers instead of changing the JSON-facing protocol shape.
+  - Truthful acceptance for this story was `cargo test -p agent-os-sidecar --test protocol -- --test-threads=1` plus root `pnpm check-types`.
 ---

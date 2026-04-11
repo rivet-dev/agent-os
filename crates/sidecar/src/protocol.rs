@@ -1,4 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::de::{self, SeqAccess, Visitor};
+use serde::ser::SerializeTuple;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::error::Error;
@@ -9,6 +11,286 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_COMPLETED_RESPONSE_CAP: usize = 10_000;
 pub type RequestId = i64;
+
+mod json_utf8_value {
+    use super::*;
+
+    pub fn serialize<S>(value: &Value, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            value.serialize(serializer)
+        } else {
+            serde_json::to_string(value)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(serializer)
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            Value::deserialize(deserializer)
+        } else {
+            let text = String::deserialize(deserializer)?;
+            serde_json::from_str(&text).map_err(de::Error::custom)
+        }
+    }
+}
+
+mod json_utf8_option {
+    use super::*;
+
+    pub fn serialize<S>(value: &Option<Value>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            value.serialize(serializer)
+        } else {
+            value
+                .as_ref()
+                .map(|inner| serde_json::to_string(inner).map_err(serde::ser::Error::custom))
+                .transpose()?
+                .serialize(serializer)
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            Option::<Value>::deserialize(deserializer)
+        } else {
+            Option::<String>::deserialize(deserializer)?
+                .map(|text| serde_json::from_str(&text).map_err(de::Error::custom))
+                .transpose()
+        }
+    }
+}
+
+mod json_utf8_vec {
+    use super::*;
+
+    pub fn serialize<S>(values: &[Value], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            values.serialize(serializer)
+        } else {
+            values
+                .iter()
+                .map(|value| serde_json::to_string(value).map_err(serde::ser::Error::custom))
+                .collect::<Result<Vec<_>, _>>()?
+                .serialize(serializer)
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Value>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            Vec::<Value>::deserialize(deserializer)
+        } else {
+            Vec::<String>::deserialize(deserializer)?
+                .into_iter()
+                .map(|text| serde_json::from_str(&text).map_err(de::Error::custom))
+                .collect()
+        }
+    }
+}
+
+fn serialize_bare_tag<S>(serializer: S, tag: u64) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serde_bare::Uint(tag).serialize(serializer)
+}
+
+fn serialize_bare_newtype_tag<S, T>(serializer: S, tag: u64, payload: &T) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+    T: Serialize,
+{
+    let mut tuple = serializer.serialize_tuple(2)?;
+    tuple.serialize_element(&serde_bare::Uint(tag))?;
+    tuple.serialize_element(payload)?;
+    tuple.end()
+}
+
+fn parse_bare_enum_tag<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(serde_bare::Uint::deserialize(deserializer)?.0)
+}
+
+macro_rules! impl_bare_string_enum {
+    ($name:ident { $($variant:ident => ($json:literal, $bare:literal)),+ $(,)? }) => {
+        impl $name {
+            fn json_name(&self) -> &'static str {
+                match self {
+                    $(Self::$variant => $json,)+
+                }
+            }
+
+            fn from_json_name(name: &str) -> Option<Self> {
+                match name {
+                    $($json => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+
+            fn bare_tag(&self) -> u64 {
+                match self {
+                    $(Self::$variant => $bare,)+
+                }
+            }
+
+            fn from_bare_tag(tag: u64) -> Option<Self> {
+                match tag {
+                    $($bare => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                if serializer.is_human_readable() {
+                    serializer.serialize_str(self.json_name())
+                } else {
+                    serialize_bare_tag(serializer, self.bare_tag())
+                }
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                if deserializer.is_human_readable() {
+                    let name = String::deserialize(deserializer)?;
+                    Self::from_json_name(&name)
+                        .ok_or_else(|| de::Error::custom(format!("unknown {} variant: {name}", stringify!($name))))
+                } else {
+                    let tag = parse_bare_enum_tag(deserializer)?;
+                    Self::from_bare_tag(tag)
+                        .ok_or_else(|| de::Error::custom(format!("unknown {} tag: {tag}", stringify!($name))))
+                }
+            }
+        }
+    };
+}
+
+macro_rules! impl_bare_newtype_union_enum {
+    (
+        $name:ident,
+        $json_name:ident,
+        $(#[$json_attr:meta])*
+        {
+            $($variant:ident($ty:ty) = $tag:literal),+ $(,)?
+        }
+    ) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+        $(#[$json_attr])*
+        enum $json_name {
+            $($variant($ty)),+
+        }
+
+        impl From<&$name> for $json_name {
+            fn from(value: &$name) -> Self {
+                match value {
+                    $($name::$variant(inner) => Self::$variant(inner.clone()),)+
+                }
+            }
+        }
+
+        impl From<$json_name> for $name {
+            fn from(value: $json_name) -> Self {
+                match value {
+                    $($json_name::$variant(inner) => Self::$variant(inner),)+
+                }
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                if serializer.is_human_readable() {
+                    $json_name::from(self).serialize(serializer)
+                } else {
+                    match self {
+                        $(Self::$variant(inner) => serialize_bare_newtype_tag(serializer, $tag, inner),)+
+                    }
+                }
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                if deserializer.is_human_readable() {
+                    Ok($json_name::deserialize(deserializer)?.into())
+                } else {
+                    struct UnionVisitor;
+
+                    impl<'de> Visitor<'de> for UnionVisitor {
+                        type Value = $name;
+
+                        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                            write!(formatter, "a {} BARE union", stringify!($name))
+                        }
+
+                        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+                        where
+                            A: SeqAccess<'de>,
+                        {
+                            let serde_bare::Uint(tag) = seq
+                                .next_element()?
+                                .ok_or_else(|| de::Error::custom(concat!("missing ", stringify!($name), " tag")))?;
+                            match tag {
+                                $(
+                                    $tag => {
+                                        let payload = seq.next_element::<$ty>()?.ok_or_else(|| {
+                                            de::Error::custom(format!(
+                                                "missing {} payload for tag {}",
+                                                stringify!($variant),
+                                                $tag
+                                            ))
+                                        })?;
+                                        Ok($name::$variant(payload))
+                                    }
+                                )+
+                                _ => Err(de::Error::custom(format!(
+                                    "unknown {} tag: {}",
+                                    stringify!($name),
+                                    tag
+                                ))),
+                            }
+                        }
+                    }
+
+                    deserializer.deserialize_tuple(2, UnionVisitor)
+                }
+            }
+        }
+    };
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolSchema {
@@ -31,8 +313,7 @@ impl Default for ProtocolSchema {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "scope", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum OwnershipScope {
     Connection {
         connection_id: String,
@@ -75,8 +356,7 @@ impl OwnershipScope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "frame_type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolFrame {
     Request(RequestFrame),
     Response(ResponseFrame),
@@ -186,8 +466,7 @@ impl EventFrame {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestPayload {
     Authenticate(AuthenticateRequest),
     OpenSession(OpenSessionRequest),
@@ -222,8 +501,7 @@ pub enum RequestPayload {
     PersistenceFlush(PersistenceFlushRequest),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponsePayload {
     Authenticated(AuthenticatedResponse),
     SessionOpened(SessionOpenedResponse),
@@ -259,24 +537,21 @@ pub enum ResponsePayload {
     Rejected(RejectedResponse),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidecarRequestPayload {
     ToolInvocation(ToolInvocationRequest),
     PermissionRequest(SidecarPermissionRequest),
     JsBridgeCall(JsBridgeCallRequest),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidecarResponsePayload {
     ToolInvocationResult(ToolInvocationResultResponse),
     PermissionRequestResult(SidecarPermissionResultResponse),
     JsBridgeResult(JsBridgeResultResponse),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventPayload {
     VmLifecycle(VmLifecycleEvent),
     ProcessOutput(ProcessOutputEvent),
@@ -284,15 +559,13 @@ pub enum EventPayload {
     Structured(StructuredEvent),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidecarPlacement {
     Shared { pool: Option<String> },
     Explicit { sidecar_id: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestRuntimeKind {
     JavaScript,
     Python,
@@ -303,16 +576,14 @@ fn default_create_session_runtime() -> GuestRuntimeKind {
     GuestRuntimeKind::JavaScript
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DisposeReason {
     Requested,
     ConnectionClosed,
     HostShutdown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesystemOperation {
     Read,
     Write,
@@ -323,8 +594,7 @@ pub enum FilesystemOperation {
     Rename,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuestFilesystemOperation {
     ReadFile,
     WriteFile,
@@ -347,8 +617,7 @@ pub enum GuestFilesystemOperation {
     Truncate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionMode {
     Allow,
     Ask,
@@ -389,15 +658,13 @@ pub struct PatternPermissionRuleSet {
     pub rules: Vec<PatternPermissionRule>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsPermissionScope {
     Mode(PermissionMode),
     Rules(FsPermissionRuleSet),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatternPermissionScope {
     Mode(PermissionMode),
     Rules(PatternPermissionRuleSet),
@@ -432,8 +699,7 @@ impl Default for PermissionsPolicy {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum RootFilesystemEntryKind {
     #[default]
     File,
@@ -441,30 +707,26 @@ pub enum RootFilesystemEntryKind {
     Symlink,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RootFilesystemMode {
     #[default]
     Ephemeral,
     ReadOnly,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootFilesystemLowerDescriptor {
     Snapshot { entries: Vec<RootFilesystemEntry> },
     BundledBaseFilesystem,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamChannel {
     Stdout,
     Stderr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VmLifecycleState {
     Creating,
     Ready,
@@ -506,7 +768,7 @@ pub struct CreateSessionRequest {
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     pub cwd: String,
-    #[serde(default)]
+    #[serde(default, with = "json_utf8_vec")]
     pub mcp_servers: Vec<Value>,
 }
 
@@ -514,7 +776,11 @@ pub struct CreateSessionRequest {
 pub struct SessionRequest {
     pub session_id: String,
     pub method: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "json_utf8_option"
+    )]
     pub params: Option<Value>,
 }
 
@@ -550,8 +816,7 @@ pub struct RootFilesystemDescriptor {
     pub bootstrap_entries: Vec<RootFilesystemEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootFilesystemEntryEncoding {
     Utf8,
     Base64,
@@ -668,7 +933,7 @@ pub struct MountDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MountPluginDescriptor {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, with = "json_utf8_value")]
     pub config: Value,
 }
 
@@ -684,8 +949,7 @@ pub struct ProjectedModuleDescriptor {
     pub entrypoint: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WasmPermissionTier {
     Full,
     ReadWrite,
@@ -791,6 +1055,7 @@ pub struct RegisterToolkitRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredToolDefinition {
     pub description: String,
+    #[serde(with = "json_utf8_value")]
     pub input_schema: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
@@ -801,6 +1066,7 @@ pub struct RegisteredToolDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredToolExample {
     pub description: String,
+    #[serde(with = "json_utf8_value")]
     pub input: Value,
 }
 
@@ -808,6 +1074,7 @@ pub struct RegisteredToolExample {
 pub struct ToolInvocationRequest {
     pub invocation_id: String,
     pub tool_key: String,
+    #[serde(with = "json_utf8_value")]
     pub input: Value,
     pub timeout_ms: u64,
 }
@@ -816,6 +1083,7 @@ pub struct ToolInvocationRequest {
 pub struct SidecarPermissionRequest {
     pub session_id: String,
     pub permission_id: String,
+    #[serde(with = "json_utf8_value")]
     pub params: Value,
 }
 
@@ -824,6 +1092,7 @@ pub struct JsBridgeCallRequest {
     pub call_id: String,
     pub mount_id: String,
     pub operation: String,
+    #[serde(with = "json_utf8_value")]
     pub args: Value,
 }
 
@@ -850,25 +1119,39 @@ pub struct SessionCreatedResponse {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "json_utf8_option"
+    )]
     pub modes: Option<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "json_utf8_vec")]
     pub config_options: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "json_utf8_option"
+    )]
     pub agent_capabilities: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "json_utf8_option"
+    )]
     pub agent_info: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRpcResponse {
     pub session_id: String,
+    #[serde(with = "json_utf8_value")]
     pub response: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SequencedNotification {
     pub sequence_number: u64,
+    #[serde(with = "json_utf8_value")]
     pub notification: Value,
 }
 
@@ -880,13 +1163,25 @@ pub struct SessionStateResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub closed: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "json_utf8_option"
+    )]
     pub modes: Option<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "json_utf8_vec")]
     pub config_options: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "json_utf8_option"
+    )]
     pub agent_capabilities: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "json_utf8_option"
+    )]
     pub agent_info: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<SequencedNotification>,
@@ -1011,8 +1306,7 @@ pub struct ProcessKilledResponse {
     pub process_id: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessSnapshotStatus {
     Running,
     Exited,
@@ -1063,8 +1357,7 @@ pub struct BoundUdpSnapshotResponse {
     pub socket: Option<SocketStateEntry>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalDispositionAction {
     Default,
     Ignore,
@@ -1118,7 +1411,11 @@ pub struct PersistenceFlushedResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolInvocationResultResponse {
     pub invocation_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "json_utf8_option"
+    )]
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -1136,7 +1433,11 @@ pub struct SidecarPermissionResultResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsBridgeResultResponse {
     pub call_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "json_utf8_option"
+    )]
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -1172,25 +1473,699 @@ pub struct StructuredEvent {
     pub detail: BTreeMap<String, String>,
 }
 
+impl_bare_string_enum!(GuestRuntimeKind {
+    JavaScript => ("java_script", 1),
+    Python => ("python", 2),
+    WebAssembly => ("web_assembly", 3),
+});
+
+impl_bare_string_enum!(DisposeReason {
+    Requested => ("requested", 1),
+    ConnectionClosed => ("connection_closed", 2),
+    HostShutdown => ("host_shutdown", 3),
+});
+
+impl_bare_string_enum!(FilesystemOperation {
+    Read => ("read", 1),
+    Write => ("write", 2),
+    Stat => ("stat", 3),
+    ReadDir => ("read_dir", 4),
+    Mkdir => ("mkdir", 5),
+    Remove => ("remove", 6),
+    Rename => ("rename", 7),
+});
+
+impl_bare_string_enum!(GuestFilesystemOperation {
+    ReadFile => ("read_file", 1),
+    WriteFile => ("write_file", 2),
+    CreateDir => ("create_dir", 3),
+    Mkdir => ("mkdir", 4),
+    Exists => ("exists", 5),
+    Stat => ("stat", 6),
+    Lstat => ("lstat", 7),
+    ReadDir => ("read_dir", 8),
+    RemoveFile => ("remove_file", 9),
+    RemoveDir => ("remove_dir", 10),
+    Rename => ("rename", 11),
+    Realpath => ("realpath", 12),
+    Symlink => ("symlink", 13),
+    ReadLink => ("read_link", 14),
+    Link => ("link", 15),
+    Chmod => ("chmod", 16),
+    Chown => ("chown", 17),
+    Utimes => ("utimes", 18),
+    Truncate => ("truncate", 19),
+});
+
+impl_bare_string_enum!(PermissionMode {
+    Allow => ("allow", 1),
+    Ask => ("ask", 2),
+    Deny => ("deny", 3),
+});
+
+impl_bare_string_enum!(RootFilesystemEntryKind {
+    File => ("file", 1),
+    Directory => ("directory", 2),
+    Symlink => ("symlink", 3),
+});
+
+impl_bare_string_enum!(RootFilesystemMode {
+    Ephemeral => ("ephemeral", 1),
+    ReadOnly => ("read_only", 2),
+});
+
+impl_bare_string_enum!(StreamChannel {
+    Stdout => ("stdout", 1),
+    Stderr => ("stderr", 2),
+});
+
+impl_bare_string_enum!(VmLifecycleState {
+    Creating => ("creating", 1),
+    Ready => ("ready", 2),
+    Disposing => ("disposing", 3),
+    Disposed => ("disposed", 4),
+    Failed => ("failed", 5),
+});
+
+impl_bare_string_enum!(RootFilesystemEntryEncoding {
+    Utf8 => ("utf8", 1),
+    Base64 => ("base64", 2),
+});
+
+impl_bare_string_enum!(WasmPermissionTier {
+    Full => ("full", 1),
+    ReadWrite => ("read-write", 2),
+    ReadOnly => ("read-only", 3),
+    Isolated => ("isolated", 4),
+});
+
+impl_bare_string_enum!(ProcessSnapshotStatus {
+    Running => ("running", 1),
+    Exited => ("exited", 2),
+});
+
+impl_bare_string_enum!(SignalDispositionAction {
+    Default => ("default", 1),
+    Ignore => ("ignore", 2),
+    User => ("user", 3),
+});
+
+impl_bare_newtype_union_enum!(
+    ProtocolFrame,
+    JsonProtocolFrame,
+    #[serde(tag = "frame_type", rename_all = "snake_case")]
+    {
+        Request(RequestFrame) = 1,
+        Response(ResponseFrame) = 2,
+        Event(EventFrame) = 3,
+        SidecarRequest(SidecarRequestFrame) = 4,
+        SidecarResponse(SidecarResponseFrame) = 5,
+    }
+);
+
+impl_bare_newtype_union_enum!(
+    RequestPayload,
+    JsonRequestPayload,
+    #[serde(tag = "type", rename_all = "snake_case")]
+    {
+        Authenticate(AuthenticateRequest) = 1,
+        OpenSession(OpenSessionRequest) = 2,
+        CreateVm(CreateVmRequest) = 3,
+        CreateSession(CreateSessionRequest) = 4,
+        SessionRequest(SessionRequest) = 5,
+        GetSessionState(GetSessionStateRequest) = 6,
+        CloseAgentSession(CloseAgentSessionRequest) = 7,
+        DisposeVm(DisposeVmRequest) = 8,
+        BootstrapRootFilesystem(BootstrapRootFilesystemRequest) = 9,
+        ConfigureVm(ConfigureVmRequest) = 10,
+        RegisterToolkit(RegisterToolkitRequest) = 11,
+        CreateLayer(CreateLayerRequest) = 12,
+        SealLayer(SealLayerRequest) = 13,
+        ImportSnapshot(ImportSnapshotRequest) = 14,
+        ExportSnapshot(ExportSnapshotRequest) = 15,
+        CreateOverlay(CreateOverlayRequest) = 16,
+        GuestFilesystemCall(GuestFilesystemCallRequest) = 17,
+        SnapshotRootFilesystem(SnapshotRootFilesystemRequest) = 18,
+        Execute(ExecuteRequest) = 19,
+        WriteStdin(WriteStdinRequest) = 20,
+        CloseStdin(CloseStdinRequest) = 21,
+        KillProcess(KillProcessRequest) = 22,
+        GetProcessSnapshot(GetProcessSnapshotRequest) = 23,
+        FindListener(FindListenerRequest) = 24,
+        FindBoundUdp(FindBoundUdpRequest) = 25,
+        GetSignalState(GetSignalStateRequest) = 26,
+        GetZombieTimerCount(GetZombieTimerCountRequest) = 27,
+        HostFilesystemCall(HostFilesystemCallRequest) = 28,
+        PermissionRequest(PermissionRequest) = 29,
+        PersistenceLoad(PersistenceLoadRequest) = 30,
+        PersistenceFlush(PersistenceFlushRequest) = 31,
+    }
+);
+
+impl_bare_newtype_union_enum!(
+    ResponsePayload,
+    JsonResponsePayload,
+    #[serde(tag = "type", rename_all = "snake_case")]
+    {
+        Authenticated(AuthenticatedResponse) = 1,
+        SessionOpened(SessionOpenedResponse) = 2,
+        VmCreated(VmCreatedResponse) = 3,
+        SessionCreated(SessionCreatedResponse) = 4,
+        SessionRpc(SessionRpcResponse) = 5,
+        SessionState(SessionStateResponse) = 6,
+        AgentSessionClosed(AgentSessionClosedResponse) = 7,
+        VmDisposed(VmDisposedResponse) = 8,
+        RootFilesystemBootstrapped(RootFilesystemBootstrappedResponse) = 9,
+        VmConfigured(VmConfiguredResponse) = 10,
+        ToolkitRegistered(ToolkitRegisteredResponse) = 11,
+        LayerCreated(LayerCreatedResponse) = 12,
+        LayerSealed(LayerSealedResponse) = 13,
+        SnapshotImported(SnapshotImportedResponse) = 14,
+        SnapshotExported(SnapshotExportedResponse) = 15,
+        OverlayCreated(OverlayCreatedResponse) = 16,
+        GuestFilesystemResult(GuestFilesystemResultResponse) = 17,
+        RootFilesystemSnapshot(RootFilesystemSnapshotResponse) = 18,
+        ProcessStarted(ProcessStartedResponse) = 19,
+        StdinWritten(StdinWrittenResponse) = 20,
+        StdinClosed(StdinClosedResponse) = 21,
+        ProcessKilled(ProcessKilledResponse) = 22,
+        ProcessSnapshot(ProcessSnapshotResponse) = 23,
+        ListenerSnapshot(ListenerSnapshotResponse) = 24,
+        BoundUdpSnapshot(BoundUdpSnapshotResponse) = 25,
+        SignalState(SignalStateResponse) = 26,
+        ZombieTimerCount(ZombieTimerCountResponse) = 27,
+        FilesystemResult(FilesystemResultResponse) = 28,
+        PermissionDecision(PermissionDecisionResponse) = 29,
+        PersistenceState(PersistenceStateResponse) = 30,
+        PersistenceFlushed(PersistenceFlushedResponse) = 31,
+        Rejected(RejectedResponse) = 32,
+    }
+);
+
+impl_bare_newtype_union_enum!(
+    SidecarRequestPayload,
+    JsonSidecarRequestPayload,
+    #[serde(tag = "type", rename_all = "snake_case")]
+    {
+        ToolInvocation(ToolInvocationRequest) = 1,
+        PermissionRequest(SidecarPermissionRequest) = 2,
+        JsBridgeCall(JsBridgeCallRequest) = 3,
+    }
+);
+
+impl_bare_newtype_union_enum!(
+    SidecarResponsePayload,
+    JsonSidecarResponsePayload,
+    #[serde(tag = "type", rename_all = "snake_case")]
+    {
+        ToolInvocationResult(ToolInvocationResultResponse) = 1,
+        PermissionRequestResult(SidecarPermissionResultResponse) = 2,
+        JsBridgeResult(JsBridgeResultResponse) = 3,
+    }
+);
+
+impl_bare_newtype_union_enum!(
+    EventPayload,
+    JsonEventPayload,
+    #[serde(tag = "type", rename_all = "snake_case")]
+    {
+        VmLifecycle(VmLifecycleEvent) = 1,
+        ProcessOutput(ProcessOutputEvent) = 2,
+        ProcessExited(ProcessExitedEvent) = 3,
+        Structured(StructuredEvent) = 4,
+    }
+);
+
+impl_bare_newtype_union_enum!(
+    FsPermissionScope,
+    JsonFsPermissionScope,
+    #[serde(untagged)]
+    {
+        Mode(PermissionMode) = 1,
+        Rules(FsPermissionRuleSet) = 2,
+    }
+);
+
+impl_bare_newtype_union_enum!(
+    PatternPermissionScope,
+    JsonPatternPermissionScope,
+    #[serde(untagged)]
+    {
+        Mode(PermissionMode) = 1,
+        Rules(PatternPermissionRuleSet) = 2,
+    }
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+enum JsonOwnershipScope {
+    Connection {
+        connection_id: String,
+    },
+    Session {
+        connection_id: String,
+        session_id: String,
+    },
+    Vm {
+        connection_id: String,
+        session_id: String,
+        vm_id: String,
+    },
+}
+
+impl From<&OwnershipScope> for JsonOwnershipScope {
+    fn from(value: &OwnershipScope) -> Self {
+        match value {
+            OwnershipScope::Connection { connection_id } => Self::Connection {
+                connection_id: connection_id.clone(),
+            },
+            OwnershipScope::Session {
+                connection_id,
+                session_id,
+            } => Self::Session {
+                connection_id: connection_id.clone(),
+                session_id: session_id.clone(),
+            },
+            OwnershipScope::Vm {
+                connection_id,
+                session_id,
+                vm_id,
+            } => Self::Vm {
+                connection_id: connection_id.clone(),
+                session_id: session_id.clone(),
+                vm_id: vm_id.clone(),
+            },
+        }
+    }
+}
+
+impl From<JsonOwnershipScope> for OwnershipScope {
+    fn from(value: JsonOwnershipScope) -> Self {
+        match value {
+            JsonOwnershipScope::Connection { connection_id } => Self::Connection { connection_id },
+            JsonOwnershipScope::Session {
+                connection_id,
+                session_id,
+            } => Self::Session {
+                connection_id,
+                session_id,
+            },
+            JsonOwnershipScope::Vm {
+                connection_id,
+                session_id,
+                vm_id,
+            } => Self::Vm {
+                connection_id,
+                session_id,
+                vm_id,
+            },
+        }
+    }
+}
+
+impl Serialize for OwnershipScope {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            JsonOwnershipScope::from(self).serialize(serializer)
+        } else {
+            match self {
+                Self::Connection { connection_id } => {
+                    serialize_bare_newtype_tag(serializer, 1, &(connection_id.clone(),))
+                }
+                Self::Session {
+                    connection_id,
+                    session_id,
+                } => serialize_bare_newtype_tag(
+                    serializer,
+                    2,
+                    &(connection_id.clone(), session_id.clone()),
+                ),
+                Self::Vm {
+                    connection_id,
+                    session_id,
+                    vm_id,
+                } => serialize_bare_newtype_tag(
+                    serializer,
+                    3,
+                    &(connection_id.clone(), session_id.clone(), vm_id.clone()),
+                ),
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OwnershipScope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            Ok(JsonOwnershipScope::deserialize(deserializer)?.into())
+        } else {
+            struct OwnershipScopeVisitor;
+
+            impl<'de> Visitor<'de> for OwnershipScopeVisitor {
+                type Value = OwnershipScope;
+
+                fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    write!(formatter, "an OwnershipScope BARE union")
+                }
+
+                fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+                where
+                    A: SeqAccess<'de>,
+                {
+                    let serde_bare::Uint(tag) = seq
+                        .next_element()?
+                        .ok_or_else(|| de::Error::custom("missing OwnershipScope tag"))?;
+                    match tag {
+                        1 => {
+                            let (connection_id,) =
+                                seq.next_element::<(String,)>()?.ok_or_else(|| {
+                                    de::Error::custom("missing Connection ownership payload")
+                                })?;
+                            Ok(OwnershipScope::Connection { connection_id })
+                        }
+                        2 => {
+                            let (connection_id, session_id) =
+                                seq.next_element::<(String, String)>()?.ok_or_else(|| {
+                                    de::Error::custom("missing Session ownership payload")
+                                })?;
+                            Ok(OwnershipScope::Session {
+                                connection_id,
+                                session_id,
+                            })
+                        }
+                        3 => {
+                            let (connection_id, session_id, vm_id) = seq
+                                .next_element::<(String, String, String)>()?
+                                .ok_or_else(|| de::Error::custom("missing Vm ownership payload"))?;
+                            Ok(OwnershipScope::Vm {
+                                connection_id,
+                                session_id,
+                                vm_id,
+                            })
+                        }
+                        _ => Err(de::Error::custom(format!(
+                            "unknown OwnershipScope tag: {tag}"
+                        ))),
+                    }
+                }
+            }
+
+            deserializer.deserialize_tuple(2, OwnershipScopeVisitor)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JsonSidecarPlacement {
+    Shared { pool: Option<String> },
+    Explicit { sidecar_id: String },
+}
+
+impl From<&SidecarPlacement> for JsonSidecarPlacement {
+    fn from(value: &SidecarPlacement) -> Self {
+        match value {
+            SidecarPlacement::Shared { pool } => Self::Shared { pool: pool.clone() },
+            SidecarPlacement::Explicit { sidecar_id } => Self::Explicit {
+                sidecar_id: sidecar_id.clone(),
+            },
+        }
+    }
+}
+
+impl From<JsonSidecarPlacement> for SidecarPlacement {
+    fn from(value: JsonSidecarPlacement) -> Self {
+        match value {
+            JsonSidecarPlacement::Shared { pool } => Self::Shared { pool },
+            JsonSidecarPlacement::Explicit { sidecar_id } => Self::Explicit { sidecar_id },
+        }
+    }
+}
+
+impl Serialize for SidecarPlacement {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            JsonSidecarPlacement::from(self).serialize(serializer)
+        } else {
+            match self {
+                Self::Shared { pool } => {
+                    serialize_bare_newtype_tag(serializer, 1, &(pool.clone(),))
+                }
+                Self::Explicit { sidecar_id } => {
+                    serialize_bare_newtype_tag(serializer, 2, &(sidecar_id.clone(),))
+                }
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SidecarPlacement {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            Ok(JsonSidecarPlacement::deserialize(deserializer)?.into())
+        } else {
+            struct SidecarPlacementVisitor;
+
+            impl<'de> Visitor<'de> for SidecarPlacementVisitor {
+                type Value = SidecarPlacement;
+
+                fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    write!(formatter, "a SidecarPlacement BARE union")
+                }
+
+                fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+                where
+                    A: SeqAccess<'de>,
+                {
+                    let serde_bare::Uint(tag) = seq
+                        .next_element()?
+                        .ok_or_else(|| de::Error::custom("missing SidecarPlacement tag"))?;
+                    match tag {
+                        1 => {
+                            let (pool,) =
+                                seq.next_element::<(Option<String>,)>()?.ok_or_else(|| {
+                                    de::Error::custom("missing shared placement payload")
+                                })?;
+                            Ok(SidecarPlacement::Shared { pool })
+                        }
+                        2 => {
+                            let (sidecar_id,) =
+                                seq.next_element::<(String,)>()?.ok_or_else(|| {
+                                    de::Error::custom("missing explicit placement payload")
+                                })?;
+                            Ok(SidecarPlacement::Explicit { sidecar_id })
+                        }
+                        _ => Err(de::Error::custom(format!(
+                            "unknown SidecarPlacement tag: {tag}"
+                        ))),
+                    }
+                }
+            }
+
+            deserializer.deserialize_tuple(2, SidecarPlacementVisitor)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JsonRootFilesystemLowerDescriptor {
+    Snapshot { entries: Vec<RootFilesystemEntry> },
+    BundledBaseFilesystem,
+}
+
+impl From<&RootFilesystemLowerDescriptor> for JsonRootFilesystemLowerDescriptor {
+    fn from(value: &RootFilesystemLowerDescriptor) -> Self {
+        match value {
+            RootFilesystemLowerDescriptor::Snapshot { entries } => Self::Snapshot {
+                entries: entries.clone(),
+            },
+            RootFilesystemLowerDescriptor::BundledBaseFilesystem => Self::BundledBaseFilesystem,
+        }
+    }
+}
+
+impl From<JsonRootFilesystemLowerDescriptor> for RootFilesystemLowerDescriptor {
+    fn from(value: JsonRootFilesystemLowerDescriptor) -> Self {
+        match value {
+            JsonRootFilesystemLowerDescriptor::Snapshot { entries } => Self::Snapshot { entries },
+            JsonRootFilesystemLowerDescriptor::BundledBaseFilesystem => Self::BundledBaseFilesystem,
+        }
+    }
+}
+
+impl Serialize for RootFilesystemLowerDescriptor {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            JsonRootFilesystemLowerDescriptor::from(self).serialize(serializer)
+        } else {
+            match self {
+                Self::Snapshot { entries } => {
+                    serialize_bare_newtype_tag(serializer, 1, &(entries.clone(),))
+                }
+                Self::BundledBaseFilesystem => serialize_bare_tag(serializer, 2),
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RootFilesystemLowerDescriptor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            Ok(JsonRootFilesystemLowerDescriptor::deserialize(deserializer)?.into())
+        } else {
+            struct RootFilesystemLowerDescriptorVisitor;
+
+            impl<'de> Visitor<'de> for RootFilesystemLowerDescriptorVisitor {
+                type Value = RootFilesystemLowerDescriptor;
+
+                fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    write!(formatter, "a RootFilesystemLowerDescriptor BARE union")
+                }
+
+                fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+                where
+                    E: de::Error,
+                {
+                    match value {
+                        2 => Ok(RootFilesystemLowerDescriptor::BundledBaseFilesystem),
+                        _ => Err(de::Error::custom(format!(
+                            "unknown RootFilesystemLowerDescriptor tag: {value}"
+                        ))),
+                    }
+                }
+
+                fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+                where
+                    A: SeqAccess<'de>,
+                {
+                    let serde_bare::Uint(tag) = seq.next_element()?.ok_or_else(|| {
+                        de::Error::custom("missing RootFilesystemLowerDescriptor tag")
+                    })?;
+                    match tag {
+                        1 => {
+                            let (entries,) = seq
+                                .next_element::<(Vec<RootFilesystemEntry>,)>()?
+                                .ok_or_else(|| {
+                                    de::Error::custom("missing snapshot lower payload")
+                                })?;
+                            Ok(RootFilesystemLowerDescriptor::Snapshot { entries })
+                        }
+                        2 => Ok(RootFilesystemLowerDescriptor::BundledBaseFilesystem),
+                        _ => Err(de::Error::custom(format!(
+                            "unknown RootFilesystemLowerDescriptor tag: {tag}"
+                        ))),
+                    }
+                }
+            }
+
+            deserializer.deserialize_any(RootFilesystemLowerDescriptorVisitor)
+        }
+    }
+}
+
+fn serialize_payload(
+    frame: &ProtocolFrame,
+    payload_codec: NativePayloadCodec,
+) -> Result<Vec<u8>, ProtocolCodecError> {
+    match payload_codec {
+        NativePayloadCodec::Json => serde_json::to_vec(frame)
+            .map_err(|error| ProtocolCodecError::SerializeFailure(error.to_string())),
+        NativePayloadCodec::Bare => serde_bare::to_vec(frame)
+            .map_err(|error| ProtocolCodecError::SerializeFailure(error.to_string())),
+    }
+}
+
+fn deserialize_payload(
+    payload: &[u8],
+    payload_codec: NativePayloadCodec,
+) -> Result<ProtocolFrame, ProtocolCodecError> {
+    match payload_codec {
+        NativePayloadCodec::Json => serde_json::from_slice(payload)
+            .map_err(|error| ProtocolCodecError::DeserializeFailure(error.to_string())),
+        NativePayloadCodec::Bare => serde_bare::from_slice(payload)
+            .map_err(|error| ProtocolCodecError::DeserializeFailure(error.to_string())),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativePayloadCodec {
+    Json,
+    Bare,
+}
+
+impl NativePayloadCodec {
+    pub fn sniff(payload: &[u8]) -> Self {
+        match payload.first() {
+            Some(b'{') => Self::Json,
+            _ => Self::Bare,
+        }
+    }
+
+    pub fn alternate(self) -> Self {
+        match self {
+            Self::Json => Self::Bare,
+            Self::Bare => Self::Json,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NativeFrameCodec {
     max_frame_bytes: usize,
+    payload_codec: NativePayloadCodec,
 }
 
 impl NativeFrameCodec {
     pub fn new(max_frame_bytes: usize) -> Self {
-        Self { max_frame_bytes }
+        Self::with_payload_codec(max_frame_bytes, NativePayloadCodec::Json)
+    }
+
+    pub fn with_payload_codec(max_frame_bytes: usize, payload_codec: NativePayloadCodec) -> Self {
+        Self {
+            max_frame_bytes,
+            payload_codec,
+        }
     }
 
     pub fn max_frame_bytes(&self) -> usize {
         self.max_frame_bytes
     }
 
+    pub fn payload_codec(&self) -> NativePayloadCodec {
+        self.payload_codec
+    }
+
     pub fn encode(&self, frame: &ProtocolFrame) -> Result<Vec<u8>, ProtocolCodecError> {
+        self.encode_with_codec(frame, self.payload_codec)
+    }
+
+    pub fn encode_with_codec(
+        &self,
+        frame: &ProtocolFrame,
+        payload_codec: NativePayloadCodec,
+    ) -> Result<Vec<u8>, ProtocolCodecError> {
         validate_frame(frame)?;
 
-        let payload = serde_json::to_vec(frame)
-            .map_err(|error| ProtocolCodecError::SerializeFailure(error.to_string()))?;
+        let payload = serialize_payload(frame, payload_codec)?;
         if payload.len() > self.max_frame_bytes {
             return Err(ProtocolCodecError::FrameTooLarge {
                 size: payload.len(),
@@ -1211,6 +2186,42 @@ impl NativeFrameCodec {
     }
 
     pub fn decode(&self, bytes: &[u8]) -> Result<ProtocolFrame, ProtocolCodecError> {
+        self.decode_detected(bytes).map(|(frame, _)| frame)
+    }
+
+    pub fn decode_with_codec(
+        &self,
+        bytes: &[u8],
+        payload_codec: NativePayloadCodec,
+    ) -> Result<ProtocolFrame, ProtocolCodecError> {
+        let payload = self.checked_payload(bytes)?;
+        let frame = deserialize_payload(payload, payload_codec)?;
+        validate_frame(&frame)?;
+        Ok(frame)
+    }
+
+    pub fn decode_detected(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(ProtocolFrame, NativePayloadCodec), ProtocolCodecError> {
+        let payload = self.checked_payload(bytes)?;
+        let primary = NativePayloadCodec::sniff(payload);
+
+        match deserialize_payload(payload, primary) {
+            Ok(frame) => {
+                validate_frame(&frame)?;
+                Ok((frame, primary))
+            }
+            Err(primary_error) => {
+                let alternate = primary.alternate();
+                let frame = deserialize_payload(payload, alternate).map_err(|_| primary_error)?;
+                validate_frame(&frame)?;
+                Ok((frame, alternate))
+            }
+        }
+    }
+
+    fn checked_payload<'a>(&self, bytes: &'a [u8]) -> Result<&'a [u8], ProtocolCodecError> {
         if bytes.len() < 4 {
             return Err(ProtocolCodecError::TruncatedFrame {
                 actual: bytes.len(),
@@ -1231,11 +2242,7 @@ impl NativeFrameCodec {
         if declared != actual {
             return Err(ProtocolCodecError::LengthPrefixMismatch { declared, actual });
         }
-
-        let frame: ProtocolFrame = serde_json::from_slice(&bytes[4..])
-            .map_err(|error| ProtocolCodecError::DeserializeFailure(error.to_string()))?;
-        validate_frame(&frame)?;
-        Ok(frame)
+        Ok(&bytes[4..])
     }
 }
 
@@ -2140,6 +3147,8 @@ pub struct JavascriptChildProcessSpawnOptions {
     pub input: Option<Value>,
     #[serde(default)]
     pub shell: bool,
+    #[serde(default)]
+    pub detached: bool,
 }
 
 #[derive(Debug, Deserialize)]

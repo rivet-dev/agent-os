@@ -211,7 +211,7 @@
         "Typecheck passes"
       ],
       "priority": 57,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -3543,6 +3543,158 @@
       "priority": 170,
       "passes": false,
       "notes": "Found during 2026-04-11 subagent review pass 43 of commit 0e29621 (US-077). Medium severity — no security or isolation bug, but a real test-coverage gap that makes US-077 weaker than its title claims. The reviewer graded assertion strength as FAIR and said verbatim: 'The test exercises guest code path + test-side bridging, not the actual sidecar child_process path' and 'True sidecar child_process unit coverage would test crates/sidecar/src/execution.rs spawn_javascript_child_process / poll_javascript_child_process directly. This commit is appropriate for unblocking the V8 bridge's child_process module compliance without claiming the sidecar's subprocess handling is fully validated.' Worth closing the gap before more stories build on the US-077 green state."
+    },
+    {
+      "id": "US-305",
+      "title": "Verify ESM named-export extraction from the US-078 node:stream polyfill refactor",
+      "description": "As a maintainer of the guest node:stream polyfill, I want a test that a guest ESM `import { Duplex, PassThrough, Readable, Writable, Transform } from 'node:stream'` successfully resolves every named export after the US-078 commit a82b6d3 refactor (in crates/v8-runtime/src/node_import_cache.rs ~line 3710-3737). The refactor changed the inline polyfill from `const streamModule = { Duplex, PassThrough, ... };` to `const streamModule = Stream; Object.assign(streamModule, { Duplex, PassThrough, ... });` — the reassignment makes `streamModule` point at the CJS `Stream` constructor with side-channel properties copied on. CJS→ESM named-export extraction (see `crates/execution/CLAUDE.md` CJS enumeration rules) walks `Object.keys(module.exports)`; if `Stream` is a class whose enumerable named exports are only the ones just `Object.assign`-ed onto it, the extraction should find them — but this is currently untested. A guest package that imports `{ Duplex }` via ESM will silently get `undefined` and break at construction time if the extraction misses a name.",
+      "acceptanceCriteria": [
+        "New conformance test in `crates/execution/tests/` or `crates/v8-runtime/tests/` runs guest ESM `import { Duplex, PassThrough, Readable, Writable, Transform, finished, pipeline } from 'node:stream'` and asserts EACH symbol is a function/class (not undefined) AND can be instantiated or invoked with a valid signature",
+        "Same test repeats the check via `const stream = require('node:stream'); const { Duplex } = stream;` (CJS path) and asserts parity",
+        "Edge case test: `import stream from 'node:stream'; new stream.Duplex(...)` — default-import path still works",
+        "Edge case test: destructuring AFTER import — `const stream = await import('node:stream'); const { Readable } = stream;` returns a real class, not undefined",
+        "If any assertion fails, the fix is to ensure the inline polyfill either (a) exports via a fresh object literal that enumerates all names, or (b) defines named enumerable properties on `Stream` BEFORE the CJS→ESM extractor runs",
+        "`cargo test -p agent-os-execution --test javascript_v8 -- --test-threads=1` passes",
+        "`cargo test -p agent-os-v8-runtime -- --test-threads=1` passes"
+      ],
+      "priority": 160,
+      "passes": false,
+      "notes": "Found during 2026-04-11 subagent review pass 44 of commit a82b6d3 (US-078). HIGH severity. The reviewer flagged: 'If a guest does import { Duplex } from node:stream; the runtime will try to extract Duplex from Stream via named-export enumeration. But if Stream is a CJS export, named-export extraction may or may not find Duplex depending on how Node's stream module assigns it.' CLAUDE.md CJS enumeration rule: 'Only fall back to runtime CJS export enumeration when static extraction finds zero names.' Untested downgrade path = silent ESM-to-undefined breakage for any package that uses node:stream named imports."
+    },
+    {
+      "id": "US-306",
+      "title": "Add hoist-only and edge-case test coverage to crates/execution/tests/module_resolution.rs",
+      "description": "As a maintainer of the pnpm module resolver in `crates/execution/src/javascript.rs`, I want `crates/execution/tests/module_resolution.rs` (added in US-078 commit a82b6d3) to cover the edge cases that the current minimal suite misses. Today the test file verifies the minimatch-specific preference case ('generic hoist vs virtual-store' at line ~609), but does NOT verify: (a) a package that exists ONLY in a generic hoist (no virtual-store copy) still resolves after the phase-split fix, (b) scoped packages `@scope/pkg` in pnpm virtual-store layouts, (c) packages without a `package.json` at the hoisted location, (d) circular pnpm symlinks, (e) broken symlinks in the virtual store, (f) packages that rely solely on `exports` field (no `main`) combined with pnpm hoist fallback. Without these tests, a follow-up change to `node_modules_direct_candidate_dirs()` / `node_modules_pnpm_fallback_candidate_dirs()` could regress silently.",
+      "acceptanceCriteria": [
+        "New test: package exists only in `<root>/node_modules/.pnpm/node_modules/foo` (no virtual store copy, no direct hoist at `<root>/node_modules/foo`); resolver must find it via the fallback phase",
+        "New test: scoped package `@scope/pkg` in pnpm virtual store at `<root>/node_modules/.pnpm/@scope+pkg@1.0.0/node_modules/@scope/pkg` resolves correctly from a sibling package referrer",
+        "New test: package without `package.json` at the hoisted location does NOT hang or panic; it returns a clear resolution error",
+        "New test: broken symlink in virtual store (`.pnpm/foo@1.0.0/node_modules/foo -> /nonexistent`) surfaces an error instead of panicking or returning stale content",
+        "New test: circular pnpm symlink (A depends on B, B depends on A, both in virtual store) resolves without infinite loop (depth-bounded)",
+        "New test: package with `exports` field and NO `main` resolves through the pnpm fallback path",
+        "`cargo test -p agent-os-execution --test module_resolution -- --test-threads=1` passes"
+      ],
+      "priority": 175,
+      "passes": false,
+      "notes": "Found during 2026-04-11 subagent review pass 44 of commit a82b6d3 (US-078). MEDIUM severity. Reviewer verbatim: 'The phase split looks correct, but untested edge cases could mask a subsequent regression.' Also: 'The test explicitly validates the fix's intent, but edge cases (scoped packages, missing package.json, broken symlinks) are untested.' The fix is structurally sound; this story exists so the safety net catches regressions before they reach the guest."
+    },
+    {
+      "id": "US-307",
+      "title": "US-079 WASI fd_write fast-path bypasses kernel VM-scoped stdio routing (isolation violation)",
+      "description": "As a maintainer of the Agent OS virtualization invariants, I want the WASI `fd_write` fast-path added in commit 0aadabd (`crates/execution/src/node_import_cache.rs`) to route guest fd 1 / fd 2 bytes through the kernel's VM-scoped stdio layer instead of calling `process.stdout.write(bytes)` / `process.stderr.write(bytes)` directly on the sidecar process. The current fast-path is: `if (numericFd === 1 || numericFd === 2) { const bytes = collectGuestIovBytes(iovs, iovsLen); (numericFd === 1 ? process.stdout : process.stderr).write(bytes); return writeGuestUint32(nwrittenPtr, bytes.length); }` — this is a kernel-isolation violation per `CLAUDE.md`: \"All guest code MUST execute inside the kernel with ZERO host escapes. No guest operation may fall through to a real host syscall.\" The sidecar process is shared across ALL active VMs, so: (1) one VM's stdout can be interleaved with another VM's stdout on the same host stream, (2) the kernel's per-VM onStdout / onStderr callbacks never receive the bytes, (3) the VM's virtual /dev/stdout, PTY redirection, and onData subscription paths are all bypassed, (4) tests that SHOULD be asserting against the kernel's routed output are instead snooping the sidecar's raw stdout, masking the real bug in the kernel stdio layer that US-079 was supposed to fix. The US-079 test suite passed because the test runner inspects the sidecar's shared stdout — the fix made the symptom go away without fixing the kernel plumbing that was actually broken.",
+      "acceptanceCriteria": [
+        "The `fd_write` path in `crates/execution/src/node_import_cache.rs` for fd 1 / fd 2 routes guest bytes through the kernel's per-VM stdio callback (the same path that `vm.spawn({ onStdout, onStderr })` subscribes to), NOT via `process.stdout.write()` / `process.stderr.write()` on the sidecar",
+        "Guest-scoped PTY redirection and the virtual `/dev/stdout` / `/dev/stderr` paths work after the fix — if a guest writes to fd 1 AND has a PTY attached, the bytes route through the PTY, not the sidecar's host stdout",
+        "Regression test: spawn two VMs concurrently, have each write a unique marker (`\"VM_A_MARKER\\n\"`, `\"VM_B_MARKER\\n\"`) through a WASM module's fd 1, assert each VM's `onStdout` handler receives ONLY its own marker — no cross-VM contamination on the shared host stream",
+        "Regression test: spawn a VM, attach a PTY, have the guest WASM write to fd 1, assert the PTY's onData callback receives the bytes (not sidecar host stdout)",
+        "The `registry/tests/kernel/node-binary-behavior.test.ts > node -e throw Error visible on terminal` test (which was the original failing case US-079 was trying to pass) must still pass after the fix — the test assertion must be rewritten to inspect the VM's onStderr callback, not the sidecar's shared stdout",
+        "`cargo test -p agent-os-execution` passes",
+        "`pnpm --dir registry exec vitest run tests/kernel/node-binary-behavior.test.ts --reporter=verbose` passes",
+        "Document in `crates/execution/CLAUDE.md` that WASI fd_write for fd 1 / fd 2 must go through the kernel stdio bridge, with a pointer to this story's reasoning so future AI agents don't reintroduce the shortcut"
+      ],
+      "priority": 40,
+      "passes": false,
+      "notes": "Found during 2026-04-11 subagent review pass 45 of commit 0aadabd (US-079). CRITICAL severity. Subagent verbatim: 'This bypasses the kernel's output routing. Guest-controlled bytes write directly to the host process.stdout — not through the kernel's VFS or stdio redirection system. In a secure-exec-style isolation model, guest fd 1/2 should route through the kernel's stdout routing (PTY layer, pipe manager, or permission checks), not directly to host streams. This is a kernel-isolation violation.' Priority 40 (very high) because this is a first-class virtualization invariant violation per CLAUDE.md: 'All guest code MUST execute inside the kernel with ZERO host escapes. No guest operation may fall through to a real host syscall.' Subtle because the tests pass — but they pass for the wrong reason."
+    },
+    {
+      "id": "US-308",
+      "title": "Move AGENT_OS_NODE_EVAL from env-var injection to an out-of-band sidecar RPC field",
+      "description": "As a maintainer hardening the guest runtime launch path, I want the `AGENT_OS_NODE_EVAL` env var added in commit 0aadabd (US-079, `crates/sidecar/src/execution.rs` `resolve_special_node_cli_invocation`) to be passed out-of-band to the guest runner instead of injected into the subprocess environment. Today the sidecar sets `env.insert(\"AGENT_OS_NODE_EVAL\", \"console.log(process.version);\")` (for `node -v`/`--version`) or `env.insert(\"AGENT_OS_NODE_EVAL\", args[1].clone())` (for `node -e <code>`) and the guest runner reads this env var to know what JS to evaluate. Two independent problems: (1) fragility — guest-side code that leaks to `process.env` inheritance can see `AGENT_OS_NODE_EVAL`, and a future refactor to the env-filter allow-list could accidentally let a malicious guest inject its own value and execute arbitrary code as the process entrypoint; (2) ugly design — evaluation code should be a first-class RPC field, not a stringly-typed env var. The subagent review of commit 0aadabd verified the current allow-list DOES filter `AGENT_OS_NODE_EVAL` out of guest `process.env`, so this is NOT an immediate exploit, but the control is implicit and fragile.",
+      "acceptanceCriteria": [
+        "`resolve_special_node_cli_invocation` and callers no longer set `AGENT_OS_NODE_EVAL` in the subprocess env",
+        "The spawn RPC payload gains an explicit `eval_source: Option<String>` field (or similar typed field) that the guest runner reads directly, outside of the env dictionary",
+        "The guest runner reads the eval source from the typed field, not from `process.env.AGENT_OS_NODE_EVAL`",
+        "`prepare_guest_runtime_env` (or the equivalent env filter) no longer needs to explicitly scrub `AGENT_OS_NODE_EVAL` — since it's never set on the env at all — and a regression test asserts `AGENT_OS_NODE_EVAL` is absent from guest `process.env` even when the sidecar is told to eval something",
+        "Security test: a guest that sets `process.env.AGENT_OS_NODE_EVAL = 'console.log(1)'` before spawning another node child does NOT get that eval executed in the child (the env var has no effect)",
+        "`node -v` / `node --version` / `node -e <code>` guest invocations still produce the correct output",
+        "`cargo test -p agent-os-sidecar` passes",
+        "`cargo test -p agent-os-execution` passes"
+      ],
+      "priority": 180,
+      "passes": false,
+      "notes": "Found during 2026-04-11 subagent review pass 45 of commit 0aadabd (US-079). MEDIUM severity (not an immediate exploit — the env filter currently scrubs this var, subagent verified zero guest-side reads across the codebase). But the design is fragile: subagent verbatim: 'This env var is set unconditionally before prepare_guest_runtime_env(...), and if any env-filtering code is later weakened or if a future builtin accidentally leaks it, malicious guest code could set it before spawning node and execute arbitrary code as the entrypoint. This should ideally be documented as sidecar-only internal, passed out-of-band (separate RPC field, not env) to the runner, or explicitly scrubbed by prepare_guest_runtime_env with an allow-list instead of relying on implicit filtering.'"
+    },
+    {
+      "id": "US-309",
+      "title": "Bound WASM net.poll sync-RPC blocking and document deadlock semantics",
+      "description": "As a maintainer of the WASM host-net sync-RPC bridge introduced in commit c24f009 (US-080), I want the sidecar's `service_javascript_sync_rpc` handler for `net.poll` in `crates/sidecar/src/execution.rs` to have an explicit, bounded timeout ceiling (e.g. 50ms) and a documented non-blocking fallback path so the WASM `recv` sync-RPC call cannot monopolize the sidecar's main thread. Today the handler calls `socket.poll(Duration::from_millis(wait_ms))` where `wait_ms` comes from the guest WASM caller — if the guest passes a large `wait_ms` (or a value that rolls over to `u64::MAX` via a cast bug), the entire sidecar main thread blocks for that duration while every other VM on the same sidecar stalls. The sync RPC bridge is single-threaded by design, so there is no concurrent socket access and no direct deadlock — BUT the cost is that every long poll is a quasi-DoS: concurrent VMs, incoming session RPCs, and even commit/shutdown requests sit behind the `poll()`. Not a pure deadlock but a latency amplifier with guest-controlled blast radius.",
+      "acceptanceCriteria": [
+        "`net.poll` handler clamps `wait_ms` to an explicit ceiling (e.g. 50ms) regardless of guest input",
+        "If the guest passes a wait duration larger than the ceiling, the handler returns immediately after ceiling expiry with the currently-observed state (no error, just shorter wait)",
+        "Stress test: 2 concurrent VMs, one guest calls `net.poll` with `wait_ms = u64::MAX`, second guest issues a `vm.dispose()` — assert the dispose completes within 200ms regardless of the first guest's poll",
+        "Rust-side clamp is unit-tested: `wait_ms = 0` → zero-wait path, `wait_ms = 10` → 10ms path, `wait_ms = 10_000` → clamped to ceiling, `wait_ms = u64::MAX` → clamped to ceiling",
+        "Document the clamp + reasoning in `crates/sidecar/CLAUDE.md` so future AI agents don't raise it thinking guests need longer waits",
+        "`cargo test -p agent-os-sidecar --test service` passes"
+      ],
+      "priority": 90,
+      "passes": false,
+      "notes": "Found during 2026-04-11 subagent review pass 46 of commit c24f009 (US-080). HIGH severity. Subagent verbatim: 'The sidecar's sync RPC handler service_javascript_sync_rpc runs on the main thread and calls socket.poll(Duration::from_millis(wait_ms)), which can block up to wait_ms milliseconds... Deadlock risk is REAL but CONTAINED... The sync RPC bridge is single-threaded by design, so no concurrent socket access. No deadlock observed in tests but recommend bounded timeouts and non-blocking poll semantics.' A guest-controlled blocking call with u64 max cost on the main thread is a latency-amplifier DoS even when it's not a strict deadlock."
+    },
+    {
+      "id": "US-310",
+      "title": "US-080 `net.write` raw-byte-payload optimization is illusory; WASM bytes still base64-round-trip via encodeSyncRpcValue",
+      "description": "As a maintainer of the WASM host-net bridge, I want the US-080 `net.write` path in `crates/execution/src/node_import_cache.rs` to actually achieve the raw-byte-payload throughput improvement that commit c24f009's message claims. Today the WASM side was simplified from `callSyncRpc('net.write', [socket.socketId, Buffer.from(chunk).toString('base64')])` to `callSyncRpc('net.write', [socket.socketId, chunk])` — looks like a removal of the explicit base64 encode, but `callSyncRpc` internally calls `encodeSyncRpcValue` on its arguments, which base64-encodes any `Uint8Array` before serializing. Net result: the guest still spends CPU encoding the buffer, the wire still carries base64, and the sidecar still decodes base64 — just at a different layer. The optimization was either a half-finish or the commit message is misleading. A guest that writes large chunks (e.g. tarball streams, media uploads) still pays the full base64 overhead.",
+      "acceptanceCriteria": [
+        "EITHER: `encodeSyncRpcValue` gains a raw-bytes transport for `Uint8Array` / `ArrayBuffer` values (separate wire format tag, no base64), and the sidecar's sync-RPC decoder recognizes it",
+        "OR: the commit message / progress.txt learning for US-080 is corrected to remove the 'raw byte payload' claim and state that the change is a code-cleanup, not a throughput optimization",
+        "Benchmark: send a 1 MiB Uint8Array via `net.write` from a guest, measure CPU cost of the encoding path before vs after — either shows a clear improvement (if the optimization was completed) or shows parity (if the claim is dropped)",
+        "If raw-bytes transport is added: round-trip test of every byte value 0..255 through `net.write` + `net.poll` / `net.read`, asserting byte-for-byte identity",
+        "`cargo test -p agent-os-execution` passes"
+      ],
+      "priority": 200,
+      "passes": false,
+      "notes": "Found during 2026-04-11 subagent review pass 46 of commit c24f009 (US-080). HIGH severity — not a bug, but the gap between the commit message and the actual diff means future performance work will not know that the base64 round-trip is still present. Subagent verbatim: 'Ralph's commit claims \"send raw byte payloads through net.write\", but the WASM path still base64-encodes via encodeSyncRpcValue(chunk). The optimization was only partial: WASM removed Buffer.from(chunk).toString(\"base64\") manually, but callSyncRpc still calls encodeSyncRpcValue which re-encodes the Uint8Array as base64. Result: No actual improvement in throughput or memory usage.' Priority 200 (medium-high) — real but not blocking. The cheap win is to fix the commit message; the real win is to add raw-bytes transport to the sync RPC wire format."
+    },
+    {
+      "id": "US-311",
+      "title": "Projected native ELF binaries are reaching the WASM runner; detect and reject earlier",
+      "description": "As a maintainer of vendor-binary routing in the sidecar, I want native ELF binaries (like `rg`, `grep`, and other vendored tools) to NEVER reach the WASM warmup / runner path. Today (as of US-081 / commit 6ccdcb2), the `claude-code-investigate.test.ts` test has been broadened to accept `CompileError: WebAssembly.Module(): expected magic word` as a valid failure signal — which is exactly what V8 throws when you hand a WASM parser the bytes of an ELF executable. That failure should be impossible: if the sidecar correctly detects ELF magic (`\\x7fELF` at offset 0) before dispatching to the WASM runner, the binary should be rejected with a clear `ERR_NATIVE_BINARY_NOT_SUPPORTED` (or similar) at the command-resolution layer. The test weakening in US-081 papered over this bug instead of fixing it — see Ralph's own progress.txt note: \"projected native vendor binaries currently fail through the WASM warmup path with an ERR_AGENT_OS_NODE_SYNC_RPC-prefixed compile error, which is still a valid regression signal.\" That is a design smell: the guest should never even attempt to invoke the WASM runner on a native binary, and the test's new assertion now permits ANY future regression where MORE native binaries get mis-routed to the WASM path.",
+      "acceptanceCriteria": [
+        "Add an ELF-magic-byte check in the sidecar command resolver (likely in `crates/execution/src/wasm.rs` prewarm path OR `crates/sidecar/src/execution.rs` spawn path) that rejects any file whose first 4 bytes are `\\x7fELF` with an explicit `NativeBinaryNotSupported` error variant",
+        "Add the same check for Mach-O magic (`\\xca\\xfe\\xba\\xbe`, `\\xfe\\xed\\xfa\\xcf`, etc.) and PE/COFF magic (`MZ`) — any non-WASM magic must be rejected before reaching the WASM parser",
+        "Revert `claude-code-investigate.test.ts` to assert the SPECIFIC rejection error (`rg-stderr:(command not found:|ERR_NATIVE_BINARY_NOT_SUPPORTED)` or equivalent) — remove the broad `CompileError: WebAssembly.Module()` fallback so future ELF-routing regressions are caught",
+        "New regression test: spawn a VM, write an ELF fixture to /tmp/fake-rg, chmod +x, attempt to spawn it, assert the sidecar returns the explicit native-binary-not-supported error — not a WASM compile error",
+        "Add a one-line note in `crates/execution/CLAUDE.md` or `crates/sidecar/CLAUDE.md` explaining why ELF binaries must be rejected early (prevents future AI agents from reintroducing the weakening)",
+        "`pnpm --dir packages/core exec vitest run tests/claude-code-investigate.test.ts --reporter=verbose` passes",
+        "`cargo test -p agent-os-sidecar` passes"
+      ],
+      "priority": 110,
+      "passes": false,
+      "notes": "Found during 2026-04-11 subagent review pass 47 of commit 6ccdcb2 (US-081). HIGH severity. Subagent verbatim: 'This treats a design smell as a feature. Projected ELF should never reach the WASM runner; if it does, that is a routing bug upstream, not a valid failure envelope... The proper fix would be to detect ELF magic bytes early and either execute natively (outside the VM, violating invariants) or fail with a clear \"native binaries not supported\" message — not accept a cryptic WASM compile error.' Also: 'The regex now accepts ANY error with the CompileError: WebAssembly.Module() expected magic word suffix... A bug that silently routes more ELF binaries to WASM would still pass this test.' Priority 110 (high) — masks an active bug and creates a permanent blind spot in the regression suite."
+    },
+    {
+      "id": "US-312",
+      "title": "Add direct unit tests for filesystem.rs rename/remove shadow-sync (US-081 follow-up)",
+      "description": "As a maintainer of the sidecar shadow-root reconciliation invariants, I want direct unit tests for the rename/remove shadow-sync logic added in commit 6ccdcb2 (US-081). Today the new `remove_shadow_path_if_exists()` and `rename_guest_shadow_path()` helpers in `crates/sidecar/src/filesystem.rs` are only verified INDIRECTLY via the Claude investigation suite — which spawns guest processes that happen to hit the shadow root via shell commands. There is no dedicated unit test that (a) renames a file and asserts guest shell commands see the new name AND the old name is gone, (b) deletes a file and asserts both kernel VFS and shadow root agree, (c) deletes a directory with contents, (d) renames across directories, (e) handles rename where the destination already exists, (f) handles symlink target vs symlink itself. The existing `filesystem-move-delete.test.ts` tests only the public `vm.move()` / `vm.delete()` API against kernel-visible results — it does NOT check the shadow root consistency that was the actual bug US-081 fixed. A future refactor could silently regress this without breaking any existing test.",
+      "acceptanceCriteria": [
+        "New unit test in `crates/sidecar/src/filesystem.rs` or `crates/sidecar/tests/` that directly calls `remove_shadow_path_if_exists()` and `rename_guest_shadow_path()` and asserts the shadow-root file state after each",
+        "Integration test: `vm.writeFile('/tmp/a.txt', 'x'); vm.move('/tmp/a.txt', '/tmp/b.txt'); const { stdout } = vm.exec('cat /tmp/b.txt'); expect(stdout).toBe('x'); expect(vm.exec('test -e /tmp/a.txt')).toRejectWith(nonzero exit)` — proves shell commands see the rename",
+        "Integration test: `vm.writeFile('/tmp/a.txt', 'x'); vm.delete('/tmp/a.txt'); expect(vm.exec('test -e /tmp/a.txt')).toRejectWith(nonzero exit)` — proves shell commands see the delete",
+        "Edge case test: rename a file whose destination already exists — the destination's old content must be replaced, not merged, and neither kernel VFS nor shadow root should have stale content",
+        "Edge case test: remove a directory with nested contents — assert recursive shadow-root cleanup",
+        "Edge case test: rename a symlink — assert the SYMLINK is renamed, not its target",
+        "`cargo test -p agent-os-sidecar --test filesystem` passes"
+      ],
+      "priority": 210,
+      "passes": false,
+      "notes": "Found during 2026-04-11 subagent review pass 47 of commit 6ccdcb2 (US-081). MEDIUM severity. Subagent verbatim: 'The filesystem test suite does NOT directly test shadow-sync behavior... It does NOT verify that after vm.move(src, dst), a guest shell command sees the rename reflected immediately in the shadow root. The fix is verified indirectly by the claude-code investigation suite passing (which spawns guest processes that read from shadow root), but there is no dedicated unit test for the rename/remove shadow-sync logic itself.' Not a bug — the fix works — but the safety net is missing."
+    },
+    {
+      "id": "US-313",
+      "title": "US-082 follow-up: wire BARE schema codegen and prescribe versioning strategy before US-083 codec work lands",
+      "description": "As a maintainer of the sidecar IPC protocol, I want the `crates/sidecar/protocol/agent_os_sidecar_v1.bare` schema file introduced in US-082 / commit 79411d4 to be the SINGLE SOURCE OF TRUTH for the Rust protocol types — today the schema and the 2,211-line `crates/sidecar/src/protocol.rs` are both checked in by hand and can drift without any mechanical check. The US-082 commit added the schema + a migration plan README but NOT: (1) a `build.rs` or Cargo codegen step that generates Rust structs from the .bare file (no `bare-rs` dependency, no generator macro, no Makefile rule), (2) structural validation tests — the existing `checked_in_bare_schema_covers_all_top_level_frame_payload_types()` test is a substring grep that passes whenever a type NAME appears somewhere in the schema file, regardless of whether its fields / variants match the Rust type, and (3) an explicit versioning prescription in the README — the plan says `ProtocolSchema.version remains 1` but does not say whether future field additions use `optional<T>`, a new union variant, or a bumped version; maintainers will drift. This story must close all three gaps BEFORE US-083 (dual-stack codec) starts, because US-083 will encode wire bytes against whichever source of truth exists — and if codegen is not wired, US-083's codec tests will silently accept Rust/BARE drift.",
+      "acceptanceCriteria": [
+        "EITHER: add a `build.rs` in `crates/sidecar/` (or similar) that invokes a BARE → Rust codegen (via `bare-rs` or a custom generator) reading `crates/sidecar/protocol/agent_os_sidecar_v1.bare` and producing the generated types in a dedicated module, then refactor `crates/sidecar/src/protocol.rs` to re-export or wrap the generated types OR: add a structural parity test that parses the .bare file and asserts, for every struct/union in the schema, that the corresponding Rust type has the same field count, field names, and field types (serde-based reflection is acceptable)",
+        "Replace the existing substring-only schema coverage test with the structural parity test above — the test must FAIL when a Rust struct adds a field that the schema does not, and vice versa",
+        "Add an explicit \"How to extend the protocol\" section to `crates/sidecar/protocol/README.md` stating: (a) when to use `optional<T>` (adding a field to an existing struct), (b) when to add a new union variant (adding a new RPC method), (c) when to bump the `ProtocolSchema.version` (breaking change), (d) whether mixing old/new clients is supported during a transition",
+        "Add a note in `crates/sidecar/CLAUDE.md` pointing at the README extension rules so future AI agents discover them before touching the schema",
+        "New test: adding a dummy field to a Rust protocol struct without updating the .bare file should fail a `cargo test` run (proves the codegen or parity check is actually wired)",
+        "`cargo build -p agent-os-sidecar` passes (codegen step doesn't break the build)",
+        "`cargo test -p agent-os-sidecar --test protocol_bare_parity` (or similar) passes"
+      ],
+      "priority": 130,
+      "passes": false,
+      "notes": "Found during 2026-04-11 subagent review pass 48 of commit 79411d4 (US-082). HIGH severity because US-082 is a planning/schema commit that US-083 will build on — if the codegen is not wired BEFORE US-083 starts, US-083's codec will inherit a schema file with no mechanical contract to Rust, and drift will silently accumulate. Subagent verbatim: 'Zero codegen. There is no build.rs, no bare-rs crate dependency in Cargo.toml, and no Makefile rule. The Rust protocol.rs types remain hand-written... If codegen is deferred or skipped in US-083, the Rust types and the checked-in .bare file will drift, violating the schema contract. This is a maintenance trap waiting to happen.' Also: 'The schema test passes as long as type names appear somewhere in the file; it does not validate field counts, types, or enum variants.' Also: 'README does not prescribe versioning strategy for future extensions... This ambiguity could lead to compatibility bugs downstream.' Priority 130 — not blocking US-083 from starting, but must land before US-083 ships a codec so the codec has a real schema to target."
     }
   ]
 }

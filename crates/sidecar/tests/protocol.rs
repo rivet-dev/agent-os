@@ -1,7 +1,7 @@
 use agent_os_sidecar::protocol::{
     validate_frame, AuthenticateRequest, AuthenticatedResponse, CreateVmRequest, EventFrame,
-    GetZombieTimerCountRequest, GuestRuntimeKind, NativeFrameCodec, OpenSessionRequest,
-    OwnershipScope, PatternPermissionScope, PermissionMode, PermissionsPolicy,
+    GetZombieTimerCountRequest, GuestRuntimeKind, NativeFrameCodec, NativePayloadCodec,
+    OpenSessionRequest, OwnershipScope, PatternPermissionScope, PermissionMode, PermissionsPolicy,
     ProcessStartedResponse, ProjectedModuleDescriptor, ProtocolCodecError, ProtocolFrame,
     RequestFrame, RequestPayload, ResponseFrame, ResponsePayload, ResponseTracker,
     ResponseTrackerError, SidecarPlacement, SidecarRequestFrame, SidecarRequestPayload,
@@ -116,6 +116,55 @@ fn codec_round_trips_sidecar_request_and_response_frames() {
         codec.decode(&codec.encode(&response).unwrap()).unwrap(),
         response
     );
+}
+
+#[test]
+fn bare_codec_round_trips_frames_with_json_utf8_fields() {
+    let codec = NativeFrameCodec::with_payload_codec(1024 * 1024, NativePayloadCodec::Bare);
+    let frame = ProtocolFrame::SidecarRequest(SidecarRequestFrame::new(
+        -12,
+        OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+        SidecarRequestPayload::ToolInvocation(ToolInvocationRequest {
+            invocation_id: "invoke-12".to_string(),
+            tool_key: "toolkit:search".to_string(),
+            input: json!({
+                "cursor": "abc123",
+                "includeSchema": true,
+            }),
+            timeout_ms: 2_000,
+        }),
+    ));
+
+    let encoded = codec.encode(&frame).expect("encode bare frame");
+    assert_eq!(
+        encoded[4], 4,
+        "BARE sidecar_request frames should start with tag 4"
+    );
+
+    let decoded = codec.decode(&encoded).expect("decode bare frame");
+    assert_eq!(decoded, frame);
+}
+
+#[test]
+fn codec_auto_detects_json_and_bare_payloads() {
+    let json_codec = NativeFrameCodec::default();
+    let bare_codec = NativeFrameCodec::with_payload_codec(1024 * 1024, NativePayloadCodec::Bare);
+    let frame = ProtocolFrame::SidecarRequest(SidecarRequestFrame::new(
+        -11,
+        OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+        SidecarRequestPayload::ToolInvocation(ToolInvocationRequest {
+            invocation_id: "invoke-1".to_string(),
+            tool_key: "toolkit:search".to_string(),
+            input: json!({ "query": "ping" }),
+            timeout_ms: 2_000,
+        }),
+    ));
+
+    let json_encoded = json_codec.encode(&frame).expect("encode json frame");
+    let bare_encoded = bare_codec.encode(&frame).expect("encode bare frame");
+
+    assert_eq!(json_codec.decode(&json_encoded).unwrap(), frame);
+    assert_eq!(json_codec.decode(&bare_encoded).unwrap(), frame);
 }
 
 #[test]

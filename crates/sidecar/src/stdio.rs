@@ -12,8 +12,8 @@ use agent_os_bridge::{
     WriteFileRequest,
 };
 use agent_os_sidecar::protocol::{
-    AuthenticatedResponse, NativeFrameCodec, ProtocolCodecError, ProtocolFrame, RequestId,
-    ResponsePayload, SessionOpenedResponse, SidecarRequestFrame, SidecarResponseFrame,
+    AuthenticatedResponse, NativeFrameCodec, NativePayloadCodec, ProtocolCodecError, ProtocolFrame,
+    RequestId, ResponsePayload, SessionOpenedResponse, SidecarRequestFrame, SidecarResponseFrame,
 };
 use agent_os_sidecar::{NativeSidecar, NativeSidecarConfig, SidecarError, SidecarRequestTransport};
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,11 +56,15 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
     let mut event_pump = time::interval(EVENT_PUMP_INTERVAL);
     let writer_codec = codec.clone();
     let reader_codec = codec.clone();
+    let transport_codec = Arc::new(Mutex::new(None::<NativePayloadCodec>));
+    let writer_transport_codec = transport_codec.clone();
 
     thread::spawn(move || {
         let mut writer = io::BufWriter::new(io::stdout());
         while let Ok(frame) = write_rx.recv() {
-            if let Err(error) = write_frame(&writer_codec, &mut writer, &frame) {
+            if let Err(error) =
+                write_frame(&writer_codec, &mut writer, &frame, &writer_transport_codec)
+            {
                 let _ = write_error_tx.send(error.to_string());
                 break;
             }
@@ -69,10 +73,11 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
 
     thread::spawn({
         let callback_transport = callback_transport.clone();
+        let transport_codec = transport_codec.clone();
         move || {
             let mut stdin = io::stdin();
             loop {
-                let frame = match read_frame(&reader_codec, &mut stdin) {
+                let frame = match read_frame(&reader_codec, &mut stdin, &transport_codec) {
                     Ok(Some(ProtocolFrame::SidecarResponse(response))) => {
                         if callback_transport.accept_response(response.clone()) {
                             continue;
@@ -210,6 +215,7 @@ fn track_session_state(
 fn read_frame(
     codec: &NativeFrameCodec,
     reader: &mut impl Read,
+    transport_codec: &Arc<Mutex<Option<NativePayloadCodec>>>,
 ) -> Result<Option<ProtocolFrame>, Box<dyn Error>> {
     let mut prefix = [0u8; 4];
     match reader.read_exact(&mut prefix) {
@@ -233,15 +239,29 @@ fn read_frame(
     bytes.extend_from_slice(&prefix);
     bytes.resize(total_len, 0);
     reader.read_exact(&mut bytes[prefix.len()..])?;
-    Ok(Some(codec.decode(&bytes)?))
+
+    let frame = if let Some(payload_codec) = *transport_codec.lock().expect("codec lock") {
+        codec.decode_with_codec(&bytes, payload_codec)?
+    } else {
+        let (frame, payload_codec) = codec.decode_detected(&bytes)?;
+        *transport_codec.lock().expect("codec lock") = Some(payload_codec);
+        frame
+    };
+
+    Ok(Some(frame))
 }
 
 fn write_frame(
     codec: &NativeFrameCodec,
     writer: &mut impl Write,
     frame: &ProtocolFrame,
+    transport_codec: &Arc<Mutex<Option<NativePayloadCodec>>>,
 ) -> Result<(), Box<dyn Error>> {
-    let bytes = codec.encode(frame)?;
+    let payload_codec = transport_codec
+        .lock()
+        .expect("codec lock")
+        .unwrap_or(codec.payload_codec());
+    let bytes = codec.encode_with_codec(frame, payload_codec)?;
     writer.write_all(&bytes)?;
     writer.flush()?;
     Ok(())
@@ -286,7 +306,8 @@ mod tests {
         let codec = NativeFrameCodec::new(16);
         let mut reader = Cursor::new((32_u32).to_be_bytes().to_vec());
 
-        let error = read_frame(&codec, &mut reader).expect_err("oversized frame should fail");
+        let error = read_frame(&codec, &mut reader, &Arc::new(Mutex::new(None)))
+            .expect_err("oversized frame should fail");
         let error = error
             .downcast::<ProtocolCodecError>()
             .expect("protocol codec error");
