@@ -1243,9 +1243,16 @@ impl JavascriptExecutionEngine {
                 .chain(request.argv.iter().skip(1).cloned())
                 .collect::<Vec<_>>()
         };
-        let use_module_mode = host_entrypoint_uses_module_mode(&host_entrypoint);
-        let user_code = if let Some(inline_code) = request.inline_code.clone() {
-            strip_javascript_hashbang(&inline_code)
+        let inline_code = request
+            .inline_code
+            .clone()
+            .map(|inline_code| strip_javascript_hashbang(&inline_code));
+        let use_module_mode = host_entrypoint_uses_module_mode(&host_entrypoint)
+            || inline_code
+                .as_deref()
+                .is_some_and(inline_code_uses_module_mode);
+        let user_code = if let Some(inline_code) = inline_code {
+            inline_code
         } else if use_module_mode {
             strip_javascript_hashbang(&fs::read_to_string(&host_entrypoint).map_err(|error| {
                 JavascriptExecutionError::PrepareImportCache(std::io::Error::new(
@@ -1267,22 +1274,12 @@ impl JavascriptExecutionEngine {
             &request.env,
         );
 
-        // Execute bridge code + user code in the V8 isolate
-        v8_host
-            .send_frame(&BinaryFrame::Execute {
-                session_id: session_id.clone(),
-                mode: if use_module_mode { 1 } else { 0 },
-                file_path: guest_entrypoint.clone(),
-                bridge_code: V8RuntimeHost::bridge_code().to_owned(),
-                post_restore_script: String::new(),
-                user_code,
-            })
-            .map_err(JavascriptExecutionError::Spawn)?;
-
         // Create session handle for sending bridge responses
         let v8_session = V8SessionHandle::new(session_id.clone(), v8_host.writer_handle());
 
-        // Spawn V8 event bridge thread that converts BinaryFrame → JavascriptExecutionEvent
+        // Start the event bridge before execution so early sync bridge calls
+        // made during module instantiation/evaluation cannot deadlock waiting
+        // for a response while no host thread is draining session frames yet.
         let pending_sync_rpc = Arc::new(Mutex::new(None));
         let kernel_stdin = Arc::new(LocalKernelStdinBridge::default());
         let events = spawn_v8_event_bridge(
@@ -1297,6 +1294,18 @@ impl JavascriptExecutionEngine {
                 ..Default::default()
             },
         );
+
+        // Execute bridge code + user code in the V8 isolate
+        v8_host
+            .send_frame(&BinaryFrame::Execute {
+                session_id: session_id.clone(),
+                mode: if use_module_mode { 1 } else { 0 },
+                file_path: guest_entrypoint.clone(),
+                bridge_code: V8RuntimeHost::bridge_code().to_owned(),
+                post_restore_script: String::new(),
+                user_code,
+            })
+            .map_err(JavascriptExecutionError::Spawn)?;
 
         Ok(JavascriptExecution {
             execution_id,
@@ -1548,6 +1557,52 @@ fn host_entrypoint_uses_module_mode(entrypoint: &Path) -> bool {
         Some("js") => nearest_package_json_type(entrypoint).as_deref() == Some("module"),
         _ => false,
     }
+}
+
+fn inline_code_uses_module_mode(source: &str) -> bool {
+    let mut in_block_comment = false;
+
+    for line in source.lines() {
+        let mut trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if in_block_comment {
+            if let Some(end) = trimmed.find("*/") {
+                trimmed = trimmed[end + 2..].trim_start();
+                in_block_comment = false;
+                if trimmed.is_empty() {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        }
+
+        if trimmed.starts_with("/*") {
+            if let Some(end) = trimmed.find("*/") {
+                trimmed = trimmed[end + 2..].trim_start();
+                if trimmed.is_empty() {
+                    continue;
+                }
+            } else {
+                in_block_comment = true;
+                continue;
+            }
+        }
+
+        if trimmed.starts_with("//") {
+            continue;
+        }
+
+        return trimmed.starts_with("import ")
+            || trimmed.starts_with("import{")
+            || trimmed.starts_with("import*")
+            || trimmed.starts_with("export ");
+    }
+
+    false
 }
 
 fn nearest_package_json_type(entrypoint: &Path) -> Option<String> {

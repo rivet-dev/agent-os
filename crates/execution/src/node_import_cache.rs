@@ -383,16 +383,10 @@ function emitControlMessage(message) {
   if (CONTROL_PIPE_FD == null) {
     if (
       message?.type === 'signal_state' &&
-      globalThis.__agentOsSyncRpc &&
-      typeof globalThis.__agentOsSyncRpc.callSync === 'function'
+      typeof process?.stdout?.write === 'function'
     ) {
       try {
-        globalThis.__agentOsSyncRpc.callSync('process.signal_state', [
-          Number(message.signal) >>> 0,
-          message.registration?.action ?? 'default',
-          JSON.stringify(message.registration?.mask ?? []),
-          Number(message.registration?.flags) >>> 0,
-        ]);
+        process.stdout.write(`__AGENT_OS_WASM_SIGNAL_STATE__:${JSON.stringify(message)}\n`);
       } catch {
         // Ignore control-channel fallback failures during teardown.
       }
@@ -403,7 +397,16 @@ function emitControlMessage(message) {
   try {
     fs.writeSync(CONTROL_PIPE_FD, `${JSON.stringify(message)}\n`);
   } catch {
-    // Ignore control-channel write failures during teardown.
+    if (
+      message?.type === 'signal_state' &&
+      typeof process?.stdout?.write === 'function'
+    ) {
+      try {
+        process.stdout.write(`__AGENT_OS_WASM_SIGNAL_STATE__:${JSON.stringify(message)}\n`);
+      } catch {
+        // Ignore control-channel fallback failures during teardown.
+      }
+    }
   }
 }
 
@@ -7241,6 +7244,10 @@ function decodeSyncRpcValue(value) {
   }
 
   if (value && typeof value === 'object') {
+    if (value.__type === 'Buffer' && typeof value.data === 'string') {
+      return Buffer.from(value.data, 'base64');
+    }
+
     if (value.__agentOsType === 'bytes' && typeof value.base64 === 'string') {
       return Buffer.from(value.base64, 'base64');
     }
@@ -7973,10 +7980,17 @@ for (const specifier of imports) {
 "#;
 
 const NODE_WASM_RUNNER_SOURCE: &str = r#"
-import fs from 'node:fs/promises';
-import { readSync, writeSync } from 'node:fs';
-import path from 'node:path';
-import { WASI } from 'node:wasi';
+const fsModule =
+  typeof globalThis._requireFrom === 'function'
+    ? globalThis._requireFrom('node:fs', '/')
+    : __agentOsRequireBuiltin('node:fs');
+const fs = fsModule.promises;
+const { readSync, writeSync } = fsModule;
+const path =
+  typeof globalThis._requireFrom === 'function'
+    ? globalThis._requireFrom('node:path', '/')
+    : __agentOsRequireBuiltin('node:path');
+const { WASI } = globalThis.__agentOsWasiModule;
 
 const WASI_ERRNO_SUCCESS = 0;
 const WASI_ERRNO_BADF = 8;
@@ -8055,6 +8069,7 @@ const modulePath = process.env.AGENT_OS_WASM_MODULE_PATH;
 if (!modulePath) {
   throw new Error('AGENT_OS_WASM_MODULE_PATH is required');
 }
+const moduleBase64 = process.env.AGENT_OS_WASM_MODULE_BASE64;
 
 const guestArgv = JSON.parse(process.env.AGENT_OS_GUEST_ARGV ?? '[]');
 const guestEnv = JSON.parse(process.env.AGENT_OS_GUEST_ENV ?? '{}');
@@ -8273,11 +8288,25 @@ function enforceMemoryLimit(moduleBytes, limitPages) {
   return Buffer.from(rewritten);
 }
 
-const moduleBytes = enforceMemoryLimit(
-  await fs.readFile(resolveModulePath(modulePath)),
-  maxMemoryPages,
-);
-const module = await WebAssembly.compile(moduleBytes);
+function decodeBase64ToUint8Array(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index) & 0xff;
+  }
+  return bytes;
+}
+
+const moduleSource =
+  typeof moduleBase64 === 'string' && moduleBase64.length > 0
+    ? moduleBase64
+    : fsModule.readFileSync(resolveModulePath(modulePath));
+const moduleBytes =
+  typeof moduleSource === 'string'
+    ? decodeBase64ToUint8Array(moduleSource)
+    : moduleSource;
+const moduleBinary = enforceMemoryLimit(moduleBytes, maxMemoryPages);
+const module = new WebAssembly.Module(moduleBinary);
 
 if (prewarmOnly) {
   process.exit(0);
@@ -9027,6 +9056,10 @@ function decodeSyncRpcValue(value) {
   }
 
   if (value && typeof value === 'object') {
+    if (value.__type === 'Buffer' && typeof value.data === 'string') {
+      return Buffer.from(value.data, 'base64');
+    }
+
     if (value.__agentOsType === 'bytes' && typeof value.base64 === 'string') {
       return Buffer.from(value.base64, 'base64');
     }
@@ -10216,7 +10249,7 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
   return writeGuestUint32(neventsPtr, readyEvents.length);
 };
 
-const instance = await WebAssembly.instantiate(module, {
+const instance = new WebAssembly.Instance(module, {
   wasi_snapshot_preview1: wasiImport,
   wasi_unstable: wasiImport,
   host_process: hostProcessImport,

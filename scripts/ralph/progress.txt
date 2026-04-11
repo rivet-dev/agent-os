@@ -5,6 +5,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
 - In `crates/execution`, keep any real-host Node helpers isolated to host-only modules used by benchmarks or import-cache tests; shared guest runtime helpers like signal metadata should live in neutral modules that JS/WASM/Python can use without depending on host launch scaffolding.
+- WASM prewarm still runs the embedded V8 runner, so `prewarm_wasm_path()` must service the runner's internal `node:fs` sync-RPC traffic just like normal execution; dropping those requests turns downstream sidecar socket-state failures into warmup timeouts.
 - In `python-runner.mjs`, keep bundled Pyodide bootstrap package loading on `/__agent_os_pyodide` and only switch to `AGENT_OS_PYODIDE_PACKAGE_BASE_URL` after `pyodide.loadPackage("micropip")`; user `micropip.install(...)` URLs and bundled wheel/bootstrap URLs cannot share the same base.
 - V8 builtin coverage should treat `node:vm`, `node:v8`, and `node:worker_threads` as compatibility shims, not denied imports; keep true escape builtins like `node:inspector` and `node:cluster` on `ERR_ACCESS_DENIED`, and assert `worker_threads.Worker` fails with `ERR_NOT_IMPLEMENTED` instead of requiring the module import to fail.
 - Guest-visible runtime env is a shared cross-runtime contract: `prepare_guest_runtime_env(...)` should supply stable kernel-owned identity vars including `PATH`, Python should mirror only that guest-facing subset into `os.environ`, and the WASM `AGENT_OS_GUEST_ENV` payload must strip internal control vars like `AGENT_OS_*` / `NODE_SYNC_RPC_*` before they reach WASI guest code.
@@ -140,4 +141,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Guest `dns.resolve*()` parity should go through the bridged DNS lookup path with explicit family filtering; routing it through `dns.lookup()` drops the rrtype contract that the sidecar transport tests assert.
   - `net.createConnection(...)` and `server.listen(...)` permission failures can surface either as synchronous throws or asynchronous `"error"` events depending on the call path, so sidecar JS network tests should cover both delivery modes.
   - Loopback TLS setup is two-sided; server-side client-hello inspection must treat a missing loopback TLS transport record as “handshake not ready yet” rather than tearing down the accepted socket.
+---
+## [2026-04-10 22:22:50 PDT] - US-075
+- Restored the real WASM prewarm execution loop on the shared V8 runtime, kept warmup timeout as a cold-start fallback instead of a hard failure, and made prewarm answer the embedded runner's internal file sync-RPCs so the sidecar listener/signal-state tests no longer hang before exercising networking assertions.
+- Updated the inline WASM runner bootstrap to load builtins through the embedded require path, feed module bytes directly through env/base64 when available, instantiate WebAssembly synchronously, and keep signal-state fallback delivery working without the legacy host control-pipe path.
+- Files changed: `crates/execution/src/javascript.rs`, `crates/execution/src/node_import_cache.rs`, `crates/execution/src/wasm.rs`, `crates/sidecar/tests/support/mod.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - When inline guest code starts with ESM syntax, `JavascriptExecutionEngine::start_execution()` must infer module mode from `inline_code`, not just the host entrypoint path, or embedded runners like the WASM bootstrap will mis-execute before tests even reach their real assertions.
+  - The embedded WASM runner is sensitive to sync-vs-async WebAssembly construction in V8; `new WebAssembly.Module(...)` plus `new WebAssembly.Instance(...)` avoids the prewarm/execute stall that showed up as sidecar socket-state timeouts.
+  - Truthful acceptance for this story is the full `cargo test -p agent-os-sidecar --test service -- --test-threads=1`, `cargo test -p agent-os-sidecar --test socket_state_queries`, and root `pnpm check-types` path, with the lingering ignored nested-child-process test still belonging to `US-076`.
 ---

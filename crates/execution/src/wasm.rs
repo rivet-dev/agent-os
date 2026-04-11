@@ -25,6 +25,7 @@ const WASM_GUEST_ARGV_ENV: &str = "AGENT_OS_GUEST_ARGV";
 const WASM_GUEST_ENV_ENV: &str = "AGENT_OS_GUEST_ENV";
 const WASM_PERMISSION_TIER_ENV: &str = "AGENT_OS_WASM_PERMISSION_TIER";
 const WASM_PREWARM_ONLY_ENV: &str = "AGENT_OS_WASM_PREWARM_ONLY";
+const WASM_MODULE_BASE64_ENV: &str = "AGENT_OS_WASM_MODULE_BASE64";
 const WASM_WARMUP_DEBUG_ENV: &str = "AGENT_OS_WASM_WARMUP_DEBUG";
 pub const WASM_PREWARM_TIMEOUT_MS_ENV: &str = "AGENT_OS_WASM_PREWARM_TIMEOUT_MS";
 pub const WASM_MAX_FUEL_ENV: &str = "AGENT_OS_WASM_MAX_FUEL";
@@ -39,8 +40,11 @@ const MAX_WASM_MODULE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_WASM_IMPORT_SECTION_ENTRIES: usize = 16_384;
 const MAX_WASM_MEMORY_SECTION_ENTRIES: usize = 1_024;
 const MAX_WASM_VARUINT_BYTES: usize = 10;
+// Warmup is a best-effort compile-cache optimization; fall back to a cold start
+// instead of burning minutes on a stalled prewarm session.
 const DEFAULT_WASM_PREWARM_TIMEOUT_MS: u64 = 30_000;
 const WASM_MAX_MEM_PAGES_FLAG: &str = "--wasm-max-mem-pages=";
+const WASM_INLINE_RUNNER_ENTRYPOINT: &str = "./__agent_os_wasm_runner__.mjs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WasmSignalDispositionAction {
@@ -466,7 +470,7 @@ impl WasmExecutionEngine {
             .import_caches
             .get(&context.vm_id)
             .expect("vm import cache should exist after materialization");
-        let warmup_metrics = prewarm_wasm_path(
+        let warmup_metrics = match prewarm_wasm_path(
             import_cache,
             &mut self.javascript_engine,
             &javascript_context_id,
@@ -474,7 +478,11 @@ impl WasmExecutionEngine {
             &request,
             frozen_time_ms,
             prewarm_timeout,
-        )?;
+        ) {
+            Ok(metrics) => metrics,
+            Err(WasmExecutionError::WarmupTimeout(_)) => None,
+            Err(error) => return Err(error),
+        };
 
         self.next_execution_id += 1;
         let execution_id = format!("exec-{}", self.next_execution_id);
@@ -590,10 +598,7 @@ fn handle_internal_wasm_sync_rpc_request(
         execution
             .respond_sync_rpc_success(
                 request.id,
-                json!({
-                    "__agentOsType": "bytes",
-                    "base64": v8_runtime::base64_encode_pub(&module_bytes),
-                }),
+                Value::String(v8_runtime::base64_encode_pub(&module_bytes)),
             )
             .map_err(map_javascript_error)?;
         return Ok(true);
@@ -939,7 +944,7 @@ fn start_wasm_javascript_execution(
         .start_execution(StartJavascriptExecutionRequest {
             vm_id: request.vm_id.clone(),
             context_id: javascript_context_id.to_owned(),
-            argv: vec![import_cache.wasm_runner_path().display().to_string()],
+            argv: vec![String::from(WASM_INLINE_RUNNER_ENTRYPOINT)],
             env,
             cwd: request.cwd.clone(),
             inline_code: Some(inline_code),
@@ -964,6 +969,12 @@ fn build_wasm_internal_env(
         WASM_MODULE_PATH_ENV.to_string(),
         resolved_module.specifier.clone(),
     );
+    if let Ok(module_bytes) = fs::read(&resolved_module.resolved_path) {
+        internal_env.insert(
+            WASM_MODULE_BASE64_ENV.to_string(),
+            v8_runtime::base64_encode_pub(&module_bytes),
+        );
+    }
     internal_env.insert(
         WASM_GUEST_ARGV_ENV.to_string(),
         encode_json_string_array(&warmup_guest_argv(resolved_module, request)),
@@ -983,11 +994,10 @@ fn build_wasm_internal_env(
 
     if prewarm_only {
         internal_env.insert(WASM_PREWARM_ONLY_ENV.to_string(), String::from("1"));
-        internal_env.remove("AGENT_OS_KEEP_STDIN_OPEN");
     } else {
-        internal_env.insert(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"));
         internal_env.remove(WASM_PREWARM_ONLY_ENV);
     }
+    internal_env.remove("AGENT_OS_KEEP_STDIN_OPEN");
 
     internal_env
 }
@@ -1510,13 +1520,27 @@ fn prewarm_wasm_path(
         WasmExecutionError::Spawn(err) => WasmExecutionError::WarmupSpawn(err),
         other => other,
     })?;
+    let mut internal_sync_rpc = WasmInternalSyncRpc {
+        module_guest_paths: wasm_guest_module_paths(&resolved_module.specifier, &request.env),
+        module_host_path: resolved_module.resolved_path.clone(),
+        guest_cwd: wasm_guest_cwd(&request.env),
+        host_cwd: request.cwd.clone(),
+        next_fd: 64,
+        open_files: BTreeMap::new(),
+    };
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let started = Instant::now();
 
     loop {
+        let poll_timeout = prewarm_timeout.saturating_sub(started.elapsed());
+        if poll_timeout.is_zero() {
+            let _ = prewarm_execution.terminate();
+            return Err(WasmExecutionError::WarmupTimeout(prewarm_timeout));
+        }
+
         match prewarm_execution
-            .poll_event_blocking(prewarm_timeout)
+            .poll_event_blocking(poll_timeout)
             .map_err(map_javascript_error)?
         {
             Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
@@ -1531,17 +1555,6 @@ fn prewarm_wasm_path(
                 break;
             }
             Some(JavascriptExecutionEvent::SyncRpcRequest(sync_request)) => {
-                let mut internal_sync_rpc = WasmInternalSyncRpc {
-                    module_guest_paths: wasm_guest_module_paths(
-                        &resolved_module.specifier,
-                        &request.env,
-                    ),
-                    module_host_path: resolved_module.resolved_path.clone(),
-                    guest_cwd: wasm_guest_cwd(&request.env),
-                    host_cwd: request.cwd.clone(),
-                    next_fd: 64,
-                    open_files: BTreeMap::new(),
-                };
                 let handled = handle_internal_wasm_sync_rpc_request(
                     &mut prewarm_execution,
                     &mut internal_sync_rpc,
@@ -1566,7 +1579,6 @@ fn prewarm_wasm_path(
     }
 
     let _ = stdout;
-    let _duration_ms = started.elapsed().as_secs_f64() * 1000.0;
     fs::write(&marker_path, marker_contents).map_err(WasmExecutionError::PrepareWarmPath)?;
     Ok(warmup_metrics_line(
         debug_enabled,
@@ -1597,6 +1609,7 @@ fn wasm_guest_module_paths(specifier: &str, env: &BTreeMap<String, String>) -> V
 
     if specifier.starts_with('/') {
         candidates.push(normalize_guest_path(specifier));
+        candidates.extend(mapped_guest_paths_for_host_path(Path::new(specifier), env));
     } else if !specifier.starts_with("file:") {
         let guest_cwd = wasm_guest_cwd(env);
         candidates.push(join_guest_path(&guest_cwd, specifier));
@@ -1617,6 +1630,51 @@ fn wasm_guest_cwd(env: &BTreeMap<String, String>) -> String {
                 .cloned()
         })
         .unwrap_or_else(|| String::from("/root"))
+}
+
+fn mapped_guest_paths_for_host_path(
+    host_path: &Path,
+    env: &BTreeMap<String, String>,
+) -> Vec<String> {
+    if !host_path.is_absolute() {
+        return Vec::new();
+    }
+
+    let mappings = env
+        .get("AGENT_OS_GUEST_PATH_MAPPINGS")
+        .and_then(|value| serde_json::from_str::<Vec<Value>>(value).ok())
+        .unwrap_or_default();
+
+    let mut candidates = Vec::new();
+    for mapping in mappings {
+        let Some(guest_root) = mapping.get("guestPath").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(host_root) = mapping.get("hostPath").and_then(Value::as_str) else {
+            continue;
+        };
+        let host_root = Path::new(host_root);
+
+        if let Ok(suffix) = host_path.strip_prefix(host_root) {
+            candidates.push(join_guest_path(
+                guest_root,
+                &suffix.to_string_lossy().replace('\\', "/"),
+            ));
+            continue;
+        }
+
+        let Ok(real_host_root) = host_root.canonicalize() else {
+            continue;
+        };
+        if let Ok(suffix) = host_path.strip_prefix(&real_host_root) {
+            candidates.push(join_guest_path(
+                guest_root,
+                &suffix.to_string_lossy().replace('\\', "/"),
+            ));
+        }
+    }
+
+    candidates
 }
 
 fn normalize_guest_path(path: &str) -> String {
@@ -2091,8 +2149,9 @@ fn resolve_path_like_specifier(cwd: &Path, specifier: &str) -> Option<PathBuf> {
 mod tests {
     use super::{
         resolve_wasm_execution_timeout, resolve_wasm_prewarm_timeout, resolved_module_path,
-        wasm_memory_limit_pages, StartWasmExecutionRequest, WasmPermissionTier, WASM_MAX_FUEL_ENV,
-        WASM_MAX_MEMORY_BYTES_ENV, WASM_PAGE_BYTES, WASM_PREWARM_TIMEOUT_MS_ENV,
+        wasm_guest_module_paths, wasm_memory_limit_pages, StartWasmExecutionRequest,
+        WasmPermissionTier, WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_PAGE_BYTES,
+        WASM_PREWARM_TIMEOUT_MS_ENV,
     };
     use std::collections::BTreeMap;
     use std::fs;
@@ -2150,6 +2209,29 @@ mod tests {
             resolve_wasm_prewarm_timeout(&request).expect("prewarm timeout"),
             Duration::from_millis(750)
         );
+    }
+
+    #[test]
+    fn wasm_guest_module_paths_include_mapped_guest_paths_for_host_specifiers() {
+        let temp = tempdir().expect("create temp dir");
+        let command_root = temp.path().join("commands");
+        let module = command_root.join("hello");
+        fs::create_dir_all(&command_root).expect("create command root");
+        fs::write(&module, b"\0asm\x01\0\0\0").expect("write wasm file");
+
+        let candidates = wasm_guest_module_paths(
+            module.to_string_lossy().as_ref(),
+            &BTreeMap::from([(
+                String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+                format!(
+                    "[{{\"guestPath\":\"/__agentos/commands/0\",\"hostPath\":\"{}\"}}]",
+                    command_root.display()
+                ),
+            )]),
+        );
+
+        assert!(candidates.contains(&module.to_string_lossy().into_owned()));
+        assert!(candidates.contains(&String::from("/__agentos/commands/0/hello")));
     }
 
     #[test]

@@ -321,9 +321,8 @@ pub fn wasm_signal_state_module() -> Vec<u8> {
   (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (type $fd_write_t)))
   (import "host_process" "proc_sigaction" (func $proc_sigaction (type $proc_sigaction_t)))
   (memory (export "memory") 1)
-  (data (i32.const 32) "signal-registered\n")
+  (data (i32.const 32) "signal:ready\n")
   (func $_start (export "_start")
-    (local $spin i32)
     (drop
       (call $proc_sigaction
         (i32.const 2)
@@ -334,7 +333,7 @@ pub fn wasm_signal_state_module() -> Vec<u8> {
       )
     )
     (i32.store (i32.const 0) (i32.const 32))
-    (i32.store (i32.const 4) (i32.const 18))
+    (i32.store (i32.const 4) (i32.const 13))
     (drop
       (call $fd_write
         (i32.const 1)
@@ -342,11 +341,6 @@ pub fn wasm_signal_state_module() -> Vec<u8> {
         (i32.const 1)
         (i32.const 24)
       )
-    )
-    (local.set $spin (i32.const 5000000))
-    (loop $wait
-      (local.set $spin (i32.sub (local.get $spin) (i32.const 1)))
-      (br_if $wait (i32.gt_s (local.get $spin) (i32.const 0)))
     )
   )
 )
