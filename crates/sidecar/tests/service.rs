@@ -866,9 +866,9 @@ ykAheWCsAteSEWVc0w==\n\
             let mut exit_code = None;
             for _ in 0..64 {
                 let next_event = {
-                    let vm = sidecar.vms.get(vm_id).expect("active vm");
+                    let vm = sidecar.vms.get_mut(vm_id).expect("active vm");
                     vm.active_processes
-                        .get(process_id)
+                        .get_mut(process_id)
                         .map(|process| {
                             process
                                 .execution
@@ -5332,7 +5332,6 @@ export async function loadPyodide() {
         }
 
         #[test]
-        #[ignore = "V8 sidecar JS filesystem integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_sync_rpc_requests_proxy_into_the_vm_kernel_filesystem() {
             assert_node_available();
 
@@ -5415,17 +5414,18 @@ await new Promise(() => {});
                         kernel_handle,
                         GuestRuntimeKind::JavaScript,
                         ActiveExecution::Javascript(execution),
-                    ),
+                    )
+                    .with_host_cwd(cwd.clone()),
                 );
             }
 
             let mut saw_stdout = false;
             for _ in 0..16 {
                 let event = {
-                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
                     let process = vm
                         .active_processes
-                        .get("proc-js-sync")
+                        .get_mut("proc-js-sync")
                         .expect("javascript process should be tracked");
                     process
                         .execution
@@ -5528,7 +5528,7 @@ await new Promise(() => {});
                 ))
                 .expect("register execution driver");
 
-            let process = kernel
+            let kernel_handle = kernel
                 .spawn_process(
                     JAVASCRIPT_COMMAND,
                     Vec::new(),
@@ -5538,10 +5538,18 @@ await new Promise(() => {});
                     },
                 )
                 .expect("spawn javascript kernel process");
+            let kernel_pid = kernel_handle.pid();
+            let mut process = ActiveProcess::new(
+                kernel_pid,
+                kernel_handle,
+                GuestRuntimeKind::JavaScript,
+                ActiveExecution::Tool(ToolExecution::default()),
+            );
 
             let link = service_javascript_fs_sync_rpc(
                 &mut kernel,
-                process.pid(),
+                &mut process,
+                kernel_pid,
                 &JavascriptSyncRpcRequest {
                     id: 1,
                     method: String::from("fs.readlinkSync"),
@@ -5549,11 +5557,12 @@ await new Promise(() => {});
                 },
             )
             .expect("resolve /proc/self");
-            assert_eq!(link, Value::String(format!("/proc/{}", process.pid())));
+            assert_eq!(link, Value::String(format!("/proc/{kernel_pid}")));
 
             let entries = service_javascript_fs_sync_rpc(
                 &mut kernel,
-                process.pid(),
+                &mut process,
+                kernel_pid,
                 &JavascriptSyncRpcRequest {
                     id: 2,
                     method: String::from("fs.readdirSync"),
@@ -5571,14 +5580,11 @@ await new Promise(() => {});
             assert!(entry_names.contains(&"1"));
             assert!(entry_names.contains(&"2"));
 
-            process.finish(0);
-            kernel
-                .waitpid(process.pid())
-                .expect("wait javascript process");
+            process.kernel_handle.finish(0);
+            kernel.waitpid(kernel_pid).expect("wait javascript process");
         }
 
         #[test]
-        #[ignore = "V8 sidecar JS fd/stream integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_fd_and_stream_rpc_requests_proxy_into_the_vm_kernel_filesystem() {
             assert_node_available();
 
@@ -5674,13 +5680,20 @@ await once(writer, "close");
 
 let watchCode = "";
 let watchFileCode = "";
+let watchSupported = false;
+let watchFileSupported = false;
 try {
-  fs.watch("/rpc/input.txt");
+  const watcher = fs.watch("/rpc/input.txt");
+  watchSupported = typeof watcher.close === "function";
+  watcher.close();
 } catch (error) {
   watchCode = error.code;
 }
 try {
-  fs.watchFile("/rpc/input.txt", () => {});
+  const watchFileListener = () => {};
+  fs.watchFile("/rpc/input.txt", watchFileListener);
+  watchFileSupported = true;
+  fs.unwatchFile("/rpc/input.txt", watchFileListener);
 } catch (error) {
   watchFileCode = error.code;
 }
@@ -5700,6 +5713,8 @@ console.log(
     privateDirMode: privateDirStat.mode & 0o777,
     asyncSummary,
     streamChunks,
+    watchSupported,
+    watchFileSupported,
     watchCode,
     watchFileCode,
   }),
@@ -5756,7 +5771,8 @@ console.log(
                         kernel_handle,
                         GuestRuntimeKind::JavaScript,
                         ActiveExecution::Javascript(execution),
-                    ),
+                    )
+                    .with_host_cwd(cwd.clone()),
                 );
             }
 
@@ -5765,9 +5781,9 @@ console.log(
             let mut exit_code = None;
             for _ in 0..64 {
                 let next_event = {
-                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
                     vm.active_processes
-                        .get("proc-js-fd")
+                        .get_mut("proc-js-fd")
                         .map(|process| {
                             process
                                 .execution
@@ -5826,11 +5842,11 @@ console.log(
                 "stdout: {stdout}"
             );
             assert!(
-                stdout.contains("\"watchCode\":\"ERR_AGENT_OS_FS_WATCH_UNAVAILABLE\""),
+                stdout.contains("\"watchSupported\":true"),
                 "stdout: {stdout}"
             );
             assert!(
-                stdout.contains("\"watchFileCode\":\"ERR_AGENT_OS_FS_WATCH_UNAVAILABLE\""),
+                stdout.contains("\"watchFileSupported\":true"),
                 "stdout: {stdout}"
             );
             {
@@ -5949,10 +5965,10 @@ await new Promise(() => {});
 
             for _ in 0..40 {
                 let event = {
-                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
                     let process = vm
                         .active_processes
-                        .get("proc-js-promises")
+                        .get_mut("proc-js-promises")
                         .expect("javascript process should be tracked");
                     process
                         .execution
@@ -7119,9 +7135,9 @@ console.log(JSON.stringify({ lookup, resolve4 }));
             let mut exit_code = None;
             for _ in 0..64 {
                 let next_event = {
-                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
                     vm.active_processes
-                        .get("proc-js-dns")
+                        .get_mut("proc-js-dns")
                         .map(|process| {
                             process
                                 .execution
@@ -7300,9 +7316,9 @@ process.exit(0);
             let mut exit_code = None;
             for _ in 0..64 {
                 let next_event = {
-                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
                     vm.active_processes
-                        .get("proc-js-ssrf-protection")
+                        .get_mut("proc-js-ssrf-protection")
                         .map(|process| {
                             process
                                 .execution
@@ -7854,9 +7870,9 @@ console.log(JSON.stringify(summary));
             let mut exit_code = None;
             for _ in 0..192 {
                 let next_event = {
-                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
                     vm.active_processes
-                        .get("proc-js-tls")
+                        .get_mut("proc-js-tls")
                         .map(|process| {
                             process
                                 .execution
@@ -10674,9 +10690,9 @@ console.log(JSON.stringify({
             let mut exit_code = None;
             for _ in 0..96 {
                 let next_event = {
-                    let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
+                    let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
                     vm.active_processes
-                        .get("proc-js-child")
+                        .get_mut("proc-js-child")
                         .map(|process| {
                             process
                                 .execution

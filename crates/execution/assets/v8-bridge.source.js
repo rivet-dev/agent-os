@@ -4567,6 +4567,9 @@ var __bridge = (() => {
     }
     return normalizeModeArgument(mode);
   }
+  function applyProcessUmask(mode) {
+    return (mode & ~0o777) | ((mode & 0o777) & ~(_umask & 0o777));
+  }
   function validateWriteStreamStartOption(options) {
     if (options?.start === void 0) {
       return;
@@ -5557,7 +5560,7 @@ var __bridge = (() => {
       const fdOption = normalizeStreamFd(_options?.fd);
       const startOption = _options?.start;
       const highWaterMarkCandidate = _options?.highWaterMark ?? _options?.bufferSize;
-      const openFlags = _options?.flags ?? (typeof startOption === "number" ? "r+" : "w");
+      const openFlags = _options?.flags ?? "w";
       this.path = filePath;
       this.autoClose = _options?.autoClose !== false;
       this.writableHighWaterMark = typeof highWaterMarkCandidate === "number" && Number.isFinite(highWaterMarkCandidate) && highWaterMarkCandidate > 0 ? Math.floor(highWaterMarkCandidate) : 16384;
@@ -6119,6 +6122,7 @@ var __bridge = (() => {
   var _fdFtruncate = createBridgeSyncFacade("fs.ftruncateSync");
   var _fdFsync = createBridgeSyncFacade("fs.fsyncSync");
   var _fdGetPath = createBridgeSyncFacade("fs._getPathSync");
+  var _processUmask = createBridgeSyncFacade("process.umask");
   var _kernelPollRaw = createBridgeSyncFacade("_kernelPollRaw");
   function decodeBridgeJson(value) {
     return typeof value === "string" ? JSON.parse(value) : value;
@@ -6487,7 +6491,12 @@ var __bridge = (() => {
       const rawPath = normalizePathLike(path);
       const pathStr = rawPath;
       const recursive = typeof options === "object" ? options?.recursive ?? false : false;
-      _fs.mkdir.applySyncPromise(void 0, [pathStr, recursive]);
+      const rawMode = typeof options === "object" ? options?.mode : options;
+      const normalizedMode = rawMode === void 0 ? void 0 : normalizeModeArgument(rawMode);
+      _fs.mkdir.applySyncPromise(void 0, [pathStr, {
+        recursive,
+        mode: applyProcessUmask(normalizedMode ?? 511)
+      }]);
       return recursive ? rawPath : void 0;
     },
     rmdirSync(path, _options) {
@@ -6638,7 +6647,8 @@ var __bridge = (() => {
     openSync(path, flags, _mode) {
       const pathStr = normalizePathLike(path);
       const numFlags = parseFlags(flags ?? "r");
-      const modeNum = normalizeOpenModeArgument(_mode);
+      const requestedMode = normalizeOpenModeArgument(_mode);
+      const modeNum = numFlags & O_CREAT ? applyProcessUmask(requestedMode ?? 438) : requestedMode;
       try {
         return _fdOpen.applySyncPromise(void 0, [pathStr, numFlags, modeNum]);
       } catch (e) {
@@ -20585,9 +20595,15 @@ ${headerLines}\r
     setgroups() {
     },
     umask(mask) {
+      const normalizedMask = mask === void 0 ? void 0 : normalizeModeArgument(mask, "mask");
+      const previousMask = Number(_processUmask.applySyncPromise(void 0, [normalizedMask ?? null]));
+      if (Number.isFinite(previousMask)) {
+        _umask = normalizedMask ?? previousMask;
+        return previousMask;
+      }
       const oldMask = _umask;
-      if (mask !== void 0) {
-        _umask = mask;
+      if (normalizedMask !== void 0) {
+        _umask = normalizedMask;
       }
       return oldMask;
     },

@@ -57,6 +57,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Root install reproducibility is best verified with the three-part probe `pnpm install --frozen-lockfile`, `pnpm check-types`, and a package-local `pnpm --dir <pkg> exec <bin> --version` check to prove the root install materialized script binaries for workspace packages.
 - The `agent-os-v8-runtime` crate currently has a split truth path: run `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main suite and `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately for the isolated snapshot coverage, as documented in the repo root `CLAUDE.md`.
 - V8 bridge method additions currently need matching updates in both `crates/bridge/bridge-contract.json` and the hardcoded sync/async registration lists in `crates/v8-runtime/src/session.rs`; after changing those lists, rebuild `cargo build -p agent-os-v8-runtime --bin agent-os-v8` before trusting JS execution tests.
+- Creation-oriented V8 `fs` helpers must preserve the guest `mode` option and resolve it against the current guest `process.umask()` before dispatching kernel-backed RPCs; otherwise `fs.openSync`, `fs.mkdirSync`, and `createWriteStream` can drift from kernel-backed stat expectations even when the rest of the bridge path works.
 - For `packages/core/tests/wasm-commands.test.ts` curl round-trip coverage, use a guest `net.createServer()` HTTP fixture when the target is the curl/WASM client path; guest `http.createServer()` exercises a separate transport-wrapper compatibility surface and can hide curl-specific regressions.
 - `US-007` is gated by verification, not broad runtime churn: `cargo test -p agent-os-sidecar --test kill_cleanup -- --test-threads=1` plus root `pnpm check-types` is the acceptance path for VM/process teardown semantics on the current branch.
 - Node builtin compatibility regressions are best covered in `crates/sidecar/tests/builtin_conformance.rs`, which runs the same probe under host Node and guest V8 and compares the JSON output directly.
@@ -120,4 +121,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - The guest env hardening contract is not “`PATH` and `HOME` are absent”; it is “host overrides are replaced by kernel-owned guest identity defaults while internal control vars stay hidden.”
   - For this story, `cargo test -p agent-os-sidecar --test security_hardening -- --test-threads=1` plus root `pnpm check-types` is the truthful acceptance path.
   - A focused host-env poisoning setup in the sidecar integration test is enough to verify the native V8 path directly; there is no need to keep this case ignored in favor of execution-layer coverage.
+---
+## [2026-04-10 18:02:42 PDT] - US-073
+- Unignored the sidecar V8 filesystem and fd/stream integration tests, updated the test harness for mutable event polling and host-cwd shadow setup, and tightened the assertions around supported watch/watchFile polling wrappers instead of expecting synthetic unsupported errors.
+- Fixed the stdlib-backed V8 bridge so creation-oriented `fs` helpers preserve `mode`, apply the guest `process.umask()` before dispatching kernel-backed RPCs, and default `createWriteStream(..., { start })` to writable creation semantics instead of reopening new files with `r+`.
+- Files changed: `crates/execution/CLAUDE.md`, `crates/execution/assets/v8-bridge.js`, `crates/execution/assets/v8-bridge.source.js`, `crates/sidecar/tests/service.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - For kernel-backed JS `fs` parity, mode handling is part of the bridge contract, not just the kernel contract; if the bridge drops `mode` or skips guest-side umask resolution, kernel-backed `stat` results will drift from Node expectations.
+  - `fs.watch` and `fs.watchFile` currently behave as guest-owned polling wrappers in `v8-bridge.source.js`, so sidecar integration tests should assert supported wrapper behavior and clean shutdown rather than legacy unsupported-error codes.
+  - `createWriteStream(path, { start })` should still default to `"w"` when it opens a path itself; treating `start` as a signal to switch to `"r+"` breaks creation of new files.
 ---
