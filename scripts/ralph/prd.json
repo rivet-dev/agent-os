@@ -239,7 +239,7 @@
         "Typecheck passes"
       ],
       "priority": 59,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -3712,6 +3712,23 @@
       "priority": 220,
       "passes": false,
       "notes": "Found during 2026-04-11 subagent review pass 49 of commit 33ee2ca (US-083). MEDIUM severity. Subagent verbatim: 'Round-trip tests cover: 2 RequestPayload variants (Authenticate, OpenSession), 1 ResponsePayload (ProcessStarted), 1 EventPayload (VmLifecycle), 2 SidecarRequestPayload (ToolInvocation), 1 SidecarResponsePayload (ToolInvocationResult). That is 1 out of 31 RequestPayload, 1 out of 32 ResponsePayload, 1 out of 3 SidecarRequestPayload tested. While the substring coverage test catches missing types, per-variant encoding bugs (field ordering, omitted optional fields, union-discriminant misalignment) would slip through.' Critical because: US-084 (TypeScript codec, upcoming) will be tested against the Rust codec's output. If the Rust codec has per-variant encoding bugs, US-084 will inherit them as 'canonical' wire format — and TypeScript consumers will then be unable to parse or emit the correct BARE bytes. Fix this before US-084 starts."
+    },
+    {
+      "id": "US-315",
+      "title": "US-084 follow-up: add explicit JSON-codec round-trip tests after skip_serializing_if removal",
+      "description": "As a maintainer of the dual-stack JSON/BARE sidecar protocol (US-083 + US-084), I want explicit JSON-codec round-trip tests that exercise the new always-serialized-placeholder wire shape for every field that previously had `#[serde(default, skip_serializing_if = ...)]`. In US-084 (commit 5d3ceb8), Ralph removed ALL `skip_serializing_if` attributes from the Rust structs that cross the BARE wire, so that BARE's positional encoding and the TypeScript decoder stay aligned. This is a WIRE-FORMAT-BREAKING change for the JSON codec path: old JSON frames omitted `None` and empty collections; new JSON frames serialize them as explicit `null` and `[]`. The JSON codec is still available via `payloadCodec: \"json\"` opt-in (used by migration tests and fixtures), but the US-084 commit added 196 test lines focused on BARE integration — it did NOT add explicit JSON-codec round-trip tests that verify the new placeholder shape. A future maintainer using `payloadCodec: \"json\"` in a new test could silently receive `null` values where existing code branches expect the key to be absent — that's a bug surface waiting to bite.",
+      "acceptanceCriteria": [
+        "Add a test file or test module that, for each Rust struct where `skip_serializing_if` was removed (grep 'removed' hunks in commit 5d3ceb8), encodes a fixture with `payloadCodec: \"json\"` and asserts the emitted JSON contains explicit `null` / `[]` / `{}` placeholders for every previously-skipped field",
+        "For each such struct, also run a Rust-side round-trip: `let encoded = json_codec.encode(&frame); let decoded: ProtocolFrame = json_codec.decode(&encoded).unwrap(); assert_eq!(decoded, frame);` — proves JSON decode still handles the new shape",
+        "For each such struct, run a TypeScript-side decode on the Rust-produced JSON bytes and assert the decoded object exposes the explicit placeholder fields (or silently ignores them consistently with the Rust decoder)",
+        "Add a note to `crates/sidecar/protocol/README.md` explaining that `skip_serializing_if` is forbidden for struct fields crossing the sidecar wire, with a pointer to the BARE positional-encoding rationale so future AI agents don't reintroduce it",
+        "Add a lint or grep-based CI check that fails the build if `skip_serializing_if` appears in any file matching `crates/sidecar/src/protocol.rs`",
+        "`cargo test -p agent-os-sidecar --test protocol` passes",
+        "`pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts` passes"
+      ],
+      "priority": 215,
+      "passes": false,
+      "notes": "Found during 2026-04-11 subagent review pass 50 of commit 5d3ceb8 (US-084). MEDIUM severity. Subagent verbatim: 'Ralph removed all skip_serializing_if from Rust structs... This is a wire-format-breaking change for the JSON codec because: Old JSON path: None values and empty vecs are omitted from the frame. New JSON path: None values and empty vecs are serialized as explicit null and []. The JSON codec is still available via payloadCodec: json but no test explicitly verifies that JSON consumers (tests using the opt-in flag) have been updated to handle the new explicit-placeholder shape... a future maintainer using payloadCodec: json in a test could silently receive null values where code expects them to be absent.' Low risk in practice (BARE is default, JSON is migration-only) but the incomplete test coverage leaves a footgun. The lint rule is the key mitigation — it keeps the invariant enforced as the codebase grows."
     }
   ]
 }

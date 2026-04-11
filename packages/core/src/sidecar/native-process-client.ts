@@ -3009,6 +3009,7 @@ function decodeResponsePayload(reader: BareReader): ResponseFrame["payload"] {
 				vm_id: reader.readString("vm_created.vm_id"),
 			};
 		case 4: {
+			const sessionId = reader.readString("session_created.session_id");
 			const pid = reader.readOptional(() => reader.readU32());
 			const modes = reader.readOptional(() =>
 				parseJsonUtf8(reader.readString("session_created.modes"), "modes"),
@@ -3035,7 +3036,7 @@ function decodeResponsePayload(reader: BareReader): ResponseFrame["payload"] {
 			);
 			return {
 				type: "session_created",
-				session_id: reader.readString("session_created.session_id"),
+				session_id: sessionId,
 				...(pid !== undefined ? { pid } : {}),
 				...(modes !== undefined ? { modes } : {}),
 				config_options: configOptions,

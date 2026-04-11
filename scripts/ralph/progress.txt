@@ -5,6 +5,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
 - Sidecar wire-protocol migrations should keep the native 4-byte big-endian frame prefix stable and use a temporary `JsonUtf8`/JSON-text boundary for existing `serde_json::Value` fields first; change payload codecs separately from outer framing so Rust and TypeScript can roll forward independently.
+- In the native sidecar BARE protocol, `SessionCreatedResponse` is positional and starts with `sessionId`; if the TypeScript decoder reads `session_id` after `pid`/`modes`/`config_options`, every `createSession()` result desynchronizes before prompt flow starts.
 - In `crates/sidecar/src/protocol.rs`, the BARE schema's enums/unions use explicit 1-based discriminants, so Rust must not rely on Serde's default enum numbering; keep manual tag mappings aligned with `protocol/agent_os_sidecar_v1.bare` while preserving the current human-readable JSON shape during the migration window.
 - For Rust sidecar BARE payloads, never use `skip_serializing_if` on protocol structs: positional binary fields still need explicit `Option`/empty markers on the wire, or the TypeScript BARE decoder will desynchronize with `unexpected end of frame` errors.
 - In `crates/execution/src/javascript.rs`, pnpm generic hoist paths like `.pnpm/node_modules/<pkg>` should stay behind package-specific virtual-store resolution for symlinked package entrypoints; otherwise guest ESM imports can silently pick an older hoisted CJS copy and lose named exports.
@@ -236,4 +237,15 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Rust `serde` structs that cross the BARE sidecar wire cannot use `skip_serializing_if`; even `None`/empty/default fields must serialize explicit placeholders so the TypeScript decoder stays aligned.
   - `serde_bare` tagged unions with an otherwise-empty variant need a real placeholder payload on the wire for this protocol shape; `RootFilesystemLowerDescriptor::BundledBaseFilesystem` now uses an ignored `bool`.
   - Truthful acceptance for this story was `pnpm --dir packages/core exec vitest run tests/sidecar-client.test.ts tests/native-sidecar-process.test.ts tests/native-sidecar-process-permissions.test.ts --reporter=verbose` plus root `pnpm check-types`, with `cargo test -p agent-os-sidecar --test protocol -- --nocapture` and `cargo test -p agent-os-sidecar read_frame_decodes_bare_authenticate_request --bin agent-os-sidecar -- --nocapture` covering the Rust half of the migration.
+---
+## [2026-04-11 06:20:24 PDT] - US-085
+- Added `packages/core/tests/migration-parity.test.ts` as the dedicated native-sidecar migration gate, covering filesystem writes plus snapshot lowers, guest process execution, host toolkit dispatch, loopback networking, and a deterministic ACP prompt/session flow on the Rust path.
+- Added the root `pnpm test:migration-parity` command and updated `packages/core/CLAUDE.md` so the suite is the documented final migration gate for this story.
+- Fixed `packages/core/src/sidecar/native-process-client.ts` so the BARE `session_created` decoder reads `session_id` in the schema's actual first-field position, which unblocks native `createSession()` responses and the new parity session flow.
+- Files changed: `package.json`, `packages/core/CLAUDE.md`, `packages/core/src/sidecar/native-process-client.ts`, `packages/core/tests/migration-parity.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The most truthful migration gate here is a single focused suite on the default native sidecar path, not a shell script that chains unrelated suites; `pnpm test:migration-parity` is now the canonical parity command for filesystem, processes, tool dispatch, networking, layers, and session flow together.
+  - BARE response structs are positional across the Rust/TypeScript boundary, so even a one-field reorder in the TypeScript decoder can break every `createSession()` call before any agent logic runs.
+  - A deterministic mock ACP adapter is the cheapest stable way to cover session/prompt/update/destroy flow in parity tests without depending on external model SDK behavior.
+  - Truthful acceptance for this story was `pnpm test:migration-parity` plus `pnpm --dir packages/core check-types`.
 ---
