@@ -84,6 +84,7 @@ async fn run_async() -> Result<(), Box<dyn Error>> {
                         }
                         Ok(Some(ProtocolFrame::SidecarResponse(response)))
                     }
+                    Ok(Some(frame)) => Ok(Some(frame)),
                     other => other,
                 }
                 .map_err(|error: Box<dyn Error>| error.to_string());
@@ -240,7 +241,12 @@ fn read_frame(
     bytes.resize(total_len, 0);
     reader.read_exact(&mut bytes[prefix.len()..])?;
 
-    let frame = if let Some(payload_codec) = *transport_codec.lock().expect("codec lock") {
+    let locked_payload_codec = {
+        let guard = transport_codec.lock().expect("codec lock");
+        *guard
+    };
+
+    let frame = if let Some(payload_codec) = locked_payload_codec {
         codec.decode_with_codec(&bytes, payload_codec)?
     } else {
         let (frame, payload_codec) = codec.decode_detected(&bytes)?;
@@ -299,6 +305,9 @@ fn default_compile_cache_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_os_sidecar::protocol::{
+        AuthenticateRequest, OwnershipScope, RequestFrame, RequestPayload, DEFAULT_MAX_FRAME_BYTES,
+    };
     use std::io::Cursor;
 
     #[test]
@@ -315,6 +324,35 @@ mod tests {
             *error,
             ProtocolCodecError::FrameTooLarge { size: 32, max: 16 }
         ));
+    }
+
+    #[test]
+    fn read_frame_decodes_bare_authenticate_request() {
+        let codec = NativeFrameCodec::new(DEFAULT_MAX_FRAME_BYTES);
+        let frame = ProtocolFrame::Request(RequestFrame::new(
+            1,
+            OwnershipScope::connection("client-hint"),
+            RequestPayload::Authenticate(AuthenticateRequest {
+                client_name: "probe".to_string(),
+                auth_token: "probe-token".to_string(),
+            }),
+        ));
+        let encoded =
+            NativeFrameCodec::with_payload_codec(DEFAULT_MAX_FRAME_BYTES, NativePayloadCodec::Bare)
+                .encode(&frame)
+                .expect("encode bare frame");
+        let mut reader = Cursor::new(encoded);
+        let transport_codec = Arc::new(Mutex::new(None));
+
+        let decoded = read_frame(&codec, &mut reader, &transport_codec)
+            .expect("decode bare frame")
+            .expect("frame present");
+
+        assert_eq!(decoded, frame);
+        assert_eq!(
+            *transport_codec.lock().expect("codec lock"),
+            Some(NativePayloadCodec::Bare)
+        );
     }
 }
 

@@ -130,6 +130,7 @@ describe("native sidecar process client permissions", () => {
 			command: "node",
 			args: [driverPath, capturePath],
 			frameTimeoutMs: 5_000,
+			payloadCodec: "json",
 		});
 
 		try {

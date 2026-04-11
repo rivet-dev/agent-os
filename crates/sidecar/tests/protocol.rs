@@ -4,7 +4,8 @@ use agent_os_sidecar::protocol::{
     OpenSessionRequest, OwnershipScope, PatternPermissionScope, PermissionMode, PermissionsPolicy,
     ProcessStartedResponse, ProjectedModuleDescriptor, ProtocolCodecError, ProtocolFrame,
     RequestFrame, RequestPayload, ResponseFrame, ResponsePayload, ResponseTracker,
-    ResponseTrackerError, SidecarPlacement, SidecarRequestFrame, SidecarRequestPayload,
+    ResponseTrackerError, RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryKind,
+    RootFilesystemLowerDescriptor, SidecarPlacement, SidecarRequestFrame, SidecarRequestPayload,
     SidecarResponseFrame, SidecarResponsePayload, SidecarResponseTracker,
     SidecarResponseTrackerError, SoftwareDescriptor, StructuredEvent, ToolInvocationRequest,
     ToolInvocationResultResponse, VmLifecycleEvent, VmLifecycleState, WriteStdinRequest,
@@ -142,6 +143,97 @@ fn bare_codec_round_trips_frames_with_json_utf8_fields() {
     );
 
     let decoded = codec.decode(&encoded).expect("decode bare frame");
+    assert_eq!(decoded, frame);
+}
+
+#[test]
+fn bare_codec_round_trips_authenticate_request_frames() {
+    let codec = NativeFrameCodec::with_payload_codec(1024 * 1024, NativePayloadCodec::Bare);
+    let frame = ProtocolFrame::Request(RequestFrame::new(
+        1,
+        OwnershipScope::connection("client-hint"),
+        RequestPayload::Authenticate(AuthenticateRequest {
+            client_name: "packages-core-vitest".to_string(),
+            auth_token: "packages-core-vitest-token".to_string(),
+        }),
+    ));
+
+    let encoded = codec
+        .encode(&frame)
+        .expect("encode bare authenticate request");
+    let decoded = codec
+        .decode(&encoded)
+        .expect("decode bare authenticate request");
+
+    assert_eq!(decoded, frame);
+}
+
+#[test]
+fn bare_codec_round_trips_root_filesystem_lower_descriptors() {
+    let lower = RootFilesystemLowerDescriptor::BundledBaseFilesystem;
+    let encoded = serde_bare::to_vec(&lower).expect("encode bare root filesystem lower");
+    let decoded: RootFilesystemLowerDescriptor =
+        serde_bare::from_slice(&encoded).expect("decode bare root filesystem lower");
+
+    assert_eq!(decoded, lower);
+}
+
+#[test]
+fn bare_codec_round_trips_root_filesystem_descriptors_with_snapshot_lowers() {
+    let descriptor = RootFilesystemDescriptor {
+        disable_default_base_layer: true,
+        lowers: vec![
+            RootFilesystemLowerDescriptor::Snapshot {
+                entries: vec![RootFilesystemEntry {
+                    path: String::from("/workspace"),
+                    kind: RootFilesystemEntryKind::Directory,
+                    ..Default::default()
+                }],
+            },
+            RootFilesystemLowerDescriptor::BundledBaseFilesystem,
+        ],
+        ..Default::default()
+    };
+
+    let encoded = serde_bare::to_vec(&descriptor).expect("encode bare root filesystem descriptor");
+    let decoded: RootFilesystemDescriptor =
+        serde_bare::from_slice(&encoded).expect("decode bare root filesystem descriptor");
+
+    assert_eq!(decoded, descriptor);
+}
+
+#[test]
+fn bare_codec_round_trips_create_vm_requests_with_snapshot_lowers() {
+    let codec = NativeFrameCodec::with_payload_codec(1024 * 1024, NativePayloadCodec::Bare);
+    let frame = ProtocolFrame::Request(RequestFrame::new(
+        2,
+        OwnershipScope::session("conn-1", "session-1"),
+        RequestPayload::CreateVm(CreateVmRequest {
+            runtime: GuestRuntimeKind::JavaScript,
+            metadata: BTreeMap::from([(String::from("cwd"), String::from("/workspace"))]),
+            root_filesystem: RootFilesystemDescriptor {
+                disable_default_base_layer: true,
+                lowers: vec![
+                    RootFilesystemLowerDescriptor::Snapshot {
+                        entries: vec![RootFilesystemEntry {
+                            path: String::from("/workspace"),
+                            kind: RootFilesystemEntryKind::Directory,
+                            ..Default::default()
+                        }],
+                    },
+                    RootFilesystemLowerDescriptor::BundledBaseFilesystem,
+                ],
+                ..Default::default()
+            },
+            permissions: None,
+        }),
+    ));
+
+    let encoded = codec.encode(&frame).expect("encode bare create_vm request");
+    let decoded = codec
+        .decode(&encoded)
+        .expect("decode bare create_vm request");
+
     assert_eq!(decoded, frame);
 }
 

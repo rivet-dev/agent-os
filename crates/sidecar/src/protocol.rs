@@ -627,34 +627,34 @@ pub enum PermissionMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FsPermissionRule {
     pub mode: PermissionMode,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub operations: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatternPermissionRule {
     pub mode: PermissionMode,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub operations: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub patterns: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FsPermissionRuleSet {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub default: Option<PermissionMode>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub rules: Vec<FsPermissionRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatternPermissionRuleSet {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub default: Option<PermissionMode>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub rules: Vec<PatternPermissionRule>,
 }
 
@@ -672,13 +672,13 @@ pub enum PatternPermissionScope {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionsPolicy {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub fs: Option<FsPermissionScope>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub network: Option<PatternPermissionScope>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub child_process: Option<PatternPermissionScope>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub env: Option<PatternPermissionScope>,
 }
 
@@ -753,7 +753,7 @@ pub struct CreateVmRequest {
     pub metadata: BTreeMap<String, String>,
     #[serde(default)]
     pub root_filesystem: RootFilesystemDescriptor,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub permissions: Option<PermissionsPolicy>,
 }
 
@@ -776,11 +776,7 @@ pub struct CreateSessionRequest {
 pub struct SessionRequest {
     pub session_id: String,
     pub method: String,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "json_utf8_option"
-    )]
+    #[serde(default, with = "json_utf8_option")]
     pub params: Option<Value>,
 }
 
@@ -822,24 +818,147 @@ pub enum RootFilesystemEntryEncoding {
     Base64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RootFilesystemEntry {
     pub path: String,
     pub kind: RootFilesystemEntryKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gid: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding: Option<RootFilesystemEntryEncoding>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub executable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct JsonRootFilesystemEntry {
+    pub path: String,
+    pub kind: RootFilesystemEntryKind,
+    #[serde(default)]
+    pub mode: Option<u32>,
+    #[serde(default)]
+    pub uid: Option<u32>,
+    #[serde(default)]
+    pub gid: Option<u32>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub encoding: Option<RootFilesystemEntryEncoding>,
+    #[serde(default)]
     pub target: Option<String>,
     #[serde(default)]
     pub executable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+struct BareRootFilesystemEntry {
+    pub path: String,
+    pub kind: RootFilesystemEntryKind,
+    #[serde(default)]
+    pub mode: Option<u32>,
+    #[serde(default)]
+    pub uid: Option<u32>,
+    #[serde(default)]
+    pub gid: Option<u32>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub encoding: Option<RootFilesystemEntryEncoding>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub executable: bool,
+}
+
+impl From<&RootFilesystemEntry> for JsonRootFilesystemEntry {
+    fn from(value: &RootFilesystemEntry) -> Self {
+        Self {
+            path: value.path.clone(),
+            kind: value.kind.clone(),
+            mode: value.mode,
+            uid: value.uid,
+            gid: value.gid,
+            content: value.content.clone(),
+            encoding: value.encoding.clone(),
+            target: value.target.clone(),
+            executable: value.executable,
+        }
+    }
+}
+
+impl From<JsonRootFilesystemEntry> for RootFilesystemEntry {
+    fn from(value: JsonRootFilesystemEntry) -> Self {
+        Self {
+            path: value.path,
+            kind: value.kind,
+            mode: value.mode,
+            uid: value.uid,
+            gid: value.gid,
+            content: value.content,
+            encoding: value.encoding,
+            target: value.target,
+            executable: value.executable,
+        }
+    }
+}
+
+impl From<&RootFilesystemEntry> for BareRootFilesystemEntry {
+    fn from(value: &RootFilesystemEntry) -> Self {
+        Self {
+            path: value.path.clone(),
+            kind: value.kind.clone(),
+            mode: value.mode,
+            uid: value.uid,
+            gid: value.gid,
+            content: value.content.clone(),
+            encoding: value.encoding.clone(),
+            target: value.target.clone(),
+            executable: value.executable,
+        }
+    }
+}
+
+impl From<BareRootFilesystemEntry> for RootFilesystemEntry {
+    fn from(value: BareRootFilesystemEntry) -> Self {
+        Self {
+            path: value.path,
+            kind: value.kind,
+            mode: value.mode,
+            uid: value.uid,
+            gid: value.gid,
+            content: value.content,
+            encoding: value.encoding,
+            target: value.target,
+            executable: value.executable,
+        }
+    }
+}
+
+impl Serialize for RootFilesystemEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            JsonRootFilesystemEntry::from(self).serialize(serializer)
+        } else {
+            BareRootFilesystemEntry::from(self).serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RootFilesystemEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            Ok(JsonRootFilesystemEntry::deserialize(deserializer)?.into())
+        } else {
+            Ok(BareRootFilesystemEntry::deserialize(deserializer)?.into())
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -848,15 +967,15 @@ pub struct ConfigureVmRequest {
     pub mounts: Vec<MountDescriptor>,
     #[serde(default)]
     pub software: Vec<SoftwareDescriptor>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub permissions: Option<PermissionsPolicy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub module_access_cwd: Option<String>,
     #[serde(default)]
     pub instructions: Vec<String>,
     #[serde(default)]
     pub projected_modules: Vec<ProjectedModuleDescriptor>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
     pub command_permissions: BTreeMap<String, WasmPermissionTier>,
     #[serde(default)]
     pub allowed_node_builtins: Vec<String>,
@@ -886,7 +1005,7 @@ pub struct ExportSnapshotRequest {
 pub struct CreateOverlayRequest {
     #[serde(default)]
     pub mode: RootFilesystemMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub upper_layer_id: Option<String>,
     #[serde(default)]
     pub lower_layer_ids: Vec<String>,
@@ -896,27 +1015,27 @@ pub struct CreateOverlayRequest {
 pub struct GuestFilesystemCallRequest {
     pub operation: GuestFilesystemOperation,
     pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub destination_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub target: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub content: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub encoding: Option<RootFilesystemEntryEncoding>,
     #[serde(default)]
     pub recursive: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub mode: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub uid: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub gid: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub atime_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub mtime_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub len: Option<u64>,
 }
 
@@ -960,18 +1079,18 @@ pub enum WasmPermissionTier {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecuteRequest {
     pub process_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub runtime: Option<GuestRuntimeKind>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub entrypoint: Option<String>,
     pub args: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
     pub env: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub wasm_permission_tier: Option<WasmPermissionTier>,
 }
 
@@ -997,19 +1116,19 @@ pub struct GetProcessSnapshotRequest {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FindListenerRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub host: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub port: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FindBoundUdpRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub host: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub port: Option<u16>,
 }
 
@@ -1057,9 +1176,9 @@ pub struct RegisteredToolDefinition {
     pub description: String,
     #[serde(with = "json_utf8_value")]
     pub input_schema: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub timeout_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub examples: Vec<RegisteredToolExample>,
 }
 
@@ -1117,27 +1236,15 @@ pub struct VmCreatedResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionCreatedResponse {
     pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub pid: Option<u32>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "json_utf8_option"
-    )]
+    #[serde(default, with = "json_utf8_option")]
     pub modes: Option<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "json_utf8_vec")]
+    #[serde(default, with = "json_utf8_vec")]
     pub config_options: Vec<Value>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "json_utf8_option"
-    )]
+    #[serde(default, with = "json_utf8_option")]
     pub agent_capabilities: Option<Value>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "json_utf8_option"
-    )]
+    #[serde(default, with = "json_utf8_option")]
     pub agent_info: Option<Value>,
 }
 
@@ -1160,30 +1267,18 @@ pub struct SessionStateResponse {
     pub session_id: String,
     pub agent_type: String,
     pub process_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub pid: Option<u32>,
     pub closed: bool,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "json_utf8_option"
-    )]
+    #[serde(default, with = "json_utf8_option")]
     pub modes: Option<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "json_utf8_vec")]
+    #[serde(default, with = "json_utf8_vec")]
     pub config_options: Vec<Value>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "json_utf8_option"
-    )]
+    #[serde(default, with = "json_utf8_option")]
     pub agent_capabilities: Option<Value>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "json_utf8_option"
-    )]
+    #[serde(default, with = "json_utf8_option")]
     pub agent_info: Option<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub events: Vec<SequencedNotification>,
 }
 
@@ -1238,17 +1333,17 @@ pub struct GuestFilesystemStat {
 pub struct GuestFilesystemResultResponse {
     pub operation: GuestFilesystemOperation,
     pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub content: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub encoding: Option<RootFilesystemEntryEncoding>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub entries: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub stat: Option<GuestFilesystemStat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub exists: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub target: Option<String>,
 }
 
@@ -1286,7 +1381,7 @@ pub struct OverlayCreatedResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessStartedResponse {
     pub process_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub pid: Option<u32>,
 }
 
@@ -1321,11 +1416,11 @@ pub struct ProcessSnapshotEntry {
     pub sid: u32,
     pub driver: String,
     pub command: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub args: Vec<String>,
     pub cwd: String,
     pub status: ProcessSnapshotStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub exit_code: Option<i32>,
 }
 
@@ -1337,23 +1432,23 @@ pub struct ProcessSnapshotResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SocketStateEntry {
     pub process_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub host: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub port: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListenerSnapshotResponse {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub listener: Option<SocketStateEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundUdpSnapshotResponse {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub socket: Option<SocketStateEntry>,
 }
 
@@ -1411,35 +1506,27 @@ pub struct PersistenceFlushedResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolInvocationResultResponse {
     pub invocation_id: String,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "json_utf8_option"
-    )]
+    #[serde(default, with = "json_utf8_option")]
     pub result: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SidecarPermissionResultResponse {
     pub permission_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub reply: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsBridgeResultResponse {
     pub call_id: String,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "json_utf8_option"
-    )]
+    #[serde(default, with = "json_utf8_option")]
     pub result: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub error: Option<String>,
 }
 
@@ -2018,7 +2105,10 @@ impl Serialize for RootFilesystemLowerDescriptor {
                 Self::Snapshot { entries } => {
                     serialize_bare_newtype_tag(serializer, 1, &(entries.clone(),))
                 }
-                Self::BundledBaseFilesystem => serialize_bare_tag(serializer, 2),
+                // serde_bare unit payloads encode to zero bytes, which makes this tagged
+                // tuple union ambiguous during round-trip decoding. Carry an explicit
+                // placeholder bool so Rust and TypeScript agree on the wire shape.
+                Self::BundledBaseFilesystem => serialize_bare_newtype_tag(serializer, 2, &false),
             }
         }
     }
@@ -2041,18 +2131,6 @@ impl<'de> Deserialize<'de> for RootFilesystemLowerDescriptor {
                     write!(formatter, "a RootFilesystemLowerDescriptor BARE union")
                 }
 
-                fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-                where
-                    E: de::Error,
-                {
-                    match value {
-                        2 => Ok(RootFilesystemLowerDescriptor::BundledBaseFilesystem),
-                        _ => Err(de::Error::custom(format!(
-                            "unknown RootFilesystemLowerDescriptor tag: {value}"
-                        ))),
-                    }
-                }
-
                 fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
                 where
                     A: SeqAccess<'de>,
@@ -2069,7 +2147,12 @@ impl<'de> Deserialize<'de> for RootFilesystemLowerDescriptor {
                                 })?;
                             Ok(RootFilesystemLowerDescriptor::Snapshot { entries })
                         }
-                        2 => Ok(RootFilesystemLowerDescriptor::BundledBaseFilesystem),
+                        2 => {
+                            seq.next_element::<bool>()?.ok_or_else(|| {
+                                de::Error::custom("missing bundled base filesystem lower payload")
+                            })?;
+                            Ok(RootFilesystemLowerDescriptor::BundledBaseFilesystem)
+                        }
                         _ => Err(de::Error::custom(format!(
                             "unknown RootFilesystemLowerDescriptor tag: {tag}"
                         ))),
@@ -2077,7 +2160,7 @@ impl<'de> Deserialize<'de> for RootFilesystemLowerDescriptor {
                 }
             }
 
-            deserializer.deserialize_any(RootFilesystemLowerDescriptorVisitor)
+            deserializer.deserialize_tuple(2, RootFilesystemLowerDescriptorVisitor)
         }
     }
 }

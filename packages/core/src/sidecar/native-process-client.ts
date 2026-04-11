@@ -611,6 +611,8 @@ type ProtocolFrame =
 	| SidecarRequestFrame
 	| SidecarResponseFrame;
 
+type NativeTransportPayloadCodec = "bare" | "json";
+
 export type SidecarRequestHandler = (
 	request: SidecarRequestFrame,
 ) => Promise<SidecarResponsePayload> | SidecarResponsePayload;
@@ -620,6 +622,8 @@ export interface NativeSidecarSpawnOptions {
 	command?: string;
 	args?: string[];
 	frameTimeoutMs?: number;
+	// Migration-only compatibility path for pre-BARE test fixtures.
+	payloadCodec?: NativeTransportPayloadCodec;
 }
 
 export interface AuthenticatedSession {
@@ -741,6 +745,7 @@ export class NativeSidecarProcessClient {
 	private readonly eventListeners = new Set<(event: EventFrame) => void>();
 	private readonly stderrChunks: Buffer[] = [];
 	private readonly frameTimeoutMs: number;
+	private readonly payloadCodec: NativeTransportPayloadCodec;
 	private stdoutBuffer = Buffer.alloc(0);
 	private stdoutClosedError: Error | null = null;
 	private readonly pendingResponses = new Map<
@@ -763,19 +768,20 @@ export class NativeSidecarProcessClient {
 	private constructor(
 		child: ChildProcessWithoutNullStreams,
 		frameTimeoutMs: number,
+		payloadCodec: NativeTransportPayloadCodec,
 	) {
 		this.child = child;
 		this.frameTimeoutMs = frameTimeoutMs;
+		this.payloadCodec = payloadCodec;
 		this.child.stderr.on("data", (chunk: Buffer | string) => {
 			this.stderrChunks.push(
 				typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk),
 			);
 		});
 		this.child.stdout.on("data", (chunk: Buffer | string) => {
-			this.stdoutBuffer = Buffer.concat([
-				this.stdoutBuffer,
-				typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk),
-			]);
+			const bytes =
+				typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk);
+			this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, bytes]);
 			this.drainFrames();
 		});
 		this.child.stdout.on("end", () => {
@@ -804,6 +810,7 @@ export class NativeSidecarProcessClient {
 		return new NativeSidecarProcessClient(
 			child,
 			options.frameTimeoutMs ?? 60_000,
+			options.payloadCodec ?? "bare",
 		);
 	}
 
@@ -2014,7 +2021,7 @@ export class NativeSidecarProcessClient {
 	}
 
 	private async writeFrame(frame: ProtocolFrame): Promise<void> {
-		const payload = Buffer.from(JSON.stringify(frame), "utf8");
+		const payload = encodeProtocolFramePayload(frame, this.payloadCodec);
 		const encoded = Buffer.allocUnsafe(4 + payload.length);
 		encoded.writeUInt32BE(payload.length, 0);
 		payload.copy(encoded, 4);
@@ -2045,7 +2052,7 @@ export class NativeSidecarProcessClient {
 
 		const payload = this.stdoutBuffer.subarray(4, 4 + declaredLength);
 		this.stdoutBuffer = this.stdoutBuffer.subarray(4 + declaredLength);
-		return JSON.parse(payload.toString("utf8")) as
+		return decodeProtocolFramePayload(payload, this.payloadCodec) as
 			| ResponseFrame
 			| EventFrame
 			| SidecarRequestFrame;
@@ -2140,6 +2147,1553 @@ export class NativeSidecarProcessClient {
 	private stderrText(): string {
 		return Buffer.concat(this.stderrChunks).toString("utf8").trim();
 	}
+}
+
+function encodeProtocolFramePayload(
+	frame: ProtocolFrame,
+	codec: NativeTransportPayloadCodec,
+): Buffer {
+	if (codec === "json") {
+		return Buffer.from(JSON.stringify(frame), "utf8");
+	}
+	return encodeBareProtocolFrame(frame);
+}
+
+function decodeProtocolFramePayload(
+	payload: Uint8Array,
+	codec: NativeTransportPayloadCodec,
+): ResponseFrame | EventFrame | SidecarRequestFrame {
+	if (codec === "json") {
+		return JSON.parse(Buffer.from(payload).toString("utf8")) as
+			| ResponseFrame
+			| EventFrame
+			| SidecarRequestFrame;
+	}
+	return decodeBareProtocolFrame(payload);
+}
+
+type BareEnumCodec<TValue extends string> = {
+	encode(value: TValue, context: string): number;
+	decode(tag: number, context: string): TValue;
+};
+
+function createBareEnumCodec<TValue extends string>(
+	entries: ReadonlyArray<readonly [TValue, number]>,
+): BareEnumCodec<TValue> {
+	const tagByValue = new Map(entries);
+	const valueByTag = new Map(entries.map(([value, tag]) => [tag, value]));
+	return {
+		encode(value, context) {
+			const tag = tagByValue.get(value);
+			if (tag === undefined) {
+				throw new Error(`unsupported ${context}: ${value}`);
+			}
+			return tag;
+		},
+		decode(tag, context) {
+			const value = valueByTag.get(tag);
+			if (value === undefined) {
+				throw new Error(`unsupported ${context} tag: ${tag}`);
+			}
+			return value;
+		},
+	};
+}
+
+const BARE_GUEST_RUNTIME_KIND = createBareEnumCodec<
+	GuestRuntimeKind | "python"
+>([
+	["java_script", 1],
+	["python", 2],
+	["web_assembly", 3],
+]);
+const BARE_DISPOSE_REASON = createBareEnumCodec<
+	Extract<RequestPayload, { type: "dispose_vm" }>["reason"]
+>([
+	["requested", 1],
+	["connection_closed", 2],
+	["host_shutdown", 3],
+]);
+const BARE_GUEST_FILESYSTEM_OPERATION = createBareEnumCodec<
+	GuestFilesystemOperation
+>([
+	["read_file", 1],
+	["write_file", 2],
+	["create_dir", 3],
+	["mkdir", 4],
+	["exists", 5],
+	["stat", 6],
+	["lstat", 7],
+	["read_dir", 8],
+	["remove_file", 9],
+	["remove_dir", 10],
+	["rename", 11],
+	["realpath", 12],
+	["symlink", 13],
+	["read_link", 14],
+	["link", 15],
+	["chmod", 16],
+	["chown", 17],
+	["utimes", 18],
+	["truncate", 19],
+]);
+const BARE_PERMISSION_MODE = createBareEnumCodec<SidecarPermissionMode>([
+	["allow", 1],
+	["ask", 2],
+	["deny", 3],
+]);
+const BARE_ROOT_FILESYSTEM_ENTRY_KIND = createBareEnumCodec<
+	RootFilesystemEntry["kind"]
+>([
+	["file", 1],
+	["directory", 2],
+	["symlink", 3],
+]);
+const BARE_ROOT_FILESYSTEM_MODE = createBareEnumCodec<
+	NonNullable<WireRootFilesystemDescriptor["mode"]>
+>([
+	["ephemeral", 1],
+	["read_only", 2],
+]);
+const BARE_ROOT_FILESYSTEM_ENTRY_ENCODING = createBareEnumCodec<
+	RootFilesystemEntryEncoding
+>([
+	["utf8", 1],
+	["base64", 2],
+]);
+const BARE_WASM_PERMISSION_TIER = createBareEnumCodec<WasmPermissionTier>([
+	["full", 1],
+	["read-write", 2],
+	["read-only", 3],
+	["isolated", 4],
+]);
+const BARE_STREAM_CHANNEL = createBareEnumCodec<
+	Extract<EventFrame["payload"], { type: "process_output" }>["channel"]
+>([
+	["stdout", 1],
+	["stderr", 2],
+]);
+const BARE_VM_LIFECYCLE_STATE = createBareEnumCodec<
+	Extract<EventFrame["payload"], { type: "vm_lifecycle" }>["state"]
+>([
+	["creating", 1],
+	["ready", 2],
+	["disposing", 3],
+	["disposed", 4],
+	["failed", 5],
+]);
+const BARE_SIGNAL_DISPOSITION_ACTION = createBareEnumCodec<
+	SidecarSignalHandlerRegistration["action"]
+>([
+	["default", 1],
+	["ignore", 2],
+	["user", 3],
+]);
+const BARE_PROCESS_SNAPSHOT_STATUS = createBareEnumCodec<
+	SidecarProcessSnapshotEntry["status"]
+>([
+	["running", 1],
+	["exited", 2],
+]);
+
+class BareWriter {
+	private readonly chunks: Buffer[] = [];
+	private length = 0;
+
+	writeByte(value: number): void {
+		const chunk = Buffer.from([value & 0xff]);
+		this.chunks.push(chunk);
+		this.length += chunk.length;
+	}
+
+	writeBool(value: boolean): void {
+		this.writeByte(value ? 1 : 0);
+	}
+
+	writeI32(value: number): void {
+		const chunk = Buffer.allocUnsafe(4);
+		chunk.writeInt32LE(value, 0);
+		this.push(chunk);
+	}
+
+	writeI64(value: number): void {
+		const chunk = Buffer.allocUnsafe(8);
+		chunk.writeBigInt64LE(BigInt(value), 0);
+		this.push(chunk);
+	}
+
+	writeU16(value: number): void {
+		const chunk = Buffer.allocUnsafe(2);
+		chunk.writeUInt16LE(value, 0);
+		this.push(chunk);
+	}
+
+	writeU32(value: number): void {
+		const chunk = Buffer.allocUnsafe(4);
+		chunk.writeUInt32LE(value, 0);
+		this.push(chunk);
+	}
+
+	writeU64(value: number): void {
+		const chunk = Buffer.allocUnsafe(8);
+		chunk.writeBigUInt64LE(BigInt(assertInteger(value, "u64 value")), 0);
+		this.push(chunk);
+	}
+
+	writeVarUint(value: number): void {
+		let remaining = BigInt(assertInteger(value, "varuint value"));
+		while (remaining >= 0x80n) {
+			this.writeByte(Number((remaining & 0x7fn) | 0x80n));
+			remaining >>= 7n;
+		}
+		this.writeByte(Number(remaining));
+	}
+
+	writeString(value: string): void {
+		const encoded = Buffer.from(value, "utf8");
+		this.writeVarUint(encoded.length);
+		this.push(encoded);
+	}
+
+	writeOptional<T>(value: T | undefined, encoder: (value: T) => void): void {
+		if (value === undefined) {
+			this.writeBool(false);
+			return;
+		}
+		this.writeBool(true);
+		encoder(value);
+	}
+
+	writeList<T>(values: readonly T[], encoder: (value: T) => void): void {
+		this.writeVarUint(values.length);
+		for (const value of values) {
+			encoder(value);
+		}
+	}
+
+	writeMap<TKey, TValue>(
+		entries: readonly (readonly [TKey, TValue])[],
+		writeKey: (key: TKey) => void,
+		writeValue: (value: TValue) => void,
+	): void {
+		this.writeVarUint(entries.length);
+		for (const [key, value] of entries) {
+			writeKey(key);
+			writeValue(value);
+		}
+	}
+
+	toBuffer(): Buffer {
+		return Buffer.concat(this.chunks, this.length);
+	}
+
+	private push(chunk: Buffer): void {
+		this.chunks.push(chunk);
+		this.length += chunk.length;
+	}
+}
+
+class BareReader {
+	private offset = 0;
+
+	constructor(private readonly bytes: Uint8Array) {}
+
+	readByte(): number {
+		this.ensureAvailable(1, "byte");
+		return this.bytes[this.offset++]!;
+	}
+
+	readBool(): boolean {
+		return this.readByte() !== 0;
+	}
+
+	readI32(): number {
+		this.ensureAvailable(4, "i32");
+		const value = Buffer.from(
+			this.bytes.buffer,
+			this.bytes.byteOffset + this.offset,
+			4,
+		).readInt32LE(0);
+		this.offset += 4;
+		return value;
+	}
+
+	readI64(context: string): number {
+		this.ensureAvailable(8, "i64");
+		const value = Buffer.from(
+			this.bytes.buffer,
+			this.bytes.byteOffset + this.offset,
+			8,
+		).readBigInt64LE(0);
+		this.offset += 8;
+		return bigIntToSafeNumber(value, context);
+	}
+
+	readU16(): number {
+		this.ensureAvailable(2, "u16");
+		const value = Buffer.from(
+			this.bytes.buffer,
+			this.bytes.byteOffset + this.offset,
+			2,
+		).readUInt16LE(0);
+		this.offset += 2;
+		return value;
+	}
+
+	readU32(): number {
+		this.ensureAvailable(4, "u32");
+		const value = Buffer.from(
+			this.bytes.buffer,
+			this.bytes.byteOffset + this.offset,
+			4,
+		).readUInt32LE(0);
+		this.offset += 4;
+		return value;
+	}
+
+	readU64(context: string): number {
+		this.ensureAvailable(8, "u64");
+		const value = Buffer.from(
+			this.bytes.buffer,
+			this.bytes.byteOffset + this.offset,
+			8,
+		).readBigUInt64LE(0);
+		this.offset += 8;
+		return bigIntToSafeNumber(value, context);
+	}
+
+	readVarUint(context: string): number {
+		let result = 0n;
+		let shift = 0n;
+		for (let index = 0; index < 10; index += 1) {
+			const byte = this.readByte();
+			result |= BigInt(byte & 0x7f) << shift;
+			if ((byte & 0x80) === 0) {
+				return bigIntToSafeNumber(result, context);
+			}
+			shift += 7n;
+		}
+		throw new Error(`invalid ${context}: variable-length integer too long`);
+	}
+
+	readString(context: string): string {
+		const length = this.readVarUint(`${context} length`);
+		this.ensureAvailable(length, context);
+		const value = Buffer.from(
+			this.bytes.buffer,
+			this.bytes.byteOffset + this.offset,
+			length,
+		).toString("utf8");
+		this.offset += length;
+		return value;
+	}
+
+	readOptional<T>(reader: () => T): T | undefined {
+		return this.readBool() ? reader() : undefined;
+	}
+
+	readList<T>(reader: () => T, context: string): T[] {
+		const length = this.readVarUint(`${context} length`);
+		const values: T[] = [];
+		for (let index = 0; index < length; index += 1) {
+			values.push(reader());
+		}
+		return values;
+	}
+
+	readMap<TKey, TValue>(
+		readKey: () => TKey,
+		readValue: () => TValue,
+		context: string,
+	): Array<[TKey, TValue]> {
+		const length = this.readVarUint(`${context} length`);
+		const entries: Array<[TKey, TValue]> = [];
+		for (let index = 0; index < length; index += 1) {
+			entries.push([readKey(), readValue()]);
+		}
+		return entries;
+	}
+
+	ensureConsumed(context: string): void {
+		if (this.offset !== this.bytes.length) {
+			throw new Error(
+				`invalid ${context}: trailing ${this.bytes.length - this.offset} byte(s)`,
+			);
+		}
+	}
+
+	private ensureAvailable(length: number, context: string): void {
+		if (this.offset + length > this.bytes.length) {
+			throw new Error(`invalid ${context}: unexpected end of frame`);
+		}
+	}
+}
+
+function assertInteger(value: number, context: string): number {
+	if (!Number.isInteger(value)) {
+		throw new Error(`expected integer ${context}, received ${value}`);
+	}
+	return value;
+}
+
+function bigIntToSafeNumber(value: bigint, context: string): number {
+	const max = BigInt(Number.MAX_SAFE_INTEGER);
+	const min = BigInt(Number.MIN_SAFE_INTEGER);
+	if (value > max || value < min) {
+		throw new Error(`${context} exceeds JavaScript safe integer range`);
+	}
+	return Number(value);
+}
+
+function stringifyJsonUtf8(value: unknown, context: string): string {
+	try {
+		const encoded = JSON.stringify(value);
+		if (encoded === undefined) {
+			throw new Error(`${context} must be JSON-serializable`);
+		}
+		return encoded;
+	} catch (error) {
+		throw new Error(
+			`${context} must be JSON-serializable: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+}
+
+function parseJsonUtf8(value: string, context: string): unknown {
+	try {
+		return JSON.parse(value);
+	} catch (error) {
+		throw new Error(
+			`invalid ${context} JSON payload: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+}
+
+function encodeBareProtocolFrame(frame: ProtocolFrame): Buffer {
+	const writer = new BareWriter();
+	switch (frame.frame_type) {
+		case "request":
+			writer.writeVarUint(1);
+			encodeProtocolSchema(writer, frame.schema);
+			writer.writeI64(frame.request_id);
+			encodeOwnershipScope(writer, frame.ownership);
+			encodeRequestPayload(writer, frame.payload);
+			break;
+		case "sidecar_response":
+			writer.writeVarUint(5);
+			encodeProtocolSchema(writer, frame.schema);
+			writer.writeI64(frame.request_id);
+			encodeOwnershipScope(writer, frame.ownership);
+			encodeSidecarResponsePayload(writer, frame.payload);
+			break;
+		default:
+			throw new Error(
+				`BARE encoding is only implemented for host-written frames, received ${frame.frame_type}`,
+			);
+	}
+	return writer.toBuffer();
+}
+
+function decodeBareProtocolFrame(
+	payload: Uint8Array,
+): ResponseFrame | EventFrame | SidecarRequestFrame {
+	const reader = new BareReader(payload);
+	const tag = reader.readVarUint("protocol frame tag");
+	let frame: ResponseFrame | EventFrame | SidecarRequestFrame;
+	switch (tag) {
+		case 2:
+			frame = {
+				frame_type: "response",
+				schema: decodeProtocolSchema(reader),
+				request_id: reader.readI64("response request id"),
+				ownership: decodeOwnershipScope(reader),
+				payload: decodeResponsePayload(reader),
+			};
+			break;
+		case 3:
+			frame = {
+				frame_type: "event",
+				schema: decodeProtocolSchema(reader),
+				ownership: decodeOwnershipScope(reader),
+				payload: decodeEventPayload(reader),
+			};
+			break;
+		case 4:
+			frame = {
+				frame_type: "sidecar_request",
+				schema: decodeProtocolSchema(reader),
+				request_id: reader.readI64("sidecar request id"),
+				ownership: decodeOwnershipScope(reader),
+				payload: decodeSidecarRequestPayload(reader),
+			};
+			break;
+		default:
+			throw new Error(`unsupported BARE protocol frame tag: ${tag}`);
+	}
+	reader.ensureConsumed("protocol frame");
+	return frame;
+}
+
+function encodeProtocolSchema(
+	writer: BareWriter,
+	schema: typeof PROTOCOL_SCHEMA,
+): void {
+	writer.writeString(schema.name);
+	writer.writeU16(schema.version);
+}
+
+function decodeProtocolSchema(reader: BareReader): typeof PROTOCOL_SCHEMA {
+	return {
+		name: reader.readString("protocol schema name"),
+		version: reader.readU16(),
+	} as typeof PROTOCOL_SCHEMA;
+}
+
+function encodeOwnershipScope(writer: BareWriter, ownership: OwnershipScope): void {
+	switch (ownership.scope) {
+		case "connection":
+			writer.writeVarUint(1);
+			writer.writeString(ownership.connection_id);
+			return;
+		case "session":
+			writer.writeVarUint(2);
+			writer.writeString(ownership.connection_id);
+			writer.writeString(ownership.session_id);
+			return;
+		case "vm":
+			writer.writeVarUint(3);
+			writer.writeString(ownership.connection_id);
+			writer.writeString(ownership.session_id);
+			writer.writeString(ownership.vm_id);
+			return;
+	}
+}
+
+function decodeOwnershipScope(reader: BareReader): OwnershipScope {
+	switch (reader.readVarUint("ownership scope tag")) {
+		case 1:
+			return {
+				scope: "connection",
+				connection_id: reader.readString("connection ownership id"),
+			};
+		case 2:
+			return {
+				scope: "session",
+				connection_id: reader.readString("session ownership connection id"),
+				session_id: reader.readString("session ownership session id"),
+			};
+		case 3:
+			return {
+				scope: "vm",
+				connection_id: reader.readString("vm ownership connection id"),
+				session_id: reader.readString("vm ownership session id"),
+				vm_id: reader.readString("vm ownership vm id"),
+			};
+		default:
+			throw new Error("unsupported ownership scope tag");
+	}
+}
+
+function encodeRequestPayload(writer: BareWriter, payload: RequestPayload): void {
+	switch (payload.type) {
+		case "authenticate":
+			writer.writeVarUint(1);
+			writer.writeString(payload.client_name);
+			writer.writeString(payload.auth_token);
+			return;
+		case "open_session":
+			writer.writeVarUint(2);
+			encodeSidecarPlacement(writer, payload.placement);
+			writer.writeMap(
+				Object.entries(payload.metadata ?? {}),
+				(key) => writer.writeString(key),
+				(value) => writer.writeString(value),
+			);
+			return;
+		case "create_vm":
+			writer.writeVarUint(3);
+			writer.writeVarUint(
+				BARE_GUEST_RUNTIME_KIND.encode(payload.runtime, "guest runtime"),
+			);
+			writer.writeMap(
+				Object.entries(payload.metadata ?? {}),
+				(key) => writer.writeString(key),
+				(value) => writer.writeString(value),
+			);
+			encodeWireRootFilesystemDescriptor(writer, payload.root_filesystem);
+			writer.writeOptional(payload.permissions, (permissions) =>
+				encodeWirePermissionsPolicy(writer, permissions),
+			);
+			return;
+		case "create_session":
+			writer.writeVarUint(4);
+			writer.writeString(payload.agent_type);
+			writer.writeVarUint(
+				BARE_GUEST_RUNTIME_KIND.encode(
+					(payload.runtime ?? "java_script") as GuestRuntimeKind | "python",
+					"create session runtime",
+				),
+			);
+			writer.writeString(payload.adapter_entrypoint);
+			writer.writeList(payload.args ?? [], (value) => writer.writeString(value));
+			writer.writeMap(
+				Object.entries(payload.env ?? {}),
+				(key) => writer.writeString(key),
+				(value) => writer.writeString(value),
+			);
+			writer.writeString(payload.cwd);
+			writer.writeList(payload.mcp_servers ?? [], (value) =>
+				writer.writeString(stringifyJsonUtf8(value, "create_session.mcp_servers")),
+			);
+			return;
+		case "session_request":
+			writer.writeVarUint(5);
+			writer.writeString(payload.session_id);
+			writer.writeString(payload.method);
+			writer.writeOptional(payload.params, (value) =>
+				writer.writeString(stringifyJsonUtf8(value, "session_request.params")),
+			);
+			return;
+		case "get_session_state":
+			writer.writeVarUint(6);
+			writer.writeString(payload.session_id);
+			return;
+		case "close_agent_session":
+			writer.writeVarUint(7);
+			writer.writeString(payload.session_id);
+			return;
+		case "dispose_vm":
+			writer.writeVarUint(8);
+			writer.writeVarUint(
+				BARE_DISPOSE_REASON.encode(payload.reason, "dispose reason"),
+			);
+			return;
+		case "bootstrap_root_filesystem":
+			writer.writeVarUint(9);
+			writer.writeList(payload.entries, (entry) =>
+				encodeRootFilesystemEntry(writer, entry),
+			);
+			return;
+		case "configure_vm":
+			writer.writeVarUint(10);
+			writer.writeList(payload.mounts ?? [], (mount) =>
+				encodeWireMountDescriptor(writer, mount),
+			);
+			writer.writeList(payload.software ?? [], (software) =>
+				encodeWireSoftwareDescriptor(writer, software),
+			);
+			writer.writeOptional(payload.permissions, (permissions) =>
+				encodeWirePermissionsPolicy(writer, permissions),
+			);
+			writer.writeOptional(payload.module_access_cwd, (value) =>
+				writer.writeString(value),
+			);
+			writer.writeList(payload.instructions ?? [], (value) =>
+				writer.writeString(value),
+			);
+			writer.writeList(payload.projected_modules ?? [], (descriptor) =>
+				encodeWireProjectedModuleDescriptor(writer, descriptor),
+			);
+			writer.writeMap(
+				Object.entries(payload.command_permissions ?? {}),
+				(key) => writer.writeString(key),
+				(value) =>
+					writer.writeVarUint(
+						BARE_WASM_PERMISSION_TIER.encode(value, "command permission"),
+					),
+			);
+			writer.writeList(payload.allowed_node_builtins ?? [], (value) =>
+				writer.writeString(value),
+			);
+			writer.writeList(payload.loopback_exempt_ports ?? [], (value) =>
+				writer.writeU16(value),
+			);
+			return;
+		case "register_toolkit":
+			writer.writeVarUint(11);
+			writer.writeString(payload.name);
+			writer.writeString(payload.description);
+			writer.writeMap(
+				Object.entries(payload.tools),
+				(key) => writer.writeString(key),
+				(tool) => encodeRegisteredToolDefinition(writer, tool),
+			);
+			return;
+		case "create_layer":
+			writer.writeVarUint(12);
+			return;
+		case "seal_layer":
+			writer.writeVarUint(13);
+			writer.writeString(payload.layer_id);
+			return;
+		case "import_snapshot":
+			writer.writeVarUint(14);
+			writer.writeList(payload.entries, (entry) =>
+				encodeRootFilesystemEntry(writer, entry),
+			);
+			return;
+		case "export_snapshot":
+			writer.writeVarUint(15);
+			writer.writeString(payload.layer_id);
+			return;
+		case "create_overlay":
+			writer.writeVarUint(16);
+			writer.writeVarUint(
+				BARE_ROOT_FILESYSTEM_MODE.encode(
+					payload.mode ?? "ephemeral",
+					"overlay mode",
+				),
+			);
+			writer.writeOptional(payload.upper_layer_id, (value) =>
+				writer.writeString(value),
+			);
+			writer.writeList(payload.lower_layer_ids ?? [], (value) =>
+				writer.writeString(value),
+			);
+			return;
+		case "guest_filesystem_call":
+			writer.writeVarUint(17);
+			writer.writeVarUint(
+				BARE_GUEST_FILESYSTEM_OPERATION.encode(
+					payload.operation,
+					"guest filesystem operation",
+				),
+			);
+			writer.writeString(payload.path);
+			writer.writeOptional(payload.destination_path, (value) =>
+				writer.writeString(value),
+			);
+			writer.writeOptional(payload.target, (value) => writer.writeString(value));
+			writer.writeOptional(payload.content, (value) => writer.writeString(value));
+			writer.writeOptional(payload.encoding, (value) =>
+				writer.writeVarUint(
+					BARE_ROOT_FILESYSTEM_ENTRY_ENCODING.encode(
+						value,
+						"root filesystem entry encoding",
+					),
+				),
+			);
+			writer.writeBool(payload.recursive ?? false);
+			writer.writeOptional(payload.mode, (value) => writer.writeU32(value));
+			writer.writeOptional(payload.uid, (value) => writer.writeU32(value));
+			writer.writeOptional(payload.gid, (value) => writer.writeU32(value));
+			writer.writeOptional(payload.atime_ms, (value) => writer.writeU64(value));
+			writer.writeOptional(payload.mtime_ms, (value) => writer.writeU64(value));
+			writer.writeOptional(payload.len, (value) => writer.writeU64(value));
+			return;
+		case "snapshot_root_filesystem":
+			writer.writeVarUint(18);
+			return;
+		case "execute":
+			writer.writeVarUint(19);
+			writer.writeString(payload.process_id);
+			writer.writeOptional(payload.command, (value) => writer.writeString(value));
+			writer.writeOptional(payload.runtime, (value) =>
+				writer.writeVarUint(
+					BARE_GUEST_RUNTIME_KIND.encode(
+						value as GuestRuntimeKind | "python",
+						"execute runtime",
+					),
+				),
+			);
+			writer.writeOptional(payload.entrypoint, (value) =>
+				writer.writeString(value),
+			);
+			writer.writeList(payload.args ?? [], (value) => writer.writeString(value));
+			writer.writeMap(
+				Object.entries(payload.env ?? {}),
+				(key) => writer.writeString(key),
+				(value) => writer.writeString(value),
+			);
+			writer.writeOptional(payload.cwd, (value) => writer.writeString(value));
+			writer.writeOptional(payload.wasm_permission_tier, (value) =>
+				writer.writeVarUint(
+					BARE_WASM_PERMISSION_TIER.encode(value, "wasm permission tier"),
+				),
+			);
+			return;
+		case "write_stdin":
+			writer.writeVarUint(20);
+			writer.writeString(payload.process_id);
+			writer.writeString(payload.chunk);
+			return;
+		case "close_stdin":
+			writer.writeVarUint(21);
+			writer.writeString(payload.process_id);
+			return;
+		case "kill_process":
+			writer.writeVarUint(22);
+			writer.writeString(payload.process_id);
+			writer.writeString(payload.signal);
+			return;
+		case "get_process_snapshot":
+			writer.writeVarUint(23);
+			return;
+		case "find_listener":
+			writer.writeVarUint(24);
+			writer.writeOptional(payload.host, (value) => writer.writeString(value));
+			writer.writeOptional(payload.port, (value) => writer.writeU16(value));
+			writer.writeOptional(payload.path, (value) => writer.writeString(value));
+			return;
+		case "find_bound_udp":
+			writer.writeVarUint(25);
+			writer.writeOptional(payload.host, (value) => writer.writeString(value));
+			writer.writeOptional(payload.port, (value) => writer.writeU16(value));
+			return;
+		case "get_signal_state":
+			writer.writeVarUint(26);
+			writer.writeString(payload.process_id);
+			return;
+		case "get_zombie_timer_count":
+			writer.writeVarUint(27);
+			return;
+	}
+}
+
+function encodeSidecarResponsePayload(
+	writer: BareWriter,
+	payload: SidecarResponsePayload,
+): void {
+	switch (payload.type) {
+		case "tool_invocation_result":
+			writer.writeVarUint(1);
+			writer.writeString(payload.invocation_id);
+			writer.writeOptional(payload.result, (value) =>
+				writer.writeString(
+					stringifyJsonUtf8(value, "tool_invocation_result.result"),
+				),
+			);
+			writer.writeOptional(payload.error, (value) => writer.writeString(value));
+			return;
+		case "permission_request_result":
+			writer.writeVarUint(2);
+			writer.writeString(payload.permission_id);
+			writer.writeOptional(payload.reply, (value) => writer.writeString(value));
+			writer.writeOptional(payload.error, (value) => writer.writeString(value));
+			return;
+		case "js_bridge_result":
+			writer.writeVarUint(3);
+			writer.writeString(payload.call_id);
+			writer.writeOptional(payload.result, (value) =>
+				writer.writeString(stringifyJsonUtf8(value, "js_bridge_result.result")),
+			);
+			writer.writeOptional(payload.error, (value) => writer.writeString(value));
+			return;
+	}
+}
+
+function decodeResponsePayload(reader: BareReader): ResponseFrame["payload"] {
+	switch (reader.readVarUint("response payload tag")) {
+		case 1:
+			return {
+				type: "authenticated",
+				sidecar_id: reader.readString("authenticated.sidecar_id"),
+				connection_id: reader.readString("authenticated.connection_id"),
+				max_frame_bytes: reader.readU32(),
+			};
+		case 2:
+			return {
+				type: "session_opened",
+				session_id: reader.readString("session_opened.session_id"),
+				owner_connection_id: reader.readString(
+					"session_opened.owner_connection_id",
+				),
+			};
+		case 3:
+			return {
+				type: "vm_created",
+				vm_id: reader.readString("vm_created.vm_id"),
+			};
+		case 4: {
+			const pid = reader.readOptional(() => reader.readU32());
+			const modes = reader.readOptional(() =>
+				parseJsonUtf8(reader.readString("session_created.modes"), "modes"),
+			);
+			const configOptions = reader.readList(
+				() =>
+					parseJsonUtf8(
+						reader.readString("session_created.config_options"),
+						"config options",
+					),
+				"session_created.config_options",
+			);
+			const agentCapabilities = reader.readOptional(() =>
+				parseJsonUtf8(
+					reader.readString("session_created.agent_capabilities"),
+					"agent capabilities",
+				),
+			);
+			const agentInfo = reader.readOptional(() =>
+				parseJsonUtf8(
+					reader.readString("session_created.agent_info"),
+					"agent info",
+				),
+			);
+			return {
+				type: "session_created",
+				session_id: reader.readString("session_created.session_id"),
+				...(pid !== undefined ? { pid } : {}),
+				...(modes !== undefined ? { modes } : {}),
+				config_options: configOptions,
+				...(agentCapabilities !== undefined
+					? { agent_capabilities: agentCapabilities }
+					: {}),
+				...(agentInfo !== undefined ? { agent_info: agentInfo } : {}),
+			};
+		}
+		case 5:
+			return {
+				type: "session_rpc",
+				session_id: reader.readString("session_rpc.session_id"),
+				response: parseJsonUtf8(
+					reader.readString("session_rpc.response"),
+					"session RPC response",
+				),
+			};
+		case 6: {
+			const sessionId = reader.readString("session_state.session_id");
+			const agentType = reader.readString("session_state.agent_type");
+			const processId = reader.readString("session_state.process_id");
+			const pid = reader.readOptional(() => reader.readU32());
+			const closed = reader.readBool();
+			const modes = reader.readOptional(() =>
+				parseJsonUtf8(reader.readString("session_state.modes"), "modes"),
+			);
+			const configOptions = reader.readList(
+				() =>
+					parseJsonUtf8(
+						reader.readString("session_state.config_options"),
+						"config options",
+					),
+				"session_state.config_options",
+			);
+			const agentCapabilities = reader.readOptional(() =>
+				parseJsonUtf8(
+					reader.readString("session_state.agent_capabilities"),
+					"agent capabilities",
+				),
+			);
+			const agentInfo = reader.readOptional(() =>
+				parseJsonUtf8(
+					reader.readString("session_state.agent_info"),
+					"agent info",
+				),
+			);
+			const events = reader.readList(
+				() => ({
+					sequence_number: reader.readU64("session_state.events.sequence_number"),
+					notification: parseJsonUtf8(
+						reader.readString("session_state.events.notification"),
+						"session state notification",
+					),
+				}),
+				"session_state.events",
+			);
+			return {
+				type: "session_state",
+				session_id: sessionId,
+				agent_type: agentType,
+				process_id: processId,
+				...(pid !== undefined ? { pid } : {}),
+				closed,
+				...(modes !== undefined ? { modes } : {}),
+				config_options: configOptions,
+				...(agentCapabilities !== undefined
+					? { agent_capabilities: agentCapabilities }
+					: {}),
+				...(agentInfo !== undefined ? { agent_info: agentInfo } : {}),
+				events,
+			};
+		}
+		case 7:
+			return {
+				type: "agent_session_closed",
+				session_id: reader.readString("agent_session_closed.session_id"),
+			};
+		case 8:
+			return {
+				type: "vm_disposed",
+				vm_id: reader.readString("vm_disposed.vm_id"),
+			};
+		case 9:
+			return {
+				type: "root_filesystem_bootstrapped",
+				entry_count: reader.readU32(),
+			};
+		case 10:
+			return {
+				type: "vm_configured",
+				applied_mounts: reader.readU32(),
+				applied_software: reader.readU32(),
+			};
+		case 11:
+			return {
+				type: "toolkit_registered",
+				toolkit: reader.readString("toolkit_registered.toolkit"),
+				command_count: reader.readU32(),
+				prompt_markdown: reader.readString("toolkit_registered.prompt_markdown"),
+			};
+		case 12:
+			return {
+				type: "layer_created",
+				layer_id: reader.readString("layer_created.layer_id"),
+			};
+		case 13:
+			return {
+				type: "layer_sealed",
+				layer_id: reader.readString("layer_sealed.layer_id"),
+			};
+		case 14:
+			return {
+				type: "snapshot_imported",
+				layer_id: reader.readString("snapshot_imported.layer_id"),
+			};
+		case 15:
+			return {
+				type: "snapshot_exported",
+				layer_id: reader.readString("snapshot_exported.layer_id"),
+				entries: reader.readList(
+					() => decodeRootFilesystemEntry(reader),
+					"snapshot_exported.entries",
+				),
+			};
+		case 16:
+			return {
+				type: "overlay_created",
+				layer_id: reader.readString("overlay_created.layer_id"),
+			};
+		case 17: {
+			const operation = BARE_GUEST_FILESYSTEM_OPERATION.decode(
+				reader.readVarUint("guest_filesystem_result.operation"),
+				"guest filesystem operation",
+			);
+			const path = reader.readString("guest_filesystem_result.path");
+			const content = reader.readOptional(() =>
+				reader.readString("guest_filesystem_result.content"),
+			);
+			const encoding = reader.readOptional(() =>
+				BARE_ROOT_FILESYSTEM_ENTRY_ENCODING.decode(
+					reader.readVarUint("guest_filesystem_result.encoding"),
+					"root filesystem entry encoding",
+				),
+			);
+			const entries = reader.readOptional(() =>
+				reader.readList(
+					() => reader.readString("guest_filesystem_result.entries"),
+					"guest_filesystem_result.entries",
+				),
+			);
+			const stat = reader.readOptional(() => decodeGuestFilesystemStat(reader));
+			const exists = reader.readOptional(() => reader.readBool());
+			const target = reader.readOptional(() =>
+				reader.readString("guest_filesystem_result.target"),
+			);
+			return {
+				type: "guest_filesystem_result",
+				operation,
+				path,
+				...(content !== undefined ? { content } : {}),
+				...(encoding !== undefined ? { encoding } : {}),
+				...(entries !== undefined ? { entries } : {}),
+				...(stat !== undefined ? { stat } : {}),
+				...(exists !== undefined ? { exists } : {}),
+				...(target !== undefined ? { target } : {}),
+			};
+		}
+		case 18:
+			return {
+				type: "root_filesystem_snapshot",
+				entries: reader.readList(
+					() => decodeRootFilesystemEntry(reader),
+					"root_filesystem_snapshot.entries",
+				),
+			};
+		case 19: {
+			const process_id = reader.readString("process_started.process_id");
+			const pid = reader.readOptional(() => reader.readU32());
+			return {
+				type: "process_started",
+				process_id,
+				...(pid !== undefined ? { pid } : {}),
+			};
+		}
+		case 20:
+			return {
+				type: "stdin_written",
+				process_id: reader.readString("stdin_written.process_id"),
+				accepted_bytes: reader.readU64("stdin_written.accepted_bytes"),
+			};
+		case 21:
+			return {
+				type: "stdin_closed",
+				process_id: reader.readString("stdin_closed.process_id"),
+			};
+		case 22:
+			return {
+				type: "process_killed",
+				process_id: reader.readString("process_killed.process_id"),
+			};
+		case 23:
+			return {
+				type: "process_snapshot",
+				processes: reader.readList(
+					() => decodeProcessSnapshotEntry(reader),
+					"process_snapshot.processes",
+				),
+			};
+		case 24: {
+			const listener = reader.readOptional(() => decodeSocketStateEntry(reader));
+			return {
+				type: "listener_snapshot",
+				...(listener !== undefined ? { listener } : {}),
+			};
+		}
+		case 25: {
+			const socket = reader.readOptional(() => decodeSocketStateEntry(reader));
+			return {
+				type: "bound_udp_snapshot",
+				...(socket !== undefined ? { socket } : {}),
+			};
+		}
+		case 26:
+			return {
+				type: "signal_state",
+				process_id: reader.readString("signal_state.process_id"),
+				handlers: Object.fromEntries(
+					reader.readMap(
+						() => String(reader.readU32()),
+						() => decodeSignalHandlerRegistration(reader),
+						"signal_state.handlers",
+					),
+				),
+			};
+		case 27:
+			return {
+				type: "zombie_timer_count",
+				count: reader.readU64("zombie_timer_count.count"),
+			};
+		case 28:
+			throw new Error(
+				"unsupported bare response payload tag: filesystem_result",
+			);
+		case 29:
+			throw new Error(
+				"unsupported bare response payload tag: permission_decision",
+			);
+		case 30:
+			throw new Error(
+				"unsupported bare response payload tag: persistence_state",
+			);
+		case 31:
+			throw new Error(
+				"unsupported bare response payload tag: persistence_flushed",
+			);
+		case 32:
+			return {
+				type: "rejected",
+				code: reader.readString("rejected.code"),
+				message: reader.readString("rejected.message"),
+			};
+		default:
+			throw new Error("unsupported response payload tag");
+	}
+}
+
+function decodeEventPayload(reader: BareReader): EventFrame["payload"] {
+	switch (reader.readVarUint("event payload tag")) {
+		case 1:
+			return {
+				type: "vm_lifecycle",
+				state: BARE_VM_LIFECYCLE_STATE.decode(
+					reader.readVarUint("vm_lifecycle.state"),
+					"vm lifecycle state",
+				),
+			};
+		case 2:
+			return {
+				type: "process_output",
+				process_id: reader.readString("process_output.process_id"),
+				channel: BARE_STREAM_CHANNEL.decode(
+					reader.readVarUint("process_output.channel"),
+					"stream channel",
+				),
+				chunk: reader.readString("process_output.chunk"),
+			};
+		case 3:
+			return {
+				type: "process_exited",
+				process_id: reader.readString("process_exited.process_id"),
+				exit_code: reader.readI32(),
+			};
+		case 4:
+			return {
+				type: "structured",
+				name: reader.readString("structured.name"),
+				detail: Object.fromEntries(
+					reader.readMap(
+						() => reader.readString("structured.detail.key"),
+						() => reader.readString("structured.detail.value"),
+						"structured.detail",
+					),
+				),
+			};
+		default:
+			throw new Error("unsupported event payload tag");
+	}
+}
+
+function decodeSidecarRequestPayload(
+	reader: BareReader,
+): SidecarRequestFrame["payload"] {
+	switch (reader.readVarUint("sidecar request payload tag")) {
+		case 1:
+			return {
+				type: "tool_invocation",
+				invocation_id: reader.readString("tool_invocation.invocation_id"),
+				tool_key: reader.readString("tool_invocation.tool_key"),
+				input: parseJsonUtf8(
+					reader.readString("tool_invocation.input"),
+					"tool invocation input",
+				),
+				timeout_ms: reader.readU64("tool_invocation.timeout_ms"),
+			};
+		case 2:
+			return {
+				type: "permission_request",
+				session_id: reader.readString("permission_request.session_id"),
+				permission_id: reader.readString("permission_request.permission_id"),
+				params: parseJsonUtf8(
+					reader.readString("permission_request.params"),
+					"permission request params",
+				),
+			};
+		case 3:
+			return {
+				type: "js_bridge_call",
+				call_id: reader.readString("js_bridge_call.call_id"),
+				mount_id: reader.readString("js_bridge_call.mount_id"),
+				operation: reader.readString("js_bridge_call.operation"),
+				args: parseJsonUtf8(
+					reader.readString("js_bridge_call.args"),
+					"js bridge call args",
+				),
+			};
+		default:
+			throw new Error("unsupported sidecar request payload tag");
+	}
+}
+
+function encodeSidecarPlacement(
+	writer: BareWriter,
+	placement: SidecarPlacement,
+): void {
+	switch (placement.kind) {
+		case "shared":
+			writer.writeVarUint(1);
+			writer.writeOptional(placement.pool ?? undefined, (value) =>
+				writer.writeString(value),
+			);
+			return;
+		case "explicit":
+			writer.writeVarUint(2);
+			writer.writeString(placement.sidecar_id);
+			return;
+	}
+}
+
+function encodeWireRootFilesystemDescriptor(
+	writer: BareWriter,
+	descriptor: WireRootFilesystemDescriptor | undefined,
+): void {
+	writer.writeVarUint(
+		BARE_ROOT_FILESYSTEM_MODE.encode(
+			descriptor?.mode ?? "ephemeral",
+			"root filesystem mode",
+		),
+	);
+	writer.writeBool(descriptor?.disable_default_base_layer ?? false);
+	writer.writeList(descriptor?.lowers ?? [], (lower) =>
+		encodeWireRootFilesystemLowerDescriptor(writer, lower),
+	);
+	writer.writeList(descriptor?.bootstrap_entries ?? [], (entry) =>
+		encodeRootFilesystemEntry(writer, entry),
+	);
+}
+
+function encodeWireRootFilesystemLowerDescriptor(
+	writer: BareWriter,
+	lower: WireRootFilesystemLowerDescriptor,
+): void {
+	if (lower.kind === "snapshot") {
+		writer.writeVarUint(1);
+		writer.writeList(lower.entries ?? [], (entry) =>
+			encodeRootFilesystemEntry(writer, entry),
+		);
+		return;
+	}
+	writer.writeVarUint(2);
+	writer.writeBool(false);
+}
+
+function encodeRootFilesystemEntry(
+	writer: BareWriter,
+	entry: RootFilesystemEntry,
+): void {
+	writer.writeString(entry.path);
+	writer.writeVarUint(
+		BARE_ROOT_FILESYSTEM_ENTRY_KIND.encode(
+			entry.kind,
+			"root filesystem entry kind",
+		),
+	);
+	writer.writeOptional(entry.mode, (value) => writer.writeU32(value));
+	writer.writeOptional(entry.uid, (value) => writer.writeU32(value));
+	writer.writeOptional(entry.gid, (value) => writer.writeU32(value));
+	writer.writeOptional(entry.content, (value) => writer.writeString(value));
+	writer.writeOptional(entry.encoding, (value) =>
+		writer.writeVarUint(
+			BARE_ROOT_FILESYSTEM_ENTRY_ENCODING.encode(
+				value,
+				"root filesystem entry encoding",
+			),
+		),
+	);
+	writer.writeOptional(entry.target, (value) => writer.writeString(value));
+	writer.writeBool(entry.executable ?? false);
+}
+
+function decodeRootFilesystemEntry(reader: BareReader): RootFilesystemEntry {
+	const path = reader.readString("root filesystem entry path");
+	const kind = BARE_ROOT_FILESYSTEM_ENTRY_KIND.decode(
+		reader.readVarUint("root filesystem entry kind"),
+		"root filesystem entry kind",
+	);
+	const mode = reader.readOptional(() => reader.readU32());
+	const uid = reader.readOptional(() => reader.readU32());
+	const gid = reader.readOptional(() => reader.readU32());
+	const content = reader.readOptional(() =>
+		reader.readString("root filesystem entry content"),
+	);
+	const encoding = reader.readOptional(() =>
+		BARE_ROOT_FILESYSTEM_ENTRY_ENCODING.decode(
+			reader.readVarUint("root filesystem entry encoding"),
+			"root filesystem entry encoding",
+		),
+	);
+	const target = reader.readOptional(() =>
+		reader.readString("root filesystem entry target"),
+	);
+	const executable = reader.readBool();
+	return {
+		path,
+		kind,
+		...(mode !== undefined ? { mode } : {}),
+		...(uid !== undefined ? { uid } : {}),
+		...(gid !== undefined ? { gid } : {}),
+		...(content !== undefined ? { content } : {}),
+		...(encoding !== undefined ? { encoding } : {}),
+		...(target !== undefined ? { target } : {}),
+		executable,
+	};
+}
+
+function encodeWireMountDescriptor(
+	writer: BareWriter,
+	descriptor: WireMountDescriptor,
+): void {
+	writer.writeString(descriptor.guest_path);
+	writer.writeBool(descriptor.read_only);
+	writer.writeString(descriptor.plugin.id);
+	writer.writeString(
+		stringifyJsonUtf8(descriptor.plugin.config ?? {}, "mount plugin config"),
+	);
+}
+
+function encodeWireSoftwareDescriptor(
+	writer: BareWriter,
+	descriptor: WireSoftwareDescriptor,
+): void {
+	writer.writeString(descriptor.package_name);
+	writer.writeString(descriptor.root);
+}
+
+function encodeWireProjectedModuleDescriptor(
+	writer: BareWriter,
+	descriptor: WireProjectedModuleDescriptor,
+): void {
+	writer.writeString(descriptor.package_name);
+	writer.writeString(descriptor.entrypoint);
+}
+
+function encodeWirePermissionsPolicy(
+	writer: BareWriter,
+	policy: WirePermissionsPolicy,
+): void {
+	writer.writeOptional(policy.fs, (value) =>
+		encodeFilesystemPermissionScope(writer, value),
+	);
+	writer.writeOptional(policy.network, (value) =>
+		encodePatternPermissionScope(writer, value),
+	);
+	writer.writeOptional(policy.child_process, (value) =>
+		encodePatternPermissionScope(writer, value),
+	);
+	writer.writeOptional(policy.env, (value) =>
+		encodePatternPermissionScope(writer, value),
+	);
+}
+
+function encodeFilesystemPermissionScope(
+	writer: BareWriter,
+	scope: SidecarPermissionScope<SidecarFsPermissionRule>,
+): void {
+	if (typeof scope === "string") {
+		writer.writeVarUint(1);
+		writer.writeVarUint(BARE_PERMISSION_MODE.encode(scope, "permission mode"));
+		return;
+	}
+	writer.writeVarUint(2);
+	writer.writeOptional(scope.default, (value) =>
+		writer.writeVarUint(BARE_PERMISSION_MODE.encode(value, "permission mode")),
+	);
+	writer.writeList(scope.rules, (rule) => {
+		writer.writeVarUint(BARE_PERMISSION_MODE.encode(rule.mode, "permission mode"));
+		writer.writeList(rule.operations ?? [], (value) => writer.writeString(value));
+		writer.writeList(rule.paths ?? [], (value) => writer.writeString(value));
+	});
+}
+
+function encodePatternPermissionScope(
+	writer: BareWriter,
+	scope: SidecarPermissionScope<SidecarPatternPermissionRule>,
+): void {
+	if (typeof scope === "string") {
+		writer.writeVarUint(1);
+		writer.writeVarUint(BARE_PERMISSION_MODE.encode(scope, "permission mode"));
+		return;
+	}
+	writer.writeVarUint(2);
+	writer.writeOptional(scope.default, (value) =>
+		writer.writeVarUint(BARE_PERMISSION_MODE.encode(value, "permission mode")),
+	);
+	writer.writeList(scope.rules, (rule) => {
+		writer.writeVarUint(BARE_PERMISSION_MODE.encode(rule.mode, "permission mode"));
+		writer.writeList(rule.operations ?? [], (value) => writer.writeString(value));
+		writer.writeList(rule.patterns ?? [], (value) => writer.writeString(value));
+	});
+}
+
+function encodeRegisteredToolDefinition(
+	writer: BareWriter,
+	tool: {
+		description: string;
+		input_schema: unknown;
+		timeout_ms?: number;
+		examples?: Array<{ description: string; input: unknown }>;
+	},
+): void {
+	writer.writeString(tool.description);
+	writer.writeString(
+		stringifyJsonUtf8(tool.input_schema, "registered tool input schema"),
+	);
+	writer.writeOptional(tool.timeout_ms, (value) => writer.writeU64(value));
+	writer.writeList(tool.examples ?? [], (example) => {
+		writer.writeString(example.description);
+		writer.writeString(
+			stringifyJsonUtf8(example.input, "registered tool example input"),
+		);
+	});
+}
+
+function decodeGuestFilesystemStat(reader: BareReader): GuestFilesystemStat {
+	return {
+		mode: reader.readU32(),
+		size: reader.readU64("guest filesystem stat.size"),
+		blocks: reader.readU64("guest filesystem stat.blocks"),
+		dev: reader.readU64("guest filesystem stat.dev"),
+		rdev: reader.readU64("guest filesystem stat.rdev"),
+		is_directory: reader.readBool(),
+		is_symbolic_link: reader.readBool(),
+		atime_ms: reader.readU64("guest filesystem stat.atime_ms"),
+		mtime_ms: reader.readU64("guest filesystem stat.mtime_ms"),
+		ctime_ms: reader.readU64("guest filesystem stat.ctime_ms"),
+		birthtime_ms: reader.readU64("guest filesystem stat.birthtime_ms"),
+		ino: reader.readU64("guest filesystem stat.ino"),
+		nlink: reader.readU64("guest filesystem stat.nlink"),
+		uid: reader.readU32(),
+		gid: reader.readU32(),
+	};
+}
+
+function decodeProcessSnapshotEntry(
+	reader: BareReader,
+): Extract<ResponseFrame["payload"], { type: "process_snapshot" }>["processes"][number] {
+	const process_id = reader.readString("process_snapshot.process_id");
+	const pid = reader.readU32();
+	const ppid = reader.readU32();
+	const pgid = reader.readU32();
+	const sid = reader.readU32();
+	const driver = reader.readString("process_snapshot.driver");
+	const command = reader.readString("process_snapshot.command");
+	const args = reader.readList(
+		() => reader.readString("process_snapshot.args"),
+		"process_snapshot.args",
+	);
+	const cwd = reader.readString("process_snapshot.cwd");
+	const status = BARE_PROCESS_SNAPSHOT_STATUS.decode(
+		reader.readVarUint("process_snapshot.status"),
+		"process snapshot status",
+	);
+	const exit_code = reader.readOptional(() => reader.readI32());
+	return {
+		process_id,
+		pid,
+		ppid,
+		pgid,
+		sid,
+		driver,
+		command,
+		...(args.length > 0 ? { args } : {}),
+		cwd,
+		status,
+		...(exit_code !== undefined ? { exit_code } : {}),
+	};
+}
+
+function decodeSocketStateEntry(
+	reader: BareReader,
+): { process_id: string; host?: string; port?: number; path?: string } {
+	const process_id = reader.readString("socket_state.process_id");
+	const host = reader.readOptional(() => reader.readString("socket_state.host"));
+	const port = reader.readOptional(() => reader.readU16());
+	const path = reader.readOptional(() => reader.readString("socket_state.path"));
+	return {
+		process_id,
+		...(host !== undefined ? { host } : {}),
+		...(port !== undefined ? { port } : {}),
+		...(path !== undefined ? { path } : {}),
+	};
+}
+
+function decodeSignalHandlerRegistration(
+	reader: BareReader,
+): {
+	action: SidecarSignalHandlerRegistration["action"];
+	mask: number[];
+	flags: number;
+} {
+	return {
+		action: BARE_SIGNAL_DISPOSITION_ACTION.decode(
+			reader.readVarUint("signal handler action"),
+			"signal disposition action",
+		),
+		mask: reader.readList(() => reader.readU32(), "signal handler mask"),
+		flags: reader.readU32(),
+	};
 }
 
 function encodeGuestFilesystemContent(content: string | Uint8Array): {

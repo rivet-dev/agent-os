@@ -225,7 +225,7 @@
         "Typecheck passes"
       ],
       "priority": 58,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -3695,6 +3695,23 @@
       "priority": 130,
       "passes": false,
       "notes": "Found during 2026-04-11 subagent review pass 48 of commit 79411d4 (US-082). HIGH severity because US-082 is a planning/schema commit that US-083 will build on — if the codegen is not wired BEFORE US-083 starts, US-083's codec will inherit a schema file with no mechanical contract to Rust, and drift will silently accumulate. Subagent verbatim: 'Zero codegen. There is no build.rs, no bare-rs crate dependency in Cargo.toml, and no Makefile rule. The Rust protocol.rs types remain hand-written... If codegen is deferred or skipped in US-083, the Rust types and the checked-in .bare file will drift, violating the schema contract. This is a maintenance trap waiting to happen.' Also: 'The schema test passes as long as type names appear somewhere in the file; it does not validate field counts, types, or enum variants.' Also: 'README does not prescribe versioning strategy for future extensions... This ambiguity could lead to compatibility bugs downstream.' Priority 130 — not blocking US-083 from starting, but must land before US-083 ships a codec so the codec has a real schema to target."
+    },
+    {
+      "id": "US-314",
+      "title": "Expand US-083 BARE codec round-trip coverage to every ProtocolFrame variant",
+      "description": "As a maintainer of the Rust BARE codec added in US-083 / commit 33ee2ca, I want round-trip encode→decode tests for EVERY ProtocolFrame variant, not just the ~3% covered today. The current test suite round-trips ~2/31 RequestPayload variants (Authenticate, OpenSession), ~1/32 ResponsePayload variants (ProcessStarted), ~1 EventPayload (VmLifecycle), ~2/3 SidecarRequestPayload, ~1/3 SidecarResponsePayload. The substring-presence schema coverage test (`checked_in_bare_schema_covers_all_top_level_frame_payload_types()`) verifies that TYPE NAMES appear somewhere in the `.bare` schema file, but does NOT verify that the Rust codec's encoding of each variant matches what a spec-compliant BARE decoder would expect byte-for-byte. Per-variant encoding bugs — field ordering drift, forgotten optional-field handling, union-discriminant misalignment between Rust and the checked-in schema — are undetected by the current suite. A data-driven round-trip test (parameterized over every variant with canonical fixture instances) would catch these gaps and also provide a safety net for future refactors.",
+      "acceptanceCriteria": [
+        "Add a test (or test harness) that round-trips a canonical fixture for EACH of: all 5 ProtocolFrame variants, all 31 RequestPayload variants, all 32 ResponsePayload variants, all 4 EventPayload variants, all 3 SidecarRequestPayload variants, all 3 SidecarResponsePayload variants",
+        "For each variant, the test must: (a) build a frame, (b) encode via the BARE codec, (c) decode via the BARE codec, (d) assert the decoded frame equals the original, (e) encode via the JSON codec, (f) decode the JSON output via the JSON codec, (g) assert equality",
+        "Cross-codec interop test: encode every variant via BARE, then sniff-decode via `decode_detected()` and assert it matches the original — proves the dual-stack sniff correctly routes each variant",
+        "Golden bytes test for a representative subset (5-10 variants): assert the BARE encoding of a fixed fixture equals a checked-in byte string, so future codec changes that silently shift wire format get caught at `cargo test` time",
+        "The canonical fixtures should use a mix of field shapes: strings of different lengths, Option<T> both Some and None, nested structs, unions with different discriminants, JsonUtf8 fields with complex JSON values",
+        "Document the test style in `crates/sidecar/protocol/README.md` so future variant additions add a fixture automatically",
+        "`cargo test -p agent-os-sidecar --test protocol_codec` (or wherever the tests live) passes"
+      ],
+      "priority": 220,
+      "passes": false,
+      "notes": "Found during 2026-04-11 subagent review pass 49 of commit 33ee2ca (US-083). MEDIUM severity. Subagent verbatim: 'Round-trip tests cover: 2 RequestPayload variants (Authenticate, OpenSession), 1 ResponsePayload (ProcessStarted), 1 EventPayload (VmLifecycle), 2 SidecarRequestPayload (ToolInvocation), 1 SidecarResponsePayload (ToolInvocationResult). That is 1 out of 31 RequestPayload, 1 out of 32 ResponsePayload, 1 out of 3 SidecarRequestPayload tested. While the substring coverage test catches missing types, per-variant encoding bugs (field ordering, omitted optional fields, union-discriminant misalignment) would slip through.' Critical because: US-084 (TypeScript codec, upcoming) will be tested against the Rust codec's output. If the Rust codec has per-variant encoding bugs, US-084 will inherit them as 'canonical' wire format — and TypeScript consumers will then be unable to parse or emit the correct BARE bytes. Fix this before US-084 starts."
     }
   ]
 }

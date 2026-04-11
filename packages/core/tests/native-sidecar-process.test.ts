@@ -26,6 +26,191 @@ import {
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const SIDECAR_BINARY = join(REPO_ROOT, "target/debug/agent-os-sidecar");
 const SIGNAL_STATE_CONTROL_PREFIX = "__AGENT_OS_SIGNAL_STATE__:";
+const BARE_FIXTURE_PROTOCOL_HELPERS = `
+const writeVarUint = (value) => {
+	let remaining = BigInt(value);
+	const bytes = [];
+	while (remaining >= 0x80n) {
+		bytes.push(Number((remaining & 0x7fn) | 0x80n));
+		remaining >>= 7n;
+	}
+	bytes.push(Number(remaining));
+	return Buffer.from(bytes);
+};
+const encodeString = (value) => {
+	const bytes = Buffer.from(String(value), "utf8");
+	return Buffer.concat([writeVarUint(bytes.length), bytes]);
+};
+const encodeU16 = (value) => {
+	const bytes = Buffer.allocUnsafe(2);
+	bytes.writeUInt16LE(value, 0);
+	return bytes;
+};
+const encodeI64 = (value) => {
+	const bytes = Buffer.allocUnsafe(8);
+	bytes.writeBigInt64LE(BigInt(value), 0);
+	return bytes;
+};
+const encodeBool = (value) => Buffer.from([value ? 1 : 0]);
+const encodeOptional = (value, encode) =>
+	value === undefined || value === null
+		? encodeBool(false)
+		: Buffer.concat([encodeBool(true), encode(value)]);
+const encodeJsonUtf8 = (value) => encodeString(JSON.stringify(value));
+const encodeSchema = (schema) =>
+	Buffer.concat([encodeString(schema.name), encodeU16(schema.version)]);
+const encodeOwnership = (ownership) => {
+	switch (ownership.scope) {
+		case "connection":
+			return Buffer.concat([writeVarUint(1), encodeString(ownership.connection_id)]);
+		case "session":
+			return Buffer.concat([
+				writeVarUint(2),
+				encodeString(ownership.connection_id),
+				encodeString(ownership.session_id),
+			]);
+		case "vm":
+			return Buffer.concat([
+				writeVarUint(3),
+				encodeString(ownership.connection_id),
+				encodeString(ownership.session_id),
+				encodeString(ownership.vm_id),
+			]);
+		default:
+			throw new Error("unsupported ownership scope");
+	}
+};
+const encodeSidecarRequestPayload = (payload) => {
+	if (payload.type !== "js_bridge_call") {
+		throw new Error("unsupported sidecar request payload");
+	}
+	return Buffer.concat([
+		writeVarUint(3),
+		encodeString(payload.call_id),
+		encodeString(payload.mount_id),
+		encodeString(payload.operation),
+		encodeJsonUtf8(payload.args),
+	]);
+};
+const encodeProtocolFrame = (frame) => {
+	if (frame.frame_type !== "sidecar_request") {
+		throw new Error("unsupported frame type");
+	}
+	return Buffer.concat([
+		writeVarUint(4),
+		encodeSchema(frame.schema),
+		encodeI64(frame.request_id),
+		encodeOwnership(frame.ownership),
+		encodeSidecarRequestPayload(frame.payload),
+	]);
+};
+const writeFrame = (frame) => {
+	const payload = encodeProtocolFrame(frame);
+	const prefix = Buffer.allocUnsafe(4);
+	prefix.writeUInt32BE(payload.length, 0);
+	process.stdout.write(Buffer.concat([prefix, payload]));
+};
+const readVarUint = (state) => {
+	let result = 0n;
+	let shift = 0n;
+	for (;;) {
+		const byte = state.buffer[state.offset++];
+		result |= BigInt(byte & 0x7f) << shift;
+		if ((byte & 0x80) === 0) {
+			return Number(result);
+		}
+		shift += 7n;
+	}
+};
+const readString = (state) => {
+	const length = readVarUint(state);
+	const value = state.buffer.subarray(state.offset, state.offset + length).toString("utf8");
+	state.offset += length;
+	return value;
+};
+const readU16 = (state) => {
+	const value = state.buffer.readUInt16LE(state.offset);
+	state.offset += 2;
+	return value;
+};
+const readI64 = (state) => {
+	const value = Number(state.buffer.readBigInt64LE(state.offset));
+	state.offset += 8;
+	return value;
+};
+const readBool = (state) => state.buffer[state.offset++] !== 0;
+const readOptional = (state, read) => (readBool(state) ? read(state) : undefined);
+const decodeSchema = (state) => ({
+	name: readString(state),
+	version: readU16(state),
+});
+const decodeOwnership = (state) => {
+	switch (readVarUint(state)) {
+		case 1:
+			return { scope: "connection", connection_id: readString(state) };
+		case 2:
+			return {
+				scope: "session",
+				connection_id: readString(state),
+				session_id: readString(state),
+			};
+		case 3:
+			return {
+				scope: "vm",
+				connection_id: readString(state),
+				session_id: readString(state),
+				vm_id: readString(state),
+			};
+		default:
+			throw new Error("unsupported ownership scope tag");
+	}
+};
+const decodeSidecarResponsePayload = (state) => {
+	switch (readVarUint(state)) {
+		case 1:
+			return {
+				type: "tool_invocation_result",
+				invocation_id: readString(state),
+				result: readOptional(state, (inner) => JSON.parse(readString(inner))),
+				error: readOptional(state, readString),
+			};
+		case 2:
+			return {
+				type: "permission_request_result",
+				permission_id: readString(state),
+				reply: readOptional(state, readString),
+				error: readOptional(state, readString),
+			};
+		case 3:
+			return {
+				type: "js_bridge_result",
+				call_id: readString(state),
+				result: readOptional(state, (inner) => JSON.parse(readString(inner))),
+				error: readOptional(state, readString),
+			};
+		default:
+			throw new Error("unsupported sidecar response payload");
+	}
+};
+const decodeProtocolFrame = (payload) => {
+	const state = { buffer: payload, offset: 0 };
+	const tag = readVarUint(state);
+	if (tag !== 5) {
+		throw new Error("expected sidecar_response frame");
+	}
+	const frame = {
+		frame_type: "sidecar_response",
+		schema: decodeSchema(state),
+		request_id: readI64(state),
+		ownership: decodeOwnership(state),
+		payload: decodeSidecarResponsePayload(state),
+	};
+	if (state.offset !== state.buffer.length) {
+		throw new Error("unexpected trailing bytes in sidecar_response");
+	}
+	return frame;
+};
+`.trim();
 
 async function waitFor<T>(
 	read: () => Promise<T> | T,
@@ -68,7 +253,7 @@ describe("native sidecar process client", () => {
 		expect(toSidecarSignalName(0)).toBe("0");
 	});
 
-	test("dispatches sidecar_request frames to the registered handler", async () => {
+	test("dispatches BARE sidecar_request frames to the registered handler", async () => {
 		const fixtureRoot = mkdtempSync(
 			join(tmpdir(), "agent-os-sidecar-request-"),
 		);
@@ -82,17 +267,12 @@ describe("native sidecar process client", () => {
 				"const capturePath = process.argv[2];",
 				"const schema = { name: 'agent-os-sidecar', version: 1 };",
 				"let stdinBuffer = Buffer.alloc(0);",
-				"const writeFrame = (frame) => {",
-				"  const payload = Buffer.from(JSON.stringify(frame), 'utf8');",
-				"  const prefix = Buffer.allocUnsafe(4);",
-				"  prefix.writeUInt32BE(payload.length, 0);",
-				"  process.stdout.write(Buffer.concat([prefix, payload]));",
-				"};",
+				BARE_FIXTURE_PROTOCOL_HELPERS,
 				"const drain = () => {",
 				"  while (stdinBuffer.length >= 4) {",
 				"    const length = stdinBuffer.readUInt32BE(0);",
 				"    if (stdinBuffer.length < 4 + length) return;",
-				"    const frame = JSON.parse(stdinBuffer.subarray(4, 4 + length).toString('utf8'));",
+				"    const frame = decodeProtocolFrame(stdinBuffer.subarray(4, 4 + length));",
 				"    stdinBuffer = stdinBuffer.subarray(4 + length);",
 				"    if (frame.frame_type === 'sidecar_response') {",
 				"      writeFileSync(capturePath, JSON.stringify(frame));",
