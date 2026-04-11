@@ -1,0 +1,824 @@
+# Agent OS sidecar protocol schema, version 1.
+# This BARE value replaces the current JSON document which sits after the
+# existing 4-byte big-endian length prefix on native stdio transports.
+#
+# Fields typed as JsonUtf8 are an intentional compatibility boundary for
+# today's serde_json::Value payloads. During the migration window they carry
+# canonical UTF-8 JSON text until later stories replace them with richer
+# BARE-native types.
+
+type JsonUtf8 str
+
+type ProtocolSchema struct {
+  name: str
+  version: u16
+}
+
+type RequestId i64
+
+type ConnectionOwnership struct {
+  connectionId: str
+}
+
+type SessionOwnership struct {
+  connectionId: str
+  sessionId: str
+}
+
+type VmOwnership struct {
+  connectionId: str
+  sessionId: str
+  vmId: str
+}
+
+type OwnershipScope union {
+  ConnectionOwnership = 1 |
+  SessionOwnership = 2 |
+  VmOwnership = 3
+}
+
+type RequestFrame struct {
+  schema: ProtocolSchema
+  requestId: RequestId
+  ownership: OwnershipScope
+  payload: RequestPayload
+}
+
+type ResponseFrame struct {
+  schema: ProtocolSchema
+  requestId: RequestId
+  ownership: OwnershipScope
+  payload: ResponsePayload
+}
+
+type EventFrame struct {
+  schema: ProtocolSchema
+  ownership: OwnershipScope
+  payload: EventPayload
+}
+
+type SidecarRequestFrame struct {
+  schema: ProtocolSchema
+  requestId: RequestId
+  ownership: OwnershipScope
+  payload: SidecarRequestPayload
+}
+
+type SidecarResponseFrame struct {
+  schema: ProtocolSchema
+  requestId: RequestId
+  ownership: OwnershipScope
+  payload: SidecarResponsePayload
+}
+
+type ProtocolFrame union {
+  RequestFrame = 1 |
+  ResponseFrame = 2 |
+  EventFrame = 3 |
+  SidecarRequestFrame = 4 |
+  SidecarResponseFrame = 5
+}
+
+type SidecarPlacementShared struct {
+  pool: optional<str>
+}
+
+type SidecarPlacementExplicit struct {
+  sidecarId: str
+}
+
+type SidecarPlacement union {
+  SidecarPlacementShared = 1 |
+  SidecarPlacementExplicit = 2
+}
+
+type GuestRuntimeKind enum {
+  JAVA_SCRIPT = 1
+  PYTHON = 2
+  WEB_ASSEMBLY = 3
+}
+
+type DisposeReason enum {
+  REQUESTED = 1
+  CONNECTION_CLOSED = 2
+  HOST_SHUTDOWN = 3
+}
+
+type FilesystemOperation enum {
+  READ = 1
+  WRITE = 2
+  STAT = 3
+  READ_DIR = 4
+  MKDIR = 5
+  REMOVE = 6
+  RENAME = 7
+}
+
+type GuestFilesystemOperation enum {
+  READ_FILE = 1
+  WRITE_FILE = 2
+  CREATE_DIR = 3
+  MKDIR = 4
+  EXISTS = 5
+  STAT = 6
+  LSTAT = 7
+  READ_DIR = 8
+  REMOVE_FILE = 9
+  REMOVE_DIR = 10
+  RENAME = 11
+  REALPATH = 12
+  SYMLINK = 13
+  READ_LINK = 14
+  LINK = 15
+  CHMOD = 16
+  CHOWN = 17
+  UTIMES = 18
+  TRUNCATE = 19
+}
+
+type PermissionMode enum {
+  ALLOW = 1
+  ASK = 2
+  DENY = 3
+}
+
+type FsPermissionRule struct {
+  mode: PermissionMode
+  operations: list<str>
+  paths: list<str>
+}
+
+type PatternPermissionRule struct {
+  mode: PermissionMode
+  operations: list<str>
+  patterns: list<str>
+}
+
+type FsPermissionRuleSet struct {
+  default: optional<PermissionMode>
+  rules: list<FsPermissionRule>
+}
+
+type PatternPermissionRuleSet struct {
+  default: optional<PermissionMode>
+  rules: list<PatternPermissionRule>
+}
+
+type FsPermissionScope union {
+  PermissionMode = 1 |
+  FsPermissionRuleSet = 2
+}
+
+type PatternPermissionScope union {
+  PermissionMode = 1 |
+  PatternPermissionRuleSet = 2
+}
+
+type PermissionsPolicy struct {
+  fs: optional<FsPermissionScope>
+  network: optional<PatternPermissionScope>
+  childProcess: optional<PatternPermissionScope>
+  env: optional<PatternPermissionScope>
+}
+
+type RootFilesystemEntryKind enum {
+  FILE = 1
+  DIRECTORY = 2
+  SYMLINK = 3
+}
+
+type RootFilesystemMode enum {
+  EPHEMERAL = 1
+  READ_ONLY = 2
+}
+
+type RootFilesystemEntryEncoding enum {
+  UTF8 = 1
+  BASE64 = 2
+}
+
+type RootFilesystemEntry struct {
+  path: str
+  kind: RootFilesystemEntryKind
+  mode: optional<u32>
+  uid: optional<u32>
+  gid: optional<u32>
+  content: optional<str>
+  encoding: optional<RootFilesystemEntryEncoding>
+  target: optional<str>
+  executable: bool
+}
+
+type SnapshotRootFilesystemLower struct {
+  entries: list<RootFilesystemEntry>
+}
+
+type BundledBaseFilesystemLower void
+
+type RootFilesystemLowerDescriptor union {
+  SnapshotRootFilesystemLower = 1 |
+  BundledBaseFilesystemLower = 2
+}
+
+type RootFilesystemDescriptor struct {
+  mode: RootFilesystemMode
+  disableDefaultBaseLayer: bool
+  lowers: list<RootFilesystemLowerDescriptor>
+  bootstrapEntries: list<RootFilesystemEntry>
+}
+
+type MountPluginDescriptor struct {
+  id: str
+  config: JsonUtf8
+}
+
+type MountDescriptor struct {
+  guestPath: str
+  readOnly: bool
+  plugin: MountPluginDescriptor
+}
+
+type SoftwareDescriptor struct {
+  packageName: str
+  root: str
+}
+
+type ProjectedModuleDescriptor struct {
+  packageName: str
+  entrypoint: str
+}
+
+type WasmPermissionTier enum {
+  FULL = 1
+  READ_WRITE = 2
+  READ_ONLY = 3
+  ISOLATED = 4
+}
+
+type StreamChannel enum {
+  STDOUT = 1
+  STDERR = 2
+}
+
+type VmLifecycleState enum {
+  CREATING = 1
+  READY = 2
+  DISPOSING = 3
+  DISPOSED = 4
+  FAILED = 5
+}
+
+type SignalDispositionAction enum {
+  DEFAULT = 1
+  IGNORE = 2
+  USER = 3
+}
+
+type ProcessSnapshotStatus enum {
+  RUNNING = 1
+  EXITED = 2
+}
+
+type AuthenticateRequest struct {
+  clientName: str
+  authToken: str
+}
+
+type OpenSessionRequest struct {
+  placement: SidecarPlacement
+  metadata: map<str><str>
+}
+
+type CreateVmRequest struct {
+  runtime: GuestRuntimeKind
+  metadata: map<str><str>
+  rootFilesystem: RootFilesystemDescriptor
+  permissions: optional<PermissionsPolicy>
+}
+
+type CreateSessionRequest struct {
+  agentType: str
+  runtime: GuestRuntimeKind
+  adapterEntrypoint: str
+  args: list<str>
+  env: map<str><str>
+  cwd: str
+  mcpServers: list<JsonUtf8>
+}
+
+type SessionRequest struct {
+  sessionId: str
+  method: str
+  params: optional<JsonUtf8>
+}
+
+type GetSessionStateRequest struct {
+  sessionId: str
+}
+
+type CloseAgentSessionRequest struct {
+  sessionId: str
+}
+
+type DisposeVmRequest struct {
+  reason: DisposeReason
+}
+
+type BootstrapRootFilesystemRequest struct {
+  entries: list<RootFilesystemEntry>
+}
+
+type ConfigureVmRequest struct {
+  mounts: list<MountDescriptor>
+  software: list<SoftwareDescriptor>
+  permissions: optional<PermissionsPolicy>
+  moduleAccessCwd: optional<str>
+  instructions: list<str>
+  projectedModules: list<ProjectedModuleDescriptor>
+  commandPermissions: map<str><WasmPermissionTier>
+  allowedNodeBuiltins: list<str>
+  loopbackExemptPorts: list<u16>
+}
+
+type CreateLayerRequest void
+
+type SealLayerRequest struct {
+  layerId: str
+}
+
+type ImportSnapshotRequest struct {
+  entries: list<RootFilesystemEntry>
+}
+
+type ExportSnapshotRequest struct {
+  layerId: str
+}
+
+type CreateOverlayRequest struct {
+  mode: RootFilesystemMode
+  upperLayerId: optional<str>
+  lowerLayerIds: list<str>
+}
+
+type GuestFilesystemCallRequest struct {
+  operation: GuestFilesystemOperation
+  path: str
+  destinationPath: optional<str>
+  target: optional<str>
+  content: optional<str>
+  encoding: optional<RootFilesystemEntryEncoding>
+  recursive: bool
+  mode: optional<u32>
+  uid: optional<u32>
+  gid: optional<u32>
+  atimeMs: optional<u64>
+  mtimeMs: optional<u64>
+  len: optional<u64>
+}
+
+type SnapshotRootFilesystemRequest void
+
+type ExecuteRequest struct {
+  processId: str
+  command: optional<str>
+  runtime: optional<GuestRuntimeKind>
+  entrypoint: optional<str>
+  args: list<str>
+  env: map<str><str>
+  cwd: optional<str>
+  wasmPermissionTier: optional<WasmPermissionTier>
+}
+
+type WriteStdinRequest struct {
+  processId: str
+  chunk: str
+}
+
+type CloseStdinRequest struct {
+  processId: str
+}
+
+type KillProcessRequest struct {
+  processId: str
+  signal: str
+}
+
+type GetProcessSnapshotRequest void
+
+type FindListenerRequest struct {
+  host: optional<str>
+  port: optional<u16>
+  path: optional<str>
+}
+
+type FindBoundUdpRequest struct {
+  host: optional<str>
+  port: optional<u16>
+}
+
+type GetSignalStateRequest struct {
+  processId: str
+}
+
+type GetZombieTimerCountRequest void
+
+type HostFilesystemCallRequest struct {
+  operation: FilesystemOperation
+  path: str
+  payloadSizeBytes: u64
+}
+
+type PermissionRequest struct {
+  capability: str
+  reason: str
+}
+
+type PersistenceLoadRequest struct {
+  key: str
+}
+
+type PersistenceFlushRequest struct {
+  key: str
+  payloadSizeBytes: u64
+}
+
+type RegisteredToolExample struct {
+  description: str
+  input: JsonUtf8
+}
+
+type RegisteredToolDefinition struct {
+  description: str
+  inputSchema: JsonUtf8
+  timeoutMs: optional<u64>
+  examples: list<RegisteredToolExample>
+}
+
+type RegisterToolkitRequest struct {
+  name: str
+  description: str
+  tools: map<str><RegisteredToolDefinition>
+}
+
+type RequestPayload union {
+  AuthenticateRequest = 1 |
+  OpenSessionRequest = 2 |
+  CreateVmRequest = 3 |
+  CreateSessionRequest = 4 |
+  SessionRequest = 5 |
+  GetSessionStateRequest = 6 |
+  CloseAgentSessionRequest = 7 |
+  DisposeVmRequest = 8 |
+  BootstrapRootFilesystemRequest = 9 |
+  ConfigureVmRequest = 10 |
+  RegisterToolkitRequest = 11 |
+  CreateLayerRequest = 12 |
+  SealLayerRequest = 13 |
+  ImportSnapshotRequest = 14 |
+  ExportSnapshotRequest = 15 |
+  CreateOverlayRequest = 16 |
+  GuestFilesystemCallRequest = 17 |
+  SnapshotRootFilesystemRequest = 18 |
+  ExecuteRequest = 19 |
+  WriteStdinRequest = 20 |
+  CloseStdinRequest = 21 |
+  KillProcessRequest = 22 |
+  GetProcessSnapshotRequest = 23 |
+  FindListenerRequest = 24 |
+  FindBoundUdpRequest = 25 |
+  GetSignalStateRequest = 26 |
+  GetZombieTimerCountRequest = 27 |
+  HostFilesystemCallRequest = 28 |
+  PermissionRequest = 29 |
+  PersistenceLoadRequest = 30 |
+  PersistenceFlushRequest = 31
+}
+
+type ToolInvocationRequest struct {
+  invocationId: str
+  toolKey: str
+  input: JsonUtf8
+  timeoutMs: u64
+}
+
+type SidecarPermissionRequest struct {
+  sessionId: str
+  permissionId: str
+  params: JsonUtf8
+}
+
+type JsBridgeCallRequest struct {
+  callId: str
+  mountId: str
+  operation: str
+  args: JsonUtf8
+}
+
+type SidecarRequestPayload union {
+  ToolInvocationRequest = 1 |
+  SidecarPermissionRequest = 2 |
+  JsBridgeCallRequest = 3
+}
+
+type AuthenticatedResponse struct {
+  sidecarId: str
+  connectionId: str
+  maxFrameBytes: u32
+}
+
+type SessionOpenedResponse struct {
+  sessionId: str
+  ownerConnectionId: str
+}
+
+type VmCreatedResponse struct {
+  vmId: str
+}
+
+type SessionCreatedResponse struct {
+  sessionId: str
+  pid: optional<u32>
+  modes: optional<JsonUtf8>
+  configOptions: list<JsonUtf8>
+  agentCapabilities: optional<JsonUtf8>
+  agentInfo: optional<JsonUtf8>
+}
+
+type SessionRpcResponse struct {
+  sessionId: str
+  response: JsonUtf8
+}
+
+type SequencedNotification struct {
+  sequenceNumber: u64
+  notification: JsonUtf8
+}
+
+type SessionStateResponse struct {
+  sessionId: str
+  agentType: str
+  processId: str
+  pid: optional<u32>
+  closed: bool
+  modes: optional<JsonUtf8>
+  configOptions: list<JsonUtf8>
+  agentCapabilities: optional<JsonUtf8>
+  agentInfo: optional<JsonUtf8>
+  events: list<SequencedNotification>
+}
+
+type AgentSessionClosedResponse struct {
+  sessionId: str
+}
+
+type VmDisposedResponse struct {
+  vmId: str
+}
+
+type RootFilesystemBootstrappedResponse struct {
+  entryCount: u32
+}
+
+type VmConfiguredResponse struct {
+  appliedMounts: u32
+  appliedSoftware: u32
+}
+
+type ToolkitRegisteredResponse struct {
+  toolkit: str
+  commandCount: u32
+  promptMarkdown: str
+}
+
+type GuestFilesystemStat struct {
+  mode: u32
+  size: u64
+  blocks: u64
+  dev: u64
+  rdev: u64
+  isDirectory: bool
+  isSymbolicLink: bool
+  atimeMs: u64
+  mtimeMs: u64
+  ctimeMs: u64
+  birthtimeMs: u64
+  ino: u64
+  nlink: u64
+  uid: u32
+  gid: u32
+}
+
+type GuestFilesystemResultResponse struct {
+  operation: GuestFilesystemOperation
+  path: str
+  content: optional<str>
+  encoding: optional<RootFilesystemEntryEncoding>
+  entries: optional<list<str>>
+  stat: optional<GuestFilesystemStat>
+  exists: optional<bool>
+  target: optional<str>
+}
+
+type RootFilesystemSnapshotResponse struct {
+  entries: list<RootFilesystemEntry>
+}
+
+type LayerCreatedResponse struct {
+  layerId: str
+}
+
+type LayerSealedResponse struct {
+  layerId: str
+}
+
+type SnapshotImportedResponse struct {
+  layerId: str
+}
+
+type SnapshotExportedResponse struct {
+  layerId: str
+  entries: list<RootFilesystemEntry>
+}
+
+type OverlayCreatedResponse struct {
+  layerId: str
+}
+
+type ProcessStartedResponse struct {
+  processId: str
+  pid: optional<u32>
+}
+
+type StdinWrittenResponse struct {
+  processId: str
+  acceptedBytes: u64
+}
+
+type StdinClosedResponse struct {
+  processId: str
+}
+
+type ProcessKilledResponse struct {
+  processId: str
+}
+
+type ProcessSnapshotEntry struct {
+  processId: str
+  pid: u32
+  ppid: u32
+  pgid: u32
+  sid: u32
+  driver: str
+  command: str
+  args: list<str>
+  cwd: str
+  status: ProcessSnapshotStatus
+  exitCode: optional<i32>
+}
+
+type ProcessSnapshotResponse struct {
+  processes: list<ProcessSnapshotEntry>
+}
+
+type SocketStateEntry struct {
+  processId: str
+  host: optional<str>
+  port: optional<u16>
+  path: optional<str>
+}
+
+type ListenerSnapshotResponse struct {
+  listener: optional<SocketStateEntry>
+}
+
+type BoundUdpSnapshotResponse struct {
+  socket: optional<SocketStateEntry>
+}
+
+type SignalHandlerRegistration struct {
+  action: SignalDispositionAction
+  mask: list<u32>
+  flags: u32
+}
+
+type SignalStateResponse struct {
+  processId: str
+  handlers: map<u32><SignalHandlerRegistration>
+}
+
+type ZombieTimerCountResponse struct {
+  count: u64
+}
+
+type FilesystemResultResponse struct {
+  operation: FilesystemOperation
+  status: str
+  payloadSizeBytes: u64
+}
+
+type PermissionDecisionResponse struct {
+  capability: str
+  decision: PermissionMode
+}
+
+type PersistenceStateResponse struct {
+  key: str
+  found: bool
+  payloadSizeBytes: u64
+}
+
+type PersistenceFlushedResponse struct {
+  key: str
+  committedBytes: u64
+}
+
+type ToolInvocationResultResponse struct {
+  invocationId: str
+  result: optional<JsonUtf8>
+  error: optional<str>
+}
+
+type SidecarPermissionResultResponse struct {
+  permissionId: str
+  reply: optional<str>
+  error: optional<str>
+}
+
+type JsBridgeResultResponse struct {
+  callId: str
+  result: optional<JsonUtf8>
+  error: optional<str>
+}
+
+type RejectedResponse struct {
+  code: str
+  message: str
+}
+
+type ResponsePayload union {
+  AuthenticatedResponse = 1 |
+  SessionOpenedResponse = 2 |
+  VmCreatedResponse = 3 |
+  SessionCreatedResponse = 4 |
+  SessionRpcResponse = 5 |
+  SessionStateResponse = 6 |
+  AgentSessionClosedResponse = 7 |
+  VmDisposedResponse = 8 |
+  RootFilesystemBootstrappedResponse = 9 |
+  VmConfiguredResponse = 10 |
+  ToolkitRegisteredResponse = 11 |
+  LayerCreatedResponse = 12 |
+  LayerSealedResponse = 13 |
+  SnapshotImportedResponse = 14 |
+  SnapshotExportedResponse = 15 |
+  OverlayCreatedResponse = 16 |
+  GuestFilesystemResultResponse = 17 |
+  RootFilesystemSnapshotResponse = 18 |
+  ProcessStartedResponse = 19 |
+  StdinWrittenResponse = 20 |
+  StdinClosedResponse = 21 |
+  ProcessKilledResponse = 22 |
+  ProcessSnapshotResponse = 23 |
+  ListenerSnapshotResponse = 24 |
+  BoundUdpSnapshotResponse = 25 |
+  SignalStateResponse = 26 |
+  ZombieTimerCountResponse = 27 |
+  FilesystemResultResponse = 28 |
+  PermissionDecisionResponse = 29 |
+  PersistenceStateResponse = 30 |
+  PersistenceFlushedResponse = 31 |
+  RejectedResponse = 32
+}
+
+type VmLifecycleEvent struct {
+  state: VmLifecycleState
+}
+
+type ProcessOutputEvent struct {
+  processId: str
+  channel: StreamChannel
+  chunk: str
+}
+
+type ProcessExitedEvent struct {
+  processId: str
+  exitCode: i32
+}
+
+type StructuredEvent struct {
+  name: str
+  detail: map<str><str>
+}
+
+type EventPayload union {
+  VmLifecycleEvent = 1 |
+  ProcessOutputEvent = 2 |
+  ProcessExitedEvent = 3 |
+  StructuredEvent = 4
+}
+
+type SidecarResponsePayload union {
+  ToolInvocationResultResponse = 1 |
+  SidecarPermissionResultResponse = 2 |
+  JsBridgeResultResponse = 3
+}

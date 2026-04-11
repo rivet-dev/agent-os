@@ -12,6 +12,9 @@ use agent_os_sidecar::protocol::{
 use serde_json::json;
 use std::collections::BTreeMap;
 
+const BARE_SCHEMA_V1: &str = include_str!("../protocol/agent_os_sidecar_v1.bare");
+const BARE_MIGRATION_PLAN: &str = include_str!("../protocol/README.md");
+
 #[test]
 fn guest_runtime_kind_serializes_python_in_snake_case() {
     let encoded = serde_json::to_value(GuestRuntimeKind::Python).expect("serialize runtime");
@@ -442,4 +445,114 @@ fn schema_supports_configuration_and_structured_events() {
         }),
     );
     validate_frame(&ProtocolFrame::Event(event)).expect("structured event is valid");
+}
+
+#[test]
+fn checked_in_bare_schema_covers_all_top_level_frame_payload_types() {
+    for type_name in [
+        "type ProtocolFrame union {",
+        "type RequestPayload union {",
+        "type ResponsePayload union {",
+        "type EventPayload union {",
+        "type SidecarRequestPayload union {",
+        "type SidecarResponsePayload union {",
+        "AuthenticateRequest",
+        "OpenSessionRequest",
+        "CreateVmRequest",
+        "CreateSessionRequest",
+        "SessionRequest",
+        "GetSessionStateRequest",
+        "CloseAgentSessionRequest",
+        "DisposeVmRequest",
+        "BootstrapRootFilesystemRequest",
+        "ConfigureVmRequest",
+        "RegisterToolkitRequest",
+        "CreateLayerRequest",
+        "SealLayerRequest",
+        "ImportSnapshotRequest",
+        "ExportSnapshotRequest",
+        "CreateOverlayRequest",
+        "GuestFilesystemCallRequest",
+        "SnapshotRootFilesystemRequest",
+        "ExecuteRequest",
+        "WriteStdinRequest",
+        "CloseStdinRequest",
+        "KillProcessRequest",
+        "GetProcessSnapshotRequest",
+        "FindListenerRequest",
+        "FindBoundUdpRequest",
+        "GetSignalStateRequest",
+        "GetZombieTimerCountRequest",
+        "HostFilesystemCallRequest",
+        "PermissionRequest",
+        "PersistenceLoadRequest",
+        "PersistenceFlushRequest",
+        "AuthenticatedResponse",
+        "SessionOpenedResponse",
+        "VmCreatedResponse",
+        "SessionCreatedResponse",
+        "SessionRpcResponse",
+        "SessionStateResponse",
+        "AgentSessionClosedResponse",
+        "VmDisposedResponse",
+        "RootFilesystemBootstrappedResponse",
+        "VmConfiguredResponse",
+        "ToolkitRegisteredResponse",
+        "LayerCreatedResponse",
+        "LayerSealedResponse",
+        "SnapshotImportedResponse",
+        "SnapshotExportedResponse",
+        "OverlayCreatedResponse",
+        "GuestFilesystemResultResponse",
+        "RootFilesystemSnapshotResponse",
+        "ProcessStartedResponse",
+        "StdinWrittenResponse",
+        "StdinClosedResponse",
+        "ProcessKilledResponse",
+        "ProcessSnapshotResponse",
+        "ListenerSnapshotResponse",
+        "BoundUdpSnapshotResponse",
+        "SignalStateResponse",
+        "ZombieTimerCountResponse",
+        "FilesystemResultResponse",
+        "PermissionDecisionResponse",
+        "PersistenceStateResponse",
+        "PersistenceFlushedResponse",
+        "RejectedResponse",
+        "VmLifecycleEvent",
+        "ProcessOutputEvent",
+        "ProcessExitedEvent",
+        "StructuredEvent",
+        "ToolInvocationRequest",
+        "SidecarPermissionRequest",
+        "JsBridgeCallRequest",
+        "ToolInvocationResultResponse",
+        "SidecarPermissionResultResponse",
+        "JsBridgeResultResponse",
+    ] {
+        assert!(
+            BARE_SCHEMA_V1.contains(type_name),
+            "schema is missing `{type_name}`"
+        );
+    }
+}
+
+#[test]
+fn checked_in_bare_migration_plan_documents_dual_stack_constraints() {
+    for needle in [
+        "4-byte big-endian length prefix",
+        "ProtocolSchema.version",
+        "request_id",
+        "positive",
+        "negative",
+        "JsonUtf8",
+        "first successfully decoded frame",
+        "JSON frames begin with `{`",
+        "delete JSON encoding",
+    ] {
+        assert!(
+            BARE_MIGRATION_PLAN.contains(needle),
+            "migration plan is missing `{needle}`"
+        );
+    }
 }

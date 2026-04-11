@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- Sidecar wire-protocol migrations should keep the native 4-byte big-endian frame prefix stable and use a temporary `JsonUtf8`/JSON-text boundary for existing `serde_json::Value` fields first; change payload codecs separately from outer framing so Rust and TypeScript can roll forward independently.
 - In `crates/execution/src/javascript.rs`, pnpm generic hoist paths like `.pnpm/node_modules/<pkg>` should stay behind package-specific virtual-store resolution for symlinked package entrypoints; otherwise guest ESM imports can silently pick an older hoisted CJS copy and lose named exports.
 - Sidecar shadow-root reconciliation should prefer active-process shadow paths and only fall back to the VM cwd shadow root when the guest path is still absent in the kernel; native-sidecar JS bridge tests that cover mounted host files need to answer the bridge's `exists`/`stat`/`lstat` probes consistently with the real host file state.
 - In `crates/execution`, keep any real-host Node helpers isolated to host-only modules used by benchmarks or import-cache tests; shared guest runtime helpers like signal metadata should live in neutral modules that JS/WASM/Python can use without depending on host launch scaffolding.
@@ -204,4 +205,14 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Direct guest filesystem API mutations on the native sidecar path must keep the VM shadow root consistent for deletes and renames, not just writes and mkdirs, or later shadow reconciliation can resurrect stale paths into the kernel.
   - The Claude investigation suite is asserting deterministic failure, not one exact stderr string; projected native vendor binaries currently fail through the WASM warmup path with an `ERR_AGENT_OS_NODE_SYNC_RPC`-prefixed compile error, which is still a valid regression signal for “projected ELF did not execute”.
   - Truthful acceptance for this story is `pnpm --dir packages/core exec vitest run tests/native-sidecar-process.test.ts tests/claude-code-investigate.test.ts tests/opencode-headless.test.ts --reporter=verbose` plus `pnpm --dir packages/core check-types`.
+---
+## [2026-04-11 04:42:34 PDT] - US-082
+- Added a checked-in BARE schema at `crates/sidecar/protocol/agent_os_sidecar_v1.bare` that covers the current request, response, event, sidecar-request, and sidecar-response frame surface, with `JsonUtf8` placeholders for the existing dynamic JSON-valued fields.
+- Documented the sidecar wire compatibility plan in `crates/sidecar/protocol/README.md`, including the preserved 4-byte big-endian length prefix, dual-stack JSON/BARE rollout, codec pinning after the first decoded frame, and normalization rules for defaulted collection fields.
+- Added protocol tests that fail if the checked-in schema or migration plan stops covering the current top-level frame payload types and compatibility constraints, and recorded the reusable protocol-migration rule in `crates/CLAUDE.md`.
+- Files changed: `crates/CLAUDE.md`, `crates/sidecar/protocol/README.md`, `crates/sidecar/protocol/agent_os_sidecar_v1.bare`, `crates/sidecar/tests/protocol.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The safest BARE migration path is to keep the native 4-byte big-endian frame prefix unchanged and swap only the payload codec first; that preserves the existing stdio/native-process framing contract while Rust and TypeScript migrate.
+  - BARE v1 cannot model recursive arbitrary JSON cleanly, so current `serde_json::Value` fields need an explicit UTF-8 JSON text boundary (`JsonUtf8`) until later stories replace them with typed BARE payloads.
+  - Truthful acceptance for this story is `cargo test -p agent-os-sidecar --test protocol -- --test-threads=1` plus root `pnpm check-types`.
 ---
