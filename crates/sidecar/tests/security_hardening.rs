@@ -6,6 +6,7 @@ use agent_os_sidecar::protocol::{
 use agent_os_sidecar::{NativeSidecar, NativeSidecarConfig};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -17,19 +18,25 @@ use support::{
 
 const ARG_PREFIX: &str = "ARG=";
 const INVOCATION_BREAK: &str = "--END--";
+const DEFAULT_GUEST_PATH_ENV: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const DEFAULT_GUEST_HOME: &str = "/home/user";
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<String>,
 }
 
 impl EnvVarGuard {
-    fn set(key: &'static str, value: &Path) -> Self {
+    fn set_value(key: &'static str, value: impl AsRef<OsStr>) -> Self {
         let previous = std::env::var(key).ok();
         // SAFETY: These sidecar integration tests mutate process env within a single test scope.
         unsafe {
             std::env::set_var(key, value);
         }
         Self { key, previous }
+    }
+
+    fn set_path(key: &'static str, value: &Path) -> Self {
+        Self::set_value(key, value.as_os_str())
     }
 }
 
@@ -123,10 +130,12 @@ fn sidecar_rejects_oversized_request_frames_before_dispatch() {
 }
 
 #[test]
-#[ignore = "V8 sidecar stdout delivery for this hardening case is flaky; execution-layer tests cover the V8 guest path"]
 fn guest_execution_clears_host_env_and_blocks_escape_paths() {
     assert_node_available();
 
+    let _host_path = EnvVarGuard::set_value("PATH", "/host/sbin:/host/bin");
+    let _host_home = EnvVarGuard::set_value("HOME", "/host/home");
+    let _host_internal = EnvVarGuard::set_value("AGENT_OS_ALLOWED", "host-internal");
     let mut sidecar = support::new_sidecar("security-hardening");
     let cwd = temp_dir("security-hardening-cwd");
     let entry = cwd.join("entry.cjs");
@@ -137,6 +146,7 @@ fn guest_execution_clears_host_env_and_blocks_escape_paths() {
 const result = {
   path: process.env.PATH ?? null,
   home: process.env.HOME ?? null,
+  pwd: process.env.PWD ?? null,
   marker: process.env.VISIBLE_MARKER ?? null,
   internalMarker: process.env.AGENT_OS_ALLOWED ?? null,
   guestPathMappings: process.env.AGENT_OS_GUEST_PATH_MAPPINGS ?? null,
@@ -190,14 +200,26 @@ console.log(JSON.stringify(result));
     assert!(stderr.is_empty(), "unexpected security stderr: {stderr}");
 
     let parsed: Value = serde_json::from_str(_stdout.trim()).expect("parse security JSON");
-    assert_eq!(parsed["path"], Value::Null);
-    assert_eq!(parsed["home"], Value::Null);
+    assert_eq!(
+        parsed["path"],
+        Value::String(String::from(DEFAULT_GUEST_PATH_ENV))
+    );
+    assert_eq!(
+        parsed["home"],
+        Value::String(String::from(DEFAULT_GUEST_HOME))
+    );
+    assert_eq!(parsed["pwd"], Value::String(String::from("/")));
     assert_eq!(parsed["marker"], Value::String(String::from("present")));
     assert_eq!(parsed["internalMarker"], Value::Null);
     assert_eq!(parsed["guestPathMappings"], Value::Null);
     assert_eq!(parsed["importCachePath"], Value::Null);
     assert_eq!(parsed["hasInternalMarker"], Value::Bool(false));
     assert_eq!(parsed["keys"], Value::Array(Vec::new()));
+    assert_ne!(
+        parsed["path"],
+        Value::String(String::from("/host/sbin:/host/bin"))
+    );
+    assert_ne!(parsed["home"], Value::String(String::from("/host/home")));
     assert_eq!(
         parsed["binding"]["code"],
         Value::String(String::from("ERR_ACCESS_DENIED"))
@@ -347,7 +369,7 @@ fn execute_ignores_host_node_binary_override_for_javascript_runtime() {
     let fake_node_path = root.join("fake-node.sh");
     let log_path = root.join("node-args.log");
     write_fake_node_binary(&fake_node_path, &log_path);
-    let _node_binary = EnvVarGuard::set("AGENT_OS_NODE_BINARY", &fake_node_path);
+    let _node_binary = EnvVarGuard::set_path("AGENT_OS_NODE_BINARY", &fake_node_path);
 
     let mut sidecar = support::new_sidecar("execute-cwd-permission-root");
     let cwd = root.join("workspace");

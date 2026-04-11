@@ -25,6 +25,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Kernel guest identity should live on `ProcessContext.identity` / `ProcessInfo.identity`, while passwd/group string formatting stays centralized in `crates/kernel/src/user.rs`; do not infer uid/gid/user state back out of env vars or `/etc/*` snapshots.
 - Kernel `fcntl` support should keep `O_APPEND` on the shared `FileDescription` while storing `O_NONBLOCK` and `FD_CLOEXEC` on `FdEntry`, so append mode stays shared across dup/fork without losing descriptor-local flag behavior.
 - Guest runtime identity defaults must keep `HOME` tied to the kernel user's homedir and `PWD` tied to the execution cwd; JS, WASM, and Python all need to consume the same prepared env so guest-visible identity probes do not fall back to host or runtime defaults.
+- Sidecar guest env-hardening coverage should assert that host `PATH`/`HOME` overrides are replaced with kernel-owned guest defaults while internal `AGENT_OS_*` / `NODE_SYNC_RPC_*` control vars remain hidden from guest-visible env.
 - Root filesystem bootstrap entries must suppress kernel-owned pseudo-filesystem paths under `/dev`, `/proc`, and `/sys`; those directories stay reserved for synthetic kernel state and should not be snapshotted from the writable upper.
 - Sidecar/V8 networking integration tests should prefer VM-local loopback peers inside the guest (for example a guest `net` server/client pair or paired `dgram` sockets) instead of host loopback fixtures plus `LOOPBACK_EXEMPT_PORTS_ENV`, so the test actually exercises kernel-owned socket routing.
 - Sidecar JS execution tests that manually register an `ActiveProcess` must set `.with_host_cwd(cwd.to_path_buf())` (or use the shared test helpers that do) before draining execution events; otherwise shadow-root sync defaults to `/` and unrelated host paths can leak into reconciliation.
@@ -110,4 +111,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Host-Node comparison code can stay for benchmarks or import-cache tests, but it should live behind a dedicated host-only helper module instead of being shared with guest runtime logic.
   - Signal registration types are shared runtime contract data between execution and sidecar; keep them in a neutral module so cleanup of launch scaffolding does not ripple into protocol users.
   - Focused migration verification for this cleanup is `cargo test -p agent-os-execution --test javascript_v8 -- --test-threads=1`, `cargo test -p agent-os-sidecar --test python -- --test-threads=1`, `cargo test -p agent-os-execution --test wasm -- --test-threads=1`, and root `pnpm check-types`.
+---
+## [2026-04-10 17:45:32 PDT] - US-072
+- Unignored the sidecar guest env hardening test and updated it to assert the current secure guest contract: host `PATH`/`HOME` overrides are scrubbed, kernel-owned guest defaults remain visible, and internal `AGENT_OS_*` control vars stay hidden from `process.env`.
+- Added an explicit host-env poisoning setup in the test so the sidecar suite now proves the native V8 path clears host escape surface without relying on execution-crate-only coverage.
+- Files changed: `crates/AGENTS.md`, `crates/sidecar/src/service.rs`, `crates/sidecar/tests/security_hardening.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The guest env hardening contract is not “`PATH` and `HOME` are absent”; it is “host overrides are replaced by kernel-owned guest identity defaults while internal control vars stay hidden.”
+  - For this story, `cargo test -p agent-os-sidecar --test security_hardening -- --test-threads=1` plus root `pnpm check-types` is the truthful acceptance path.
+  - A focused host-env poisoning setup in the sidecar integration test is enough to verify the native V8 path directly; there is no need to keep this case ignored in favor of execution-layer coverage.
 ---

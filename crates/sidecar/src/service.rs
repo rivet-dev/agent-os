@@ -2553,7 +2553,8 @@ where
                     })?;
                 let terminal = self.require_visible_acp_terminal(session_id, terminal_id)?;
                 if terminal.exit_code.is_none() {
-                    self.kill_process_internal(&vm_id, &terminal.process_id, "SIGTERM")?;
+                    let process_id = terminal.process_id.clone();
+                    self.kill_process_internal(&vm_id, &process_id, "SIGTERM")?;
                 }
                 Ok(Some(Value::Null))
             }
