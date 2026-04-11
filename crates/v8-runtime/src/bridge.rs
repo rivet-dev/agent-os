@@ -454,6 +454,12 @@ fn sync_bridge_callback(
         Err(err_msg) => {
             let msg = v8::String::new(scope, &err_msg).unwrap();
             let exc = v8::Exception::error(scope, msg);
+            if let Some(code) = bridge_error_code(&err_msg) {
+                let exc_object = exc.to_object(scope).unwrap();
+                let code_key = v8::String::new(scope, "code").unwrap();
+                let code_value = v8::String::new(scope, code).unwrap();
+                let _ = exc_object.set(scope, code_key.into(), code_value.into());
+            }
             scope.throw_exception(exc);
         }
     }
@@ -741,12 +747,11 @@ pub fn resolve_pending_promise(
 }
 
 fn bridge_error_code(message: &str) -> Option<&str> {
-    let (code, _) = message.split_once(':')?;
-    if code.len() < 2 || !code.starts_with('E') {
-        return None;
-    }
-    code[1..]
-        .bytes()
-        .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-        .then_some(code)
+    message.split(':').map(str::trim).find(|code| {
+        code.len() >= 2
+            && code.starts_with('E')
+            && code[1..]
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    })
 }

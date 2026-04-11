@@ -26,21 +26,20 @@ use crate::service::{
 use crate::state::{
     ActiveCipherSession, ActiveDhSession, ActiveDiffieHellmanSession, ActiveEcdhSession,
     ActiveExecution, ActiveExecutionEvent, ActiveHttp2Server, ActiveHttp2Session,
-    ActiveHttp2Stream, ActiveHttpServer, ActiveProcess, ActiveSqliteDatabase,
-    ActiveMappedHostFd, ActiveSqliteStatement, ActiveTcpListener, ActiveTcpSocket,
-    ActiveTlsState, ActiveTlsStream, ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket,
-    BridgeError, Http2BridgeEvent, Http2RuntimeSnapshot, Http2SessionCommand,
-    Http2SessionSnapshot, Http2SocketSnapshot, Http2StreamDirection, JavascriptSocketFamily,
-    JavascriptSocketPathContext, JavascriptTcpListenerEvent, JavascriptTcpSocketEvent,
-    JavascriptTlsBridgeOptions, JavascriptTlsClientHello, JavascriptTlsDataValue,
-    JavascriptTlsMaterial, JavascriptUdpFamily, JavascriptUdpSocketEvent,
-    JavascriptUnixListenerEvent, MAPPED_HOST_FD_START, NetworkResourceCounts, PendingTcpSocket,
+    ActiveHttp2Stream, ActiveHttpServer, ActiveMappedHostFd, ActiveProcess, ActiveSqliteDatabase,
+    ActiveSqliteStatement, ActiveTcpListener, ActiveTcpSocket, ActiveTlsState, ActiveTlsStream,
+    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError, Http2BridgeEvent,
+    Http2RuntimeSnapshot, Http2SessionCommand, Http2SessionSnapshot, Http2SocketSnapshot,
+    Http2StreamDirection, JavascriptSocketFamily, JavascriptSocketPathContext,
+    JavascriptTcpListenerEvent, JavascriptTcpSocketEvent, JavascriptTlsBridgeOptions,
+    JavascriptTlsClientHello, JavascriptTlsDataValue, JavascriptTlsMaterial, JavascriptUdpFamily,
+    JavascriptUdpSocketEvent, JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket,
     PendingUnixSocket, ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution,
     ResolvedTcpConnectAddr, SharedBridge, SharedSidecarRequestClient, SidecarKernel,
     SocketQueryKind, ToolExecution, VmDnsConfig, VmListenPolicy, VmState,
     DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
-    JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, PYTHON_COMMAND, TOOL_DRIVER_NAME,
-    VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
+    JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, MAPPED_HOST_FD_START, PYTHON_COMMAND,
+    TOOL_DRIVER_NAME, VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
     VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
 };
 use crate::tools::{
@@ -127,7 +126,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -505,6 +504,255 @@ fn is_broken_pipe_error(error: &SidecarError) -> bool {
     matches!(error, SidecarError::Execution(message) if message.contains("Broken pipe") || message.contains("os error 32") || message.contains("EPIPE"))
 }
 
+fn loopback_tls_transport_registry(
+) -> &'static Mutex<BTreeMap<String, Weak<crate::state::LoopbackTlsTransportPair>>> {
+    static REGISTRY: OnceLock<
+        Mutex<BTreeMap<String, Weak<crate::state::LoopbackTlsTransportPair>>>,
+    > = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn loopback_tls_transport_key(
+    vm_id: &str,
+    socket_id: SocketId,
+    peer_socket_id: SocketId,
+) -> String {
+    let (lower, higher) = if socket_id <= peer_socket_id {
+        (socket_id, peer_socket_id)
+    } else {
+        (peer_socket_id, socket_id)
+    };
+    format!("{vm_id}:{lower}:{higher}")
+}
+
+fn loopback_tls_endpoint(
+    vm_id: &str,
+    socket_id: SocketId,
+    peer_socket_id: SocketId,
+) -> Result<crate::state::LoopbackTlsEndpoint, SidecarError> {
+    let key = loopback_tls_transport_key(vm_id, socket_id, peer_socket_id);
+    let registry = loopback_tls_transport_registry();
+    let mut transports = registry.lock().map_err(|_| {
+        SidecarError::InvalidState(String::from(
+            "loopback TLS transport registry lock poisoned",
+        ))
+    })?;
+    transports.retain(|_, pair| pair.strong_count() > 0);
+    let pair = transports
+        .get(&key)
+        .and_then(Weak::upgrade)
+        .unwrap_or_else(|| {
+            let pair = Arc::new(crate::state::LoopbackTlsTransportPair {
+                state: Mutex::new(crate::state::LoopbackTlsTransportPairState::default()),
+                ready: std::sync::Condvar::new(),
+            });
+            transports.insert(key, Arc::downgrade(&pair));
+            pair
+        });
+    Ok(crate::state::LoopbackTlsEndpoint {
+        pair,
+        is_lower_socket: socket_id <= peer_socket_id,
+    })
+}
+
+impl crate::state::LoopbackTlsEndpoint {
+    fn shutdown_write(&self) -> Result<(), SidecarError> {
+        let mut state = self.pair.state.lock().map_err(|_| {
+            SidecarError::InvalidState(String::from("loopback TLS transport lock poisoned"))
+        })?;
+        if self.is_lower_socket {
+            state.lower_write_closed = true;
+        } else {
+            state.higher_write_closed = true;
+        }
+        self.pair.ready.notify_all();
+        Ok(())
+    }
+
+    fn close_endpoint(&self) -> Result<(), SidecarError> {
+        let mut state = self.pair.state.lock().map_err(|_| {
+            SidecarError::InvalidState(String::from("loopback TLS transport lock poisoned"))
+        })?;
+        if self.is_lower_socket {
+            state.lower_write_closed = true;
+            state.lower_closed = true;
+        } else {
+            state.higher_write_closed = true;
+            state.higher_closed = true;
+        }
+        self.pair.ready.notify_all();
+        Ok(())
+    }
+}
+
+fn parse_tls_client_hello_from_bytes(
+    buffer: &[u8],
+) -> Result<Option<JavascriptTlsClientHello>, SidecarError> {
+    if buffer.is_empty() {
+        return Ok(None);
+    }
+
+    let mut acceptor = rustls::server::Acceptor::default();
+    let mut cursor = Cursor::new(buffer);
+    acceptor.read_tls(&mut cursor).map_err(sidecar_net_error)?;
+    let Some(accepted) = acceptor.accept().map_err(|(error, _)| {
+        SidecarError::Execution(format!("failed to parse TLS client hello: {error}"))
+    })?
+    else {
+        return Ok(None);
+    };
+    let client_hello = accepted.client_hello();
+    let alpn_protocols = client_hello.alpn().map(|protocols| {
+        protocols
+            .filter_map(|protocol| String::from_utf8(protocol.to_vec()).ok())
+            .collect::<Vec<_>>()
+    });
+    Ok(Some(JavascriptTlsClientHello {
+        servername: client_hello.server_name().map(str::to_owned),
+        alpn_protocols,
+    }))
+}
+
+fn peek_loopback_tls_client_hello(
+    vm_id: &str,
+    socket_id: SocketId,
+    peer_socket_id: SocketId,
+) -> Result<Option<JavascriptTlsClientHello>, SidecarError> {
+    let key = loopback_tls_transport_key(vm_id, socket_id, peer_socket_id);
+    let registry = loopback_tls_transport_registry();
+    let pair = registry
+        .lock()
+        .map_err(|_| {
+            SidecarError::InvalidState(String::from(
+                "loopback TLS transport registry lock poisoned",
+            ))
+        })?
+        .get(&key)
+        .and_then(Weak::upgrade);
+    let Some(pair) = pair else {
+        return Ok(None);
+    };
+    let is_lower_socket = socket_id <= peer_socket_id;
+    let state = pair.state.lock().map_err(|_| {
+        SidecarError::InvalidState(String::from("loopback TLS transport lock poisoned"))
+    })?;
+    let buffered = if is_lower_socket {
+        state.higher_to_lower.iter().copied().collect::<Vec<_>>()
+    } else {
+        state.lower_to_higher.iter().copied().collect::<Vec<_>>()
+    };
+    drop(state);
+    parse_tls_client_hello_from_bytes(&buffered)
+}
+
+fn wait_for_loopback_peer_socket_id(
+    kernel: &SidecarKernel,
+    socket_id: SocketId,
+) -> Option<SocketId> {
+    for _ in 0..50 {
+        if let Some(peer_socket_id) = kernel
+            .socket_get(socket_id)
+            .and_then(|record| record.peer_socket_id())
+        {
+            return Some(peer_socket_id);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    None
+}
+
+impl Drop for crate::state::LoopbackTlsEndpoint {
+    fn drop(&mut self) {
+        let _ = self.close_endpoint();
+    }
+}
+
+impl Read for crate::state::LoopbackTlsEndpoint {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let mut state = self
+            .pair
+            .state
+            .lock()
+            .map_err(|_| std::io::Error::other("loopback TLS transport lock poisoned"))?;
+
+        loop {
+            let (peer_write_closed, peer_closed) = if self.is_lower_socket {
+                (state.higher_write_closed, state.higher_closed)
+            } else {
+                (state.lower_write_closed, state.lower_closed)
+            };
+
+            let incoming = if self.is_lower_socket {
+                &mut state.higher_to_lower
+            } else {
+                &mut state.lower_to_higher
+            };
+
+            if !incoming.is_empty() {
+                let count = buffer.len().min(incoming.len());
+                for slot in buffer.iter_mut().take(count) {
+                    *slot = incoming
+                        .pop_front()
+                        .expect("loopback TLS transport should contain buffered bytes");
+                }
+                return Ok(count);
+            }
+
+            if peer_write_closed || peer_closed {
+                return Ok(0);
+            }
+
+            let (next_state, wait_result) = self
+                .pair
+                .ready
+                .wait_timeout(state, TCP_SOCKET_POLL_TIMEOUT)
+                .map_err(|_| std::io::Error::other("loopback TLS transport lock poisoned"))?;
+            state = next_state;
+            if wait_result.timed_out() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "loopback TLS transport read timed out",
+                ));
+            }
+        }
+    }
+}
+
+impl Write for crate::state::LoopbackTlsEndpoint {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let mut state = self
+            .pair
+            .state
+            .lock()
+            .map_err(|_| std::io::Error::other("loopback TLS transport lock poisoned"))?;
+
+        let peer_closed = if self.is_lower_socket {
+            state.higher_closed
+        } else {
+            state.lower_closed
+        };
+        let outgoing = if self.is_lower_socket {
+            &mut state.lower_to_higher
+        } else {
+            &mut state.higher_to_lower
+        };
+        if peer_closed {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "loopback TLS peer is closed",
+            ));
+        }
+
+        outgoing.extend(buffer.iter().copied());
+        self.pair.ready.notify_all();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 // TCP types moved to crate::state
 
 impl ActiveTcpSocket {
@@ -625,11 +873,12 @@ impl ActiveTcpSocket {
         guest_local_addr: SocketAddr,
         guest_remote_addr: SocketAddr,
     ) -> Self {
+        let (sender, events) = mpsc::channel();
         Self {
             stream: None,
             pending_read_stream: None,
-            events: None,
-            event_sender: None,
+            events: Some(events),
+            event_sender: Some(sender),
             kernel_socket_id: Some(socket_id),
             no_delay: false,
             keep_alive: false,
@@ -652,6 +901,22 @@ impl ActiveTcpSocket {
         kernel_pid: u32,
         wait: Duration,
     ) -> Result<Option<JavascriptTcpSocketEvent>, SidecarError> {
+        if self.tls_mode.load(Ordering::SeqCst) {
+            self.ensure_tcp_reader()?;
+            return match self
+                .events
+                .as_ref()
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from("TCP socket event channel missing"))
+                })?
+                .recv_timeout(wait)
+            {
+                Ok(event) => Ok(Some(event)),
+                Err(RecvTimeoutError::Timeout) => Ok(None),
+                Err(RecvTimeoutError::Disconnected) => Ok(None),
+            };
+        }
+
         if let Some(socket_id) = self.kernel_socket_id {
             let result = kernel
                 .poll_targets(
@@ -809,34 +1074,50 @@ impl ActiveTcpSocket {
         Ok(())
     }
 
-    fn upgrade_tls(&self, options: JavascriptTlsBridgeOptions) -> Result<(), SidecarError> {
-        if self.kernel_socket_id.is_some() {
-            return Err(SidecarError::Execution(String::from(
-                "ERR_NOT_IMPLEMENTED: TLS upgrade is unavailable for kernel-backed loopback sockets",
-            )));
-        }
+    fn upgrade_tls(
+        &self,
+        vm_id: &str,
+        kernel: &SidecarKernel,
+        options: JavascriptTlsBridgeOptions,
+    ) -> Result<(), SidecarError> {
         if self.tls_mode.load(Ordering::SeqCst) {
             return Ok(());
         }
 
         let client_hello = if options.is_server {
-            self.peek_tls_client_hello()?
+            self.peek_tls_client_hello(vm_id, kernel)?
         } else {
             None
         };
 
-        self.pending_read_stream
-            .as_ref()
-            .ok_or_else(|| {
-                SidecarError::InvalidState(String::from("TCP socket reader handle missing"))
-            })?
-            .lock()
-            .map_err(|_| {
-                SidecarError::InvalidState(String::from("TCP socket reader lock poisoned"))
-            })?
-            .take();
-
-        let tls_stream = {
+        let tls_stream = if let Some(socket_id) = self.kernel_socket_id {
+            let peer_socket_id = wait_for_loopback_peer_socket_id(kernel, socket_id)
+                .ok_or_else(|| {
+                    SidecarError::Execution(format!(
+                        "ERR_NOT_IMPLEMENTED: kernel-backed loopback socket {socket_id} has no peer for TLS upgrade"
+                    ))
+                })?;
+            let endpoint = loopback_tls_endpoint(vm_id, socket_id, peer_socket_id)?;
+            if options.is_server {
+                ActiveTlsStream::LoopbackServer(build_server_loopback_tls_stream(
+                    endpoint, &options,
+                )?)
+            } else {
+                ActiveTlsStream::LoopbackClient(build_client_loopback_tls_stream(
+                    endpoint, &options,
+                )?)
+            }
+        } else {
+            self.pending_read_stream
+                .as_ref()
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from("TCP socket reader handle missing"))
+                })?
+                .lock()
+                .map_err(|_| {
+                    SidecarError::InvalidState(String::from("TCP socket reader lock poisoned"))
+                })?
+                .take();
             let stream = self
                 .stream
                 .as_ref()
@@ -895,10 +1176,21 @@ impl ActiveTcpSocket {
         Ok(())
     }
 
-    fn peek_tls_client_hello(&self) -> Result<Option<JavascriptTlsClientHello>, SidecarError> {
-        if self.kernel_socket_id.is_some() {
-            return Ok(None);
+    fn peek_tls_client_hello(
+        &self,
+        vm_id: &str,
+        kernel: &SidecarKernel,
+    ) -> Result<Option<JavascriptTlsClientHello>, SidecarError> {
+        if let Some(socket_id) = self.kernel_socket_id {
+            let Some(peer_socket_id) = kernel
+                .socket_get(socket_id)
+                .and_then(|record| record.peer_socket_id())
+            else {
+                return Ok(None);
+            };
+            return peek_loopback_tls_client_hello(vm_id, socket_id, peer_socket_id);
         }
+
         let stream = self
             .stream
             .as_ref()
@@ -919,29 +1211,14 @@ impl ActiveTcpSocket {
             }
             Err(error) => return Err(sidecar_net_error(error)),
         };
-
-        let mut acceptor = rustls::server::Acceptor::default();
-        let mut cursor = Cursor::new(&buffer[..bytes]);
-        acceptor.read_tls(&mut cursor).map_err(sidecar_net_error)?;
-        let Some(accepted) = acceptor.accept().map_err(|(error, _)| {
-            SidecarError::Execution(format!("failed to parse TLS client hello: {error}"))
-        })?
-        else {
-            return Ok(None);
-        };
-        let client_hello = accepted.client_hello();
-        let alpn_protocols = client_hello.alpn().map(|protocols| {
-            protocols
-                .filter_map(|protocol| String::from_utf8(protocol.to_vec()).ok())
-                .collect::<Vec<_>>()
-        });
-        Ok(Some(JavascriptTlsClientHello {
-            servername: client_hello.server_name().map(str::to_owned),
-            alpn_protocols,
-        }))
+        parse_tls_client_hello_from_bytes(&buffer[..bytes])
     }
 
-    fn tls_client_hello_json(&self) -> Result<Value, SidecarError> {
+    fn tls_client_hello_json(
+        &self,
+        vm_id: &str,
+        kernel: &SidecarKernel,
+    ) -> Result<Value, SidecarError> {
         if let Some(client_hello) = self
             .tls_state
             .lock()
@@ -960,13 +1237,13 @@ impl ActiveTcpSocket {
         }
 
         javascript_net_json_string(
-            serde_json::to_value(self.peek_tls_client_hello()?.unwrap_or_default()).map_err(
-                |error| {
-                    SidecarError::InvalidState(format!(
-                        "failed to serialize TLS client hello: {error}"
-                    ))
-                },
-            )?,
+            serde_json::to_value(
+                self.peek_tls_client_hello(vm_id, kernel)?
+                    .unwrap_or_default(),
+            )
+            .map_err(|error| {
+                SidecarError::InvalidState(format!("failed to serialize TLS client hello: {error}"))
+            })?,
             "net.socket_get_tls_client_hello",
         )
     }
@@ -1033,11 +1310,6 @@ impl ActiveTcpSocket {
         kernel_pid: u32,
         contents: &[u8],
     ) -> Result<usize, SidecarError> {
-        if let Some(socket_id) = self.kernel_socket_id {
-            return kernel
-                .socket_write(EXECUTION_DRIVER_NAME, kernel_pid, socket_id, contents)
-                .map_err(kernel_error);
-        }
         if self.tls_mode.load(Ordering::SeqCst) {
             let mut tls_stream = self.tls_stream.lock().map_err(|_| {
                 SidecarError::InvalidState(String::from("TLS stream lock poisoned"))
@@ -1047,6 +1319,11 @@ impl ActiveTcpSocket {
             })?;
             stream.write_all(contents)?;
             return Ok(contents.len());
+        }
+        if let Some(socket_id) = self.kernel_socket_id {
+            return kernel
+                .socket_write(EXECUTION_DRIVER_NAME, kernel_pid, socket_id, contents)
+                .map_err(kernel_error);
         }
 
         let mut stream = self
@@ -1064,6 +1341,21 @@ impl ActiveTcpSocket {
         kernel: &mut SidecarKernel,
         kernel_pid: u32,
     ) -> Result<(), SidecarError> {
+        if self.tls_mode.load(Ordering::SeqCst) {
+            if let Some(stream) = self
+                .tls_stream
+                .lock()
+                .map_err(|_| SidecarError::InvalidState(String::from("TLS stream lock poisoned")))?
+                .as_mut()
+            {
+                let _ = stream.send_close_notify();
+                let _ = stream.shutdown_write();
+            }
+            if self.kernel_socket_id.is_some() {
+                self.saw_local_shutdown.store(true, Ordering::SeqCst);
+                return Ok(());
+            }
+        }
         if let Some(socket_id) = self.kernel_socket_id {
             return kernel
                 .socket_shutdown(
@@ -1073,16 +1365,6 @@ impl ActiveTcpSocket {
                     KernelSocketShutdown::Write,
                 )
                 .map_err(kernel_error);
-        }
-        if self.tls_mode.load(Ordering::SeqCst) {
-            if let Some(stream) = self
-                .tls_stream
-                .lock()
-                .map_err(|_| SidecarError::InvalidState(String::from("TLS stream lock poisoned")))?
-                .as_mut()
-            {
-                let _ = stream.send_close_notify();
-            }
         }
         let stream = self
             .stream
@@ -1109,11 +1391,6 @@ impl ActiveTcpSocket {
     }
 
     fn close(&self, kernel: &mut SidecarKernel, kernel_pid: u32) -> Result<(), SidecarError> {
-        if let Some(socket_id) = self.kernel_socket_id {
-            return kernel
-                .socket_close(EXECUTION_DRIVER_NAME, kernel_pid, socket_id)
-                .map_err(kernel_error);
-        }
         if self.tls_mode.load(Ordering::SeqCst) {
             if let Some(stream) = self
                 .tls_stream
@@ -1122,7 +1399,16 @@ impl ActiveTcpSocket {
                 .as_mut()
             {
                 let _ = stream.send_close_notify();
+                let _ = stream.close();
             }
+            if self.kernel_socket_id.is_some() {
+                return Ok(());
+            }
+        }
+        if let Some(socket_id) = self.kernel_socket_id {
+            return kernel
+                .socket_close(EXECUTION_DRIVER_NAME, kernel_pid, socket_id)
+                .map_err(kernel_error);
         }
         let stream = self
             .stream
@@ -1145,6 +1431,14 @@ impl ActiveTlsStream {
                 stream.write_all(contents).map_err(sidecar_net_error)?;
                 stream.flush().map_err(sidecar_net_error)
             }
+            Self::LoopbackClient(stream) => {
+                stream.write_all(contents).map_err(sidecar_net_error)?;
+                stream.flush().map_err(sidecar_net_error)
+            }
+            Self::LoopbackServer(stream) => {
+                stream.write_all(contents).map_err(sidecar_net_error)?;
+                stream.flush().map_err(sidecar_net_error)
+            }
         }
     }
 
@@ -1152,6 +1446,8 @@ impl ActiveTlsStream {
         match self {
             Self::Client(stream) => stream.read(buffer),
             Self::Server(stream) => stream.read(buffer),
+            Self::LoopbackClient(stream) => stream.read(buffer),
+            Self::LoopbackServer(stream) => stream.read(buffer),
         }
     }
 
@@ -1165,14 +1461,54 @@ impl ActiveTlsStream {
                 stream.conn.send_close_notify();
                 let _ = stream.conn.complete_io(&mut stream.sock);
             }
+            Self::LoopbackClient(stream) => {
+                stream.conn.send_close_notify();
+                let _ = stream.conn.complete_io(&mut stream.sock);
+            }
+            Self::LoopbackServer(stream) => {
+                stream.conn.send_close_notify();
+                let _ = stream.conn.complete_io(&mut stream.sock);
+            }
         }
         Ok(())
+    }
+
+    fn shutdown_write(&mut self) -> Result<(), SidecarError> {
+        match self {
+            Self::Client(stream) => stream
+                .sock
+                .shutdown(Shutdown::Write)
+                .map_err(sidecar_net_error),
+            Self::Server(stream) => stream
+                .sock
+                .shutdown(Shutdown::Write)
+                .map_err(sidecar_net_error),
+            Self::LoopbackClient(stream) => stream.sock.shutdown_write(),
+            Self::LoopbackServer(stream) => stream.sock.shutdown_write(),
+        }
+    }
+
+    fn close(&mut self) -> Result<(), SidecarError> {
+        match self {
+            Self::Client(stream) => stream
+                .sock
+                .shutdown(Shutdown::Both)
+                .map_err(sidecar_net_error),
+            Self::Server(stream) => stream
+                .sock
+                .shutdown(Shutdown::Both)
+                .map_err(sidecar_net_error),
+            Self::LoopbackClient(stream) => stream.sock.close_endpoint(),
+            Self::LoopbackServer(stream) => stream.sock.close_endpoint(),
+        }
     }
 
     fn peer_certificates(&self) -> Option<&[CertificateDer<'static>]> {
         match self {
             Self::Client(stream) => stream.conn.peer_certificates(),
             Self::Server(stream) => stream.conn.peer_certificates(),
+            Self::LoopbackClient(stream) => stream.conn.peer_certificates(),
+            Self::LoopbackServer(stream) => stream.conn.peer_certificates(),
         }
     }
 
@@ -1180,6 +1516,8 @@ impl ActiveTlsStream {
         match self {
             Self::Client(stream) => stream.conn.negotiated_cipher_suite(),
             Self::Server(stream) => stream.conn.negotiated_cipher_suite(),
+            Self::LoopbackClient(stream) => stream.conn.negotiated_cipher_suite(),
+            Self::LoopbackServer(stream) => stream.conn.negotiated_cipher_suite(),
         }
     }
 
@@ -1187,6 +1525,8 @@ impl ActiveTlsStream {
         match self {
             Self::Client(stream) => stream.conn.protocol_version(),
             Self::Server(stream) => stream.conn.protocol_version(),
+            Self::LoopbackClient(stream) => stream.conn.protocol_version(),
+            Self::LoopbackServer(stream) => stream.conn.protocol_version(),
         }
     }
 }
@@ -4856,7 +5196,7 @@ where
                             .execution
                             .respond_javascript_sync_rpc_error(
                                 request.id,
-                                "ERR_AGENT_OS_NODE_SYNC_RPC",
+                                &javascript_sync_rpc_error_code(&error),
                                 error.to_string(),
                             )
                             .or_else(ignore_stale_javascript_sync_rpc_response)?,
@@ -5637,14 +5977,6 @@ fn sync_host_directory_tree_to_kernel_inner(
             vm.kernel
                 .chmod(&guest_path, desired_mode)
                 .map_err(kernel_error)?;
-            fs::set_permissions(&host_path, fs::Permissions::from_mode(desired_mode)).map_err(
-                |error| {
-                    SidecarError::Io(format!(
-                        "failed to set host shadow file mode on {}: {error}",
-                        host_path.display()
-                    ))
-                },
-            )?;
             continue;
         }
 
@@ -8220,6 +8552,36 @@ fn build_client_tls_stream(
     Ok(tls_stream)
 }
 
+fn build_client_loopback_tls_stream(
+    transport: crate::state::LoopbackTlsEndpoint,
+    options: &JavascriptTlsBridgeOptions,
+) -> Result<rustls::StreamOwned<ClientConnection, crate::state::LoopbackTlsEndpoint>, SidecarError>
+{
+    let config = build_client_tls_config(options)?;
+    let server_name = options
+        .servername
+        .clone()
+        .unwrap_or_else(|| String::from("localhost"));
+    let server_name = ServerName::try_from(server_name)
+        .map_err(|_| SidecarError::InvalidState(String::from("invalid TLS servername")))?;
+    let mut tls_stream = rustls::StreamOwned::new(
+        ClientConnection::new(Arc::new(config), server_name).map_err(|error| {
+            SidecarError::Execution(format!("failed to start TLS client: {error}"))
+        })?,
+        transport,
+    );
+    match tls_stream.conn.complete_io(&mut tls_stream.sock) {
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) => {}
+        Err(error) => return Err(sidecar_net_error(error)),
+    }
+    Ok(tls_stream)
+}
+
 fn build_client_tls_config(
     options: &JavascriptTlsBridgeOptions,
 ) -> Result<ClientConfig, SidecarError> {
@@ -8287,6 +8649,20 @@ fn build_server_tls_stream(
         .set_write_timeout(None)
         .map_err(sidecar_net_error)?;
     Ok(tls_stream)
+}
+
+fn build_server_loopback_tls_stream(
+    transport: crate::state::LoopbackTlsEndpoint,
+    options: &JavascriptTlsBridgeOptions,
+) -> Result<rustls::StreamOwned<ServerConnection, crate::state::LoopbackTlsEndpoint>, SidecarError>
+{
+    let config = build_server_tls_config(options)?;
+    Ok(rustls::StreamOwned::new(
+        ServerConnection::new(Arc::new(config)).map_err(|error| {
+            SidecarError::Execution(format!("failed to start TLS server: {error}"))
+        })?,
+        transport,
+    ))
 }
 
 fn build_server_tls_config(
@@ -12123,7 +12499,7 @@ where
                         .execution
                         .respond_javascript_sync_rpc_error(
                             request.id,
-                            "ERR_AGENT_OS_NODE_SYNC_RPC",
+                            &javascript_sync_rpc_error_code(&error),
                             error.to_string(),
                         )
                         .or_else(ignore_stale_javascript_sync_rpc_response)?,
@@ -15248,7 +15624,7 @@ where
                     "unknown TCP socket {socket_id} for TLS upgrade"
                 ))
             })?;
-            socket.upgrade_tls(options)?;
+            socket.upgrade_tls(vm_id, kernel, options)?;
             Ok(Value::Null)
         }
         "net.socket_get_tls_client_hello" => {
@@ -15262,7 +15638,7 @@ where
                     "unknown TCP socket {socket_id} for TLS client hello query"
                 ))
             })?;
-            socket.tls_client_hello_json()
+            socket.tls_client_hello_json(vm_id, kernel)
         }
         "net.socket_tls_query" => {
             let socket_id =
@@ -15605,7 +15981,7 @@ where
         }
         "net.write" => {
             let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "net.write socket id")?;
-            let chunk = javascript_sync_rpc_base64_arg(&request.args, 1, "net.write chunk")?;
+            let chunk = javascript_sync_rpc_bytes_arg(&request.args, 1, "net.write chunk")?;
             if let Some(socket) = process.tcp_sockets.get(socket_id) {
                 socket
                     .write_all(kernel, process.kernel_pid, &chunk)
@@ -15828,23 +16204,19 @@ pub(crate) fn error_code(error: &SidecarError) -> &'static str {
 }
 
 fn guest_errno_code(message: &str) -> Option<&str> {
-    let (code, _) = message.split_once(':')?;
-    if code.len() < 2 || !code.starts_with('E') {
-        return None;
-    }
-    code[1..]
-        .bytes()
-        .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-        .then_some(code)
+    message.split(':').map(str::trim).find(|code| {
+        code.len() >= 2
+            && code.starts_with('E')
+            && code[1..]
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    })
 }
 
 pub(crate) fn javascript_sync_rpc_error_code(error: &SidecarError) -> String {
-    match error {
-        SidecarError::Execution(message) => guest_errno_code(message)
-            .unwrap_or("ERR_AGENT_OS_NODE_SYNC_RPC")
-            .to_owned(),
-        _ => String::from("ERR_AGENT_OS_NODE_SYNC_RPC"),
-    }
+    guest_errno_code(&error.to_string())
+        .unwrap_or("ERR_AGENT_OS_NODE_SYNC_RPC")
+        .to_owned()
 }
 
 pub(crate) fn ignore_stale_javascript_sync_rpc_response(

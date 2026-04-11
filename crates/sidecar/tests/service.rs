@@ -1974,7 +1974,10 @@ ykAheWCsAteSEWVc0w==\n\
                     method: String::from("net.write"),
                     args: vec![
                         json!(server_socket_id.clone()),
-                        json!(base64::engine::general_purpose::STANDARD.encode("ping")),
+                        json!({
+                            "__agentOsType": "bytes",
+                            "base64": base64::engine::general_purpose::STANDARD.encode("ping"),
+                        }),
                     ],
                 },
             )
@@ -2590,7 +2593,10 @@ ykAheWCsAteSEWVc0w==\n\
                     method: String::from("net.write"),
                     args: vec![
                         json!(socket_id.clone()),
-                        json!(base64::engine::general_purpose::STANDARD.encode("ping")),
+                        json!({
+                            "__agentOsType": "bytes",
+                            "base64": base64::engine::general_purpose::STANDARD.encode("ping"),
+                        }),
                     ],
                 },
             )
@@ -2674,41 +2680,28 @@ ykAheWCsAteSEWVc0w==\n\
             )
             .expect("listen through sidecar net RPC");
             let server_id = listen["serverId"].as_str().expect("server id").to_string();
-            let host_port = {
-                let vm = sidecar.vms.get(&vm_id).expect("javascript vm");
-                vm.active_processes
-                    .get("proc-js-tls-server")
-                    .and_then(|process| process.tcp_listeners.get(&server_id))
-                    .expect("sidecar tcp listener")
-                    .local_addr()
-                    .port()
-            };
-
-            let client = thread::spawn(move || {
-                let config = tls_test_client_config(false, &["h2", "http/1.1"]);
-                let stream =
-                    TcpStream::connect(("127.0.0.1", host_port)).expect("connect to TLS server");
-                let server_name = ServerName::try_from("localhost").expect("TLS test server name");
-                let mut stream = rustls::StreamOwned::new(
-                    ClientConnection::new(config, server_name)
-                        .expect("create TLS client connection"),
-                    stream,
-                );
-                while stream.conn.is_handshaking() {
-                    stream
-                        .conn
-                        .complete_io(&mut stream.sock)
-                        .expect("complete TLS client handshake");
-                }
-                assert_eq!(stream.conn.alpn_protocol(), Some(b"h2".as_slice()));
-                stream.write_all(b"ping").expect("write TLS client payload");
-                stream.flush().expect("flush TLS client payload");
-                let mut response = [0_u8; 4];
-                stream
-                    .read_exact(&mut response)
-                    .expect("read TLS server response");
-                assert_eq!(&response, b"pong");
-            });
+            let guest_port = listen["localPort"]
+                .as_u64()
+                .and_then(|value| u16::try_from(value).ok())
+                .expect("guest listener port");
+            let client_connect = call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-server",
+                JavascriptSyncRpcRequest {
+                    id: 2,
+                    method: String::from("net.connect"),
+                    args: vec![json!({
+                        "host": "127.0.0.1",
+                        "port": guest_port,
+                    })],
+                },
+            )
+            .expect("connect guest TLS client");
+            let client_socket_id = client_connect["socketId"]
+                .as_str()
+                .expect("client socket id")
+                .to_string();
 
             let accepted = (0..30)
                 .find_map(|attempt| {
@@ -2738,6 +2731,27 @@ ykAheWCsAteSEWVc0w==\n\
                 .as_str()
                 .expect("accepted socket id")
                 .to_string();
+
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-server",
+                JavascriptSyncRpcRequest {
+                    id: 40,
+                    method: String::from("net.socket_upgrade_tls"),
+                    args: vec![
+                        json!(client_socket_id.clone()),
+                        json!(serde_json::to_string(&json!({
+                            "isServer": false,
+                            "servername": "localhost",
+                            "rejectUnauthorized": false,
+                            "ALPNProtocols": ["h2", "http/1.1"],
+                        }))
+                        .expect("serialize client TLS options")),
+                    ],
+                },
+            )
+            .expect("upgrade guest TLS client socket");
 
             let client_hello = (0..30)
                 .find_map(|attempt| {
@@ -2808,25 +2822,66 @@ ykAheWCsAteSEWVc0w==\n\
                     .expect("parse TLS certificate");
             assert_eq!(certificate["type"], Value::from("object"));
 
-            let protocol = call_javascript_sync_rpc(
+            (0..30)
+                .find_map(|attempt| {
+                    let server_protocol = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-tls-server",
+                        JavascriptSyncRpcRequest {
+                            id: 82 + attempt * 2,
+                            method: String::from("net.socket_tls_query"),
+                            args: vec![json!(socket_id.clone()), json!("getProtocol")],
+                        },
+                    )
+                    .expect("query server TLS protocol");
+                    let server_protocol: Value = serde_json::from_str(
+                        server_protocol.as_str().expect("server protocol JSON"),
+                    )
+                    .expect("parse server protocol");
+
+                    let client_protocol = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-tls-server",
+                        JavascriptSyncRpcRequest {
+                            id: 83 + attempt * 2,
+                            method: String::from("net.socket_tls_query"),
+                            args: vec![json!(client_socket_id.clone()), json!("getProtocol")],
+                        },
+                    )
+                    .expect("query client TLS protocol");
+                    let client_protocol: Value = serde_json::from_str(
+                        client_protocol.as_str().expect("client protocol JSON"),
+                    )
+                    .expect("parse client protocol");
+
+                    if server_protocol.is_null() || client_protocol.is_null() {
+                        thread::sleep(Duration::from_millis(10));
+                        None
+                    } else {
+                        Some(())
+                    }
+                })
+                .expect("eventually complete guest TLS handshake");
+
+            call_javascript_sync_rpc(
                 &mut sidecar,
                 &vm_id,
                 "proc-js-tls-server",
                 JavascriptSyncRpcRequest {
-                    id: 82,
-                    method: String::from("net.socket_tls_query"),
-                    args: vec![json!(socket_id.clone()), json!("getProtocol")],
+                    id: 145,
+                    method: String::from("net.write"),
+                    args: vec![
+                        json!(client_socket_id.clone()),
+                        json!({
+                            "__agentOsType": "bytes",
+                            "base64": base64::engine::general_purpose::STANDARD.encode("ping"),
+                        }),
+                    ],
                 },
             )
-            .expect("query TLS protocol");
-            let protocol: Value =
-                serde_json::from_str(protocol.as_str().expect("TLS protocol JSON"))
-                    .expect("parse TLS protocol");
-            assert!(
-                protocol == Value::String(String::from("TLSv1.3"))
-                    || protocol == Value::String(String::from("TLSv1.2")),
-                "protocol: {protocol}"
-            );
+            .expect("write guest TLS client payload");
 
             let payload = (0..30)
                 .find_map(|attempt| {
@@ -2835,7 +2890,7 @@ ykAheWCsAteSEWVc0w==\n\
                         &vm_id,
                         "proc-js-tls-server",
                         JavascriptSyncRpcRequest {
-                            id: 90 + attempt,
+                            id: 150 + attempt,
                             method: String::from("net.socket_read"),
                             args: vec![json!(socket_id.clone())],
                         },
@@ -2851,6 +2906,36 @@ ykAheWCsAteSEWVc0w==\n\
                 .expect("eventually receive TLS client payload");
             assert_eq!(payload, Value::from("cGluZw=="));
 
+            let protocol = (0..30)
+                .find_map(|attempt| {
+                    let value = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-tls-server",
+                        JavascriptSyncRpcRequest {
+                            id: 190 + attempt,
+                            method: String::from("net.socket_tls_query"),
+                            args: vec![json!(socket_id.clone()), json!("getProtocol")],
+                        },
+                    )
+                    .expect("query TLS protocol");
+                    let parsed: Value =
+                        serde_json::from_str(value.as_str().expect("TLS protocol JSON"))
+                            .expect("parse TLS protocol");
+                    if parsed.is_null() {
+                        thread::sleep(Duration::from_millis(10));
+                        None
+                    } else {
+                        Some(parsed)
+                    }
+                })
+                .expect("eventually negotiate TLS protocol");
+            assert!(
+                protocol == Value::String(String::from("TLSv1.3"))
+                    || protocol == Value::String(String::from("TLSv1.2")),
+                "protocol: {protocol}"
+            );
+
             call_javascript_sync_rpc(
                 &mut sidecar,
                 &vm_id,
@@ -2860,11 +2945,37 @@ ykAheWCsAteSEWVc0w==\n\
                     method: String::from("net.write"),
                     args: vec![
                         json!(socket_id.clone()),
-                        json!(base64::engine::general_purpose::STANDARD.encode("pong")),
+                        json!({
+                            "__agentOsType": "bytes",
+                            "base64": base64::engine::general_purpose::STANDARD.encode("pong"),
+                        }),
                     ],
                 },
             )
             .expect("write TLS server payload");
+
+            let client_payload = (0..30)
+                .find_map(|attempt| {
+                    let value = call_javascript_sync_rpc(
+                        &mut sidecar,
+                        &vm_id,
+                        "proc-js-tls-server",
+                        JavascriptSyncRpcRequest {
+                            id: 220 + attempt,
+                            method: String::from("net.socket_read"),
+                            args: vec![json!(client_socket_id.clone())],
+                        },
+                    )
+                    .expect("read guest TLS client payload");
+                    if value == Value::from("__secure_exec_net_timeout__") {
+                        thread::sleep(Duration::from_millis(10));
+                        None
+                    } else {
+                        Some(value)
+                    }
+                })
+                .expect("eventually receive TLS server payload");
+            assert_eq!(client_payload, Value::from("cG9uZw=="));
 
             call_javascript_sync_rpc(
                 &mut sidecar,
@@ -2883,13 +2994,22 @@ ykAheWCsAteSEWVc0w==\n\
                 "proc-js-tls-server",
                 JavascriptSyncRpcRequest {
                     id: 122,
+                    method: String::from("net.destroy"),
+                    args: vec![json!(client_socket_id)],
+                },
+            )
+            .expect("destroy guest TLS client socket");
+            call_javascript_sync_rpc(
+                &mut sidecar,
+                &vm_id,
+                "proc-js-tls-server",
+                JavascriptSyncRpcRequest {
+                    id: 123,
                     method: String::from("net.server_close"),
                     args: vec![json!(server_id)],
                 },
             )
             .expect("close TLS listener");
-
-            client.join().expect("join TLS client");
         }
 
         #[test]
@@ -7050,7 +7170,6 @@ console.log(JSON.stringify(summary));
         }
 
         #[test]
-        #[ignore = "V8 sidecar DNS integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_dns_rpc_resolves_localhost() {
             assert_node_available();
 
@@ -7126,7 +7245,8 @@ console.log(JSON.stringify({ lookup, resolve4 }));
                         kernel_handle,
                         GuestRuntimeKind::JavaScript,
                         ActiveExecution::Javascript(execution),
-                    ),
+                    )
+                    .with_host_cwd(cwd.clone()),
                 );
             }
 
@@ -7188,7 +7308,6 @@ console.log(JSON.stringify({ lookup, resolve4 }));
         }
 
         #[test]
-        #[ignore = "V8 sidecar network SSRF integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_network_ssrf_protection_blocks_private_dns_and_unowned_loopback_targets() {
             assert_node_available();
 
@@ -7231,25 +7350,33 @@ const dnsLookup = await (async () => {{
 }})();
 
 const privateConnect = await new Promise((resolve) => {{
-  const socket = net.createConnection({{ host: "metadata.test", port: 80 }});
-  socket.on("connect", () => {{
-    socket.destroy();
-    resolve({{ unexpected: true }});
-  }});
-  socket.on("error", (error) => {{
+  try {{
+    const socket = net.createConnection({{ host: "metadata.test", port: 80 }});
+    socket.on("connect", () => {{
+      socket.destroy();
+      resolve({{ unexpected: true }});
+    }});
+    socket.on("error", (error) => {{
+      resolve({{ code: error.code ?? null, message: error.message }});
+    }});
+  }} catch (error) {{
     resolve({{ code: error.code ?? null, message: error.message }});
-  }});
+  }}
 }});
 
 const loopbackConnect = await new Promise((resolve) => {{
-  const socket = net.createConnection({{ host: "127.0.0.1", port: {loopback_port} }});
-  socket.on("connect", () => {{
-    socket.destroy();
-    resolve({{ unexpected: true }});
-  }});
-  socket.on("error", (error) => {{
+  try {{
+    const socket = net.createConnection({{ host: "127.0.0.1", port: {loopback_port} }});
+    socket.on("connect", () => {{
+      socket.destroy();
+      resolve({{ unexpected: true }});
+    }});
+    socket.on("error", (error) => {{
+      resolve({{ code: error.code ?? null, message: error.message }});
+    }});
+  }} catch (error) {{
     resolve({{ code: error.code ?? null, message: error.message }});
-  }});
+  }}
 }});
 
 console.log(JSON.stringify({{ dnsLookup, privateConnect, loopbackConnect }}));
@@ -7307,7 +7434,8 @@ process.exit(0);
                         kernel_handle,
                         GuestRuntimeKind::JavaScript,
                         ActiveExecution::Javascript(execution),
-                    ),
+                    )
+                    .with_host_cwd(cwd.clone()),
                 );
             }
 
@@ -7518,7 +7646,6 @@ console.log(JSON.stringify({ lookup, resolved, socketSummary }));
         }
 
         #[test]
-        #[ignore = "V8 sidecar network permission integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_network_permission_callbacks_fire_for_dns_lookup_connect_and_listen() {
             assert_node_available();
 
@@ -7645,7 +7772,6 @@ process.exit(0);
         }
 
         #[test]
-        #[ignore = "V8 sidecar network denial integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_network_permission_denials_surface_eacces_to_guest_code() {
             assert_node_available();
 
@@ -7684,21 +7810,29 @@ try {
 } catch (error) {
   dnsResult = { code: error.code ?? null, message: error.message };
 }
-const listenResult = (() => {
+const listenResult = await new Promise((resolve) => {
   const server = net.createServer();
-  try {
-    server.listen(0, "127.0.0.1");
-    return { unexpected: true };
-  } catch (error) {
-    return { code: error.code ?? null, message: error.message };
-  }
-})();
-const connectResult = await new Promise((resolve) => {
-  const socket = net.createConnection({ host: "127.0.0.1", port: 43111 });
-  socket.on("connect", () => resolve({ unexpected: true }));
-  socket.on("error", (error) => {
+  server.on("error", (error) => {
     resolve({ code: error.code ?? null, message: error.message });
   });
+  try {
+    server.listen(0, "127.0.0.1", () => {
+      resolve({ unexpected: true });
+    });
+  } catch (error) {
+    resolve({ code: error.code ?? null, message: error.message });
+  }
+});
+const connectResult = await new Promise((resolve) => {
+  try {
+    const socket = net.createConnection({ host: "127.0.0.1", port: 43111 });
+    socket.on("connect", () => resolve({ unexpected: true }));
+    socket.on("error", (error) => {
+      resolve({ code: error.code ?? null, message: error.message });
+    });
+  } catch (error) {
+    resolve({ code: error.code ?? null, message: error.message });
+  }
 });
 
 console.log(JSON.stringify({ dnsResult, listenResult, connectResult }));
@@ -7728,7 +7862,6 @@ process.exit(0);
         }
 
         #[test]
-        #[ignore = "V8 sidecar TLS integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_tls_rpc_connects_and_serves_over_guest_net() {
             assert_node_available();
 
@@ -9969,7 +10102,6 @@ console.log(JSON.stringify(summary));
         }
 
         #[test]
-        #[ignore = "V8 sidecar Unix-socket integration is flaky in this harness; execution-layer tests cover the V8 bridge path"]
         fn javascript_net_rpc_listens_and_connects_over_unix_domain_sockets() {
             assert_node_available();
 
@@ -10035,7 +10167,8 @@ console.log(JSON.stringify(summary));
                         kernel_handle,
                         GuestRuntimeKind::JavaScript,
                         ActiveExecution::Javascript(execution),
-                    ),
+                    )
+                    .with_host_cwd(cwd.clone()),
                 );
             }
 

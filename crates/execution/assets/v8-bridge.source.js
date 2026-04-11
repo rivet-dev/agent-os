@@ -9306,15 +9306,27 @@ var __bridge = (() => {
     },
     resolve(hostname, rrtype, callback) {
       let cb = callback;
+      let family;
       if (typeof rrtype === "function") {
         cb = rrtype;
-      }
-      dns.lookup(hostname, (err, address) => {
-        if (err) {
-          cb?.(err);
+      } else {
+        const normalizedType = rrtype == null ? "A" : String(rrtype).toUpperCase();
+        if (normalizedType === "A") {
+          family = 4;
+        } else if (normalizedType === "AAAA") {
+          family = 6;
         } else {
-          cb?.(null, address ? [address] : []);
+          queueMicrotask(() => cb?.(new Error(`Unsupported DNS rrtype: ${normalizedType}`)));
+          return;
         }
+      }
+      _networkDnsLookupRaw.apply(void 0, [{ hostname: String(hostname), family }], {
+        result: { promise: true }
+      }).then((resultJson) => {
+        const records = parseDnsLookupRecords(resultJson);
+        cb?.(null, records.map((record) => record.address));
+      }).catch((err) => {
+        cb?.(err);
       });
     },
     resolve4(hostname, callback) {
@@ -9330,6 +9342,22 @@ var __bridge = (() => {
       resolve(hostname, rrtype) {
         return new Promise((resolve, reject) => {
           dns.resolve(hostname, rrtype || "A", (err, addresses) => {
+            if (err) reject(err);
+            else resolve(addresses || []);
+          });
+        });
+      },
+      resolve4(hostname) {
+        return new Promise((resolve, reject) => {
+          dns.resolve4(hostname, (err, addresses) => {
+            if (err) reject(err);
+            else resolve(addresses || []);
+          });
+        });
+      },
+      resolve6(hostname) {
+        return new Promise((resolve, reject) => {
+          dns.resolve6(hostname, (err, addresses) => {
             if (err) reject(err);
             else resolve(addresses || []);
           });
@@ -15813,7 +15841,10 @@ ${headerLines}\r
       const base64 = buf.toString("base64");
       debugBridgeNetwork("socket write", this._socketId, buf.length, base64.slice(0, 64));
       this.bytesWritten += buf.length;
-      _netSocketWriteRaw.applySync(void 0, [this._socketId, base64]);
+      _netSocketWriteRaw.applySync(void 0, [this._socketId, {
+        __agentOsType: "bytes",
+        base64
+      }]);
       this._touchTimeout();
       const cb = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
       if (cb) cb();
