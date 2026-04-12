@@ -28,6 +28,7 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
 - Kernel socket lifecycle coverage should use `KernelVm` wrappers like `socket_bind_inet`, `socket_listen`, `socket_accept`, and `socket_get` so driver ownership, resource limits, and socket-table state stay under the same test path.
 - Before loopback listener routing lands, kernel TCP data-plane coverage should pair stream sockets with `socket_connect_pair()` and drive I/O through `socket_write`, `socket_read`, `socket_shutdown`, and `socket_close` on `KernelVm` rather than mutating peer links inside `SocketTable` tests.
 - Kernel loopback-routing coverage should use `socket_connect_inet_loopback()` for guest listener routing and `socket_send_to_inet_loopback()` plus `socket_recv_datagram()` for UDP delivery so tests stay on the in-kernel address-routing path.
+- TLS-heavy service tests in `crates/sidecar/tests/service.rs` share enough runtime state under `cargo test -- --test-threads=4` that new TLS/loopback-TLS coverage should take `tls_service_test_lock()` to avoid cross-test handshake corruption.
 - Kernel UDP receive tests should assert datagram-boundary truncation: a short `socket_recv_datagram()` consumes only that queued datagram and must not leak leftover bytes into the next receive.
 - Kernel Unix-socket coverage should use `socket_bind_unix()`, `socket_connect_unix()`, and `socket_accept()` so path normalization, backlog handling, and accepted-socket creation stay on the kernel-owned path.
 - Kernel DNS resolution should live behind `KernelVm::resolve_dns()` / `crates/kernel/src/dns.rs`; explicit guest DNS APIs use `DnsLookupPolicy::CheckPermissions`, while TCP/UDP/HTTP helpers that already gate egress separately should use `SkipPermissions` so the DNS migration does not add an extra permission requirement.
@@ -269,4 +270,12 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Shared `src/*.rs` modules that are re-used from `crates/sidecar/tests/*` need `#[cfg(test)]` around harness-only helpers and imports; otherwise focused library targets keep surfacing dead-code warnings for test scaffolding.
   - Warning cleanup after the sidecar module split is mostly import hygiene: once helper ownership moves into `execution.rs` or `filesystem.rs`, `service.rs` should stop re-exporting or importing symbols that the dispatch hub no longer touches.
   - Truthful acceptance for this story was `cargo test -p agent-os-execution --test javascript_v8 -- --test-threads=1`, `cargo test -p agent-os-sidecar --test protocol -- --test-threads=1`, and root `pnpm check-types`.
+---
+## [2026-04-11 23:05 PDT] US-297
+- Removed the loopback TLS transport's panic-on-empty-queue path by making `LoopbackTlsEndpoint::read()` stop draining when `pop_front()` returns `None` instead of asserting.
+- Added multithreaded service regressions for concurrent loopback TLS handshakes and for a competing drain plus peer-drop race on the loopback TLS endpoint; serialized TLS-heavy service tests with `tls_service_test_lock()` so the truth suite stays deterministic under `--test-threads=4`.
+- Files changed: `crates/sidecar/src/execution.rs`, `crates/sidecar/tests/service.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Loopback TLS transport reads must treat guest-buffer availability as fallible state and break on `pop_front() == None` instead of assuming the queue contents are immutable.
+  - New sidecar TLS integration tests should use the shared test lock when the suite runs multithreaded, otherwise unrelated guest TLS cases can fail with handshake corruption rather than the story under test.
 ---

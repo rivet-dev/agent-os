@@ -3429,7 +3429,7 @@
         "`cargo test -p agent-os-sidecar --test service -- --test-threads=4` passes (multi-threaded intentionally to exercise the race)"
       ],
       "priority": 45,
-      "passes": false,
+      "passes": true,
       "notes": "Introduced by US-074 (commit 667347e). Subagent review pass 40 flagged as CRITICAL. Guest TLS handshake bytes are untrusted input; a panic here is a guest→host DoS and crashes the entire VM session, not just the offending socket."
     },
     {

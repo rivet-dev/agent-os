@@ -80,7 +80,10 @@ mod service {
         use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
         use std::path::{Path, PathBuf};
         use std::process::Command;
-        use std::sync::{Arc, Mutex};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Barrier, Mutex, OnceLock,
+        };
         use std::thread;
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1743,6 +1746,258 @@ ykAheWCsAteSEWVc0w==\n\
             Arc::new(config)
         }
 
+        fn loopback_tls_endpoints() -> (
+            crate::state::LoopbackTlsEndpoint,
+            crate::state::LoopbackTlsEndpoint,
+        ) {
+            let pair = Arc::new(crate::state::LoopbackTlsTransportPair {
+                state: Mutex::new(crate::state::LoopbackTlsTransportPairState::default()),
+                ready: std::sync::Condvar::new(),
+            });
+            (
+                crate::state::LoopbackTlsEndpoint {
+                    pair: Arc::clone(&pair),
+                    is_lower_socket: true,
+                },
+                crate::state::LoopbackTlsEndpoint {
+                    pair,
+                    is_lower_socket: false,
+                },
+            )
+        }
+
+        fn with_panic_counter<T>(
+            operation: impl FnOnce(Arc<AtomicUsize>) -> T + std::panic::UnwindSafe,
+        ) -> T {
+            static PANIC_HOOK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+            let _hook_guard = PANIC_HOOK_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .expect("panic hook lock");
+            let panic_counter = Arc::new(AtomicUsize::new(0));
+            let previous_hook = std::panic::take_hook();
+            let hook_counter = Arc::clone(&panic_counter);
+            std::panic::set_hook(Box::new(move |_| {
+                hook_counter.fetch_add(1, Ordering::SeqCst);
+            }));
+
+            let result = std::panic::catch_unwind(|| operation(Arc::clone(&panic_counter)));
+            std::panic::set_hook(previous_hook);
+            match result {
+                Ok(value) => value,
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        }
+
+        fn tls_service_test_lock() -> std::sync::MutexGuard<'static, ()> {
+            static TLS_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            TLS_TEST_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .expect("TLS service test lock")
+        }
+
+        fn complete_loopback_tls_handshake(start: Arc<Barrier>) {
+            let (client_transport, server_transport) = loopback_tls_endpoints();
+            let server_start = Arc::clone(&start);
+            let server = thread::spawn(move || {
+                server_start.wait();
+                let mut stream = rustls::StreamOwned::new(
+                    ServerConnection::new(tls_test_server_config(&["h2"]))
+                        .expect("create loopback TLS server"),
+                    server_transport,
+                );
+                while stream.conn.is_handshaking() {
+                    match stream.conn.complete_io(&mut stream.sock) {
+                        Ok(_) => {}
+                        Err(error)
+                            if {
+                                let kind = error.kind();
+                                kind == std::io::ErrorKind::WouldBlock
+                                    || kind == std::io::ErrorKind::TimedOut
+                            } =>
+                        {
+                            thread::yield_now()
+                        }
+                        Err(error) => panic!("complete loopback TLS server handshake: {error}"),
+                    }
+                }
+
+                let mut payload = [0_u8; 4];
+                stream
+                    .read_exact(&mut payload)
+                    .expect("read loopback TLS client payload");
+                assert_eq!(&payload, b"ping");
+                stream
+                    .write_all(b"pong")
+                    .expect("write loopback TLS server payload");
+                stream.flush().expect("flush loopback TLS server payload");
+            });
+
+            let client = thread::spawn(move || {
+                start.wait();
+                let mut stream = rustls::StreamOwned::new(
+                    ClientConnection::new(
+                        tls_test_client_config(false, &["h2"]),
+                        ServerName::try_from("localhost").expect("loopback TLS server name"),
+                    )
+                    .expect("create loopback TLS client"),
+                    client_transport,
+                );
+                while stream.conn.is_handshaking() {
+                    match stream.conn.complete_io(&mut stream.sock) {
+                        Ok(_) => {}
+                        Err(error)
+                            if {
+                                let kind = error.kind();
+                                kind == std::io::ErrorKind::WouldBlock
+                                    || kind == std::io::ErrorKind::TimedOut
+                            } =>
+                        {
+                            thread::yield_now()
+                        }
+                        Err(error) => panic!("complete loopback TLS client handshake: {error}"),
+                    }
+                }
+
+                stream
+                    .write_all(b"ping")
+                    .expect("write loopback TLS client payload");
+                stream.flush().expect("flush loopback TLS client payload");
+                let mut payload = [0_u8; 4];
+                stream
+                    .read_exact(&mut payload)
+                    .expect("read loopback TLS server payload");
+                assert_eq!(&payload, b"pong");
+            });
+
+            client.join().expect("join loopback TLS client");
+            server.join().expect("join loopback TLS server");
+        }
+
+        #[test]
+        fn loopback_tls_transport_survives_concurrent_handshakes_without_panicking() {
+            let _tls_lock = tls_service_test_lock();
+            with_panic_counter(|panic_counter| {
+                let concurrency = 4;
+                let start = Arc::new(Barrier::new(concurrency * 2));
+                let workers = (0..concurrency)
+                    .map(|_| {
+                        let start = Arc::clone(&start);
+                        thread::spawn(move || complete_loopback_tls_handshake(start))
+                    })
+                    .collect::<Vec<_>>();
+
+                for worker in workers {
+                    worker
+                        .join()
+                        .expect("join loopback TLS handshake stress worker");
+                }
+
+                assert_eq!(
+                    panic_counter.load(Ordering::SeqCst),
+                    0,
+                    "loopback TLS handshake stress triggered a panic"
+                );
+            });
+        }
+
+        #[test]
+        fn loopback_tls_endpoint_read_survives_competing_drain_and_peer_drop() {
+            with_panic_counter(|panic_counter| {
+                let (reader_endpoint, peer_endpoint) = loopback_tls_endpoints();
+                {
+                    let mut state = reader_endpoint
+                        .pair
+                        .state
+                        .lock()
+                        .expect("loopback TLS state");
+                    state
+                        .higher_to_lower
+                        .extend((0..4096).map(|value| (value % 251) as u8));
+                }
+
+                let competing_reader = crate::state::LoopbackTlsEndpoint {
+                    pair: Arc::clone(&reader_endpoint.pair),
+                    is_lower_socket: reader_endpoint.is_lower_socket,
+                };
+                let start = Arc::new(Barrier::new(3));
+
+                let primary_reader = {
+                    let start = Arc::clone(&start);
+                    thread::spawn(move || {
+                        start.wait();
+                        let mut endpoint = reader_endpoint;
+                        let mut buffer = [0_u8; 64];
+                        let mut total = 0;
+                        loop {
+                            match endpoint.read(&mut buffer) {
+                                Ok(0) => return total,
+                                Ok(read) => total += read,
+                                Err(error)
+                                    if {
+                                        let kind = error.kind();
+                                        kind == std::io::ErrorKind::WouldBlock
+                                            || kind == std::io::ErrorKind::TimedOut
+                                    } =>
+                                {
+                                    thread::yield_now()
+                                }
+                                Err(error) => panic!("primary loopback TLS read failed: {error}"),
+                            }
+                        }
+                    })
+                };
+
+                let drain_racer = {
+                    let start = Arc::clone(&start);
+                    thread::spawn(move || {
+                        start.wait();
+                        let mut endpoint = competing_reader;
+                        let mut buffer = [0_u8; 31];
+                        loop {
+                            match endpoint.read(&mut buffer) {
+                                Ok(0) => return,
+                                Ok(_) => thread::yield_now(),
+                                Err(error)
+                                    if {
+                                        let kind = error.kind();
+                                        kind == std::io::ErrorKind::WouldBlock
+                                            || kind == std::io::ErrorKind::TimedOut
+                                    } =>
+                                {
+                                    thread::yield_now()
+                                }
+                                Err(error) => {
+                                    panic!("competing loopback TLS read failed: {error}")
+                                }
+                            }
+                        }
+                    })
+                };
+
+                let closer = {
+                    let start = Arc::clone(&start);
+                    thread::spawn(move || {
+                        start.wait();
+                        thread::sleep(std::time::Duration::from_millis(5));
+                        drop(peer_endpoint);
+                    })
+                };
+
+                primary_reader.join().expect("join primary loopback reader");
+                drain_racer.join().expect("join competing loopback reader");
+                closer.join().expect("join loopback peer closer");
+
+                assert_eq!(
+                    panic_counter.load(Ordering::SeqCst),
+                    0,
+                    "loopback TLS endpoint race triggered a panic"
+                );
+            });
+        }
+
         #[derive(Debug)]
         struct TestInsecureTlsVerifier {
             supported_schemes: Vec<SignatureScheme>,
@@ -2534,6 +2789,7 @@ ykAheWCsAteSEWVc0w==\n\
 
         #[test]
         fn javascript_tls_client_upgrade_query_and_cipher_list_work() {
+            let _tls_lock = tls_service_test_lock();
             assert_node_available();
 
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind TLS listener");
@@ -2762,6 +3018,7 @@ ykAheWCsAteSEWVc0w==\n\
 
         #[test]
         fn javascript_tls_server_client_hello_and_server_upgrade_work() {
+            let _tls_lock = tls_service_test_lock();
             assert_node_available();
 
             let mut sidecar = create_test_sidecar();
@@ -8184,6 +8441,7 @@ process.exit(0);
 
         #[test]
         fn javascript_tls_rpc_connects_and_serves_over_guest_net() {
+            let _tls_lock = tls_service_test_lock();
             assert_node_available();
 
             let mut sidecar = create_test_sidecar();

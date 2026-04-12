@@ -693,11 +693,13 @@ impl Read for crate::state::LoopbackTlsEndpoint {
             };
 
             if !incoming.is_empty() {
-                let count = buffer.len().min(incoming.len());
-                for slot in buffer.iter_mut().take(count) {
-                    *slot = incoming
-                        .pop_front()
-                        .expect("loopback TLS transport should contain buffered bytes");
+                let mut count = 0;
+                while count < buffer.len() {
+                    let Some(byte) = incoming.pop_front() else {
+                        break;
+                    };
+                    buffer[count] = byte;
+                    count += 1;
                 }
                 return Ok(count);
             }
