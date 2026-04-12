@@ -156,10 +156,10 @@
         "Either switch to a blocking wait-with-deadline via a wasi-ext call, or exponentially back off the poll interval, or document the gap with a kernel-side wait signal",
         "A benchmark confirms CPU usage during `timeout 10 sleep 10` is bounded (well under 5% of a core)",
         "The timeout behavior itself is preserved \u2014 the command is still killed at the deadline",
-        "`cargo test -p agent-os-kernel --test wasm_commands` passes"
+        "`cargo test -p secureexec-shims --manifest-path registry/native/Cargo.toml` passes"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Found during 2026-04-10 code review pass 6. Comment on line 76 admits WASI sleep returns immediately; combined with 1ms poll = 100% CPU burn."
     },
     {

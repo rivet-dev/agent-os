@@ -3,6 +3,9 @@
 //! Spawns a child process and kills it if it exceeds the timeout duration.
 //! Uses std::process::Command (which delegates to wasi-ext proc_spawn)
 //! with try_wait() for non-blocking wait and kill() for termination.
+//! On WASI, poll sleeps must go through `wasi_ext::host_sleep_ms()` because
+//! `std::thread::sleep()` returns immediately and turns the timeout loop into
+//! a hot busy-wait.
 //!
 //! Usage:
 //!   timeout DURATION COMMAND [ARG]...
@@ -15,6 +18,10 @@
 //!   127 - command not found
 
 use std::ffi::OsString;
+use std::time::Duration;
+
+const INITIAL_POLL_SLEEP_MS: u32 = 1;
+const MAX_POLL_SLEEP_MS: u32 = 128;
 
 pub fn timeout(args: Vec<OsString>) -> i32 {
     let str_args: Vec<String> = args
@@ -44,10 +51,7 @@ pub fn timeout(args: Vec<OsString>) -> i32 {
     let program = &str_args[1];
     let child_args = &str_args[2..];
 
-    let mut child = match std::process::Command::new(program)
-        .args(child_args)
-        .spawn()
-    {
+    let mut child = match std::process::Command::new(program).args(child_args).spawn() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("timeout: failed to run command '{}': {}", program, e);
@@ -56,7 +60,8 @@ pub fn timeout(args: Vec<OsString>) -> i32 {
     };
 
     let start = std::time::Instant::now();
-    let timeout_duration = std::time::Duration::from_secs_f64(duration_secs);
+    let timeout_duration = Duration::from_secs_f64(duration_secs);
+    let mut poll_sleep_ms = INITIAL_POLL_SLEEP_MS;
 
     loop {
         match child.try_wait() {
@@ -72,15 +77,71 @@ pub fn timeout(args: Vec<OsString>) -> i32 {
                     let _ = child.wait(); // reap
                     return 124;
                 }
-                // Yield briefly to avoid pure busy-wait
-                // (In WASI Phase 1, sleep returns immediately but
-                // Instant::now() still tracks real wall-clock time)
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                let remaining = timeout_duration.saturating_sub(start.elapsed());
+                let sleep_ms = next_poll_sleep_ms(poll_sleep_ms, remaining);
+                if let Err(error) = sleep_for_poll(Duration::from_millis(u64::from(sleep_ms))) {
+                    eprintln!("timeout: failed to sleep while waiting for command: {error}");
+                    return 125;
+                }
+                poll_sleep_ms = poll_sleep_ms.saturating_mul(2).min(MAX_POLL_SLEEP_MS);
             }
             Err(e) => {
                 eprintln!("timeout: error waiting for command: {}", e);
                 return 125;
             }
         }
+    }
+}
+
+fn next_poll_sleep_ms(requested_ms: u32, remaining: Duration) -> u32 {
+    let remaining_ms = ceil_duration_to_millis(remaining);
+    requested_ms.max(1).min(remaining_ms.max(1))
+}
+
+fn ceil_duration_to_millis(duration: Duration) -> u32 {
+    let millis = duration.as_millis();
+    if millis == 0 && !duration.is_zero() {
+        return 1;
+    }
+
+    millis.try_into().unwrap_or(u32::MAX)
+}
+
+fn sleep_for_poll(duration: Duration) -> Result<(), String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let millis = ceil_duration_to_millis(duration);
+        wasi_ext::host_sleep_ms(millis).map_err(|errno| format!("wasi errno {errno}"))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::sleep(duration);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ceil_duration_to_millis, next_poll_sleep_ms, MAX_POLL_SLEEP_MS};
+    use std::time::Duration;
+
+    #[test]
+    fn poll_sleep_is_capped_by_remaining_time() {
+        assert_eq!(
+            next_poll_sleep_ms(MAX_POLL_SLEEP_MS, Duration::from_millis(40)),
+            40
+        );
+    }
+
+    #[test]
+    fn poll_sleep_uses_one_millisecond_floor_for_submillisecond_remaining_time() {
+        assert_eq!(next_poll_sleep_ms(8, Duration::from_micros(250)), 1);
+        assert_eq!(ceil_duration_to_millis(Duration::from_micros(250)), 1);
+    }
+
+    #[test]
+    fn poll_sleep_preserves_requested_delay_when_deadline_allows_it() {
+        assert_eq!(next_poll_sleep_ms(32, Duration::from_secs(2)), 32);
     }
 }

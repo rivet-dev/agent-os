@@ -4,6 +4,7 @@ Backlog reset: 2026-04-09 post-audit migration PRD for `finish-ts-rust-migration
 Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact verification commands count as green. `scripts/ralph/archive/` contains superseded historical snapshots that may mention stale green states or obsolete pnpm/Vitest guidance.
 ## Codebase Patterns
 - Treat `scripts/ralph/archive/` as historical-only context; use the active `scripts/ralph/prd.json` test policy and per-story acceptance commands to decide what is green.
+- WASI command shims that poll child-process state must sleep via `wasi_ext::host_sleep_ms()`, not `std::thread::sleep()`: the host import blocks inside the VM kernel, while wasm32-wasip1 `std::thread::sleep()` returns immediately and turns loops like `timeout` into hot busy-waits.
 - When `crates/sidecar/tests/*` includes a shared `src/*.rs` module, keep any harness-only helpers and imports behind `#[cfg(test)]`; otherwise focused library targets will keep warning on dead test scaffolding that production code never touches.
 - In `examples/quickstart`, the supported first-party example surface is the set of scripts exported by `examples/quickstart/package.json`; unreferenced probe/debug files should be removed instead of drifting beside the canonical examples.
 - Sidecar wire-protocol migrations should keep the native 4-byte big-endian frame prefix stable and use a temporary `JsonUtf8`/JSON-text boundary for existing `serde_json::Value` fields first; change payload codecs separately from outer framing so Rust and TypeScript can roll forward independently.
@@ -62,4 +63,13 @@ Current truth: Only this `scripts/ralph/prd.json` backlog and each story's exact
   - Guest-side WebAssembly in V8 is part of the supported npm-compat surface; blocking `WebAssembly.Module` or `WebAssembly.Instance` at isolate setup regresses real packages without improving kernel isolation.
   - Snapshot restore coverage should assert guest WASM still works after restore, because the snapshot mechanism does not need a second-stage WASM deny hook.
   - When hardening guest WASM, keep the guardrail at V8's built-in implementation limits and add conformance tests around those limits instead of reintroducing embedder callbacks.
+---
+## [2026-04-12 03:31 PDT] US-201
+- Replaced the `timeout` shim's 1ms busy loop with kernel-backed poll sleeping: the WASI path now sleeps through `wasi_ext::host_sleep_ms()` and backs off between `try_wait()` polls instead of spinning on `std::thread::sleep()`.
+- Added focused unit coverage for the timeout poll-delay math and documented the reusable WASI-shim sleep rule in `registry/AGENTS.md`.
+- Files changed: `registry/native/crates/libs/shims/src/timeout.rs`, `registry/AGENTS.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - On wasm32-wasip1, `std::thread::sleep()` is not a real blocking primitive for guest shims; use `wasi_ext::host_sleep_ms()` whenever a polling loop needs to yield wall-clock time without burning CPU.
+  - The old `US-201` PRD verification bullet pointed at a nonexistent `agent-os-kernel` test target, so the active story now records the focused native-shims command that actually validates this code path.
+  - End-to-end timeout sanity is easy to spot-check from the native workspace: a short-lived command should exit `0`, while a longer `sleep` under a shorter timeout should exit `124`.
 ---
