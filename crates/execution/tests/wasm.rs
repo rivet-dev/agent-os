@@ -5,16 +5,29 @@ use agent_os_execution::{
     CreateWasmContextRequest, StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionEvent,
     WasmPermissionTier,
 };
+use base64::Engine;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use tempfile::tempdir;
 
 const WASM_WARMUP_METRICS_PREFIX: &str = "__AGENT_OS_WASM_WARMUP_METRICS__:";
+
+fn node_binary_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn lock_node_binary_env() -> MutexGuard<'static, ()> {
+    node_binary_env_lock()
+        .lock()
+        .expect("lock AGENT_OS_NODE_BINARY test guard")
+}
 
 struct EnvVarGuard {
     key: &'static str,
@@ -60,6 +73,7 @@ struct WasmWarmupMetrics {
 }
 
 fn assert_node_available() {
+    let _guard = lock_node_binary_env();
     let binary = std::env::var("AGENT_OS_NODE_BINARY").unwrap_or_else(|_| String::from("node"));
     let output = Command::new(binary)
         .arg("--version")
@@ -70,6 +84,19 @@ fn assert_node_available() {
 
 fn write_fixture(path: &Path, contents: &[u8]) {
     fs::write(path, contents).expect("write fixture");
+}
+
+fn decode_sync_rpc_bytes(value: &serde_json::Value) -> Vec<u8> {
+    let base64 = value
+        .get("__agentOsType")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| kind == "bytes")
+        .then(|| value.get("base64").and_then(serde_json::Value::as_str))
+        .flatten()
+        .expect("sync rpc bytes payload");
+    base64::engine::general_purpose::STANDARD
+        .decode(base64)
+        .expect("decode sync rpc bytes")
 }
 
 fn write_fake_node_binary(path: &Path, log_path: &Path) {
@@ -535,6 +562,7 @@ fn wasm_contexts_preserve_vm_and_module_configuration() {
 
 #[test]
 fn wasm_execution_stays_inside_v8_runtime_without_host_node_launches() {
+    let _guard = lock_node_binary_env();
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
     let log_path = temp.path().join("node-invocations.log");
@@ -750,6 +778,62 @@ fn wasm_execution_streams_exit_event() {
     }
 
     assert!(saw_stdout, "expected stdout event before exit");
+}
+
+#[test]
+fn wasm_execution_can_route_stdio_through_kernel_sync_rpc() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(&temp.path().join("guest.wasm"), &wasm_stdout_module());
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let mut execution = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: Vec::new(),
+            env: BTreeMap::from([(
+                String::from("AGENT_OS_WASI_STDIO_SYNC_RPC"),
+                String::from("1"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
+        })
+        .expect("start wasm execution");
+
+    let request = match execution
+        .poll_event_blocking(Duration::from_secs(5))
+        .expect("poll wasm event")
+    {
+        Some(WasmExecutionEvent::SyncRpcRequest(request)) => request,
+        other => panic!("expected kernel stdio sync RPC request, got {other:?}"),
+    };
+
+    assert_eq!(request.method, "__kernel_stdio_write");
+    assert_eq!(request.args.first(), Some(&json!(1)));
+    assert_eq!(
+        String::from_utf8(decode_sync_rpc_bytes(&request.args[1])).expect("stdout utf8"),
+        "stdout:wasm-smoke\n"
+    );
+
+    execution
+        .respond_sync_rpc_success(request.id, json!(18))
+        .expect("respond to __kernel_stdio_write");
+
+    let result = execution.wait().expect("wait for wasm execution");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "stderr={stderr}");
+    assert!(
+        result.stdout.is_empty(),
+        "stdout should be kernel-routed in this mode"
+    );
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
 #[test]

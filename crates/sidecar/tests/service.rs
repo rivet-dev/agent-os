@@ -44,12 +44,19 @@ mod service {
             RootFilesystemEntry, RootFilesystemEntryKind, SidecarPlacement, SidecarRequestFrame,
             SidecarRequestPayload, SidecarResponsePayload, WriteStdinRequest,
         };
-        use crate::state::{ToolExecution, VM_DNS_SERVERS_METADATA_KEY};
+        use crate::state::{
+            ActiveProcess, ToolExecution, EXECUTION_SANDBOX_ROOT_ENV, WASM_COMMAND,
+            WASM_STDIO_SYNC_RPC_ENV, VM_DNS_SERVERS_METADATA_KEY,
+        };
         use agent_os_bridge::{FileKind, SymlinkRequest};
-        use agent_os_execution::PythonVfsRpcMethod;
+        use agent_os_execution::{
+            CreateWasmContextRequest, PythonVfsRpcMethod, StartWasmExecutionRequest,
+            WasmPermissionTier,
+        };
         use agent_os_kernel::command_registry::CommandDriver;
         use agent_os_kernel::kernel::{KernelVmConfig, SpawnOptions};
         use agent_os_kernel::mount_table::{MountEntry, MountTable};
+        use agent_os_kernel::poll::{PollTargetEntry, POLLIN};
         use agent_os_kernel::permissions::{FsAccessRequest, FsOperation, Permissions};
         use agent_os_kernel::vfs::{
             MemoryFileSystem, VfsError, VirtualDirEntry, VirtualFileSystem, VirtualStat,
@@ -903,6 +910,119 @@ ykAheWCsAteSEWVc0w==\n\
             }
 
             (stdout, stderr, exit_code)
+        }
+
+        fn wasm_stdout_module(message: &str) -> Vec<u8> {
+            wat::parse_str(format!(
+                r#"
+(module
+  (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (type $fd_write_t)))
+  (memory (export "memory") 1)
+  (data (i32.const 16) "{message}\n")
+  (func $_start (export "_start")
+    (i32.store (i32.const 0) (i32.const 16))
+    (i32.store (i32.const 4) (i32.const {length}))
+    (drop
+      (call $fd_write
+        (i32.const 1)
+        (i32.const 0)
+        (i32.const 1)
+        (i32.const 32)
+      )
+    )
+  )
+)
+"#,
+                length = message.len() + 1,
+            ))
+            .expect("compile wasm stdout fixture")
+        }
+
+        fn start_fake_wasm_process(
+            sidecar: &mut NativeSidecar<RecordingBridge>,
+            vm_id: &str,
+            cwd: &Path,
+            process_id: &str,
+            attach_stdout_pty: bool,
+        ) -> Option<u32> {
+            let context = sidecar.wasm_engine.create_context(CreateWasmContextRequest {
+                vm_id: vm_id.to_owned(),
+                module_path: Some(String::from("./guest.wasm")),
+            });
+
+            let env = {
+                let vm = sidecar.vms.get(vm_id).expect("wasm vm");
+                BTreeMap::from([
+                    (
+                        String::from(EXECUTION_SANDBOX_ROOT_ENV),
+                        normalize_host_path(&vm.cwd).to_string_lossy().into_owned(),
+                    ),
+                    (String::from(WASM_STDIO_SYNC_RPC_ENV), String::from("1")),
+                ])
+            };
+
+            let execution = sidecar
+                .wasm_engine
+                .start_execution(StartWasmExecutionRequest {
+                    vm_id: vm_id.to_owned(),
+                    context_id: context.context_id,
+                    argv: vec![String::from("./guest.wasm")],
+                    env: env.clone(),
+                    cwd: cwd.to_path_buf(),
+                    permission_tier: WasmPermissionTier::Full,
+                })
+                .expect("start fake wasm execution");
+
+            let (kernel_handle, master_fd) = {
+                let vm = sidecar.vms.get_mut(vm_id).expect("wasm vm");
+                let kernel_handle = vm
+                    .kernel
+                    .spawn_process(
+                        WASM_COMMAND,
+                        vec![String::from("./guest.wasm")],
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            cwd: Some(String::from("/")),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn kernel wasm process");
+                let kernel_pid = kernel_handle.pid();
+                let master_fd = if attach_stdout_pty {
+                    let (master_fd, slave_fd, _pty_path) = vm
+                        .kernel
+                        .open_pty(EXECUTION_DRIVER_NAME, kernel_pid)
+                        .expect("open kernel pty");
+                    vm.kernel
+                        .fd_dup2(EXECUTION_DRIVER_NAME, kernel_pid, slave_fd, 1)
+                        .expect("dup kernel pty slave onto fd 1");
+                    vm.kernel
+                        .fd_close(EXECUTION_DRIVER_NAME, kernel_pid, slave_fd)
+                        .expect("close extra kernel pty slave fd");
+                    Some(master_fd)
+                } else {
+                    None
+                };
+                (kernel_handle, master_fd)
+            };
+
+            let vm = sidecar.vms.get_mut(vm_id).expect("wasm vm");
+            let kernel_pid = kernel_handle.pid();
+            vm.active_processes.insert(
+                process_id.to_owned(),
+                ActiveProcess::new(
+                    kernel_pid,
+                    kernel_handle,
+                    GuestRuntimeKind::WebAssembly,
+                    ActiveExecution::Wasm(execution),
+                )
+                .with_guest_cwd(String::from("/"))
+                .with_env(env)
+                .with_host_cwd(cwd.to_path_buf()),
+            );
+
+            master_fd
         }
 
         fn start_fake_javascript_process(
@@ -4940,6 +5060,199 @@ ykAheWCsAteSEWVc0w==\n\
 
             assert_eq!(exit_code, Some(0), "stderr: {stderr}");
             assert!(stdout.contains("wasm:ready"), "stdout: {stdout}");
+        }
+
+        #[test]
+        fn wasm_fd_write_sync_rpc_keeps_stdout_isolated_per_vm() {
+            let cwd_a = temp_dir("agent-os-sidecar-wasm-stdio-vm-a");
+            let cwd_b = temp_dir("agent-os-sidecar-wasm-stdio-vm-b");
+            write_fixture(&cwd_a.join("guest.wasm"), wasm_stdout_module("VM_A_MARKER"));
+            write_fixture(&cwd_b.join("guest.wasm"), wasm_stdout_module("VM_B_MARKER"));
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_a = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm A");
+            let vm_b = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm B");
+
+            for (request_id, vm_id, process_id, entrypoint) in [
+                (6, &vm_a, "proc-wasm-a", cwd_a.join("guest.wasm")),
+                (7, &vm_b, "proc-wasm-b", cwd_b.join("guest.wasm")),
+            ] {
+                let response = sidecar
+                    .dispatch_blocking(request(
+                        request_id,
+                        OwnershipScope::vm(&connection_id, &session_id, vm_id),
+                        RequestPayload::Execute(crate::protocol::ExecuteRequest {
+                            process_id: String::from(process_id),
+                            command: None,
+                            runtime: Some(GuestRuntimeKind::WebAssembly),
+                            entrypoint: Some(entrypoint.to_string_lossy().into_owned()),
+                            args: Vec::new(),
+                            env: BTreeMap::new(),
+                            cwd: None,
+                            wasm_permission_tier: None,
+                        }),
+                    ))
+                    .expect("dispatch wasm execute");
+
+                match response.response.payload {
+                    ResponsePayload::ProcessStarted(response) => {
+                        assert_eq!(response.process_id, process_id);
+                    }
+                    other => panic!("unexpected execute response: {other:?}"),
+                }
+            }
+
+            let (stdout_a, stderr_a, exit_a) =
+                drain_process_output(&mut sidecar, &vm_a, "proc-wasm-a");
+            let (stdout_b, stderr_b, exit_b) =
+                drain_process_output(&mut sidecar, &vm_b, "proc-wasm-b");
+
+            assert_eq!(exit_a, Some(0), "stderr A: {stderr_a}");
+            assert_eq!(exit_b, Some(0), "stderr B: {stderr_b}");
+            assert!(stderr_a.is_empty(), "unexpected stderr A: {stderr_a}");
+            assert!(stderr_b.is_empty(), "unexpected stderr B: {stderr_b}");
+            assert!(
+                stdout_a.contains("VM_A_MARKER"),
+                "stdout A missing marker: {stdout_a:?}"
+            );
+            assert!(
+                !stdout_a.contains("VM_B_MARKER"),
+                "stdout A leaked B marker: {stdout_a:?}"
+            );
+            assert!(
+                stdout_b.contains("VM_B_MARKER"),
+                "stdout B missing marker: {stdout_b:?}"
+            );
+            assert!(
+                !stdout_b.contains("VM_A_MARKER"),
+                "stdout B leaked A marker: {stdout_b:?}"
+            );
+        }
+
+        #[test]
+        fn wasm_fd_write_sync_rpc_routes_stdout_into_kernel_pty() {
+            let cwd = temp_dir("agent-os-sidecar-wasm-stdio-pty");
+            write_fixture(&cwd.join("guest.wasm"), wasm_stdout_module("PTY_MARKER"));
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+
+            let master_fd = start_fake_wasm_process(
+                &mut sidecar,
+                &vm_id,
+                &cwd,
+                "proc-wasm-pty",
+                true,
+            )
+            .expect("attach stdout pty");
+
+            let mut pty_text = None;
+            let mut stderr = String::new();
+            let mut exit_code = None;
+
+            for _ in 0..64 {
+                let next_event = {
+                    let vm = sidecar.vms.get_mut(&vm_id).expect("active vm");
+                    vm.active_processes
+                        .get_mut("proc-wasm-pty")
+                        .map(|process| {
+                            if let Some(event) = process.pending_execution_events.pop_front() {
+                                Some(event)
+                            } else {
+                                process
+                                    .execution
+                                    .poll_event_blocking(Duration::from_secs(5))
+                                    .expect("poll wasm pty process event")
+                            }
+                        })
+                        .flatten()
+                };
+                let Some(event) = next_event else {
+                    break;
+                };
+
+                if let ActiveExecutionEvent::Stderr(chunk) = &event {
+                    stderr.push_str(&String::from_utf8_lossy(chunk));
+                }
+                if let ActiveExecutionEvent::Exited(code) = &event {
+                    exit_code = Some(*code);
+                }
+
+                sidecar
+                    .handle_execution_event(&vm_id, "proc-wasm-pty", event)
+                    .expect("handle wasm pty process event");
+
+                if pty_text.is_none() {
+                    let maybe_pty = {
+                        let vm = sidecar.vms.get_mut(&vm_id).expect("wasm vm");
+                        let kernel_pid = vm
+                            .active_processes
+                            .get("proc-wasm-pty")
+                            .map(|process| process.kernel_pid)
+                            .unwrap_or_else(|| {
+                                panic!("proc-wasm-pty should stay active until exit is handled")
+                            });
+                        let ready = vm
+                            .kernel
+                            .poll_targets(
+                                EXECUTION_DRIVER_NAME,
+                                kernel_pid,
+                                vec![PollTargetEntry::fd(master_fd, POLLIN)],
+                                0,
+                            )
+                            .expect("poll pty master");
+                        if ready.ready_count == 0 {
+                            None
+                        } else {
+                            Some(
+                                String::from_utf8(
+                                    vm.kernel
+                                        .fd_read(EXECUTION_DRIVER_NAME, kernel_pid, master_fd, 64)
+                                        .expect("read pty master"),
+                                )
+                                .expect("pty output utf8"),
+                            )
+                        }
+                    };
+                    if maybe_pty.is_some() {
+                        pty_text = maybe_pty;
+                    }
+                }
+
+                if exit_code.is_some() && pty_text.is_some() {
+                    break;
+                }
+            }
+
+            let pty_text = pty_text.expect("pty master should receive stdout");
+            assert!(
+                pty_text.replace("\r\n", "\n").contains("PTY_MARKER\n"),
+                "pty output should contain routed marker: {pty_text:?}"
+            );
+            assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
         }
 
         #[test]

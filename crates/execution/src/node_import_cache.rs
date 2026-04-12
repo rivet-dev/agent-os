@@ -15,7 +15,7 @@ const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
 const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "8";
-const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "33";
+const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "37";
 const NODE_IMPORT_CACHE_DIR_PREFIX: &str = "agent-os-node-import-cache";
 const DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const PYODIDE_DIST_DIR: &str = "pyodide-dist";
@@ -8156,6 +8156,7 @@ const CONTROL_PIPE_FD = parseControlPipeFd(process.env.AGENT_OS_CONTROL_PIPE_FD)
 const NODE_SYNC_RPC_ENABLE = process.env.AGENT_OS_NODE_SYNC_RPC_ENABLE === '1';
 const NODE_SYNC_RPC_REQUEST_FD = parseControlPipeFd(process.env.AGENT_OS_NODE_SYNC_RPC_REQUEST_FD);
 const NODE_SYNC_RPC_RESPONSE_FD = parseControlPipeFd(process.env.AGENT_OS_NODE_SYNC_RPC_RESPONSE_FD);
+const KERNEL_STDIO_SYNC_RPC = process.env.AGENT_OS_WASI_STDIO_SYNC_RPC === '1';
 let nextSyncRpcId = 1;
 let syncRpcResponseBuffer = '';
 const spawnedChildren = new Map();
@@ -9772,6 +9773,9 @@ const hostProcessImport =
           return WASI_ERRNO_FAULT;
         },
         proc_sigaction(signal, action, maskLo, maskHi, flags) {
+          if (permissionTier !== 'full') {
+            return WASI_ERRNO_FAULT;
+          }
           try {
             const registration = {
               action: action === 0 ? 'default' : action === 1 ? 'ignore' : 'user',
@@ -10050,6 +10054,15 @@ wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
   if (numericFd === 1 || numericFd === 2) {
     try {
       const bytes = collectGuestIovBytes(iovs, iovsLen);
+      const sidecarManagedProcess =
+        typeof process?.env?.AGENT_OS_SANDBOX_ROOT === 'string' &&
+        process.env.AGENT_OS_SANDBOX_ROOT.length > 0;
+      if (sidecarManagedProcess || KERNEL_STDIO_SYNC_RPC) {
+        const written = Number(
+          callSyncRpc('__kernel_stdio_write', [numericFd, bytes]),
+        ) >>> 0;
+        return writeGuestUint32(nwrittenPtr, written);
+      }
       (numericFd === 1 ? process.stdout : process.stderr).write(bytes);
       return writeGuestUint32(nwrittenPtr, bytes.length);
     } catch {
@@ -10332,7 +10345,7 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
 const instance = new WebAssembly.Instance(module, {
   wasi_snapshot_preview1: wasiImport,
   wasi_unstable: wasiImport,
-  host_process: hostProcessImport,
+  host_process: permissionTier === 'full' ? hostProcessImport : undefined,
   host_net: hostNetImport,
   host_user: hostUserImport,
   host_fs: hostFsImport,
