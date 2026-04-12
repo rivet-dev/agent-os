@@ -35,20 +35,6 @@ impl BridgeCodeCache {
     }
 }
 
-/// Callback that denies all WebAssembly code generation.
-extern "C" fn deny_wasm_code_generation(
-    _context: v8::Local<v8::Context>,
-    _source: v8::Local<v8::String>,
-) -> bool {
-    false
-}
-
-/// Disable WebAssembly compilation on the isolate.
-/// Must be called before any code execution.
-pub fn disable_wasm(isolate: &mut v8::OwnedIsolate) {
-    isolate.set_allow_wasm_code_generation_callback(deny_wasm_code_generation);
-}
-
 /// Inject `_processConfig` and `_osConfig` as frozen, non-writable, non-configurable
 /// global properties, and harden the context (remove SharedArrayBuffer in freeze mode).
 ///
@@ -2010,31 +1996,90 @@ mod tests {
             ));
         }
 
-        // --- Part 6: WASM disabled ---
+        // --- Part 6: Guest WebAssembly compilation stays enabled by default ---
         {
             let mut isolate = isolate::create_isolate(None);
-            disable_wasm(&mut isolate);
             let context = isolate::create_context(&mut isolate);
 
-            // Attempting to compile WASM should throw
-            assert!(eval_throws(
+            assert!(!eval_throws(
                 &mut isolate,
                 &context,
                 "new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0]))"
             ));
         }
 
-        // --- Part 7: WASM works without disable_wasm ---
+        // --- Part 7: Guest WebAssembly modules can instantiate and execute ---
         {
             let mut isolate = isolate::create_isolate(None);
             let context = isolate::create_context(&mut isolate);
 
-            // WASM should work by default (minimal valid WASM module)
-            assert!(!eval_throws(
+            let result = eval(
                 &mut isolate,
                 &context,
-                "new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0]))"
-            ));
+                r#"
+                (function() {
+                    var bytes = new Uint8Array([
+                        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+                        0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
+                        0x03, 0x02, 0x01, 0x00,
+                        0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00,
+                        0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,
+                    ]);
+                    var module = new WebAssembly.Module(bytes);
+                    var instance = new WebAssembly.Instance(module, {});
+                    return String(instance.exports.add(19, 23));
+                })()
+                "#,
+            );
+            assert_eq!(result, "42");
+        }
+
+        // --- Part 8: V8 still enforces its own WebAssembly memory limits ---
+        {
+            let mut isolate = isolate::create_isolate(None);
+            let context = isolate::create_context(&mut isolate);
+
+            let limit_report = eval(
+                &mut isolate,
+                &context,
+                r#"
+                (function() {
+                    function capture(fn) {
+                        try {
+                            fn();
+                            return "ALLOWED";
+                        } catch (error) {
+                            return error.name + ":" + error.message;
+                        }
+                    }
+
+                    var moduleLimit = capture(function() {
+                        var bytes = new Uint8Array([
+                            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+                            0x05, 0x06, 0x01, 0x01, 0x01, 0x81, 0x80, 0x04,
+                        ]);
+                        new WebAssembly.Module(bytes);
+                    });
+                    var memoryLimit = capture(function() {
+                        new WebAssembly.Memory({ initial: 1, maximum: 65537 });
+                    });
+                    return JSON.stringify({ moduleLimit: moduleLimit, memoryLimit: memoryLimit });
+                })()
+                "#,
+            );
+
+            assert!(
+                limit_report.contains(r#""moduleLimit":"CompileError:"#),
+                "unexpected module limit report: {limit_report}"
+            );
+            assert!(
+                limit_report.contains(r#""memoryLimit":"RangeError:"#),
+                "unexpected memory limit report: {limit_report}"
+            );
+            assert!(
+                limit_report.contains("65536"),
+                "unexpected limit report: {limit_report}"
+            );
         }
 
         // --- Part 8: Sync bridge call returns value ---
@@ -3854,7 +3899,6 @@ mod tests {
         // --- Part 43: Timeout terminates infinite loop ---
         {
             let mut iso = isolate::create_isolate(None);
-            disable_wasm(&mut iso);
             let ctx = isolate::create_context(&mut iso);
 
             // Create abort channel for timeout
@@ -3885,7 +3929,6 @@ mod tests {
         // --- Part 44: Timeout cancelled when execution completes before deadline ---
         {
             let mut iso = isolate::create_isolate(None);
-            disable_wasm(&mut iso);
             let ctx = isolate::create_context(&mut iso);
 
             let (abort_tx, _abort_rx) = crossbeam_channel::bounded::<()>(0);
@@ -3911,7 +3954,6 @@ mod tests {
         // --- Part 45: Timeout fires during sync bridge call (unblocks channel reader) ---
         {
             let mut iso = isolate::create_isolate(None);
-            disable_wasm(&mut iso);
             let ctx = isolate::create_context(&mut iso);
 
             // Set up abort channel for timeout
