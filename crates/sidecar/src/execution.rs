@@ -14,8 +14,9 @@ use crate::protocol::{
     KillProcessRequest, ListenerSnapshotResponse, OwnershipScope, ProcessExitedEvent,
     ProcessKilledResponse, ProcessOutputEvent, ProcessSnapshotEntry, ProcessSnapshotResponse,
     ProcessSnapshotStatus, ProcessStartedResponse, RequestFrame, ResponsePayload,
-    SidecarRequestPayload, SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse,
-    SocketStateEntry, StdinClosedResponse, StdinWrittenResponse, StreamChannel, WasmPermissionTier,
+    SidecarRequestPayload, SidecarResponsePayload, SignalDispositionAction,
+    SignalHandlerRegistration, SignalStateResponse, SocketStateEntry, StdinClosedResponse,
+    StdinWrittenResponse, StreamChannel, TransformHttpRequest, WasmPermissionTier,
     WriteStdinRequest, ZombieTimerCountResponse,
 };
 use crate::service::{
@@ -5323,6 +5324,17 @@ where
                         let resource_limits = vm.kernel.resource_limits().clone();
                         let network_counts = vm_network_resource_counts(vm);
                         let socket_paths = build_javascript_socket_path_context(vm)?;
+                        let enable_transform = vm.configuration.enable_http_request_transform;
+                        let ownership = OwnershipScope::vm(
+                            vm.connection_id.clone(),
+                            vm.session_id.clone(),
+                            vm_id.to_owned(),
+                        );
+                        let http_transform = if enable_transform {
+                            Some((&self.sidecar_requests, &ownership))
+                        } else {
+                            None
+                        };
                         let root = vm
                             .active_processes
                             .get_mut(process_id)
@@ -5349,6 +5361,7 @@ where
                             &request,
                             &resource_limits,
                             network_counts,
+                            http_transform,
                         )
                     };
 
@@ -10256,6 +10269,7 @@ pub(crate) fn service_javascript_sync_rpc<B>(
     request: &JavascriptSyncRpcRequest,
     resource_limits: &ResourceLimits,
     network_counts: NetworkResourceCounts,
+    http_transform: Option<(&SharedSidecarRequestClient, &OwnershipScope)>,
 ) -> Result<Value, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
@@ -10302,6 +10316,7 @@ where
             request,
             resource_limits,
             network_counts,
+            http_transform,
         ),
         "net.http2_server_listen"
         | "net.http2_server_poll"
@@ -10365,6 +10380,7 @@ where
             request,
             resource_limits,
             network_counts,
+            http_transform,
         ),
         "dgram.createSocket"
         | "dgram.bind"
@@ -12682,6 +12698,7 @@ where
                     &request,
                     resource_limits,
                     network_counts,
+                    None,
                 );
                 match response {
                     Ok(result) => process
@@ -15345,6 +15362,7 @@ pub(crate) fn service_javascript_net_sync_rpc<B>(
     request: &JavascriptSyncRpcRequest,
     resource_limits: &ResourceLimits,
     network_counts: NetworkResourceCounts,
+    http_transform: Option<(&SharedSidecarRequestClient, &OwnershipScope)>,
 ) -> Result<Value, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
@@ -15352,7 +15370,7 @@ where
 {
     match request.method.as_str() {
         "net.http_request" => {
-            let (url, options, headers) = parse_http_request_options(request)?;
+            let (mut url, mut options, mut headers) = parse_http_request_options(request)?;
             let host = url.host_str().ok_or_else(|| {
                 SidecarError::Execution(String::from("ERR_INVALID_URL: missing host"))
             })?;
@@ -15400,6 +15418,79 @@ where
                         (server_id, request_id),
                     )?;
                     return Ok(Value::String(response));
+                }
+            }
+
+            if let Some((sidecar_requests, ownership)) = &http_transform {
+                let header_json = json!(headers.normalized);
+                let transform_request = TransformHttpRequest {
+                    request_id: format!("http-{}", request.id),
+                    url: url.to_string(),
+                    method: options.method.clone().unwrap_or_else(|| String::from("GET")),
+                    headers: header_json,
+                    body: options.body.clone(),
+                };
+                let transform_response = sidecar_requests.invoke(
+                    (*ownership).clone(),
+                    SidecarRequestPayload::TransformHttpRequest(transform_request),
+                    Duration::from_secs(10),
+                );
+                match transform_response {
+                    Ok(SidecarResponsePayload::TransformHttpResult(result)) => {
+                        if let Some(error) = result.error {
+                            return Err(SidecarError::Execution(format!(
+                                "ERR_HTTP_TRANSFORM_FAILED: {error}"
+                            )));
+                        }
+                        if let Some(new_url) = result.url {
+                            url = Url::parse(&new_url).map_err(|error| {
+                                SidecarError::Execution(format!(
+                                    "ERR_HTTP_TRANSFORM_INVALID_URL: {error}"
+                                ))
+                            })?;
+                        }
+                        if let Some(new_method) = result.method {
+                            options.method = Some(new_method);
+                        }
+                        if let Some(new_headers) = result.headers {
+                            if let Some(map) = new_headers.as_object() {
+                                let mut normalized = BTreeMap::new();
+                                let mut raw_pairs = Vec::new();
+                                for (key, value) in map {
+                                    let values: Vec<String> = match value {
+                                        Value::Array(arr) => arr
+                                            .iter()
+                                            .filter_map(|v| v.as_str().map(String::from))
+                                            .collect(),
+                                        Value::String(s) => vec![s.clone()],
+                                        _ => continue,
+                                    };
+                                    for v in &values {
+                                        raw_pairs.push((key.clone(), v.clone()));
+                                    }
+                                    normalized.insert(key.clone(), values);
+                                }
+                                headers = HttpHeaderCollection {
+                                    normalized,
+                                    raw_pairs,
+                                };
+                            }
+                        }
+                        if result.body.is_some() {
+                            options.body = result.body;
+                        }
+                    }
+                    Ok(unexpected) => {
+                        return Err(SidecarError::Execution(format!(
+                            "ERR_HTTP_TRANSFORM_FAILED: unexpected response type: {}",
+                            unexpected.kind_name()
+                        )));
+                    }
+                    Err(error) => {
+                        return Err(SidecarError::Execution(format!(
+                            "ERR_HTTP_TRANSFORM_FAILED: {error}"
+                        )));
+                    }
                 }
             }
 

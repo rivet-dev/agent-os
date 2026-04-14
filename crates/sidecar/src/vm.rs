@@ -318,6 +318,7 @@ where
             command_permissions: payload.command_permissions.clone(),
             allowed_node_builtins: payload.allowed_node_builtins.clone(),
             loopback_exempt_ports: payload.loopback_exempt_ports.clone(),
+            enable_http_request_transform: payload.enable_http_request_transform,
         };
         if let Some(permissions) = payload.permissions.as_ref() {
             self.bridge.set_vm_permissions(&vm_id, permissions)?;

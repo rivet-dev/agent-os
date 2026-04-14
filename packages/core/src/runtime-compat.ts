@@ -1988,6 +1988,7 @@ class NativeKernel implements Kernel {
 				fs: VirtualFileSystem;
 				readOnly?: boolean;
 			}>;
+			enableHttpRequestTransform?: boolean;
 		},
 	) {
 		this.env = { ...(options.env ?? {}) };
@@ -2243,7 +2244,8 @@ class NativeKernel implements Kernel {
 		);
 		if (
 			this.pendingLocalMounts.length > 0 ||
-			this.loopbackExemptPorts.length > 0
+			this.loopbackExemptPorts.length > 0 ||
+			this.options.enableHttpRequestTransform
 		) {
 			await client.configureVm(session, vm, {
 				mounts: this.pendingLocalMounts.map((mount) =>
@@ -2266,6 +2268,7 @@ class NativeKernel implements Kernel {
 							}),
 				),
 				loopbackExemptPorts: this.loopbackExemptPorts,
+				enableHttpRequestTransform: this.options.enableHttpRequestTransform,
 			});
 		}
 
@@ -2297,6 +2300,7 @@ export function createKernel(options: {
 	loopbackExemptPorts?: number[];
 	logger?: unknown;
 	mounts?: Array<{ path: string; fs: VirtualFileSystem; readOnly?: boolean }>;
+	enableHttpRequestTransform?: boolean;
 }): Kernel {
 	return new NativeKernel(options);
 }

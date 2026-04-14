@@ -234,6 +234,7 @@ pub(crate) struct VmConfiguration {
     pub(crate) command_permissions: BTreeMap<String, WasmPermissionTier>,
     pub(crate) allowed_node_builtins: Vec<String>,
     pub(crate) loopback_exempt_ports: Vec<u16>,
+    pub(crate) enable_http_request_transform: bool,
 }
 
 #[allow(dead_code)]

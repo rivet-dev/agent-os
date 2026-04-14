@@ -216,6 +216,7 @@ type RequestPayload =
 			command_permissions: Record<string, WasmPermissionTier>;
 			allowed_node_builtins?: string[];
 			loopback_exempt_ports?: number[];
+			enable_http_request_transform?: boolean;
 	  }
 	| {
 			type: "register_toolkit";
@@ -346,6 +347,14 @@ export type SidecarRequestPayload =
 			mount_id: string;
 			operation: string;
 			args: unknown;
+	  }
+	| {
+			type: "transform_http_request";
+			request_id: string;
+			url: string;
+			method: string;
+			headers: Record<string, string[]>;
+			body?: string;
 	  };
 
 export type SidecarResponsePayload =
@@ -365,6 +374,15 @@ export type SidecarResponsePayload =
 			type: "js_bridge_result";
 			call_id: string;
 			result?: unknown;
+			error?: string;
+	  }
+	| {
+			type: "transform_http_result";
+			request_id: string;
+			url?: string;
+			method?: string;
+			headers?: Record<string, string[]>;
+			body?: string;
 			error?: string;
 	  };
 
@@ -1062,6 +1080,7 @@ export class NativeSidecarProcessClient {
 			commandPermissions?: Record<string, WasmPermissionTier>;
 			allowedNodeBuiltins?: string[];
 			loopbackExemptPorts?: number[];
+			enableHttpRequestTransform?: boolean;
 		},
 	): Promise<void> {
 		const response = await this.sendRequest({
@@ -1087,6 +1106,9 @@ export class NativeSidecarProcessClient {
 					: {}),
 				...(options.loopbackExemptPorts
 					? { loopback_exempt_ports: options.loopbackExemptPorts }
+					: {}),
+				...(options.enableHttpRequestTransform
+					? { enable_http_request_transform: true }
 					: {}),
 			},
 		});
@@ -2812,6 +2834,7 @@ function encodeRequestPayload(writer: BareWriter, payload: RequestPayload): void
 			writer.writeList(payload.loopback_exempt_ports ?? [], (value) =>
 				writer.writeU16(value),
 			);
+			writer.writeBool(payload.enable_http_request_transform ?? false);
 			return;
 		case "register_toolkit":
 			writer.writeVarUint(11);
@@ -2981,6 +3004,19 @@ function encodeSidecarResponsePayload(
 			writer.writeOptional(payload.result, (value) =>
 				writer.writeString(stringifyJsonUtf8(value, "js_bridge_result.result")),
 			);
+			writer.writeOptional(payload.error, (value) => writer.writeString(value));
+			return;
+		case "transform_http_result":
+			writer.writeVarUint(4);
+			writer.writeString(payload.request_id);
+			writer.writeOptional(payload.url, (value) => writer.writeString(value));
+			writer.writeOptional(payload.method, (value) => writer.writeString(value));
+			writer.writeOptional(payload.headers, (value) =>
+				writer.writeString(
+					stringifyJsonUtf8(value, "transform_http_result.headers"),
+				),
+			);
+			writer.writeOptional(payload.body, (value) => writer.writeString(value));
 			writer.writeOptional(payload.error, (value) => writer.writeString(value));
 			return;
 	}
@@ -3383,6 +3419,20 @@ function decodeSidecarRequestPayload(
 					"js bridge call args",
 				),
 			};
+		case 4:
+			return {
+				type: "transform_http_request",
+				request_id: reader.readString("transform_http_request.request_id"),
+				url: reader.readString("transform_http_request.url"),
+				method: reader.readString("transform_http_request.method"),
+				headers: parseJsonUtf8(
+					reader.readString("transform_http_request.headers"),
+					"transform_http_request headers",
+				) as Record<string, string[]>,
+				body: reader.readOptional(() =>
+					reader.readString("transform_http_request.body"),
+				),
+			};
 		default:
 			throw new Error("unsupported sidecar request payload tag");
 	}
@@ -3739,6 +3789,8 @@ function isMatchingSidecarResponsePayload(
 			return response.type === "permission_request_result";
 		case "js_bridge_call":
 			return response.type === "js_bridge_result";
+		case "transform_http_request":
+			return response.type === "transform_http_result";
 	}
 }
 
@@ -3764,6 +3816,12 @@ function errorSidecarResponsePayload(
 			return {
 				type: "js_bridge_result",
 				call_id: request.call_id,
+				error: message,
+			};
+		case "transform_http_request":
+			return {
+				type: "transform_http_result",
+				request_id: request.request_id,
 				error: message,
 			};
 	}
