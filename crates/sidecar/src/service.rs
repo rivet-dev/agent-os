@@ -1858,6 +1858,17 @@ where
                 let resource_limits = vm.kernel.resource_limits().clone();
                 let network_counts = vm_network_resource_counts(vm);
                 let socket_paths = build_javascript_socket_path_context(vm)?;
+                let enable_transform = vm.configuration.enable_http_request_transform;
+                let ownership = OwnershipScope::vm(
+                    vm.connection_id.clone(),
+                    vm.session_id.clone(),
+                    vm_id.to_owned(),
+                );
+                let http_transform = if enable_transform {
+                    Some((&self.sidecar_requests, &ownership))
+                } else {
+                    None
+                };
                 let process = vm
                     .active_processes
                     .get_mut(process_id)
@@ -1872,6 +1883,7 @@ where
                     &request,
                     &resource_limits,
                     network_counts,
+                    http_transform,
                 )
             }
         };

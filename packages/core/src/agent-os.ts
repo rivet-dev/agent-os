@@ -374,6 +374,13 @@ export interface AgentOsOptions {
 	 * Pass an explicit sidecar handle to pin the VM to a caller-managed sidecar.
 	 */
 	sidecar?: AgentOsSidecarConfig;
+	/**
+	 * When enabled, the sidecar sends a `transform_http_request` callback to the
+	 * host before every outbound HTTP request. The host can modify the URL,
+	 * headers, and body (e.g. for credential injection) before the request is
+	 * issued. Handle the callback via `setSidecarRequestHandler` on the client.
+	 */
+	enableHttpRequestTransform?: boolean;
 }
 
 /** Configuration for a local MCP server (spawned as a child process). */
@@ -1691,6 +1698,7 @@ export class AgentOs {
 					commandPermissions: processed.commandPermissions,
 					allowedNodeBuiltins: options?.allowedNodeBuiltins,
 					loopbackExemptPorts: options?.loopbackExemptPorts,
+					enableHttpRequestTransform: options?.enableHttpRequestTransform,
 				});
 				if (toolKits && toolKits.length > 0) {
 					toolReference = await registerToolkitsOnSidecar(
@@ -3027,6 +3035,11 @@ export class AgentOs {
 						call_id: request.payload.call_id,
 						error: `unsupported sidecar request type: ${request.payload.type}`,
 					});
+				case "transform_http_request":
+					return {
+						type: "transform_http_result" as const,
+						request_id: request.payload.request_id,
+					};
 			}
 		});
 	}

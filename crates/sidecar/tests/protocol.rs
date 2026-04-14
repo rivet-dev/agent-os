@@ -8,7 +8,8 @@ use agent_os_sidecar::protocol::{
     RootFilesystemLowerDescriptor, SidecarPlacement, SidecarRequestFrame, SidecarRequestPayload,
     SidecarResponseFrame, SidecarResponsePayload, SidecarResponseTracker,
     SidecarResponseTrackerError, SoftwareDescriptor, StructuredEvent, ToolInvocationRequest,
-    ToolInvocationResultResponse, VmLifecycleEvent, VmLifecycleState, WriteStdinRequest,
+    ToolInvocationResultResponse, TransformHttpRequest, TransformHttpResultResponse,
+    VmLifecycleEvent, VmLifecycleState, WriteStdinRequest,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -113,6 +114,108 @@ fn codec_round_trips_sidecar_request_and_response_frames() {
         codec.decode(&codec.encode(&request).unwrap()).unwrap(),
         request
     );
+    assert_eq!(
+        codec.decode(&codec.encode(&response).unwrap()).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn codec_round_trips_transform_http_request_and_response() {
+    let codec = NativeFrameCodec::default();
+    let request = ProtocolFrame::SidecarRequest(SidecarRequestFrame::new(
+        -20,
+        OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+        SidecarRequestPayload::TransformHttpRequest(TransformHttpRequest {
+            request_id: "http-42".to_string(),
+            url: "https://api.example.com/v1/data".to_string(),
+            method: "POST".to_string(),
+            headers: json!({
+                "authorization": ["Bearer __CREDENTIAL_REF_abc__"],
+                "content-type": ["application/json"],
+            }),
+            body: Some(r#"{"key":"value"}"#.to_string()),
+        }),
+    ));
+    let response = ProtocolFrame::SidecarResponse(SidecarResponseFrame::new(
+        -20,
+        OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+        SidecarResponsePayload::TransformHttpResult(TransformHttpResultResponse {
+            request_id: "http-42".to_string(),
+            url: None,
+            method: None,
+            headers: Some(json!({
+                "authorization": ["Bearer real-secret-token"],
+                "content-type": ["application/json"],
+            })),
+            body: None,
+            error: None,
+        }),
+    ));
+
+    assert_eq!(
+        codec.decode(&codec.encode(&request).unwrap()).unwrap(),
+        request
+    );
+    assert_eq!(
+        codec.decode(&codec.encode(&response).unwrap()).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn bare_codec_round_trips_transform_http_request_frames() {
+    let codec = NativeFrameCodec::with_payload_codec(1024 * 1024, NativePayloadCodec::Bare);
+    let request = ProtocolFrame::SidecarRequest(SidecarRequestFrame::new(
+        -21,
+        OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+        SidecarRequestPayload::TransformHttpRequest(TransformHttpRequest {
+            request_id: "http-99".to_string(),
+            url: "https://api.stripe.com/v1/charges".to_string(),
+            method: "GET".to_string(),
+            headers: json!({"accept": ["application/json"]}),
+            body: None,
+        }),
+    ));
+
+    let encoded = codec.encode(&request).expect("encode bare transform request");
+    let decoded = codec.decode(&encoded).expect("decode bare transform request");
+    assert_eq!(decoded, request);
+
+    let response = ProtocolFrame::SidecarResponse(SidecarResponseFrame::new(
+        -21,
+        OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+        SidecarResponsePayload::TransformHttpResult(TransformHttpResultResponse {
+            request_id: "http-99".to_string(),
+            url: Some("https://api.stripe.com/v1/charges".to_string()),
+            method: Some("GET".to_string()),
+            headers: Some(json!({"accept": ["application/json"], "authorization": ["Bearer sk_live_xxx"]})),
+            body: None,
+            error: None,
+        }),
+    ));
+
+    let encoded = codec.encode(&response).expect("encode bare transform response");
+    let decoded = codec.decode(&encoded).expect("decode bare transform response");
+    assert_eq!(decoded, response);
+}
+
+#[test]
+fn transform_http_result_with_error_round_trips() {
+    let codec = NativeFrameCodec::default();
+    let response = ProtocolFrame::SidecarResponse(SidecarResponseFrame::new(
+        -22,
+        OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+        SidecarResponsePayload::TransformHttpResult(TransformHttpResultResponse {
+            request_id: "http-fail".to_string(),
+            url: None,
+            method: None,
+            headers: None,
+            body: None,
+            error: Some("credential resolver unavailable".to_string()),
+        }),
+    ));
+
     assert_eq!(
         codec.decode(&codec.encode(&response).unwrap()).unwrap(),
         response

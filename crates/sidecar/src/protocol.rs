@@ -542,6 +542,7 @@ pub enum SidecarRequestPayload {
     ToolInvocation(ToolInvocationRequest),
     PermissionRequest(SidecarPermissionRequest),
     JsBridgeCall(JsBridgeCallRequest),
+    TransformHttpRequest(TransformHttpRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -549,6 +550,7 @@ pub enum SidecarResponsePayload {
     ToolInvocationResult(ToolInvocationResultResponse),
     PermissionRequestResult(SidecarPermissionResultResponse),
     JsBridgeResult(JsBridgeResultResponse),
+    TransformHttpResult(TransformHttpResultResponse),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -981,6 +983,8 @@ pub struct ConfigureVmRequest {
     pub allowed_node_builtins: Vec<String>,
     #[serde(default)]
     pub loopback_exempt_ports: Vec<u16>,
+    #[serde(default)]
+    pub enable_http_request_transform: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1213,6 +1217,32 @@ pub struct JsBridgeCallRequest {
     pub operation: String,
     #[serde(with = "json_utf8_value")]
     pub args: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransformHttpRequest {
+    pub request_id: String,
+    pub url: String,
+    pub method: String,
+    #[serde(with = "json_utf8_value")]
+    pub headers: Value,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransformHttpResultResponse {
+    pub request_id: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default, with = "json_utf8_option")]
+    pub headers: Option<Value>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1757,6 +1787,7 @@ impl_bare_newtype_union_enum!(
         ToolInvocation(ToolInvocationRequest) = 1,
         PermissionRequest(SidecarPermissionRequest) = 2,
         JsBridgeCall(JsBridgeCallRequest) = 3,
+        TransformHttpRequest(TransformHttpRequest) = 4,
     }
 );
 
@@ -1768,6 +1799,7 @@ impl_bare_newtype_union_enum!(
         ToolInvocationResult(ToolInvocationResultResponse) = 1,
         PermissionRequestResult(SidecarPermissionResultResponse) = 2,
         JsBridgeResult(JsBridgeResultResponse) = 3,
+        TransformHttpResult(TransformHttpResultResponse) = 4,
     }
 );
 
@@ -2808,6 +2840,7 @@ enum ExpectedSidecarResponseKind {
     ToolInvocationResult,
     PermissionRequestResult,
     JsBridgeResult,
+    TransformHttpResult,
 }
 
 impl ExpectedResponseKind {
@@ -2861,6 +2894,7 @@ impl ExpectedSidecarResponseKind {
             Self::ToolInvocationResult => "tool_invocation_result",
             Self::PermissionRequestResult => "permission_request_result",
             Self::JsBridgeResult => "js_bridge_result",
+            Self::TransformHttpResult => "transform_http_result",
         }
     }
 
@@ -2952,6 +2986,7 @@ impl SidecarRequestPayload {
             Self::ToolInvocation(_) => ExpectedSidecarResponseKind::ToolInvocationResult,
             Self::PermissionRequest(_) => ExpectedSidecarResponseKind::PermissionRequestResult,
             Self::JsBridgeCall(_) => ExpectedSidecarResponseKind::JsBridgeResult,
+            Self::TransformHttpRequest(_) => ExpectedSidecarResponseKind::TransformHttpResult,
         }
     }
 }
@@ -3036,11 +3071,12 @@ impl SidecarResponsePayload {
         OwnershipRequirement::Vm
     }
 
-    fn kind_name(&self) -> &'static str {
+    pub(crate) fn kind_name(&self) -> &'static str {
         match self {
             Self::ToolInvocationResult(_) => "tool_invocation_result",
             Self::PermissionRequestResult(_) => "permission_request_result",
             Self::JsBridgeResult(_) => "js_bridge_result",
+            Self::TransformHttpResult(_) => "transform_http_result",
         }
     }
 }
