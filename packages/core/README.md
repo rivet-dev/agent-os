@@ -1,4 +1,4 @@
-# @rivet-dev/agent-os
+# @rivet-dev/agent-os-core
 
 A high-level SDK for running coding agents in isolated VMs. agentOS manages the full lifecycle of virtual machines — from filesystem setup and process management to launching AI agents via the Agent Communication Protocol (ACP).
 
@@ -19,13 +19,13 @@ Agents run inside sandboxed VMs with their own filesystem, process table, and ne
 ## Quick Start
 
 ```bash
-npm install @rivet-dev/agent-os
+npm install @rivet-dev/agent-os-core
 # Install an agent adapter + its underlying agent
 npm install pi-acp @mariozechner/pi-coding-agent
 ```
 
 ```typescript
-import { AgentOs } from "@rivet-dev/agent-os";
+import { AgentOs } from "@rivet-dev/agent-os-core";
 
 // 1. Create a VM
 const vm = await AgentOs.create();

@@ -10,7 +10,7 @@ plugin.
 ## Usage
 
 ```ts
-import { AgentOs } from "@rivet-dev/agent-os";
+import { AgentOs } from "@rivet-dev/agent-os-core";
 import { createGoogleDriveBackend } from "@rivet-dev/agent-os-google-drive";
 
 const vm = await AgentOs.create({
