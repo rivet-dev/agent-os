@@ -157,6 +157,15 @@ def _aos_coerce(value):
 def _aos_run(request):
     import duckdb
     db_path = request.get("database") or ":memory:"
+    # For file-backed DBs, ensure the parent directory exists — DuckDB
+    # won't auto-create intermediate dirs and will surface "No such file
+    # or directory" instead. AGENT_OS_SCRATCH_DIR itself is only created
+    # when the first helper writes to it, so callers using that path
+    # for a DB file would otherwise hit this on a fresh VM.
+    if db_path and db_path != ":memory:":
+        parent = _aos_os.path.dirname(db_path)
+        if parent:
+            _aos_os.makedirs(parent, exist_ok=True)
     con = duckdb.connect(db_path)
     cur = con.cursor()
     op = request.get("op")
