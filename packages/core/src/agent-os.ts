@@ -96,8 +96,9 @@ import type {
 	DbtTripwireSnapshot,
 	RunDbtOptions,
 } from "./dbt.js";
+import { AgentOsDuckdb } from "./duckdb.js";
 
-export { AgentOsDbt, AGENT_OS_SCRATCH_DIR };
+export { AgentOsDbt, AgentOsDuckdb, AGENT_OS_SCRATCH_DIR };
 export type {
 	DbtCatalog,
 	DbtCatalogEntry,
@@ -111,10 +112,22 @@ export type {
 	DbtTripwireSnapshot,
 	RunDbtOptions,
 } from "./dbt.js";
+export type {
+	DuckdbExecOptions,
+	DuckdbExecResult,
+	DuckdbListOptions,
+	DuckdbQueryOptions,
+	DuckdbQueryResult,
+	DuckdbTableInfo,
+	DuckdbTableOptions,
+	DuckdbTableSchema,
+} from "./duckdb.js";
+export { DuckdbError } from "./duckdb.js";
 
 // Back-compat pass-through re-exports for the raw helper scripts,
 // sentinels, and parsers. These remain part of the package API until
-// the follow-up cleanup internalizes them behind the `aos.dbt` surface.
+// the follow-up cleanup internalizes them behind the `aos.dbt` /
+// `aos.duckdb` surfaces.
 export {
 	DBT_RESULT_SENTINEL_BEGIN,
 	DBT_RESULT_SENTINEL_END,
@@ -980,6 +993,12 @@ export class AgentOs {
 	 * `python: { dbt: true }`.
 	 */
 	readonly dbt: AgentOsDbt;
+	/**
+	 * DuckDB operations namespace (`query`, `execute`, `describeTable`,
+	 * `listTables`). DuckDB ships alongside the dbt wheel bundle, so
+	 * this is usable whenever `python.dbt: true` was set.
+	 */
+	readonly duckdb: AgentOsDuckdb;
 	private _sessions = new Map<string, Session>();
 	private _processes = new Map<
 		number,
@@ -1026,6 +1045,7 @@ export class AgentOs {
 	) {
 		this.kernel = kernel;
 		this.dbt = new AgentOsDbt(this);
+		this.duckdb = new AgentOsDuckdb(this);
 		this._moduleAccessCwd = moduleAccessCwd;
 		this._softwareRoots = softwareRoots;
 		this._softwareAgentConfigs = softwareAgentConfigs;
