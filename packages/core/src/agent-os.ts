@@ -98,7 +98,19 @@ import type {
 } from "./dbt.js";
 
 export { AgentOsDbt, AGENT_OS_SCRATCH_DIR };
-export type { DbtRunResult, DbtTripwireSnapshot, RunDbtOptions };
+export type {
+	DbtCatalog,
+	DbtCatalogEntry,
+	DbtManifest,
+	DbtManifestNode,
+	DbtRunResult,
+	DbtRunResultRow,
+	DbtRunResults,
+	DbtRunStats,
+	DbtSubOptions,
+	DbtTripwireSnapshot,
+	RunDbtOptions,
+} from "./dbt.js";
 
 // Back-compat pass-through re-exports for the raw helper scripts,
 // sentinels, and parsers. These remain part of the package API until

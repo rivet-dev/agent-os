@@ -70,6 +70,102 @@ export interface DbtRunResult {
 	exception: string | null;
 	/** Tripwire snapshot captured after the run completed. */
 	tripwire: DbtTripwireSnapshot | null;
+	/**
+	 * Aggregate counts parsed from `target/run_results.json` when the
+	 * command wrote one (build/run/test/seed/snapshot). `undefined` for
+	 * commands that don't produce run_results.json (debug/parse/deps) or
+	 * when `options.cwd` wasn't supplied so there was no project root to
+	 * probe.
+	 */
+	stats?: DbtRunStats;
+}
+
+/** Aggregate counters derived from dbt's `target/run_results.json`. */
+export interface DbtRunStats {
+	modelsRun: number;
+	modelsPassed: number;
+	modelsFailed: number;
+	testsRun: number;
+	testsPassed: number;
+	testsFailed: number;
+	/** Sum of per-result `execution_time`, in milliseconds. */
+	totalElapsedMs: number;
+}
+
+/**
+ * Options accepted by the dbt subcommand shortcuts (`build`, `test`,
+ * `compile`, `seed`, `deps`, `debug`, `parse`). Extends `RunDbtOptions`
+ * with typed versions of the most common CLI flags so callers don't
+ * have to splice `--select` / `--exclude` / `--target` / `--vars` into
+ * the args array themselves.
+ */
+export interface DbtSubOptions extends RunDbtOptions {
+	/** Node selectors forwarded as `--select a b c`. */
+	select?: string[];
+	/** Node selectors forwarded as `--exclude a b c`. */
+	exclude?: string[];
+	/** Target name forwarded as `--target <name>`. */
+	target?: string;
+	/** Profile name forwarded as `--profile <name>`. */
+	profile?: string;
+	/** Vars forwarded as `--vars '<json>'`. JSON is a valid YAML subset for flat maps. */
+	vars?: Record<string, unknown>;
+}
+
+/** Parsed shape of `target/manifest.json`. */
+export interface DbtManifest {
+	/** Every manifest node (models, tests, seeds, snapshots, sources, macros…). */
+	nodes: DbtManifestNode[];
+	/** `manifest.metadata` block (dbt version, generated_at, adapter, etc.). */
+	metadata: Record<string, unknown>;
+}
+
+/** A single node entry out of the flattened manifest. */
+export interface DbtManifestNode {
+	uniqueId: string;
+	name: string;
+	/** dbt's `resource_type` — "model" | "test" | "seed" | "snapshot" | "source" | … */
+	resourceType: string;
+	path: string;
+	description?: string;
+	dependsOn: { nodes: string[] };
+	meta?: Record<string, unknown>;
+}
+
+/** Parsed shape of `target/run_results.json`. */
+export interface DbtRunResults {
+	args: Record<string, unknown>;
+	results: DbtRunResultRow[];
+	/** Total elapsed time of the dbt run in seconds (dbt's own metric). */
+	elapsedTime: number;
+	generatedAt: string;
+}
+
+/** A single row of `run_results.json` normalized to camelCase. */
+export interface DbtRunResultRow {
+	uniqueId: string;
+	/** "success" | "error" | "fail" | "pass" | "skipped" | "warn" | "runtime error" */
+	status: string;
+	/** Per-row execution_time in seconds. */
+	executionTime?: number;
+	message?: string;
+	failures?: number;
+}
+
+/** Parsed shape of `target/catalog.json` (produced by `dbt docs generate`). */
+export interface DbtCatalog {
+	nodes: Record<string, DbtCatalogEntry>;
+	sources?: Record<string, DbtCatalogEntry>;
+	errors?: Record<string, string>;
+}
+
+/** A single table entry in the catalog. */
+export interface DbtCatalogEntry {
+	metadata: { schema: string; name: string; type?: string };
+	columns: Record<
+		string,
+		{ type: string; index: number; comment?: string | null }
+	>;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -317,6 +413,66 @@ function findByteSequence(haystack: Uint8Array, needle: Uint8Array): number {
 	return -1;
 }
 
+/**
+ * Translate `DbtSubOptions` into the CLI flag array the dbt helper
+ * expects. Empty arrays and missing fields produce nothing — the dbt
+ * CLI rejects bare `--select` with no values.
+ */
+function subOptionArgs(opts: DbtSubOptions | undefined): string[] {
+	if (!opts) return [];
+	const out: string[] = [];
+	if (opts.select && opts.select.length > 0) {
+		out.push("--select", ...opts.select);
+	}
+	if (opts.exclude && opts.exclude.length > 0) {
+		out.push("--exclude", ...opts.exclude);
+	}
+	if (opts.target) out.push("--target", opts.target);
+	if (opts.profile) out.push("--profile", opts.profile);
+	if (opts.vars && Object.keys(opts.vars).length > 0) {
+		out.push("--vars", JSON.stringify(opts.vars));
+	}
+	return out;
+}
+
+/**
+ * Fold `DbtRunResults` into the flat counters shape surfaced on
+ * `DbtRunResult.stats`. `skipped` rows don't count against pass/fail —
+ * they count only toward the total rows-seen bucket.
+ */
+function aggregateRunStats(results: DbtRunResults): DbtRunStats {
+	let modelsRun = 0;
+	let modelsPassed = 0;
+	let modelsFailed = 0;
+	let testsRun = 0;
+	let testsPassed = 0;
+	let testsFailed = 0;
+	let totalElapsedSec = 0;
+	for (const row of results.results) {
+		totalElapsedSec += row.executionTime ?? 0;
+		const kind = row.uniqueId.split(".")[0];
+		const ok = row.status === "success" || row.status === "pass";
+		if (kind === "model") {
+			modelsRun++;
+			if (ok) modelsPassed++;
+			else if (row.status !== "skipped") modelsFailed++;
+		} else if (kind === "test") {
+			testsRun++;
+			if (ok) testsPassed++;
+			else if (row.status !== "skipped") testsFailed++;
+		}
+	}
+	return {
+		modelsRun,
+		modelsPassed,
+		modelsFailed,
+		testsRun,
+		testsPassed,
+		testsFailed,
+		totalElapsedMs: Math.round(totalElapsedSec * 1000),
+	};
+}
+
 // ────────────────────────────────────────────────────────────────────
 // AgentOsDbt — namespace exposed as `aos.dbt`
 // ────────────────────────────────────────────────────────────────────
@@ -391,28 +547,187 @@ export class AgentOsDbt {
 		stderr += stderrDecoder.decode();
 
 		const parsed = parseDbtResultSentinel(stdout);
-		if (!parsed) {
-			// Helper never printed the sentinel — likely crashed before
-			// reaching the final line. Return a shaped failure so callers
-			// get stdout/stderr without having to special-case missing
-			// structured data.
-			return {
-				success: false,
-				exitCode,
-				stdout,
-				stderr,
-				exception: null,
-				tripwire: null,
-			};
+		const base: DbtRunResult = parsed
+			? {
+					success: parsed.success,
+					exitCode,
+					stdout: parsed.trimmedStdout,
+					stderr,
+					exception: parsed.exception,
+					tripwire: parsed.tripwire,
+				}
+			: // Helper never printed the sentinel — likely crashed before
+				// reaching the final line. Return a shaped failure so callers
+				// get stdout/stderr without having to special-case missing
+				// structured data.
+				{
+					success: false,
+					exitCode,
+					stdout,
+					stderr,
+					exception: null,
+					tripwire: null,
+				};
+
+		// Opportunistic stats: if the caller gave us a project root, read
+		// dbt's run_results.json (if present) and fold its rows into flat
+		// counters. Subcommands that don't produce run_results.json
+		// (debug/parse/deps) will simply leave `stats` undefined.
+		if (options?.cwd) {
+			const rr = await this.readRunResults(options.cwd);
+			if (rr) base.stats = aggregateRunStats(rr);
 		}
+
+		return base;
+	}
+
+	/**
+	 * Run `dbt build` — the pipeline shortcut that runs models, tests,
+	 * seeds, and snapshots in dependency order. Equivalent to
+	 * `run(["build", …flags(options)], options)`.
+	 */
+	async build(options?: DbtSubOptions): Promise<DbtRunResult> {
+		return this.run(["build", ...subOptionArgs(options)], options);
+	}
+
+	/** Run `dbt test`. */
+	async test(options?: DbtSubOptions): Promise<DbtRunResult> {
+		return this.run(["test", ...subOptionArgs(options)], options);
+	}
+
+	/** Run `dbt compile`. */
+	async compile(options?: DbtSubOptions): Promise<DbtRunResult> {
+		return this.run(["compile", ...subOptionArgs(options)], options);
+	}
+
+	/** Run `dbt seed`. */
+	async seed(options?: DbtSubOptions): Promise<DbtRunResult> {
+		return this.run(["seed", ...subOptionArgs(options)], options);
+	}
+
+	/** Run `dbt deps`. No artifact output; `stats` will be undefined. */
+	async deps(options?: DbtSubOptions): Promise<DbtRunResult> {
+		return this.run(["deps", ...subOptionArgs(options)], options);
+	}
+
+	/**
+	 * Run `dbt debug`. Does not produce run_results.json, so `stats`
+	 * will always be undefined on the returned result.
+	 */
+	async debug(options?: DbtSubOptions): Promise<DbtRunResult> {
+		return this.run(["debug", ...subOptionArgs(options)], options);
+	}
+
+	/**
+	 * Run `dbt parse` — resolves references and emits
+	 * `target/manifest.json` without executing models.
+	 */
+	async parse(options?: DbtSubOptions): Promise<DbtRunResult> {
+		return this.run(["parse", ...subOptionArgs(options)], options);
+	}
+
+	/**
+	 * Read and parse `target/manifest.json` from the given project root.
+	 * Returns `null` if the file doesn't exist or isn't valid JSON —
+	 * useful for probing "has this project been parsed yet?" without
+	 * having to stat the file yourself.
+	 */
+	async readManifest(projectDir: string): Promise<DbtManifest | null> {
+		const raw = await this._readTargetJson(projectDir, "manifest.json");
+		if (!raw || typeof raw !== "object") return null;
+		const rawNodes = (raw as Record<string, unknown>).nodes;
+		const nodes: DbtManifestNode[] = [];
+		if (rawNodes && typeof rawNodes === "object") {
+			for (const [uniqueId, value] of Object.entries(
+				rawNodes as Record<string, unknown>,
+			)) {
+				const node = value as Record<string, unknown>;
+				const dependsOn = (node.depends_on as Record<string, unknown>) ?? {};
+				nodes.push({
+					uniqueId,
+					name: String(node.name ?? ""),
+					resourceType: String(node.resource_type ?? ""),
+					path: String(node.path ?? ""),
+					description: node.description as string | undefined,
+					dependsOn: {
+						nodes: Array.isArray(dependsOn.nodes)
+							? (dependsOn.nodes as string[])
+							: [],
+					},
+					meta: node.meta as Record<string, unknown> | undefined,
+				});
+			}
+		}
+		const metadata =
+			((raw as Record<string, unknown>).metadata as Record<string, unknown>) ??
+			{};
+		return { nodes, metadata };
+	}
+
+	/**
+	 * Read and parse `target/run_results.json`. Returns `null` if the
+	 * file is missing or invalid. Also used internally to populate
+	 * `DbtRunResult.stats` after a successful `run`.
+	 */
+	async readRunResults(projectDir: string): Promise<DbtRunResults | null> {
+		const raw = await this._readTargetJson(projectDir, "run_results.json");
+		if (!raw || typeof raw !== "object") return null;
+		const rawResults = (raw as Record<string, unknown>).results;
+		const results: DbtRunResultRow[] = Array.isArray(rawResults)
+			? rawResults.map((entry) => {
+					const row = entry as Record<string, unknown>;
+					return {
+						uniqueId: String(row.unique_id ?? ""),
+						status: String(row.status ?? ""),
+						executionTime:
+							typeof row.execution_time === "number"
+								? row.execution_time
+								: undefined,
+						message:
+							typeof row.message === "string" ? row.message : undefined,
+						failures:
+							typeof row.failures === "number" ? row.failures : undefined,
+					};
+				})
+			: [];
 		return {
-			success: parsed.success,
-			exitCode,
-			stdout: parsed.trimmedStdout,
-			stderr,
-			exception: parsed.exception,
-			tripwire: parsed.tripwire,
+			args: ((raw as Record<string, unknown>).args as Record<
+				string,
+				unknown
+			>) ?? {},
+			results,
+			elapsedTime: Number((raw as Record<string, unknown>).elapsed_time ?? 0),
+			generatedAt: String((raw as Record<string, unknown>).generated_at ?? ""),
 		};
+	}
+
+	/**
+	 * Read and parse `target/catalog.json` (emitted by `dbt docs
+	 * generate`). Returns `null` if no catalog has been generated yet.
+	 */
+	async readCatalog(projectDir: string): Promise<DbtCatalog | null> {
+		const raw = await this._readTargetJson(projectDir, "catalog.json");
+		if (!raw || typeof raw !== "object") return null;
+		const r = raw as Record<string, unknown>;
+		return {
+			nodes: (r.nodes as Record<string, DbtCatalogEntry>) ?? {},
+			sources: (r.sources as Record<string, DbtCatalogEntry>) ?? undefined,
+			errors: (r.errors as Record<string, string>) ?? undefined,
+		};
+	}
+
+	private async _readTargetJson(
+		projectDir: string,
+		filename: string,
+	): Promise<unknown | null> {
+		const cleanedDir = projectDir.replace(/\/+$/, "");
+		const path = `${cleanedDir}/target/${filename}`;
+		try {
+			const bytes = await this.aos.readFile(path);
+			return JSON.parse(new TextDecoder().decode(bytes));
+		} catch {
+			return null;
+		}
 	}
 
 	/**
