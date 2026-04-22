@@ -8,6 +8,7 @@ description: Run an E2E smoke test that installs agent-os packages from npm in a
 ## Usage
 - `/sanity-check` — run in a temp directory on the host
 - `/sanity-check docker` — run inside a `node:22` Docker container
+- `/sanity-check --with-dbt` — additionally exercise the `python.dbt` opt-in (boots a VM with the vendored Pyodide wheels, runs a trivial dbt project end-to-end)
 - `/sanity-check <custom instructions>` — any extra instructions (e.g. "use rc.3", "use pnpm", "test on node 20")
 
 ## What it tests
@@ -136,3 +137,66 @@ Remove the temp directory after the test completes.
 - Always install from the public npm registry — never use local links.
 - If Docker mode, clean up the container's node_modules via `docker run --rm` before removing the host temp dir.
 - Report the installed versions of `@rivet-dev/agent-os-core` and `@rivet-dev/agent-os-common` in the output.
+
+## --with-dbt mode
+
+When the user passes `--with-dbt`, additionally install
+`@rivet-dev/agent-os-python-wheels` and run a trivial dbt project
+end-to-end against in-memory DuckDB. This validates the L7 promise of
+the dbt-on-Pyodide ralph plan.
+
+**Extra package.json dependency:**
+```json
+"@rivet-dev/agent-os-python-wheels": "*"
+```
+
+**Additional test step (append to test.mjs after the main flow):**
+```js
+console.log("\n--- DBT smoke ---");
+const dbtVm = await AgentOs.create({
+  software: [common],
+  python: { dbt: true },
+});
+try {
+  await dbtVm.writeFiles([
+    {
+      path: "/root/dbt-projects/demo/dbt_project.yml",
+      content: "name: 'demo'\nversion: '1.0.0'\nconfig-version: 2\nprofile: 'demo'\nmodel-paths: ['models']\ntarget-path: 'target'\n",
+    },
+    {
+      path: "/root/dbt-projects/demo/models/example.sql",
+      content: "{{ config(materialized='table') }}\nselect 1 as id, 'hello' as name\n",
+    },
+    {
+      path: "/root/.dbt/profiles.yml",
+      content: "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: ':memory:'\n      threads: 1\n",
+    },
+  ]);
+  await dbtVm.writeFile(
+    "/tmp/run_dbt.py",
+    "import os\nos.chdir('/root/dbt-projects/demo')\nfrom dbt.cli.main import dbtRunner\nres = dbtRunner().invoke(['run', '--threads', '1'])\nprint('success=', res.success)",
+  );
+  const dbtResult = await dbtVm.exec("python /tmp/run_dbt.py");
+  console.log(dbtResult.stdout);
+  if (!dbtResult.stdout.includes("success= True")) {
+    console.log("❌ DBT SMOKE FAILED");
+    process.exit(1);
+  }
+  const manifestExists = await dbtVm.exists("/root/dbt-projects/demo/target/manifest.json");
+  if (!manifestExists) {
+    console.log("❌ DBT SMOKE FAILED (no manifest)");
+    process.exit(1);
+  }
+  console.log("✅ DBT SMOKE PASSED");
+} finally {
+  await dbtVm.dispose();
+}
+```
+
+**Constraints to surface in --with-dbt mode:**
+- Cold start adds ~10-15 seconds for the wheel preload
+- The wheels package must be published to npm before this works against
+  the public registry
+- If `@rivet-dev/agent-os-python-wheels` is unpublished, the test will
+  fail at `npm install` and the skill should report that the wheels
+  package needs to be published first

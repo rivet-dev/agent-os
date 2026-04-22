@@ -1,0 +1,22 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -14,7 +14,7 @@ pyo3 = { version = "0.24.1", features = ["abi3-py39", "extension-module"] }
+ # rayon disabled under target_os = "emscripten" to avoid pthread linkage.
+ rayon = { version = "1.5.1", optional = true }
+ tree-sitter = "0.20.8"
+-tree-sitter-jinja2 = { git = "https://github.com/dbt-labs/tree-sitter-jinja2", tag = "v0.2.0" }
++tree-sitter-jinja2 = { path = "vendor/tree-sitter-jinja2" }
+ thiserror = "2.0.12"
+ 
+ [features]
+--- /dev/null
++++ b/.cargo/config.toml
+@@ -0,0 +1,8 @@
++# Pyodide cross-build sandbox cannot do `git clone`. Vendor tree-sitter-jinja2.
++# The vendor/ directory is populated by build_extractor.sh before `pyodide build`.
++
++[net]
++offline = true
++
++[source.crates-io]
++replace-with = "vendored-sources"

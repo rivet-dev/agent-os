@@ -22,12 +22,25 @@ import type {
 	RuntimeDriverOptions,
 	VirtualFileSystem,
 } from "@secure-exec/core";
+import {
+	WORKER_WHEEL_PRELOAD_JS,
+	checkPackageInstallAllowed,
+	normalizeWheelPreload,
+	type WheelPreloadOptions,
+	type WheelPreloadPayload,
+} from "./wheel-preload.js";
 
-const PYTHON_PACKAGE_UNSUPPORTED_ERROR =
-	"ERR_PYTHON_PACKAGE_INSTALL_UNSUPPORTED: Python package installation is not supported in this runtime";
-const PACKAGE_INSTALL_PATHWAYS_PATTERN =
-	/\b(micropip|loadPackagesFromImports|loadPackage)\b/;
 const MAX_SERIALIZED_VALUE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Extra options accepted by the standalone Pyodide driver beyond the base
+ * `RuntimeDriverOptions` shape from @secure-exec/core. Wheel preloading
+ * lets callers vendor a curated set of `.whl` files into the runtime via
+ * NODEFS + micropip, gated by an explicit allowlist.
+ */
+export interface PyodideRuntimeDriverExtraOptions {
+	wheelPreload?: WheelPreloadOptions;
+}
 
 type WorkerRequestType = "init" | "exec" | "run";
 
@@ -99,11 +112,17 @@ function getPyodideIndexPath(): string {
 	return `${dirname(pyodideModulePath)}/`;
 }
 
-function ensurePackageInstallPathwaysAreDisabled(code: string): void {
-	if (!PACKAGE_INSTALL_PATHWAYS_PATTERN.test(code)) {
-		return;
-	}
-	throw new Error(PYTHON_PACKAGE_UNSUPPORTED_ERROR);
+/**
+ * Resolve the absolute file:// URL for `pyodide.mjs`. The Worker is
+ * created with eval:true and has no module-resolution cwd, so bare
+ * specifiers like "pyodide" fail when this driver is consumed from a
+ * different package. Pass this URL through the init payload so the
+ * worker can `await import(pyodideModuleUrl)` reliably.
+ */
+function getPyodideModuleUrl(): string {
+	const requireFromRuntime = createRequire(import.meta.url);
+	const pyodideModulePath = requireFromRuntime.resolve("pyodide/pyodide.mjs");
+	return `file://${pyodideModulePath}`;
 }
 
 const WORKER_SOURCE = String.raw`
@@ -113,6 +132,7 @@ let pyodide = null;
 let currentRequestId = null;
 let nextRpcId = 1;
 const pendingRpc = new Map();
+${WORKER_WHEEL_PRELOAD_JS}
 
 function serializeError(error) {
 	if (error instanceof Error) {
@@ -215,7 +235,14 @@ async function ensurePyodide(payload) {
 	if (pyodide) {
 		return pyodide;
 	}
-	const { loadPyodide } = await import("pyodide");
+	// Pyodide must be loaded by absolute file: URL when the host resolves it,
+	// because the Worker (eval:true) has no module-resolution cwd. Falls back
+	// to bare specifier so existing tests that don't pass pyodideModuleUrl
+	// still work.
+	const pyodideUrl = payload?.pyodideModuleUrl
+		? payload.pyodideModuleUrl
+		: "pyodide";
+	const { loadPyodide } = await import(pyodideUrl);
 	pyodide = await loadPyodide({
 		indexURL: payload?.indexPath,
 		env: payload?.env || {},
@@ -228,6 +255,13 @@ async function ensurePyodide(payload) {
 		fetch: async (url, options) =>
 			callHost("networkFetch", { url, options: options || {} }),
 	});
+
+	// Preload vendored wheels (mount + micropip + bootstrap) BEFORE locking
+	// down access to pyodide_js. micropip itself depends on pyodide_js for
+	// installation; if we install the importer block first, micropip cannot
+	// load. The trusted preload code runs first, then we engage the sandbox
+	// for any subsequent agent code execution.
+	await applyWheelPreload(pyodide, payload?.wheelPreload);
 
 	// Block import js / pyodide_js — prevents sandbox escape via host JS runtime
 	await pyodide.runPythonAsync([
@@ -464,11 +498,16 @@ export class PyodideRuntimeDriver implements PythonRuntimeDriver {
 	private readonly defaultCpuTimeLimitMs?: number;
 	private readonly runtimeEnv: Record<string, string>;
 	private readonly indexPath: string;
+	private readonly wheelPreload?: WheelPreloadPayload;
+	private readonly allowRuntimeInstalls: boolean;
 	private nextRequestId = 1;
 	private readyPromise: Promise<void> | null = null;
 	private disposed = false;
 
-	constructor(private readonly options: RuntimeDriverOptions) {
+	constructor(
+		private readonly options: RuntimeDriverOptions &
+			PyodideRuntimeDriverExtraOptions,
+	) {
 		this.defaultOnStdio = options.onStdio;
 		const permissions = options.system.permissions;
 		this.filesystem = options.system.filesystem
@@ -480,6 +519,9 @@ export class PyodideRuntimeDriver implements PythonRuntimeDriver {
 		this.runtimeEnv = filterEnv(options.runtime.process.env, permissions);
 		this.defaultCpuTimeLimitMs = normalizeCpuTimeLimitMs(options.cpuTimeLimitMs);
 		this.indexPath = getPyodideIndexPath();
+		this.wheelPreload = normalizeWheelPreload(options.wheelPreload);
+		this.allowRuntimeInstalls =
+			options.wheelPreload?.allowRuntimeInstalls ?? false;
 	}
 
 	private ensureNotDisposed(): void {
@@ -611,8 +653,9 @@ export class PyodideRuntimeDriver implements PythonRuntimeDriver {
 		this.worker = this.createWorker();
 		this.readyPromise = this.callWorker<void>("init", {
 			indexPath: this.indexPath,
+			pyodideModuleUrl: getPyodideModuleUrl(),
 			env: this.runtimeEnv,
-			packageInstallError: PYTHON_PACKAGE_UNSUPPORTED_ERROR,
+			wheelPreload: this.wheelPreload,
 		}).then(() => undefined);
 		await this.readyPromise;
 	}
@@ -700,7 +743,9 @@ export class PyodideRuntimeDriver implements PythonRuntimeDriver {
 		options: PythonRunOptions = {},
 	): Promise<PythonRunResult<T>> {
 		try {
-			ensurePackageInstallPathwaysAreDisabled(code);
+			checkPackageInstallAllowed(code, {
+				allowRuntimeInstalls: this.allowRuntimeInstalls,
+			});
 			await this.ensureWorkerReady();
 			const timeoutMs = normalizeCpuTimeLimitMs(
 				options.cpuTimeLimitMs ?? this.defaultCpuTimeLimitMs,
@@ -748,7 +793,9 @@ export class PyodideRuntimeDriver implements PythonRuntimeDriver {
 
 	async exec(code: string, options?: ExecOptions): Promise<ExecResult> {
 		try {
-			ensurePackageInstallPathwaysAreDisabled(code);
+			checkPackageInstallAllowed(code, {
+				allowRuntimeInstalls: this.allowRuntimeInstalls,
+			});
 			await this.ensureWorkerReady();
 			const timeoutMs = normalizeCpuTimeLimitMs(
 				options?.cpuTimeLimitMs ?? this.defaultCpuTimeLimitMs,
@@ -822,10 +869,24 @@ export class PyodideRuntimeDriver implements PythonRuntimeDriver {
 	}
 }
 
-export function createPyodideRuntimeDriverFactory(): PythonRuntimeDriverFactory {
+/**
+ * Factory accepts an optional `factoryDefaults` argument so callers can
+ * preconfigure wheel preloading (or any other extra option) once and have
+ * every runtime created by the factory inherit it. Per-call options on
+ * `createRuntimeDriver` always win when they overlap.
+ */
+export function createPyodideRuntimeDriverFactory(
+	factoryDefaults?: PyodideRuntimeDriverExtraOptions,
+): PythonRuntimeDriverFactory {
 	return {
-		createRuntimeDriver(options: RuntimeDriverOptions): PythonRuntimeDriver {
-			return new PyodideRuntimeDriver(options);
+		createRuntimeDriver(
+			options: RuntimeDriverOptions & PyodideRuntimeDriverExtraOptions,
+		): PythonRuntimeDriver {
+			const merged: RuntimeDriverOptions & PyodideRuntimeDriverExtraOptions = {
+				...options,
+				wheelPreload: options.wheelPreload ?? factoryDefaults?.wheelPreload,
+			};
+			return new PyodideRuntimeDriver(merged);
 		},
 	};
 }

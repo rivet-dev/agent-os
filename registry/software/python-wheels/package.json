@@ -1,0 +1,30 @@
+{
+  "name": "@rivet-dev/agent-os-python-wheels",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "Pyodide wheels for the dbt-core + dbt-duckdb + DuckDB stack, vendored for offline install via micropip in the agent-os Python runtime.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "wheels"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "check-types": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@rivet-dev/agent-os-registry-types": "link:../../../packages/registry-types",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.9.2"
+  }
+}

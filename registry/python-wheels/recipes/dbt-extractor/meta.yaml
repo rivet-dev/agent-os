@@ -1,0 +1,40 @@
+# Pyodide build recipe for dbt-extractor.
+#
+# Modeled on the recipes shipped in https://github.com/pyodide/pyodide-recipes
+# for tiktoken / pydantic_core (both PyO3 + maturin packages).
+#
+# Patches:
+#   0001-no-rayon-on-emscripten.patch — feature-gate rayon behind
+#     `cfg(not(target_os = "emscripten"))` so the wheel links without pthreads.
+#   0002-vendor-tree-sitter-jinja2.patch — replaces the git dep on
+#     dbt-labs/tree-sitter-jinja2 with a vendored sdist tarball
+#     (the Pyodide cross-build sandbox cannot do `git clone`).
+
+package:
+  name: dbt-extractor
+  version: 0.6.0
+  tag:
+    - rust
+  top-level:
+    - dbt_extractor
+
+source:
+  url: https://files.pythonhosted.org/packages/source/d/dbt-extractor/dbt_extractor-0.6.0.tar.gz
+  sha256: d6cf08ec793b8bc2bd6e260ef818230ae68a4f71436fa489f08d7db1a52e2ffe
+  patches:
+    - patches/0001-no-rayon-on-emscripten.patch
+    - patches/0002-vendor-tree-sitter-jinja2.patch
+
+requirements:
+  executable:
+    - rustup
+
+test:
+  imports:
+    - dbt_extractor
+
+about:
+  home: https://github.com/dbt-labs/dbt-extractor
+  PyPI: https://pypi.org/project/dbt-extractor
+  summary: Static parser for dbt Jinja blocks (Pyodide-compatible build).
+  license: Apache-2.0

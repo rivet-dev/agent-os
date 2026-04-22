@@ -51,3 +51,30 @@ export interface WasmMetaPackage {
 	/** Package names (without scope) included in this meta-package. */
 	includes: string[];
 }
+
+/**
+ * Descriptor for a Python wheel bundle package.
+ *
+ * Unlike WASM command packages, these vendor pre-built `.whl` files
+ * (Pyodide-compatible) for offline `micropip` install inside the
+ * Python runtime. The wheels are mounted into the Pyodide VFS via
+ * NODEFS and resolved through a warehouse-JSON-shaped index.
+ */
+export interface PythonWheelPackage {
+	/** Package name without scope (e.g., "python-wheels"). */
+	name: string;
+	/** Human-readable description. */
+	description: string;
+	/** Always "pyodide" today; reserved for future multi-runtime targets. */
+	target: "pyodide";
+	/** Absolute host path to the directory holding all `.whl` files. */
+	readonly wheelsDir: string;
+	/** Absolute host path to the warehouse JSON index directory. */
+	readonly indexDir: string;
+	/** Absolute host path to the version+sha256 lockfile. */
+	readonly lockfilePath: string;
+	/** Returns wheel filenames present on disk (sorted). */
+	listWheels(): string[];
+	/** Returns the parsed lockfile, or null if not yet built. */
+	readLockfile(): unknown;
+}

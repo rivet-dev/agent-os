@@ -7,6 +7,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import {
 	sep as hostPathSeparator,
@@ -93,7 +94,14 @@ export interface AgentRegistryEntry {
 }
 
 import { createWasmVmRuntime } from "@rivet-dev/agent-os-posix";
-import { createPythonRuntime } from "@rivet-dev/agent-os-python";
+import type { WheelPreloadOptions } from "@rivet-dev/agent-os-python";
+import {
+	createPythonRuntime,
+	DBT_BOOTSTRAP_SCRIPT,
+	DBT_DEFAULT_PROFILES_DIR,
+	DBT_DEFAULT_PROJECTS_DIR,
+	DBT_ENV,
+} from "@rivet-dev/agent-os-python";
 import {
 	createNodeHostNetworkAdapter,
 	createNodeRuntime,
@@ -238,6 +246,58 @@ export interface AgentOsOptions {
 	 * CreateSessionOptions.acpTimeoutMs. Defaults to 900 000 (15 min).
 	 */
 	acpTimeoutMs?: number;
+	/**
+	 * Python runtime configuration. Currently exposes the dbt opt-in,
+	 * which mounts vendored Pyodide wheels at boot and patches the
+	 * runtime so `import dbt` works.
+	 */
+	python?: PythonConfig;
+}
+
+/**
+ * Configuration for the in-VM Python runtime.
+ */
+export interface PythonConfig {
+	/**
+	 * Enable dbt-on-Pyodide support.
+	 *
+	 * Set to `true` to use the default opt-in: mounts the wheels from
+	 * `@rivet-dev/agent-os-python-wheels` (must be a peer dep on the
+	 * host) at /wheels, micropip-installs the dbt + DuckDB stack at
+	 * worker boot, and applies the multiprocessing monkey-patch +
+	 * environment variables required to run dbt single-threaded.
+	 *
+	 * Pass an object to override the default wheels package or the
+	 * profiles dir.
+	 */
+	dbt?: boolean | DbtConfig;
+}
+
+/** Detailed dbt opt-in configuration. */
+export interface DbtConfig {
+	/**
+	 * npm package providing the vendored wheels. The package must export
+	 * a `wheelsDir` and `listWheels()` per the PythonWheelPackage shape.
+	 * Defaults to `@rivet-dev/agent-os-python-wheels`.
+	 */
+	wheelsPackage?: string;
+	/**
+	 * VFS path mounted as the dbt profiles directory inside the VM.
+	 * Defaults to `/root/.dbt`.
+	 */
+	profilesDir?: string;
+	/**
+	 * VFS path used as the default project root inside the VM.
+	 * Defaults to `/root/dbt-projects`.
+	 */
+	projectsDir?: string;
+	/**
+	 * Extra micropip-allowed wheel packages beyond the dbt closure. The
+	 * caller must supply matching wheels in the wheelsPackage's wheels/
+	 * directory. Useful when the user wants to bring extra dbt adapters
+	 * or analysis packages.
+	 */
+	extraWheels?: string[];
 }
 
 /** Configuration for a local MCP server (spawned as a child process). */
@@ -594,6 +654,146 @@ async function resolveMounts(
 	);
 }
 
+/**
+ * Resolve the dbt config to a concrete shape with defaults applied.
+ * Returns an empty object when dbt is not enabled.
+ */
+function normalizeDbtConfig(python: PythonConfig | undefined): DbtConfig {
+	if (!python?.dbt) return {};
+	if (python.dbt === true) return {};
+	return python.dbt;
+}
+
+/**
+ * createRequire is hot-path-cheap, but we only need one per module load.
+ */
+const _dbtRequire = createRequire(import.meta.url);
+
+/**
+ * Build the WheelPreloadOptions handed to createPythonRuntime when the
+ * caller opts into dbt support. Returns undefined when dbt is disabled.
+ */
+function resolveDbtWheelPreload(
+	python: PythonConfig | undefined,
+): WheelPreloadOptions | undefined {
+	if (!python?.dbt) return undefined;
+	const cfg = normalizeDbtConfig(python);
+	const pkgName = cfg.wheelsPackage ?? "@rivet-dev/agent-os-python-wheels";
+
+	let pkg: { wheelsDir: string; listWheels(): string[] };
+	try {
+		const mod = _dbtRequire(pkgName);
+		pkg = mod.default ?? mod;
+	} catch (cause) {
+		throw new Error(
+			`AgentOs: python.dbt is enabled but the wheel package "${pkgName}" ` +
+				`is not installed on the host. Run \`pnpm add ${pkgName}\` (or pin ` +
+				"a custom package via python.dbt.wheelsPackage).",
+			{ cause: cause as Error },
+		);
+	}
+
+	const wheels = pkg.listWheels();
+	if (wheels.length === 0) {
+		throw new Error(
+			`AgentOs: python.dbt is enabled but ${pkgName}/wheels/ is empty. ` +
+				"Run `make -C registry/python-wheels build-all` (or `gh workflow run python-wheels.yml`) " +
+				"to populate the wheel set.",
+		);
+	}
+
+	// Validate user-supplied extras up-front so we surface a clear error
+	// at boot instead of cryptic micropip failures inside the worker.
+	const extras = cfg.extraWheels ?? [];
+	for (const e of extras) {
+		if (!e.endsWith(".whl")) {
+			throw new Error(
+				`AgentOs: python.dbt.extraWheels entry "${e}" is not a .whl filename`,
+			);
+		}
+		if (e.includes("/") || e.includes("\\")) {
+			throw new Error(
+				`AgentOs: python.dbt.extraWheels entry "${e}" must be a bare filename, not a path`,
+			);
+		}
+	}
+
+	return {
+		mountPath: "/wheels",
+		hostDir: pkg.wheelsDir,
+		// Order is alphabetical (from listWheels). For deps=False micropip,
+		// install order is irrelevant because Python checks dependencies at
+		// import time, not install time. Extras follow.
+		wheels: [...wheels, ...extras],
+		// Pyodide-bundled packages our dbt closure transitively depends on.
+		// Must match the PYODIDE_BUNDLED skip-set in
+		// registry/python-wheels/scripts/build_pure_index.py — keep them in
+		// lockstep when adjusting the closure.
+		pyodidePackages: DBT_PYODIDE_BUNDLED_DEPS,
+		bootstrapScript: DBT_BOOTSTRAP_SCRIPT,
+		allowRuntimeInstalls: false,
+	};
+}
+
+/**
+ * Pyodide-bundled packages the dbt closure imports at runtime.
+ * Pyodide ships these with the distribution but does not auto-load them;
+ * we explicitly call loadPackage() on each before micropip-installing our
+ * own wheel set, so transitive imports don't fail with ModuleNotFoundError.
+ *
+ * MUST stay in lockstep with `_PYODIDE_BUNDLED_RAW` in
+ * `registry/python-wheels/scripts/build_pure_index.py` — those names are
+ * the ones the index-builder skips, so they must be loaded here.
+ */
+const DBT_PYODIDE_BUNDLED_DEPS: string[] = [
+	"jinja2",
+	"markupsafe",
+	"click",
+	"jsonschema",
+	"jsonschema-specifications",
+	"msgpack",
+	"networkx",
+	"packaging",
+	"protobuf",
+	"pydantic",
+	"pydantic-core",
+	"pyyaml",
+	"python-dateutil",
+	"pytz",
+	"referencing",
+	"requests",
+	"rpds-py",
+	"more-itertools",
+	"typing-extensions",
+	"urllib3",
+	"charset-normalizer",
+	"certifi",
+	"idna",
+	"six",
+	"attrs",
+	"annotated-types",
+];
+
+/**
+ * Best-effort `mkdir -p` against the kernel. Used during boot to
+ * pre-create dbt's standard directories.
+ *
+ * Logs a warning on unexpected errors (anything other than "already exists")
+ * so a misconfigured profilesDir doesn't fail silently.
+ */
+async function ensureVmDir(kernel: Kernel, path: string): Promise<void> {
+	try {
+		await kernel.mkdir(path);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		if (/EEXIST|already exists/i.test(msg)) return;
+		console.warn(
+			`AgentOs: could not pre-create ${path}: ${msg}. ` +
+				"dbt operations against this directory may fail.",
+		);
+	}
+}
+
 export class AgentOs {
 	readonly kernel: Kernel;
 	private _sessions = new Map<string, Session>();
@@ -746,7 +946,20 @@ export class AgentOs {
 						: undefined,
 			}),
 		);
-		await kernel.mount(createPythonRuntime());
+		const pythonWheelPreload = resolveDbtWheelPreload(options?.python);
+		await kernel.mount(
+			createPythonRuntime({
+				wheelPreload: pythonWheelPreload,
+			}),
+		);
+		if (pythonWheelPreload) {
+			const dbtCfg = normalizeDbtConfig(options?.python);
+			const profilesDir = dbtCfg.profilesDir ?? DBT_DEFAULT_PROFILES_DIR;
+			const projectsDir = dbtCfg.projectsDir ?? DBT_DEFAULT_PROJECTS_DIR;
+			await ensureVmDir(kernel, profilesDir);
+			await ensureVmDir(kernel, projectsDir);
+			Object.assign(env, { ...DBT_ENV, ...env });
+		}
 		finishKernelBootstrap();
 
 		const vm = new AgentOs(

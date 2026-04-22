@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dbt-extractor"
+version = "0.6.0+pyodide.shim"
+description = "Pure-Python shim for dbt-extractor — raises ExtractionError so dbt-core falls back to the full Jinja parser. Used in environments where the Rust wheel cannot be built (e.g., Pyodide without rayon)."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "agent-os" }]
+requires-python = ">=3.9"
+
+[project.urls]
+Homepage = "https://github.com/dbt-labs/dbt-extractor"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

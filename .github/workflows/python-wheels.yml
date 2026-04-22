@@ -1,0 +1,210 @@
+name: Build Python wheels
+
+on:
+  push:
+    paths:
+      - 'registry/python-wheels/**'
+      - 'registry/software/python-wheels/**'
+      - '.github/workflows/python-wheels.yml'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish @rivet-dev/agent-os-python-wheels to npm after build'
+        required: false
+        type: boolean
+        default: false
+      tag:
+        description: 'npm dist-tag (latest | rc | next)'
+        required: false
+        default: 'latest'
+
+env:
+  PYODIDE_BUILD_VERSION: '0.34.1'
+  PYTHON_VERSION: '3.13'
+  PYTHON_TAG: 'cp313'
+  PYODIDE_ABI_TAG: 'pyodide_2025_0_wasm32'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      wheel-count: ${{ steps.summary.outputs.count }}
+      lockfile-sha256: ${{ steps.summary.outputs.lockfile_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pyodide-build + uv + build tools
+        run: |
+          pip install --upgrade pip
+          pip install \
+            "pyodide-build==${PYODIDE_BUILD_VERSION}" \
+            "wheel<0.44" \
+            build \
+            uv
+
+      - name: Resolve Emscripten version
+        id: emscripten
+        run: |
+          version=$(pyodide config get emscripten_version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Pyodide expects Emscripten $version"
+
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ steps.emscripten.outputs.version }}
+
+      - name: Verify toolchain
+        run: |
+          python --version
+          pip --version
+          emcc --version | head -1
+          pyodide --version
+
+      - name: Fetch DuckDB wheel
+        working-directory: registry/python-wheels
+        run: bash scripts/fetch_duckdb.sh \
+          "https://github.com/xlwings/duckdb-pyodide/releases/download/duckdb-v1.5.0-pyodide-0.29.3/duckdb-1.5.0-cp313-cp313-pyodide_2025_0_wasm32.whl" \
+          "ee14bd19e6d9a390bb2803f119d4eff06a88a8e4b52ebf6c947c9dac67f6ba11" \
+          "../software/python-wheels/wheels"
+
+      - name: Build dbt-extractor pure-Python shim
+        working-directory: registry/python-wheels
+        run: |
+          python -m build --wheel \
+            --outdir ../software/python-wheels/wheels \
+            recipes/dbt-extractor-shim
+
+      # Optional: try to build the real Rust wheel. If it fails (cross-build
+      # env quirks, vendored crate issues), the shim wheel built above acts
+      # as the fallback so the rest of the pipeline succeeds.
+      - name: Try building dbt-extractor Rust wheel (best-effort)
+        working-directory: registry/python-wheels
+        run: |
+          set +e
+          bash scripts/build_extractor.sh \
+            "$pythonLocation" \
+            "$EMSDK" \
+            "../software/python-wheels/wheels"
+          if [ $? -ne 0 ]; then
+            echo "::warning::Rust dbt-extractor build failed; falling back to shim"
+          fi
+        env:
+          pythonLocation: ${{ env.pythonLocation }}
+        continue-on-error: true
+
+      - name: Build pure-Python wheel index
+        working-directory: registry/python-wheels
+        run: |
+          python scripts/build_pure_index.py \
+            --out ../software/python-wheels/wheels \
+            --index ../software/python-wheels/wheels/index \
+            --lockfile ../software/python-wheels/wheels/lockfile.json \
+            --python-tag ${{ env.PYTHON_TAG }} \
+            --abi-tag ${{ env.PYODIDE_ABI_TAG }}
+
+      - name: Finalize lockfile
+        working-directory: registry/python-wheels
+        run: |
+          python scripts/build_pure_index.py --finalize-lockfile \
+            --out ../software/python-wheels/wheels \
+            --index ../software/python-wheels/wheels/index \
+            --lockfile ../software/python-wheels/wheels/lockfile.json \
+            --python-tag ${{ env.PYTHON_TAG }} \
+            --abi-tag ${{ env.PYODIDE_ABI_TAG }}
+
+      - name: Summarize build
+        id: summary
+        working-directory: registry/software/python-wheels/wheels
+        run: |
+          count=$(ls *.whl 2>/dev/null | wc -l | tr -d ' ')
+          echo "Built $count wheel(s)"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          if [ -f lockfile.json ]; then
+            lock_sha=$(sha256sum lockfile.json | cut -d ' ' -f1)
+            echo "lockfile_sha256=$lock_sha" >> "$GITHUB_OUTPUT"
+          fi
+          ls -la *.whl
+          echo "---"
+          du -sh .
+
+      - name: Upload wheels artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyodide-wheels-${{ env.PYODIDE_ABI_TAG }}
+          path: registry/software/python-wheels/wheels/
+          retention-days: 30
+
+  verify:
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: pyodide-wheels-${{ env.PYODIDE_ABI_TAG }}
+          path: registry/software/python-wheels/wheels/
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build packages
+        run: pnpm --filter "@rivet-dev/agent-os-python" --filter "@rivet-dev/agent-os-core" --filter "@rivet-dev/agent-os-python-wheels" build
+      - name: Run dbt smoke test
+        run: pnpm test:dbt-pyodide all
+        timeout-minutes: 20
+
+  publish:
+    runs-on: ubuntu-24.04
+    needs: [build, verify]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true'
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: pyodide-wheels-${{ env.PYODIDE_ABI_TAG }}
+          path: registry/software/python-wheels/wheels/
+      - name: Install + build wheels package
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter "@rivet-dev/agent-os-python-wheels" build
+      - name: Set date-based version
+        working-directory: registry/software/python-wheels
+        run: |
+          version="0.0.$(date -u +%y%m%d%H%M%S)"
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            p.version = '$version';
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+            console.log('Set version:', p.name, '@', p.version);
+          "
+      - name: pnpm publish (dry-run)
+        working-directory: registry/software/python-wheels
+        run: pnpm publish --dry-run --no-git-checks --tag ${{ github.event.inputs.tag }}
+      - name: pnpm publish
+        working-directory: registry/software/python-wheels
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm publish --access public --no-git-checks --tag ${{ github.event.inputs.tag }}

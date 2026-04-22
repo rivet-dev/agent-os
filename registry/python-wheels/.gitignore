@@ -1,0 +1,8 @@
+.toolchain/
+.build-cache/
+xbuildenv/
+*.tar.bz2
+*.tar.gz
+__pycache__/
+*.pyc
+recipes/*/dist/

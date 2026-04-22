@@ -16,10 +16,22 @@ import type {
   ProcessContext,
   DriverProcess,
 } from '@secure-exec/core';
+import {
+  WORKER_WHEEL_PRELOAD_JS,
+  normalizeWheelPreload,
+  type WheelPreloadOptions,
+  type WheelPreloadPayload,
+} from './wheel-preload.js';
 
 export interface PythonRuntimeOptions {
   /** CPU time limit in ms for each Python execution (no limit by default). */
   cpuTimeLimitMs?: number;
+  /**
+   * Pre-mount a host wheel directory into Pyodide's VFS via NODEFS and
+   * micropip-install the wheels at boot. Used by the agent-os dbt-on-Pyodide
+   * stack to vendor `dbt-core` + `dbt-duckdb` + `duckdb` offline.
+   */
+  wheelPreload?: WheelPreloadOptions;
 }
 
 /**
@@ -34,6 +46,7 @@ export function createPythonRuntime(options?: PythonRuntimeOptions): RuntimeDriv
 // ---------------------------------------------------------------------------
 
 let _indexPathCache: string | null = null;
+let _moduleUrlCache: string | null = null;
 
 function getPyodideIndexPath(): string {
   if (_indexPathCache) return _indexPathCache;
@@ -41,6 +54,20 @@ function getPyodideIndexPath(): string {
   const pyodideModulePath = requireFromRuntime.resolve('pyodide/pyodide.mjs');
   _indexPathCache = `${dirname(pyodideModulePath)}/`;
   return _indexPathCache;
+}
+
+/**
+ * Resolve the absolute file:// URL for `pyodide.mjs`. Used by the worker
+ * which (running with eval:true) cannot resolve bare specifiers like
+ * "pyodide" from its own context. The host resolves the path here and
+ * forwards the URL through the init payload.
+ */
+function getPyodideModuleUrl(): string {
+  if (_moduleUrlCache) return _moduleUrlCache;
+  const requireFromRuntime = createRequire(import.meta.url);
+  const pyodideModulePath = requireFromRuntime.resolve('pyodide/pyodide.mjs');
+  _moduleUrlCache = `file://${pyodideModulePath}`;
+  return _moduleUrlCache;
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +134,7 @@ let pyodide = null;
 let currentRequestId = null;
 let nextRpcId = 1;
 const pendingRpc = new Map();
+${WORKER_WHEEL_PRELOAD_JS}
 
 function serializeError(error) {
   if (error instanceof Error) {
@@ -135,7 +163,15 @@ function callHost(method, params) {
 
 async function ensurePyodide(payload) {
   if (pyodide) return pyodide;
-  const { loadPyodide } = await import("pyodide");
+  // Pyodide must be loaded by absolute file: URL, not by bare specifier.
+  // The Worker is created with eval:true and has no module-resolution cwd,
+  // so bare specifiers fail when this driver is mounted from a different
+  // package (e.g. agent-os-core consuming agent-os-python). The host
+  // resolves pyodide.mjs's location via createRequire and passes it here.
+  const pyodideUrl = payload?.pyodideModuleUrl
+    ? payload.pyodideModuleUrl
+    : "pyodide";
+  const { loadPyodide } = await import(pyodideUrl);
   pyodide = await loadPyodide({
     indexURL: payload?.indexPath,
     env: payload?.env || {},
@@ -151,6 +187,12 @@ async function ensurePyodide(payload) {
     kernel_spawn: async (command, argsJson, envJson, cwd) =>
       callHost("kernelSpawn", { command, args: JSON.parse(argsJson), env: JSON.parse(envJson), cwd }),
   });
+
+  // Preload vendored wheels (mount + micropip + bootstrap) BEFORE installing
+  // the import sandbox. micropip itself imports pyodide_js, which the sandbox
+  // would otherwise reject. The trusted preload code runs first, then we
+  // engage the import block for subsequent agent code.
+  await applyWheelPreload(pyodide, payload?.wheelPreload);
 
   // Block import js / pyodide_js — prevents sandbox escape via host JS runtime
   await pyodide.runPythonAsync([
@@ -432,9 +474,11 @@ class PythonRuntimeDriver implements RuntimeDriver {
   private _nextRequestId = 1;
   private _pending = new Map<number, PendingRequest>();
   private _cpuTimeLimitMs?: number;
+  private _wheelPreload?: WheelPreloadPayload;
 
   constructor(options?: PythonRuntimeOptions) {
     this._cpuTimeLimitMs = options?.cpuTimeLimitMs;
+    this._wheelPreload = normalizeWheelPreload(options?.wheelPreload);
   }
 
   async init(kernel: KernelInterface): Promise<void> {
@@ -510,9 +554,12 @@ class PythonRuntimeDriver implements RuntimeDriver {
 
     this._worker = this._createWorker();
     const indexPath = getPyodideIndexPath();
+    const pyodideModuleUrl = getPyodideModuleUrl();
     this._readyPromise = this._callWorker<void>('init', {
       indexPath,
+      pyodideModuleUrl,
       env: {},
+      wheelPreload: this._wheelPreload,
     }).then(() => undefined);
     await this._readyPromise;
   }

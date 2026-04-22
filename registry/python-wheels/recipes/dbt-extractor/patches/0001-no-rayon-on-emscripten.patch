@@ -1,0 +1,45 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -10,7 +10,8 @@ name = "dbt_extractor"
+ crate-type = ["cdylib", "lib"]
+ 
+ [dependencies]
+ pyo3 = { version = "0.24.1", features = ["abi3-py39", "extension-module"] }
+-rayon = "1.5.1"
++# rayon disabled under target_os = "emscripten" to avoid pthread linkage.
++rayon = { version = "1.5.1", optional = true }
+ tree-sitter = "0.20.8"
+ tree-sitter-jinja2 = { git = "https://github.com/dbt-labs/tree-sitter-jinja2", tag = "v0.2.0" }
+ thiserror = "2.0.12"
++
++[features]
++default = ["parallel"]
++parallel = ["dep:rayon"]
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,4 +1,5 @@
+ use pyo3::prelude::*;
++#[cfg(feature = "parallel")]
+ use rayon::prelude::*;
+ use tree_sitter::Parser;
+ use tree_sitter_jinja2::language;
+@@ -42,8 +43,16 @@ fn process_jinja(blocks: Vec<String>) -> Vec<ParsedBlock> {
+-    blocks
+-        .par_iter()
+-        .map(|src| parse_block(src))
+-        .collect()
++    #[cfg(feature = "parallel")]
++    {
++        blocks
++            .par_iter()
++            .map(|src| parse_block(src))
++            .collect()
++    }
++    #[cfg(not(feature = "parallel"))]
++    {
++        blocks
++            .iter()
++            .map(|src| parse_block(src))
++            .collect()
++    }
+ }

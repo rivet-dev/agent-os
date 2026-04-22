@@ -17,6 +17,7 @@
 		"sandbox": "node --import tsx src/sandbox.ts",
 		"nodejs": "node --import tsx src/nodejs.ts",
 		"python": "node --import tsx src/python.ts",
+		"dbt": "node --import tsx src/dbt.ts",
 		"bash": "node --import tsx src/bash.ts",
 		"s3-filesystem": "node --import tsx src/s3-filesystem.ts",
 		"pi-extensions": "node --import tsx src/pi-extensions.ts"
@@ -31,8 +32,9 @@
 		"@rivet-dev/agent-os-codex-agent": "workspace:*",
 		"@rivet-dev/agent-os-opencode": "workspace:*",
 		"@rivet-dev/agent-os-pi": "workspace:*",
+		"@rivet-dev/agent-os-python-wheels": "workspace:*",
 		"@rivet-dev/agent-os-s3": "workspace:*",
-		"pyodide": "^0.28.3",
+		"pyodide": "^0.29.3",
 		"zod": "^4.1.11"
 	},
 	"devDependencies": {

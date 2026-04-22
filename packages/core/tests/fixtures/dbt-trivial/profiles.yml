@@ -1,0 +1,7 @@
+agent_os_demo:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: ":memory:"
+      threads: 1

@@ -61,12 +61,60 @@ These modules are available through Pyodide's bundled CPython standard library. 
 
 | Feature | Error |
 | --- | --- |
-| `micropip` / package installation | `ERR_PYTHON_PACKAGE_INSTALL_UNSUPPORTED: Python package installation is not supported in this runtime` |
-| `loadPackagesFromImports` | Same as above. |
-| `loadPackage` | Same as above. |
+| `micropip` / package installation in user code | `ERR_PYTHON_PACKAGE_INSTALL_UNSUPPORTED: Python package installation is not supported in this runtime` |
+| `loadPackagesFromImports` in user code | Same as above. |
+| `loadPackage` in user code | Same as above. |
 | Subprocess spawning | `secure_exec.spawn` is not exposed. |
 
 Package installation keywords are detected before execution and fail deterministically.
+
+**Exception — vendored wheel preload.** When the runtime is created with
+`wheelPreload` configured (or via the AgentOs `python.dbt: true` opt-in
+described below), micropip is invoked **once** at worker boot to install a
+fixed allowlist of vendored wheels. After preload completes, the install
+pathway is locked back down — agent code still cannot install arbitrary
+additional packages.
+
+### Pre-bundled application stacks
+
+The Python runtime ships with optional pre-bundled stacks that vendor a
+curated set of Pyodide-compatible wheels. Today there is one stack:
+
+#### `python.dbt: true` — dbt-core + dbt-duckdb
+
+Boots the runtime with `dbt-core`, `dbt-duckdb`, `dbt-extractor` (or its
+pure-Python shim), and `duckdb` pre-installed. Targets `dbt-core 1.11.x`
++ `dbt-duckdb 1.10.x` + `DuckDB 1.5.0` against the
+`pyodide_2025_0_wasm32` ABI.
+
+```ts
+const vm = await AgentOs.create({ python: { dbt: true } });
+await vm.writeFile("/root/.dbt/profiles.yml", "demo:\n  target: dev\n  ...");
+await vm.exec("python /tmp/run_dbt.py");
+```
+
+**Constraints** (these are documented limitations, not bugs to file):
+
+- **Single-threaded.** `DBT_SINGLE_THREADED=True` and `--threads 1` are
+  forced. Pyodide does not support real pthreads.
+- **No `httpfs`.** The bundled DuckDB only ships `core_functions`, `json`,
+  `parquet`, `icu`. To read remote files, fetch them via Python first and
+  pass to DuckDB locally.
+- **No runtime extension installation.** `INSTALL spatial` etc. fail.
+- **No `dbt deps`.** No git/HTTP at runtime; pre-vendor `dbt_packages/`
+  if your project depends on hub packages.
+- **`multiprocessing.get_context("spawn")` is monkey-patched.** dbt's
+  use of multiprocessing primitives routes through `threading` instead.
+- **Anonymous telemetry is disabled** (`DBT_SEND_ANONYMOUS_USAGE_STATS=False`).
+- **Cold start is slow.** Loading the DuckDB wasm extension and
+  micropip-installing the dbt stack takes ~7–15 seconds on first boot.
+  Subsequent invocations on the same kernel are warm.
+
+The wheel set lives in
+[`@rivet-dev/agent-os-python-wheels`](https://www.npmjs.com/package/@rivet-dev/agent-os-python-wheels)
+and must be installed as a peer dependency on the host. See
+[`registry/python-wheels/README.md`](https://github.com/rivet-dev/agent-os/blob/main/registry/python-wheels/README.md)
+for build instructions.
 
 ## Execution Model
 

@@ -33,10 +33,10 @@
   },
   "dependencies": {
     "@secure-exec/core": "^0.2.1",
-    "pyodide": "^0.28.3"
+    "pyodide": "^0.29.3"
   },
   "peerDependencies": {
-    "pyodide": ">=0.28.0"
+    "pyodide": ">=0.29.0"
   },
   "peerDependenciesMeta": {
     "pyodide": {

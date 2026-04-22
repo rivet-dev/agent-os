@@ -24,6 +24,8 @@ Thumbs.db
 # Secrets
 secrets/**/*
 
+.opencode
+
 # Registry build artifacts
 registry/native/target/
 registry/native/vendor/
@@ -37,3 +39,19 @@ registry/software/*/agent-os-package.meta.json
 registry/.last-publish-hash
 registry/software/*/.last-publish-hash
 registry/.build-markers/
+
+# Python wheel pipeline artifacts
+registry/software/python-wheels/wheels/*.whl
+registry/software/python-wheels/wheels/index/
+registry/software/python-wheels/wheels/lockfile.json
+registry/software/python-wheels/wheels/_requirements.in
+registry/software/python-wheels/wheels/_requirements.lock
+registry/python-wheels/.toolchain/
+registry/python-wheels/.build-cache/
+registry/python-wheels/recipes/*/build/
+registry/python-wheels/recipes/*/dist/
+registry/python-wheels/recipes/*/src/*.egg-info/
+registry/python-wheels/recipes/*/*.egg-info/
+
+# Test harness outputs
+.agent/test-runs/

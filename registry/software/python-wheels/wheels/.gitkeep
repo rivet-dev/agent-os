@@ -1,0 +1,2 @@
+# Placeholder so the wheels/ directory exists in git even before the
+# build pipeline runs. Actual *.whl files are gitignored — see root .gitignore.

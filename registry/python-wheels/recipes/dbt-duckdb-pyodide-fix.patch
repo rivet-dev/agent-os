@@ -1,0 +1,191 @@
+diff --git a/dbt/adapters/duckdb/environments/local.py b/dbt/adapters/duckdb/environments/local.py
+index 27cb197..16e0f8e 100644
+--- a/dbt/adapters/duckdb/environments/local.py
++++ b/dbt/adapters/duckdb/environments/local.py
+@@ -10,34 +10,132 @@ from dbt.adapters.contracts.connection import Connection
+ 
+ 
+ class DuckDBCursorWrapper:
+-    def __init__(self, cursor):
+-        self._cursor = cursor
++    """A "cursor" that defensively handles its own transaction state.
++
++    Under runtimes where dbt's connection-pool reuse pattern interacts
++    badly with DuckDB's connection-scoped transaction state (notably
++    duckdb-wasm in Pyodide), we make BEGIN/COMMIT/ROLLBACK idempotent
++    against our own bookkeeping rather than the underlying conn's state.
++    """
++
++    # Substrings of DuckDB transaction-state errors that are safe to
++    # swallow: dbt-core's connection pool issues redundant BEGIN / COMMIT /
++    # ROLLBACK against the same conn after close+reuse cycles, and DuckDB
++    # raises rather than treating the redundant call as a no-op.
++    _TXN_NOOP_PATTERNS = (
++        "cannot start a transaction within a transaction",
++        "cannot commit - no transaction is active",
++        "cannot rollback - no transaction is active",
++    )
++
++    def __init__(self, env):
++        self._env = env
++        self._cursor = None
++        self._fetch_cursor = None
++        self._closed = False
++
++    def _ensure_cursor(self):
++        if self._closed or self._cursor is None:
++            with self._env.lock:
++                if self._env.conn is None:
++                    self._env.conn = self._env.initialize_db(
++                        self._env.creds, self._env._plugins
++                    )
++            self._cursor = self._env.initialize_cursor(
++                self._env.creds,
++                self._env.conn.cursor(),
++                self._env._plugins,
++                self._env._REGISTERED_DF,
++            )
++            self._closed = False
+ 
+-    # forward along all non-execute() methods/attribute look-ups
+-    def __getattr__(self, name):
+-        return getattr(self._cursor, name)
++    def _normalized(self, sql: str) -> str:
++        return sql.strip().rstrip(";").upper()
++
++    def _is_txn_control(self, norm: str) -> bool:
++        return norm in ("BEGIN", "COMMIT", "ROLLBACK") or norm.startswith("BEGIN ")
+ 
+     def execute(self, sql, bindings=None):
++        self._ensure_cursor()
++        norm = self._normalized(sql) if isinstance(sql, str) else ""
+         try:
+             if bindings is None:
+-                return self._cursor.execute(sql)
++                self._fetch_cursor = self._cursor.execute(sql)
+             else:
+-                return self._cursor.execute(sql, bindings)
+-        except RuntimeError as e:
+-            # Preserve original error with full context including potential transaction state info
+-            raise DbtRuntimeError(str(e)) from e
++                self._fetch_cursor = self._cursor.execute(sql, bindings)
++            return self
++        except Exception as e:
++            msg = str(e)
++            # Idempotent transaction control: swallow DuckDB's "redundant
++            # BEGIN/COMMIT/ROLLBACK" errors so dbt-core's reuse pattern works.
++            if self._is_txn_control(norm):
++                for pat in DuckDBCursorWrapper._TXN_NOOP_PATTERNS:
++                    if pat in msg:
++                        # Treat as success — the txn is already in the
++                        # desired state.
++                        self._fetch_cursor = self._cursor
++                        return self
++            if isinstance(e, RuntimeError):
++                raise DbtRuntimeError(msg) from e
++            raise
++
++    def fetchone(self):
++        cur = self._fetch_cursor or self._cursor
++        return cur.fetchone() if cur is not None else None
++
++    def fetchall(self):
++        cur = self._fetch_cursor or self._cursor
++        return cur.fetchall() if cur is not None else []
++
++    def fetchmany(self, *a, **kw):
++        cur = self._fetch_cursor or self._cursor
++        return cur.fetchmany(*a, **kw) if cur is not None else []
++
++    @property
++    def description(self):
++        cur = self._fetch_cursor or self._cursor
++        return cur.description if cur is not None else None
++
++    def close(self):
++        # Mark closed; the next execute() will mint a fresh cursor.
++        # Don't call self._cursor.close() — under duckdb-wasm repeated
++        # cursor close+open is flaky. The conn stays alive until env.close().
++        self._closed = True
++        self._cursor = None
++        self._fetch_cursor = None
++
++    def __getattr__(self, name):
++        # Delegate everything else (arrow, df, register, unregister, etc.)
++        # to the underlying cursor, ensuring it exists.
++        if name.startswith("_"):
++            raise AttributeError(name)
++        self._ensure_cursor()
++        return getattr(self._cursor, name)
+ 
+ 
+ class DuckDBConnectionWrapper:
+     def __init__(self, cursor, env):
+-        self._cursor = DuckDBCursorWrapper(cursor)
++        # `cursor` is no longer used; we keep the signature for API
++        # compatibility with code that calls env.handle().
++        self._cursor = DuckDBCursorWrapper(env)
+         self._env = env
++        self._closed = False
+ 
+     def close(self):
+-        self._cursor.close()
++        if self._closed:
++            return
++        self._closed = True
++        try:
++            self._cursor.close()
++        except Exception:
++            pass
+         self._env.notify_closed()
+ 
+     def cursor(self):
++        # If close() was called, our DuckDBCursorWrapper has marked itself
++        # ready for a fresh underlying cursor on next execute. Reset our
++        # own _closed flag so the wrapper is reusable.
++        self._closed = False
+         return self._cursor
+ 
+ 
+@@ -50,14 +148,23 @@ class LocalEnvironment(Environment):
+         self._plugins = self.initialize_plugins(credentials)
+         self.handle_count = 0
+         self.lock = threading.RLock()
+-        self._keep_open = (
+-            credentials.keep_open or credentials.path == ":memory:" or credentials.is_motherduck
+-        )
++        # Always keep the underlying duckdb conn open across handle()/close()
++        # cycles. The previous heuristic (close when handle_count drops to 0
++        # and path != ':memory:') breaks under runtimes where cursor.close()
++        # cascades to the parent connection (notably duckdb-wasm in Pyodide,
++        # where dbt's macro-loading phase closes the conn before the run
++        # phase reopens it, surfacing as "Connection already closed").
++        # Keeping the conn open until LocalEnvironment.close() (or process
++        # exit) is the safe behavior for all runtimes.
++        self._keep_open = True
+         self._REGISTERED_DF: dict = {}
+ 
+     def notify_closed(self):
+         with self.lock:
+             self.handle_count -= 1
++            # _keep_open is now always True (see __init__); we no longer
++            # eagerly close the underlying conn on handle_count==0. The conn
++            # closes when LocalEnvironment.close() or __del__ runs.
+             if self.handle_count == 0 and not self._keep_open:
+                 self.close()
+ 
+@@ -74,11 +181,9 @@ class LocalEnvironment(Environment):
+             if self.conn is None:
+                 self.conn = self.initialize_db(self.creds, self._plugins)
+             self.handle_count += 1
+-
+-        cursor = self.initialize_cursor(
+-            self.creds, self.conn.cursor(), self._plugins, self._REGISTERED_DF
+-        )
+-        return DuckDBConnectionWrapper(cursor, self)
++        # The DuckDBConnectionWrapper now always mints fresh cursors lazily
++        # via DuckDBCursorWrapper, so we just hand it a placeholder.
++        return DuckDBConnectionWrapper(None, self)
+ 
+     def submit_python_job(self, handle, parsed_model: dict, compiled_code: str) -> AdapterResponse:
+         con = handle.cursor()
