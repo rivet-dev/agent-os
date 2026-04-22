@@ -11,10 +11,11 @@
 //      /root/.dbt/ and /root/dbt-projects/, and applies the dbt-bootstrap
 //      monkey-patches for Pyodide's single-threaded runtime.
 //   2. Writes a tiny project (one model, one schema test) into the VM.
-//   3. Invokes dbt via `vm.runDbt(...)` — the canonical high-level API
-//      that spawns python3, streams stdout/stderr, and returns a
-//      structured DbtRunResult.
-//   4. Reads back target/manifest.json to confirm the run completed.
+//   3. Invokes dbt via the namespaced API: `aos.dbt.build(...)` /
+//      `aos.dbt.test(...)`. Both return structured DbtRunResults with
+//      aggregate stats parsed from target/run_results.json.
+//   4. Reads back the manifest and queries the warehouse via
+//      `aos.duckdb.query(...)`.
 
 import { AgentOs } from "@rivet-dev/agent-os-core";
 
@@ -31,7 +32,7 @@ const PROFILES_YML = `demo:
   outputs:
     dev:
       type: duckdb
-      path: ":memory:"
+      path: "/root/dbt-projects/demo/demo.duckdb"
       threads: 1
 `;
 
@@ -51,44 +52,51 @@ models:
           - unique
 `;
 
-const vm = await AgentOs.create({
+const aos = await AgentOs.create({
 	python: { dbt: true },
 });
 
 try {
-	await vm.writeFiles([
-		{ path: "/root/dbt-projects/demo/dbt_project.yml", content: PROJECT_YML },
-		{ path: "/root/dbt-projects/demo/models/example.sql", content: MODEL_SQL },
-		{ path: "/root/dbt-projects/demo/models/_schema.yml", content: SCHEMA_YML },
+	const projectCwd = "/root/dbt-projects/demo";
+	const warehouse = `${projectCwd}/demo.duckdb`;
+
+	await aos.writeFiles([
+		{ path: `${projectCwd}/dbt_project.yml`, content: PROJECT_YML },
+		{ path: `${projectCwd}/models/example.sql`, content: MODEL_SQL },
+		{ path: `${projectCwd}/models/_schema.yml`, content: SCHEMA_YML },
 		{ path: "/root/.dbt/profiles.yml", content: PROFILES_YML },
 	]);
 
-	const projectCwd = "/root/dbt-projects/demo";
-
-	console.log("--- dbt run ---");
-	const runResult = await vm.runDbt(["run", "--threads", "1"], {
+	console.log("--- dbt build ---");
+	const build = await aos.dbt.build({
 		cwd: projectCwd,
 		onStdout: (chunk) => process.stdout.write(chunk),
 		onStderr: (chunk) => process.stderr.write(chunk),
 	});
-	console.log(`\ndbt run: success=${runResult.success}`);
-	if (runResult.exception) console.error("exception:", runResult.exception);
-	if (!runResult.success) {
-		console.error("dbt run failed");
+	console.log(`\ndbt build: success=${build.success}`);
+	if (build.stats) {
+		console.log(
+			`  models: ${build.stats.modelsPassed}/${build.stats.modelsRun} passed`,
+		);
+		console.log(
+			`  tests:  ${build.stats.testsPassed}/${build.stats.testsRun} passed`,
+		);
+		console.log(`  elapsed: ${build.stats.totalElapsedMs} ms`);
+	}
+	if (!build.success) {
+		console.error("build failed:", build.exception);
 		process.exit(1);
 	}
 
-	console.log("\n--- dbt test ---");
-	const testResult = await vm.runDbt(["test", "--threads", "1"], {
-		cwd: projectCwd,
-		onStdout: (chunk) => process.stdout.write(chunk),
-		onStderr: (chunk) => process.stderr.write(chunk),
-	});
-	console.log(`\ndbt test: success=${testResult.success}`);
-	if (testResult.exception) console.error("exception:", testResult.exception);
+	const manifest = await aos.dbt.readManifest(projectCwd);
+	console.log(`\nmanifest nodes: ${manifest?.nodes.length ?? 0}`);
 
-	const manifestExists = await vm.exists(`${projectCwd}/target/manifest.json`);
-	console.log("\nmanifest.json present:", manifestExists);
+	console.log("\n--- duckdb.query against the warehouse ---");
+	const rows = await aos.duckdb.query("SELECT * FROM main.example ORDER BY id", {
+		database: warehouse,
+	});
+	console.log(`columns: ${rows.columns.join(", ")}`);
+	for (const row of rows.rows) console.log(" ", row.join(" | "));
 } finally {
-	await vm.dispose();
+	await aos.dispose();
 }
