@@ -34,6 +34,56 @@ import sys
 import threading
 import types
 
+# ---------------------------------------------------------------------------
+# Tripwire counters
+# ---------------------------------------------------------------------------
+# A passive observation surface: every patched shim increments a counter on
+# this module so callers can prove the patches actually fired during a run.
+# Exposed two ways:
+#   1. As attributes on \`sys.modules['_agent_os_dbt_tripwire']\` for fast
+#      in-process reads (e.g. from \`AgentOs.runDbt\` post-run).
+#   2. As a JSON file at /tmp/_dbt_tripwire.json refreshed on each shim hit
+#      so the playground can read it via \`aos.readFile\` without going
+#      through Python again.
+# Counters are monotonic per Python interpreter lifetime; reset by reloading
+# the bootstrap (which currently happens once per worker init).
+if "_agent_os_dbt_tripwire" not in sys.modules:
+    _trip = types.ModuleType("_agent_os_dbt_tripwire")
+    _trip.thread_pool_executor_submit = 0
+    _trip.dbt_thread_pool_apply_async = 0
+    _trip.dbt_thread_pool_init = 0
+    _trip.multiprocessing_get_context = 0
+    _trip.multiprocessing_dummy_start = 0
+    _trip.workers_alive = 1
+    _trip.last_updated = ""
+    sys.modules["_agent_os_dbt_tripwire"] = _trip
+_trip = sys.modules["_agent_os_dbt_tripwire"]
+
+def _agent_os_tripwire_persist():
+    """Best-effort write of tripwire snapshot to /tmp/_dbt_tripwire.json.
+
+    Swallows all exceptions because the tripwire is an observation aid,
+    not a load-bearing surface — failure to persist must never break a
+    dbt run.
+    """
+    try:
+        import json as _trip_json
+        import datetime as _trip_dt
+        snapshot = {
+            "thread_pool_executor_submit": int(_trip.thread_pool_executor_submit),
+            "dbt_thread_pool_apply_async": int(_trip.dbt_thread_pool_apply_async),
+            "dbt_thread_pool_init": int(_trip.dbt_thread_pool_init),
+            "multiprocessing_get_context": int(_trip.multiprocessing_get_context),
+            "multiprocessing_dummy_start": int(_trip.multiprocessing_dummy_start),
+            "workers_alive": int(_trip.workers_alive),
+            "last_updated": _trip_dt.datetime.utcnow().isoformat() + "Z",
+        }
+        _trip.last_updated = snapshot["last_updated"]
+        with open("/tmp/_dbt_tripwire.json", "w") as _trip_fh:
+            _trip_json.dump(snapshot, _trip_fh)
+    except Exception:
+        pass
+
 # Replace concurrent.futures.ThreadPoolExecutor with a synchronous executor.
 # Pyodide's CPython has no real OS threads — any ThreadPoolExecutor.submit()
 # call would raise RuntimeError("can't start new thread"). dbt-core uses
@@ -81,6 +131,8 @@ if not getattr(_cf.ThreadPoolExecutor, "_agent_os_dbt_sync_patched", False):
             pass
 
         def submit(self, fn, *args, **kwargs):
+            _trip.thread_pool_executor_submit += 1
+            _agent_os_tripwire_persist()
             try:
                 return _SyncFuture(result=fn(*args, **kwargs))
             except BaseException as e:
@@ -190,6 +242,8 @@ _orig_get_context = multiprocessing.get_context
 
 
 def _patched_get_context(method=None):
+    _trip.multiprocessing_get_context += 1
+    _agent_os_tripwire_persist()
     if method is None:
         method = "spawn"  # dbt's default
     if method == "spawn":
@@ -278,9 +332,12 @@ class _SyncDbtPool:
     """ThreadPool stand-in: every apply_async runs in-line."""
 
     def __init__(self, *args, **kwargs):
-        pass
+        _trip.dbt_thread_pool_init += 1
+        _agent_os_tripwire_persist()
 
     def apply_async(self, func, args=(), kwds=None, callback=None, error_callback=None):
+        _trip.dbt_thread_pool_apply_async += 1
+        _agent_os_tripwire_persist()
         if kwds is None:
             kwds = {}
         try:
@@ -337,6 +394,38 @@ try:
     _dbt_runnable.DbtThreadPool = _SyncDbtPool  # type: ignore[attr-defined]
 except Exception:
     pass
+
+# Defense in depth: even if some code path bypasses DbtThreadPool and goes
+# directly through multiprocessing.pool.ThreadPool, multiprocessing.dummy's
+# DummyProcess.start() ultimately calls threading.Thread.start which raises
+# "can't start new thread" under Pyodide. Replace DummyProcess.start with
+# a synchronous variant that runs the target inline.
+try:
+    import multiprocessing.dummy as _mp_dummy
+    _orig_dummy_start = _mp_dummy.DummyProcess.start
+
+    def _sync_dummy_start(self):
+        _trip.multiprocessing_dummy_start += 1
+        _agent_os_tripwire_persist()
+        try:
+            target = self._target
+            args = self._args
+            kwargs = self._kwargs
+            if target is not None:
+                target(*args, **kwargs)
+        except Exception:
+            pass
+
+    _mp_dummy.DummyProcess.start = _sync_dummy_start
+except Exception as _err:  # noqa: BLE001
+    print(
+        f"warning: dbt-bootstrap could not patch multiprocessing.dummy.DummyProcess.start: {_err!r}",
+        flush=True,
+    )
+
+# Persist the initial tripwire snapshot so consumers see a zero-state file
+# even before the first shim fires.
+_agent_os_tripwire_persist()
 `;
 
 /** Default profiles directory and project root used by AgentOs for dbt. */

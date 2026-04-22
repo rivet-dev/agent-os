@@ -53,6 +53,35 @@ export interface WheelPreloadOptions {
 	 * like the multiprocessing.get_context shim required by dbt-core.
 	 */
 	bootstrapScript?: string;
+	/**
+	 * Additional NODEFS mounts to install inside Pyodide's filesystem so
+	 * Python's `open()`/`os.walk()` see the same files agent-os exposes
+	 * via its kernel-VFS host-dir mounts.
+	 *
+	 * Without this, files written from the host via `aos.writeFile(...)` to
+	 * a host-dir-backed mount path live on the host filesystem but are
+	 * INVISIBLE to Pyodide (which has its own MEMFS for everything outside
+	 * /wheels). Mounting the same host directories under their VM paths
+	 * here means a single physical file is visible to both pathways:
+	 *
+	 *   - `aos.writeFile("/home/user/tmp/foo")` -> host `/tmp/foo`
+	 *   - Python `open("/home/user/tmp/foo")` -> host `/tmp/foo` (via NODEFS)
+	 *
+	 * Each entry mounts {hostDir} into Pyodide at {mountPath}. The mount
+	 * path is created with `mkdirTree` if missing. Read-only flag mirrors
+	 * the underlying host-dir backend's read-only state.
+	 */
+	extraNodefsMounts?: ExtraNodefsMount[];
+}
+
+/** Single host-dir <-> Pyodide path bridge. */
+export interface ExtraNodefsMount {
+	/** Absolute host directory containing the files. */
+	hostDir: string;
+	/** Pyodide-visible POSIX path to mount the host dir at. */
+	mountPath: string;
+	/** If true, NODEFS mount is treated as read-only by the worker. */
+	readOnly?: boolean;
 }
 
 /**
@@ -65,6 +94,7 @@ export interface WheelPreloadPayload {
 	wheels: string[];
 	pyodidePackages: string[];
 	bootstrapScript: string;
+	extraNodefsMounts: ExtraNodefsMount[];
 }
 
 export function normalizeWheelPreload(
@@ -79,6 +109,7 @@ export function normalizeWheelPreload(
 		wheels: options.wheels,
 		pyodidePackages: options.pyodidePackages ?? [],
 		bootstrapScript: options.bootstrapScript ?? "",
+		extraNodefsMounts: options.extraNodefsMounts ?? [],
 	};
 }
 
@@ -107,6 +138,45 @@ async function applyWheelPreload(pyodide, preload) {
 		{ root: preload.hostDir },
 		mountPath,
 	);
+	// Bridge agent-os' kernel-VFS host-dir mounts into Pyodide so Python's
+	// open()/os.walk() see the same files aos.writeFile() wrote. Without
+	// this, files written via the actor SDK live on the host filesystem
+	// but stay invisible to Pyodide's MEMFS — dbt would never see its
+	// own project files.
+	const extraMounts = Array.isArray(preload.extraNodefsMounts)
+		? preload.extraNodefsMounts
+		: [];
+	for (const m of extraMounts) {
+		if (!m || typeof m.hostDir !== "string" || typeof m.mountPath !== "string") {
+			continue;
+		}
+		try {
+			pyodide.FS.mkdirTree(m.mountPath);
+		} catch (e) {
+			// directory may already exist
+		}
+		try {
+			pyodide.FS.mount(
+				pyodide.FS.filesystems.NODEFS,
+				{ root: m.hostDir },
+				m.mountPath,
+			);
+		} catch (mountErr) {
+			// Surface as a warning on stderr; don't block boot. A failed
+			// extra mount means certain paths won't be bridged but the
+			// runtime is still usable for everything else.
+			try {
+				console.error(
+					"agent-os python: NODEFS mount failed for " +
+						m.mountPath +
+						" -> " +
+						m.hostDir +
+						": " +
+						(mountErr && mountErr.message ? mountErr.message : String(mountErr)),
+				);
+			} catch (_logErr) {}
+		}
+	}
 	if (preload.wheels.length > 0) {
 		// Step 1: load Pyodide-bundled packages our wheels transitively
 		// depend on. micropip.install with deps=False skips dependency

@@ -160,4 +160,38 @@ print('PASSTHROUGH_OK')
 		expect(r.code).toBe(0);
 		expect(r.stdout).toContain("PASSTHROUGH_OK");
 	});
+
+	it("exposes tripwire counters incremented by the patched shims", () => {
+		// The tripwire module is the observability surface callers use to
+		// prove the monkey-patches actually fired during a dbt run. This
+		// test hits each shim once and confirms the counters move.
+		const harness = `${DBT_BOOTSTRAP_SCRIPT}
+import sys
+trip = sys.modules['_agent_os_dbt_tripwire']
+
+# Baseline counters
+base_submit = trip.thread_pool_executor_submit
+base_ctx = trip.multiprocessing_get_context
+
+# Trip the sync ThreadPoolExecutor.submit shim
+from concurrent.futures import ThreadPoolExecutor
+with ThreadPoolExecutor() as exe:
+    fut = exe.submit(lambda: 42)
+    assert fut.result() == 42
+
+# Trip the get_context shim
+import multiprocessing
+multiprocessing.get_context('spawn')
+
+assert trip.thread_pool_executor_submit == base_submit + 1, \\
+    f'submit counter did not move: {trip.thread_pool_executor_submit}'
+assert trip.multiprocessing_get_context == base_ctx + 1, \\
+    f'get_context counter did not move: {trip.multiprocessing_get_context}'
+print('TRIPWIRE_OK')
+`;
+		const r = runPython(harness);
+		expect(r.stderr, r.stderr).toBe("");
+		expect(r.code).toBe(0);
+		expect(r.stdout).toContain("TRIPWIRE_OK");
+	});
 });

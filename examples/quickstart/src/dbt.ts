@@ -6,10 +6,14 @@
 //       make -C ../../registry/python-wheels build-all
 //
 // What this does:
-//   1. Boots an AgentOs with python.dbt: true, which mounts the vendored
-//      Pyodide wheels at /wheels and pre-installs dbt + DuckDB.
+//   1. Boots an AgentOs with python.dbt: true. This mounts the vendored
+//      Pyodide wheels, pre-installs the dbt + DuckDB stack, auto-creates
+//      /root/.dbt/ and /root/dbt-projects/, and applies the dbt-bootstrap
+//      monkey-patches for Pyodide's single-threaded runtime.
 //   2. Writes a tiny project (one model, one schema test) into the VM.
-//   3. Invokes dbt-core programmatically via dbtRunner inside Pyodide.
+//   3. Invokes dbt via `vm.runDbt(...)` — the canonical high-level API
+//      that spawns python3, streams stdout/stderr, and returns a
+//      structured DbtRunResult.
 //   4. Reads back target/manifest.json to confirm the run completed.
 
 import { AgentOs } from "@rivet-dev/agent-os-core";
@@ -59,35 +63,32 @@ try {
 		{ path: "/root/.dbt/profiles.yml", content: PROFILES_YML },
 	]);
 
-	await vm.writeFile(
-		"/tmp/run_dbt.py",
-		`
-import os
-os.chdir("/root/dbt-projects/demo")
-from dbt.cli.main import dbtRunner
-print("--- dbt run ---")
-res = dbtRunner().invoke(["run", "--threads", "1"])
-print("success=", res.success)
-if res.exception is not None:
-    print("exception=", repr(res.exception))
-print("--- dbt test ---")
-res2 = dbtRunner().invoke(["test", "--threads", "1"])
-print("success=", res2.success)
-`,
-	);
+	const projectCwd = "/root/dbt-projects/demo";
 
-	const result = await vm.exec("python /tmp/run_dbt.py");
-	console.log(result.stdout);
-	if (result.exitCode !== 0) {
-		console.error("Exit code:", result.exitCode);
-		console.error(result.stderr);
+	console.log("--- dbt run ---");
+	const runResult = await vm.runDbt(["run", "--threads", "1"], {
+		cwd: projectCwd,
+		onStdout: (chunk) => process.stdout.write(chunk),
+		onStderr: (chunk) => process.stderr.write(chunk),
+	});
+	console.log(`\ndbt run: success=${runResult.success}`);
+	if (runResult.exception) console.error("exception:", runResult.exception);
+	if (!runResult.success) {
+		console.error("dbt run failed");
 		process.exit(1);
 	}
 
-	const manifestExists = await vm.exists(
-		"/root/dbt-projects/demo/target/manifest.json",
-	);
-	console.log("manifest.json present:", manifestExists);
+	console.log("\n--- dbt test ---");
+	const testResult = await vm.runDbt(["test", "--threads", "1"], {
+		cwd: projectCwd,
+		onStdout: (chunk) => process.stdout.write(chunk),
+		onStderr: (chunk) => process.stderr.write(chunk),
+	});
+	console.log(`\ndbt test: success=${testResult.success}`);
+	if (testResult.exception) console.error("exception:", testResult.exception);
+
+	const manifestExists = await vm.exists(`${projectCwd}/target/manifest.json`);
+	console.log("\nmanifest.json present:", manifestExists);
 } finally {
 	await vm.dispose();
 }

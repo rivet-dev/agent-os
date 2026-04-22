@@ -342,6 +342,9 @@ _subprocess.check_output = _kernel_check_output
 async function applyExecOverrides(py, options) {
   if (!options) {
     py.setStdin();
+    // Reset argv to a conservative default so a prior invocation's argv
+    // never bleeds into the next one.
+    await py.runPythonAsync("import sys\nsys.argv = ['']");
     return;
   }
   if (typeof options.stdin === "string") {
@@ -376,6 +379,23 @@ async function applyExecOverrides(py, options) {
     } finally {
       try { py.globals.delete("__secure_exec_cwd__"); } catch {}
     }
+  }
+
+  // Set sys.argv from the JSON payload so Python scripts see the caller's
+  // args. Matches CPython contract:
+  //   - 'python script.py a b'  -> argv = ['script.py', 'a', 'b']
+  //   - 'python -c "..." a b'   -> argv = ['-c', 'a', 'b']
+  //   - 'python -m mod a b'     -> argv = ['mod', 'a', 'b']
+  // Always set this (including to [""]) so leftover state from a previous
+  // invocation can't leak into the next one.
+  const argv = Array.isArray(options.argv) ? options.argv : [""];
+  py.globals.set("__secure_exec_argv_json__", JSON.stringify(argv));
+  try {
+    await py.runPythonAsync(
+      "import json, sys\nsys.argv = [str(_a) for _a in json.loads(__secure_exec_argv_json__)]"
+    );
+  } finally {
+    try { py.globals.delete("__secure_exec_argv_json__"); } catch {}
   }
 }
 
@@ -734,7 +754,7 @@ class PythonRuntimeDriver implements RuntimeDriver {
       await this._ensureWorkerReady();
 
       // Resolve the Python code to execute
-      const { code, filePath } = await this._resolveEntry(command, args, kernel);
+      const { code, filePath, argv } = await this._resolveEntry(command, args, kernel);
 
       // Build stdout/stderr forwarders
       const onStdout = (data: Uint8Array) => {
@@ -755,6 +775,7 @@ class PythonRuntimeDriver implements RuntimeDriver {
           options: {
             env: ctx.env,
             cwd: ctx.cwd,
+            argv,
           },
         },
         onStdout,
@@ -790,7 +811,7 @@ class PythonRuntimeDriver implements RuntimeDriver {
     command: string,
     args: string[],
     kernel: KernelInterface,
-  ): Promise<{ code: string; filePath?: string }> {
+  ): Promise<{ code: string; filePath?: string; argv: string[] }> {
     // pip command
     if (command === 'pip') {
       throw new Error('Python package installation is not supported in this runtime');
@@ -803,29 +824,40 @@ class PythonRuntimeDriver implements RuntimeDriver {
   private async _resolvePythonArgs(
     args: string[],
     kernel: KernelInterface,
-  ): Promise<{ code: string; filePath?: string }> {
+  ): Promise<{ code: string; filePath?: string; argv: string[] }> {
     for (let i = 0; i < args.length; i++) {
       const arg = args[i];
 
-      // -c: next arg is code
+      // -c: next arg is code. CPython contract: argv = ['-c', ...rest]
       if (arg === '-c' && i + 1 < args.length) {
-        return { code: args[i + 1] };
+        const scriptArgs = args.slice(i + 2);
+        return { code: args[i + 1], argv: ['-c', ...scriptArgs] };
       }
 
-      // -m: module execution
+      // -m: module execution. CPython contract: argv = ['<module>', ...rest]
       if (arg === '-m' && i + 1 < args.length) {
         const moduleName = args[i + 1];
-        return { code: `import runpy; runpy.run_module('${moduleName}', run_name='__main__')` };
+        const scriptArgs = args.slice(i + 2);
+        return {
+          code: `import runpy; runpy.run_module('${moduleName}', run_name='__main__')`,
+          argv: [moduleName, ...scriptArgs],
+        };
       }
 
       // Skip flags
       if (arg.startsWith('-')) continue;
 
-      // First non-flag arg is the script path
+      // First non-flag arg is the script path. CPython contract:
+      // argv = [<script_path>, ...args_after_script]
       const scriptPath = arg;
+      const scriptArgs = args.slice(i + 1);
       try {
         const content = await kernel.vfs.readTextFile(scriptPath);
-        return { code: content, filePath: scriptPath };
+        return {
+          code: content,
+          filePath: scriptPath,
+          argv: [scriptPath, ...scriptArgs],
+        };
       } catch {
         throw new Error(`python: can't open file '${scriptPath}': [Errno 2] No such file or directory`);
       }
