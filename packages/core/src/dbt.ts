@@ -186,26 +186,25 @@ export interface DbtCatalogEntry {
 export const AGENT_OS_SCRATCH_DIR = "/root/.dbt/.aos";
 
 /**
- * Where the dbt helper persists its structured result. Consumers that
- * can't capture stdout (e.g. cross-actor RPC callers) can `readFile`
- * this path after `waitProcess` instead of scanning stdout for the
- * sentinel. Lives inside `AGENT_OS_SCRATCH_DIR` so it's visible on both
- * sides of the NODEFS bridge.
+ * Where the dbt helper persists its structured result. Lives inside
+ * `AGENT_OS_SCRATCH_DIR` so it's visible on both sides of the NODEFS
+ * bridge. Internal: callers should use `aos.dbt.run` which parses the
+ * result for them.
  */
-export const RUN_DBT_RESULT_PATH = `${AGENT_OS_SCRATCH_DIR}/run_dbt_result.json`;
+const RUN_DBT_RESULT_PATH = `${AGENT_OS_SCRATCH_DIR}/run_dbt_result.json`;
 
 /** Path where the helper is staged inside the VM. */
-export const RUN_DBT_HELPER_PATH = "/tmp/_agent_os_run_dbt.py";
+const RUN_DBT_HELPER_PATH = "/tmp/_agent_os_run_dbt.py";
 
 /**
  * Sentinel that delimits the structured tail of the dbt helper script
  * output. The helper prints `__AGENT_OS_DBT_RESULT_JSON__{...}__END__` as
  * its last line so the host can parse a structured result without
- * competing with dbt's own stdout. Kept as module-level constants so
- * the helper script and the parser can't drift.
+ * competing with dbt's own stdout. Module-local so the helper script
+ * and the parser can't drift.
  */
-export const DBT_RESULT_SENTINEL_BEGIN = "__AGENT_OS_DBT_RESULT_JSON__";
-export const DBT_RESULT_SENTINEL_END = "__END__";
+const DBT_RESULT_SENTINEL_BEGIN = "__AGENT_OS_DBT_RESULT_JSON__";
+const DBT_RESULT_SENTINEL_END = "__END__";
 
 // ────────────────────────────────────────────────────────────────────
 // Helper scripts (Python)
@@ -218,7 +217,7 @@ export const DBT_RESULT_SENTINEL_END = "__END__";
  * line delimited by the sentinels above. Never calls sys.exit so
  * Pyodide's webloop doesn't mangle the exit path.
  */
-export const RUN_DBT_HELPER_PY = `# agent-os dbt.run helper — auto-installed; do not edit.
+const RUN_DBT_HELPER_PY = `# agent-os dbt.run helper — auto-installed; do not edit.
 import json as _aos_json
 import sys as _aos_sys
 import traceback as _aos_traceback
@@ -276,12 +275,10 @@ print("${DBT_RESULT_SENTINEL_BEGIN}" + _aos_json.dumps(_aos_payload) + "${DBT_RE
 /**
  * Python `-c` probe that reads the `_agent_os_dbt_tripwire` module and
  * prints either "NULL" (module not loaded) or a single-line JSON
- * snapshot. Kept as an exported constant so consumers that can't call
- * `aos.dbt.tripwire()` directly (e.g. external actor frameworks on an
- * older runtime) can invoke the same probe via `exec("python3 -c <probe>")`
- * and parse the output with `parseDbtTripwireProbe`.
+ * snapshot. Internal: callers should use `aos.dbt.tripwire()` which
+ * invokes + parses this for them.
  */
-export const DBT_TRIPWIRE_PROBE_PY = `import sys, json
+const DBT_TRIPWIRE_PROBE_PY = `import sys, json
 mod = sys.modules.get("_agent_os_dbt_tripwire")
 if mod is None:
     print("NULL")
@@ -306,7 +303,7 @@ else:
  * when the tripwire module is absent (i.e. the VM wasn't booted with
  * `python.dbt: true`) or the output isn't valid JSON.
  */
-export function parseDbtTripwireProbe(
+function parseDbtTripwireProbe(
 	output: string,
 ): DbtTripwireSnapshot | null {
 	const trimmed = output.trim();
@@ -320,12 +317,11 @@ export function parseDbtTripwireProbe(
 
 /**
  * Best-effort parser for the sentinel-delimited result line emitted by
- * `RUN_DBT_HELPER_PY`. Exposed so consumers that drive dbt through the
- * same canonical protocol via their own `exec("python3 HELPER …")` path
- * (rather than through `aos.dbt.run` directly) can reuse the parser
- * instead of re-implementing sentinel scanning.
+ * `RUN_DBT_HELPER_PY`. Module-local — `aos.dbt.run` is the public entry
+ * point that stages the helper, captures stdout, and invokes the
+ * parser for you.
  */
-export function parseDbtResultSentinel(stdout: string): {
+function parseDbtResultSentinel(stdout: string): {
 	success: boolean;
 	exception: string | null;
 	tripwire: DbtTripwireSnapshot | null;

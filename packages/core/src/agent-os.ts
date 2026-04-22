@@ -91,11 +91,6 @@ export interface BatchReadResult {
 // so existing `import … from "@rivet-dev/agent-os-core"` paths stay
 // intact while the implementation lives in a focused file.
 import { AgentOsDbt, AGENT_OS_SCRATCH_DIR } from "./dbt.js";
-import type {
-	DbtRunResult,
-	DbtTripwireSnapshot,
-	RunDbtOptions,
-} from "./dbt.js";
 import { AgentOsDuckdb } from "./duckdb.js";
 
 export { AgentOsDbt, AgentOsDuckdb, AGENT_OS_SCRATCH_DIR };
@@ -123,21 +118,6 @@ export type {
 	DuckdbTableSchema,
 } from "./duckdb.js";
 export { DuckdbError } from "./duckdb.js";
-
-// Back-compat pass-through re-exports for the raw helper scripts,
-// sentinels, and parsers. These remain part of the package API until
-// the follow-up cleanup internalizes them behind the `aos.dbt` /
-// `aos.duckdb` surfaces.
-export {
-	DBT_RESULT_SENTINEL_BEGIN,
-	DBT_RESULT_SENTINEL_END,
-	DBT_TRIPWIRE_PROBE_PY,
-	RUN_DBT_HELPER_PATH,
-	RUN_DBT_HELPER_PY,
-	RUN_DBT_RESULT_PATH,
-	parseDbtResultSentinel,
-	parseDbtTripwireProbe,
-} from "./dbt.js";
 
 /** Entry in the agent registry, describing an available agent type. */
 export interface AgentRegistryEntry {
@@ -924,66 +904,6 @@ const DBT_PYODIDE_BUNDLED_DEPS: string[] = [
 	"annotated-types",
 ];
 
-/**
- * Result path the DuckDB-query probe writes its single JSON line to.
- * Intentionally sibling to `RUN_DBT_RESULT_PATH` so consumers have one
- * canonical location pattern for probe output. Lives inside
- * `AGENT_OS_SCRATCH_DIR` so it's visible on both sides of the NODEFS
- * bridge.
- */
-export const DUCKDB_PROBE_RESULT_PATH = `${AGENT_OS_SCRATCH_DIR}/duckdb_result.json`;
-
-/**
- * Short, parameterised DuckDB query probe used by callers that need
- * columns + rows from an arbitrary SQL statement. Emits a single-line
- * JSON envelope to both stdout AND `DUCKDB_PROBE_RESULT_PATH` so both
- * streaming and file-read consumers work.
- *
- * Argv: [dbPath, limit, sql]
- */
-export const DUCKDB_QUERY_PROBE_PY = `import sys, json, traceback
-
-if len(sys.argv) < 4:
-    _out = json.dumps({"error": "usage: probe.py <db_path> <limit> <sql>"})
-else:
-    _db_path = sys.argv[1]
-    try:
-        _limit = int(sys.argv[2])
-    except Exception:
-        _limit = 100
-    _sql = sys.argv[3]
-    try:
-        import duckdb
-        _con = duckdb.connect(_db_path)
-        _cur = _con.cursor()
-        _cur.execute(_sql)
-        _cols = [d[0] for d in _cur.description] if _cur.description else []
-        _rows = _cur.fetchmany(_limit)
-        _coerced = []
-        for _row in _rows:
-            _line = []
-            for _v in _row:
-                if _v is None or isinstance(_v, (bool, int, float, str)):
-                    _line.append(_v)
-                elif hasattr(_v, "isoformat"):
-                    _line.append(_v.isoformat())
-                else:
-                    _line.append(str(_v))
-            _coerced.append(_line)
-        _out = json.dumps({"columns": _cols, "rows": _coerced})
-    except Exception as _err:
-        traceback.print_exc(file=sys.stderr)
-        _out = json.dumps({"error": str(_err)})
-
-print(_out, flush=True)
-try:
-    import os as _os
-    _os.makedirs("${AGENT_OS_SCRATCH_DIR}", exist_ok=True)
-    with open("${DUCKDB_PROBE_RESULT_PATH}", "w") as _f:
-        _f.write(_out)
-except Exception:
-    pass
-`;
 
 export class AgentOs {
 	readonly kernel: Kernel;
@@ -1342,25 +1262,6 @@ export class AgentOs {
 		const entry = this._processes.get(pid);
 		if (!entry) throw new Error(`Process not found: ${pid}`);
 		return entry.proc.wait();
-	}
-
-	/**
-	 * @deprecated Use `aos.dbt.run(args, options)` instead. This flat
-	 * alias will be removed in a future release.
-	 */
-	async runDbt(
-		args: string[],
-		options?: RunDbtOptions,
-	): Promise<DbtRunResult> {
-		return this.dbt.run(args, options);
-	}
-
-	/**
-	 * @deprecated Use `aos.dbt.tripwire()` instead. This flat alias will
-	 * be removed in a future release.
-	 */
-	async readDbtTripwire(): Promise<DbtTripwireSnapshot | null> {
-		return this.dbt.tripwire();
 	}
 
 	private _assertSafeAbsolutePath(path: string): void {

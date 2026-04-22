@@ -126,10 +126,10 @@ export class DuckdbError extends Error {
 // ────────────────────────────────────────────────────────────────────
 
 /** Path where the helper script is staged inside the VM. */
-export const RUN_DUCKDB_HELPER_PATH = "/tmp/_agent_os_run_duckdb.py";
+const RUN_DUCKDB_HELPER_PATH = "/tmp/_agent_os_run_duckdb.py";
 
 /** Where the helper script writes its structured response. */
-export const DUCKDB_RESULT_PATH = `${AGENT_OS_SCRATCH_DIR}/duckdb_result.json`;
+const DUCKDB_RESULT_PATH = `${AGENT_OS_SCRATCH_DIR}/duckdb_result.json`;
 
 /**
  * Python helper dispatched on a JSON argv to perform query / execute /
@@ -138,7 +138,7 @@ export const DUCKDB_RESULT_PATH = `${AGENT_OS_SCRATCH_DIR}/duckdb_result.json`;
  * so other prints (tracebacks, schema warnings) don't pollute the
  * payload.
  */
-export const RUN_DUCKDB_HELPER_PY = `# agent-os duckdb helper — auto-installed; do not edit.
+const RUN_DUCKDB_HELPER_PY = `# agent-os duckdb helper — auto-installed; do not edit.
 import json as _aos_json
 import os as _aos_os
 import sys as _aos_sys

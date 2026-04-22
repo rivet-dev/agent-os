@@ -64,17 +64,7 @@ export {
 	AgentOs,
 	AgentOsDbt,
 	AgentOsDuckdb,
-	DBT_RESULT_SENTINEL_BEGIN,
-	DBT_RESULT_SENTINEL_END,
-	DBT_TRIPWIRE_PROBE_PY,
 	DuckdbError,
-	parseDbtResultSentinel,
-	parseDbtTripwireProbe,
-	DUCKDB_PROBE_RESULT_PATH,
-	DUCKDB_QUERY_PROBE_PY,
-	RUN_DBT_HELPER_PATH,
-	RUN_DBT_HELPER_PY,
-	RUN_DBT_RESULT_PATH,
 } from "./agent-os.js";
 export type {
 	AgentConfig,
