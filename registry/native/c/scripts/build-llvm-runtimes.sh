@@ -17,11 +17,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PATCH_DIR="$SCRIPT_DIR/../patches/llvm-project"
 WASI_NM="$WASI_SDK_DIR/bin/llvm-nm"
 
+# Prefer GNU patch (gpatch on macOS via brew) — Apple's BSD patch silently
+# accepts both forward and reverse dry-runs on multi-file patches whose hunks
+# happen to match in either direction, which causes the "already applied" branch
+# below to skip patches that were never actually applied.
+PATCH_TOOL="$(command -v gpatch 2>/dev/null || command -v patch)"
+
 if [ -d "$PATCH_DIR" ]; then
   while IFS= read -r patch_file; do
-    if patch --dry-run -p1 -d "$LLVM_PROJECT_SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
-      patch --no-backup-if-mismatch -p1 -d "$LLVM_PROJECT_SRC_DIR" < "$patch_file" >/dev/null
-    elif patch --dry-run -R -p1 -d "$LLVM_PROJECT_SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
+    if "$PATCH_TOOL" --dry-run -N --batch -p1 -d "$LLVM_PROJECT_SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
+      "$PATCH_TOOL" -N --batch --no-backup-if-mismatch -p1 -d "$LLVM_PROJECT_SRC_DIR" < "$patch_file" >/dev/null
+      # Cleanup any stray .rej files from already-applied hunks
+      find "$LLVM_PROJECT_SRC_DIR" -name '*.rej' -delete 2>/dev/null || true
+    elif "$PATCH_TOOL" --dry-run --batch -R -p1 -d "$LLVM_PROJECT_SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
       :
     else
       echo "failed to apply llvm-project patch: $patch_file" >&2

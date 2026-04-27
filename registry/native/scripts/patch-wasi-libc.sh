@@ -18,6 +18,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WASMCORE_DIR="$(dirname "$SCRIPT_DIR")"
 PATCHES_DIR="$WASMCORE_DIR/patches/wasi-libc"
 
+# Prefer GNU patch (gpatch on macOS via brew) — Apple's BSD patch silently
+# accepts both forward and reverse dry-runs on multi-file patches whose hunks
+# happen to match in either direction, breaking the "already applied" detection.
+PATCH_TOOL="$(command -v gpatch 2>/dev/null || command -v patch)"
+
 # wasi-libc commit pinned by wasi-sdk-25's git submodule
 WASI_LIBC_COMMIT="574b88da481569b65a237cb80daf9a2d5aeaf82d"
 WASI_LIBC_REPO="https://github.com/WebAssembly/wasi-libc.git"
@@ -148,16 +153,18 @@ else
     for PATCH in $PATCH_FILES; do
         PATCH_NAME="$(basename "$PATCH")"
 
+        # Use `patch -p1` instead of `git apply` because some patches in this
+        # directory mix `diff --git` and bare `--- a/file` headers, which
+        # `git apply` rejects but the standard `patch` utility accepts.
         case "$MODE" in
             check)
                 echo -n "Checking $PATCH_NAME ... "
-                if git -C "$WASI_LIBC_SRC_DIR" apply --check --recount "$PATCH" > /dev/null 2>&1; then
-                    git -C "$WASI_LIBC_SRC_DIR" apply --recount "$PATCH" > /dev/null 2>&1
+                if "$PATCH_TOOL" -p1 -d "$WASI_LIBC_SRC_DIR" -N --dry-run --batch --no-backup-if-mismatch < "$PATCH" > /dev/null 2>&1; then
+                    "$PATCH_TOOL" -p1 -d "$WASI_LIBC_SRC_DIR" -N --batch --no-backup-if-mismatch < "$PATCH" > /dev/null 2>&1
                     echo "OK (applies cleanly)"
-                elif git -C "$WASI_LIBC_SRC_DIR" apply -R --check --recount "$PATCH" > /dev/null 2>&1; then
+                elif patch -R -p1 -d "$WASI_LIBC_SRC_DIR" --dry-run --batch --no-backup-if-mismatch < "$PATCH" > /dev/null 2>&1; then
                     echo "OK (already applied)"
                 else
-                    # Check if new files from this patch exist (layered patch scenario)
                     NEW_FILES=$(
                         sed -n 's|^+++ b/\([^[:space:]]*\).*|\1|p' "$PATCH" | while read -r f; do
                             [ -f "$WASI_LIBC_SRC_DIR/$f" ] && echo "$f"
@@ -173,10 +180,10 @@ else
                 ;;
             apply)
                 echo -n "Applying $PATCH_NAME ... "
-                if git -C "$WASI_LIBC_SRC_DIR" apply --check --recount "$PATCH" > /dev/null 2>&1; then
-                    git -C "$WASI_LIBC_SRC_DIR" apply --recount "$PATCH" > /dev/null 2>&1
+                if "$PATCH_TOOL" -p1 -d "$WASI_LIBC_SRC_DIR" -N --dry-run --batch --no-backup-if-mismatch < "$PATCH" > /dev/null 2>&1; then
+                    "$PATCH_TOOL" -p1 -d "$WASI_LIBC_SRC_DIR" -N --batch --no-backup-if-mismatch < "$PATCH" > /dev/null 2>&1
                     echo "applied"
-                elif git -C "$WASI_LIBC_SRC_DIR" apply -R --check --recount "$PATCH" > /dev/null 2>&1; then
+                elif patch -R -p1 -d "$WASI_LIBC_SRC_DIR" --dry-run --batch --no-backup-if-mismatch < "$PATCH" > /dev/null 2>&1; then
                     echo "already applied (skipping)"
                 else
                     echo "FAIL (does not apply)"
@@ -185,8 +192,8 @@ else
                 ;;
             reverse)
                 echo -n "Reversing $PATCH_NAME ... "
-                if git -C "$WASI_LIBC_SRC_DIR" apply -R --check --recount "$PATCH" > /dev/null 2>&1; then
-                    git -C "$WASI_LIBC_SRC_DIR" apply -R --recount "$PATCH" > /dev/null 2>&1
+                if patch -R -p1 -d "$WASI_LIBC_SRC_DIR" --dry-run --batch --no-backup-if-mismatch < "$PATCH" > /dev/null 2>&1; then
+                    patch -R -p1 -d "$WASI_LIBC_SRC_DIR" --batch --no-backup-if-mismatch < "$PATCH" > /dev/null 2>&1
                     echo "reversed"
                 else
                     echo "not applied (skipping)"

@@ -24,7 +24,13 @@ TOOLCHAIN_FILE="$WASI_SDK_DIR/share/cmake/wasi-sdk.cmake"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PATCH_DIR="$SCRIPT_DIR/../patches/duckdb"
 COMMON_FLAGS="-I$OVERLAY_INCLUDE_DIR -D_WASI_EMULATED_PTHREAD -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS"
-COMMON_CXX_FLAGS="$COMMON_FLAGS -DDUCKDB_DISABLE_EXTENSION_LOAD -DSQLITE_NOHAVE_SYSTEM -DSQLITE_OMIT_POPEN -fwasm-exceptions -DWEBDB_FAST_EXCEPTIONS=1"
+# Bundled extensions: parquet (read .parquet files), json (read/write JSON
+# data), core_functions (additional builtins).
+# Excluded:
+# - httpfs — requires OpenSSL+CURL; WASM-compiled mbedtls/curl not in sysroot.
+#   Server-side DuckDB (`@duckdb/node-api` in the converter actor) handles S3.
+# - icu — requires POSIX timezone APIs (tzset/timezone/tzname) absent from WASI.
+COMMON_CXX_FLAGS="$COMMON_FLAGS -DSQLITE_NOHAVE_SYSTEM -DSQLITE_OMIT_POPEN -fwasm-exceptions -DWEBDB_FAST_EXCEPTIONS=1"
 CXX_STDLIB_INCLUDE="$SYSROOT_DIR/include/wasm32-wasi/c++/v1"
 
 if [ ! -d "$CXX_STDLIB_INCLUDE" ]; then
@@ -32,11 +38,17 @@ if [ ! -d "$CXX_STDLIB_INCLUDE" ]; then
   exit 1
 fi
 
+# Prefer GNU patch (gpatch on macOS) — see comment in build-llvm-runtimes.sh.
+PATCH_TOOL="$(command -v gpatch 2>/dev/null || command -v patch)"
+
 if [ -d "$PATCH_DIR" ]; then
   while IFS= read -r patch_file; do
-    if patch --dry-run -p1 -d "$DUCKDB_SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
-      patch --no-backup-if-mismatch -p1 -d "$DUCKDB_SRC_DIR" < "$patch_file" >/dev/null
-    elif patch --dry-run -R -p1 -d "$DUCKDB_SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
+    # `-N` (forward-only) makes gpatch SKIP already-applied patches instead of
+    # silently reversing them.
+    if "$PATCH_TOOL" --dry-run -N --batch -p1 -d "$DUCKDB_SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
+      "$PATCH_TOOL" -N --batch --no-backup-if-mismatch -p1 -d "$DUCKDB_SRC_DIR" < "$patch_file" >/dev/null
+      find "$DUCKDB_SRC_DIR" -name '*.rej' -delete 2>/dev/null || true
+    elif "$PATCH_TOOL" --dry-run --batch -R -p1 -d "$DUCKDB_SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
       :
     else
       echo "failed to apply DuckDB patch: $patch_file" >&2
@@ -66,9 +78,8 @@ cmake \
   -DENABLE_UBSAN=0 \
   -DDISABLE_THREADS=1 \
   -DSMALLER_BINARY=1 \
-  -DDISABLE_EXTENSION_LOAD=1 \
-  -DBUILD_EXTENSIONS=core_functions \
-  -DSKIP_EXTENSIONS="parquet;jemalloc" \
+  -DBUILD_EXTENSIONS="core_functions;parquet;json" \
+  -DSKIP_EXTENSIONS="jemalloc" \
   -DDUCKDB_EXPLICIT_PLATFORM=wasm32-wasip1-posix \
   -DOVERRIDE_GIT_DESCRIBE="$DUCKDB_GIT_DESCRIBE"
 
