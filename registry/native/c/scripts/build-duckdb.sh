@@ -24,12 +24,20 @@ TOOLCHAIN_FILE="$WASI_SDK_DIR/share/cmake/wasi-sdk.cmake"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PATCH_DIR="$SCRIPT_DIR/../patches/duckdb"
 COMMON_FLAGS="-I$OVERLAY_INCLUDE_DIR -D_WASI_EMULATED_PTHREAD -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS"
+# ICU's putilimp.h falls back to declaring `extern` references to
+# tzset() / timezone / tzname when the platform isn't Win32/iOS/etc.
+# The patched WASI sysroot doesn't expose those symbols. Defining
+# U_HAVE_* short-circuits the fallback, leaving uprv_tzset() a no-op
+# and routing uprv_timezone() through localtime_r/mktime (which we
+# do support — VM is permanently UTC, so it returns 0 cleanly).
+ICU_TZ_FLAGS="-DU_HAVE_TZSET=1 -DU_HAVE_TIMEZONE=1 -DU_HAVE_TZNAME=1"
+COMMON_FLAGS="$COMMON_FLAGS $ICU_TZ_FLAGS"
 # Bundled extensions: parquet (read .parquet files), json (read/write JSON
-# data), core_functions (additional builtins).
-# Excluded:
-# - httpfs — requires OpenSSL+CURL; WASM-compiled mbedtls/curl not in sysroot.
-#   Server-side DuckDB (`@duckdb/node-api` in the converter actor) handles S3.
-# - icu — requires POSIX timezone APIs (tzset/timezone/tzname) absent from WASI.
+# data), icu (date/time conversions; uses our timezone.c override since the
+# VM is permanently UTC), core_functions (additional builtins).
+# httpfs is intentionally excluded — its OpenSSL+CURL hard dependency requires
+# a WASM-compiled mbedtls/curl that we don't ship in this sysroot. Server-side
+# DuckDB (`@duckdb/node-api` in the converter actor) handles S3 reads.
 COMMON_CXX_FLAGS="$COMMON_FLAGS -DSQLITE_NOHAVE_SYSTEM -DSQLITE_OMIT_POPEN -fwasm-exceptions -DWEBDB_FAST_EXCEPTIONS=1"
 CXX_STDLIB_INCLUDE="$SYSROOT_DIR/include/wasm32-wasi/c++/v1"
 
@@ -78,7 +86,7 @@ cmake \
   -DENABLE_UBSAN=0 \
   -DDISABLE_THREADS=1 \
   -DSMALLER_BINARY=1 \
-  -DBUILD_EXTENSIONS="core_functions;parquet;json" \
+  -DBUILD_EXTENSIONS="core_functions;parquet;json;icu" \
   -DSKIP_EXTENSIONS="jemalloc" \
   -DDUCKDB_EXPLICIT_PLATFORM=wasm32-wasip1-posix \
   -DOVERRIDE_GIT_DESCRIBE="$DUCKDB_GIT_DESCRIBE"

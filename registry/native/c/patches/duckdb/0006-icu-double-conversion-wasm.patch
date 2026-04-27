@@ -1,0 +1,17 @@
+Add __wasm__ to the list of architectures Double-Conversion considers
+"correct double" — same as the existing __EMSCRIPTEN__ entry. wasm32 has
+IEEE-754 doubles so the assumption holds; the upstream check just hadn't
+been taught about WASI/wasip1 builds.
+
+diff --git a/extension/icu/third_party/icu/i18n/double-conversion-utils.h b/extension/icu/third_party/icu/i18n/double-conversion-utils.h
+--- a/extension/icu/third_party/icu/i18n/double-conversion-utils.h
++++ b/extension/icu/third_party/icu/i18n/double-conversion-utils.h
+@@ -112,7 +112,7 @@
+     defined(__AARCH64EL__) || defined(__aarch64__) || defined(__AARCH64EB__) || \
+     defined(__riscv) || defined(__e2k__) || \
+     defined(__or1k__) || defined(__arc__) || \
+-    defined(__EMSCRIPTEN__)
++    defined(__EMSCRIPTEN__) || defined(__wasm__)
+ #define DOUBLE_CONVERSION_CORRECT_DOUBLE_OPERATIONS 1
+ #elif defined(__mc68000__) || \
+     defined(__pnacl__) || defined(__native_client__)
