@@ -1,0 +1,25 @@
+diff --git a/src/include/httpfs_extension.hpp b/src/include/httpfs_extension.hpp
+index eeca2c9..722fb9f 100644
+--- a/src/include/httpfs_extension.hpp
++++ b/src/include/httpfs_extension.hpp
+@@ -6,9 +6,20 @@ namespace duckdb {
+ 
+ class HttpfsExtension : public Extension {
+ public:
++	// __attribute__((used,visibility("default"))) keeps the vtable alive
++	// under emscripten's wasm-ld --gc-sections + hidden visibility default.
++	// Without this, the HttpfsExtension vtable ended up exported-but-
++	// undefined in the final .so and Pyodide's dynamic loader rejected
++	// the wheel with "bad export type: undefined".
++#if defined(__EMSCRIPTEN__)
++	void Load(ExtensionLoader &loader) override __attribute__((used,visibility("default")));
++	std::string Name() override __attribute__((used,visibility("default")));
++	std::string Version() const override __attribute__((used,visibility("default")));
++#else
+ 	void Load(ExtensionLoader &loader) override;
+ 	std::string Name() override;
+ 	std::string Version() const override;
++#endif
+ };
+ 
+ } // namespace duckdb
