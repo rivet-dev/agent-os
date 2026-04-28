@@ -1,14 +1,24 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 02a059c..a3bb601 100644
+index 02a059c..847e52d 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -103,6 +103,9 @@ if(APPLE)
+@@ -103,6 +103,19 @@ if(APPLE)
    target_link_options(
      _duckdb PRIVATE "LINKER:-exported_symbol,_duckdb_adbc_init"
      "LINKER:-exported_symbol,_PyInit__duckdb")
 +elseif(EMSCRIPTEN)
-+  # wasm-ld does not support --export-dynamic-symbol; symbol exports are
-+  # handled by pyodide-build via --exports=whole_archive
++  # wasm-ld doesn't support --export-dynamic-symbol; pyodide-build
++  # handles exports via --exports=whole_archive.
++  #
++  # JSPI suspending import for httpfs's HTTP client (declared in
++  # duckdb-httpfs/src/httpfs_fetch_lib.js). Attach the link options
++  # to the _duckdb target — NOT LDFLAGS — so cmake's configure-time
++  # probes don't see them. Path comes from cmake var DUCKDB_HTTPFS_FETCH_LIB.
++  if(DEFINED DUCKDB_HTTPFS_FETCH_LIB)
++    target_link_options(_duckdb PRIVATE
++      "SHELL:-sJSPI_IMPORTS=_httpfs_fetch_js"
++      "SHELL:--js-library=${DUCKDB_HTTPFS_FETCH_LIB}")
++  endif()
  elseif(UNIX AND NOT APPLE)
    target_link_options(
      _duckdb PRIVATE "LINKER:--export-dynamic-symbol=duckdb_adbc_init"

@@ -1,8 +1,8 @@
 diff --git a/src/httpfs_client_wasm.cpp b/src/httpfs_client_wasm.cpp
-index 4095281..c6a7fdd 100644
+index 4095281..69f7f78 100644
 --- a/src/httpfs_client_wasm.cpp
 +++ b/src/httpfs_client_wasm.cpp
-@@ -1,15 +1,236 @@
+@@ -1,15 +1,187 @@
 +// Pyodide / emscripten HTTP client for httpfs.
 +//
 +// Replaces the upstream stub with an EM_ASYNC_JS-based implementation
@@ -23,8 +23,8 @@ index 4095281..c6a7fdd 100644
  #include "http_state.hpp"
 +#include "duckdb/common/exception.hpp"
 +
-+#include <emscripten.h>
 +#include <cstdlib>
++#include <cstdint>
 +#include <cstring>
 +#include <sstream>
 +#include <vector>
@@ -38,61 +38,12 @@ index 4095281..c6a7fdd 100644
 +// JSPI auto-wraps any `await` in this block so the wasm side suspends
 +// until the JS Promise resolves. Node 22+ honors this without flags
 +// (Node 24 confirmed working).
-+// Signature uses int for pointer params — emscripten treats wasm32
-+// pointers as int32, and using `*` in the EM_ASYNC_JS signature leaks
-+// the * into the generated JS function declaration, producing
-+// "Unexpected token '*'" at JS parse time.
-+EM_ASYNC_JS(int, _httpfs_fetch_js, (int url_p, int method_p, int headers_flat_p,
-+                                      int body_p, int body_len, int out_status, int out_body,
-+                                      int out_body_len, int out_headers), {
-+	try {
-+		const url = UTF8ToString(url_p);
-+		const method = UTF8ToString(method_p);
-+		const headersFlat = UTF8ToString(headers_flat_p);
-+		const headerObj = {};
-+		for (const line of headersFlat.split("\n")) {
-+			const colon = line.indexOf(":");
-+			if (colon < 0) continue;
-+			const key = line.slice(0, colon).trim();
-+			const val = line.slice(colon + 1).trim();
-+			if (key) headerObj[key] = val;
-+		}
-+		const init = { method, headers: headerObj };
-+		if (body_p && body_len > 0) {
-+			init.body = HEAPU8.slice(body_p, body_p + body_len);
-+		}
-+		const resp = await fetch(url, init);
-+		HEAP32[out_status >> 2] = resp.status;
-+
-+		const respBuf = await resp.arrayBuffer();
-+		const respBytes = new Uint8Array(respBuf);
-+		const ptr = _malloc(respBytes.byteLength || 1);
-+		if (respBytes.byteLength > 0) HEAPU8.set(respBytes, ptr);
-+		HEAPU32[out_body >> 2] = ptr;
-+		HEAPU32[out_body_len >> 2] = respBytes.byteLength;
-+
-+		const hdrLines = [];
-+		resp.headers.forEach(function(v, k) { hdrLines.push(k + ": " + v); });
-+		const hdrStr = hdrLines.join("\n") + "\n";
-+		const hdrLen = lengthBytesUTF8(hdrStr) + 1;
-+		const hdrPtr = _malloc(hdrLen);
-+		stringToUTF8(hdrStr, hdrPtr, hdrLen);
-+		HEAPU32[out_headers >> 2] = hdrPtr;
-+		return 0;
-+	} catch (err) {
-+		// Surface the JS error message via the headers buffer so the
-+		// C++ caller can include it in the HTTPResponse.reason field.
-+		const msg = "X-Fetch-Error: " + (err && err.message ? err.message : String(err)) + "\n";
-+		const msgLen = lengthBytesUTF8(msg) + 1;
-+		const msgPtr = _malloc(msgLen);
-+		stringToUTF8(msg, msgPtr, msgLen);
-+		HEAPU32[out_headers >> 2] = msgPtr;
-+		HEAP32[out_status >> 2] = 0;
-+		HEAPU32[out_body >> 2] = 0;
-+		HEAPU32[out_body_len >> 2] = 0;
-+		return 1;
-+	}
-+});
++// _httpfs_fetch_js is implemented in src/httpfs_fetch_lib.js (JS library)
++// linked with --js-library + registered as a JSPI suspending import via
++// -sJSPI_IMPORTS=_httpfs_fetch_js. Wasm caller blocks on the returned
++// Promise via WebAssembly.Suspending. No Asyncify runtime needed.
++extern "C" int _httpfs_fetch_js(int url_p, int method_p, int headers_flat_p, int body_p, int body_len,
++                                int out_status, int out_body, int out_body_len, int out_headers);
 +
 +static void ParseResponseHeaders(const char *raw, HTTPHeaders &out, string &error_msg) {
 +	if (!raw) return;
@@ -149,11 +100,11 @@ index 4095281..c6a7fdd 100644
 +		void *body_ptr = nullptr;
 +		size_t body_size = 0;
 +		char *headers_ptr = nullptr;
-+		_httpfs_fetch_js(reinterpret_cast<int>(full_url.c_str()), reinterpret_cast<int>(method),
-+		                  reinterpret_cast<int>(flat.c_str()), reinterpret_cast<int>(body_data),
-+		                  static_cast<int>(body_len), reinterpret_cast<int>(&status),
-+		                  reinterpret_cast<int>(&body_ptr), reinterpret_cast<int>(&body_size),
-+		                  reinterpret_cast<int>(&headers_ptr));
++		_httpfs_fetch_js(reinterpret_cast<intptr_t>(full_url.c_str()), reinterpret_cast<intptr_t>(method),
++		                  reinterpret_cast<intptr_t>(flat.c_str()), reinterpret_cast<intptr_t>(body_data),
++		                  static_cast<int>(body_len), reinterpret_cast<intptr_t>(&status),
++		                  reinterpret_cast<intptr_t>(&body_ptr), reinterpret_cast<intptr_t>(&body_size),
++		                  reinterpret_cast<intptr_t>(&headers_ptr));
 +
 +		auto response = make_uniq<HTTPResponse>(static_cast<HTTPStatusCode>(status));
 +
@@ -241,3 +192,62 @@ index 4095281..c6a7fdd 100644
  	return result;
  }
  
+diff --git a/src/httpfs_fetch_lib.js b/src/httpfs_fetch_lib.js
+new file mode 100644
+index 0000000..509358e
+--- /dev/null
++++ b/src/httpfs_fetch_lib.js
+@@ -0,0 +1,53 @@
++// JS library bindings for httpfs's emscripten HTTP client.
++// Linked into the wheel via --js-library at build time. Marked
++// `__async: true` so emscripten 4.0.9 + JSPI wraps the import with
++// WebAssembly.Suspending — wasm callers block on the returned
++// Promise without needing Asyncify (which Pyodide doesn't expose).
++addToLibrary({
++  _httpfs_fetch_js__async: true,
++  _httpfs_fetch_js: async function(url_p, method_p, headers_flat_p, body_p, body_len, out_status, out_body, out_body_len, out_headers) {
++    try {
++      const url = UTF8ToString(url_p);
++      const method = UTF8ToString(method_p);
++      const headersFlat = UTF8ToString(headers_flat_p);
++      const headerObj = {};
++      for (const line of headersFlat.split('\n')) {
++        const colon = line.indexOf(':');
++        if (colon < 0) continue;
++        const key = line.slice(0, colon).trim();
++        const val = line.slice(colon + 1).trim();
++        if (key) headerObj[key] = val;
++      }
++      const init = { method, headers: headerObj };
++      if (body_p && body_len > 0) {
++        init.body = HEAPU8.slice(body_p, body_p + body_len);
++      }
++      const resp = await fetch(url, init);
++      HEAP32[out_status >> 2] = resp.status;
++      const respBuf = await resp.arrayBuffer();
++      const respBytes = new Uint8Array(respBuf);
++      const ptr = _malloc(respBytes.byteLength || 1);
++      if (respBytes.byteLength > 0) HEAPU8.set(respBytes, ptr);
++      HEAPU32[out_body >> 2] = ptr;
++      HEAPU32[out_body_len >> 2] = respBytes.byteLength;
++      const hdrLines = [];
++      resp.headers.forEach(function(v, k) { hdrLines.push(k + ': ' + v); });
++      const hdrStr = hdrLines.join('\n') + '\n';
++      const hdrLen = lengthBytesUTF8(hdrStr) + 1;
++      const hdrPtr = _malloc(hdrLen);
++      stringToUTF8(hdrStr, hdrPtr, hdrLen);
++      HEAPU32[out_headers >> 2] = hdrPtr;
++      return 0;
++    } catch (err) {
++      const msg = 'X-Fetch-Error: ' + (err && err.message ? err.message : String(err)) + '\n';
++      const msgLen = lengthBytesUTF8(msg) + 1;
++      const msgPtr = _malloc(msgLen);
++      stringToUTF8(msg, msgPtr, msgLen);
++      HEAPU32[out_headers >> 2] = msgPtr;
++      HEAP32[out_status >> 2] = 0;
++      HEAPU32[out_body >> 2] = 0;
++      HEAPU32[out_body_len >> 2] = 0;
++      return 1;
++    }
++  },
++});

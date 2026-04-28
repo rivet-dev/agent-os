@@ -165,7 +165,8 @@ else
   #     the template instantiation references HttpfsExtension's vtable
   #     but the lib is never linked → load fails with
   #     "bad export type for _ZTVN6duckdb15HttpfsExtensionE: undefined"
-  EXTRA_CMAKE_ARGS="-DDUCKDB_EXTENSION_CONFIGS=$HTTPFS_CONFIG_PATH -DBUILD_EXTENSIONS=core_functions;json;parquet;icu;httpfs"
+  HTTPFS_FETCH_LIB="$HTTPFS_LOCAL_DIR/src/httpfs_fetch_lib.js"
+  EXTRA_CMAKE_ARGS="-DDUCKDB_EXTENSION_CONFIGS=$HTTPFS_CONFIG_PATH -DBUILD_EXTENSIONS=core_functions;json;parquet;icu;httpfs -DDUCKDB_HTTPFS_FETCH_LIB=$HTTPFS_FETCH_LIB"
 fi
 
 echo "=== Activating emsdk ==="
@@ -187,19 +188,9 @@ export CFLAGS="-fwasm-exceptions"
 # WITH httpfs — bootstrap (no httpfs) doesn't need them and avoids the
 # ~2x binary growth.
 if [ "${HTTPFS_PROBE:-0}" = "1" ] || [ "${RECIPE_PATCHES_OPTIONAL:-0}" = "0" ]; then
-  # JSPI (JavaScript Promise Integration) instead of ASYNCIFY:
-  # - JSPI doesn't transform the binary — it adds promise markers
-  #   on imports/exports that the runtime resolves via the
-  #   WebAssembly.Suspending API. Node 22+ supports it natively.
-  # - ASYNCIFY-enabled side modules require the MAIN module
-  #   (Pyodide itself) to also be ASYNCIFY, which it isn't.
-  # - JSPI side modules load cleanly into Pyodide.
-  #
-  # NO sFETCH=1: emscripten_fetch's XHR-based path doesn't work in
-  # Node, even with an XHR polyfill (synchronous XHR isn't supported).
-  # Our httpfs_client_wasm.cpp uses EM_ASYNC_JS to call the host's
-  # native fetch() directly, suspending via JSPI until the response
-  # arrives. Smaller binary, no XHR dependency.
+  # JSPI (JavaScript Promise Integration) — wasm calls Promise-returning
+  # JS imports and suspends until they resolve, via WebAssembly.Suspending.
+  # No Asyncify runtime needed (which Pyodide doesn't expose).
   export LDFLAGS="-fwasm-exceptions -sJSPI=1"
 else
   export LDFLAGS="-fwasm-exceptions"
