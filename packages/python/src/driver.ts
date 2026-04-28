@@ -29,6 +29,7 @@ import {
 	type WheelPreloadOptions,
 	type WheelPreloadPayload,
 } from "./wheel-preload.js";
+import { WORKER_SAB_FETCH_JS } from "./sab-fetch-bootstrap.js";
 
 const MAX_SERIALIZED_VALUE_BYTES = 4 * 1024 * 1024;
 
@@ -132,7 +133,9 @@ let pyodide = null;
 let currentRequestId = null;
 let nextRpcId = 1;
 const pendingRpc = new Map();
+let sabFetch = null;
 ${WORKER_WHEEL_PRELOAD_JS}
+${WORKER_SAB_FETCH_JS}
 
 function serializeError(error) {
 	if (error instanceof Error) {
@@ -255,6 +258,18 @@ async function ensurePyodide(payload) {
 		fetch: async (url, options) =>
 			callHost("networkFetch", { url, options: options || {} }),
 	});
+
+	// Synchronous fetch for libraries that can't await JS Promises from
+	// wasm side modules (DuckDB's parquet reader is the canonical case).
+	// Backed by SharedArrayBuffer + side-worker. Side worker uses Node's
+	// native fetch directly — does NOT route through the NetworkAdapter
+	// permission gate. Safe for the playground's full-network Pi VM;
+	// stricter deployments should pass a MessagePort to the side worker
+	// to gate each fetch through callHost("networkFetch", ...).
+	if (sabFetch === null) {
+		sabFetch = startSabFetch();
+	}
+	registerSabFetchModule(pyodide, sabFetch);
 
 	// Preload vendored wheels (mount + micropip + bootstrap) BEFORE locking
 	// down access to pyodide_js. micropip itself depends on pyodide_js for
