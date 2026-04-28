@@ -1,0 +1,23 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index b2cea06..ad4913a 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -3,12 +3,17 @@ set(HTTPFS_SOURCES
+     s3fs.cpp
+     httpfs.cpp
+     http_state.cpp
+-    crypto.cpp
+     hash_functions.cpp
+     create_secret_functions.cpp
+     httpfs_extension.cpp
+     s3_multi_part_upload.cpp)
+ if(NOT EMSCRIPTEN)
++  # crypto.cpp #includes <openssl/err.h>. The httpfs cmake only defines
++  # OVERRIDE_ENCRYPTION_UTILS=1 on non-emscripten builds, so under
++  # emscripten the file fails compilation with a missing header. Upstream
++  # has it duplicated in both lists by accident — pulling it into the
++  # NOT EMSCRIPTEN branch makes the emscripten build work without
++  # touching native behaviour.
+   set(HTTPFS_SOURCES ${HTTPFS_SOURCES} crypto.cpp httpfs_httplib_client.cpp
+                      httpfs_curl_client.cpp)
+ else()

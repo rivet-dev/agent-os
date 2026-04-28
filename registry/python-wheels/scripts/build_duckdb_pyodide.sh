@@ -156,7 +156,16 @@ else
   fi
   prepare_httpfs_source
   export DUCKDB_HTTPFS_DIRECTORY="$HTTPFS_LOCAL_DIR"
-  EXTRA_CMAKE_ARGS="-DDUCKDB_EXTENSION_CONFIGS=$HTTPFS_CONFIG_PATH"
+  # BOTH knobs are required:
+  #   DUCKDB_EXTENSION_CONFIGS — tells DuckDB to register/build the
+  #     out-of-tree httpfs extension (loads sources via FetchContent
+  #     OR via DUCKDB_HTTPFS_DIRECTORY env var)
+  #   BUILD_EXTENSIONS — tells duckdb-python's loader cmake to LINK
+  #     the resulting httpfs_extension.a into _duckdb.so. Without this
+  #     the template instantiation references HttpfsExtension's vtable
+  #     but the lib is never linked → load fails with
+  #     "bad export type for _ZTVN6duckdb15HttpfsExtensionE: undefined"
+  EXTRA_CMAKE_ARGS="-DDUCKDB_EXTENSION_CONFIGS=$HTTPFS_CONFIG_PATH -DBUILD_EXTENSIONS=core_functions;json;parquet;icu;httpfs"
 fi
 
 echo "=== Activating emsdk ==="
