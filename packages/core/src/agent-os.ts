@@ -902,6 +902,12 @@ const DBT_PYODIDE_BUNDLED_DEPS: string[] = [
 	"six",
 	"attrs",
 	"annotated-types",
+	// Required by `pyodide-httpfs` (the dbt-duckdb plugin that bridges
+	// s3://+https:// reads through the SAB-fetch host module). The
+	// fsspec `AbstractFileSystem` / `AbstractBufferedFile` parents are
+	// imported at module load, so without fsspec preloaded the wheel
+	// install fails with "ModuleNotFoundError: No module named 'fsspec'".
+	"fsspec",
 ];
 
 
