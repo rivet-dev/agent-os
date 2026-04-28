@@ -1,0 +1,260 @@
+{
+  "generatedAt": "2026-04-22T15:17:16.265638+00:00",
+  "pyodideAbi": "pyodide_2025_0_wasm32",
+  "pythonTag": "cp313",
+  "wheels": [
+    {
+      "name": "agate",
+      "version": "1.9.1",
+      "filename": "agate-1.9.1-py2.py3-none-any.whl",
+      "sha256": "1cf329510b3dde07c4ad1740b7587c9c679abc3dcd92bb1107eabc10c2e03c50",
+      "size": 95085,
+      "kind": "pure"
+    },
+    {
+      "name": "babel",
+      "version": "2.18.0",
+      "filename": "babel-2.18.0-py3-none-any.whl",
+      "sha256": "e2b422b277c2b9a9630c1d7903c2a00d0830c409c59ac8cae9081c92f1aeba35",
+      "size": 10196845,
+      "kind": "pure"
+    },
+    {
+      "name": "colorama",
+      "version": "0.4.6",
+      "filename": "colorama-0.4.6-py2.py3-none-any.whl",
+      "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6",
+      "size": 25335,
+      "kind": "pure"
+    },
+    {
+      "name": "daff",
+      "version": "1.4.2",
+      "filename": "daff-1.4.2-py3-none-any.whl",
+      "sha256": "88981a21d065e4378b5c4bd40b975dbfdea9b7ff540071f3bb5e20cc8b3590b5",
+      "size": 144922,
+      "kind": "pure"
+    },
+    {
+      "name": "dbt-adapters",
+      "version": "1.22.10",
+      "filename": "dbt_adapters-1.22.10-py3-none-any.whl",
+      "sha256": "9217a2f8dd35425cafc9093dae70ea12b4b8fc414e3abce8a44d44d5c2fff563",
+      "size": 173738,
+      "kind": "pure"
+    },
+    {
+      "name": "dbt-common",
+      "version": "1.37.3",
+      "filename": "dbt_common-1.37.3-py3-none-any.whl",
+      "sha256": "e11b81903107d9f254d0ec7ac14b2bcf6d531e46456cbc7881fdbfeb9bbd8eec",
+      "size": 87733,
+      "kind": "pure"
+    },
+    {
+      "name": "dbt-core",
+      "version": "1.11.8",
+      "filename": "dbt_core-1.11.8-py3-none-any.whl",
+      "sha256": "13ff79252a7ae9c9acc7de243789b72f04f7f915f05930d3407edeeea3758b6f",
+      "size": 1061289,
+      "kind": "pure"
+    },
+    {
+      "name": "dbt-duckdb",
+      "version": "1.10.2",
+      "filename": "dbt_duckdb-1.10.2-py3-none-any.whl",
+      "sha256": "ca66b41384251a06aa01f317772970e2a19c0d92c825fd544e5d194eeefe2a88",
+      "size": 86734,
+      "kind": "pure"
+    },
+    {
+      "name": "dbt-extractor",
+      "version": "0.6.0+pyodide.shim",
+      "filename": "dbt_extractor-0.6.0+pyodide.shim-py3-none-any.whl",
+      "sha256": "f9ac868f610be8fb6cd28dd93ad64c6a3af57daeea2c8284fb4bda945789395f",
+      "size": 2308,
+      "kind": "pure"
+    },
+    {
+      "name": "dbt-protos",
+      "version": "1.0.474",
+      "filename": "dbt_protos-1.0.474-py3-none-any.whl",
+      "sha256": "ef3de3ba2a7665e26c3a245ee7b9efeb7db1c16c95332754c138484f88777cb5",
+      "size": 195468,
+      "kind": "pure"
+    },
+    {
+      "name": "dbt-semantic-interfaces",
+      "version": "0.9.0",
+      "filename": "dbt_semantic_interfaces-0.9.0-py3-none-any.whl",
+      "sha256": "1b54c06ba89190a47a7f0563360930a0cce869e55b484ca09d261ade0e319155",
+      "size": 147008,
+      "kind": "pure"
+    },
+    {
+      "name": "deepdiff",
+      "version": "8.6.2",
+      "filename": "deepdiff-8.6.2-py3-none-any.whl",
+      "sha256": "4d22034a866c3928303a9332c279362f714192d9305bac17c498720d095fd1b4",
+      "size": 91979,
+      "kind": "pure"
+    },
+    {
+      "name": "duckdb",
+      "version": "1.5.0",
+      "filename": "duckdb-1.5.0-cp313-cp313-pyodide_2025_0_wasm32.whl",
+      "sha256": "ee14bd19e6d9a390bb2803f119d4eff06a88a8e4b52ebf6c947c9dac67f6ba11",
+      "size": 10093888,
+      "kind": "native"
+    },
+    {
+      "name": "importlib-metadata",
+      "version": "8.9.0",
+      "filename": "importlib_metadata-8.9.0-py3-none-any.whl",
+      "sha256": "e0f761b6ea91ced3b0844c14c9d955224d538105921f8e6754c00f6ca79fba7f",
+      "size": 27220,
+      "kind": "pure"
+    },
+    {
+      "name": "isodate",
+      "version": "0.7.2",
+      "filename": "isodate-0.7.2-py3-none-any.whl",
+      "sha256": "28009937d8031054830160fce6d409ed342816b543597cece116d966c6d99e15",
+      "size": 22320,
+      "kind": "pure"
+    },
+    {
+      "name": "leather",
+      "version": "0.4.1",
+      "filename": "leather-0.4.1-py3-none-any.whl",
+      "sha256": "ec61cba1ca3ccb96ed90e38b116fc58757d97d352171006b3288c47ce3fbd183",
+      "size": 30340,
+      "kind": "pure"
+    },
+    {
+      "name": "mashumaro",
+      "version": "3.14",
+      "filename": "mashumaro-3.14-py3-none-any.whl",
+      "sha256": "c12a649599a8f7b1a0b35d18f12e678423c3066189f7bc7bd8dd431c5c8132c3",
+      "size": 92183,
+      "kind": "pure"
+    },
+    {
+      "name": "orderly-set",
+      "version": "5.5.0",
+      "filename": "orderly_set-5.5.0-py3-none-any.whl",
+      "sha256": "46f0b801948e98f427b412fcabb831677194c05c3b699b80de260374baa0b1e7",
+      "size": 13068,
+      "kind": "pure"
+    },
+    {
+      "name": "parsedatetime",
+      "version": "2.6",
+      "filename": "parsedatetime-2.6-py3-none-any.whl",
+      "sha256": "cb96edd7016872f58479e35879294258c71437195760746faffedb692aef000b",
+      "size": 42548,
+      "kind": "pure"
+    },
+    {
+      "name": "pathspec",
+      "version": "0.12.1",
+      "filename": "pathspec-0.12.1-py3-none-any.whl",
+      "sha256": "a0d503e138a4c123b27490a4f7beda6a01c6f288df0e4a8b79c7eb0dc7b4cc08",
+      "size": 31191,
+      "kind": "pure"
+    },
+    {
+      "name": "pyodide-httpfs",
+      "version": "0.1.2",
+      "filename": "pyodide_httpfs-0.1.2-py3-none-any.whl",
+      "sha256": "475487b1b3dc40c3d98c553e5760626feb75dd5090f574168c529a818bcca6f7",
+      "size": 7170,
+      "kind": "pure"
+    },
+    {
+      "name": "python-slugify",
+      "version": "8.0.4",
+      "filename": "python_slugify-8.0.4-py2.py3-none-any.whl",
+      "sha256": "276540b79961052b66b7d116620b36518847f52d5fd9e3a70164fc8c50faa6b8",
+      "size": 10051,
+      "kind": "pure"
+    },
+    {
+      "name": "pytimeparse",
+      "version": "1.1.8",
+      "filename": "pytimeparse-1.1.8-py2.py3-none-any.whl",
+      "sha256": "04b7be6cc8bd9f5647a6325444926c3ac34ee6bc7e69da4367ba282f076036bd",
+      "size": 9969,
+      "kind": "pure"
+    },
+    {
+      "name": "snowplow-tracker",
+      "version": "1.1.0",
+      "filename": "snowplow_tracker-1.1.0-py3-none-any.whl",
+      "sha256": "24ea32ddac9cca547421bf9ab162f5f33c00711c6ef118ad5f78093cee962224",
+      "size": 44128,
+      "kind": "pure"
+    },
+    {
+      "name": "sqlparse",
+      "version": "0.5.5",
+      "filename": "sqlparse-0.5.5-py3-none-any.whl",
+      "sha256": "12a08b3bf3eec877c519589833aed092e2444e68240a3577e8e26148acc7b1ba",
+      "size": 46138,
+      "kind": "pure"
+    },
+    {
+      "name": "text-unidecode",
+      "version": "1.3",
+      "filename": "text_unidecode-1.3-py2.py3-none-any.whl",
+      "sha256": "1311f10e8b895935241623731c2ba64f4c455287888b18189350b67134a822e8",
+      "size": 78154,
+      "kind": "pure"
+    },
+    {
+      "name": "typing-inspection",
+      "version": "0.4.2",
+      "filename": "typing_inspection-0.4.2-py3-none-any.whl",
+      "sha256": "4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7",
+      "size": 14611,
+      "kind": "pure"
+    },
+    {
+      "name": "zipp",
+      "version": "3.23.1",
+      "filename": "zipp-3.23.1-py3-none-any.whl",
+      "sha256": "0b3596c50a5c700c9cb40ba8d86d9f2cc4807e9bedb06bcdf7fac85633e444dc",
+      "size": 10378,
+      "kind": "pure"
+    }
+  ],
+  "installOrder": [
+    "agate",
+    "babel",
+    "colorama",
+    "daff",
+    "dbt-adapters",
+    "dbt-common",
+    "dbt-core",
+    "dbt-duckdb",
+    "dbt-extractor",
+    "dbt-protos",
+    "dbt-semantic-interfaces",
+    "deepdiff",
+    "duckdb",
+    "importlib-metadata",
+    "isodate",
+    "leather",
+    "mashumaro",
+    "orderly-set",
+    "parsedatetime",
+    "pathspec",
+    "python-slugify",
+    "pytimeparse",
+    "snowplow-tracker",
+    "sqlparse",
+    "text-unidecode",
+    "typing-inspection",
+    "zipp"
+  ]
+}

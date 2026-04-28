@@ -1,0 +1,32 @@
+{
+  "info": {
+    "name": "pyodide-httpfs",
+    "version": "0.1.2"
+  },
+  "releases": {
+    "0.1.2": [
+      {
+        "filename": "pyodide_httpfs-0.1.2-py3-none-any.whl",
+        "url": "emfs:/wheels/pyodide_httpfs-0.1.2-py3-none-any.whl",
+        "digests": {
+          "sha256": "475487b1b3dc40c3d98c553e5760626feb75dd5090f574168c529a818bcca6f7"
+        },
+        "size": 7170,
+        "packagetype": "bdist_wheel",
+        "yanked": false
+      }
+    ]
+  },
+  "urls": [
+    {
+      "filename": "pyodide_httpfs-0.1.2-py3-none-any.whl",
+      "url": "emfs:/wheels/pyodide_httpfs-0.1.2-py3-none-any.whl",
+      "digests": {
+        "sha256": "475487b1b3dc40c3d98c553e5760626feb75dd5090f574168c529a818bcca6f7"
+      },
+      "size": 7170,
+      "packagetype": "bdist_wheel",
+      "yanked": false
+    }
+  ]
+}
