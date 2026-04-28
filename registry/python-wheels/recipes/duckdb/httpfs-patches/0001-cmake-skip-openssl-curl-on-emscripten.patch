@@ -1,0 +1,21 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6954beb..f8cde7a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -14,10 +14,12 @@ if(MINGW)
+   set(OPENSSL_USE_STATIC_LIBS TRUE)
+ endif()
+ 
+-find_package(OpenSSL REQUIRED)
+-find_package(CURL REQUIRED)
+-include_directories(${OPENSSL_INCLUDE_DIR})
+-include_directories(${CURL_INCLUDE_DIRS})
++if(NOT EMSCRIPTEN)
++  find_package(OpenSSL REQUIRED)
++  find_package(CURL REQUIRED)
++  include_directories(${OPENSSL_INCLUDE_DIR})
++  include_directories(${CURL_INCLUDE_DIRS})
++endif()
+ 
+ include_directories(src/include
+                     ${DUCKDB_MODULE_BASE_DIR}/third_party/httplib)
