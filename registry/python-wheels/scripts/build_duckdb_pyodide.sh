@@ -173,6 +173,12 @@ export CMAKE_ARGS="-DDUCKDB_EXPLICIT_PLATFORM=wasm_eh_pyodide $EXTRA_CMAKE_ARGS"
 export CFLAGS="-fwasm-exceptions"
 export LDFLAGS="-fwasm-exceptions"
 export OVERRIDE_GIT_DESCRIBE="$DUCKDB_REF"
+# Pin pyodide-build to use the xbuildenv matching the Pyodide runtime
+# version the wheel will run under (else it defaults to a newer xbuildenv
+# whose ABI tag — `pyemscripten_2025_0_wasm32` — micropip rejects against
+# Pyodide 0.29.3 because the underlying Emscripten differs).
+PYODIDE_VERSION="${PYODIDE_VERSION:-0.29.3}"
+export DEFAULT_CROSS_BUILD_ENV_URL="https://github.com/pyodide/pyodide/releases/download/${PYODIDE_VERSION}/xbuildenv-${PYODIDE_VERSION}.tar.bz2"
 
 # pyodide-build resolves the xbuildenv via PYODIDE_VERSION-specific
 # tarball downloads. The Makefile's setup-toolchain step already
@@ -181,8 +187,48 @@ export OVERRIDE_GIT_DESCRIBE="$DUCKDB_REF"
 
 popd >/dev/null
 
+echo "=== Retag wheel to pyodide_2025_0_wasm32 ABI ==="
+# pyodide-build 0.34.1 emits the post-rename `pyemscripten_*` ABI tag
+# even when xbuildenv is the older Pyodide 0.29.3. The compiled bytes
+# are bit-identical to a `pyodide_*`-tagged build (same emscripten,
+# same scikit-build-core); only the wheel METADATA records the new
+# tag, and Pyodide 0.29.3's micropip rejects it. Rewrite the Tag line
+# and rename the file so micropip accepts it.
+SRC_TAG="cp313-cp313-pyemscripten_2025_0_wasm32"
+DST_TAG="cp313-cp313-pyodide_2025_0_wasm32"
+PYODIDE_BUILD_OUT_TAG="${PYODIDE_BUILD_OUT_TAG:-$SRC_TAG}"
+if [ "$PYODIDE_BUILD_OUT_TAG" != "$DST_TAG" ]; then
+  for in_whl in "$SRC_DIR"/dist/*-${PYODIDE_BUILD_OUT_TAG}.whl; do
+    [ -f "$in_whl" ] || continue
+    base="$(basename "$in_whl" -${PYODIDE_BUILD_OUT_TAG}.whl)"
+    out_whl="$SRC_DIR/dist/${base}-${DST_TAG}.whl"
+    work="$(mktemp -d)"
+    unzip -q "$in_whl" -d "$work"
+    sed -i.bak "s|Tag: ${PYODIDE_BUILD_OUT_TAG}|Tag: ${DST_TAG}|" "$work"/*.dist-info/WHEEL
+    rm -f "$work"/*.dist-info/WHEEL.bak
+    # Re-zip preserving structure. Use python's zipfile to keep
+    # deterministic ordering and avoid macOS zip's metadata files.
+    python3 -c "
+import os, zipfile, sys
+src, dst = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(dst, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+    for root, dirs, files in os.walk(src):
+        for f in files:
+            full = os.path.join(root, f)
+            rel = os.path.relpath(full, src)
+            zf.write(full, rel)
+" "$work" "$out_whl"
+    rm -rf "$work" "$in_whl"
+    echo "  retagged: $(basename "$out_whl")"
+  done
+fi
+
 echo "=== Copying wheel to $OUT_DIR ==="
 mkdir -p "$OUT_DIR"
+# Remove any older pyemscripten/pyodide variants of duckdb so the npm
+# package doesn't ship two competing wheels.
+rm -f "$OUT_DIR"/duckdb-*-cp313-cp313-py*emscripten*_wasm32.whl
+rm -f "$OUT_DIR"/duckdb-*-cp313-cp313-pyodide_*_wasm32.whl
 cp "$SRC_DIR"/dist/*.whl "$OUT_DIR/"
 
 echo "=== Done. Built wheels: ==="

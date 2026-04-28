@@ -1,0 +1,19 @@
+diff --git a/cmake/duckdb_loader.cmake b/cmake/duckdb_loader.cmake
+index 9c21aba..6061a4f 100644
+--- a/cmake/duckdb_loader.cmake
++++ b/cmake/duckdb_loader.cmake
+@@ -261,7 +261,13 @@ function(duckdb_link_extensions target_name)
+     message(STATUS "Linking DuckDB extensions:")
+     foreach(ext IN LISTS BUILD_EXTENSIONS)
+       message(STATUS "- ${ext}")
+-      target_link_libraries(${target_name} PRIVATE ${ext}_extension)
++      # WHOLE_ARCHIVE so the linker doesn't dead-code-eliminate symbols
++      # like Extension subclass vtables (HttpfsExtension etc) — wasm-ld
++      # is aggressive about gc-sections, and without WHOLE_ARCHIVE the
++      # extension's vtable can end up declared-but-undefined in the
++      # final .so, which Pyodide's dynamic loader rejects with
++      # "bad export type: undefined".
++      target_link_libraries(${target_name} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${ext}_extension>")
+     endforeach()
+   else()
+     message(STATUS "No DuckDB extensions linked in")
