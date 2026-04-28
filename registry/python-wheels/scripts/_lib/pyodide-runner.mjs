@@ -29,6 +29,17 @@ function resolvePyodideIndex() {
 const WORKER_SOURCE = String.raw`
 const { parentPort, workerData } = require("node:worker_threads");
 
+// emscripten_fetch (used by our custom DuckDB Pyodide wheel's httpfs)
+// internally calls \`new XMLHttpRequest()\` — Node doesn't ship XHR
+// natively. Polyfill before Pyodide loads so the wheel's HTTP code
+// path can resolve the constructor. \`xhr2\` is a small npm shim that
+// implements the spec on top of Node's http(s) modules.
+try {
+	globalThis.XMLHttpRequest = require("xhr2");
+} catch (err) {
+	// Non-fatal — only matters when running tests that exercise httpfs.
+}
+
 (async () => {
 	try {
 		const { loadPyodide } = await import("pyodide");

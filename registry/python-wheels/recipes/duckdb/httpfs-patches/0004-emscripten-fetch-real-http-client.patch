@@ -1,155 +1,189 @@
 diff --git a/src/httpfs_client_wasm.cpp b/src/httpfs_client_wasm.cpp
-index 4095281..abc7e73 100644
+index 4095281..c6a7fdd 100644
 --- a/src/httpfs_client_wasm.cpp
 +++ b/src/httpfs_client_wasm.cpp
-@@ -1,15 +1,204 @@
+@@ -1,15 +1,236 @@
 +// Pyodide / emscripten HTTP client for httpfs.
 +//
-+// Replaces the upstream stub (which throws "InitializeClient is not
-+// expected to be called") with a real implementation that uses
-+// emscripten_fetch in synchronous mode. This works under Pyodide
-+// because:
-+//   - Pyodide doesn't expose POSIX TCP sockets — direct httplib code
-+//     can't make outbound HTTP connections (verified: urllib + raw
-+//     socket both fail).
-+//   - emscripten_fetch routes through the host JS environment's fetch
-+//     API, which Pyodide's runtime allows. Combined with `-sASYNCIFY=1`
-+//     at link time, the synchronous flag makes the C++ side block
-+//     until the JS fetch resolves.
++// Replaces the upstream stub with an EM_ASYNC_JS-based implementation
++// that calls the host JS environment's native fetch() and uses JSPI
++// (JavaScript Promise Integration) to suspend the wasm side until the
++// response is available. This avoids:
 +//
-+// Build flags required (set in build_duckdb_pyodide.sh):
-+//   -sFETCH=1      — links the emscripten_fetch implementation
-+//   -sASYNCIFY=1   — allows EMSCRIPTEN_FETCH_SYNCHRONOUS on main thread
++//   - POSIX TCP sockets (Pyodide doesn't expose them — verified)
++//   - emscripten_fetch + XMLHttpRequest (XHR synchronous mode is
++//     deprecated and doesn't work cleanly in Node anyway)
++//   - mbedtls TLS vendoring (the host JS fetch handles HTTPS)
 +//
-+// HTTPS works automatically — the JS host's fetch handles TLS, mbedtls
-+// is not in the picture. The httplib + WASI/socket gymnastics from the
-+// agent-os WASI build is replaced entirely.
++// Build flag required:
++//   -sJSPI=1   — wasm-side `await` on JS Promises via the
++//                 WebAssembly.Suspending API. Node 22+ supports it
++//                 natively (no flag needed in Node 24+).
  #include "httpfs_client.hpp"
  #include "http_state.hpp"
 +#include "duckdb/common/exception.hpp"
 +
-+#include <emscripten/fetch.h>
++#include <emscripten.h>
++#include <cstdlib>
 +#include <cstring>
 +#include <sstream>
 +#include <vector>
  
  namespace duckdb {
  
-+// Parse "Header-Name: value\r\n" lines emscripten_fetch returns.
-+static void ParseResponseHeaders(const char *raw, HTTPHeaders &out) {
++// Calls JS `fetch(url, {method, headers, body})` and writes the
++// response status, body, body_len, and headers (as malloc'd C strings)
++// to the out parameters. Returns 0 on success, non-zero on failure.
++//
++// JSPI auto-wraps any `await` in this block so the wasm side suspends
++// until the JS Promise resolves. Node 22+ honors this without flags
++// (Node 24 confirmed working).
++// Signature uses int for pointer params — emscripten treats wasm32
++// pointers as int32, and using `*` in the EM_ASYNC_JS signature leaks
++// the * into the generated JS function declaration, producing
++// "Unexpected token '*'" at JS parse time.
++EM_ASYNC_JS(int, _httpfs_fetch_js, (int url_p, int method_p, int headers_flat_p,
++                                      int body_p, int body_len, int out_status, int out_body,
++                                      int out_body_len, int out_headers), {
++	try {
++		const url = UTF8ToString(url_p);
++		const method = UTF8ToString(method_p);
++		const headersFlat = UTF8ToString(headers_flat_p);
++		const headerObj = {};
++		for (const line of headersFlat.split("\n")) {
++			const colon = line.indexOf(":");
++			if (colon < 0) continue;
++			const key = line.slice(0, colon).trim();
++			const val = line.slice(colon + 1).trim();
++			if (key) headerObj[key] = val;
++		}
++		const init = { method, headers: headerObj };
++		if (body_p && body_len > 0) {
++			init.body = HEAPU8.slice(body_p, body_p + body_len);
++		}
++		const resp = await fetch(url, init);
++		HEAP32[out_status >> 2] = resp.status;
++
++		const respBuf = await resp.arrayBuffer();
++		const respBytes = new Uint8Array(respBuf);
++		const ptr = _malloc(respBytes.byteLength || 1);
++		if (respBytes.byteLength > 0) HEAPU8.set(respBytes, ptr);
++		HEAPU32[out_body >> 2] = ptr;
++		HEAPU32[out_body_len >> 2] = respBytes.byteLength;
++
++		const hdrLines = [];
++		resp.headers.forEach(function(v, k) { hdrLines.push(k + ": " + v); });
++		const hdrStr = hdrLines.join("\n") + "\n";
++		const hdrLen = lengthBytesUTF8(hdrStr) + 1;
++		const hdrPtr = _malloc(hdrLen);
++		stringToUTF8(hdrStr, hdrPtr, hdrLen);
++		HEAPU32[out_headers >> 2] = hdrPtr;
++		return 0;
++	} catch (err) {
++		// Surface the JS error message via the headers buffer so the
++		// C++ caller can include it in the HTTPResponse.reason field.
++		const msg = "X-Fetch-Error: " + (err && err.message ? err.message : String(err)) + "\n";
++		const msgLen = lengthBytesUTF8(msg) + 1;
++		const msgPtr = _malloc(msgLen);
++		stringToUTF8(msg, msgPtr, msgLen);
++		HEAPU32[out_headers >> 2] = msgPtr;
++		HEAP32[out_status >> 2] = 0;
++		HEAPU32[out_body >> 2] = 0;
++		HEAPU32[out_body_len >> 2] = 0;
++		return 1;
++	}
++});
++
++static void ParseResponseHeaders(const char *raw, HTTPHeaders &out, string &error_msg) {
 +	if (!raw) return;
 +	std::istringstream stream(raw);
 +	std::string line;
 +	while (std::getline(stream, line)) {
 +		if (line.empty() || line == "\r") continue;
-+		// Strip trailing \r
 +		if (!line.empty() && line.back() == '\r') line.pop_back();
 +		auto colon = line.find(':');
 +		if (colon == std::string::npos) continue;
 +		auto key = line.substr(0, colon);
 +		auto val = line.substr(colon + 1);
-+		// Trim leading spaces in value
 +		while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(0, 1);
-+		out.Insert(key, val);
++		if (key == "X-Fetch-Error") {
++			error_msg = val;
++		} else {
++			out.Insert(key, val);
++		}
 +	}
 +}
 +
 +class EmscriptenFetchClient : public HTTPClient {
 +public:
 +	EmscriptenFetchClient(HTTPFSParams &http_params_p, const string &proto_host_port_p)
-+	    : proto_host_port(proto_host_port_p), state(http_params_p.state) {
++	    : proto_host_port(proto_host_port_p), state(http_params_p.state),
++	      bearer_token(http_params_p.bearer_token) {
 +	}
 +
 +	void Initialize(HTTPParams &http_p) override {
 +		HTTPFSParams &http_params = (HTTPFSParams &)http_p;
 +		state = http_params.state;
 +		bearer_token = http_params.bearer_token;
-+		// Note: TLS verification, CA file, proxy settings, timeouts are all
-+		// handled by the host JS fetch implementation. We don't pass them
-+		// through — emscripten_fetch doesn't expose those knobs and the
-+		// host environment's defaults (Node's HTTPS module / browser
-+		// security context) are appropriate for both prod S3 and MinIO
-+		// dev (the latter typically runs on plain HTTP anyway).
 +	}
 +
 +	unique_ptr<HTTPResponse> DoFetch(const char *method, const string &path, const HTTPHeaders &headers,
 +	                                  const_data_ptr_t body_data, idx_t body_len) {
-+		emscripten_fetch_attr_t attr;
-+		emscripten_fetch_attr_init(&attr);
-+		strncpy(attr.requestMethod, method, sizeof(attr.requestMethod) - 1);
-+		attr.requestMethod[sizeof(attr.requestMethod) - 1] = '\0';
-+		attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY | EMSCRIPTEN_FETCH_SYNCHRONOUS;
-+
-+		// Build the full URL — proto_host_port already has scheme + authority.
-+		string full_url = proto_host_port + path;
-+
-+		// Headers: emscripten wants a NULL-terminated flat array of
-+		// alternating key, value pointers. Stash the strings in a
-+		// vector so the c_str() pointers stay valid through the call.
-+		std::vector<std::string> hdr_storage;
-+		hdr_storage.reserve((headers.end() - headers.begin()) * 2 + 2);
++		// Flatten headers into "key: value\n" lines for the JS side.
++		std::string flat;
 +		for (auto it = headers.begin(); it != headers.end(); ++it) {
-+			hdr_storage.push_back(it->first);
-+			hdr_storage.push_back(it->second);
++			flat += it->first;
++			flat += ": ";
++			flat += it->second;
++			flat += "\n";
 +		}
 +		if (!bearer_token.empty()) {
-+			hdr_storage.push_back("Authorization");
-+			hdr_storage.push_back("Bearer " + bearer_token);
-+		}
-+		std::vector<const char *> hdr_array;
-+		for (auto &s : hdr_storage) hdr_array.push_back(s.c_str());
-+		hdr_array.push_back(nullptr);
-+		attr.requestHeaders = hdr_array.data();
-+
-+		if (body_data && body_len > 0) {
-+			attr.requestData = reinterpret_cast<const char *>(body_data);
-+			attr.requestDataSize = static_cast<size_t>(body_len);
++			flat += "Authorization: Bearer ";
++			flat += bearer_token;
++			flat += "\n";
 +		}
 +
-+		emscripten_fetch_t *fetch = emscripten_fetch(&attr, full_url.c_str());
++		string full_url = proto_host_port + path;
 +
-+		auto response = make_uniq<HTTPResponse>(static_cast<HTTPStatusCode>(fetch ? fetch->status : 0));
++		int status = 0;
++		void *body_ptr = nullptr;
++		size_t body_size = 0;
++		char *headers_ptr = nullptr;
++		_httpfs_fetch_js(reinterpret_cast<int>(full_url.c_str()), reinterpret_cast<int>(method),
++		                  reinterpret_cast<int>(flat.c_str()), reinterpret_cast<int>(body_data),
++		                  static_cast<int>(body_len), reinterpret_cast<int>(&status),
++		                  reinterpret_cast<int>(&body_ptr), reinterpret_cast<int>(&body_size),
++		                  reinterpret_cast<int>(&headers_ptr));
++
++		auto response = make_uniq<HTTPResponse>(static_cast<HTTPStatusCode>(status));
++
++		if (body_ptr && body_size > 0) {
++			response->body.assign(reinterpret_cast<const char *>(body_ptr), body_size);
++		}
++		if (body_ptr) std::free(body_ptr);
++
++		string error_msg;
++		ParseResponseHeaders(headers_ptr, response->headers, error_msg);
++		if (headers_ptr) std::free(headers_ptr);
++
++		if (status == 0 && !error_msg.empty()) {
++			response->reason = error_msg;
++		}
++
++		response->success = (status >= 200 && status < 300);
 +		if (state) {
 +			if (strcmp(method, "GET") == 0) state->get_count++;
 +			else if (strcmp(method, "HEAD") == 0) state->head_count++;
 +			else if (strcmp(method, "PUT") == 0) state->put_count++;
 +			else if (strcmp(method, "POST") == 0) state->post_count++;
 +			else if (strcmp(method, "DELETE") == 0) state->delete_count++;
++			state->total_bytes_received += body_size;
 +		}
-+
-+		if (!fetch) {
-+			response->reason = "emscripten_fetch returned null";
-+			return response;
-+		}
-+
-+		if (fetch->statusText[0]) {
-+			response->reason = fetch->statusText;
-+		}
-+
-+		if (fetch->numBytes > 0 && fetch->data) {
-+			response->body.assign(fetch->data, fetch->numBytes);
-+			if (state) state->total_bytes_received += fetch->numBytes;
-+		}
-+
-+		// Parse response headers — emscripten_fetch_get_response_headers
-+		// returns a single buffer of "Key: Value\r\n" lines.
-+		size_t hdr_size = emscripten_fetch_get_response_headers_length(fetch);
-+		if (hdr_size > 0) {
-+			std::vector<char> hdr_buf(hdr_size + 1, 0);
-+			emscripten_fetch_get_response_headers(fetch, hdr_buf.data(), hdr_buf.size());
-+			ParseResponseHeaders(hdr_buf.data(), response->headers);
-+		}
-+
-+		response->success = (fetch->status >= 200 && fetch->status < 300);
-+		emscripten_fetch_close(fetch);
 +		return response;
 +	}
 +
 +	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
 +		auto resp = DoFetch("GET", info.path, info.headers, nullptr, 0);
-+		// If a content_handler was supplied, stream the body through it.
-+		// emscripten_fetch with LOAD_TO_MEMORY gives us the full body in
-+		// one shot; we just deliver it as a single chunk.
 +		if (info.content_handler && !resp->body.empty()) {
 +			info.content_handler(reinterpret_cast<const_data_ptr_t>(resp->body.data()), resp->body.size());
 +		}
@@ -189,8 +223,6 @@ index 4095281..abc7e73 100644
  }
  
  unordered_map<string, string> HTTPFSUtil::ParseGetParameters(const string &text) {
-+	// Same simple parser the upstream native path uses — split "k=v&k=v"
-+	// on the first '?' and on '&'.
  	unordered_map<string, string> result;
 -	// TODO: HTTPFSUtil::ParseGetParameters is currently not implemented
 +	auto qmark = text.find('?');
