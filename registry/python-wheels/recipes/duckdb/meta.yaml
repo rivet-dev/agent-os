@@ -1,0 +1,86 @@
+# Pyodide build recipe for DuckDB with httpfs statically linked.
+#
+# Replaces the xlwings prebuilt wheel (which lacks httpfs entirely) with
+# a local from-source build that enables BUILD_HTTPFS_EXTENSION=ON.
+# Source: https://github.com/duckdb/duckdb-python at v$DUCKDB_VERSION.
+#
+# Why httpfs matters: dbt-duckdb runs inside Pyodide via the Python
+# `duckdb` package — that's THIS wheel. Without httpfs in the wheel,
+# `dbt build` cannot read sources from S3 over HTTPS, which forces
+# everything through a host-dir mirror that breaks at >50 GB.
+#
+# Build chain (from xlwings/duckdb-pyodide, verified working flow):
+#   1. Clone duckdb-python at the matching tag, including submodules
+#      (duckdb itself is a submodule at .duckdb/).
+#   2. Apply CMakeLists.txt patch — wasm-ld doesn't support GNU ld's
+#      `--export-dynamic-symbol`; pyodide-build handles exports via
+#      `--exports=whole_archive` instead.
+#   3. Apply httpfs+TLS patches (NEW vs xlwings):
+#      - Enable BUILD_HTTPFS_EXTENSION=ON
+#      - Wire mbedtls (already vendored in duckdb's third_party/)
+#      - Patch httpfs source to handle emscripten socket emulation
+#        (the duckdb-wasm patch is too invasive — we instead use
+#        httplib over emscripten's BSD socket emulation, which proxies
+#        through Node's net module under Pyodide-on-Node).
+#   4. Run `pyodide build --exports=whole_archive`.
+#
+# Output:
+#   wheels/duckdb-$VERSION-cp313-cp313-pyodide_2025_0_wasm32.whl
+
+package:
+  name: duckdb
+  version: 1.5.0
+  tag:
+    - native
+    - httpfs
+  top-level:
+    - duckdb
+
+source:
+  # Source is the duckdb-python repo at the version tag, NOT the
+  # PyPI sdist (which is the same content but doesn't include the
+  # duckdb submodule we need for from-source build).
+  git: https://github.com/duckdb/duckdb-python.git
+  ref: v1.5.0
+  submodules: true
+  patches:
+    - patches/0001-cmake-wasm-ld-export-dynamic-symbol.patch
+    - patches/0002-cmake-enable-httpfs-with-mbedtls.patch
+    - patches/0003-httpfs-emscripten-socket-emulation.patch
+
+build:
+  # Match the xlwings build environment exactly, plus our httpfs
+  # additions.
+  env:
+    DUCKDB_CUSTOM_PLATFORM: wasm_eh_pyodide
+    CMAKE_ARGS: >-
+      -DDUCKDB_EXPLICIT_PLATFORM=wasm_eh_pyodide
+      -DBUILD_HTTPFS_EXTENSION=ON
+      -DBUILD_EXTENSIONS_FROM_VCPKG=OFF
+    CFLAGS: "-fwasm-exceptions"
+    LDFLAGS: "-fwasm-exceptions"
+    # Setuptools_scm sees the patched-tree as dirty and can't determine
+    # the version; pin it explicitly.
+    OVERRIDE_GIT_DESCRIBE: v1.5.0
+  command: pyodide build --exports=whole_archive
+
+requirements:
+  executable:
+    - emcc
+    - emcmake
+
+test:
+  imports:
+    - duckdb
+  # See verify_duckdb.mjs — exercises:
+  #   - Basic SELECT
+  #   - Parquet read from local file
+  #   - INSTALL httpfs (no-op — statically linked)
+  #   - LOAD httpfs
+  #   - SELECT * FROM 'http://localhost:9000/test.csv' (MinIO smoke test)
+
+about:
+  home: https://github.com/duckdb/duckdb-python
+  PyPI: https://pypi.org/project/duckdb
+  summary: DuckDB Python bindings, Pyodide-compatible build with httpfs+TLS.
+  license: MIT

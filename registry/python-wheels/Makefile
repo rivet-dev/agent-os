@@ -82,10 +82,25 @@ build-shim: setup-toolchain
 	@bash scripts/build_shim.sh "$(VENV_DIR)" "$(WHEELS_DIR)"
 
 # ---------------------------------------------------------------------------
-# DuckDB — fetch prebuilt xlwings wheel
+# DuckDB — fetch prebuilt xlwings wheel (LEGACY, no httpfs)
 # ---------------------------------------------------------------------------
 fetch-duckdb:
 	@bash scripts/fetch_duckdb.sh "$(DUCKDB_WHEEL_URL)" "$(DUCKDB_WHEEL_SHA256)" "$(WHEELS_DIR)"
+
+# ---------------------------------------------------------------------------
+# DuckDB — build from source with httpfs+TLS (replaces fetch-duckdb)
+# ---------------------------------------------------------------------------
+# Recipe at recipes/duckdb/. Forks xlwings/duckdb-pyodide's known-working
+# pyodide-build flow, layered with patches that enable BUILD_HTTPFS_EXTENSION
+# and link mbedtls (already vendored in duckdb's third_party/).
+#
+# The flag RECIPE_PATCHES_OPTIONAL=1 lets the build proceed against empty
+# patch placeholders — useful during bootstrap to verify the baseline
+# (no-httpfs) pipeline works before layering on httpfs patches.
+build-duckdb: setup-toolchain
+	@DUCKDB_VERSION="$(DUCKDB_VERSION)" \
+	  bash scripts/build_duckdb_pyodide.sh \
+	  "$(VENV_DIR)" "$(EMSDK_DIR)" "$(WHEELS_DIR)"
 
 # ---------------------------------------------------------------------------
 # Pure-Python wheel index (~22 packages)
