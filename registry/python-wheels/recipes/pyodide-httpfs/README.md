@@ -41,9 +41,20 @@ con.execute("SELECT * FROM read_parquet('https://bucket.s3.amazonaws.com/file.pa
 
 ## Required host setup
 
-The host JS environment (where Pyodide runs) MUST install
-`globalThis._sabFetch(url, init)` BEFORE `loadPyodide()`. This function
-takes a URL + RequestInit and returns synchronously:
+The host JS environment (where Pyodide runs) MUST register a synthetic
+Python module named `_pyodide_httpfs_host` exposing a synchronous
+`fetch(url, initJson)` function before any user Python code runs:
+
+```typescript
+pyodide.registerJsModule("_pyodide_httpfs_host", {
+  fetch: (url: string, initJson: string) => {
+    const init = JSON.parse(initJson);
+    return sabFetch(url, init);  // your SAB-backed sync fetch
+  },
+});
+```
+
+`sabFetch(url, init)` returns synchronously with shape:
 
 ```typescript
 {
@@ -53,6 +64,10 @@ takes a URL + RequestInit and returns synchronously:
   error: string | null,
 }
 ```
+
+This indirection (registered module instead of `import js`) lets sandboxed
+Python environments — like agent-os's Pi VM, which blocks `import js` and
+`import pyodide_js` — still load the package.
 
 Implementation: spawn a side worker that exposes `fetch()`. Main thread
 writes request to a `SharedArrayBuffer`, calls `Atomics.wait`, side worker

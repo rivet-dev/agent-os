@@ -28,15 +28,24 @@ def _fetch_sync(url: str, *, method: str = "GET",
     Returns (status_code, headers, body_bytes). Raises IOError if the
     host hasn't installed _sabFetch or if the fetch failed.
     """
-    # Lazy-import js so this module is importable outside Pyodide too —
-    # useful for testing and tooling. Real calls only work in Pyodide.
-    import js  # type: ignore[import-not-found]
-
-    if not hasattr(js, "_sabFetch"):
+    # The host registers a module named `_pyodide_httpfs_host` that exposes
+    # `fetch(url, init_json)` — a synchronous JS function backed by SAB +
+    # side-worker. Lazy-import so this module is importable outside Pyodide
+    # for testing and tooling.
+    #
+    # We deliberately do NOT use `import js` because agent-os's Python
+    # sandbox blocks that import. Going through a registered module keeps
+    # the FS package compatible with sandboxed environments — the host
+    # registers the module BEFORE the sandbox lock closes.
+    try:
+        import _pyodide_httpfs_host as _host  # type: ignore[import-not-found]
+    except ImportError as e:
         raise IOError(
-            "host has not installed globalThis._sabFetch — see "
-            "pyodide_httpfs README for the required SAB protocol"
-        )
+            "host hasn't registered the _pyodide_httpfs_host JS module. "
+            "The host must call pyodide.registerJsModule('_pyodide_httpfs_host', "
+            "{ fetch: (url, initJson) => sabFetch(url, JSON.parse(initJson)) }) "
+            "before any Python code runs. See pyodide_httpfs README."
+        ) from e
 
     headers: dict[str, str] = dict(extra_headers or {})
     if range_ is not None:
@@ -44,8 +53,8 @@ def _fetch_sync(url: str, *, method: str = "GET",
         # HTTP Range is inclusive on both ends; fsspec end is exclusive.
         headers["Range"] = f"bytes={start}-{end - 1}"
 
-    init = {"method": method, "headers": headers}
-    res = js._sabFetch(url, js.JSON.parse(json.dumps(init)))
+    init_json = json.dumps({"method": method, "headers": headers})
+    res = _host.fetch(url, init_json)
 
     err = res.error if hasattr(res, "error") else None
     if err:

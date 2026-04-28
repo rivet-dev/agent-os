@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyodide-httpfs"
-version = "0.1.0"
+version = "0.1.2"
 description = "fsspec-compatible HTTPS/S3 filesystem for DuckDB inside Pyodide. Reads byte ranges synchronously from sync Python via a SharedArrayBuffer + side-worker bridge installed by the host JS environment."
 readme = "README.md"
 license = { text = "Apache-2.0" }
