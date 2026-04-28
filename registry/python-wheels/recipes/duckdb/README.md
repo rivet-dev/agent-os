@@ -46,6 +46,30 @@ etc.). Diagnostics in `.build-cache/duckdb/build-out.log`.
 | `0002-cmake-enable-httpfs-with-mbedtls.patch` | Force-enable httpfs cmake target + link mbedtls. New for this recipe. |
 | `0003-httpfs-emscripten-socket-emulation.patch` | Adjust the WASI httpfs httplib client to work over emscripten's BSD socket emulation. Adapted from agent-os WASI httpfs patch. |
 
+## Critical finding from research (2026-04-28)
+
+Upstream `duckdb-httpfs` ships an **emscripten stub** at
+`src/httpfs_client_wasm.cpp` (16 lines, throws `InternalException` on
+every call). DuckDB-WASM (the npm package) avoids this by intercepting
+network reads in the JavaScript runtime layer that ships alongside it.
+
+Pyodide has no equivalent JS interception layer — so simply enabling
+`-DBUILD_HTTPFS_EXTENSION=ON` against an unmodified upstream produces a
+wheel where `LOAD httpfs` succeeds but the first `SELECT ... FROM 's3://...'`
+throws.
+
+**Implication:** Patch 0003 must replace the upstream emscripten stub
+with a real httplib client analogous to our WASI patch
+(`agent-os/registry/native/c/patches/httpfs/0001-wasi-real-httplib-client.patch`),
+adapted for emscripten's BSD socket emulation. emscripten exposes POSIX
+sockets via `net.Socket` proxying when running under Pyodide-on-Node,
+which is our deploy target.
+
+The WASI patch is the template; emscripten differences:
+- Different headers/sysroot
+- Different errno mappings
+- TLS via mbedtls works (mbedtls already vendored in duckdb's third_party/)
+
 ## Caveats
 
 - **DuckDB extension installation** at runtime (`INSTALL httpfs`)
