@@ -32,6 +32,11 @@ COMMON_FLAGS="-I$OVERLAY_INCLUDE_DIR -D_WASI_EMULATED_PTHREAD -D_WASI_EMULATED_M
 # do support — VM is permanently UTC, so it returns 0 cleanly).
 ICU_TZ_FLAGS="-DU_HAVE_TZSET=1 -DU_HAVE_TIMEZONE=1 -DU_HAVE_TZNAME=1"
 COMMON_FLAGS="$COMMON_FLAGS $ICU_TZ_FLAGS"
+# Tell duckdb-httpfs to compile httpfs_httplib_client.cpp without
+# CPPHTTPLIB_OPENSSL_SUPPORT — it falls back to httplib's plain HTTP
+# namespace (`duckdb_httplib`). Real S3 reads work as long as the
+# endpoint is HTTP. HTTPS would need a follow-up to wire mbedtls.
+COMMON_FLAGS="$COMMON_FLAGS -DDUCKDB_HTTPFS_HTTP_ONLY=1"
 # Bundled extensions: parquet (read .parquet files), json (read/write JSON
 # data), icu (date/time conversions; uses our timezone.c override since the
 # VM is permanently UTC), core_functions (additional builtins).

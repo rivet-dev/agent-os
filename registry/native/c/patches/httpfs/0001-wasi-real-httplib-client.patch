@@ -1,0 +1,267 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6954beb..69ee1a7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -4,20 +4,34 @@ project(HTTPFsExtension)
+ 
+ add_extension_definitions()
+ 
+-if (NOT EMSCRIPTEN)
++# Three build modes:
++#   native      — full httplib + OpenSSL + curl + mbedtls (the upstream path)
++#   emscripten  — wasm stub client (JS fetch handles networking)
++#   wasi        — real httplib over our patched WASI sockets, HTTP-only
++set(HTTPFS_BUILD_TARGET "native")
++if(EMSCRIPTEN)
++  set(HTTPFS_BUILD_TARGET "emscripten")
++elseif(CMAKE_SYSTEM_NAME STREQUAL "WASI")
++  set(HTTPFS_BUILD_TARGET "wasi")
++endif()
++
++if(HTTPFS_BUILD_TARGET STREQUAL "native")
+   add_definitions(-DOVERRIDE_ENCRYPTION_UTILS=1)
+-else()
++elseif(HTTPFS_BUILD_TARGET STREQUAL "emscripten")
+   set(DUCKDB_EXTENSION_HTTPFS_LINKED_LIBS "../../third_party/mbedtls/libduckdb_mbedtls.a")
+ endif()
++# WASI build doesn't link mbedtls — HTTP-only, no TLS yet.
+ 
+ if(MINGW)
+   set(OPENSSL_USE_STATIC_LIBS TRUE)
+ endif()
+ 
+-find_package(OpenSSL REQUIRED)
+-find_package(CURL REQUIRED)
+-include_directories(${OPENSSL_INCLUDE_DIR})
+-include_directories(${CURL_INCLUDE_DIRS})
++if(HTTPFS_BUILD_TARGET STREQUAL "native")
++  find_package(OpenSSL REQUIRED)
++  find_package(CURL REQUIRED)
++  include_directories(${OPENSSL_INCLUDE_DIR})
++  include_directories(${CURL_INCLUDE_DIRS})
++endif()
+ 
+ include_directories(src/include
+                     ${DUCKDB_MODULE_BASE_DIR}/third_party/httplib)
+@@ -29,8 +43,11 @@ build_static_extension(httpfs ${EXTENSION_SOURCES})
+ set(PARAMETERS "-warnings")
+ build_loadable_extension(httpfs ${PARAMETERS} ${EXTENSION_SOURCES})
+ 
+-if(EMSCRIPTEN)
++if(HTTPFS_BUILD_TARGET STREQUAL "emscripten")
++  target_link_libraries(httpfs_extension duckdb_mbedtls)
+   target_link_libraries(httpfs_loadable_extension duckdb_mbedtls)
++elseif(HTTPFS_BUILD_TARGET STREQUAL "wasi")
++  # No TLS deps — HTTP-only over WASI sockets.
+ else()
+   # Link dependencies into extension
+   target_link_libraries(httpfs_loadable_extension ${CURL_LIBRARIES})
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index b2cea06..54930be 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -3,14 +3,26 @@ set(HTTPFS_SOURCES
+     s3fs.cpp
+     httpfs.cpp
+     http_state.cpp
+-    crypto.cpp
+     hash_functions.cpp
+     create_secret_functions.cpp
+     httpfs_extension.cpp
+     s3_multi_part_upload.cpp)
+-if(NOT EMSCRIPTEN)
++
++set(HTTPFS_BUILD_TARGET_SRC "native")
++if(EMSCRIPTEN)
++  set(HTTPFS_BUILD_TARGET_SRC "emscripten")
++elseif(CMAKE_SYSTEM_NAME STREQUAL "WASI")
++  set(HTTPFS_BUILD_TARGET_SRC "wasi")
++endif()
++
++if(HTTPFS_BUILD_TARGET_SRC STREQUAL "native")
+   set(HTTPFS_SOURCES ${HTTPFS_SOURCES} crypto.cpp httpfs_httplib_client.cpp
+                      httpfs_curl_client.cpp)
++elseif(HTTPFS_BUILD_TARGET_SRC STREQUAL "wasi")
++  # WASI: real httplib client. No crypto.cpp (it pulls in OpenSSL),
++  # no curl client. HTTPFSUtil's InitializeClient comes from
++  # httpfs_httplib_client.cpp.
++  set(HTTPFS_SOURCES ${HTTPFS_SOURCES} httpfs_httplib_client.cpp)
+ else()
+   set(HTTPFS_SOURCES ${HTTPFS_SOURCES} httpfs_client_wasm.cpp)
+ endif()
+diff --git a/src/httpfs_extension.cpp b/src/httpfs_extension.cpp
+index 446fee1..44b8376 100644
+--- a/src/httpfs_extension.cpp
++++ b/src/httpfs_extension.cpp
+@@ -11,7 +11,10 @@
+ #include "crypto.hpp"
+ #endif // OVERRIDE_ENCRYPTION_UTILS
+ 
+-#ifndef EMSCRIPTEN
++// Curl is only used for the "native" build target. Skip on EMSCRIPTEN
++// (uses fetch via JS bridge) and on __wasm__ / WASI (uses our patched
++// httplib over WASI sockets).
++#if !defined(EMSCRIPTEN) && !defined(__wasm__)
+ #include "httpfs_curl_client.hpp"
+ #endif
+ 
+@@ -114,7 +117,7 @@ static void LoadInternal(ExtensionLoader &loader) {
+ 			throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `wasm` and "
+ 			                            "`default` are currently supported for duckdb-wasm");
+ 		}
+-#ifndef EMSCRIPTEN
++#if !defined(EMSCRIPTEN) && !defined(__wasm__)
+ 		if (value == "curl" || value == "default") {
+ 			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil-Curl") {
+ 				config.http_util = make_shared_ptr<HTTPFSCurlUtil>();
+@@ -127,6 +130,15 @@ static void LoadInternal(ExtensionLoader &loader) {
+ 			}
+ 			return;
+ 		}
++#elif defined(__wasm__) && !defined(EMSCRIPTEN)
++		// WASI: only the httplib-backed HTTPFSUtil is available — no
++		// curl. Both "default" and "httplib" map to it.
++		if (value == "httplib" || value == "default") {
++			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil") {
++				config.http_util = make_shared_ptr<HTTPFSUtil>();
++			}
++			return;
++		}
+ #endif
+ 		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `curl`, `httplib` and "
+ 		                            "`default` are currently supported");
+@@ -140,9 +152,11 @@ static void LoadInternal(ExtensionLoader &loader) {
+ 	if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
+ 		// Already handled, do not override
+ 	} else {
+-#ifndef EMSCRIPTEN
++#if !defined(EMSCRIPTEN) && !defined(__wasm__)
+ 		config.http_util = make_shared_ptr<HTTPFSCurlUtil>();
+ #else
++		// EMSCRIPTEN: wasm stub. WASI: httplib HTTPFSUtil from
++		// httpfs_httplib_client.cpp.
+ 		config.http_util = make_shared_ptr<HTTPFSUtil>();
+ #endif
+ 	}
+diff --git a/src/httpfs_httplib_client.cpp b/src/httpfs_httplib_client.cpp
+index 63d7197..07dee82 100644
+--- a/src/httpfs_httplib_client.cpp
++++ b/src/httpfs_httplib_client.cpp
+@@ -1,26 +1,45 @@
+ #include "httpfs_client.hpp"
+ #include "http_state.hpp"
++// DUCKDB_HTTPFS_HTTP_ONLY is set on WASI builds where we don't have
++// OpenSSL/mbedtls — httplib then exposes its plain HTTP namespace
++// (`duckdb_httplib`) instead of the SSL one (`duckdb_httplib_openssl`).
++#ifndef DUCKDB_HTTPFS_HTTP_ONLY
+ #define CPPHTTPLIB_OPENSSL_SUPPORT
++#endif
+ #include "httplib.hpp"
+ 
++#ifdef DUCKDB_HTTPFS_HTTP_ONLY
++namespace duckdb_httpfs_httplib = duckdb_httplib;
++#else
++namespace duckdb_httpfs_httplib = duckdb_httplib_openssl;
++#endif
++
+ namespace duckdb {
+ 
+ class HTTPFSClient : public HTTPClient {
+ public:
+ 	HTTPFSClient(HTTPFSParams &http_params, const string &proto_host_port) {
+-		client = make_uniq<duckdb_httplib_openssl::Client>(proto_host_port);
++		client = make_uniq<duckdb_httpfs_httplib::Client>(proto_host_port);
+ 		Initialize(http_params);
+ 	}
+ 	void Initialize(HTTPParams &http_p) override {
+ 		HTTPFSParams &http_params = (HTTPFSParams &)http_p;
+ 		client->set_follow_location(http_params.follow_location);
+ 		client->set_keep_alive(http_params.keep_alive);
++#ifndef DUCKDB_HTTPFS_HTTP_ONLY
++		// TLS configuration is only available on the SSL-enabled
++		// httplib namespace (`duckdb_httplib_openssl::Client`). The
++		// plain HTTP namespace (`duckdb_httplib::Client`) used for the
++		// HTTP-only WASI build doesn't have these methods. CA path and
++		// cert verification settings are simply ignored there — there's
++		// no TLS handshake to configure.
+ 		if (!http_params.ca_cert_file.empty()) {
+ 			client->set_ca_cert_path(http_params.ca_cert_file.c_str());
+ 		}
+ 		const bool verify_ssl =
+ 		    http_params.override_verify_ssl ? http_params.verify_ssl : http_params.enable_server_cert_verification;
+ 		client->enable_server_certificate_verification(verify_ssl);
++#endif
+ 		client->set_write_timeout(http_params.timeout, http_params.timeout_usec);
+ 		client->set_read_timeout(http_params.timeout, http_params.timeout_usec);
+ 		client->set_connection_timeout(http_params.timeout, http_params.timeout_usec);
+@@ -49,7 +68,7 @@ public:
+ 		} else {
+ 			return TransformResult(client->Get(
+ 			    info.path.c_str(), headers,
+-			    [&](const duckdb_httplib_openssl::Response &response) {
++			    [&](const duckdb_httpfs_httplib::Response &response) {
+ 				    auto http_response = TransformResponse(response);
+ 				    return info.response_handler(*http_response);
+ 			    },
+@@ -93,7 +112,7 @@ public:
+ 			state->total_bytes_sent += info.buffer_in_len;
+ 		}
+ 		// We use a custom Request method here, because there is no Post call with a contentreceiver in httplib
+-		duckdb_httplib_openssl::Request req;
++		duckdb_httpfs_httplib::Request req;
+ 		if (info.send_post_as_get_request) {
+ 			req.method = "GET";
+ 		} else {
+@@ -121,10 +140,10 @@ public:
+ 	}
+ 
+ private:
+-	duckdb_httplib_openssl::Headers TransformHeaders(const HTTPHeaders &header_map, const HTTPParams &params) {
++	duckdb_httpfs_httplib::Headers TransformHeaders(const HTTPHeaders &header_map, const HTTPParams &params) {
+ 		auto &httpfs_params = params.Cast<HTTPFSParams>();
+ 
+-		duckdb_httplib_openssl::Headers headers;
++		duckdb_httpfs_httplib::Headers headers;
+ 		for (auto &entry : header_map) {
+ 			headers.insert(entry);
+ 		}
+@@ -136,7 +155,7 @@ private:
+ 		return headers;
+ 	}
+ 
+-	unique_ptr<HTTPResponse> TransformResponse(const duckdb_httplib_openssl::Response &response) {
++	unique_ptr<HTTPResponse> TransformResponse(const duckdb_httpfs_httplib::Response &response) {
+ 		auto status_code = HTTPUtil::ToStatusCode(response.status);
+ 		auto result = make_uniq<HTTPResponse>(status_code);
+ 		result->body = response.body;
+@@ -147,8 +166,8 @@ private:
+ 		return result;
+ 	}
+ 
+-	unique_ptr<HTTPResponse> TransformResult(duckdb_httplib_openssl::Result &&res) {
+-		if (res.error() == duckdb_httplib_openssl::Error::Success) {
++	unique_ptr<HTTPResponse> TransformResult(duckdb_httpfs_httplib::Result &&res) {
++		if (res.error() == duckdb_httpfs_httplib::Error::Success) {
+ 			auto &response = res.value();
+ 			return TransformResponse(response);
+ 		} else {
+@@ -159,7 +178,7 @@ private:
+ 	}
+ 
+ private:
+-	unique_ptr<duckdb_httplib_openssl::Client> client;
++	unique_ptr<duckdb_httpfs_httplib::Client> client;
+ 	optional_ptr<HTTPState> state;
+ };
+ 
+@@ -169,8 +188,8 @@ unique_ptr<HTTPClient> HTTPFSUtil::InitializeClient(HTTPParams &http_params, con
+ }
+ 
+ unordered_map<string, string> HTTPFSUtil::ParseGetParameters(const string &text) {
+-	duckdb_httplib_openssl::Params query_params;
+-	duckdb_httplib_openssl::detail::parse_query_text(text, query_params);
++	duckdb_httpfs_httplib::Params query_params;
++	duckdb_httpfs_httplib::detail::parse_query_text(text, query_params);
+ 
+ 	unordered_map<string, string> result;
+ 	for (auto &entry : query_params) {
