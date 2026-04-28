@@ -22,6 +22,7 @@ import {
   type WheelPreloadOptions,
   type WheelPreloadPayload,
 } from './wheel-preload.js';
+import { WORKER_SAB_FETCH_JS } from './sab-fetch-bootstrap.js';
 
 export interface PythonRuntimeOptions {
   /** CPU time limit in ms for each Python execution (no limit by default). */
@@ -134,7 +135,12 @@ let pyodide = null;
 let currentRequestId = null;
 let nextRpcId = 1;
 const pendingRpc = new Map();
+// SAB-fetch state — single side worker per Pyodide worker, lazily started.
+// Allows DuckDB-in-Pyodide (a side module that can't suspend via Asyncify/JSPI)
+// to reach https:// + s3:// URLs through Atomics.wait. See sab-fetch-bootstrap.ts.
+let sabFetch = null;
 ${WORKER_WHEEL_PRELOAD_JS}
+${WORKER_SAB_FETCH_JS}
 
 function serializeError(error) {
   if (error instanceof Error) {
@@ -187,6 +193,15 @@ async function ensurePyodide(payload) {
     kernel_spawn: async (command, argsJson, envJson, cwd) =>
       callHost("kernelSpawn", { command, args: JSON.parse(argsJson), env: JSON.parse(envJson), cwd }),
   });
+
+  // Register the synchronous fetch module used by pyodide-httpfs / DuckDB.
+  // Wires up _pyodide_httpfs_host so dbt-duckdb's Plugin.configure_connection
+  // can register an fsspec FS that DuckDB calls into for https://+s3:// reads
+  // without needing JSPI/Asyncify in the side module call stack.
+  if (sabFetch === null) {
+    sabFetch = startSabFetch();
+  }
+  registerSabFetchModule(pyodide, sabFetch);
 
   // Preload vendored wheels (mount + micropip + bootstrap) BEFORE installing
   // the import sandbox. micropip itself imports pyodide_js, which the sandbox
